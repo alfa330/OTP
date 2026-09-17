@@ -43,3 +43,16 @@ export const opEntryTime = (entryAt, day) => {
     if (!match) return { time: '—', previousDay: false };
     return { time: `${match[2]}:${match[3]}`, previousDay: Boolean(day) && match[1] < String(day) };
 };
+
+/*
+ * Ось графика «По часам» — одна на отдел и все группы: от первого часа со звонками отдела до
+ * текущего часа снимка. Без общей оси у группы с двумя рабочими часами получались две плиты во
+ * всю ширину, а при переключении группы столбики прыгали. Звонков ещё не было — null.
+ */
+export const opHourRange = (snapshot) => {
+    const active = (snapshot?.hourly || []).filter((h) => h.arrived || h.outgoing).map((h) => h.hour);
+    if (!active.length) return null;
+    const match = String(snapshot?.captured_at || '').match(/T(\d{2}):/);
+    const nowHour = match ? Number(match[1]) : -1;
+    return { first: Math.min(...active), last: Math.max(...active, nowHour) };
+};

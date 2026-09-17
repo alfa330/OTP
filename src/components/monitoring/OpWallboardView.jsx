@@ -7,7 +7,7 @@ import { formatInt, wallboardStaleNotice } from './szovWallboardShared';
 import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
 import { BroadcastControls, WidgetButton } from './SzovWallboardView';
 import OpStatusJournalPanel from './OpStatusJournal';
-import { OP_GROUP_ALL, opEntryTime, opGroupOptions, opGroupView, opSelectedGroup } from './opWallboardGroups';
+import { OP_GROUP_ALL, opEntryTime, opGroupOptions, opGroupView, opHourRange, opSelectedGroup } from './opWallboardGroups';
 import {
     OP_METRIC_MAP,
     formatCount,
@@ -65,39 +65,42 @@ const MetricStatTile = ({ metricKey, snapshot, scale = 1 }) => {
 };
 
 /*
- * По часам: столбики принятых и потерянных, без библиотек — на стене нужны пропорции, а не
- * подписи к каждому делению. Пустые часы до начала дня не рисуются, чтобы утро не читалось
- * как провал.
+ * По часам: столбики принятых, потерянных и исходящих, без библиотек — на стене нужны пропорции, а
+ * не подписи к каждому делению. Ось часов одна на отдел и группы (`range` из полного снимка) и
+ * доходит до текущего часа: при переключении группы столбики не прыгают по ширине и месту, а у
+ * группы с двумя рабочими часами не разрастаются в две плиты на всю карточку. Пустые часы до начала
+ * дня не рисуются, чтобы утро не читалось как провал.
  */
-const HourlyBars = ({ snapshot, scale = 1 }) => {
+const HourlyBars = ({ snapshot, range, scale = 1 }) => {
     const hourly = snapshot?.hourly || [];
-    const active = hourly.filter((h) => h.arrived || h.outgoing);
-    if (!active.length) {
+    if (!range || !hourly.some((h) => h.arrived || h.outgoing)) {
         return <div className="text-[13px] text-slate-500">Звонков за сегодня ещё не было.</div>;
     }
-    const first = Math.min(...active.map((h) => h.hour));
-    const last = Math.max(...active.map((h) => h.hour));
-    const shown = hourly.slice(first, last + 1);
+    const shown = hourly.slice(range.first, range.last + 1);
     const peak = Math.max(1, ...shown.map((h) => h.arrived + h.outgoing));
-    const height = 120 * scale;
+    const height = 132 * scale;
+    const px = (n) => Math.round((n / peak) * height);
     return (
-        <div className="flex items-end gap-1" style={{ height: `${height + 28}px` }}>
-            {shown.map((h) => {
-                const total = h.arrived + h.outgoing;
-                const px = (n) => Math.round((n / peak) * height);
-                return (
-                    <div key={h.hour} className="flex flex-1 flex-col items-center justify-end" title={`${h.hour}:00 — входящих ${h.arrived} (принято ${h.answered}, потеряно ${h.missed}), исходящих ${h.outgoing}`}>
-                        <div className="flex w-full flex-col justify-end overflow-hidden rounded-t" style={{ height: `${height}px` }}>
+        <div>
+            <div className="flex items-end gap-1.5 border-b border-slate-200/80" style={{ height: `${height}px` }}>
+                {shown.map((h) => (
+                    <div key={h.hour} className="flex h-full min-w-0 flex-1 items-end justify-center"
+                         title={`${h.hour}:00 — входящих ${h.arrived} (принято ${h.answered}, потеряно ${h.missed}), исходящих ${h.outgoing}`}>
+                        <div className="flex w-full max-w-[56px] flex-col justify-end overflow-hidden rounded-t-[6px]">
                             <div className="w-full bg-slate-300" style={{ height: `${px(h.outgoing)}px` }} />
                             <div className="w-full bg-amber-400" style={{ height: `${px(h.missed)}px` }} />
                             <div className="w-full bg-green-500" style={{ height: `${px(h.answered)}px` }} />
                         </div>
-                        <div className="mt-1 text-slate-500 tabular-nums" style={{ fontSize: `${11 * scale}px` }}>
-                            {total ? `${h.hour}` : ''}
-                        </div>
                     </div>
-                );
-            })}
+                ))}
+            </div>
+            <div className="mt-1.5 flex gap-1.5">
+                {shown.map((h) => (
+                    <div key={h.hour} className="min-w-0 flex-1 text-center tabular-nums text-slate-400" style={{ fontSize: `${11 * scale}px` }}>
+                        {String(h.hour).padStart(2, '0')}
+                    </div>
+                ))}
+            </div>
         </div>
     );
 };
@@ -111,13 +114,23 @@ const HourlyLegend = () => (
 );
 
 /*
+ * Молчащий телефон: событий за 16 часов нет и звонков сегодня нет. Обычно это люди не на смене —
+ * на стене ОП их два десятка, и список вырастал вдвое серыми строками. Они не прячутся, а
+ * сворачиваются в одну строку с числом: развернуть можно одним нажатием.
+ */
+const isIdleRow = (row) => (
+    row.in_roster !== false && row.status_key === 'unknown' && !row.answered && !row.missed && !row.outgoing
+);
+
+/*
  * Поимённый список: статус телефона, время входа и счётчики дня. Порядок — по разряду статуса.
  * Столбец «Группа» есть только в «Все»: внутри выбранной группы он повторял бы фильтр в каждой
- * строке. ФИО — кнопка журнала, но только у тех, от чьего телефона были статусы: у «Нет событий»
- * журнал всегда пуст, а два десятка синих имён, ведущих в пустоту, — шум. У номера вне состава
- * журнала нет тоже (нет сотрудника).
+ * строке. Строка с журналом нажимается целиком, как строка списка в macOS: подсветка при наведении,
+ * шеврон справа, ФИО — кнопка для клавиатуры. Журнал есть только у тех, от чьего телефона были
+ * статусы: у «Нет событий» он всегда пуст. Нули — светло-серые, чтобы глаз цеплялся за ненулевое.
  */
 const OperatorsTable = ({ snapshot, scale = 1, showGroup = false, selectedId = null, onOpenJournal = null }) => {
+    const [showIdle, setShowIdle] = useState(false);
     const rows = snapshot?.operators || [];
     if (!rows.length) {
         return (
@@ -128,72 +141,112 @@ const OperatorsTable = ({ snapshot, scale = 1, showGroup = false, selectedId = n
             </div>
         );
     }
-    const cell = 'px-3 py-2 text-right tabular-nums';
+    const idle = rows.filter(isIdleRow);
+    const shown = showIdle ? [...rows.filter((row) => !isIdleRow(row)), ...idle] : rows.filter((row) => !isIdleRow(row));
+    const head = 'px-3 pb-2 text-[12px] font-medium text-slate-400';
+    const cell = 'px-3 py-2.5 text-right tabular-nums';
+    const count = (value, tone = 'text-slate-700') => (
+        <td className={`${cell} ${value ? tone : 'text-slate-300'}`}>{formatCount(value)}</td>
+    );
+    const toggle = idle.length ? (
+        <button
+            type="button"
+            onClick={() => setShowIdle((value) => !value)}
+            className="mt-2 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98]"
+        >
+            <FaIcon className={`fas ${showIdle ? 'fa-chevron-up' : 'fa-chevron-down'} text-[10px]`} aria-hidden="true" />
+            {showIdle ? 'Скрыть' : 'Показать'} без событий телефона
+            <span className="tabular-nums text-slate-400">{idle.length}</span>
+        </button>
+    ) : null;
+    if (!shown.length) {
+        return (
+            <div>
+                <div className="text-[13px] text-slate-500">Сегодня телефоны группы молчат.</div>
+                {toggle}
+            </div>
+        );
+    }
     return (
-        <div className="overflow-x-auto">
-            <table className="w-full text-left" style={{ fontSize: `${13 * scale}px` }}>
-                <thead className="text-slate-500">
-                    <tr>
-                        <th className="px-3 py-2">Сотрудник</th>
-                        <th className="px-3 py-2">Внутренний</th>
-                        {showGroup ? <th className="px-3 py-2">Группа</th> : null}
-                        <th className="px-3 py-2">Статус</th>
-                        <th className="px-3 py-2">Время входа</th>
-                        <th className={cell}>Принято</th>
-                        <th className={cell}>Потеряно</th>
-                        <th className={cell}>Исходящих</th>
-                        <th className={cell}>Разговор</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows.map((row) => {
-                        const chip = opStatusChip(row);
-                        const entry = opEntryTime(row.entry_at, snapshot?.day);
-                        const selected = row.id != null && row.id === selectedId;
-                        return (
-                            <tr key={`${row.id ?? 'ext'}-${row.ext}`} className={`border-t border-slate-100 ${selected ? 'bg-blue-50/70' : ''} ${chip.muted ? 'text-slate-400' : ''}`}>
-                                <td className="px-3 py-2 font-medium">
-                                    {row.id != null && row.status_key !== 'unknown' && onOpenJournal ? (
-                                        <button
-                                            type="button"
-                                            onClick={() => onOpenJournal(row)}
-                                            title="Журнал статусов"
-                                            className="text-left font-medium text-blue-600 underline-offset-2 transition-colors hover:text-blue-700 hover:underline"
-                                        >
-                                            {row.name}
-                                        </button>
-                                    ) : row.name}
-                                </td>
-                                <td className="px-3 py-2 tabular-nums">{row.ext || '—'}</td>
-                                {showGroup ? <td className="px-3 py-2 text-slate-500">{row.group_label || '—'}</td> : null}
-                                <td className="px-3 py-2">
-                                    <span className={`inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 ${chip.className}`}>
-                                        {chip.label}
-                                        {row.status_seconds ? <span className="opacity-70 tabular-nums">{formatSeconds(row.status_seconds)}</span> : null}
-                                    </span>
-                                </td>
-                                <td className="px-3 py-2 tabular-nums">
-                                    {entry.time}
-                                    {entry.previousDay ? <span className="ml-1.5 text-slate-400">вчера</span> : null}
-                                </td>
-                                <td className={cell}>{formatCount(row.answered)}</td>
-                                <td className={`${cell} ${row.missed ? 'text-amber-700' : ''}`}>{formatCount(row.missed)}</td>
-                                <td className={cell}>
-                                    {formatCount(row.outgoing)}
-                                    {row.outgoing ? <span className="text-slate-400"> → {formatInt(row.outgoing_answered)}</span> : null}
-                                </td>
-                                <td className={cell}>{formatSeconds(row.talk_seconds)}</td>
-                            </tr>
-                        );
-                    })}
-                </tbody>
-            </table>
+        <div>
+            <div className="-mx-3 overflow-x-auto">
+                <table className="w-full text-left" style={{ fontSize: `${13 * scale}px` }}>
+                    <thead>
+                        <tr className="border-b border-slate-200/80">
+                            <th className={head}>Сотрудник</th>
+                            <th className={head}>Внутренний</th>
+                            {showGroup ? <th className={head}>Группа</th> : null}
+                            <th className={head}>Статус</th>
+                            <th className={head}>Время входа</th>
+                            <th className={`${head} text-right`}>Принято</th>
+                            <th className={`${head} text-right`}>Потеряно</th>
+                            <th className={`${head} text-right`}>Исходящих</th>
+                            <th className={`${head} text-right`}>Разговор</th>
+                            <th className="w-8 pb-2" aria-hidden="true" />
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                        {shown.map((row) => {
+                            const chip = opStatusChip(row);
+                            const entry = opEntryTime(row.entry_at, snapshot?.day);
+                            const canOpen = row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal);
+                            const selected = canOpen && row.id === selectedId;
+                            return (
+                                <tr
+                                    key={`${row.id ?? 'ext'}-${row.ext}`}
+                                    onClick={canOpen ? () => onOpenJournal(row) : undefined}
+                                    className={`transition-colors ${canOpen ? 'cursor-pointer' : ''} ${
+                                        selected ? 'bg-blue-50' : canOpen ? 'hover:bg-slate-50' : ''} ${
+                                        chip.muted ? 'text-slate-400' : 'text-slate-700'}`}
+                                >
+                                    <td className="px-3 py-2.5">
+                                        {canOpen ? (
+                                            <button
+                                                type="button"
+                                                onClick={(event) => { event.stopPropagation(); onOpenJournal(row); }}
+                                                title="Журнал статусов"
+                                                className={`rounded text-left font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+                                                    selected ? 'text-blue-700' : 'text-slate-900'}`}
+                                            >
+                                                {row.name}
+                                            </button>
+                                        ) : <span className="font-medium">{row.name}</span>}
+                                    </td>
+                                    <td className="px-3 py-2.5 tabular-nums text-slate-500">{row.ext || '—'}</td>
+                                    {showGroup ? <td className="px-3 py-2.5 text-slate-500">{row.group_label || '—'}</td> : null}
+                                    <td className="px-3 py-2.5">
+                                        <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[0.92em] font-medium ${chip.className}`}>
+                                            {chip.label}
+                                            {row.status_seconds ? <span className="font-normal tabular-nums opacity-70">{formatSeconds(row.status_seconds)}</span> : null}
+                                        </span>
+                                    </td>
+                                    <td className={`px-3 py-2.5 tabular-nums ${entry.time === '—' ? 'text-slate-300' : ''}`}>
+                                        {entry.time}
+                                        {entry.previousDay ? <span className="ml-1.5 text-slate-400">вчера</span> : null}
+                                    </td>
+                                    {count(row.answered)}
+                                    {count(row.missed, 'text-amber-600')}
+                                    <td className={`${cell} ${row.outgoing ? 'text-slate-700' : 'text-slate-300'}`}>
+                                        {formatCount(row.outgoing)}
+                                        {row.outgoing ? <span className="text-slate-400"> → {formatInt(row.outgoing_answered)}</span> : null}
+                                    </td>
+                                    <td className={`${cell} ${row.talk_seconds ? 'text-slate-700' : 'text-slate-300'}`}>{formatSeconds(row.talk_seconds)}</td>
+                                    <td className="py-2.5 pr-3 text-right text-[11px] text-slate-300">
+                                        {canOpen ? <FaIcon className="fas fa-chevron-right" aria-hidden="true" /> : null}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+            {toggle}
         </div>
     );
 };
 
 /** Тело табло — одно и то же встроенным и на весь экран, различается только масштабом. */
-function OpWallboardBody({ snapshot, scale = 1, showGroup = false, selectedId = null, onOpenJournal = null }) {
+function OpWallboardBody({ snapshot, hourRange = null, scale = 1, showGroup = false, selectedId = null, onOpenJournal = null }) {
     return (
         <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
@@ -221,7 +274,7 @@ function OpWallboardBody({ snapshot, scale = 1, showGroup = false, selectedId = 
                 </div>
             </Section>
             <Section icon="fa-clock" title="По часам" right={<HourlyLegend />}>
-                <HourlyBars snapshot={snapshot} scale={scale} />
+                <HourlyBars snapshot={snapshot} range={hourRange} scale={scale} />
             </Section>
             <Section icon="fa-users" title="Сотрудники" right={<span className="text-[12px] text-slate-500">статусы — iCORE Phone, счётчики — касания за день</span>}>
                 <OperatorsTable snapshot={snapshot} scale={scale} showGroup={showGroup}
@@ -262,6 +315,7 @@ export default function OpWallboardView({
     const group = useMemo(() => opSelectedGroup(snapshot, groupKey), [groupKey, snapshot]);
     const view = useMemo(() => opGroupView(snapshot, group), [group, snapshot]);
     const groupOptions = useMemo(() => opGroupOptions(snapshot), [snapshot]);
+    const hourRange = useMemo(() => opHourRange(snapshot), [snapshot]);
     const showGroupColumn = !group && groupOptions.length > 1;
 
     // Строку журнала берём из полного снимка, а не из отфильтрованного: смена группы на экране
@@ -313,7 +367,10 @@ export default function OpWallboardView({
                     </div>
                 ) : null}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+                {/* Фильтр — в одной строке с действиями, как сегменты в тулбаре macOS; на узком
+                    экране строка переносится сама. */}
+                {groupSwitch ? <div className="mr-2">{groupSwitch}</div> : null}
                 {canManageBroadcast ? (
                     <BroadcastControls
                         direction="op"
@@ -337,7 +394,6 @@ export default function OpWallboardView({
                     На стену
                 </button>
             </div>
-            {groupSwitch ? <div className="basis-full">{groupSwitch}</div> : null}
         </div>
     );
 
@@ -355,7 +411,7 @@ export default function OpWallboardView({
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
-            <OpWallboardBody snapshot={view} scale={1} showGroup={showGroupColumn}
+            <OpWallboardBody snapshot={view} hourRange={hourRange} scale={1} showGroup={showGroupColumn}
                              selectedId={journalRow?.id ?? null} onOpenJournal={openJournal} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
@@ -370,7 +426,7 @@ export default function OpWallboardView({
                     closeOnEscape={!journalRow}
                     onClose={() => setFullscreen(false)}
                 >
-                    <OpWallboardBody snapshot={view} scale={1.5} showGroup={showGroupColumn}
+                    <OpWallboardBody snapshot={view} hourRange={hourRange} scale={1.5} showGroup={showGroupColumn}
                                      selectedId={journalRow?.id ?? null} onOpenJournal={openJournal} />
                 </FullscreenSheet>,
                 document.body,

@@ -6,6 +6,7 @@ import {
     opEntryTime,
     opGroupOptions,
     opGroupView,
+    opHourRange,
     opSelectedGroup,
 } from '../src/components/monitoring/opWallboardGroups.js';
 
@@ -54,4 +55,11 @@ test('время входа: часы и минуты, вчерашнее — с
     assert.deepEqual(opEntryTime('2026-09-17T08:28:08', '2026-09-17'), { time: '08:28', previousDay: false });
     assert.deepEqual(opEntryTime('2026-09-16T19:53:44', '2026-09-17'), { time: '19:53', previousDay: true });
     assert.deepEqual(opEntryTime(null, '2026-09-17'), { time: '—', previousDay: false });
+});
+
+test('ось часов одна на отдел и группы и доходит до текущего часа', () => {
+    const hourly = Array.from({ length: 24 }, (_, hour) => ({ hour, arrived: [7, 9].includes(hour) ? 3 : 0, outgoing: hour === 8 ? 1 : 0 }));
+    assert.deepEqual(opHourRange({ hourly, captured_at: '2026-09-17T11:39:51' }), { first: 7, last: 11 });
+    assert.deepEqual(opHourRange({ hourly, captured_at: '' }), { first: 7, last: 9 });
+    assert.equal(opHourRange({ hourly: hourly.map((h) => ({ ...h, arrived: 0, outgoing: 0 })) }), null);
 });

@@ -804,14 +804,14 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('operators: (snapshot.operators || []).filter((row) => row.group_id === group.id)', groups)
 
     def test_table_has_entry_time_and_group_column_only_in_all(self):
-        self.assertIn('<th className="px-3 py-2">Время входа</th>', self.view)
-        self.assertIn('{showGroup ? <th className="px-3 py-2">Группа</th> : null}', self.view)
+        self.assertIn('<th className={head}>Время входа</th>', self.view)
+        self.assertIn('{showGroup ? <th className={head}>Группа</th> : null}', self.view)
         self.assertIn('const showGroupColumn = !group && groupOptions.length > 1;', self.view)
 
     def test_name_opens_the_journal_which_follows_status_changes_without_polling(self):
         journal = (MONITORING / 'OpStatusJournal.jsx').read_text(encoding='utf-8-sig')
-        self.assertIn('onClick={() => onOpenJournal(row)}', self.view)
-        self.assertIn("row.id != null && row.status_key !== 'unknown' && onOpenJournal", self.view)
+        self.assertIn('onClick={canOpen ? () => onOpenJournal(row) : undefined}', self.view)
+        self.assertIn("row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal)", self.view)
         # Строка журнала — из полного снимка: смена группы не закрывает журнал.
         self.assertIn('(snapshot?.operators || []).find((row) => row.id != null && row.id === journalOperatorId)', self.view)
         self.assertIn('journalRow.status_key}|${journalRow.status_at}', self.view)
@@ -820,6 +820,13 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("export const OP_JOURNAL_PATH = '/api/op_wallboard/journal';", self.shared)
         # Esc при открытом журнале на стене закрывает журнал, а не стену.
         self.assertIn('closeOnEscape={!journalRow}', self.view)
+
+    def test_quiet_phones_fold_and_hour_axis_is_shared_by_groups(self):
+        """Два десятка «Нет событий» сворачиваются в одну строку; ось часов — из полного снимка."""
+        self.assertIn("row.in_roster !== false && row.status_key === 'unknown'", self.view)
+        self.assertIn('без событий телефона', self.view)
+        self.assertIn('const hourRange = useMemo(() => opHourRange(snapshot), [snapshot]);', self.view)
+        self.assertEqual(self.view.count('hourRange={hourRange}'), 2)
 
     def test_app_wires_the_widget_with_the_sections_own_access(self):
         """Окно поверх других одно на приложение; право на него — у раздела «Табло ОП»."""

@@ -72,17 +72,18 @@ function LiveDuration({ seconds, fetchedAt }) {
 const JournalRow = ({ segment, live, fetchedAt }) => {
     const chip = opStatusChip(segment);
     return (
-        <div className="px-3.5 py-2.5">
+        // Текущий статус выделен так же, как выбранная строка таблицы: глаз находит его сразу.
+        <div className={`px-3.5 py-2.5 ${live ? 'bg-blue-50/60' : ''}`}>
             <div className="flex items-center justify-between gap-3">
                 <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[12.5px] font-medium ${chip.className}`}>
                     {chip.label}
                 </span>
-                <span className="text-[13px] font-medium tabular-nums text-slate-700">
+                <span className={`text-[13px] tabular-nums ${live ? 'font-semibold text-slate-900' : 'font-medium text-slate-600'}`}>
                     {live ? <LiveDuration seconds={segment.seconds} fetchedAt={fetchedAt} /> : formatDuration(segment.seconds)}
                 </span>
             </div>
             <div className="mt-1 text-[12.5px] tabular-nums text-slate-500">
-                {formatClock(segment.start_at)} — {live ? 'сейчас' : formatClock(segment.end_at)}
+                {formatClock(segment.start_at)} — {live ? <span className="font-medium text-blue-600">сейчас</span> : formatClock(segment.end_at)}
             </div>
         </div>
     );
@@ -192,7 +193,7 @@ export default function OpStatusJournalPanel({
                     {data && error ? (
                         <div className="border-b border-amber-200/70 bg-amber-50 px-5 py-1.5 text-[12px] text-amber-800">{error}</div>
                     ) : null}
-                    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+                    <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-3">
                         {body}
                     </div>
                 </motion.aside>
