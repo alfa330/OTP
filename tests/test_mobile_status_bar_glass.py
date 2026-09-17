@@ -111,6 +111,51 @@ class ScrollTitleTests(unittest.TestCase):
         self.assertIn('padding: calc(max(10px, env(safe-area-inset-top)) - env(safe-area-inset-top)) 62px 0 16px;', body)
 
 
+class SheetGlassTests(unittest.TestCase):
+    """Шторка разделов («Ещё»). Владелец 17.09.2026: «при входе в раздел, где
+    можно просмотреть другие разделы, полоска не идёт как стекло».
+
+    Мешали трое, все по тому же правилу WebKit: сам лист (fixed во весь экран
+    со своим фоном), body, прибитый замком прокрутки (на коротком разделе
+    ростом ровно с экран), и липкая полоса с именем, прилипавшая к нулю. Слой
+    выше окна больше чем на 5% WebKit панелью не считает — лист и body
+    вытянуты за нижнюю грань."""
+
+    LOCK = (ROOT / 'src' / 'utils' / 'pageScrollLock.js').read_text(encoding='utf-8')
+    TITLE = (ROOT / 'src' / 'components' / 'common' / 'MobileSheetTitle.jsx').read_text(encoding='utf-8')
+
+    def test_sheet_is_taller_than_the_screen(self):
+        body = rule_body(SHELL_CSS, 'body.mobile-shell .sidebar')
+        self.assertIn('--sheet-overhang: 20vh;', body)
+        self.assertIn('height: calc(100% + var(--sheet-overhang));', body)
+        self.assertIn('bottom: auto;', body)
+        # Приближение при появлении — от середины экрана, а не вытянутого листа.
+        self.assertIn('transform-origin: 50% calc(50% - var(--sheet-overhang) / 2);', body)
+
+    def test_last_row_stays_above_the_bar(self):
+        """Лишнее уходит за нижнюю грань — нижнее поле списка растёт на столько
+        же во всех трёх положениях бара, иначе «Выйти» уезжает под край."""
+        self.assertIn('+ var(--sheet-overhang));', rule_body(SHELL_CSS, 'body.mobile-shell .sidebar > div'))
+        for side in ('right', 'left'):
+            self.assertIn(
+                'padding-bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--sheet-overhang));',
+                rule_body(SHELL_CSS, f'body[data-tabbar-side="{side}"].mobile-shell .sidebar > div'),
+            )
+
+    def test_locked_body_is_taller_than_the_screen(self):
+        self.assertIn("style.minHeight = '120vh';", self.LOCK)
+        self.assertIn('minHeight: style.minHeight,', self.LOCK)
+        self.assertIn('style.minHeight = savedStyle.minHeight;', self.LOCK)
+
+    def test_name_bar_sticks_below_the_notch(self):
+        body = rule_body(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar')
+        self.assertIn('top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)) - 8px);', body)
+        self.assertIn('height: 44px;', body)
+        self.assertIn('flex-shrink: 0;', body)
+        # Имя показывается, когда крупное имя ушло под НИЗ прилипшей полосы.
+        self.assertIn('rootMargin: `-${Math.round(stuckBottom)}px 0px 0px 0px`', self.TITLE)
+
+
 class AuctionStripGlassTests(unittest.TestCase):
     """Стекло прилипшей полосы дней продолжается вверх только до выреза: на 86%
     непрозрачности оно делало полосу с часами сплошной."""

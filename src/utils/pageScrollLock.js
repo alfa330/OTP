@@ -38,12 +38,19 @@ export const lockPageScroll = () => {
         left: style.left,
         right: style.right,
         width: style.width,
+        minHeight: style.minHeight,
     };
     style.position = 'fixed';
     style.top = `${-savedScrollY}px`;
     style.left = '0';
     style.right = '0';
     style.width = '100%';
+    /* Прибитый body ростом с экран WebKit считает панелью у верхней грани и
+       заливает полосу с часами сплошным цветом вместо стекла iOS 26 (правило —
+       «Верх экрана отдан стеклу iOS 26» в mobile-shell.css). Слой выше окна
+       больше чем на 5% он пропускает, поэтому короткий раздел под листом
+       вытягиваем за нижнюю грань; длинный и так выше. */
+    style.minHeight = '120vh';
 };
 
 export const unlockPageScroll = () => {
@@ -57,6 +64,7 @@ export const unlockPageScroll = () => {
         style.left = savedStyle.left;
         style.right = savedStyle.right;
         style.width = savedStyle.width;
+        style.minHeight = savedStyle.minHeight;
         savedStyle = null;
     }
     /* Возврат на прежнее место обязателен: пока body был прибит, документ

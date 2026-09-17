@@ -51,14 +51,23 @@ export default function MobileSheetTitle({ name = '', open = false }) {
         const target = document.querySelector('.mobile-sheet-hero__name');
         if (!scroller || !target) return undefined;
 
+        /* Нижняя кромка прилипшей полосы от верха листа. Полоса липнет под
+           вырезом (над ней — стекло iOS 26), поэтому это не её высота, а
+           высота плюс место, где она прилипает: поле листа под колокол плюс её
+           отрицательный top. */
+        const stuckBottom = bar.offsetHeight + Math.max(
+            0,
+            (parseFloat(getComputedStyle(scroller).paddingTop) || 0) + (parseFloat(getComputedStyle(bar).top) || 0),
+        );
+
         const observer = new IntersectionObserver(
             ([entry]) => setShown(!entry.isIntersecting),
             {
                 root: scroller,
-                /* Верхнюю кромку поднимаем на высоту самой полосы: имя считается
+                /* Верхнюю кромку опускаем до низа полосы: имя считается
                    ушедшим, когда оно скрылось ПОД ней, а не когда коснулось
                    верхнего края листа. */
-                rootMargin: `-${Math.round(bar.offsetHeight)}px 0px 0px 0px`,
+                rootMargin: `-${Math.round(stuckBottom)}px 0px 0px 0px`,
                 threshold: 0,
             },
         );

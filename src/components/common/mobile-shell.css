@@ -271,13 +271,23 @@ body.mobile-shell {
    Так надо: transform у листа делает его точкой отсчёта для position: fixed
    внутри — а там живут выпадающие подменю с посчитанными координатами, и
    сдвинутый угол увёл бы их мимо своих пунктов. */
+/* ЛИСТ ВЫШЕ ЭКРАНА на --sheet-overhang — ради стекла iOS 26 над часами.
+   Владелец 17.09.2026: «при входе в раздел, где можно просмотреть другие
+   разделы, полоска не идёт как стекло». Лист — fixed во весь экран со своим
+   фоном, и WebKit, найдя его у верхней грани, заливал полосу с часами цветом
+   листа (правило — «Верх экрана отдан стеклу iOS 26»). Слой выше окна больше
+   чем на 5% WebKit панелью не считает и пропускает. Лишнее уходит за нижнюю
+   грань под бар разделов, нижнее поле списка растёт на столько же, а
+   приближение при появлении считается от середины ЭКРАНА, не листа. */
 body.mobile-shell .sidebar {
+    --sheet-overhang: 20vh;
     top: 0;
     left: 0;
     right: 0;
-    bottom: 0;
+    bottom: auto;
     width: 100% !important;
-    height: 100%;
+    height: calc(100% + var(--sheet-overhang));
+    transform-origin: 50% calc(50% - var(--sheet-overhang) / 2);
     max-height: none;
     z-index: 65;
     /* ПОЯВЛЕНИЕ, А НЕ ВЫЕЗД СНИЗУ. Лист занимает весь экран, и поездка от
@@ -315,7 +325,7 @@ body.mobile-shell .sidebar > div {
     /* Сверху добавлено место под колокол: он висит в углу экрана, и портрет,
        прижатый к самому верху, оказывался бы под ним. */
     padding: calc(max(10px, env(safe-area-inset-top)) + 8px) 0
-             calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
+             calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + var(--sheet-overhang));
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     min-height: 0;
@@ -330,12 +340,12 @@ body[data-tabbar-side="right"].mobile-shell .sidebar > div {
     padding-right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
     /* Боком высоты в обрез, но нижняя строка не должна упираться в самый край:
        кнопка у кромки экрана на телефоне попадает в жест «домой». */
-    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    padding-bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--sheet-overhang));
 }
 
 body[data-tabbar-side="left"].mobile-shell .sidebar > div {
     padding-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
-    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    padding-bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--sheet-overhang));
 }
 
 /* Список разделов больше не прокручивается сам — он часть общего полотна. */
@@ -2738,18 +2748,21 @@ body.mobile-shell .mobile-crop__card[data-busy] .mobile-crop__stage {
    уходит вверх, над списком проявляется стеклянная полоса с именем. Полоса
    ЛИПКАЯ и лежит прямо в прокручиваемом листе, поэтому держится сама, без
    единого обработчика прокрутки. */
+/* Полоса прилипает ПОД ВЫРЕЗОМ, а не к самому верху листа: полоса с часами
+   над ней — место стекла iOS 26, а прибитая к нулю липкая полоса во всю ширину
+   заменяла это стекло сплошной заливкой (17.09.2026, см. «Верх экрана отдан
+   стеклу iOS 26»). У прокручиваемого блока сверху поле под колокол —
+   отрицательный top снимает его ровно до выреза. flex-shrink: 0 — лист
+   flex-колонка, и без запрета полоса сжималась (замер: 34 px вместо 44). */
 body.mobile-shell .mobile-sheet-topbar {
     position: sticky;
-    /* Прилипает к САМОМУ верху листа, а не к его внутреннему отступу: у
-       прокручиваемого блока сверху есть поле под колокол, и с top: 0 над
-       стеклом оставалась бы полоска, сквозь которую видно уезжающие строки.
-       Отрицательный отступ ровно на эту величину и убирает её. */
-    top: calc(-1 * (max(10px, env(safe-area-inset-top)) + 8px));
+    top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)) - 8px);
     z-index: 4;
     display: flex;
     align-items: flex-end;
     justify-content: center;
-    height: calc(44px + env(safe-area-inset-top));
+    flex-shrink: 0;
+    height: 44px;
     /* Поля по бокам — ВНУТРЕННИЕ. Отрицательные внешние выносили полосу за края
        листа, и лист начинал ездить вбок: владелец 11.09.2026 — «имеется боковой
        скролл в профиле, он не нужен». */

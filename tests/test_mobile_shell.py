@@ -170,7 +170,8 @@ class SheetTests(unittest.TestCase):
         self.assertIn('left: 0;', block)
         self.assertIn('transform: none;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar.mobile-open {'))
         inner = css_block(SHELL_CSS, 'body.mobile-shell .sidebar > div {')
-        self.assertIn('calc(var(--mtb-thickness) + env(safe-area-inset-bottom))', inner)
+        # Плюс свес листа за нижнюю грань (стекло iOS 26, tests/test_mobile_status_bar_glass.py).
+        self.assertIn('calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + var(--sheet-overhang))', inner)
 
     def test_sheet_appears_instead_of_flying_from_the_bottom(self):
         """Лист занимает весь экран, и поездка от нижнего края читалась как
@@ -1567,8 +1568,9 @@ class AccountScreenTests(unittest.TestCase):
         self.assertIn('open={mobileMenuOpen} />', APP)
         bar = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar {', 1100)
         self.assertIn('position: sticky;', bar)
-        # Прилипает к верхней грани листа, а не к его внутреннему отступу.
-        self.assertIn('top: calc(-1 * (max(10px, env(safe-area-inset-top)) + 8px));', bar)
+        # Прилипает под вырезом, а не к верхней грани листа: полоса с часами —
+        # место стекла iOS 26 (tests/test_mobile_status_bar_glass.py).
+        self.assertIn('top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)) - 8px);', bar)
         self.assertIn('pointer-events: none;', bar)
 
     def test_photo_lives_behind_one_row(self):
