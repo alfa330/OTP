@@ -6,7 +6,8 @@
 
 ДВЕ ДВЕРИ, И ОНИ РАЗНЫЕ. Это главное в модуле:
 
-  ЧИТАТЬ (`/pending`, `/<id>/read`) — только аутентификация. Ни тумблера
+  ЧИТАТЬ (`/pending`, `/<id>/read`, лента `/feed` и прохождение теста и
+  тренажёра `/<id>/quiz`, `/<id>/trainer`) — только аутентификация. Ни тумблера
   `departments.wiki_enabled`, ни QR-подтверждения сессии, которые стоят на
   роутах вики. Так требует постановка: «чтобы увидеть новость необязательно
   иметь доступ к чувствительным данным или к вики». Оператор отдела, которому
@@ -29,6 +30,7 @@ from . import access as news_access
 from . import photos as news_photos
 from . import queries
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
+                     pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
                      quiz_ready as schema_quiz_ready, schema_is_ready)
 
@@ -88,6 +90,19 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _quiz_table['ready']:
             _quiz_table['ready'] = schema_quiz_ready(cursor)
         return _quiz_table['ready']
+
+    # Колонки тренажёра и обязательности прохождения (задача #342) — тем же
+    # приёмом: без них тест обязателен, как до задачи, а тренажёров нет.
+    _pass_columns = {'ready': False}
+
+    def _pass_ready(cursor):
+        if not _pass_columns['ready']:
+            _pass_columns['ready'] = schema_pass_ready(cursor)
+        return _pass_columns['ready']
+
+    def _get_post(cursor, post_id):
+        """Карточка с колонками #342, когда они развёрнуты."""
+        return queries.get_post(cursor, post_id, with_pass=_pass_ready(cursor))
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -309,6 +324,30 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return None, (jsonify({"error": problem, "code": "NEWS_QUIZ_INVALID"}), 400)
         return quiz, None
 
+    def _passes_from_request(cursor, payload, post=None):
+        """({'pass_required', 'trainer_key'}, отказ) из тела запроса.
+
+        Ключа нет — берём прежнее значение карточки (post) или умолчание:
+        правка одного поля не должна сносить остальные. Умолчание
+        pass_required — ДА: так вели себя все тесты до задачи #342, и форма,
+        не знающая про тумблер, не должна молча делать тест необязательным.
+        """
+        current = post or {}
+        key = current.get('trainer_key')
+        if 'trainer_key' in payload:
+            key, problem = news_access.normalize_trainer_key(payload.get('trainer_key'))
+            if problem:
+                return None, (jsonify({"error": problem, "code": "NEWS_TRAINER_INVALID"}), 400)
+        required = bool(payload.get('pass_required', current.get('pass_required', True)))
+        if not _pass_ready(cursor) and (key or not required):
+            # Прислали тренажёр или «необязательно», а колонок нет: молча
+            # проглотить нельзя — автор выпустил бы объявление не таким, каким
+            # его собрал.
+            return None, (jsonify({"error": "Тренажёры к новостям ещё разворачиваются — "
+                                            "сохраните без них или загляните позже",
+                                   "code": "NEWS_PASS_NOT_READY"}), 503)
+        return {'pass_required': required, 'trainer_key': key}, None
+
     def _set_photos_refusal(cursor, ctx, post_id, payload):
         """Привязка кадров, если форма их прислала. Строка отказа или None.
 
@@ -369,7 +408,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         items = queries.pending_for_user(
             cursor, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], with_photos=with_photos,
-            with_quiz=_quiz_ready(cursor))
+            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor))
         if with_photos:
             # Подписи берутся из процессного кэша и базу не трогают: обращений к
             # ней у этого роута столько же, сколько было до фотографий.
@@ -392,9 +431,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         status, detail = queries.confirm_read(
             cursor, news_id=post_id, user_id=ctx['user_id'],
             otp_role=ctx['otp_role'], subjects=ctx['subjects'],
-            answers=payload.get('answers'), with_quiz=_quiz_ready(cursor))
+            answers=payload.get('answers'), with_quiz=_quiz_ready(cursor),
+            with_pass=_pass_ready(cursor))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
+        if status == 'trainer_pending':
+            return jsonify({"error": "Сначала пройдите тренажёр",
+                            "code": "NEWS_TRAINER_PENDING"}), 409
         if status == 'too_early':
             return jsonify({"error": "Кнопка станет активной чуть позже",
                             "code": "NEWS_TOO_EARLY",
@@ -404,6 +447,76 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             "code": "NEWS_QUIZ_WRONG",
                             "wrong": detail}), 409
         return jsonify({"status": "ok"})
+
+    @news_route('/<int:post_id>/quiz', methods=('POST',))
+    def news_quiz_pass(cursor, ctx, post_id):
+        """«Проверить» у теста (задача #342). Отметка в журнале, без подтверждения.
+
+        Нужен необязательному тесту: он не держит «Прочитал», но пройти его
+        человек вправе — в окне или позже во вкладке «Новости». Тот же гейт, что
+        у /read: опубликована и адресована этому человеку (queries.pass_quiz).
+        """
+        if not (_quiz_ready(cursor) and _pass_ready(cursor)):
+            return jsonify({"error": "Тесты ещё разворачиваются, попробуйте чуть позже",
+                            "code": "NEWS_QUIZ_NOT_READY"}), 503
+        payload = request.get_json(silent=True) or {}
+        status, detail = queries.pass_quiz(
+            cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
+            subjects=ctx['subjects'], answers=payload.get('answers'))
+        if status in ('not_found', 'no_quiz'):
+            return jsonify({"error": "Теста у этой новости нет"}), 404
+        if status == 'quiz_wrong':
+            return jsonify({"error": "Есть неверные ответы — перечитайте новость",
+                            "code": "NEWS_QUIZ_WRONG", "wrong": detail}), 409
+        return jsonify({"status": "ok"})
+
+    @news_route('/<int:post_id>/trainer', methods=('POST',))
+    def news_trainer_pass(cursor, ctx, post_id):
+        """Тренажёр новости пройден до конца (задача #342).
+
+        Зовёт окно, когда урок дошёл до финального шага. Итог присылает браузер
+        — сценарии живут в коде фронта, и так же пишется статистика тренажёров
+        вики; граница — та же, что у /read.
+        """
+        if not _pass_ready(cursor):
+            return jsonify({"error": "Тренажёры ещё разворачиваются, попробуйте чуть позже",
+                            "code": "NEWS_PASS_NOT_READY"}), 503
+        status, _detail = queries.mark_trainer_passed(
+            cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
+            subjects=ctx['subjects'])
+        if status in ('not_found', 'no_trainer'):
+            return jsonify({"error": "Тренажёра у этой новости нет"}), 404
+        return jsonify({"status": "ok"})
+
+    @news_route('/feed')
+    def news_feed(cursor, ctx):
+        """Лента «мои новости» для вкладки «Новости» вики (решение владельца 17.09.2026).
+
+        Вкладка открыта всем, но читателю — «только сами новости, которые ему
+        были предназначены». Поэтому периметр тот же, что у окна, а права
+        публикации роут не считает вовсе: чтение за них не платит.
+        """
+        limit = min(max(_int_or_none(request.args.get('limit')) or 20, 1), 50)
+        offset = max(_int_or_none(request.args.get('offset')) or 0, 0)
+        total, items = queries.feed_for_user(
+            cursor, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
+            subjects=ctx['subjects'], limit=limit, offset=offset,
+            with_photos=_photos_ready(cursor), with_quiz=_quiz_ready(cursor),
+            with_pass=_pass_ready(cursor))
+        return jsonify({"items": items, "total": total, "schema_ready": True})
+
+    @news_route('/feed/<int:post_id>')
+    def news_feed_item(cursor, ctx, post_id):
+        """Новость из ленты целиком: текст, кадры, тест без ответов, тренажёр."""
+        with_photos = _photos_ready(cursor)
+        post = queries.feed_post(
+            cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
+            subjects=ctx['subjects'], with_photos=with_photos,
+            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor))
+        if post is None:
+            return jsonify({"error": "Новость не найдена"}), 404
+        post['photos'] = news_photos.sign_urls(gcs, post['photos']) if with_photos else []
+        return jsonify(post)
 
     # ── ВЫПУСК: супервайзер и выше ───────────────────────────────────────
     @news_route('/access', rights=True)
@@ -441,13 +554,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             viewer_level=news_access.effective_role_level(ctx['otp_role']),
             departments=ctx['departments'], status=status,
             limit=limit, offset=offset, with_photos=_photos_ready(cursor),
-            with_quiz=_quiz_ready(cursor))
+            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
                         "total": total})
 
     @news_route('/posts/<int:post_id>', publisher=True)
     def news_post_item(cursor, ctx, post_id):
-        post = queries.get_post(cursor, post_id)
+        post = _get_post(cursor, post_id)
         if not post:
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_read_post(ctx, post):
@@ -471,13 +584,19 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         quiz, quiz_refusal = _quiz_from_request(cursor, payload)
         if quiz_refusal:
             return quiz_refusal
+        passes, pass_refusal = _passes_from_request(cursor, payload)
+        if pass_refusal:
+            return pass_refusal
 
         post_id = queries.create_post(
             cursor, title=title, body=body, author_id=ctx['user_id'],
             author_department_id=ctx['department_id'],
-            # С тестом — всегда обязательна: у необязательной крестик
-            # подтверждал бы прочтение без единого ответа.
-            is_mandatory=bool(payload.get('is_mandatory', True)) or bool(quiz),
+            # С ОБЯЗАТЕЛЬНЫМ прохождением — всегда обязательна: у необязательной
+            # крестик подтверждал бы прочтение без единого ответа. Необязательный
+            # тест или тренажёр (#342) обязательность не навязывают.
+            is_mandatory=bool(payload.get('is_mandatory', True)) or news_access.must_pass(
+                pass_required=passes['pass_required'], has_quiz=bool(quiz),
+                has_trainer=bool(passes['trainer_key'])),
             confirm_delay_seconds=news_access.normalize_delay(
                 payload.get('confirm_delay_seconds', DEFAULT_CONFIRM_DELAY_SECONDS)),
             expires_at=_timestamp_or_none(payload.get('expires_at')),
@@ -495,14 +614,17 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # кадры: окно, всплывшее у отдела без вопросов, второй раз не всплывёт.
         if quiz:
             queries.set_quiz(cursor, post_id=post_id, quiz=quiz)
+        # Тренажёр и обязательность — тоже до публикации и по той же причине.
+        if _pass_ready(cursor):
+            queries.set_passes(cursor, post_id=post_id, **passes)
         if payload.get('publish'):
             queries.publish_post(cursor, post_id=post_id,
                                  audience_max_role_level=ctx['ceiling'])
-        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id))), 201
+        return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id))), 201
 
     @news_route('/posts/<int:post_id>', methods=('PATCH',), publisher=True)
     def news_post_update(cursor, ctx, post_id):
-        post = queries.get_post(cursor, post_id)
+        post = _get_post(cursor, post_id)
         if not post:
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_edit(ctx, post):
@@ -550,22 +672,44 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             quiz, quiz_refusal = _quiz_from_request(cursor, payload)
             if quiz_refusal:
                 return quiz_refusal
-            if quiz:
-                wants_mandatory = True
+        # Тренажёр и обязательность прохождения выпускавшейся новости не
+        # меняются по той же причине, что тест: часть отдела уже прошла или
+        # подтвердила её на прежних условиях. Сравниваем со значением, а не с
+        # наличием ключа: форма вправе прислать то, что и так стоит.
+        passes, pass_refusal = _passes_from_request(cursor, payload, post)
+        if pass_refusal:
+            return pass_refusal
+        if post['published_at'] and (
+                passes['trainer_key'] != post['trainer_key']
+                or passes['pass_required'] != post['pass_required']):
+            return jsonify({
+                "error": "Тренажёр и обязательность прохождения опубликованной новости "
+                         "не меняются — опубликуйте новую новость",
+                "code": "NEWS_PASS_LOCKED",
+            }), 409
+        # Принесли тест или тренажёр с обязательным прохождением — новость
+        # становится обязательной сама, как и при создании.
+        if news_access.must_pass(
+                pass_required=passes['pass_required'], has_quiz=bool(quiz),
+                has_trainer='trainer_key' in payload and bool(passes['trainer_key'])):
+            wants_mandatory = True
         if post['status'] == 'published' and wants_mandatory != bool(post['is_mandatory']):
             return jsonify({
                 "error": "У опубликованной новости обязательность не меняется — "
                          "снимите её с показа и опубликуйте заново",
                 "code": "NEWS_MANDATORY_LOCKED",
             }), 409
-        # С тестом — тем более: у необязательной новости крестик и есть
-        # подтверждение, без единого ответа.
+        # С обязательным прохождением — тем более: у необязательной новости
+        # крестик и есть подтверждение, без единого ответа.
         # Тест, который останется у новости: присланный в этой правке или прежний.
         keeps_quiz = (bool(quiz) if quiz is not None
                       else bool(_quiz_ready(cursor) and queries.quiz_answer_key(cursor, post_id)))
-        if not wants_mandatory and keeps_quiz:
+        if not wants_mandatory and news_access.must_pass(
+                pass_required=passes['pass_required'], has_quiz=keeps_quiz,
+                has_trainer=bool(passes['trainer_key'])):
             return jsonify({
-                "error": "У новости с тестом обязательность не снимается",
+                "error": "У новости с обязательным тестом или тренажёром "
+                         "обязательность не снимается",
                 "code": "NEWS_QUIZ_MANDATORY",
             }), 409
 
@@ -582,14 +726,16 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # Пустой список у черновика — «убрать тест».
         if quiz is not None and _quiz_ready(cursor):
             queries.set_quiz(cursor, post_id=post_id, quiz=quiz)
+        if _pass_ready(cursor):
+            queries.set_passes(cursor, post_id=post_id, **passes)
         photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
         if photo_refusal:
             return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
-        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id)))
+        return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>/publish', methods=('POST',), publisher=True)
     def news_post_publish(cursor, ctx, post_id):
-        post = queries.get_post(cursor, post_id)
+        post = _get_post(cursor, post_id)
         if not post:
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_edit(ctx, post):
@@ -602,22 +748,22 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
         queries.publish_post(cursor, post_id=post_id,
                              audience_max_role_level=ctx['ceiling'])
-        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id)))
+        return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>/archive', methods=('POST',), publisher=True)
     def news_post_archive(cursor, ctx, post_id):
-        post = queries.get_post(cursor, post_id)
+        post = _get_post(cursor, post_id)
         if not post:
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_take_down(ctx, post):
             return jsonify({"error": "Снять новость может её автор "
                                      "или руководитель выше него"}), 403
         queries.set_status(cursor, post_id=post_id, status='archived')
-        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id)))
+        return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>', methods=('DELETE',), publisher=True)
     def news_post_delete(cursor, ctx, post_id):
-        post = queries.get_post(cursor, post_id)
+        post = _get_post(cursor, post_id)
         if not post:
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_edit(ctx, post):
@@ -756,7 +902,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 if row['uploaded_by'] != ctx['user_id']:
                     return jsonify({"error": "Фотография не найдена"}), 404
             else:
-                post = queries.get_post(cursor, row['news_id'])
+                post = _get_post(cursor, row['news_id'])
                 if not post:
                     return jsonify({"error": "Новость не найдена"}), 404
                 # _may_edit, а не _may_read_post: чужой текст не правят, и
@@ -773,12 +919,12 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
     @news_route('/posts/<int:post_id>/report', publisher=True)
     def news_post_report(cursor, ctx, post_id):
         """Кто прочитал, кто нет. Ради этого журнала раздел и делали."""
-        post = queries.get_post(cursor, post_id)
+        post = _get_post(cursor, post_id)
         if not post:
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_read_post(ctx, post):
             return jsonify({"error": "Эта новость не из вашего периметра"}), 403
-        rows = queries.read_report(cursor, post_id)
+        rows = queries.read_report(cursor, post_id, with_pass=_pass_ready(cursor))
         # Знаменатель — только НЫНЕШНИЕ адресаты: «из скольких» отвечает на
         # вопрос «сколько человек это касается сейчас». Числитель — по тем же
         # людям, чтобы «12 из 30» нельзя было прочитать двумя способами.
@@ -791,6 +937,11 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "confirmed": sum(1 for row in addressed if row['confirmed_at']),
             "confirmed_outside": sum(1 for row in rows
                                      if row['confirmed_at'] and not row['in_audience']),
+            # Задача #342: сколько нынешних адресатов прошли тест и тренажёр.
+            # Тем же знаменателем, что «подтвердили», — иначе «прошли 9» и
+            # «подтвердили 12 из 30» считались бы по разным людям.
+            "quiz_passed": sum(1 for row in addressed if row['quiz_passed_at']),
+            "trainer_passed": sum(1 for row in addressed if row['trainer_passed_at']),
         })
 
     return bp

@@ -205,8 +205,15 @@ export function TrainerPlayer({
     /* Наружу — что сделал стажёр со звонком (answer | reject | hold | unhold |
        transfer | end). */
     onCall = null,
+    /* Урок дошёл до финального шага. Нужен новости с обязательным тренажёром
+       (задача #342): окно отмечает прохождение и отпускает кнопку «Прочитал».
+       Держится в ref — новая функция из родителя на каждом рендере не должна
+       перезапускать эффект завершения. */
+    onFinished = null,
 }) {
     const [run, setRun] = useState(() => startRun(scenario, { caseData }));
+    const onFinishedRef = useRef(onFinished);
+    onFinishedRef.current = onFinished;
     const phoneRef = useRef(null);
     const stageRef = useRef(null);
     const stages = useMemo(() => stageCount(scenario), [scenario]);
@@ -574,6 +581,7 @@ export function TrainerPlayer({
             // Лента обязана уйти на завершении: дальше попытки уже нет.
             logRef.current.flush();
             runLog.close('finished');
+            onFinishedRef.current?.();
         }
     }, [finished, runLog]);
 
@@ -1042,6 +1050,9 @@ export function TrainerPlayer({
 export default function TrainerModal({
     scenario, onClose, record = null,
     caseData = null, voice = null, onCallApi = null, onCall = null,
+    /* layer="top" — поверх окна «Новость дня» (z-index 120): оттуда тренажёр
+       открывают, пока окно остаётся на месте (задача #342). */
+    onFinished = null, layer = null,
 }) {
     const reduceMotion = useReducedMotion();
     /* Закрытие тоже анимируется — тем же движением, что и открытие, только в
@@ -1082,7 +1093,8 @@ export default function TrainerModal({
     if (!scenario) return null;
 
     return createPortal(
-        <div className="wt-overlay" role="dialog" aria-modal="true" aria-label={scenario.title}>
+        <div className={`wt-overlay${layer === 'top' ? ' wt-overlay--top' : ''}`}
+             role="dialog" aria-modal="true" aria-label={scenario.title}>
             <TrainerPlayer
                 scenario={scenario}
                 onClose={requestClose}
@@ -1093,6 +1105,7 @@ export default function TrainerModal({
                 voice={voice}
                 onCallApi={onCallApi}
                 onCall={onCall}
+                onFinished={onFinished}
             />
         </div>,
         document.body,

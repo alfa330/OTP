@@ -5,6 +5,7 @@
 про пул и транзакции — их открывает вызывающий, как в wiki/queries.py и call_qa.
 """
 
+import html
 import json
 
 from wiki import access as wiki_access
@@ -192,8 +193,22 @@ def is_wiki_admin(cursor, user_id):
 # ВЫДАЧА ОКНА
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pass_columns_sql(with_pass):
+    """Колонки прохождения (#342) для выборок с `p` = news_posts и `r` = news_reads.
+
+    Без развёрнутых колонок — литералы того же вида: тест обязателен (так было
+    до задачи), тренажёра нет, ничего не пройдено. Запрос не падает на
+    отсутствующей колонке, и форма строки одна при любой готовности схемы.
+    """
+    if with_pass:
+        return ("p.pass_required, p.trainer_key, "
+                "r.quiz_passed_at, r.trainer_passed_at")
+    return ("TRUE AS pass_required, NULL::varchar AS trainer_key, "
+            "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at")
+
+
 def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
-                     with_quiz=False):
+                     with_quiz=False, with_pass=False):
     """Новости, которые этому человеку сейчас показывают. Свои — не показываем.
 
     Порядок: обязательные раньше необязательных, внутри — по публикации. Автор
@@ -227,7 +242,8 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
                -- Наружу не отдаётся (окно не показывает время публикации), но
                -- обязано быть в CTE: по нему сортирует внешний запрос с
                -- кадрами. Без него — «column q.published_at does not exist».
-               p.published_at
+               p.published_at,
+               """ + _pass_columns_sql(with_pass) + """
           FROM news_posts p
           LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
          WHERE p.status = 'published'
@@ -242,58 +258,62 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
          ORDER BY p.is_mandatory DESC, p.published_at, p.id
          LIMIT 20
         """)
-    if with_photos or with_quiz:
-        if with_photos:
-            params['max_photos'] = MAX_PHOTOS_PER_POST
-        # Кадры СКАЛЯРНЫМ подзапросом, а не джойном, и СНАРУЖИ лимита.
-        #
-        # Джойн испортил бы две вещи сразу. Во-первых, размножил бы строку
-        # новости на число кадров — вместе с телом объявления в каждой копии, а
-        # это самый горячий запрос портала. Во-вторых, и это хуже, он отдал бы
-        # LIMIT 20 КАРТИНКАМ: две новости по десять кадров съели бы всю очередь,
-        # и третье объявление молча не доехало бы до окна.
-        #
-        # Снаружи CTE, а не в исходном SELECT-листе: подзапрос с LIMIT в
-        # родителя не разворачивается, поэтому агрегат считается РОВНО для
-        # отобранных двадцати, а не для каждого кандидата до сортировки.
-        #
-        # bucket и blob_path здесь есть — без них нечего подписывать, — но
-        # наружу не уходят: роут гонит список через news_photos.sign_urls, а тот
-        # собирает новый словарь по белому списку ключей.
-        photos = ("""COALESCE((
-                   SELECT json_agg(json_build_object(
-                              'id', f.id, 'bucket', f.bucket,
-                              'blob_path', f.blob_path, 'content_type', f.content_type,
-                              'width', f.width, 'height', f.height,
-                              'file_size', f.file_size, 'sort_order', f.sort_order)
-                          ORDER BY f.sort_order, f.id)
-                     FROM (SELECT id, bucket, blob_path, content_type,
-                                  width, height, file_size, sort_order
-                             FROM news_photos
-                            WHERE news_id = q.id
-                            ORDER BY sort_order, id
-                            LIMIT %(max_photos)s) f
-               ), '[]'::json)""" if with_photos else "'[]'::json")
-        # Тест в окне — тем же приёмом и по той же причине: скалярно и снаружи
-        # лимита. ВЕРНОГО ВАРИАНТА здесь нет и быть не должно: окно показывает
-        # только формулировки, а сверку делает сервер (confirm_read). Отдай мы
-        # индекс верного варианта, тест проходился бы из вкладки «Сеть».
-        quiz = ("""COALESCE((
-                   SELECT json_agg(json_build_object(
-                              'id', z.id, 'prompt', z.prompt, 'options', z.options)
-                          ORDER BY z.position, z.id)
-                     FROM news_quiz_questions z
-                    WHERE z.news_id = q.id
-               ), '[]'::json)""" if with_quiz else "'[]'::json")
-        sql = ("""
-        WITH queue AS (""" + sql + """)
-        SELECT q.id, q.title, q.body, q.is_mandatory, q.confirm_delay_seconds,
-               q.shown_at, q.remaining_seconds,
-               """ + photos + """ AS photos,
-               """ + quiz + """ AS quiz
-          FROM queue q
-         ORDER BY q.is_mandatory DESC, q.published_at, q.id
-        """)
+    # Обёртка — ВСЕГДА, а не только при кадрах или тесте: строка ответа тогда
+    # одного вида при любой готовности схемы, и разбор ниже не гадает, на каком
+    # месте какая колонка. Цена — ноль: CTE с LIMIT планировщик считает один раз.
+    if with_photos:
+        params['max_photos'] = MAX_PHOTOS_PER_POST
+    # Кадры СКАЛЯРНЫМ подзапросом, а не джойном, и СНАРУЖИ лимита.
+    #
+    # Джойн испортил бы две вещи сразу. Во-первых, размножил бы строку
+    # новости на число кадров — вместе с телом объявления в каждой копии, а
+    # это самый горячий запрос портала. Во-вторых, и это хуже, он отдал бы
+    # LIMIT 20 КАРТИНКАМ: две новости по десять кадров съели бы всю очередь,
+    # и третье объявление молча не доехало бы до окна.
+    #
+    # Снаружи CTE, а не в исходном SELECT-листе: подзапрос с LIMIT в
+    # родителя не разворачивается, поэтому агрегат считается РОВНО для
+    # отобранных двадцати, а не для каждого кандидата до сортировки.
+    #
+    # bucket и blob_path здесь есть — без них нечего подписывать, — но
+    # наружу не уходят: роут гонит список через news_photos.sign_urls, а тот
+    # собирает новый словарь по белому списку ключей.
+    photos = ("""COALESCE((
+               SELECT json_agg(json_build_object(
+                          'id', f.id, 'bucket', f.bucket,
+                          'blob_path', f.blob_path, 'content_type', f.content_type,
+                          'width', f.width, 'height', f.height,
+                          'file_size', f.file_size, 'sort_order', f.sort_order)
+                      ORDER BY f.sort_order, f.id)
+                 FROM (SELECT id, bucket, blob_path, content_type,
+                              width, height, file_size, sort_order
+                         FROM news_photos
+                        WHERE news_id = q.id
+                        ORDER BY sort_order, id
+                        LIMIT %(max_photos)s) f
+           ), '[]'::json)""" if with_photos else "'[]'::json")
+    # Тест в окне — тем же приёмом и по той же причине: скалярно и снаружи
+    # лимита. ВЕРНОГО ВАРИАНТА здесь нет и быть не должно: окно показывает
+    # только формулировки, а сверку делает сервер (confirm_read). Отдай мы
+    # индекс верного варианта, тест проходился бы из вкладки «Сеть».
+    quiz = ("""COALESCE((
+               SELECT json_agg(json_build_object(
+                          'id', z.id, 'prompt', z.prompt, 'options', z.options)
+                      ORDER BY z.position, z.id)
+                 FROM news_quiz_questions z
+                WHERE z.news_id = q.id
+           ), '[]'::json)""" if with_quiz else "'[]'::json")
+    sql = ("""
+    WITH queue AS (""" + sql + """)
+    SELECT q.id, q.title, q.body, q.is_mandatory, q.confirm_delay_seconds,
+           q.shown_at, q.remaining_seconds,
+           """ + photos + """ AS photos,
+           """ + quiz + """ AS quiz,
+           q.pass_required, q.trainer_key,
+           q.quiz_passed_at IS NOT NULL, q.trainer_passed_at IS NOT NULL
+      FROM queue q
+     ORDER BY q.is_mandatory DESC, q.published_at, q.id
+    """)
     # @NOW@ подставляем str.replace, а не %-форматом: в тексте запроса живут
     # именованные параметры psycopg2 (%(user_id)s), и %-формат сломался бы на
     # них — тем же способом, каким он уже ронял DDL вики на комментарии с '%'.
@@ -316,6 +336,13 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
         'photos': (row[7] or []) if with_photos else [],
         # Формулировки и варианты, без верных ответов (см. выше).
         'quiz': (row[8] or []) if with_quiz else [],
+        # Задача #342: держит ли прохождение кнопку, какой тренажёр и что уже
+        # пройдено. Пройденное нужно окну после перезагрузки страницы: иначе
+        # человек, прошедший тренажёр, увидел бы его снова непройденным.
+        'pass_required': bool(row[9]),
+        'trainer_key': row[10],
+        'quiz_passed': bool(row[11]),
+        'trainer_passed': bool(row[12]),
     } for row in cursor.fetchall()]
 
 
@@ -392,11 +419,12 @@ def set_quiz(cursor, *, post_id, quiz):
 
 
 def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
-                 with_quiz=False):
+                 with_quiz=False, with_pass=False):
     """Принять «Прочитал». (status, подробность).
 
     Подробность — оставшиеся секунды у 'too_early' и id вопросов с неверным
-    ответом у 'quiz_wrong'.
+    ответом у 'quiz_wrong'. 'trainer_pending' — обязательный тренажёр ещё не
+    пройден (задача #342).
 
     Задержку проверяет СЕРВЕР — по своей же отметке о показе. Клиентский
     таймер это удобство: без серверной проверки подтверждение уходило бы из
@@ -413,13 +441,14 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
         SELECT p.is_mandatory, r.shown_at, r.confirmed_at,
                GREATEST(0, p.confirm_delay_seconds
                         - EXTRACT(EPOCH FROM ({now} - COALESCE(r.shown_at, {now})))
-               )::int AS remaining
+               )::int AS remaining,
+               {passes}
           FROM news_posts p
           LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
          WHERE p.id = %(news_id)s
            AND p.status = 'published'
            AND
-        """.format(now=_NOW) + AUDIENCE_MATCH_FOR_VIEWER,
+        """.format(now=_NOW, passes=_pass_columns_sql(with_pass)) + AUDIENCE_MATCH_FOR_VIEWER,
         params,
     )
     row = cursor.fetchone()
@@ -434,15 +463,18 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
     # подтвердившим.
     if row is None:
         return 'not_found', 0
-    is_mandatory, shown_at, confirmed_at, remaining = row
+    (is_mandatory, shown_at, confirmed_at, remaining,
+     pass_required, trainer_key, quiz_passed_at, trainer_passed_at) = row
     if confirmed_at is not None:
         return 'already', 0
 
-    # Новость с тестом обязательна ВСЕГДА, что бы ни стояло в записи: крестик
-    # необязательной подтверждал бы прочтение без единого ответа, и тест
-    # обходился бы одним нажатием.
+    # Новость с ОБЯЗАТЕЛЬНЫМ прохождением обязательна ВСЕГДА, что бы ни стояло
+    # в записи: крестик необязательной подтверждал бы прочтение без единого
+    # ответа, и тест обходился бы одним нажатием. Необязательный тест
+    # (задача #342) окно не держит — по нему и обязательность не навязывается.
     answer_key = quiz_answer_key(cursor, news_id) if with_quiz else []
-    if answer_key:
+    if news_access.must_pass(pass_required=pass_required, has_quiz=bool(answer_key),
+                             has_trainer=bool(trainer_key)):
         is_mandatory = True
 
     # У НЕОБЯЗАТЕЛЬНОЙ новости кнопки «Прочитал» нет вовсе — её закрывают
@@ -479,23 +511,271 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
     if int(remaining or 0) > 0:
         return 'too_early', int(remaining)
 
-    if answer_key:
+    left = news_access.outstanding_passes(
+        pass_required=pass_required, has_quiz=bool(answer_key),
+        has_trainer=bool(trainer_key), quiz_passed=quiz_passed_at is not None,
+        trainer_passed=trainer_passed_at is not None)
+    if 'trainer' in left:
+        # Отметку тренажёра ставит окно, когда урок дошёл до конца
+        # (mark_trainer_passed). Без неё подтверждение не принимается — иначе
+        # обязательный тренажёр обходился бы кнопкой из консоли.
+        return 'trainer_pending', 0
+    quiz_passed_now = False
+    if 'quiz' in left:
         wrong = news_access.quiz_mistakes(answer_key, answers)
         if wrong:
             # Ошибку называем по вопросу, а верный вариант — нет: окно подсветит
             # вопрос, и человек перечитает новость, а не подберёт ответ перебором.
             return 'quiz_wrong', wrong
+        quiz_passed_now = True
 
     cursor.execute(
         """
         UPDATE news_reads
-           SET confirmed_at = {now}
+           SET confirmed_at = {now}{quiz_mark}
          WHERE news_id = %(news_id)s AND user_id = %(user_id)s
            AND confirmed_at IS NULL
-        """.format(now=_NOW),
+        """.format(now=_NOW,
+                   # Верные ответы при подтверждении — это и есть пройденный
+                   # тест: журнал обязан показать его так же, как пройденный
+                   # отдельной кнопкой «Проверить».
+                   quiz_mark=(', quiz_passed_at = COALESCE(quiz_passed_at, %s)' % _NOW
+                              if quiz_passed_now and with_pass else '')),
         {'news_id': news_id, 'user_id': user_id},
     )
     return 'ok', 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРОХОЖДЕНИЕ И ЛЕНТА ЧИТАТЕЛЯ (задача #342)
+#
+# «После публикации новости оператор должен иметь возможность открыть и пройти
+# прикреплённый тест». Проходят его в окне и во вкладке «Новости» вики — она
+# открыта всем (решение владельца 17.09.2026): читателю показываются только
+# адресованные ему новости, редактору — ещё и управление.
+#
+# Периметр у всех функций раздела один — опубликованная и адресованная этому
+# человеку (AUDIENCE_MATCH_FOR_VIEWER). Роуты стоят на голой аутентификации,
+# как /read, поэтому проверка здесь обязательна: без неё перебором id можно
+# было бы прочитать чужой черновик или «пройти» ещё не выпущенный тест.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Первые знаки текста для строки ленты. Считает Postgres: тело объявления в
+# питон ради двух строк превью не тянем.
+FEED_PREVIEW_LENGTH = 220
+
+
+def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass):
+    """Опубликованная новость, адресованная человеку, со своими отметками. None — нет.
+
+    Своя новость сюда НЕ попадает: автор её не получает (как и окно).
+    """
+    params = news_access.audience_params(subjects, user_id, otp_role)
+    params.update(_role_params())
+    params['news_id'] = news_id
+    cursor.execute(
+        """
+        SELECT p.id, {passes}, r.confirmed_at
+          FROM news_posts p
+          LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
+         WHERE p.id = %(news_id)s
+           AND p.status = 'published'
+           AND p.author_id IS DISTINCT FROM %(user_id)s
+           AND
+        """.format(passes=_pass_columns_sql(with_pass)) + AUDIENCE_MATCH_FOR_VIEWER,
+        params,
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return {'id': row[0], 'pass_required': bool(row[1]), 'trainer_key': row[2],
+            'quiz_passed_at': row[3], 'trainer_passed_at': row[4], 'confirmed_at': row[5]}
+
+
+def _mark_pass(cursor, *, news_id, user_id, column):
+    """Отметка «прошёл» в строке журнала. Первая остаётся — повтор её не двигает.
+
+    Строки может ещё не быть: необязательную новость проходят и во вкладке,
+    куда окно не заглядывало (горизонт показа, срок новости). Тогда строка
+    заводится здесь же — отметка «открыл» в ней честная: человек новость открыл.
+    """
+    assert column in ('quiz_passed_at', 'trainer_passed_at')
+    cursor.execute(
+        """
+        INSERT INTO news_reads (news_id, user_id, shown_at, {col})
+        VALUES (%(news_id)s, %(user_id)s, {now}, {now})
+        ON CONFLICT (news_id, user_id)
+        DO UPDATE SET {col} = COALESCE(news_reads.{col}, EXCLUDED.{col})
+        """.format(col=column, now=_NOW),
+        {'news_id': news_id, 'user_id': user_id},
+    )
+
+
+def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers):
+    """«Проверить» у теста новости. (status, подробность).
+
+    'not_found' — новости нет или она не этому человеку; 'no_quiz' — теста у
+    неё нет; 'quiz_wrong' — id вопросов с ошибкой; 'ok' — тест пройден и
+    отмечен в журнале. Подтверждение прочтения здесь НЕ ставится: это другой
+    вопрос, и отвечает на него кнопка «Прочитал».
+    """
+    post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
+                        subjects=subjects, with_pass=True)
+    if post is None:
+        return 'not_found', 0
+    answer_key = quiz_answer_key(cursor, news_id)
+    if not answer_key:
+        return 'no_quiz', 0
+    wrong = news_access.quiz_mistakes(answer_key, answers)
+    if wrong:
+        return 'quiz_wrong', wrong
+    _mark_pass(cursor, news_id=news_id, user_id=user_id, column='quiz_passed_at')
+    return 'ok', 0
+
+
+def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects):
+    """Тренажёр новости дошёл до конца. (status, 0).
+
+    Итог урока присылает браузер: сценарий живёт в коде фронта, и сервер
+    проверить прохождение шаг за шагом не может — ровно так же пишется и
+    статистика тренажёров вики (wiki_trainer_runs). Граница здесь та, что есть:
+    новость опубликована, адресована этому человеку и тренажёр у неё правда есть.
+    """
+    post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
+                        subjects=subjects, with_pass=True)
+    if post is None:
+        return 'not_found', 0
+    if not post['trainer_key']:
+        return 'no_trainer', 0
+    _mark_pass(cursor, news_id=news_id, user_id=user_id, column='trainer_passed_at')
+    return 'ok', 0
+
+
+def feed_for_user(cursor, *, user_id, otp_role, subjects, limit=20, offset=0,
+                  with_photos=False, with_quiz=False, with_pass=False):
+    """Лента «мои новости»: опубликованные и адресованные человеку. (всего, строки).
+
+    Свежие сверху. Без тела и без кадров — строка списка отвечает на «что это
+    за новость»; целиком карточку отдаёт feed_post, когда её открыли. Горизонт
+    показа и срок новости ленту НЕ режут: они снимают окно, а не память о
+    новости — открыть её и пройти тест человек вправе и через месяц.
+    """
+    params = news_access.audience_params(subjects, user_id, otp_role)
+    params.update(_role_params())
+    params.update({'limit': int(limit), 'offset': int(offset)})
+    where = """
+         WHERE p.status = 'published'
+           AND p.author_id IS DISTINCT FROM %(user_id)s
+           AND
+        """ + AUDIENCE_MATCH_FOR_VIEWER
+    cursor.execute(
+        """
+        SELECT p.id, p.title, p.is_mandatory, p.published_at,
+               -- Блочные теги — пробелом (абзацы не слипаются), строчные —
+               -- ничем: «<strong>Sapar</strong>.» не должно стать «Sapar .».
+               left(regexp_replace(
+                        regexp_replace(p.body, '</?(p|li|ul|ol|h[1-6]|br|div|blockquote)[^>]*>',
+                                       ' ', 'gi'),
+                        '<[^>]+>', '', 'g'), {preview}) AS preview,
+               r.confirmed_at,
+               {photo_count} AS photo_count,
+               {quiz_count} AS quiz_count,
+               {passes}
+          FROM news_posts p
+          LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
+        """.format(
+            preview=FEED_PREVIEW_LENGTH * 2,
+            photo_count=("(SELECT COUNT(*) FROM news_photos f WHERE f.news_id = p.id)"
+                         if with_photos else "0"),
+            quiz_count=("(SELECT COUNT(*) FROM news_quiz_questions z WHERE z.news_id = p.id)"
+                        if with_quiz else "0"),
+            passes=_pass_columns_sql(with_pass),
+        ) + where + """
+         ORDER BY p.published_at DESC NULLS LAST, p.id DESC
+         LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    # Счётчик отдельным запросом, а не окном COUNT(*) OVER (): страница за
+    # хвостом вернула бы ноль вместо «на этой странице пусто».
+    cursor.execute("SELECT COUNT(*) FROM news_posts p" + where, params)
+    total = int(cursor.fetchone()[0])
+    return total, [{
+        'id': row[0],
+        'title': row[1],
+        'is_mandatory': bool(row[2]),
+        'published_at': row[3].isoformat() if row[3] else None,
+        'preview': _plain_preview(row[4]),
+        'confirmed': row[5] is not None,
+        'photo_count': int(row[6] or 0),
+        'quiz_count': int(row[7] or 0),
+        'pass_required': bool(row[8]),
+        'trainer_key': row[9],
+        'quiz_passed': row[10] is not None,
+        'trainer_passed': row[11] is not None,
+    } for row in rows]
+
+
+def _plain_preview(text):
+    """Превью без сущностей HTML и лишних пробелов, по границе слова."""
+    plain = ' '.join(html.unescape(str(text or '')).split())
+    if len(plain) <= FEED_PREVIEW_LENGTH:
+        return plain
+    cut = plain[:FEED_PREVIEW_LENGTH].rsplit(' ', 1)[0]
+    return cut.rstrip(' ,.;:—-') + '…'
+
+
+def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False,
+              with_quiz=False, with_pass=False):
+    """Карточка новости из ленты — тем же периметром, что и лента. None — не его.
+
+    Тест — БЕЗ верных ответов, как в окне: сверяет сервер (pass_quiz).
+    """
+    params = news_access.audience_params(subjects, user_id, otp_role)
+    params.update(_role_params())
+    params['news_id'] = news_id
+    cursor.execute(
+        """
+        SELECT p.id, p.title, p.body, p.is_mandatory, p.published_at, r.confirmed_at,
+               {quiz} AS quiz,
+               {passes}
+          FROM news_posts p
+          LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
+         WHERE p.id = %(news_id)s
+           AND p.status = 'published'
+           AND p.author_id IS DISTINCT FROM %(user_id)s
+           AND
+        """.format(
+            quiz=("""COALESCE((
+                       SELECT json_agg(json_build_object(
+                                  'id', z.id, 'prompt', z.prompt, 'options', z.options)
+                              ORDER BY z.position, z.id)
+                         FROM news_quiz_questions z
+                        WHERE z.news_id = p.id
+                   ), '[]'::json)""" if with_quiz else "'[]'::json"),
+            passes=_pass_columns_sql(with_pass),
+        ) + AUDIENCE_MATCH_FOR_VIEWER,
+        params,
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        'id': row[0],
+        'title': row[1],
+        'body': row[2],
+        'is_mandatory': bool(row[3]),
+        'published_at': row[4].isoformat() if row[4] else None,
+        'confirmed': row[5] is not None,
+        'quiz': row[6] or [],
+        'pass_required': bool(row[7]),
+        'trainer_key': row[8],
+        'quiz_passed': row[9] is not None,
+        'trainer_passed': row[10] is not None,
+        # Кадры подшивает роут: подпись — его работа (news_photos.sign_urls).
+        'photos': post_photos(cursor, row[0]) if with_photos else [],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -503,7 +783,7 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
-               limit=50, offset=0, with_photos=False, with_quiz=False):
+               limit=50, offset=0, with_photos=False, with_quiz=False, with_pass=False):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
@@ -523,7 +803,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                u.name AS author_name, d.name AS author_department,
                p.author_id, u.role AS author_role,
                {photo_count} AS photo_count,
-               {quiz_count} AS quiz_count
+               {quiz_count} AS quiz_count,
+               {trainer_key} AS trainer_key
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -548,6 +829,7 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
             # Тест — тем же приёмом и с той же оговоркой про таблицу.
             quiz_count=("(SELECT COUNT(*) FROM news_quiz_questions z WHERE z.news_id = p.id)"
                         if with_quiz else "0"),
+            trainer_key=("p.trainer_key" if with_pass else "NULL::varchar"),
         ),
         params,
     )
@@ -591,6 +873,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         'photo_count': int(row[13] or 0),
         # Сколько вопросов в тесте окна. Форма по нему запирает обязательность.
         'quiz_count': int(row[14] or 0),
+        # Тренажёр новости (#342): метка в строке и дверь к журналу прохождений.
+        'trainer_key': row[15],
         # Заполняется ниже одним запросом на всю страницу: считать его
         # подзапросом по news_reads значило бы считать НЕ ТО, что показывает
         # журнал (там знаменатель — нынешние адресаты), и «Прочитали: 14» на
@@ -638,19 +922,26 @@ def audience_stats(cursor, post_ids):
     return {int(row[0]): (int(row[1]), int(row[2])) for row in cursor.fetchall()}
 
 
-def get_post(cursor, post_id):
-    """Карточка новости с адресатами. None — нет такой."""
+def get_post(cursor, post_id, with_pass=False):
+    """Карточка новости с адресатами. None — нет такой.
+
+    with_pass — развёрнуты ли колонки тренажёра и обязательности прохождения
+    (schema.pass_ready). Без них карточка читается как до задачи #342: тест
+    обязателен, тренажёра нет.
+    """
     cursor.execute(
         """
         SELECT p.id, p.title, p.body, p.status, p.is_mandatory,
                p.confirm_delay_seconds, p.published_at, p.expires_at,
                p.author_id, p.author_department_id, p.audience_max_role_level,
-               u.name, d.name, p.created_at, p.updated_at, u.role
+               u.name, d.name, p.created_at, p.updated_at, u.role,
+               {pass_required}, {trainer_key}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
          WHERE p.id = %s
-        """,
+        """.format(pass_required='p.pass_required' if with_pass else 'TRUE',
+                   trainer_key='p.trainer_key' if with_pass else 'NULL::varchar'),
         (post_id,),
     )
     row = cursor.fetchone()
@@ -675,6 +966,8 @@ def get_post(cursor, post_id):
         # Должность автора — ею меряется периметр карточки и право снять с
         # показа (news/routes.py: _may_read_post, _may_take_down).
         'author_role': row[15],
+        'pass_required': bool(row[16]),
+        'trainer_key': row[17],
         'audience': audience_rules(cursor, post_id),
     }
 
@@ -779,6 +1072,19 @@ def update_post(cursor, *, post_id, title, body, is_mandatory,
     )
 
 
+def set_passes(cursor, *, post_id, pass_required, trainer_key):
+    """Тренажёр и обязательность прохождения (#342). Отдельно от update_post:
+    её зовут и «Вопросы операторов», где этих колонок могло ещё не быть."""
+    cursor.execute(
+        """
+        UPDATE news_posts
+           SET pass_required = %(required)s, trainer_key = %(trainer)s
+         WHERE id = %(id)s
+        """,
+        {'id': post_id, 'required': bool(pass_required), 'trainer': trainer_key},
+    )
+
+
 def set_audience(cursor, *, post_id, rules, audience_max_role_level=None):
     """Полная замена адресатов. Частичной правки у набора нет намеренно:
     «кому ушла новость» — один ответ, и собирать его из добавленных и удалённых
@@ -850,7 +1156,7 @@ def delete_post(cursor, post_id):
 # ЖУРНАЛ: кто прочитал, кто нет
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_report(cursor, post_id):
+def read_report(cursor, post_id, with_pass=False):
     """Адресаты новости с отметками показа и подтверждения.
 
     Круг адресатов считается ТЕМИ ЖЕ правилами, что и выдача окна
@@ -883,7 +1189,9 @@ def read_report(cursor, post_id):
         -- приносит с собой отметки по ЧУЖИМ новостям, и журнал распухает
         -- дублями и посторонними людьми. Поймано прогоном на живой базе.
         reads AS (
-            SELECT user_id, shown_at, confirmed_at
+            SELECT user_id, shown_at, confirmed_at, """ + (
+                "quiz_passed_at, trainer_passed_at" if with_pass else
+                "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at") + """
               FROM news_reads
              WHERE news_id = %(post_id)s
         )
@@ -892,7 +1200,8 @@ def read_report(cursor, post_id):
                COALESCE(a.role, u.role)            AS role,
                COALESCE(a.department_name, d.name) AS department_name,
                r.shown_at, r.confirmed_at,
-               (a.id IS NOT NULL)                  AS in_audience
+               (a.id IS NOT NULL)                  AS in_audience,
+               r.quiz_passed_at, r.trainer_passed_at
           FROM addressed a
           FULL JOIN reads r ON r.user_id = a.id
           LEFT JOIN users u ON u.id = r.user_id
@@ -913,6 +1222,10 @@ def read_report(cursor, post_id):
         # когда-то, а потом уволился или сменил отдел; из знаменателя «из
         # скольких» такой не считается, но из журнала не пропадает.
         'in_audience': bool(row[6]),
+        # Задача #342: кто прошёл тест и тренажёр. Отдельно от подтверждения —
+        # необязательный тест проходят и после «Прочитал», и не проходят вовсе.
+        'quiz_passed_at': row[7].isoformat() if row[7] else None,
+        'trainer_passed_at': row[8].isoformat() if row[8] else None,
     } for row in cursor.fetchall()]
 
 

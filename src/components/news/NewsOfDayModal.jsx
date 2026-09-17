@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Bell, Check, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import NewsGallery from './NewsGallery';
+import NewsPasses from './NewsPasses';
 import { subscribeNewsPoke } from './newsShared';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
@@ -37,68 +38,9 @@ import './news-modal.css';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-/* Тест в окне новости («Вопросы операторов», задача #321): «после ознакомления
- * оператор проходит небольшой тест из 2–3 вопросов … при правильных ответах
- * нажимает «Подтвердить», после чего плашка исчезает».
- *
- * Варианты — кнопками на всю ширину: окно читают и с телефона, между звонками,
- * и в кружок на 16 пикселей пальцем не попасть. Верного ответа здесь нет и не
- * бывает — сервер отдаёт только формулировки и сверяет сам. Цвет — только у
- * ошибки и только у выбранного варианта: подкрасить остальные значило бы
- * подсказать.
- */
-function NewsQuiz({ quiz, answers, wrong, onAnswer }) {
-    return (
-        <div className="mt-5 space-y-4 border-t border-slate-100 pt-4">
-            {quiz.map((item, index) => {
-                const missed = wrong.includes(item.id);
-                return (
-                    <fieldset key={item.id} className="space-y-2">
-                        <legend className="text-[14px] font-medium leading-snug text-slate-900">
-                            {index + 1}. {item.prompt}
-                        </legend>
-                        <div className="space-y-1.5" role="radiogroup">
-                            {(item.options || []).map((option, optionIndex) => {
-                                const chosen = answers[item.id] === optionIndex;
-                                const miss = missed && chosen;
-                                return (
-                                    <button
-                                        key={optionIndex}
-                                        type="button"
-                                        role="radio"
-                                        aria-checked={chosen}
-                                        onClick={() => onAnswer(item.id, optionIndex)}
-                                        className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[14px] ring-1 transition active:scale-[0.99] ${
-                                            miss
-                                                ? 'bg-rose-50 text-rose-900 ring-rose-200'
-                                                : chosen
-                                                    ? 'bg-indigo-50 text-slate-900 ring-indigo-200'
-                                                    : 'bg-white text-slate-700 ring-slate-200 hover:bg-slate-50'
-                                        }`}
-                                    >
-                                        <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full ring-1 ${
-                                            chosen
-                                                ? (miss ? 'bg-rose-500 ring-rose-500' : 'bg-indigo-600 ring-indigo-600')
-                                                : 'bg-white ring-slate-300'
-                                        }`}>
-                                            {chosen && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                                        </span>
-                                        <span className="min-w-0 break-words">{option}</span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        {missed && (
-                            <p className="text-[12px] text-rose-600">
-                                Неверно — перечитайте новость и выберите другой вариант
-                            </p>
-                        )}
-                    </fieldset>
-                );
-            })}
-        </div>
-    );
-}
+/* Тест и тренажёр под текстом — общий блок NewsPasses: его же рисует лента во
+ * вкладке «Новости» вики (задача #342), и считать «пройдено» двумя разными
+ * способами окно и лента не должны. */
 
 export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     const [queue, setQueue] = useState([]);
@@ -108,6 +50,11 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     /* Тест: выбранные варианты и вопросы, где сервер нашёл ошибку. */
     const [answers, setAnswers] = useState({});
     const [wrong, setWrong] = useState([]);
+    /* Прохождение в этой вкладке (задача #342). Сервер присылает своё в
+       quiz_passed/trainer_passed, здесь — то, что случилось после его ответа. */
+    const [quizPassedHere, setQuizPassedHere] = useState(false);
+    const [trainerPassedHere, setTrainerPassedHere] = useState(false);
+    const [trainerOpen, setTrainerOpen] = useState(false);
     /* Уже показанное в этой вкладке. Нужно, чтобы перезапрос (тычок канала,
        возврат во вкладку) не сбрасывал отсчёт у открытой карточки: сервер
        считает остаток от ПЕРВОГО показа, а человек в этот момент читает. */
@@ -117,6 +64,14 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     const current = queue[0] || null;
     const quiz = current?.quiz || [];
     const quizAnswered = quiz.every((item) => Number.isInteger(answers[item.id]));
+    const quizPassed = quizPassedHere || !!current?.quiz_passed;
+    const trainerPassed = trainerPassedHere || !!current?.trainer_passed;
+    /* Что держит кнопку — то же правило, что на сервере
+       (news/access.py: outstanding_passes). Необязательное прохождение не
+       держит ничего: его проходят по желанию, кнопкой «Проверить». */
+    const mustPass = !!current?.pass_required && (quiz.length > 0 || !!current?.trainer_key);
+    const trainerLeft = mustPass && !!current?.trainer_key && !trainerPassed;
+    const quizLeft = mustPass && quiz.length > 0 && !quizPassed;
     /* Когда ходили последний раз. Тычок канала колокола широковещателен и
        приходит на ЛЮБОЕ его событие — чужую задачу, опрос, ивент, — а не только
        на публикацию новости; плюс возврат во вкладку поднимает сразу два
@@ -179,10 +134,13 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
         setError('');
     }, [current]);
 
-    // Следующая новость — свой тест с чистого листа.
+    // Следующая новость — свой тест и тренажёр с чистого листа.
     useEffect(() => {
         setAnswers({});
         setWrong([]);
+        setQuizPassedHere(false);
+        setTrainerPassedHere(false);
+        setTrainerOpen(false);
     }, [current?.id]);
 
     useEffect(() => {
@@ -206,10 +164,10 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     }, []);
 
     const confirm = useCallback(() => {
-        if (!current || sending || remaining > 0 || !quizAnswered) return;
+        if (!current || sending || remaining > 0 || trainerLeft || (quizLeft && !quizAnswered)) return;
         setSending(true);
         axios.post(`${apiBaseUrl}/api/news/${current.id}/read`,
-                   quiz.length ? { answers } : {}, { headers })
+                   quizLeft ? { answers } : {}, { headers })
             .then(() => {
                 dropCurrent();
                 /* Сервер отмечает «показали» только ТОЙ новости, что человек
@@ -227,6 +185,13 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                     setError('');
                     return;
                 }
+                /* Сервер не видит отметки тренажёра (не доехала) — возвращаем
+                   строку тренажёра в «не пройден», там есть «Пройти». */
+                if (e?.response?.data?.code === 'NEWS_TRAINER_PENDING') {
+                    setTrainerPassedHere(false);
+                    setError(errText(e, 'Сначала пройдите тренажёр'));
+                    return;
+                }
                 // 409 — сервер считает, что читали слишком быстро. Не спорим:
                 // берём его остаток и досчитываем. Расхождение бывает от
                 // рассинхрона часов, и правым здесь всегда сервер.
@@ -239,8 +204,8 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 }
             })
             .finally(() => setSending(false));
-    }, [answers, apiBaseUrl, current, dropCurrent, headers, quiz.length, quizAnswered,
-        remaining, sending]);
+    }, [answers, apiBaseUrl, current, dropCurrent, headers, quizAnswered, quizLeft,
+        remaining, sending, trainerLeft]);
 
     /* Необязательную новость закрывают крестиком, и это ТОЖЕ отметка о
        прочтении: иначе она возвращалась бы при каждом заходе, а «закрыл» —
@@ -254,12 +219,15 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
         dropCurrent();
     }, [apiBaseUrl, current, dropCurrent, headers]);
 
+    /* Пока открыт тренажёр, Esc принадлежит ему: слушатели окна и урока
+       срабатывают на одно нажатие, и без этой проверки закрылись бы оба слоя
+       разом — вместе с необязательной новостью, которую ещё читают. */
     useEffect(() => {
-        if (!current || current.is_mandatory) return undefined;
+        if (!current || current.is_mandatory || trainerOpen) return undefined;
         const onKey = (e) => { if (e.key === 'Escape') dismiss(); };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [current, dismiss]);
+    }, [current, dismiss, trainerOpen]);
 
     /* «Назад» на телефоне работает как Escape: необязательную новость закрывает
        (и это тоже отметка о прочтении), обязательную — нет. Но и провалиться
@@ -276,9 +244,11 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     if (!current) return null;
 
     const ready = remaining <= 0;
-    const canConfirm = ready && !sending && quizAnswered;
-    // С тестом нажатие означает не «прочитал», а «прочитал и ответил».
-    const verb = quiz.length ? 'Подтвердить' : 'Прочитал';
+    const canConfirm = ready && !sending && !trainerLeft && (!quizLeft || quizAnswered);
+    // С обязательным тестом нажатие означает не «прочитал», а «прочитал и ответил».
+    const verb = quizLeft ? 'Подтвердить' : 'Прочитал';
+    /* Причина неактивности — в самой кнопке: обязательный тренажёр не пройден. */
+    const confirmLabel = trainerLeft ? 'Пройдите тренажёр' : (ready ? verb : `${verb} · ${remaining} с`);
 
     return (
         <div
@@ -330,18 +300,26 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                         видом карусели. */}
                     <NewsGallery photos={current.photos} onBroken={() => load(true)} />
                     <div className="news-body" dangerouslySetInnerHTML={{ __html: current.body || '' }} />
-                    {/* Тест — ПОД текстом: сначала прочитать, потом ответить. */}
-                    {quiz.length > 0 && (
-                        <NewsQuiz
-                            quiz={quiz}
-                            answers={answers}
-                            wrong={wrong}
-                            onAnswer={(questionId, index) => {
-                                setAnswers((prev) => ({ ...prev, [questionId]: index }));
-                                setWrong((prev) => prev.filter((id) => id !== questionId));
-                            }}
-                        />
-                    )}
+                    {/* Тренажёр и тест — ПОД текстом: сначала прочитать, потом
+                        пройти. «Проверить» — только у необязательного теста:
+                        обязательный сверяет само подтверждение. */}
+                    <NewsPasses
+                        post={current}
+                        apiBaseUrl={apiBaseUrl}
+                        headers={headers}
+                        answers={answers}
+                        onAnswer={(questionId, index) => setAnswers((prev) => ({ ...prev, [questionId]: index }))}
+                        wrong={wrong}
+                        onWrong={setWrong}
+                        quizPassed={quizPassed}
+                        onQuizPassed={() => setQuizPassedHere(true)}
+                        trainerPassed={trainerPassed}
+                        onTrainerPassed={() => { setTrainerPassedHere(true); setError(''); }}
+                        trainerOpen={trainerOpen}
+                        onTrainerOpenChange={setTrainerOpen}
+                        checkable={!mustPass}
+                        layer="top"
+                    />
                 </div>
 
                 {/* Подписи «Окно нельзя закрыть или свернуть» здесь нет
@@ -370,7 +348,7 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                             {sending
                                 ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                                 : canConfirm && <Check className="h-4 w-4" aria-hidden="true" />}
-                            {ready ? verb : `${verb} · ${remaining} с`}
+                            {confirmLabel}
                         </button>
                     </div>
                 </div>

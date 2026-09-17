@@ -68,6 +68,11 @@ QUIZ_MAX_OPTIONS = 4
 QUIZ_MAX_PROMPT_LENGTH = 300
 QUIZ_MAX_OPTION_LENGTH = 200
 
+# Ключ тренажёра вики (src/components/wiki/trainers/registry.js). Сценарии
+# живут в коде, а не в базе, поэтому сервер знает только форму ключа: латиница,
+# цифры и дефис. Длина — как у wiki_trainer_runs.trainer_key.
+TRAINER_KEY_MAX_LENGTH = 64
+
 _NOW ="(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
 _STATEMENTS = [
@@ -217,7 +222,33 @@ _STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_news_quiz_post ON news_quiz_questions(news_id, position, id);",
+    # ── Тренажёр и обязательность прохождения (задача #342) ─────────────────
+    # «При создании новости должна быть возможность прикрепить тренажёр или
+    # тест… предусмотреть вариант, при котором тест проходить необязательно».
+    #
+    # pass_required — ОДИН признак на тест и тренажёр: постановка говорит об
+    # одной настройке обязательности, а два тумблера рядом спрашивали бы автора
+    # о различии, которого он не задумывал. TRUE по умолчанию: тесты, выпущенные
+    # до этой задачи, были обязательными, и журнал по ним обязан читаться как
+    # прежде.
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS pass_required BOOLEAN NOT NULL DEFAULT TRUE;",
+    # Ключ тренажёра, без внешнего ключа: сценарии в коде (как у wiki_trainer_runs).
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS trainer_key VARCHAR(%(trainer_key_max)s);",
+    # Кто прошёл тест и тренажёр — в той же строке, что «открыл» и «подтвердил»:
+    # журнал отвечает на все четыре вопроса одним чтением. Отдельно от
+    # confirmed_at, потому что необязательный тест проходят и после
+    # подтверждения, и не проходят вовсе.
+    "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS quiz_passed_at TIMESTAMP;",
+    "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS trainer_passed_at TIMESTAMP;",
 ]
+
+# Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.
+PASS_COLUMNS = (
+    ('news_posts', 'pass_required'),
+    ('news_posts', 'trainer_key'),
+    ('news_reads', 'quiz_passed_at'),
+    ('news_reads', 'trainer_passed_at'),
+)
 
 
 def init_news_schema(cursor):
@@ -225,7 +256,8 @@ def init_news_schema(cursor):
     for statement in _STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW)
                        .replace('%(default_delay)s', str(DEFAULT_CONFIRM_DELAY_SECONDS))
-                       .replace('%(max_delay)s', str(MAX_CONFIRM_DELAY_SECONDS)))
+                       .replace('%(max_delay)s', str(MAX_CONFIRM_DELAY_SECONDS))
+                       .replace('%(trainer_key_max)s', str(TRAINER_KEY_MAX_LENGTH)))
 
 
 def schema_is_ready(cursor):
@@ -262,3 +294,24 @@ def quiz_ready(cursor):
     cursor.execute("SELECT to_regclass('public.news_quiz_questions') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])
+
+
+def pass_ready(cursor):
+    """Развёрнуты ли колонки тренажёра и обязательности прохождения (#342).
+
+    Отдельно — по той же причине, что кадры и тест. Схема раздела применяется
+    одним SAVEPOINT'ом: сорвись одна инструкция, откатятся и новые колонки, а
+    таблицы прошлых деплоев останутся. Тогда выдача, читающая p.pass_required,
+    ответила бы пятисоткой каждому вошедшему в портал. Без колонок у новостей
+    просто нет тренажёров, а тест, как и раньше, обязателен.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND (table_name, column_name) IN (%s)
+        """ % ', '.join(['(%s, %s)'] * len(PASS_COLUMNS)),
+        [value for pair in PASS_COLUMNS for value in pair],
+    )
+    row = cursor.fetchone()
+    return bool(row and int(row[0]) == len(PASS_COLUMNS))

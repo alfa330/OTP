@@ -446,11 +446,13 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
              появилась бы, а половина внутри неё — тем более. */
           show: features.catalog && (isEditor || canManageStructure
                                      || canGrantAccess || canGrantGuest) },
-        /* «Новости» — тому, кто их пишет. Получателю вкладка не нужна: новость
-           приходит к нему окном поверх портала, и второй экран с тем же
-           текстом был бы дублем. */
+        /* «Новости» — ВСЕМ (решение владельца 17.09.2026, задача #342):
+           читателю вкладка показывает только адресованные ему новости и даёт
+           пройти прикреплённый тест или тренажёр после того, как окно
+           закрыто; тому, кто вправе публиковать (canPublishNews), — ещё и
+           управление. Что именно показать, решает WikiNews по ответу сервера. */
         { key: 'news', label: 'Новости', icon: Megaphone,
-          show: features.news && canPublishNews },
+          show: features.news },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: features.overview },
         { key: 'parks', label: 'Парки', icon: Building2, show: features.parks },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: features.offices },

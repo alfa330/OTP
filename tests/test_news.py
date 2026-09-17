@@ -295,9 +295,11 @@ class NewsDoorsTests(unittest.TestCase):
     def test_publisher_routes_are_marked_at_the_declaration(self):
         """У каждой двери видно, про чтение она или про выпуск.
 
-        Читающих ровно две — выдача окна и отметка о прочтении. Всё остальное
-        обязано нести publisher=True: забытый флаг открыл бы оператору чужой
-        журнал прочтений.
+        Читающих ровно столько: выдача окна и отметка о прочтении, лента
+        «мои новости» с карточкой и прохождение теста и тренажёра (задача #342 —
+        вкладка «Новости» открыта всем, решение владельца 17.09.2026). Всё
+        остальное обязано нести publisher=True: забытый флаг открыл бы оператору
+        чужой журнал прочтений.
         """
         tree = ast.parse(_read('news', 'routes.py'))
         open_routes = []
@@ -313,7 +315,9 @@ class NewsDoorsTests(unittest.TestCase):
                                 for kw in decorator.keywords)
                 if not publisher:
                     open_routes.append(decorator.args[0].value)
-        self.assertEqual(sorted(open_routes), ['/<int:post_id>/read', '/access', '/pending'])
+        self.assertEqual(sorted(open_routes), [
+            '/<int:post_id>/quiz', '/<int:post_id>/read', '/<int:post_id>/trainer',
+            '/access', '/feed', '/feed/<int:post_id>', '/pending'])
 
     def test_access_route_is_open_but_says_nothing_to_outsiders(self):
         """/access открыт всем НАМЕРЕННО и обязан молчать не-редактору.
@@ -538,10 +542,24 @@ class NewsFrontendTests(unittest.TestCase):
         wiki_view = _read('src', 'components', 'wiki', 'WikiView.jsx')
         self.assertNotIn('NewsOfDayModal', wiki_view)
 
-    def test_news_tab_is_hidden_from_those_who_cannot_publish(self):
+    def test_news_tab_is_open_to_every_reader(self):
+        """Вкладка «Новости» — всем (решение владельца 17.09.2026, задача #342).
+
+        Читателю — «только сами новости, которые ему были предназначены»,
+        редактору — ещё и управление. Право правки — прежний потолок
+        публикации, второго признака рядом с ним нет.
+        """
         source = _read('src', 'components', 'wiki', 'WikiView.jsx')
         self.assertIn('const canPublishNews = state?.grant_ceiling != null;', source)
-        self.assertIn('show: features.news && canPublishNews', source)
+        self.assertIn("{ key: 'news', label: 'Новости', icon: Megaphone,\n          show: features.news },",
+                      source)
+        tab = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        # Читатель получает ленту, а не отказ «публикуют супервайзер и выше».
+        self.assertIn('if (!canPublish) {', tab)
+        self.assertIn('return <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} />;', tab)
+        self.assertNotIn('Новости публикуют супервайзер и выше', tab)
+        # Список редактора читателю не запрашивается — иначе 403 на каждом заходе.
+        self.assertIn("if (!canPublish || bucket === 'mine')", tab)
 
     def test_row_actions_come_from_the_server(self):
         """Что можно с новостью, решает сервер и присылает признаком.
@@ -964,7 +982,8 @@ class NewsFormQuizTests(unittest.TestCase):
         create = routes[routes.index('def news_post_create('):routes.index('def news_post_update(')]
         self.assertLess(create.index('_quiz_from_request('), create.index('queries.create_post('))
         self.assertLess(create.index('queries.set_quiz('), create.index('queries.publish_post('))
-        self.assertIn('or bool(quiz)', create)
+        # Обязательность навязывает только ОБЯЗАТЕЛЬНОЕ прохождение (#342).
+        self.assertIn('or news_access.must_pass(', create)
 
     def test_quiz_of_a_published_news_is_locked(self):
         routes = _read('news', 'routes.py')
@@ -990,6 +1009,199 @@ class NewsFormQuizTests(unittest.TestCase):
         for source in (form, questions):
             self.assertIn("import NewsQuizEditor from '../news/NewsQuizEditor'", source)
         self.assertNotIn('function QuizEditor', questions)
+
+
+class NewsPassTests(unittest.TestCase):
+    """Задача #342: тренажёр в новости и необязательный тест.
+
+    «При создании новости должна быть возможность прикрепить тренажёр или тест…
+    Если тест обязательный, оператор не должен иметь возможности закрыть
+    новость, не пройдя тест. Если необязательный — может ознакомиться без него».
+    """
+
+    def test_trainer_key_is_checked_by_shape_only(self):
+        """Сценарии живут в коде фронта — сервер знает только форму ключа."""
+        self.assertEqual(news_access.normalize_trainer_key('yandex-pro-edo-provider'),
+                         ('yandex-pro-edo-provider', None))
+        self.assertEqual(news_access.normalize_trainer_key('  '), (None, None))
+        self.assertEqual(news_access.normalize_trainer_key(None), (None, None))
+        for bad in ('Yandex', 'a b', '../x', '-lead', 'x' * 65, '<script>'):
+            key, problem = news_access.normalize_trainer_key(bad)
+            self.assertIsNone(key, bad)
+            self.assertTrue(problem, bad)
+
+    def test_optional_pass_never_holds_the_confirmation(self):
+        self.assertEqual(news_access.outstanding_passes(
+            pass_required=False, has_quiz=True, has_trainer=True,
+            quiz_passed=False, trainer_passed=False), [])
+        self.assertFalse(news_access.must_pass(pass_required=False, has_quiz=True,
+                                               has_trainer=True))
+
+    def test_required_pass_lists_what_is_left_trainer_first(self):
+        left = news_access.outstanding_passes(
+            pass_required=True, has_quiz=True, has_trainer=True,
+            quiz_passed=False, trainer_passed=False)
+        self.assertEqual(left, ['trainer', 'quiz'])
+        self.assertEqual(news_access.outstanding_passes(
+            pass_required=True, has_quiz=True, has_trainer=True,
+            quiz_passed=False, trainer_passed=True), ['quiz'])
+        self.assertEqual(news_access.outstanding_passes(
+            pass_required=True, has_quiz=True, has_trainer=False,
+            quiz_passed=True, trainer_passed=False), [])
+
+    def test_nothing_to_pass_means_nothing_required(self):
+        """pass_required по умолчанию TRUE и у новости без теста ничего не значит."""
+        self.assertFalse(news_access.must_pass(pass_required=True, has_quiz=False,
+                                               has_trainer=False))
+
+    def test_old_quizzes_stay_required(self):
+        """Тесты, выпущенные до задачи, были обязательными — умолчание ДА."""
+        source = _read('news', 'schema.py')
+        self.assertIn('ADD COLUMN IF NOT EXISTS pass_required BOOLEAN NOT NULL DEFAULT TRUE',
+                      source)
+        for table, column in news_schema.PASS_COLUMNS:
+            self.assertIn('ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s' % (table, column), source)
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn("current.get('pass_required', True)", routes)
+
+    def test_missing_columns_do_not_break_the_portal(self):
+        """Колонки #342 не подмешаны в готовность раздела и читаются по флагу."""
+        schema_src = _read('news', 'schema.py')
+        ready = schema_src[schema_src.index('def schema_is_ready('):
+                           schema_src.index('def photos_ready(')]
+        self.assertNotIn('pass_required', ready)
+        self.assertIn('def pass_ready(', schema_src)
+        queries_src = _read('news', 'queries.py')
+        pending = queries_src[queries_src.index('def pending_for_user('):
+                              queries_src.index('def mark_shown(')]
+        self.assertIn('_pass_columns_sql(with_pass)', pending)
+        self.assertNotIn('p.pass_required', pending)
+        # По-прежнему одно обращение к базе на горячем роуте.
+        self.assertEqual(pending.count('cursor.execute('), 1)
+
+    def test_confirmation_waits_for_a_required_trainer(self):
+        source = _read('news', 'queries.py')
+        confirm = source[source.index('def confirm_read('):]
+        confirm = confirm[:confirm.index('\n# ─')]
+        self.assertIn('news_access.must_pass(', confirm)
+        self.assertLess(confirm.index('news_access.must_pass('),
+                        confirm.index('if not is_mandatory:'))
+        self.assertLess(confirm.index("return 'trainer_pending'"),
+                        confirm.rindex('SET confirmed_at'))
+        self.assertLess(confirm.index("'too_early'"), confirm.index("'trainer_pending'"))
+        self.assertIn('NEWS_TRAINER_PENDING', _read('news', 'routes.py'))
+
+    def test_reader_doors_are_bounded_by_audience_and_status(self):
+        """/quiz, /trainer и лента стоят на голой аутентификации — как /read.
+
+        Без периметра перебором id можно было бы прочитать чужой черновик или
+        «пройти» ещё не выпущенный тест.
+        """
+        source = _read('news', 'queries.py')
+        for name, end in (('def _viewer_post(', 'def _mark_pass('),
+                          ('def feed_for_user(', 'def _plain_preview('),
+                          ('def feed_post(', '# ─')):
+            block = source[source.index(name):]
+            block = block[:block.index(end)]
+            self.assertIn("p.status = 'published'", block, name)
+            self.assertIn('AUDIENCE_MATCH_FOR_VIEWER', block, name)
+            # Свою новость автор не получает — ни окном, ни в ленте.
+            self.assertIn('p.author_id IS DISTINCT FROM %(user_id)s', block, name)
+            self.assertNotIn('correct_index', block, name)
+        for name in ('def pass_quiz(', 'def mark_trainer_passed('):
+            block = source[source.index(name):]
+            block = block[:block.index('\ndef ', 10)]
+            self.assertIn('_viewer_post(', block, name)
+
+    def test_a_pass_mark_is_never_moved_by_a_retry(self):
+        source = _read('news', 'queries.py')
+        mark = source[source.index('def _mark_pass('):source.index('def pass_quiz(')]
+        self.assertIn('ON CONFLICT (news_id, user_id)', mark)
+        self.assertIn('COALESCE(news_reads.{col}, EXCLUDED.{col})', mark)
+
+    def test_published_news_keeps_its_trainer_and_requirement(self):
+        routes = _read('news', 'routes.py')
+        update = routes[routes.index('def news_post_update('):routes.index('def news_post_publish(')]
+        self.assertIn('NEWS_PASS_LOCKED', update)
+        self.assertLess(update.index('NEWS_PASS_LOCKED'), update.index('queries.update_post('))
+        create = routes[routes.index('def news_post_create('):routes.index('def news_post_update(')]
+        self.assertLess(create.index('queries.set_passes('), create.index('queries.publish_post('))
+
+    def test_report_counts_passes_over_the_same_people(self):
+        routes = _code_only(_read('news', 'routes.py'))
+        report = routes[routes.index('def news_post_report('):]
+        self.assertIn("for row in addressed if row['quiz_passed_at']", report)
+        self.assertIn("for row in addressed if row['trainer_passed_at']", report)
+
+
+class NewsPassFrontendTests(unittest.TestCase):
+    """Задача #342 во фронте: окно, лента и форма."""
+
+    MODAL = os.path.join('src', 'components', 'news', 'NewsOfDayModal.jsx')
+    PASSES = os.path.join('src', 'components', 'news', 'NewsPasses.jsx')
+    FEED = os.path.join('src', 'components', 'news', 'NewsFeed.jsx')
+    TAB = os.path.join('src', 'components', 'wiki', 'WikiNews.jsx')
+
+    def test_window_waits_for_a_required_trainer_but_not_an_optional_one(self):
+        modal = _jsx_code_only(_read(self.MODAL))
+        self.assertIn("const mustPass = !!current?.pass_required && (quiz.length > 0 || !!current?.trainer_key);",
+                      modal)
+        self.assertIn('!trainerLeft && (!quizLeft || quizAnswered)', modal)
+        self.assertIn("'Пройдите тренажёр'", modal)
+        self.assertIn('NEWS_TRAINER_PENDING', modal)
+        # «Проверить» — только у необязательного: обязательный сверяет подтверждение.
+        self.assertIn('checkable={!mustPass}', modal)
+
+    def test_escape_belongs_to_the_trainer_while_it_is_open(self):
+        """Слушатели окна и урока срабатывают на одно нажатие Esc — без проверки
+        закрылись бы оба слоя, вместе с необязательной новостью."""
+        modal = _jsx_code_only(_read(self.MODAL))
+        self.assertIn('if (!current || current.is_mandatory || trainerOpen) return undefined;', modal)
+        passes = _read(self.PASSES)
+        # «Назад» на телефоне снимает урок: своя запись в стеке поверх записи окна.
+        self.assertIn('useScreenBackGesture(isMobileShell && open, onClose);', passes)
+
+    def test_trainer_stands_above_the_window(self):
+        passes = _read(self.PASSES)
+        self.assertIn('layer="top"', _read(self.MODAL))
+        self.assertIn('layer={layer}', passes)
+        css = _read('src', 'components', 'wiki', 'trainers', 'trainer.css')
+        self.assertIn('.wt-overlay--top { z-index: 130; }', css)
+        player = _read('src', 'components', 'wiki', 'trainers', 'TrainerPlayer.jsx')
+        self.assertIn('onFinishedRef.current?.();', player)
+
+    def test_trainer_and_registry_are_not_in_the_main_chunk(self):
+        """Окно смонтировано в корне портала — сценарии едут только к тем, кому
+        тренажёр прикреплён."""
+        passes = _jsx_code_only(_read(self.PASSES))
+        self.assertIn("lazy(() => import('../wiki/trainers/TrainerPlayer'))", passes)
+        self.assertIn("import('../wiki/trainers/registry')", passes)
+        self.assertNotIn("from '../wiki/trainers/registry'", passes)
+        self.assertNotIn('trainers/', _jsx_code_only(_read(self.MODAL)))
+
+    def test_one_block_serves_the_window_and_the_feed(self):
+        for path in (self.MODAL, self.FEED):
+            self.assertIn("import NewsPasses from './NewsPasses';", _read(path), path)
+        passes = _jsx_code_only(_read(self.PASSES))
+        self.assertIn('/api/news/${post.id}/quiz', passes)
+        self.assertIn('/api/news/${post.id}/trainer', passes)
+
+    def test_feed_shows_nothing_about_the_author(self):
+        """Как и окно: сотрудник читает объявление, а не карточку автора."""
+        feed = _jsx_code_only(_read(self.FEED))
+        for forbidden in ('author_name', 'author_role', 'author_department', 'initialsOf'):
+            self.assertNotIn(forbidden, feed, forbidden)
+
+    def test_form_sends_trainer_and_requirement_under_the_quiz_lock(self):
+        tab = _jsx_code_only(_read(self.TAB))
+        lock = tab[tab.index('...(quizLocked ? {} : {'):]
+        lock = lock[:lock.index('}),')]
+        self.assertIn('trainer_key: trainerKey', lock)
+        self.assertIn('pass_required: passRequired', lock)
+        self.assertIn('is_mandatory: mandatory || mustPass', tab)
+        self.assertIn('disabled={mustPass}', tab)
+        # Список тренажёров — из реестра, а не своим перечнем.
+        self.assertIn("import { TRAINER_CARDS } from './trainers/registry';", _read(self.TAB))
 
 
 if __name__ == '__main__':

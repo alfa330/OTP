@@ -6,17 +6,21 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
-    Bold, Check, Image as ImageIcon, Italic, Link2, List, ListOrdered, Loader2,
-    Megaphone, Plus, Sparkles, Underline as UnderlineIcon, Users, X,
+    Bold, Check, Image as ImageIcon, Italic, Link2, List, ListChecks, ListOrdered, Loader2,
+    Megaphone, PlayCircle, Plus, Sparkles, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
     IosBadge, IosHint, IosMenu, IosModal, IosSegmented, IosToggle,
 } from '../ui/ios';
 import { publishedLabel, roleTitle } from '../news/newsShared';
+import NewsFeed from '../news/NewsFeed';
 import NewsGallery from '../news/NewsGallery';
 import NewsQuizEditor from '../news/NewsQuizEditor';
 import { quizForForm, quizProblem } from './questionQuiz';
+/* Реестр тренажёров — без экранов и без React (см. шапку registry.js): форме
+   нужны только названия, проигрыватель сюда не едет. */
+import { TRAINER_CARDS } from './trainers/registry';
 /* Клиентский конвейер берём готовым у «Посылок»: модуль ничего не импортирует
    и уже решает три вещи, которые пришлось бы решать заново и хуже — поворот из
    EXIF (иначе половина снимков с телефона ляжет боком), сторож зависшего
@@ -28,12 +32,15 @@ import {
 } from '../parcels/parcelPhoto';
 import '../news/news-modal.css';
 
-/* Вкладка «Новости» — там, где новость ПИШУТ.
+/* Вкладка «Новости» — там, где новость ПИШУТ и где её перечитывают.
  *
- * Показывать её тому, кто новость получает, незачем: у него она приходит окном
- * поверх портала (src/components/news/NewsOfDayModal.jsx), и второй экран с тем
- * же текстом был бы дублем. Поэтому вкладка живёт внутри «Вики» и открывается
- * тем, у кого есть потолок выдачи, — супервайзеру и выше.
+ * Открыта ВСЕМ (решение владельца 17.09.2026, задача #342): «для людей с
+ * правами чтения показывать только сами новости, которые ему были
+ * предназначены; если у человека есть право на редактирование — они могут
+ * редактировать и публиковать новости». Право редактирования — прежний потолок
+ * публикации (супервайзер и выше, администратор вики): второй, новый признак
+ * рядом с ним разошёлся бы с сервером молча. Читатель видит ленту NewsFeed,
+ * редактор — управление и ту же ленту сегментом «Для меня».
  *
  * ПОЧЕМУ ДАННЫЕ НЕ ИЗ /api/wiki. Роуты вики стоят за тумблером отдела и
  * QR-подтверждением сессии, а новость обязана доехать и до тех, кто через эти
@@ -47,6 +54,8 @@ const BUCKETS = [
     { value: 'published', label: 'Опубликованные' },
     { value: 'draft', label: 'Черновики' },
     { value: 'archived', label: 'Архив' },
+    /* Новости, адресованные самому редактору: сверху они приходят и ему. */
+    { value: 'mine', label: 'Для меня' },
 ];
 
 /* Виды адресата в том порядке, в каком их выбирают: сначала «кому вообще»
@@ -70,6 +79,11 @@ const SUBJECT_TITLES = {
 };
 
 const ruleKey = (rule) => `${rule.subject_type}:${rule.subject_id ?? rule.subject_role}`;
+
+/* Журнал нужен обязательной новости и новости, которую можно ПРОЙТИ: у
+   необязательной с тестом или тренажёром подтверждений не ждут, а «кто прошёл»
+   автору знать надо (задача #342). */
+const hasJournal = (post) => !!post?.is_mandatory || (post?.quiz_count || 0) > 0 || !!post?.trainer_key;
 
 /* Заготовки задержки. Числом в поле её тоже задают, но человек, ставящий
    объявление на смену, думает не в секундах, а «быстро / нормально / вдумчиво». */
@@ -217,6 +231,45 @@ function AudiencePicker({ open, onClose, access, value, onChange }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Выбор тренажёра (задача #342)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/* Список тех же тренажёров, что во вкладке «Тренажёры» вики, — из реестра, а не
+   своим перечнем: сценарии живут в коде, и второй список отстал бы от первого
+   на первом же новом тренажёре. Нажатие выбирает и закрывает окно — как выбор
+   значения в «Настройках» iOS. */
+function TrainerPicker({ open, value, onClose, onChange }) {
+    return (
+        <IosModal open={open} onClose={onClose} title="Тренажёр к новости" maxWidth="max-w-lg">
+            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                {TRAINER_CARDS.map((trainer) => {
+                    const active = trainer.key === value;
+                    return (
+                        <button
+                            key={trainer.key}
+                            type="button"
+                            onClick={() => { onChange(trainer.key); onClose(); }}
+                            className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100"
+                        >
+                            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
+                                <PlayCircle className="h-[18px] w-[18px]" aria-hidden="true" />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[14px] font-medium text-slate-900">{trainer.title}</span>
+                                {trainer.subtitle && (
+                                    <span className="block truncate text-[12px] text-slate-500">{trainer.subtitle}</span>
+                                )}
+                            </span>
+                            {active && <Check className="h-4 w-4 shrink-0 text-blue-600" strokeWidth={2.5} aria-hidden="true" />}
+                        </button>
+                    );
+                })}
+            </div>
+        </IosModal>
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Форма новости
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -243,8 +296,18 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     const [quiz, setQuiz] = useState([]);
     const [quizBusy, setQuizBusy] = useState(false);
     const [quizNotes, setQuizNotes] = useState([]);
+    /* Тренажёр и обязательность прохождения (задача #342). Один тумблер на тест
+       и тренажёр — постановка говорит об одной настройке обязательности. */
+    const [trainerKey, setTrainerKey] = useState(null);
+    const [passRequired, setPassRequired] = useState(true);
+    const [trainerPickerOpen, setTrainerPickerOpen] = useState(false);
     // По published_at, как на сервере: снятая с показа новость ответы уже собрала.
+    // Тем же замком запираются тренажёр и обязательность (NEWS_PASS_LOCKED).
     const quizLocked = !!post?.published_at;
+    const trainerCard = TRAINER_CARDS.find((item) => item.key === trainerKey) || null;
+    /* Держит ли прохождение подтверждение — то же правило, что на сервере
+       (news/access.py: must_pass). Держит — новость обязательна всегда. */
+    const mustPass = passRequired && (quiz.length > 0 || !!trainerKey);
     // Что отдали в URL.createObjectURL — освобождаем при закрытии формы, иначе
     // байты кадров висят в памяти вкладки до перезагрузки страницы.
     const localUrls = useRef([]);
@@ -286,6 +349,9 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setQuiz(post?.quiz?.length ? quizForForm(post.quiz) : []);
         setQuizNotes([]);
         setQuizBusy(false);
+        setTrainerKey(post?.trainer_key || null);
+        setPassRequired(post ? post.pass_required !== false : true);
+        setTrainerPickerOpen(false);
         // Уже прикреплённые кадры приезжают с карточкой готовыми адресами.
         setPhotos((post?.photos || []).map((photo) => ({
             key: `id:${photo.id}`, id: photo.id, url: photo.url,
@@ -293,11 +359,12 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         editor?.commands.setContent(post?.body || '');
     }, [open, post, access, editor]);
 
-    // Новость с тестом всегда обязательна: у необязательной крестик подтверждал
-    // бы прочтение без единого ответа (сервер: NEWS_QUIZ_MANDATORY).
+    // Новость с ОБЯЗАТЕЛЬНЫМ тестом или тренажёром всегда обязательна: у
+    // необязательной крестик подтверждал бы прочтение без единого ответа
+    // (сервер: NEWS_QUIZ_MANDATORY).
     useEffect(() => {
-        if (quiz.length) setMandatory(true);
-    }, [quiz.length]);
+        if (mustPass) setMandatory(true);
+    }, [mustPass]);
 
     /* «Составить ИИ» — по тому, что уже написано в форме. Ответ модели ложится
        в тот же редактор: проверить и поправить его человек обязан сам, выпускает
@@ -437,11 +504,14 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         onSave({
             title: text,
             body,
-            is_mandatory: mandatory || quiz.length > 0,
+            is_mandatory: mandatory || mustPass,
             // Тест опубликованной новости не отправляется вовсе: сервер его не
             // меняет (NEWS_QUIZ_LOCKED), а пустой список читался бы как «убрать».
+            // Тренажёр и обязательность — под тем же замком (NEWS_PASS_LOCKED).
             ...(quizLocked ? {} : {
                 quiz: quiz.map(({ prompt, options, correct }) => ({ prompt, options, correct })),
+                trainer_key: trainerKey,
+                pass_required: passRequired,
             }),
             confirm_delay_seconds: Number(delay) || 0,
             expires_at: expires || null,
@@ -658,10 +728,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
 
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                     <span className={`${iosGroupLabel} flex items-center gap-1.5`}>
-                        Тест
+                        Тест и тренажёр
                         <IosHint
-                            label="Что даёт тест"
-                            text="Сотрудник закроет окно новости, только ответив на вопросы верно: ошибка подсвечивается у вопроса, правильный ответ не подсказывается. Новость с тестом всегда обязательна. В тесте 2–3 вопроса."
+                            label="Что дают тест и тренажёр"
+                            text="Тест — 2–3 вопроса под текстом новости: ошибка подсвечивается у вопроса, правильный ответ не подсказывается. Тренажёр — урок из вкладки «Тренажёры», сотрудник открывает его прямо из новости. Кто что прошёл, видно в журнале «Кто прочитал»."
                         />
                     </span>
                     {quiz.length > 0 && !quizLocked && (
@@ -681,45 +751,100 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                         </span>
                     )}
                 </div>
-                <div className={`${iosCard} p-3`}>
-                    {quiz.length === 0 ? (
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-[12.5px] text-slate-500">
-                                {quizLocked
-                                    ? 'Теста нет — к опубликованной новости его не добавить'
-                                    : 'Без теста сотрудник подтверждает прочтение кнопкой'}
-                            </p>
-                            {!quizLocked && (
-                                <span className="flex flex-wrap gap-2">
-                                    <button type="button" className={iosBtnSecondary} disabled={quizBusy}
-                                            onClick={() => setQuiz(quizForForm([]))}>
-                                        <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
-                                        Добавить вопросы
-                                    </button>
-                                    <button type="button" className={iosBtnSecondary} disabled={quizBusy}
-                                            onClick={draftQuiz}>
-                                        {quizBusy
-                                            ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
-                                            : <Sparkles className="mr-1 inline h-4 w-4" aria-hidden="true" />}
-                                        {quizBusy ? 'Составляем…' : 'Составить ИИ'}
-                                    </button>
-                                </span>
-                            )}
-                        </div>
-                    ) : (
-                        <>
-                            {quizLocked && (
-                                <p className="mb-2 text-[12px] text-slate-500">
-                                    Тест опубликованной новости не меняется: часть отдела уже ответила
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                    <div className="p-3">
+                        {quiz.length === 0 ? (
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="flex items-center gap-2.5 text-[14px] text-slate-900">
+                                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+                                        <ListChecks className="h-[18px] w-[18px]" aria-hidden="true" />
+                                    </span>
+                                    {quizLocked ? 'Теста нет' : 'Тест'}
                                 </p>
+                                {!quizLocked && (
+                                    <span className="flex flex-wrap gap-2">
+                                        <button type="button" className={iosBtnSecondary} disabled={quizBusy}
+                                                onClick={() => setQuiz(quizForForm([]))}>
+                                            <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
+                                            Добавить вопросы
+                                        </button>
+                                        <button type="button" className={iosBtnSecondary} disabled={quizBusy}
+                                                onClick={draftQuiz}>
+                                            {quizBusy
+                                                ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
+                                                : <Sparkles className="mr-1 inline h-4 w-4" aria-hidden="true" />}
+                                            {quizBusy ? 'Составляем…' : 'Составить ИИ'}
+                                        </button>
+                                    </span>
+                                )}
+                            </div>
+                        ) : (
+                            <>
+                                {quizLocked && (
+                                    <p className="mb-2 text-[12px] text-slate-500">
+                                        Тест опубликованной новости не меняется: часть отдела уже ответила
+                                    </p>
+                                )}
+                                <NewsQuizEditor quiz={quiz} onChange={setQuiz} disabled={quizBusy || quizLocked} />
+                                {quizNotes.length > 0 && (
+                                    <ul className="mt-2 space-y-1 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-900 ring-1 ring-amber-200/70">
+                                        {quizNotes.map((note) => <li key={note}>{note}</li>)}
+                                    </ul>
+                                )}
+                            </>
+                        )}
+                    </div>
+
+                    {/* Тренажёр — строкой, как пункт «Настроек»: иконка, название,
+                        действие справа. Описание урока здесь не нужно — автор
+                        выбирает из знакомого списка вкладки «Тренажёры». */}
+                    <div className="flex items-center gap-2.5 px-3 py-3">
+                        <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
+                            trainerKey ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
+                            <PlayCircle className="h-[18px] w-[18px]" aria-hidden="true" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[14px] text-slate-900">
+                                {trainerKey ? (trainerCard?.title || 'Тренажёр недоступен') : (quizLocked ? 'Тренажёра нет' : 'Тренажёр')}
+                            </span>
+                            {trainerCard?.subtitle && (
+                                <span className="block truncate text-[12px] text-slate-500">{trainerCard.subtitle}</span>
                             )}
-                            <NewsQuizEditor quiz={quiz} onChange={setQuiz} disabled={quizBusy || quizLocked} />
-                            {quizNotes.length > 0 && (
-                                <ul className="mt-2 space-y-1 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-900 ring-1 ring-amber-200/70">
-                                    {quizNotes.map((note) => <li key={note}>{note}</li>)}
-                                </ul>
-                            )}
-                        </>
+                        </span>
+                        {!quizLocked && (trainerKey ? (
+                            <span className="flex shrink-0 items-center gap-1">
+                                <button type="button" onClick={() => setTrainerPickerOpen(true)}
+                                        className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
+                                    Сменить
+                                </button>
+                                <button type="button" onClick={() => setTrainerKey(null)}
+                                        aria-label="Убрать тренажёр" title="Убрать тренажёр"
+                                        className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-rose-500 active:scale-95">
+                                    <X className="h-4 w-4" aria-hidden="true" />
+                                </button>
+                            </span>
+                        ) : (
+                            <button type="button" className={iosBtnSecondary}
+                                    onClick={() => setTrainerPickerOpen(true)}>
+                                <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
+                                Выбрать
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Тумблер — только когда есть что проходить: без теста и
+                        тренажёра он настраивал бы то, чего нет. */}
+                    {(quiz.length > 0 || trainerKey) && (
+                        <div className="flex items-center justify-between gap-3 px-3.5 py-3">
+                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                Пройти обязательно
+                                <IosHint
+                                    label="Что значит «пройти обязательно»"
+                                    text="Включено — сотрудник не подтвердит новость и не закроет окно, пока не пройдёт тест и тренажёр; такая новость всегда обязательна к прочтению. Выключено — пройти можно по желанию: в окне новости или позже во вкладке «Новости», а прочитать и закрыть новость — и без этого."
+                                />
+                            </p>
+                            <IosToggle checked={passRequired} onChange={setPassRequired} disabled={quizLocked} />
+                        </div>
                     )}
                 </div>
 
@@ -783,12 +908,11 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                                 />
                             </p>
                         </div>
-                        {/* У новости с тестом обязательность
-                            не снимается: у необязательной крестик подтверждал бы
-                            прочтение без единого ответа. Сервер держит то же
-                            правило (NEWS_QUIZ_MANDATORY). */}
-                        <IosToggle checked={mandatory} onChange={setMandatory}
-                                   disabled={quiz.length > 0 || (post?.quiz_count || post?.quiz?.length || 0) > 0} />
+                        {/* У новости с обязательным тестом или тренажёром
+                            обязательность не снимается: у необязательной крестик
+                            подтверждал бы прочтение без единого ответа. Сервер
+                            держит то же правило (NEWS_QUIZ_MANDATORY). */}
+                        <IosToggle checked={mandatory} onChange={setMandatory} disabled={mustPass} />
                     </div>
                     {/* Задержка нужна только обязательной: у необязательной
                         кнопки «Прочитал» нет вовсе, и поле рядом с ней было бы
@@ -873,6 +997,12 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                 value={audience}
                 onChange={setAudience}
             />
+            <TrainerPicker
+                open={trainerPickerOpen}
+                value={trainerKey}
+                onClose={() => setTrainerPickerOpen(false)}
+                onChange={setTrainerKey}
+            />
         </>
     );
 }
@@ -894,6 +1024,12 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
             .catch(() => setState(null))
             .finally(() => setLoading(false));
     }, [apiBaseUrl, headers, open, post?.id]);
+
+    /* Что у новости есть проходить (задача #342): от этого зависят счётчики в
+       шапке и отметки в строках. Без теста и тренажёра журнал выглядит как
+       прежде — лишних пустых колонок у простого объявления нет. */
+    const hasQuiz = (post?.quiz_count || 0) > 0;
+    const hasTrainer = !!post?.trainer_key;
 
     const rows = useMemo(() => {
         const items = state?.items || [];
@@ -933,6 +1069,13 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                     и ещё {state.confirmed_outside} — из тех, кто больше не в адресатах
                                 </p>
                             )}
+                            {(hasQuiz || hasTrainer) && (
+                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                    {[hasTrainer ? `тренажёр прошли ${state.trainer_passed || 0}` : null,
+                                      hasQuiz ? `тест прошли ${state.quiz_passed || 0}` : null]
+                                        .filter(Boolean).join(' · ')}
+                                </p>
+                            )}
                         </div>
                         <button
                             type="button"
@@ -967,10 +1110,31 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                     списка, не значит ничего. Кто не прочитал,
                                     видно и так — они наверху (сортировка) и
                                     посчитаны в шапке. */}
-                                <span className="shrink-0 text-[12px] tabular-nums text-slate-400">
-                                    {row.confirmed_at
-                                        ? publishedLabel(row.confirmed_at)
-                                        : (row.shown_at ? 'открыл, не подтвердил' : 'не видел')}
+                                <span className="flex shrink-0 flex-col items-end gap-0.5">
+                                    <span className="text-[12px] tabular-nums text-slate-400">
+                                        {row.confirmed_at
+                                            ? publishedLabel(row.confirmed_at)
+                                            : (row.shown_at ? 'открыл, не подтвердил' : 'не видел')}
+                                    </span>
+                                    {/* Пройденное — галочкой, непройденное не пишем
+                                        вовсе: «не прошёл» у половины строк стало бы
+                                        той же стеной серого, от которой ушли выше. */}
+                                    {((hasTrainer && row.trainer_passed_at) || (hasQuiz && row.quiz_passed_at)) && (
+                                        <span className="flex items-center gap-2 text-[11.5px] text-slate-500">
+                                            {hasTrainer && row.trainer_passed_at && (
+                                                <span className="inline-flex items-center gap-0.5">
+                                                    <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} aria-hidden="true" />
+                                                    тренажёр
+                                                </span>
+                                            )}
+                                            {hasQuiz && row.quiz_passed_at && (
+                                                <span className="inline-flex items-center gap-0.5">
+                                                    <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} aria-hidden="true" />
+                                                    тест
+                                                </span>
+                                            )}
+                                        </span>
+                                    )}
                                 </span>
                             </div>
                         ))}
@@ -1031,20 +1195,28 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
 
+    const canPublish = !!access?.can_publish;
+
+    /* Список редактора грузим только редактору и только в «его» сегментах:
+       читателю сервер ответил бы 403 красной строкой в консоли на каждом
+       заходе, а сегмент «Для меня» — это лента, у неё свой запрос. */
     const load = useCallback(() => {
+        if (!canPublish || bucket === 'mine') { setLoading(false); return Promise.resolve(); }
         setLoading(true);
         return axios.get(`${apiBaseUrl}/api/news/posts`, { headers, params: { status: bucket } })
             .then((r) => { setItems(r.data?.items || []); setError(''); })
             .catch((e) => { setItems([]); setError(errText(e, 'Не удалось загрузить новости')); })
             .finally(() => setLoading(false));
-    }, [apiBaseUrl, headers, bucket]);
+    }, [apiBaseUrl, headers, bucket, canPublish]);
 
     useEffect(() => { load(); }, [load]);
 
+    /* null — ещё не знаем, кто перед нами; false — ответ не пришёл. Различать
+       нужно: до ответа вкладка не решает, ленту показывать или управление. */
     useEffect(() => {
         axios.get(`${apiBaseUrl}/api/news/access`, { headers })
             .then((r) => setAccess(r.data))
-            .catch(() => setAccess(null));
+            .catch(() => setAccess(false));
     }, [apiBaseUrl, headers]);
 
     /* Карточку для правки берём с сервера целиком: в списке нет ни текста, ни
@@ -1113,37 +1285,49 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
             </div>
         );
     }
-    if (access && !access.can_publish) {
+    if (access === null) {
         return (
-            <div className={`${iosCard} p-6 text-center`}>
-                <p className="text-[14px] text-slate-900">Новости публикуют супервайзер и выше</p>
-            </div>
+            <p className="py-10 text-center text-[13px] text-slate-400">
+                <Loader2 className="mr-1.5 inline h-4 w-4 animate-spin" />Загружаем
+            </p>
         );
+    }
+    /* Право только на чтение — «только сами новости, которые ему были
+       предназначены» (решение владельца 17.09.2026). Без сегментов и кнопок:
+       управлять читателю нечем. */
+    if (!canPublish) {
+        return <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} />;
     }
 
     return (
         <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
-                <IosSegmented
-                    value={bucket}
-                    options={BUCKETS}
-                    onChange={setBucket}
-                />
+                {/* Четыре сегмента на телефоне шире экрана — переключатель
+                    прокручивается пальцем, а не вылезает за край. */}
+                <div className="max-w-full overflow-x-auto scrollbar-hide">
+                    <IosSegmented
+                        value={bucket}
+                        options={BUCKETS}
+                        onChange={setBucket}
+                    />
+                </div>
                 <button type="button" className={iosBtnPrimary} onClick={() => openForm(null)}>
                     <Megaphone className="mr-1.5 inline h-4 w-4" aria-hidden="true" />
                     Новая новость
                 </button>
             </div>
 
-            {error && <p className="text-[13px] text-rose-600">{error}</p>}
+            {bucket === 'mine' && <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} />}
 
-            {loading && (
+            {bucket !== 'mine' && error && <p className="text-[13px] text-rose-600">{error}</p>}
+
+            {bucket !== 'mine' && loading && (
                 <p className="py-10 text-center text-[13px] text-slate-400">
                     <Loader2 className="mr-1.5 inline h-4 w-4 animate-spin" />Загружаем
                 </p>
             )}
 
-            {!loading && items.length === 0 && (
+            {bucket !== 'mine' && !loading && items.length === 0 && (
                 <div className={`${iosCard} px-6 py-10 text-center`}>
                     <p className="text-[14px] text-slate-900">
                         {bucket === 'published' ? 'Опубликованных новостей нет'
@@ -1156,7 +1340,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                 </div>
             )}
 
-            {!loading && items.map((post) => (
+            {bucket !== 'mine' && !loading && items.map((post) => (
                 <div key={post.id} className={`${iosCard} flex items-start gap-3 px-4 py-3.5`}>
                     <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1179,13 +1363,14 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                             {/* Метка, а не число: тест меняет у сотрудника сам
                                 способ закрыть окно. */}
                             {post.quiz_count > 0 && <IosBadge tone="slate">с тестом</IosBadge>}
+                            {post.trainer_key && <IosBadge tone="slate">с тренажёром</IosBadge>}
                         </div>
                         <p className="mt-1 truncate text-[12px] text-slate-400">
                             {[post.author_name, post.author_department,
                               publishedLabel(post.published_at || post.created_at)]
                                 .filter(Boolean).join(' · ')}
                         </p>
-                        {post.status === 'published' && post.is_mandatory && (
+                        {post.status === 'published' && hasJournal(post) && (
                             <button
                                 type="button"
                                 onClick={() => setReportPost(post)}
@@ -1219,7 +1404,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                                 ? [{ key: 'archive', label: 'Снять с показа',
                                      onSelect: () => act(post, 'archive') }]
                                 : []),
-                            ...(post.status === 'published' && post.is_mandatory
+                            ...(post.status === 'published' && hasJournal(post)
                                 ? [{ key: 'report', label: 'Кто прочитал',
                                      onSelect: () => setReportPost(post) }]
                                 : []),

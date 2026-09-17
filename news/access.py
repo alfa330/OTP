@@ -24,13 +24,15 @@
 """
 
 import json
+import re
 
 from wiki import access as wiki_access
 from wiki.access import ROLE_LEVELS, normalize_role, role_level_of  # noqa: F401  (реэкспорт)
 
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_CONFIRM_DELAY_SECONDS,
                      QUIZ_MAX_OPTION_LENGTH, QUIZ_MAX_OPTIONS, QUIZ_MAX_PROMPT_LENGTH,
-                     QUIZ_MAX_QUESTIONS, QUIZ_MIN_OPTIONS, QUIZ_MIN_QUESTIONS)
+                     QUIZ_MAX_QUESTIONS, QUIZ_MIN_OPTIONS, QUIZ_MIN_QUESTIONS,
+                     TRAINER_KEY_MAX_LENGTH)
 
 # Длина заголовка — колонка VARCHAR(255); режем на входе, чтобы отказ был
 # внятным, а не «value too long for type character varying(255)».
@@ -389,3 +391,56 @@ def quiz_mistakes(answer_key, answers):
         if value != int(correct):
             wrong.append(int(question_id))
     return wrong
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТРЕНАЖЁР И ОБЯЗАТЕЛЬНОСТЬ ПРОХОЖДЕНИЯ (задача #342)
+#
+# «При создании новости должна быть возможность прикрепить тренажёр или тест…
+# Если тест обязательный, оператор не должен иметь возможности закрыть новость,
+# не пройдя тест. Если необязательный — может ознакомиться без прохождения».
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TRAINER_KEY = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+
+
+def normalize_trainer_key(raw):
+    """(ключ, отказ). Пустое значение — тренажёра нет, и это не ошибка.
+
+    Сценарии живут в коде фронта (trainers/registry.js), поэтому сервер
+    проверяет только форму ключа. Незнакомый, но правильный по форме ключ
+    окно покажет честной заглушкой «тренажёр недоступен», а не упадёт.
+    """
+    key = str(raw or '').strip()
+    if not key:
+        return None, None
+    if len(key) > TRAINER_KEY_MAX_LENGTH or not _TRAINER_KEY.match(key):
+        return None, 'Неизвестный тренажёр'
+    return key, None
+
+
+def must_pass(*, pass_required, has_quiz, has_trainer):
+    """Обязано ли прохождение держать подтверждение новости.
+
+    Нечего проходить — нечего и требовать: признак pass_required у новости без
+    теста и тренажёра ничего не значит (он остаётся от формы и по умолчанию
+    TRUE).
+    """
+    return bool(pass_required) and bool(has_quiz or has_trainer)
+
+
+def outstanding_passes(*, pass_required, has_quiz, has_trainer, quiz_passed, trainer_passed):
+    """Что человеку ещё осталось пройти, чтобы подтвердить новость. Список видов.
+
+    Порядок — порядок в окне: сначала тренажёр (он показывает, КАК делать),
+    потом тест (он проверяет, понял ли). Необязательное прохождение сюда не
+    попадает никогда — его отсутствие подтверждение не держит.
+    """
+    if not must_pass(pass_required=pass_required, has_quiz=has_quiz, has_trainer=has_trainer):
+        return []
+    left = []
+    if has_trainer and not trainer_passed:
+        left.append('trainer')
+    if has_quiz and not quiz_passed:
+        left.append('quiz')
+    return left
