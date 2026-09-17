@@ -41,7 +41,7 @@ import {
   X
 } from 'lucide-react';
 import { isAdminLikeRole, isSupervisorRole, normalizeRole } from '../../utils/roles';
-import { APPLE_FONT, IosModal, IosBadge, IosSegmented, IosToggle, iosCard } from '../ui/ios';
+import { APPLE_FONT, IosModal, IosBadge, IosSegmented, IosToggle, iosCard, iosGroupLabel } from '../ui/ios';
 import {
   filterOperationalShiftAuctionOperators,
   getShiftAuctionOperatorStatusLabel,
@@ -65,6 +65,7 @@ import {
 import {
   AUCTION_PHONE_BUTTON,
   AUCTION_PHONE_TIME_INPUT,
+  AuctionPhoneCheckRow,
   AuctionPhoneChips,
   AuctionPhoneField,
   AuctionPhoneGrid,
@@ -73,7 +74,9 @@ import {
   AuctionPhoneNormBar,
   AuctionPhonePill,
   AuctionPhoneRow,
+  AuctionPhoneSearch,
   AuctionPhoneStatusCard,
+  AuctionPhoneTabs,
   useLastPresent
 } from './ShiftAuctionMobile';
 import { MyShiftsTimeline } from '../schedule/MyShiftsMobile';
@@ -3941,7 +3944,22 @@ const ShiftAuctionShiftsTable = ({
     return { operator, workload, date, claimed, dayAvailable, compatible, isDayOff };
   }, [selectedCell, operators, workloadById, lotsByOperatorDate, availableLotsByDate]);
 
+  // Телефон: таблица «операторы × дни» на 960 px в экран не помещается. День
+  // выбирается лентой, операторы — списком со сменами этого дня справа, ячейка —
+  // экраном с теми же действиями «Убрать» и «Добавить», что у окна на компьютере.
+  const isMobileShell = useIsMobileShell();
+  const [phoneDate, setPhoneDate] = useState('');
+  const [phoneUnclaimLot, setPhoneUnclaimLot] = useState(null);
+  const phoneCell = useLastPresent(cellModalData);
+
   if (!rows.length || !dates.length) {
+    if (isMobileShell) {
+      return (
+        <p className={`${iosCard} px-4 py-6 text-center text-[15px] text-slate-500`}>
+          {!dates.length ? 'Нет смен в выбранном периоде.' : 'Нет операторов-участников.'}
+        </p>
+      );
+    }
     return (
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
@@ -3949,6 +3967,186 @@ const ShiftAuctionShiftsTable = ({
           {!dates.length ? 'Нет смен в выбранном периоде.' : 'Нет операторов-участников.'}
         </p>
       </section>
+    );
+  }
+
+  if (isMobileShell) {
+    const today = getTodayDateInputValue();
+    const activeDate = dates.includes(phoneDate) ? phoneDate : (dates.includes(today) ? today : dates[0]);
+    const closeCell = () => {
+      if (actionLoading) return false;
+      setSelectedCell(null);
+      setPendingAction(null);
+      return undefined;
+    };
+    const lotRowKey = (lot) => `${lot.id ?? `${lot.source_schedule_shift_id || ''}-${lot.start_time}-${lot.end_time}`}`;
+    return (
+      <div className="flex flex-col gap-3">
+        {canEdit ? (
+          <div className="flex items-center gap-2 px-1" style={{ flexWrap: 'nowrap' }}>
+            <span className="min-w-0 flex-1 text-[13px] leading-snug text-slate-500">Нажмите на оператора, чтобы добавить или убрать смену</span>
+            <button
+              type="button"
+              onClick={performUndo}
+              disabled={!undoStack.length || actionLoading}
+              aria-label="Отменить действие"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white text-blue-600 ring-1 ring-slate-200/70 disabled:text-slate-300"
+            >
+              <Undo2 size={17} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={performRedo}
+              disabled={!redoStack.length || actionLoading}
+              aria-label="Повторить действие"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white text-blue-600 ring-1 ring-slate-200/70 disabled:text-slate-300"
+            >
+              <Redo2 size={17} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+        <AuctionPhoneChips
+          ariaLabel="День таблицы"
+          onSelect={(item) => setPhoneDate(item.id)}
+          items={dates.map((date) => {
+            const taken = rows.reduce((sum, { opId }) => sum + (lotsByOperatorDate.get(`${opId}|${date}`) || []).length, 0);
+            return {
+              id: date,
+              label: formatShiftsTableDateHeader(date),
+              caption: `взято ${taken}`,
+              active: date === activeDate
+            };
+          })}
+        />
+        <AuctionPhoneGroup hint="Справа — смены дня; часы — взято / норма периода.">
+          {rows.map(({ operator, opId, workload }) => {
+            const claimedNet = Number(workload?.claimed_net_minutes || 0);
+            const norm = Number(workload?.ceiling_minutes || workload?.norm_minutes || 0);
+            const pct = norm > 0 ? Math.round((claimedNet / norm) * 100) : 0;
+            const normTone = !norm ? 'text-slate-500' : pct >= 100 ? 'text-emerald-600' : pct >= 80 ? 'text-amber-600' : 'text-orange-600';
+            const cellLots = lotsByOperatorDate.get(`${opId}|${activeDate}`) || [];
+            const isDayOff = Array.isArray(workload?.day_off_dates) && workload.day_off_dates.includes(activeDate);
+            return (
+              <AuctionPhoneRow
+                key={`phone-shifts-row-${opId}`}
+                title={operator?.name || `Оператор #${opId}`}
+                subtitle={(
+                  <>
+                    <span className={normTone}>{formatHours(claimedNet)} / {formatHours(norm)} ч</span>
+                    {` · ставка ${Number(operator?.rate ?? workload?.rate ?? 1).toFixed(2)}`}
+                    {operator?.direction ? ` · ${operator.direction}` : ''}
+                  </>
+                )}
+                trailing={(
+                  <span className="flex shrink-0 flex-col items-end text-[14px] tabular-nums">
+                    {isDayOff ? <span className="text-violet-600">выходной</span> : null}
+                    {cellLots.map((lot) => (
+                      <span key={`phone-cell-lot-${lotRowKey(lot)}`} className="font-semibold text-blue-700">
+                        {formatAuctionLotEffectiveTimeRangeLabel(lot)}
+                      </span>
+                    ))}
+                    {!isDayOff && !cellLots.length ? <span className="text-slate-300">—</span> : null}
+                  </span>
+                )}
+                onClick={canEdit ? () => setSelectedCell({ opId, date: activeDate }) : null}
+                chevron={canEdit}
+              />
+            );
+          })}
+        </AuctionPhoneGroup>
+
+        <IosModal
+          open={Boolean(cellModalData)}
+          onClose={closeCell}
+          title={phoneCell?.operator?.name || 'Оператор'}
+          subtitle={phoneCell ? `${formatShiftsTableDateHeader(phoneCell.date)} · ${formatHours(phoneCell.workload?.claimed_net_minutes || 0)} / ${formatHours(phoneCell.workload?.ceiling_minutes || phoneCell.workload?.norm_minutes || 0)} ч` : ''}
+        >
+          {phoneCell ? (
+            <div className="space-y-5">
+              {phoneCell.isDayOff ? (
+                <p className="rounded-xl bg-violet-50 px-4 py-3 text-[14px] text-violet-800">Оператор выбрал выходной</p>
+              ) : null}
+              <AuctionPhoneGroup label="Взятые смены" hint={phoneCell.claimed.length ? null : 'Нет смен на эту дату.'}>
+                {phoneCell.claimed.map((lot) => (
+                  <AuctionPhoneRow
+                    key={`phone-claimed-${lotRowKey(lot)}`}
+                    title={formatAuctionLotEffectiveTimeRangeLabel(lot)}
+                    trailing={(
+                      <AuctionPhonePill
+                        label="Убрать"
+                        tone="rose"
+                        disabled={actionLoading}
+                        onClick={() => setPhoneUnclaimLot(lot)}
+                        ariaLabel={`Убрать смену ${formatAuctionLotEffectiveTimeRangeLabel(lot)}`}
+                      />
+                    )}
+                  />
+                ))}
+              </AuctionPhoneGroup>
+              <AuctionPhoneGroup label={`Можно добавить · ${phoneCell.compatible.length}`} hint={phoneCell.compatible.length ? null : 'Нет совместимых смен.'}>
+                {phoneCell.compatible.map((lot) => (
+                  <AuctionPhoneRow
+                    key={`phone-compatible-${lotRowKey(lot)}`}
+                    title={formatAuctionLotEffectiveTimeRangeLabel(lot)}
+                    trailing={(
+                      <AuctionPhonePill
+                        label="Добавить"
+                        tone="blue"
+                        busy={actionLoading && pendingAction?.lot === lot}
+                        disabled={actionLoading}
+                        onClick={() => {
+                          setPendingAction({ type: 'claim', lot });
+                          handleClaim(lot, phoneCell.operator.id);
+                        }}
+                        ariaLabel={`Добавить смену ${formatAuctionLotEffectiveTimeRangeLabel(lot)}`}
+                      />
+                    )}
+                  />
+                ))}
+              </AuctionPhoneGroup>
+              {phoneCell.dayAvailable.length > phoneCell.compatible.length ? (
+                <AuctionPhoneGroup label="Пересекаются со взятыми">
+                  {phoneCell.dayAvailable.filter((lot) => !phoneCell.compatible.includes(lot)).map((lot) => (
+                    <AuctionPhoneRow
+                      key={`phone-overlap-${lotRowKey(lot)}`}
+                      title={formatAuctionLotEffectiveTimeRangeLabel(lot)}
+                      muted
+                    />
+                  ))}
+                </AuctionPhoneGroup>
+              ) : null}
+              {actionLoading ? <p className="text-center text-[13px] text-slate-500">Сохраняем…</p> : null}
+            </div>
+          ) : null}
+        </IosModal>
+
+        <MobileActionSheet
+          open={Boolean(phoneUnclaimLot)}
+          onClose={() => { if (!actionLoading) setPhoneUnclaimLot(null); }}
+          actions={phoneUnclaimLot ? [
+            {
+              key: 'question',
+              render: (
+                <div className="sa-m-sheet-title">
+                  <b>Убрать смену у оператора?</b>
+                  <span>{`${phoneCell?.operator?.name || ''}, ${formatAuctionLotEffectiveTimeRangeLabel(phoneUnclaimLot)}. Смена снова станет свободной.`}</span>
+                </div>
+              )
+            },
+            {
+              key: 'unclaim',
+              danger: true,
+              disabled: actionLoading,
+              label: 'Убрать смену',
+              onClick: async () => {
+                const lot = phoneUnclaimLot;
+                setPhoneUnclaimLot(null);
+                await handleUnclaim(lot);
+              }
+            }
+          ] : []}
+        />
+      </div>
     );
   }
 
@@ -4318,6 +4516,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const canMonitor = canManage || isSupervisorRole(role);
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const isMobileShell = useIsMobileShell();
+  // Экран вкладки «Настройки» на телефоне: участники или группа времени.
+  const [phoneSettingsScreen, setPhoneSettingsScreen] = useState('');
   const showToastRef = useRef(showToast);
   const streamAbortRef = useRef(null);
   const snapshotRequestRef = useRef(false);
@@ -7265,22 +7465,540 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   };
 
   const renderPhoneTabs = () => (
-    <div className="sa-m-bleed overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-      <IosSegmented
-        value={monitorTab}
-        onChange={setMonitorTab}
-        className="sa-m-segments"
-        ariaLabel="Разделы аукциона"
-        options={[
-          canManage ? { value: 'settings', label: 'Настройки' } : null,
-          { value: 'monitoring', label: 'Смены' },
-          { value: 'shifts_table', label: 'Таблица' },
-          { value: 'progress', label: 'Прогресс', count: operatorWorkloadStats.total },
-          { value: 'journal', label: 'Журнал', count: journalTotal }
+    <AuctionPhoneTabs
+      value={monitorTab}
+      onChange={setMonitorTab}
+      ariaLabel="Разделы аукциона"
+      items={[
+        canManage ? { value: 'settings', label: 'Настройки' } : null,
+        { value: 'monitoring', label: 'Смены' },
+        { value: 'shifts_table', label: 'Таблица' },
+        { value: 'progress', label: 'Прогресс', count: operatorWorkloadStats.total },
+        { value: 'journal', label: 'Журнал', count: journalTotal }
+      ]}
+    />
+  );
+
+  // «Прогресс» на телефоне: фильтр лентой, поиск и список людей с полосой нормы.
+  // Нажатие открывает тот же экран оператора, что и из сетки смен.
+  const renderPhoneProgress = () => (
+    <div className="flex flex-col gap-3">
+      <AuctionPhoneTabs
+        value={operatorWorkloadFilter}
+        onChange={setOperatorWorkloadFilter}
+        ariaLabel="Отбор операторов"
+        items={[
+          { value: 'all', label: 'Все', count: operatorWorkloadStats.total },
+          { value: 'lagging', label: 'Отстают', count: operatorWorkloadStats.empty + operatorWorkloadStats.lagging },
+          { value: 'complete', label: 'Норма', count: operatorWorkloadStats.complete },
+          { value: 'over', label: 'Перебор', count: operatorWorkloadStats.over },
+          { value: 'empty', label: 'Пусто', count: operatorWorkloadStats.empty }
         ]}
       />
+      <AuctionPhoneSearch value={operatorWorkloadQuery} onChange={setOperatorWorkloadQuery} placeholder="Поиск оператора" />
+      {filteredOperatorWorkloads.length ? (
+        <AuctionPhoneGroup hint="Норма зависит от ставки и статусных периодов. Отстающие — наверху.">
+          {filteredOperatorWorkloads.map((row) => {
+            const barClass = row.status === 'over'
+              ? 'bg-rose-500'
+              : row.status === 'complete' ? 'bg-emerald-500' : row.status === 'partial' ? 'bg-blue-600' : 'bg-slate-300';
+            const chip = row.status === 'over'
+              ? { text: `+${formatAuctionHours(row.over_minutes || 0)} ч`, className: 'text-rose-600' }
+              : row.status === 'complete'
+                ? { text: 'Норма', className: 'text-emerald-600' }
+                : row.status === 'partial'
+                  ? { text: `−${formatAuctionHours(row.remaining_minutes || 0)} ч`, className: 'text-blue-600' }
+                  : { text: 'Пусто', className: 'text-slate-400' };
+            const meta = [
+              `${formatAuctionHours(row.claimed_net_minutes || 0)} / ${formatAuctionHours(row.ceiling_minutes || row.norm_minutes || 0)} ч`,
+              `${row.lots_claimed_count || 0} ${formatAuctionShiftsWord(row.lots_claimed_count || 0)}`,
+              row.blocked_days ? `закрыто ${row.blocked_days} дн.` : '',
+              row.selected_day_offs ? `вых. ${row.selected_day_offs}` : ''
+            ].filter(Boolean).join(' · ');
+            return (
+              <AuctionPhoneRow
+                key={`phone-workload-${row.operator_id}`}
+                title={row.name}
+                subtitle={meta}
+                note={(
+                  <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                    <span className={`block h-full rounded-full ${barClass}`} style={{ width: `${clampNumber(row.progress, 0, 100)}%` }} />
+                  </span>
+                )}
+                trailing={<span className={`shrink-0 text-[15px] font-semibold tabular-nums ${chip.className}`}>{chip.text}</span>}
+                onClick={() => setDrilldownOperatorId(Number(row.operator_id))}
+                chevron
+              />
+            );
+          })}
+        </AuctionPhoneGroup>
+      ) : (
+        <p className={`${iosCard} px-4 py-6 text-center text-[15px] text-slate-500`}>Под фильтр операторов не нашлось.</p>
+      )}
     </div>
   );
+
+  // «Журнал» на телефоне: кто и когда забрал смену — строкой списка, время
+  // взятия справа; нажатие открывает экран оператора.
+  const renderPhoneJournal = () => {
+    const pageCount = Math.max(1, Math.ceil(journalTotal / journalPerPage));
+    const shortStamp = (value) => {
+      const date = value ? new Date(value) : null;
+      if (!date || Number.isNaN(date.getTime())) return '';
+      const pad = (num) => String(num).padStart(2, '0');
+      return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}, ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    };
+    let hint = null;
+    if (journalError) hint = <span className="text-rose-600">{journalError}</span>;
+    else if (!journalEntries.length) hint = journalLoading ? 'Загружаю журнал…' : 'Пока никто не забирал смены.';
+    return (
+      <div className="flex flex-col gap-3">
+        <AuctionPhoneGroup
+          label={`Кто забрал смены · ${journalTotal}`}
+          right={(
+            <button
+              type="button"
+              onClick={() => fetchJournalPage(journalPage)}
+              disabled={journalLoading}
+              className="h-7 shrink-0 text-[15px] font-semibold text-blue-600 disabled:opacity-50"
+            >
+              {journalLoading ? 'Обновляю…' : 'Обновить'}
+            </button>
+          )}
+          hint={hint}
+        >
+          {journalEntries.map((entry) => {
+            let shift = '—';
+            if (entry.shift_date) {
+              shift = `${formatShortDateLabel(entry.shift_date)} · ${entry.start_time || ''}–${entry.end_time || ''}`;
+              if (entry.is_post_auction) {
+                shift += entry.is_partial && entry.claim_start_time && entry.claim_end_time
+                  ? ` · добор ${entry.claim_start_time}–${entry.claim_end_time}`
+                  : ' · добор';
+              }
+            }
+            return (
+              <AuctionPhoneRow
+                key={`phone-journal-${entry.id}`}
+                title={entry.claimed_by_name || `#${entry.claimed_by || ''}`}
+                subtitle={shift}
+                trailing={<span className="shrink-0 text-[13px] tabular-nums text-slate-500">{shortStamp(entry.claimed_at)}</span>}
+                onClick={entry.claimed_by ? () => setDrilldownOperatorId(Number(entry.claimed_by)) : null}
+              />
+            );
+          })}
+        </AuctionPhoneGroup>
+        {journalTotal > journalPerPage ? (
+          <div className={`${iosCard} flex items-center gap-1 px-1 py-1`} style={{ flexWrap: 'nowrap' }}>
+            <button
+              type="button"
+              onClick={() => fetchJournalPage(Math.max(1, journalPage - 1))}
+              disabled={journalLoading || journalPage <= 1}
+              aria-label="Предыдущая страница"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-blue-600 disabled:opacity-30"
+            >
+              <ChevronLeft size={22} aria-hidden="true" />
+            </button>
+            <span className="min-w-0 flex-1 text-center text-[15px] tabular-nums text-slate-600">Стр. {journalPage} из {pageCount}</span>
+            <button
+              type="button"
+              onClick={() => fetchJournalPage(journalPage + 1)}
+              disabled={journalLoading || (journalPage * journalPerPage) >= journalTotal}
+              aria-label="Следующая страница"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-blue-600 disabled:opacity-30"
+            >
+              <ChevronRight size={22} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  // «Настройки» на телефоне — список настроек телефона: переключатели строками,
+  // период галочкой, окно календарём и системным колесом времени, группы и
+  // участники — экранами. Правила и запросы те же, что у настольной формы.
+  const renderPhoneSettings = () => {
+    const actionRow = (label, onClick, { tone = 'text-blue-600', disabled = false, subtitle = null } = {}) => (
+      <AuctionPhoneRow
+        title={<span className={`font-normal ${disabled ? 'text-slate-400' : tone}`}>{label}</span>}
+        subtitle={subtitle}
+        onClick={disabled ? null : onClick}
+      />
+    );
+    const timeInput = (dateValue, timeValue, onTime, disabled = false) => (
+      <input
+        type="time"
+        value={timeValue || ''}
+        disabled={disabled || !dateValue}
+        step={300}
+        onChange={(event) => {
+          const time = normalizeClockValue(event.target.value);
+          if (time) onTime(time);
+        }}
+        className={AUCTION_PHONE_TIME_INPUT}
+      />
+    );
+    const groupScreenOpen = phoneSettingsScreen === 'group';
+    const groupIndex = draftTimeGroups.findIndex((group) => group.key === expandedTimeGroupKey);
+    const editedGroup = groupIndex >= 0 ? draftTimeGroups[groupIndex] : null;
+    const editedGroupDate = editedGroup ? (editedGroup.date || draftStartsAtParts.date) : '';
+    const editedGroupIssue = editedGroup ? timeGroupIssues.get(editedGroup.key) || '' : '';
+    const memberQuery = timeGroupMemberQuery.trim().toLowerCase();
+    const pickerOperators = memberQuery
+      ? operatorOptions.filter((operator) => (
+        `${operator.name} ${operator.direction || ''} ${operator.supervisor_name || ''}`.toLowerCase().includes(memberQuery)
+      ))
+      : operatorOptions;
+    const operatorSubtitle = (operator) => {
+      const statusLabel = !isActiveShiftAuctionOperator(operator) ? getShiftAuctionOperatorStatusLabel(operator.status) : '';
+      return [
+        operator.direction || 'Без направления',
+        `ставка ${Number(operator.rate || 1).toFixed(2)}`,
+        operator.supervisor_name || '',
+        statusLabel
+      ].filter(Boolean).join(' · ');
+    };
+
+    return (
+      <div className="flex flex-col gap-5">
+        {settings.published_to_work_schedules_at ? (
+          <p className="px-1 text-[14px] leading-snug text-emerald-700">
+            Итоги сохранены в графики работы {formatDateTimeLabel(settings.published_to_work_schedules_at)}
+            {settings.published_to_work_schedules_by_name ? ` · ${settings.published_to_work_schedules_by_name}` : ''}.
+          </p>
+        ) : null}
+
+        <AuctionPhoneGroup label="Аукцион">
+          <AuctionPhoneRow
+            title={<span className="font-normal">Аукцион включён</span>}
+            subtitle="Применяется после «Сохранить»"
+            trailing={<IosToggle checked={draftEnabled} onChange={updateDraftEnabled} />}
+          />
+          <AuctionPhoneRow
+            title={<span className="font-normal">Режим добора</span>}
+            subtitle={settings.topup_started_at
+              ? `Включён ${formatDateTimeLabel(settings.topup_started_at)}${settings.topup_started_by_name ? ` · ${settings.topup_started_by_name}` : ''}`
+              : runtimeStatus === 'open' ? 'Смены сверх нормы без пересечений' : 'Только при открытом аукционе'}
+            trailing={(
+              <IosToggle
+                checked={Boolean(settings.topup_started_at)}
+                onChange={handleToggleTopup}
+                disabled={isTogglingTopup || (runtimeStatus !== 'open' && !settings.topup_started_at)}
+              />
+            )}
+          />
+          <AuctionPhoneRow
+            title={<span className="font-normal">Только своя ставка</span>}
+            subtitle="Применяется сразу"
+            trailing={<IosToggle checked={Boolean(settings.rate_lock_enabled)} onChange={handleToggleRateLock} disabled={isTogglingRateLock} />}
+          />
+        </AuctionPhoneGroup>
+
+        {['scheduled', 'open', 'paused'].includes(runtimeStatus) ? (
+          <AuctionPhoneGroup label="Ход аукциона">
+            {runtimeStatus === 'open'
+              ? actionRow('Поставить на паузу', () => handleAuctionControl('pause'), { tone: 'text-amber-600', disabled: isControllingAuction })
+              : null}
+            {runtimeStatus === 'paused'
+              ? actionRow('Возобновить', () => handleAuctionControl('resume'), { tone: 'text-emerald-600', disabled: isControllingAuction })
+              : null}
+            {actionRow('Завершить сейчас', () => handleAuctionControl('finish'), { tone: 'text-rose-600', disabled: isControllingAuction })}
+          </AuctionPhoneGroup>
+        ) : null}
+
+        <AuctionPhoneGroup
+          label="Период аукциона"
+          hint="Перезапуск доступен для периодов, которые еще не закончились. При перезапуске очищаются все выбранные смены и выходные."
+        >
+          {restartablePeriods.length ? restartablePeriods.map((period) => {
+            const isCurrent = Number(settings.selected_schedule_plan_id) === Number(period.id);
+            return (
+              <AuctionPhoneCheckRow
+                key={`phone-period-${period.id}`}
+                title={formatAuctionPeriodLabel(period)}
+                subtitle={`${Number(period.shift_count || 0)} ${formatAuctionShiftsWord(Number(period.shift_count || 0))}${isCurrent ? ' · активная' : ''}`}
+                checked={Number(draftSchedulePlanId) === Number(period.id)}
+                onClick={() => updateDraftSchedulePlanId(period.id)}
+              />
+            );
+          }) : (
+            <AuctionPhoneRow title={<span className="font-normal text-slate-500">Нет планов на текущие или будущие даты</span>} />
+          )}
+        </AuctionPhoneGroup>
+
+        <section>
+          <div className="mb-1.5 flex items-center gap-2 px-1">
+            <h2 className={`${iosGroupLabel} sa-m-group__label min-w-0 flex-1 truncate`}>Окно аукциона</h2>
+            {draftRangeInvalid ? <span className="shrink-0 text-[13px] font-semibold text-rose-600">Завершение раньше старта</span> : null}
+          </div>
+          <div className={`${iosCard} sa-m-window p-3`}>
+            <AuctionRangeCalendar
+              startsAt={draftStartsAt}
+              endsAt={draftEndsAt}
+              onStartsAtChange={updateDraftStartsAt}
+              onEndsAtChange={updateDraftEndsAt}
+            />
+          </div>
+        </section>
+        <AuctionPhoneGroup
+          hint={draftAuctionWindowMinutes ? `Длительность — ${formatAuctionHours(draftAuctionWindowMinutes)} ч` : 'Выберите старт и завершение'}
+        >
+          <AuctionPhoneField label={`Начало${draftStartsAtParts.date ? ` · ${formatDateLabel(draftStartsAtParts.date)}` : ''}`}>
+            {timeInput(draftStartsAtParts.date, draftStartsAtParts.time, (time) => updateDraftStartsAt(
+              mergeAuctionDateTimeValue(draftStartsAt || `${draftStartsAtParts.date}T${time}`, { date: draftStartsAtParts.date, time })
+            ))}
+          </AuctionPhoneField>
+          <AuctionPhoneField label={`Завершение${draftEndsAtParts.date ? ` · ${formatDateLabel(draftEndsAtParts.date)}` : ''}`}>
+            {timeInput(draftEndsAtParts.date, draftEndsAtParts.time, (time) => updateDraftEndsAt(
+              mergeAuctionDateTimeValue(draftEndsAt || `${draftEndsAtParts.date}T${time}`, { date: draftEndsAtParts.date, time })
+            ))}
+          </AuctionPhoneField>
+          <div className="sa-m-row flex w-full items-center gap-2 overflow-x-auto px-4 py-2.5" style={{ flexWrap: 'nowrap', scrollbarWidth: 'none' }}>
+            <span className="shrink-0 text-[15px] text-slate-500">Завершить через</span>
+            {AUCTION_DURATION_PRESETS.map((preset) => (
+              <button
+                key={`phone-preset-${preset.label}`}
+                type="button"
+                onClick={() => updateDraftEndsAt(addMinutesToDateTimeInputValue(draftStartsAt, preset.minutes))}
+                disabled={!draftStartsAt}
+                className="h-8 shrink-0 rounded-full bg-slate-100 px-3 text-[14px] font-semibold text-slate-700 disabled:opacity-50"
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </AuctionPhoneGroup>
+
+        <AuctionPhoneGroup
+          label="Группы времени"
+          right={(
+            <button
+              type="button"
+              onClick={() => {
+                addDraftTimeGroup();
+                setPhoneSettingsScreen('group');
+              }}
+              disabled={!selectedDraftPeriod || draftTimeGroups.length >= AUCTION_TIME_GROUP_LIMIT}
+              className="h-7 shrink-0 text-[15px] font-semibold text-blue-600 disabled:opacity-40"
+            >
+              Добавить
+            </button>
+          )}
+          hint={selectedDraftPeriod
+            ? (draftTimeGroups.length
+              ? `Группы действуют только на период ${formatAuctionPeriodLabel(selectedDraftPeriod)}.`
+              : 'Групп нет — все участники стартуют в общее время.')
+            : 'Сначала выберите период аукциона.'}
+        >
+          {draftTimeGroups.map((group, index) => {
+            const issue = timeGroupIssues.get(group.key) || '';
+            return (
+              <AuctionPhoneRow
+                key={`phone-group-${group.key}`}
+                title={getTimeGroupTitle(group, index)}
+                subtitle={`${formatTimeGroupWindowLabel(group, draftStartsAt, draftEndsAt)} · ${group.operatorIds.length} в группе`}
+                note={issue ? <span className="text-rose-600">{issue}</span> : null}
+                onClick={() => {
+                  setExpandedTimeGroupKey(group.key);
+                  setTimeGroupMemberQuery('');
+                  setPhoneSettingsScreen('group');
+                }}
+                chevron
+              />
+            );
+          })}
+        </AuctionPhoneGroup>
+
+        <AuctionPhoneGroup label="Текст для тестовой группы">
+          <div className="px-4 py-3">
+            <textarea
+              value={draftNote}
+              onChange={(event) => updateDraftNote(event.target.value)}
+              rows={3}
+              maxLength={1000}
+              placeholder="Например: запуск начнется после проверки генерации смен."
+              className="block w-full resize-none border-0 bg-transparent p-0 text-[16px] leading-snug text-slate-900 outline-none placeholder:text-slate-400"
+            />
+          </div>
+        </AuctionPhoneGroup>
+
+        <AuctionPhoneGroup label="Участники">
+          <AuctionPhoneRow
+            title={<span className="font-normal">Выбрано</span>}
+            subtitle={selectedOperators.length ? selectedOperators.slice(0, 3).map((operator) => operator.name).join(', ') + (selectedOperators.length > 3 ? '…' : '') : 'Пока никто не выбран'}
+            trailing={<span className="shrink-0 text-[16px] tabular-nums text-slate-500">{selectedIds.size}</span>}
+            onClick={() => setPhoneSettingsScreen('participants')}
+            chevron
+          />
+        </AuctionPhoneGroup>
+
+        <button type="button" onClick={handleSave} disabled={isSaving} className={AUCTION_PHONE_BUTTON.blue}>
+          {isSaving ? 'Сохранение…' : 'Сохранить'}
+        </button>
+
+        <AuctionPhoneGroup>
+          {runtimeStatus === 'closed'
+            ? actionRow(isPublishingAuction ? 'Сохранение…' : 'Сохранить в графики', handlePublishAuction, { tone: 'text-emerald-600', disabled: isPublishingAuction })
+            : null}
+          {actionRow(isExportingAuctionReport ? 'Выгрузка…' : 'Отчет Excel', handleExportAuctionReport, {
+            disabled: isExportingAuctionReport || !isViewingActivePeriod || !lots.length,
+            subtitle: !isViewingActivePeriod ? 'Только для активного периода' : (!lots.length ? 'Нет смен для выгрузки' : null)
+          })}
+          {actionRow(isRestarting ? 'Перезапуск…' : 'Начать заново', handleRestartAuction, {
+            tone: 'text-rose-600',
+            disabled: isRestarting || !selectedDraftPeriod
+          })}
+        </AuctionPhoneGroup>
+
+        <IosModal
+          open={phoneSettingsScreen === 'participants'}
+          onClose={() => setPhoneSettingsScreen('')}
+          title="Участники"
+          subtitle={`Выбрано ${selectedIds.size}${query.trim() ? ` · найдено ${filteredOperators.length}` : ''}`}
+        >
+          <div className="space-y-3">
+            <AuctionPhoneSearch value={query} onChange={setQuery} placeholder="Оператор, направление или СВ" />
+            <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+              <button
+                type="button"
+                onClick={selectAllFilteredOperators}
+                disabled={!filteredOperators.length || allFilteredOperatorsSelected}
+                className="h-10 rounded-xl bg-white text-[15px] font-semibold text-blue-600 ring-1 ring-slate-200/70 disabled:opacity-50"
+              >
+                {query.trim() ? 'Выбрать найденных' : 'Выбрать всех'}
+              </button>
+              <button
+                type="button"
+                onClick={clearSelectedOperators}
+                disabled={!selectedIds.size}
+                className="h-10 rounded-xl bg-white text-[15px] font-semibold text-rose-600 ring-1 ring-slate-200/70 disabled:opacity-50"
+              >
+                Снять выбор
+              </button>
+            </div>
+            {filteredOperators.length ? (
+              <AuctionPhoneGroup>
+                {filteredOperators.map((operator) => (
+                  <AuctionPhoneCheckRow
+                    key={`phone-participant-${operator.id}`}
+                    title={operator.name}
+                    subtitle={operatorSubtitle(operator)}
+                    badge={timeGroupByOperatorId.get(operator.id)?.title || null}
+                    checked={selectedIds.has(operator.id)}
+                    onClick={() => toggleOperator(operator.id)}
+                  />
+                ))}
+              </AuctionPhoneGroup>
+            ) : (
+              <p className={`${iosCard} px-4 py-6 text-center text-[15px] text-slate-500`}>Операторы не найдены.</p>
+            )}
+          </div>
+        </IosModal>
+
+        <IosModal
+          open={groupScreenOpen && Boolean(editedGroup)}
+          onClose={() => {
+            setPhoneSettingsScreen('');
+            setTimeGroupMemberQuery('');
+          }}
+          title={editedGroup ? getTimeGroupTitle(editedGroup, groupIndex) : 'Группа'}
+          subtitle={editedGroup ? `${formatTimeGroupWindowLabel(editedGroup, draftStartsAt, draftEndsAt)} · ${editedGroup.operatorIds.length} в группе` : ''}
+        >
+          {editedGroup ? (
+            <div className="space-y-5">
+              {editedGroupIssue ? <p className="rounded-xl bg-rose-50 px-4 py-3 text-[14px] leading-snug text-rose-700">{editedGroupIssue}</p> : null}
+              <AuctionPhoneGroup>
+                <label className="sa-m-row flex w-full items-center px-4 py-2">
+                  <input
+                    value={editedGroup.name}
+                    onChange={(event) => patchDraftTimeGroup(editedGroup.key, { name: event.target.value })}
+                    maxLength={80}
+                    placeholder="Название — например, Наставники"
+                    className="h-9 w-full border-0 bg-transparent p-0 text-[16px] text-slate-900 outline-none placeholder:text-slate-400"
+                  />
+                </label>
+              </AuctionPhoneGroup>
+              {auctionWeekDates.length ? (
+                <AuctionPhoneGroup label="День группы">
+                  <div className="grid gap-1 px-3 py-3" style={{ gridTemplateColumns: `repeat(${Math.min(7, auctionWeekDates.length)}, minmax(0, 1fr))` }}>
+                    {auctionWeekDates.map((weekDate) => {
+                      const active = editedGroupDate === weekDate;
+                      return (
+                        <button
+                          key={`phone-group-day-${weekDate}`}
+                          type="button"
+                          onClick={() => patchDraftTimeGroup(editedGroup.key, { date: weekDate })}
+                          aria-pressed={active}
+                          className={`h-12 rounded-xl text-[13px] font-semibold leading-tight ${active ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}
+                        >
+                          <span className="block">{AUCTION_WEEKDAY_LABELS[getWeekdayIndex(weekDate)]}</span>
+                          <span className="block tabular-nums">{weekDate.slice(8)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </AuctionPhoneGroup>
+              ) : null}
+              <AuctionPhoneGroup hint={editedGroup.endTime ? null : 'Завершение общее — как у остальных участников.'}>
+                <AuctionPhoneField label="Старт группы">
+                  {timeInput(editedGroupDate, editedGroup.startTime, (time) => patchDraftTimeGroup(editedGroup.key, { startTime: time }))}
+                </AuctionPhoneField>
+                <AuctionPhoneField label="Завершение группы">
+                  {timeInput(
+                    editedGroupDate,
+                    editedGroup.endTime || splitDateTimeInputValue(draftEndsAt).time,
+                    (time) => patchDraftTimeGroup(editedGroup.key, { endTime: time })
+                  )}
+                </AuctionPhoneField>
+                {editedGroup.endTime
+                  ? actionRow('Завершать вместе со всеми', () => patchDraftTimeGroup(editedGroup.key, { endTime: '' }))
+                  : null}
+              </AuctionPhoneGroup>
+              <AuctionPhoneGroup hint={`Участники сами ставят смены на дни. Потолок — норма плюс ${formatAuctionHours(AUCTION_SELF_SCHEDULE_EXTRA_MINUTES)} ч.`}>
+                <AuctionPhoneRow
+                  title={<span className="font-normal">Свой график</span>}
+                  trailing={(
+                    <IosToggle
+                      checked={Boolean(editedGroup.selfSchedule)}
+                      onChange={(checked) => patchDraftTimeGroup(editedGroup.key, { selfSchedule: Boolean(checked) })}
+                    />
+                  )}
+                />
+              </AuctionPhoneGroup>
+              {operatorOptions.length > 8 ? (
+                <AuctionPhoneSearch value={timeGroupMemberQuery} onChange={setTimeGroupMemberQuery} placeholder="Оператор, направление или СВ" />
+              ) : null}
+              <AuctionPhoneGroup label={`Кто в группе · ${editedGroup.operatorIds.length}`}>
+                {pickerOperators.length ? pickerOperators.map((operator) => {
+                  const memberOf = timeGroupByOperatorId.get(operator.id);
+                  const inThisGroup = memberOf?.key === editedGroup.key;
+                  return (
+                    <AuctionPhoneCheckRow
+                      key={`phone-member-${operator.id}`}
+                      title={operator.name}
+                      subtitle={operatorSubtitle(operator)}
+                      badge={memberOf && !inThisGroup ? memberOf.title : null}
+                      checked={inThisGroup}
+                      onClick={() => toggleTimeGroupMember(editedGroup.key, operator.id)}
+                    />
+                  );
+                }) : (
+                  <AuctionPhoneRow title={<span className="font-normal text-slate-500">{operatorOptions.length ? 'Никого не нашли' : 'Операторы не найдены'}</span>} />
+                )}
+              </AuctionPhoneGroup>
+              <AuctionPhoneGroup>
+                {actionRow('Удалить группу', () => {
+                  removeDraftTimeGroup(editedGroup.key);
+                  setPhoneSettingsScreen('');
+                }, { tone: 'text-rose-600' })}
+              </AuctionPhoneGroup>
+            </div>
+          ) : null}
+        </IosModal>
+      </div>
+    );
+  };
 
   const renderPhonePeriods = () => {
     const previewNote = !isViewingActivePeriod && !selectedViewPostAuctionActive;
@@ -8677,7 +9395,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           />
         )}
 
-        {canMonitor && monitorTab === 'progress' && (
+        {canMonitor && monitorTab === 'progress' && isMobileShell ? renderPhoneProgress() : null}
+
+        {canMonitor && monitorTab === 'progress' && !isMobileShell && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -8804,7 +9524,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canManage && monitorTab === 'settings' && (
+        {canManage && monitorTab === 'settings' && isMobileShell ? renderPhoneSettings() : null}
+
+        {canManage && monitorTab === 'settings' && !isMobileShell && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-3 py-3 sm:px-5 sm:py-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -9450,7 +10172,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           </section>
         )}
 
-        {canMonitor && monitorTab === 'journal' && (
+        {canMonitor && monitorTab === 'journal' && isMobileShell ? renderPhoneJournal() : null}
+
+        {canMonitor && monitorTab === 'journal' && !isMobileShell && (
           <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
             <div className="flex flex-col gap-3 border-b border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:py-4">
               <div>

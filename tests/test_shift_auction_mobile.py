@@ -217,5 +217,65 @@ class PhoneGridTests(unittest.TestCase):
         self.assertEqual(VIEW.count('renderPhoneGrid()'), 1)
 
 
+class PhoneManagerTabsTests(unittest.TestCase):
+    """Владелец 17.09.2026: «сделать адаптив под разделы … аукцион смен тоже»,
+    «на данный момент пусть ячейки в аукционе смен останутся такими же». Сетка
+    ячеек не тронута; телефонными стали вкладки руководителя «Настройки»,
+    «Таблица», «Прогресс» и «Журнал» — до этого на телефоне стояла их настольная
+    разметка."""
+
+    def test_tabs_are_a_strip_not_a_squeezed_segmented_control(self):
+        """Пять вкладок со счётчиками в сегментный переключатель на 358 px не
+        помещались: «Прогресс 3Журнал 16»."""
+        tabs = VIEW[VIEW.index('const renderPhoneTabs = () => ('):VIEW.index('const renderPhoneProgress = () => (')]
+        self.assertIn('<AuctionPhoneTabs', tabs)
+        self.assertNotIn('IosSegmented', tabs)
+        self.assertIn('export const AuctionPhoneTabs', PHONE)
+
+    def test_manager_tabs_branch_on_the_phone(self):
+        for tab, render, guard in (
+            ('progress', 'renderPhoneProgress()', 'canMonitor'),
+            ('settings', 'renderPhoneSettings()', 'canManage'),
+            ('journal', 'renderPhoneJournal()', 'canMonitor'),
+        ):
+            self.assertIn("{%s && monitorTab === '%s' && isMobileShell ? %s : null}" % (guard, tab, render), VIEW)
+            self.assertIn("{%s && monitorTab === '%s' && !isMobileShell && (" % (guard, tab), VIEW)
+
+    def test_shifts_table_keeps_its_actions_on_the_phone(self):
+        """Таблица смен на телефоне — день лентой, операторы списком, ячейка
+        экраном; назначают и снимают смену те же handleClaim/handleUnclaim с
+        историей отмены, снятие спрашивает листом."""
+        table = VIEW[VIEW.index('const ShiftAuctionShiftsTable = ('):VIEW.index('const ShiftAuctionView = (')]
+        phone = table[table.index('  if (isMobileShell) {'):table.index('<section className="rounded-lg border border-slate-200 bg-white shadow-sm">\n      <div className="border-b')]
+        for marker in ('handleClaim(lot, phoneCell.operator.id)', 'await handleUnclaim(lot);', 'onClick={performUndo}',
+                       'onClick={performRedo}', '<MobileActionSheet', "label: 'Убрать смену'", '<AuctionPhoneChips'):
+            self.assertIn(marker, phone, marker)
+        self.assertNotIn('fixed inset-0', phone)
+        # Хуки телефона объявлены до раннего выхода «нет смен».
+        self.assertLess(table.index('const isMobileShell = useIsMobileShell();'), table.index('if (!rows.length || !dates.length) {'))
+
+    def test_progress_and_journal_open_the_operator_screen(self):
+        progress = VIEW[VIEW.index('const renderPhoneProgress = () => ('):VIEW.index('const renderPhoneJournal = () => {')]
+        journal = VIEW[VIEW.index('const renderPhoneJournal = () => {'):VIEW.index('const renderPhoneSettings = () => {')]
+        self.assertIn('setDrilldownOperatorId(Number(row.operator_id))', progress)
+        self.assertIn('setOperatorWorkloadFilter', progress)
+        self.assertIn('<AuctionPhoneSearch value={operatorWorkloadQuery}', progress)
+        self.assertIn('setDrilldownOperatorId(Number(entry.claimed_by))', journal)
+        self.assertIn('fetchJournalPage(journalPage + 1)', journal)
+
+    def test_settings_use_the_desktop_rules_and_requests(self):
+        settings = VIEW[VIEW.index('const renderPhoneSettings = () => {'):VIEW.index('const renderPhonePeriods = () => {')]
+        for handler in ('handleSave', 'handleRestartAuction', 'handlePublishAuction', 'handleExportAuctionReport',
+                        "handleAuctionControl('pause')", "handleAuctionControl('finish')", 'handleToggleTopup',
+                        'handleToggleRateLock', 'updateDraftEnabled', 'updateDraftSchedulePlanId', 'addDraftTimeGroup',
+                        'patchDraftTimeGroup', 'removeDraftTimeGroup', 'toggleTimeGroupMember', 'toggleOperator',
+                        'selectAllFilteredOperators', 'clearSelectedOperators', '<AuctionRangeCalendar'):
+            self.assertIn(handler, settings, handler)
+        self.assertNotIn('axios.', settings)
+        self.assertIn('title="Участники"', settings)
+        self.assertIn('className={`${iosCard} sa-m-window p-3`}', settings)
+        self.assertIn('.sa-m-window > div', CSS)
+
+
 if __name__ == '__main__':
     unittest.main()

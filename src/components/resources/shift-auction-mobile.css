@@ -241,3 +241,26 @@ body.mobile-shell .main-content .sa-m-root select.sa-m-wheel {
     opacity: 0;
     font-size: 16px;
 }
+
+/* ── Вкладка «Настройки» руководителя ──
+
+   Календарь окна аукциона — настольный компонент со своей рамкой и серой
+   подложкой месяца. В карточке телефона это давало рамку в рамке; здесь обе
+   снимаются, и календарь лежит прямо на карточке группы. */
+body.mobile-shell .sa-m-root .sa-m-window > div {
+    border-width: 0;
+    padding: 0;
+    background: transparent;
+}
+
+body.mobile-shell .sa-m-root .sa-m-window > div > div + div {
+    border-width: 0;
+    padding: 0;
+    background: transparent;
+}
+
+/* День календаря — под палец: 36 px настольной сетки мельче рекомендованных 44. */
+body.mobile-shell .sa-m-root .sa-m-window button[class*="h-9"] {
+    height: 40px;
+    font-size: 15px;
+}

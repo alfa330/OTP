@@ -3,6 +3,47 @@ import axios from 'axios';
 import { createPortal } from 'react-dom';
 import ResourceSchedulePlanner from './ResourceSchedulePlanner';
 import CustomSelect from '../ui/CustomSelect';
+import useIsMobileShell from '../common/useIsMobileShell';
+import MobileActionSheet from '../common/MobileActionSheet';
+import { APPLE_FONT, IosModal, IosPager, IosSegmented, IosToggle, iosCard } from '../ui/ios';
+import {
+  RF_PHONE_AXIS_TICK,
+  RF_PHONE_BUTTON,
+  RF_PHONE_CHART_MARGIN,
+  RfPhoneBar,
+  RfPhoneCalendar,
+  RfPhoneCard,
+  RfPhoneChart,
+  RfPhoneCheckRow,
+  RfPhoneEmpty,
+  RfPhoneDayStrip,
+  RfPhoneGroup,
+  RfPhoneGroupAction,
+  RfPhoneHeader,
+  RfPhoneInputRow,
+  RfPhoneLegend,
+  RfPhoneNote,
+  RfPhonePeriodStepper,
+  RfPhonePills,
+  RfPhoneRoundButton,
+  RfPhoneRow,
+  RfPhoneSection,
+  RfPhoneSelectRow,
+  RfPhoneTable,
+  RfPhoneTiles,
+  RfPhoneToggleRow,
+  useRfPhoneLastPresent,
+} from './ResourceFteMobile';
+import {
+  formatPhoneDayTitle,
+  formatPhoneHour,
+  formatPhoneRange,
+  formatPhoneShortDate,
+  formatPhoneWeekday,
+  orderPhoneTimeRange,
+  phoneTabLabel,
+} from './resourceFtePhone';
+import './resource-fte-mobile.css';
 import {
   chatBillingAverages,
   chatBillingHourLabel,
@@ -27,6 +68,7 @@ import {
   ChevronDown,
   CheckCircle2,
   Clock3,
+  MoreHorizontal,
   Eye,
   EyeOff,
   FileDown,
@@ -3107,6 +3149,93 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
   );
 };
 
+// Тот же редактор комментария на телефоне — экраном, а не поповером у ячейки:
+// ячейка на телефоне едет вбок внутри таблицы, и прибитый к ней поповер уезжал
+// бы вместе с ней за край. Правила сохранения — те же, что у поповера: пустой
+// текст у существующего комментария — это его снятие.
+const BillingGroupingCommentPhoneScreen = ({ open, editor, hours, saving, onSave, onClose }) => {
+  const minHour = hours.length ? hours[0] : Number(editor?.hourFrom || 0);
+  const maxHour = hours.length ? hours[hours.length - 1] : Number(editor?.hourTo || 0);
+  const [text, setText] = useState(editor?.comment || '');
+  const [hourFrom, setHourFrom] = useState(Number(editor?.hourFrom || 0));
+  const [hourTo, setHourTo] = useState(Number(editor?.hourTo || 0));
+  if (!editor) return null;
+  const trimmed = text.trim();
+  const original = String(editor.comment || '').trim();
+  const unchanged = trimmed === original && hourFrom === editor.hourFrom && hourTo === editor.hourTo;
+  const canSave = !saving && !unchanged && (trimmed.length > 0 || original.length > 0);
+  const stepper = (label, value, onChange) => (
+    <RfPhoneRow
+      title={label}
+      trailing={(
+        <span className="flex shrink-0 items-center gap-1" style={{ flexWrap: 'nowrap' }}>
+          <button
+            type="button"
+            onClick={() => onChange(value - 1)}
+            disabled={value <= minHour}
+            aria-label={`${label}: на час раньше`}
+            className="grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-700 disabled:opacity-30"
+          >
+            <ChevronLeft size={18} aria-hidden="true" />
+          </button>
+          <span className="w-14 text-center text-[17px] font-semibold tabular-nums text-slate-900">{formatPhoneHour(value)}</span>
+          <button
+            type="button"
+            onClick={() => onChange(value + 1)}
+            disabled={value >= maxHour}
+            aria-label={`${label}: на час позже`}
+            className="grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-700 disabled:opacity-30"
+          >
+            <ChevronRight size={18} aria-hidden="true" />
+          </button>
+        </span>
+      )}
+    />
+  );
+  return (
+    <IosModal
+      open={open}
+      onClose={() => (saving ? false : onClose())}
+      title="Комментарий"
+      subtitle={`${formatPhoneDayTitle(editor.date)} · ${hourFrom === hourTo ? `час ${hourFrom}` : `часы ${hourFrom}–${hourTo}`}`}
+      footer={(
+        <button
+          type="button"
+          onClick={() => { if (canSave) onSave({ hourFrom, hourTo, comment: trimmed }); }}
+          disabled={!canSave}
+          className={RF_PHONE_BUTTON.blue}
+        >
+          {saving ? 'Сохраняем…' : 'Сохранить'}
+        </button>
+      )}
+    >
+      <div className="space-y-5">
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          rows={4}
+          maxLength={500}
+          placeholder="Что происходило в эти часы"
+          className="w-full resize-none rounded-2xl border-0 bg-white px-4 py-3 text-[16px] text-slate-900 outline-none ring-1 ring-slate-200/70 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/60"
+        />
+        <RfPhoneGroup>
+          {stepper('С', hourFrom, (value) => { setHourFrom(value); if (value > hourTo) setHourTo(value); })}
+          {stepper('По', hourTo, (value) => { setHourTo(value); if (value < hourFrom) setHourFrom(value); })}
+        </RfPhoneGroup>
+        {original ? (
+          <RfPhoneGroup>
+            <RfPhoneRow
+              title={<span className="text-rose-600">Удалить комментарий</span>}
+              onClick={() => onSave({ hourFrom: editor.hourFrom, hourTo: editor.hourTo, comment: '' })}
+              disabled={saving}
+            />
+          </RfPhoneGroup>
+        ) : null}
+      </div>
+    </IosModal>
+  );
+};
+
 const WeekForecastPicker = ({
   value,
   startValue,
@@ -3394,6 +3523,14 @@ const ResourceFteView = ({
   const [savingRateOperatorId, setSavingRateOperatorId] = useState(null);
   const [isOperatorDetailsLoading, setIsOperatorDetailsLoading] = useState(false);
   const [operatorDetailsError, setOperatorDetailsError] = useState('');
+  // Телефон: один вопрос «мы на телефоне» на весь портал (useIsMobileShell), лист
+  // действий шапки, открытый экран (календари, окно времени, показатели прогноза),
+  // день биллинга экраном и сколько строк «Деталей расчёта» уже показано.
+  const isMobileShell = useIsMobileShell();
+  const [phoneSheet, setPhoneSheet] = useState('');
+  const [phoneScreen, setPhoneScreen] = useState('');
+  const [phoneBillingDay, setPhoneBillingDay] = useState('');
+  const [phoneOperatorLimit, setPhoneOperatorLimit] = useState(OPERATOR_DETAILS_PAGE_SIZE);
   const userId = user?.id || '';
 
   useEffect(() => {
@@ -4752,6 +4889,1975 @@ const ResourceFteView = ({
       return { ...current, selected_direction_ids: Array.from(next) };
     });
   };
+
+  // ── Телефон ─────────────────────────────────────────────────────────────────
+  // Владелец 17.09.2026: «сделать адаптив под разделы расчёт ресурсов линия/чат …
+  // аккуратно, удобно в стиле ios/macos», «применить только к мобильной версии».
+  // Телефонный вид строится из ТЕХ ЖЕ данных и обработчиков, что и настольный:
+  // запросы, формулы, тумблеры показателей и их хранилище общие, различается
+  // только подача. Поэтому телефон уходит ранним return перед настольной
+  // разметкой, и она не тронута ни строкой. Разметка — ResourceFteMobile.jsx,
+  // правила без React — resourceFtePhone.js.
+  const phoneBillingDayData = useRfPhoneLastPresent(
+    billingDays.find((day) => day.date === phoneBillingDay) || null,
+  );
+  const phoneCommentEditor = useRfPhoneLastPresent(billingMode === 'grouping' ? billingCommentEditor : null);
+
+  const closePhoneScreen = () => setPhoneScreen('');
+  const phoneArTone = (ratio) => (ratio === null ? 'slate' : ratio > 0.1 ? 'rose' : ratio > 0.05 ? 'amber' : 'slate');
+  const phoneSlTone = (ratio) => (ratio === null ? 'slate' : ratio < 0.6 ? 'rose' : ratio < 0.8 ? 'amber' : 'slate');
+
+  const renderPhoneTop = () => {
+    const hasMenu = Boolean(cfg.hasUpload || cfg.hasOktellSync);
+    return (
+      <div className="flex flex-col gap-3">
+        <RfPhoneHeader
+          title="Расчет ресурсов"
+          caption={isChat ? 'Чат' : 'Линия'}
+          action={hasMenu ? (
+            <RfPhoneRoundButton icon={MoreHorizontal} onClick={() => setPhoneSheet('actions')} ariaLabel="Действия раздела" />
+          ) : (
+            <RfPhoneRoundButton icon={RefreshCw} onClick={fetchOverview} ariaLabel="Обновить данные" spinning={isLoading} disabled={isLoading} />
+          )}
+        />
+        <RfPhonePills
+          items={cfg.tabs.map((tab) => ({ value: tab.key, label: phoneTabLabel(tab) }))}
+          value={activeDashboardView}
+          onChange={setActiveDashboardView}
+          ariaLabel="Вкладки раздела"
+        />
+      </div>
+    );
+  };
+
+  const renderPhoneHistoryPeriod = () => (
+    <RfPhoneGroup>
+      <RfPhoneRow
+        title={cfg.historyPickerLabel}
+        value={formatPhoneRange(dateFrom, dateTo)}
+        onClick={() => setPhoneScreen('history-period')}
+        chevron
+      />
+    </RfPhoneGroup>
+  );
+
+  // Касание графика на телефоне — это и «наведение», и выбор: подсказка
+  // появляется у пальца, а легенда под графиком называет цвета, которые на
+  // компьютере объяснял курсор.
+  const renderPhoneTrendChart = () => (
+    <>
+      <RfPhoneChart height={210}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={historyTrendData} margin={RF_PHONE_CHART_MARGIN}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+            <XAxis dataKey="date" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={14} />
+            <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+            <YAxis yAxisId="right" orientation="right" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={30} />
+            <Tooltip content={<OverviewTrendTooltip config={cfg.trendTooltipConfig} />} />
+            {displayOptions[cfg.trendKeys.calls] && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[3, 3, 0, 0]} />}
+            {cfg.hasLosses && displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[3, 3, 0, 0]} />}
+            {displayOptions[cfg.trendKeys.forecastFte] && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
+            {displayOptions[cfg.trendKeys.actualFte] && <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} dot={false} />}
+            {cfg.hasLosses && displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </RfPhoneChart>
+      <RfPhoneLegend
+        items={[
+          displayOptions[cfg.trendKeys.calls] ? { key: 'calls', label: cfg.unit.manyCap, color: '#93c5fd', shape: 'bar' } : null,
+          cfg.hasLosses && displayOptions.chartLosses ? { key: 'lost', label: 'Потери', color: '#fda4af', shape: 'bar' } : null,
+          displayOptions[cfg.trendKeys.forecastFte] ? { key: 'forecast', label: isChat ? 'Потребность, ч' : 'Прогноз FTE', color: '#2563eb', shape: 'line' } : null,
+          displayOptions[cfg.trendKeys.actualFte] ? { key: 'actual', label: isChat ? 'Факт, ч' : 'Факт FTE', color: '#059669', shape: 'line' } : null,
+          cfg.hasLosses && displayOptions.chartLossRate ? { key: 'rate', label: 'Доля потерь', color: '#e11d48', shape: 'line' } : null,
+        ]}
+      />
+    </>
+  );
+
+  const renderPhoneOverview = () => {
+    const history = overview?.history || [];
+    const chatDelta = chatOverviewSummary.online - chatOverviewSummary.need;
+    const tiles = isChat ? [
+      displayOptions.metricForecastChats ? {
+        key: 'forecast-chats',
+        label: 'Прогноз чатов',
+        value: formatInt(nextWeekForecast.periodCalls),
+        hint: formatPhoneRange(nextWeekForecast.period_start, nextWeekForecast.period_end),
+      } : null,
+      displayOptions.metricForecastFteHours ? { key: 'forecast-hours', label: 'Чатнико-часы прогноза', value: formatNumber(nextWeekForecast.periodFteHours, 1) } : null,
+      displayOptions.metricActualFteHours ? { key: 'actual-hours', label: 'Факт чатнико-часов', value: formatNumber(chatOverviewSummary.online, 1) } : null,
+      displayOptions.metricFteDelta ? { key: 'delta', label: 'Разница с прогнозом', value: formatSignedNumber(chatDelta, 1), tone: chatDelta < -0.5 ? 'rose' : 'slate' } : null,
+      displayOptions.metricInTargetShare ? {
+        key: 'in-target',
+        label: 'Первый ответ в цель',
+        value: formatPercent(chatOverviewSummary.inTargetShare),
+        hint: `цель ${describeChatTarget(overview?.settings?.target_first_reply_seconds || 60)}`,
+        tone: chatOverviewSummary.inTargetShare < 0.8 ? 'amber' : 'slate',
+      } : null,
+      displayOptions.metricCoveredDays ? { key: 'days', label: 'Дней с чатами', value: formatInt(chatOverviewSummary.days) } : null,
+    ] : [
+      displayOptions.metricOperators ? { key: 'forecast-fte', label: 'Прогноз FTE периода', value: formatNumber(overviewPeriodSummary.forecastFteTotal, 1) } : null,
+      displayOptions.metricWeeklyFte ? { key: 'actual-fte', label: 'Факт FTE периода', value: formatNumber(overviewPeriodSummary.actualFteTotal, 1) } : null,
+      displayOptions.metricBaseOperators ? {
+        key: 'delta',
+        label: 'Разница FTE',
+        value: formatSignedNumber(overviewPeriodSummary.fteDelta, 1),
+        tone: overviewPeriodSummary.fteDelta < -0.5 ? 'rose' : 'slate',
+      } : null,
+      displayOptions.metricHistoryWarnings ? { key: 'days', label: 'Дни с отчетами', value: formatInt(overviewPeriodSummary.days) } : null,
+      displayOptions.metricLostCalls ? { key: 'lost', label: 'Потерянные звонки', value: formatInt(periodLossSummary.totalLost), hint: `принято ${formatInt(periodLossSummary.totalAccepted)}` } : null,
+      displayOptions.metricLossRate ? {
+        key: 'loss-rate',
+        label: 'Доля потерь',
+        value: formatPercent(periodLossSummary.lossRate),
+        hint: periodLossSummary.worstDay ? `пик ${formatPhoneShortDate(periodLossSummary.worstDay.report_date)}` : null,
+        tone: periodLossSummary.lossRate > 0.08 ? 'rose' : 'slate',
+      } : null,
+    ];
+    const riskTiles = [
+      {
+        key: 'held',
+        label: 'Выдержка',
+        value: `${formatInt(incidentRiskSummary.heldDayCount)} / ${formatInt(incidentRiskSummary.sourceDayCount)}`,
+        hint: 'дней без превышения',
+        tone: incidentRiskSummary.overloadDayCount > 0 ? 'rose' : 'emerald',
+      },
+      {
+        key: 'delta',
+        label: 'Факт − прогноз',
+        value: formatSignedNumber(incidentRiskSummary.totalDeltaCalls, 0),
+        hint: `факт ${formatInt(incidentRiskSummary.totalActualCalls)}`,
+        tone: incidentRiskSummary.totalDeltaCalls > 0 ? 'rose' : incidentRiskSummary.totalDeltaCalls < 0 ? 'emerald' : 'slate',
+      },
+      { key: 'over', label: 'Превышение', value: `+${formatInt(incidentRiskSummary.totalPositiveDeltaCalls)}`, hint: 'часы выше прогноза', tone: 'rose' },
+      {
+        key: 'uplift',
+        label: cfg.hasUpliftProjection ? 'Прирост 7 дней' : 'Прирост периода',
+        value: `+${formatInt(upliftPeriodCalls)}`,
+        hint: formatPhoneRange(upliftWindowStart, upliftWindowEnd),
+        tone: 'emerald',
+      },
+      {
+        key: 'uplift-fte',
+        label: cfg.hasUpliftProjection ? 'Доп. FTE' : 'Доп. чатнико-часы',
+        value: `+${formatNumber(upliftPeriodFteHours, 1)}`,
+        hint: cfg.hasUpliftProjection ? 'FTE-ч на ближайшие 7 дней' : 'на окно прироста',
+        tone: 'emerald',
+      },
+    ];
+    return (
+      <>
+        {renderPhoneHistoryPeriod()}
+        <RfPhoneTiles items={tiles} />
+        <RfPhoneCard title={cfg.overviewTrendTitle} subtitle={`${formatInt(history.length)} дн. в истории`}>
+          {historyTrendData.length ? renderPhoneTrendChart() : (
+            <p className="py-6 text-center text-[14px] leading-snug text-slate-500">
+              {cfg.hasUpload
+                ? 'Загрузите первый ежедневный CSV, чтобы увидеть динамику.'
+                : 'За выбранный период данных не нашлось.'}
+            </p>
+          )}
+        </RfPhoneCard>
+
+        {isChat && (overview?.weekday_profile || []).length ? (
+          <RfPhoneGroup label="Профиль по дням недели">
+            {(overview?.weekday_profile || []).map((row) => (
+              <RfPhoneRow
+                key={row.weekday}
+                title={`${String(row.short || '').charAt(0)}${String(row.short || '').slice(1).toLowerCase()}`}
+                subtitle={[
+                  row.peak_hour === null || row.peak_hour === undefined ? '' : `пик ${formatPhoneHour(row.peak_hour)}`,
+                  `дней в выборке ${formatInt(row.days_in_sample)}`,
+                ].filter(Boolean).join(' · ')}
+                value={formatInt(row.avg_chats)}
+                valueClassName="font-semibold text-slate-900"
+              />
+            ))}
+          </RfPhoneGroup>
+        ) : null}
+        {isChat && (overview?.channels || []).length ? (
+          <RfPhoneGroup label="Каналы">
+            {(overview?.channels || []).map((channel) => (
+              <RfPhoneRow
+                key={channel.channel}
+                title={channel.channel}
+                subtitle={`${formatInt(channel.chats)} ${cfg.unit.many}`}
+                value={formatPercent(channel.share)}
+              >
+                <RfPhoneBar percent={Number(channel.share || 0) * 100} className="bg-blue-500" />
+              </RfPhoneRow>
+            ))}
+          </RfPhoneGroup>
+        ) : null}
+
+        <RfPhoneSection
+          label="Прирост и выдержка прогноза"
+          hint={incidentRiskProfile.source_start
+            ? `Источник ${formatPhoneRange(incidentRiskProfile.source_start, incidentRiskProfile.source_end)}`
+            : null}
+        >
+          <RfPhoneTiles items={riskTiles} />
+          <RfPhoneCard title="Последние 6 дней" subtitle="ближайшие дни имеют больший вес">
+            {incidentRiskDailyData.length ? (
+              <>
+                <RfPhoneChart height={190}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={incidentRiskDailyData} margin={RF_PHONE_CHART_MARGIN}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                      <XAxis dataKey="dateLabel" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} />
+                      <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                      <YAxis yAxisId="right" orientation="right" hide />
+                      <Tooltip content={<IncidentRiskTooltip />} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
+                      <Bar yAxisId="left" dataKey="forecastCalls" fill="#bfdbfe" radius={[3, 3, 0, 0]} />
+                      <Bar yAxisId="left" dataKey="positiveDeltaCalls" fill="#fecdd3" radius={[3, 3, 0, 0]} />
+                      <Line yAxisId="left" type="monotone" dataKey="actualCalls" stroke="#0f172a" strokeWidth={2} dot={{ r: 2.5 }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </RfPhoneChart>
+                <RfPhoneLegend
+                  items={[
+                    { key: 'forecast', label: 'Прогноз', color: '#93c5fd', shape: 'bar' },
+                    { key: 'over', label: 'Превышение', color: '#fda4af', shape: 'bar' },
+                    { key: 'fact', label: 'Факт', color: '#0f172a', shape: 'line' },
+                  ]}
+                />
+              </>
+            ) : (
+              <p className="py-5 text-center text-[14px] text-slate-500">Нужны отчёты за последние дни.</p>
+            )}
+          </RfPhoneCard>
+          {cfg.hasUpliftProjection ? (
+            <RfPhoneCard title="Построенный прирост на 7 дней" subtitle="от текущего дня, без влияния периода">
+              {incidentProjectionData.length ? (
+                <>
+                  <RfPhoneChart height={190}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={incidentProjectionData} margin={RF_PHONE_CHART_MARGIN}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                        <XAxis dataKey="dateLabel" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} />
+                        <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                        <YAxis yAxisId="right" orientation="right" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={26} />
+                        <Tooltip content={<IncidentProjectionTooltip />} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
+                        <Bar yAxisId="left" dataKey="forecastCalls" stackId="calls" fill="#bfdbfe" />
+                        <Bar yAxisId="left" dataKey="upliftCalls" stackId="calls" fill="#86efac" radius={[3, 3, 0, 0]} />
+                        <Line yAxisId="right" type="monotone" dataKey="upliftFte" stroke="#059669" strokeWidth={2} dot={{ r: 2.5 }} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </RfPhoneChart>
+                  <RfPhoneLegend
+                    items={[
+                      { key: 'forecast', label: 'Прогноз', color: '#93c5fd', shape: 'bar' },
+                      { key: 'uplift', label: 'Прирост', color: '#86efac', shape: 'bar' },
+                      { key: 'fte', label: 'Доп. FTE', color: '#059669', shape: 'line' },
+                    ]}
+                  />
+                </>
+              ) : (
+                <p className="py-5 text-center text-[14px] text-slate-500">Прирост появится после расчёта FTE.</p>
+              )}
+            </RfPhoneCard>
+          ) : null}
+        </RfPhoneSection>
+
+        {incidentRiskDailyData.length ? (
+          <RfPhoneGroup label="Дни, которые сформировали риск" hint="В строке — прогноз / факт и вес дня: ближайшие дни весят больше.">
+            {[...incidentRiskDailyData].reverse().map((row) => (
+              <RfPhoneRow
+                key={row.date}
+                title={formatPhoneDayTitle(row.date)}
+                subtitle={`${formatNumber(row.forecastCalls, 0)} / ${formatNumber(row.actualCalls, 0)} · вес ${formatNumber(row.weight, 0)}`}
+                value={row.status === 'overload' ? 'не выдержал' : 'выдержал'}
+                valueClassName={`text-[15px] ${row.status === 'overload' ? 'text-rose-600' : 'text-emerald-600'}`}
+              />
+            ))}
+          </RfPhoneGroup>
+        ) : null}
+        <RfPhoneGroup
+          label="Часы прироста"
+          hint={incidentRiskTopHours.length ? null : 'За последние 6 дней нет часов, где факт был выше прогноза.'}
+        >
+          {incidentRiskTopHours.map((row) => (
+            <RfPhoneRow
+              key={row.hour}
+              title={row.hourLabel}
+              strong
+              subtitle={`риск ${formatPercent(row.growthRatio, 0)} · надёжн. ${formatPercent(row.confidence, 0)} · дней ${formatInt(row.positiveSourceCount)}/${formatInt(row.sourceCount)}`}
+              value={`+${formatNumber(row.weightedDeltaCalls, 1)} ${cfg.unit.short}`}
+              valueClassName="font-semibold text-emerald-600"
+            />
+          ))}
+        </RfPhoneGroup>
+      </>
+    );
+  };
+
+  const renderPhoneForecast = () => {
+    const days = nextWeekForecast.days || [];
+    const actualOn = showForecastActualLoad && selectedForecastHasActualLoad;
+    const historyText = cfg.hasHistoryPairs
+      ? (forecastHistoryPeriods || []).map((period) => formatPhoneRange(period.start, period.end)).join(' и ')
+      : chatBaseWeekStarts.map((item) => formatPhoneShortDate(item)).join(', ');
+    let periodHint = historyText ? `${cfg.hasHistoryPairs ? 'История' : 'Базовые недели'}: ${historyText}` : null;
+    if (cfg.hasHistoryPairs && !forecastPeriodComplete) {
+      periodHint = <span className="text-amber-700">Периоду не хватает истории · {historyText}</span>;
+    } else if (!cfg.hasHistoryPairs && chatSkippedBaseWeeks.length) {
+      periodHint = (
+        <span className="text-amber-700">
+          Неполные недели пропущены: {chatSkippedBaseWeeks.map((item) => formatPhoneShortDate(item.week_start)).join(', ')}
+        </span>
+      );
+    }
+
+    const requiredFte = Number(nextWeekForecast.operatorsWithShrinkage || 0);
+    const requiredWithUplift = Number(nextWeekForecast.incidentAdjustedOperatorsWithShrinkage ?? requiredFte);
+    const hasUpliftRequirement = Math.abs(requiredWithUplift - requiredFte) > 0.005;
+    const upliftGap = Number(periodAvailableOperatorFte || 0) - requiredWithUplift;
+    const gapValue = Number(periodAvailableOperatorFteGap || 0);
+    const isDeficit = (hasUpliftRequirement ? upliftGap : gapValue) < 0;
+
+    const compactTiles = [
+      isChat && displayOptions.forecastKpiCapacity ? {
+        key: 'capacity',
+        label: 'Ёмкость',
+        value: `${formatNumber(chatCapacityPerHourValue, 1)} чат/ч`,
+        hint: chatCapacityExplain.source === 'manual' ? 'задана вручную' : chatCapacityExplain.source === 'first_reply' ? 'по первому ответу' : 'из ответа внутри чата',
+      } : null,
+      isChat && displayOptions.forecastKpiTarget ? {
+        key: 'target',
+        label: 'Цель ответа',
+        value: describeChatTarget(overview?.settings?.target_reply_seconds),
+        hint: `первый ответ ${describeChatTarget(chatTargetFirstSeconds)}`,
+      } : null,
+      displayOptions.forecastKpiUplift ? {
+        key: 'uplift',
+        label: 'Возможный прирост',
+        value: `+${formatInt(nextWeekForecast.incidentUpliftCalls)} ${cfg.unit.short}`,
+        hint: `+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} ${cfg.unit.fteHoursShort}`,
+        tone: 'emerald',
+      } : null,
+      cfg.hasAht && displayOptions.forecastKpiAht ? { key: 'aht', label: 'AHT периода', value: formatSeconds(nextWeekForecast.periodAhtSeconds ?? nextWeekForecast.weeklyAhtSeconds) } : null,
+      cfg.hasAnswerRate && displayOptions.forecastKpiAnswerRate ? { key: 'answer', label: 'Принято', value: formatPercent(nextWeekForecast.answerRate) } : null,
+      cfg.hasOccUr && displayOptions.forecastKpiOccUr ? {
+        key: 'occ',
+        label: 'OCC / UR',
+        value: `${formatPercent(nextWeekForecast.occ, 0)} / ${formatPercent(nextWeekForecast.ur, 0)}`,
+        hint: `эфф. мин/час ${formatNumber(nextWeekForecast.effectiveMinutes, 1)}`,
+      } : null,
+      displayOptions.forecastKpiShrinkage ? { key: 'shrinkage', label: 'Усушка', value: formatPercent(nextWeekForecast.shrinkage, 0) } : null,
+    ];
+
+    const legendItems = (cfg.chartLegend || [])
+      .filter((item) => {
+        if (item.requires === 'uplift') return incidentUpliftAvailable;
+        if (item.requires === 'actual') return actualOn;
+        return true;
+      })
+      .map((item) => ({ ...item, active: Boolean(displayOptions[item.key]) }));
+
+    const hiddenCount = (cfg.forecastPanelGroups || []).reduce((acc, group) => (
+      acc + group.items.filter(([key, , requires]) => {
+        if (requires === 'uplift' && !incidentUpliftAvailable) return false;
+        if (requires === 'actual' && !actualOn) return false;
+        return !displayOptions[key];
+      }).length
+    ), 0);
+
+    const tableColumns = [
+      { key: 'calls', label: cfg.unit.manyCap, render: (row) => formatNumber(row.forecast_calls, 1) },
+      incidentUpliftAvailable && displayOptions.forecastTableUplift
+        ? { key: 'uplift', label: 'Прирост', className: 'text-emerald-700', render: (row) => `+${formatNumber(row.incident_uplift_calls, 1)}` }
+        : null,
+      actualOn && displayOptions[cfg.forecastTableKeys.actualCalls]
+        ? { key: 'actual-calls', label: `Факт ${cfg.unit.many}`, className: 'text-emerald-700', render: (row) => (row.has_actual_report ? formatInt(row.actual_received_calls) : '-') }
+        : null,
+      cfg.hasAht && displayOptions.forecastTableAht
+        ? { key: 'aht', label: 'AHT дня', render: (row) => formatSeconds(row.forecast_aht_seconds) }
+        : null,
+      cfg.hasWorkloadMinutes && displayOptions.forecastTableWorkload
+        ? { key: 'workload', label: 'Минут нагрузки', render: (row) => formatNumber(row.forecast_workload_minutes, 1) }
+        : null,
+      cfg.hasWorkloadMinutes && actualOn && displayOptions.forecastTableActualWorkload
+        ? { key: 'actual-workload', label: 'Факт нагрузки', className: 'text-emerald-700', render: (row) => (row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-') }
+        : null,
+      { key: 'fte', label: cfg.unit.needFte, className: 'font-semibold text-blue-700', render: (row) => formatNumber(row.forecast_fte, 2) },
+      incidentUpliftAvailable && displayOptions.forecastTableAdjustedFte
+        ? { key: 'adjusted', label: isChat ? 'С приростом' : 'FTE с приростом', className: 'font-semibold text-emerald-700', render: (row) => formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2) }
+        : null,
+      actualOn && displayOptions[cfg.forecastTableKeys.actualFte]
+        ? { key: 'actual-fte', label: isChat ? 'Факт чатнико-часов' : 'Факт FTE', className: 'font-semibold text-emerald-700', render: (row) => (row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-') }
+        : null,
+      isChat && actualOn && displayOptions.forecastTableFirstReply
+        ? { key: 'first-reply', label: 'Первый ответ', render: (row) => formatReplySeconds(row.actual_first_reply_seconds) }
+        : null,
+    ].filter(Boolean);
+
+    const day = selectedForecastDay;
+    const peakForecastLabel = selectedForecastPeakHours[0] ? formatPhoneHour(selectedForecastPeakHours[0].hour) : '—';
+    const peakActualLabel = selectedActualPeakHours[0] ? formatPhoneHour(selectedActualPeakHours[0].hour) : '—';
+    let dayHint = null;
+    if (day && cfg.hasHistoryPairs) {
+      dayHint = day.insufficient_history
+        ? <span className="text-amber-700">Для дня не хватает истории · {day.history_count}/2</span>
+        : `История ${day.history_count}/2${showForecastActualLoad ? ` · ${selectedForecastHasActualLoad ? 'факт отчёта загружен' : 'факта отчёта нет'}` : ''}`;
+    } else if (day) {
+      dayHint = selectedForecastHasActualLoad ? 'Факт дня есть' : 'День ещё не прошёл';
+    }
+
+    return (
+      <>
+        <RfPhonePeriodStepper
+          label="Период прогноза"
+          right={(
+            <RfPhoneGroupAction
+              label={isRecalculating ? 'Пересчитываем…' : 'Пересчитать'}
+              onClick={handleRecalculate}
+              disabled={isRecalculating}
+            />
+          )}
+          value={formatPhoneRange(forecastPeriodStart, forecastPeriodEnd)}
+          hint={periodHint}
+          onPrev={() => shiftForecastPeriod(-1)}
+          onNext={() => shiftForecastPeriod(1)}
+          onOpen={() => setPhoneScreen('forecast-period')}
+          prevLabel="Неделя назад"
+          nextLabel="Неделя вперёд"
+        />
+
+        {displayOptions.forecastKpiFteHours ? (
+          <RfPhoneTiles
+            items={[{
+              key: 'fte-hours',
+              label: cfg.unit.fteHoursCap,
+              value: formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1),
+              hint: isChat
+                ? `${formatInt(nextWeekForecast.periodDays)} дн. · ${formatInt(nextWeekForecast.periodCalls)} ${cfg.unit.many}`
+                : `${formatInt(nextWeekForecast.periodDays || days.length)} дн. в периоде`,
+            }]}
+          />
+        ) : null}
+
+        {displayOptions.forecastKpiOperators ? (
+          <RfPhoneGroup label={cfg.unit.operators}>
+            <RfPhoneRow title="Нужно" value={formatNumber(requiredFte, 2)} valueClassName="font-semibold text-slate-900" />
+            {hasUpliftRequirement ? (
+              <RfPhoneRow title="С приростом" value={formatNumber(requiredWithUplift, 2)} valueClassName="font-semibold text-emerald-600" />
+            ) : null}
+            <RfPhoneRow
+              title="Доступно"
+              subtitle={`сотрудников ${formatInt(periodAvailableOperatorCount)} из ${formatInt(periodOperatorCount)}`}
+              value={formatNumber(periodAvailableOperatorFte, 2)}
+              valueClassName={`font-semibold ${isDeficit ? 'text-rose-600' : 'text-emerald-600'}`}
+            />
+            <RfPhoneRow
+              title="Разница"
+              value={`${formatSignedNumber(gapValue, 2)} ${cfg.unit.fteWord}`}
+              valueClassName={gapValue < 0 ? 'text-rose-600' : 'text-emerald-600'}
+            />
+            {hasUpliftRequirement ? (
+              <RfPhoneRow
+                title="Разница с приростом"
+                value={`${formatSignedNumber(upliftGap, 2)} ${cfg.unit.fteWord}`}
+                valueClassName={upliftGap < 0 ? 'text-rose-600' : 'text-emerald-600'}
+              />
+            ) : null}
+            <RfPhoneRow
+              title={<span className="text-blue-600">Детали расчета</span>}
+              subtitle={`без усушки ${formatNumber(nextWeekForecast.baseOperators, 2)} · часть периода ${formatInt(periodPartialOperatorCount)} · не работают ${formatInt(periodUnavailableOperatorCount)}`}
+              onClick={openOperatorDetails}
+              chevron
+            />
+          </RfPhoneGroup>
+        ) : null}
+
+        <RfPhoneTiles items={compactTiles} />
+
+        {days.length ? (
+          <RfPhoneSection label="Дни периода">
+            <RfPhoneDayStrip
+              ariaLabel="Дни периода"
+              onSelect={(item) => setSelectedForecastDate(item.key)}
+              days={days.map((profile) => {
+                const enoughSources = cfg.hasHistoryPairs
+                  ? !profile.insufficient_history
+                  : Number(profile.used_source_count || 0) > 1;
+                return {
+                  key: profile.forecast_date,
+                  top: profile.forecast_date === todayValue ? 'Сегодня' : formatPhoneWeekday(profile.forecast_date),
+                  main: formatPhoneShortDate(profile.forecast_date).slice(0, 2),
+                  bottom: formatNumber(profile.forecast_daily_fte, 1),
+                  active: selectedForecastDay?.forecast_date === profile.forecast_date,
+                  accentClassName: enoughSources ? '' : 'bg-amber-400',
+                  ariaLabel: `${formatPhoneDayTitle(profile.forecast_date)}, ${formatNumber(profile.forecast_daily_fte, 2)} ${cfg.unit.dayFteCaption}${enoughSources ? '' : ', истории не хватает'}`,
+                };
+              })}
+            />
+          </RfPhoneSection>
+        ) : null}
+
+        {day ? (
+          <>
+            <RfPhoneGroup label={formatPhoneDayTitle(day.forecast_date)} hint={dayHint}>
+              {isChat ? (
+                <>
+                  <RfPhoneRow
+                    title={cfg.unit.manyCap}
+                    subtitle={selectedForecastHasActualLoad ? `факт ${formatInt(day.actual_received_calls)}` : null}
+                    value={formatInt(day.forecast_calls)}
+                    valueClassName="font-semibold text-slate-900"
+                  />
+                  <RfPhoneRow
+                    title="Чатнико-часы"
+                    subtitle={selectedForecastHasActualLoad ? `факт ${formatNumber(day.actual_report_fte, 1)}` : null}
+                    value={formatNumber(day.forecast_daily_fte, 1)}
+                    valueClassName="font-semibold text-slate-900"
+                  />
+                  <RfPhoneRow title="Пиковый час" value={peakForecastLabel} />
+                  <RfPhoneRow title="Первый ответ в цель" value={day.has_actual ? formatPercent(day.in_target_share) : '—'} />
+                </>
+              ) : (
+                <>
+                  <RfPhoneRow
+                    title="Звонки"
+                    subtitle={actualOn
+                      ? `факт ${formatInt(day.actual_received_calls)} · прирост +${formatInt(day.incident_uplift_calls)}`
+                      : `+${formatInt(day.incident_uplift_calls)} возможный прирост · вес ${formatPercent(day.incident_future_weight ?? 1, 0)}`}
+                    value={formatInt(day.forecast_calls)}
+                    valueClassName="font-semibold text-slate-900"
+                  />
+                  <RfPhoneRow
+                    title="Минут нагрузки"
+                    subtitle={actualOn ? `факт ${formatNumber(day.actual_workload_minutes, 1)}` : null}
+                    value={formatNumber(day.forecast_workload_minutes, 1)}
+                  />
+                  <RfPhoneRow
+                    title="FTE дня"
+                    subtitle={[
+                      actualOn ? `факт ${formatNumber(day.actual_report_fte, 2)}` : '',
+                      `с приростом ${formatNumber(day.incident_adjusted_daily_fte ?? day.forecast_daily_fte, 2)}`,
+                    ].filter(Boolean).join(' · ')}
+                    value={formatNumber(day.forecast_daily_fte, 2)}
+                    valueClassName="font-semibold text-slate-900"
+                  />
+                  <RfPhoneRow title="Пиковый час" subtitle={actualOn ? `факт ${peakActualLabel}` : null} value={peakForecastLabel} />
+                </>
+              )}
+            </RfPhoneGroup>
+
+            <RfPhoneCard
+              title={isChat ? 'Потребность по часам' : 'Почасовой FTE'}
+              subtitle={pinnedForecastHour !== null ? `Закреплён ${formatPhoneHour(pinnedForecastHour)}` : null}
+            >
+              <RfPhoneChart height={220}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart
+                    data={selectedForecastHourlyData}
+                    margin={RF_PHONE_CHART_MARGIN}
+                    onClick={(state) => togglePinnedForecastSlice(state?.activeLabel)}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                    <XAxis dataKey="hour" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} interval={3} />
+                    <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                    <YAxis yAxisId="right" orientation="right" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={26} />
+                    <Tooltip content={<ForecastHourlyTooltip />} />
+                    {activeForecastHourLabel ? (
+                      <ReferenceLine yAxisId="left" x={activeForecastHourLabel} stroke="#0f172a" strokeDasharray="4 4" />
+                    ) : null}
+                    {displayOptions[cfg.forecastChartKeys.calls] ? (
+                      <Bar yAxisId="left" dataKey="calls" stackId="calls" fill="#bfdbfe" radius={incidentUpliftAvailable && displayOptions.forecastChartUplift ? [0, 0, 0, 0] : [3, 3, 0, 0]} />
+                    ) : null}
+                    {incidentUpliftAvailable && displayOptions.forecastChartUplift ? (
+                      <Bar yAxisId="left" dataKey="upliftCalls" stackId="calls" fill="#bbf7d0" radius={[3, 3, 0, 0]} />
+                    ) : null}
+                    {cfg.hasWorkloadMinutes && displayOptions.forecastChartWorkload ? (
+                      <Line yAxisId="left" type="monotone" dataKey="workload" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                    ) : null}
+                    {isChat && actualOn && displayOptions.forecastChartActualChats ? (
+                      <Bar yAxisId="left" dataKey="actualCalls" fill="#34d399" radius={[3, 3, 0, 0]} />
+                    ) : null}
+                    {displayOptions.forecastChartFte ? (
+                      <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} />
+                    ) : null}
+                    {incidentUpliftAvailable && displayOptions.forecastChartAdjustedFte ? (
+                      <Line yAxisId="right" type="monotone" dataKey="adjustedFte" stroke="#059669" strokeWidth={2} strokeDasharray="4 3" dot={false} />
+                    ) : null}
+                    {cfg.hasWorkloadMinutes && actualOn && displayOptions.forecastChartActualWorkload ? (
+                      <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} />
+                    ) : null}
+                    {cfg.hasWorkloadMinutes && actualOn && displayOptions.forecastChartActualFte ? (
+                      <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} />
+                    ) : null}
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </RfPhoneChart>
+              <RfPhoneLegend items={legendItems} onToggle={toggleDisplayOption} />
+            </RfPhoneCard>
+
+            <RfPhoneSection label="По часам">
+              <RfPhoneTable>
+                <table className="text-sm tabular-nums">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="text-left font-semibold">Час</th>
+                      {tableColumns.map((column) => (
+                        <th key={column.key} className="text-right font-semibold">{column.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {forecastHourlyRows.map((row) => {
+                      const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                      return (
+                        <tr
+                          key={row.hour}
+                          onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                          className={rowIsPinned ? 'bg-blue-50' : ''}
+                        >
+                          <td className={`font-medium ${rowIsPinned ? 'text-blue-700' : 'text-slate-900'}`}>{formatPhoneHour(row.hour)}</td>
+                          {tableColumns.map((column) => (
+                            <td key={column.key} className={`text-right ${column.className || 'text-slate-900'}`}>{column.render(row)}</td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </RfPhoneTable>
+            </RfPhoneSection>
+
+            {cfg.hasWorkloadMinutes && showForecastActualLoad && !selectedForecastHasActualLoad ? (
+              <RfPhoneNote>Для дня нет загруженного отчета или день еще не прошел — факт нагрузки не показан.</RfPhoneNote>
+            ) : null}
+
+            {selectedForecastPeakHours.length ? (
+              <RfPhoneGroup label={isChat ? 'Пиковые часы' : 'Пиковые часы прогноз'}>
+                {(() => {
+                  const peakMax = Math.max(1e-6, ...selectedForecastPeakHours.map((item) => Number(item.forecast_fte || 0)));
+                  return selectedForecastPeakHours.map((row) => {
+                    const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
+                    return (
+                      <RfPhoneRow
+                        key={row.hour}
+                        title={formatPhoneHour(row.hour)}
+                        strong
+                        subtitle={`${cfg.unit.manyCap} ${formatNumber(row.forecast_calls, 1)}${cfg.hasWorkloadMinutes ? ` · нагрузка ${formatNumber(row.forecast_workload_minutes, 1)} мин` : ''}`}
+                        value={`${formatNumber(row.forecast_fte, 2)}${cfg.hasWorkloadMinutes ? ' FTE' : ''}`}
+                        valueClassName="font-semibold text-blue-600"
+                        onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                      >
+                        <RfPhoneBar percent={(Number(row.forecast_fte || 0) / peakMax) * 100} className={rowIsPinned ? 'bg-blue-600' : 'bg-blue-400'} />
+                      </RfPhoneRow>
+                    );
+                  });
+                })()}
+              </RfPhoneGroup>
+            ) : null}
+
+            {cfg.hasActualPeakHours && actualOn && displayOptions.forecastShowActualPeakHours && selectedActualPeakHours.length ? (
+              <RfPhoneGroup label="Пиковые часы факт">
+                {(() => {
+                  const peakMax = Math.max(1e-6, ...selectedActualPeakHours.map((item) => Number(item.actual_report_fte || 0)));
+                  return selectedActualPeakHours.map((row) => (
+                    <RfPhoneRow
+                      key={row.hour}
+                      title={formatPhoneHour(row.hour)}
+                      strong
+                      subtitle={`Звонки ${formatInt(row.actual_received_calls)} · нагрузка ${formatNumber(row.actual_workload_minutes, 1)} мин`}
+                      value={`${formatNumber(row.actual_report_fte, 2)} FTE`}
+                      valueClassName="font-semibold text-emerald-600"
+                      onClick={() => togglePinnedForecastSlice(Number(row.hour))}
+                    >
+                      <RfPhoneBar percent={(Number(row.actual_report_fte || 0) / peakMax) * 100} className="bg-emerald-500" />
+                    </RfPhoneRow>
+                  ));
+                })()}
+              </RfPhoneGroup>
+            ) : null}
+          </>
+        ) : (
+          <RfPhoneEmpty
+            title="Нет прогноза"
+            text={cfg.hasUpload
+              ? 'Загрузите исторические отчеты, чтобы построить прогноз периода.'
+              : 'Для периода не нашлось базовых недель с чатами. Сдвиньте период.'}
+            action={cfg.hasUpload ? (
+              <button type="button" onClick={() => setIsUploadModalOpen(true)} className={RF_PHONE_BUTTON.blue}>
+                Загрузить отчёт
+              </button>
+            ) : null}
+          />
+        )}
+
+        <RfPhoneGroup>
+          <RfPhoneRow
+            title="Показатели прогноза"
+            value={hiddenCount > 0 ? `скрыто ${hiddenCount}` : null}
+            onClick={() => setPhoneScreen('forecast-display')}
+            chevron
+          />
+        </RfPhoneGroup>
+      </>
+    );
+  };
+
+  const renderPhoneLosses = () => {
+    const forecastFactMode = callsChartMode === 'forecastFact';
+    const trendIndex = historyTrendData.findIndex((item) => item.reportDate === selectedDate);
+    const stepDay = (delta) => {
+      const next = historyTrendData[trendIndex + delta];
+      if (next) selectLossReportDate(next.reportDate);
+    };
+    return (
+      <>
+        {renderPhoneHistoryPeriod()}
+        <RfPhoneGroup label="Итоги периода">
+          {forecastFactMode ? (
+            <>
+              <RfPhoneRow title="Прогноз кол-во" value={formatNumber(periodLossSummary.totalForecastCalls, 0)} valueClassName="text-blue-600" />
+              <RfPhoneRow title="Факт кол-во" value={formatInt(periodLossSummary.totalReceived)} valueClassName="text-emerald-600" />
+              <RfPhoneRow
+                title="Разница"
+                value={formatSignedNumber(periodLossSummary.callsDelta, 0)}
+                valueClassName={periodLossSummary.callsDelta < 0 ? 'text-rose-600' : 'text-slate-900'}
+              />
+              <RfPhoneRow title="Выполнение" value={periodLossSummary.totalForecastCalls > 0 ? formatPercent(periodLossSummary.callsCompletion, 0) : '-'} />
+              <RfPhoneRow title="Совпадение" value={periodLossSummary.totalForecastCalls > 0 ? `${formatNumber(periodLossSummary.callsMatchPercent, 1)}%` : '-'} valueClassName="text-violet-600" />
+            </>
+          ) : (
+            <>
+              <RfPhoneRow title="Поступило" value={formatInt(periodLossSummary.totalReceived)} valueClassName="text-slate-900" />
+              <RfPhoneRow title="Принято" value={formatInt(periodLossSummary.totalAccepted)} valueClassName="text-emerald-600" />
+              <RfPhoneRow title="Потеряно" value={formatInt(periodLossSummary.totalLost)} valueClassName="text-rose-600" />
+              <RfPhoneRow title="Доля потерь" value={formatPercent(periodLossSummary.lossRate)} valueClassName="text-rose-600" />
+              {periodLossSummary.worstDay ? (
+                <RfPhoneRow
+                  title="Худший день"
+                  value={`${formatPhoneShortDate(periodLossSummary.worstDay.report_date)} · ${formatPercent(periodLossSummary.worstDay.no_answer_rate)}`}
+                  valueClassName="text-rose-600"
+                  onClick={() => selectLossReportDate(periodLossSummary.worstDay.report_date)}
+                />
+              ) : null}
+            </>
+          )}
+        </RfPhoneGroup>
+
+        <IosSegmented
+          value={callsChartMode}
+          onChange={setCallsChartMode}
+          stretch
+          size="lg"
+          ariaLabel="Режим графика звонков"
+          options={[
+            { value: 'losses', label: 'Потери' },
+            { value: 'forecastFact', label: 'Прогноз и факт' },
+          ]}
+        />
+
+        <RfPhoneCard title="Звонки по дням" subtitle="Нажмите на день, чтобы открыть его часы">
+          {historyTrendData.length ? (
+            <>
+              <RfPhoneChart height={210}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={historyTrendData} margin={RF_PHONE_CHART_MARGIN} onClick={selectLossChartDay}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                    <XAxis dataKey="date" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={14} />
+                    <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      tick={RF_PHONE_AXIS_TICK}
+                      tickLine={false}
+                      axisLine={false}
+                      width={30}
+                      domain={forecastFactMode ? [0, 100] : undefined}
+                      tickFormatter={forecastFactMode ? (value) => `${Math.round(value)}%` : undefined}
+                    />
+                    <Tooltip content={<CallsTrendTooltip mode={callsChartMode} />} />
+                    {selectedLossTrendPoint ? (
+                      <ReferenceLine yAxisId="left" x={selectedLossTrendPoint.date} stroke="#0f172a" strokeDasharray="4 4" />
+                    ) : null}
+                    {!forecastFactMode && displayOptions.chartCalls ? (
+                      <Bar yAxisId="left" dataKey="accepted" stackId="calls" fill="#bbf7d0">
+                        {historyTrendData.map((item) => (
+                          <Cell key={`phone-accepted-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#22c55e' : '#bbf7d0'} />
+                        ))}
+                      </Bar>
+                    ) : null}
+                    {!forecastFactMode && displayOptions.chartLosses ? (
+                      <Bar yAxisId="left" dataKey="lost" stackId="calls" fill="#fecdd3" radius={[3, 3, 0, 0]}>
+                        {historyTrendData.map((item) => (
+                          <Cell key={`phone-lost-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#fb7185' : '#fecdd3'} />
+                        ))}
+                      </Bar>
+                    ) : null}
+                    {forecastFactMode && displayOptions.chartCalls ? (
+                      <Bar yAxisId="left" dataKey="forecastCalls" fill="#bfdbfe" radius={[3, 3, 0, 0]}>
+                        {historyTrendData.map((item) => (
+                          <Cell key={`phone-forecast-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#60a5fa' : '#bfdbfe'} />
+                        ))}
+                      </Bar>
+                    ) : null}
+                    {forecastFactMode && displayOptions.chartCalls ? (
+                      <Bar yAxisId="left" dataKey="calls" fill="#22c55e" radius={[3, 3, 0, 0]}>
+                        {historyTrendData.map((item) => (
+                          <Cell key={`phone-fact-${item.reportDate}`} fill={item.reportDate === selectedDate ? '#16a34a' : '#22c55e'} />
+                        ))}
+                      </Bar>
+                    ) : null}
+                    {forecastFactMode ? (
+                      <Line yAxisId="right" type="monotone" dataKey="forecastMatchPercent" stroke="#7c3aed" strokeWidth={2} dot={false} />
+                    ) : null}
+                    {!forecastFactMode && displayOptions.chartLossRate ? (
+                      <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />
+                    ) : null}
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </RfPhoneChart>
+              <RfPhoneLegend
+                items={forecastFactMode ? [
+                  displayOptions.chartCalls ? { key: 'forecast', label: 'Прогноз', color: '#93c5fd', shape: 'bar' } : null,
+                  displayOptions.chartCalls ? { key: 'fact', label: 'Факт', color: '#22c55e', shape: 'bar' } : null,
+                  { key: 'match', label: 'Совпадение, %', color: '#7c3aed', shape: 'line' },
+                ] : [
+                  displayOptions.chartCalls ? { key: 'accepted', label: 'Принято', color: '#86efac', shape: 'bar' } : null,
+                  displayOptions.chartLosses ? { key: 'lost', label: 'Потери', color: '#fda4af', shape: 'bar' } : null,
+                  displayOptions.chartLossRate ? { key: 'rate', label: 'Доля потерь', color: '#e11d48', shape: 'line' } : null,
+                ]}
+              />
+            </>
+          ) : (
+            <p className="py-6 text-center text-[14px] text-slate-500">Загрузите ежедневные отчеты, чтобы увидеть динамику.</p>
+          )}
+        </RfPhoneCard>
+
+        {selectedLossSummary ? (
+          <>
+            <RfPhonePeriodStepper
+              label="Выбранный день"
+              value={formatPhoneDayTitle(selectedLossSummary.reportDate)}
+              onPrev={trendIndex > 0 ? () => stepDay(-1) : null}
+              onNext={trendIndex >= 0 && trendIndex < historyTrendData.length - 1 ? () => stepDay(1) : null}
+              prevLabel="Предыдущий день"
+              nextLabel="Следующий день"
+            />
+            <RfPhoneGroup>
+              {forecastFactMode ? (
+                <>
+                  <RfPhoneRow title="Прогноз кол-во" value={formatNumber(selectedLossSummary.forecastCalls, 0)} valueClassName="text-blue-600" />
+                  <RfPhoneRow title="Факт кол-во" value={formatInt(selectedLossSummary.received)} valueClassName="text-emerald-600" />
+                  <RfPhoneRow
+                    title="Разница"
+                    value={formatSignedNumber(selectedLossSummary.callDelta, 0)}
+                    valueClassName={selectedLossSummary.callDelta < 0 ? 'text-rose-600' : 'text-slate-900'}
+                  />
+                  <RfPhoneRow title="Выполнение" value={selectedLossSummary.forecastCalls > 0 ? formatPercent(selectedLossSummary.callsCompletion, 0) : '-'} />
+                  <RfPhoneRow title="Совпадение" value={selectedLossSummary.forecastCalls > 0 ? `${formatNumber(selectedLossSummary.callsMatchPercent, 1)}%` : '-'} valueClassName="text-violet-600" />
+                </>
+              ) : (
+                <>
+                  <RfPhoneRow title="Поступило" value={formatInt(selectedLossSummary.received)} valueClassName="text-slate-900" />
+                  <RfPhoneRow title="Принято" value={formatInt(selectedLossSummary.accepted)} valueClassName="text-emerald-600" />
+                  <RfPhoneRow title="Потеряно" value={formatInt(selectedLossSummary.lost)} valueClassName="text-rose-600" />
+                  <RfPhoneRow title="Доля потерь" value={formatPercent(selectedLossSummary.lossRate)} valueClassName="text-rose-600" />
+                  <RfPhoneRow
+                    title="Пиковый час потерь"
+                    value={selectedLossSummary.peakLossHour ? `${selectedLossSummary.peakLossHour.hour_label} · ${formatInt(selectedLossSummary.peakLossHour.lost_calls)}` : '-'}
+                  />
+                </>
+              )}
+            </RfPhoneGroup>
+
+            {selectedSummary ? (
+              <>
+                <RfPhoneCard title={forecastFactMode ? 'Прогноз и факт по часам' : 'Принято и потеряно по часам'}>
+                  <RfPhoneChart height={200}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      {forecastFactMode ? (
+                        <ComposedChart data={dayForecastFactData} margin={RF_PHONE_CHART_MARGIN}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                          <XAxis dataKey="hour" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} interval={3} />
+                          <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                          <Tooltip content={<DayCallsTooltip />} />
+                          <Area yAxisId="left" type="monotone" dataKey="forecastCalls" stroke="#2563eb" strokeWidth={2} fill="#bfdbfe" fillOpacity={0.75} />
+                          <Area yAxisId="left" type="monotone" dataKey="factCalls" stroke="#16a34a" strokeWidth={2} fill="#22c55e" fillOpacity={0.38} />
+                        </ComposedChart>
+                      ) : (
+                        <AreaChart data={dayAcceptedLostData} margin={RF_PHONE_CHART_MARGIN}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                          <XAxis dataKey="hour" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} interval={3} />
+                          <YAxis tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                          <Tooltip formatter={(value, name) => [name === 'lossRate' ? `${formatNumber(value, 1)}%` : formatNumber(value, 0), name === 'accepted' ? 'Принято' : name === 'lost' ? 'Потеряно' : 'Доля потерь']} />
+                          <Area type="monotone" dataKey="accepted" stackId="1" stroke="#16a34a" fill="#bbf7d0" />
+                          <Area type="monotone" dataKey="lost" stackId="1" stroke="#e11d48" fill="#fecdd3" />
+                        </AreaChart>
+                      )}
+                    </ResponsiveContainer>
+                  </RfPhoneChart>
+                  <RfPhoneLegend
+                    items={forecastFactMode ? [
+                      { key: 'forecast', label: 'Прогноз', color: '#2563eb', shape: 'line' },
+                      { key: 'fact', label: 'Факт', color: '#16a34a', shape: 'line' },
+                    ] : [
+                      { key: 'accepted', label: 'Принято', color: '#16a34a', shape: 'line' },
+                      { key: 'lost', label: 'Потеряно', color: '#e11d48', shape: 'line' },
+                    ]}
+                  />
+                </RfPhoneCard>
+                <RfPhoneGroup
+                  label={forecastFactMode ? 'Отклонения факт/прогноз' : 'Топ часов риска'}
+                  hint={(forecastFactMode ? dayCallDeltaHotspots : dayLossHotspots).length
+                    ? null
+                    : (forecastFactMode ? 'По дню нет данных для сравнения прогноза и факта.' : 'По дню потерь нет.')}
+                >
+                  {forecastFactMode ? dayCallDeltaHotspots.map((row) => (
+                    <RfPhoneRow
+                      key={row.hour}
+                      title={row.hour}
+                      strong
+                      subtitle={`прогноз ${formatNumber(row.forecastCalls, 0)} · факт ${formatInt(row.factCalls)} · вып. ${row.forecastCalls > 0 ? formatPercent(row.completion, 0) : '-'}`}
+                      value={formatSignedNumber(row.delta, 0)}
+                      valueClassName={`font-semibold ${row.delta < 0 ? 'text-rose-600' : row.delta > 0 ? 'text-emerald-600' : 'text-slate-500'}`}
+                    />
+                  )) : dayLossHotspots.map((row) => (
+                    <RfPhoneRow
+                      key={row.hour}
+                      title={row.hour_label}
+                      strong
+                      subtitle={`вход ${formatInt(row.received_calls)} · потери ${formatInt(row.lost_calls)} · факт ${formatNumber(row.actual_fte, 1)}`}
+                      value={formatPercent(row.no_answer_rate)}
+                      valueClassName="font-semibold text-rose-600"
+                    />
+                  ))}
+                </RfPhoneGroup>
+              </>
+            ) : (
+              <RfPhoneNote>{isDayLoading ? 'Загружаем почасовую детализацию дня…' : 'Для выбранной даты нет почасовой детализации.'}</RfPhoneNote>
+            )}
+          </>
+        ) : null}
+      </>
+    );
+  };
+
+  const renderPhoneChats = () => {
+    const allForecastEmpty = analyticsChartData.length > 0 && analyticsChartData.every((row) => !row.forecastChats);
+    return (
+      <>
+        <RfPhoneGroup>
+          <RfPhoneRow
+            title="Период аналитики"
+            value={formatPhoneRange(analyticsFrom, analyticsTo)}
+            onClick={() => setPhoneScreen('analytics-period')}
+            chevron
+          />
+        </RfPhoneGroup>
+        <RfPhoneTiles
+          items={[
+            { key: 'chats', label: cfg.unit.manyCap, value: formatInt(analyticsTotals.chats), hint: `${formatInt(analytics?.range?.days)} дн. в периоде` },
+            {
+              key: 'in-target',
+              label: 'Первый ответ в цель',
+              value: formatPercent(analyticsTotals.in_target_share),
+              hint: `цель ${describeChatTarget(analyticsTotals.target_first_reply_seconds || chatTargetFirstSeconds)}`,
+              tone: Number(analyticsTotals.in_target_share || 0) < 0.8 ? 'amber' : 'slate',
+            },
+            { key: 'no-reply', label: 'Без ответа', value: formatInt(analyticsTotals.no_reply), tone: Number(analyticsTotals.no_reply || 0) > 0 ? 'rose' : 'slate' },
+            { key: 'first-reply', label: 'Ср. первый ответ', value: formatReplySeconds(analyticsTotals.avg_first_reply_seconds) },
+            { key: 'hours', label: 'Факт чатнико-часов', value: formatNumber(analyticsTotals.actual_online_hours, 1) },
+          ]}
+        />
+        <IosSegmented
+          value={chatsChartMode}
+          onChange={setChatsChartMode}
+          stretch
+          size="lg"
+          ariaLabel="Режим графика"
+          options={[
+            { value: 'volume', label: 'Факт и прогноз' },
+            { value: 'reply', label: 'Первый ответ' },
+          ]}
+        />
+        <RfPhoneCard title={chatsChartMode === 'volume' ? 'Объём по дням' : 'Первый ответ по дням'}>
+          {analyticsChartData.length ? (
+            <>
+              <RfPhoneChart height={210}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={analyticsChartData} margin={RF_PHONE_CHART_MARGIN}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                    <XAxis dataKey="date" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={14} />
+                    <YAxis yAxisId="left" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={34} />
+                    <YAxis yAxisId="right" orientation="right" tick={RF_PHONE_AXIS_TICK} tickLine={false} axisLine={false} width={chatsChartMode === 'volume' ? 0 : 28} hide={chatsChartMode === 'volume'} />
+                    <Tooltip formatter={(value, name) => [formatNumber(value, 0), name]} />
+                    {chatsChartMode === 'volume' ? (
+                      <>
+                        <Bar yAxisId="left" dataKey="forecastChats" name="Прогноз" fill="#bfdbfe" radius={[3, 3, 0, 0]} />
+                        <Bar yAxisId="left" dataKey="chats" name="Факт" fill="#22c55e" radius={[3, 3, 0, 0]} />
+                      </>
+                    ) : (
+                      <>
+                        <Bar yAxisId="left" dataKey="inTarget" name="В цель" stackId="reply" fill="#bbf7d0" />
+                        <Bar yAxisId="left" dataKey="outOfTarget" name="Вне цели" stackId="reply" fill="#fecdd3" radius={[3, 3, 0, 0]} />
+                        <Line yAxisId="right" type="monotone" dataKey="firstReply" name="Среднее, с" stroke="#e11d48" strokeWidth={2} dot={false} />
+                      </>
+                    )}
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </RfPhoneChart>
+              <RfPhoneLegend
+                items={chatsChartMode === 'volume' ? [
+                  { key: 'forecast', label: 'Прогноз', color: '#93c5fd', shape: 'bar' },
+                  { key: 'fact', label: 'Факт', color: '#22c55e', shape: 'bar' },
+                ] : [
+                  { key: 'in', label: 'В цель', color: '#86efac', shape: 'bar' },
+                  { key: 'out', label: 'Вне цели', color: '#fda4af', shape: 'bar' },
+                  { key: 'avg', label: 'Среднее, с', color: '#e11d48', shape: 'line' },
+                ]}
+              />
+              {chatsChartMode === 'volume' && allForecastEmpty ? (
+                <p className="mt-2 text-[13px] leading-snug text-slate-500">
+                  Прогноз берётся из истории пересчётов — пока «Пересчитать» не нажимали, столбец прогноза пуст.
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <p className="py-6 text-center text-[14px] text-slate-500">
+              {isAnalyticsLoading ? 'Загружаем период…' : 'За выбранный период обращений не нашлось.'}
+            </p>
+          )}
+        </RfPhoneCard>
+
+        <RfPhoneGroup
+          label="Топ часов риска"
+          hint={analyticsRiskHours.length ? 'Худшая доля на объёме: ночной час с тремя чатами весит меньше дневного с сотней.' : 'За период нет часов с провалом первого ответа.'}
+        >
+          {analyticsRiskHours.map((row) => (
+            <RfPhoneRow
+              key={row.hour}
+              title={row.hour_label}
+              strong
+              subtitle={`${cfg.unit.many} ${formatInt(row.chats)} · без ответа ${formatInt(row.no_reply)} · ответ ${formatReplySeconds(row.avg_first_reply_seconds)}`}
+              value={formatPercent(1 - Number(row.in_target_share || 0))}
+              valueClassName="font-semibold text-rose-600"
+            />
+          ))}
+        </RfPhoneGroup>
+
+        <RfPhoneGroup
+          label="По дням"
+          hint={analyticsDays.length ? 'Справа — доля первых ответов в цель.' : (isAnalyticsLoading ? 'Загружаем период…' : 'За выбранный период данных нет.')}
+        >
+          {analyticsDays.map((row) => {
+            const share = Number(row.in_target_share || 0);
+            return (
+              <RfPhoneRow
+                key={row.date}
+                title={formatPhoneDayTitle(row.date)}
+                subtitle={`${formatInt(row.chats)} ${cfg.unit.many} · прогноз ${formatNumber(row.forecast_chats, 0)}`}
+                value={formatPercent(row.in_target_share)}
+                valueClassName={`font-semibold ${share < 0.8 ? 'text-rose-600' : 'text-emerald-600'}`}
+              >
+                <span className="block truncate text-[13px] tabular-nums text-slate-500">
+                  без ответа {formatInt(row.no_reply)} · ответ {formatReplySeconds(row.avg_first_reply_seconds)} · {formatNumber(row.actual_online_hours, 1)} ч
+                </span>
+              </RfPhoneRow>
+            );
+          })}
+        </RfPhoneGroup>
+
+        {analyticsChannels.length ? (
+          <RfPhoneGroup label="Каналы периода">
+            {analyticsChannels.map((channel) => (
+              <RfPhoneRow
+                key={channel.channel}
+                title={channel.channel}
+                subtitle={`${formatInt(channel.chats)} ${cfg.unit.many}`}
+                value={formatPercent(channel.share)}
+              >
+                <RfPhoneBar percent={Number(channel.share || 0) * 100} className="bg-blue-500" />
+              </RfPhoneRow>
+            ))}
+          </RfPhoneGroup>
+        ) : null}
+      </>
+    );
+  };
+
+  const renderPhoneBillingTable = (day) => {
+    if (billingMode === 'operator') return <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />;
+    if (billingMode === 'grouping' && !cfg.hasBillingTalkTime) {
+      return <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode={billingReport?.park ? 'groupingPark' : 'grouping'} />;
+    }
+    if (billingMode === 'grouping') return <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />;
+    return <BillingSummaryTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />;
+  };
+
+  const renderPhoneBilling = () => {
+    const hasReport = !isBillingLoading && billingReport && (
+      (billingMode === 'detail' && billingDetailRows.length > 0)
+      || (billingMode !== 'detail' && billingTotals && billingDays.length > 0)
+    );
+    let modeHint = '';
+    if (cfg.billing.modeHint) modeHint = cfg.billing.modeHint(billingMode, billingSlSeconds);
+    else if (billingMode === 'operator') modeHint = 'OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз';
+    else if (billingMode === 'detail') modeHint = 'Одна строка — один звонок; на странице 25 звонков';
+    else if (billingMode === 'grouping') modeHint = 'Разница — факт смен минус прогноз; комментарий к часу — нажатие на его ячейку';
+    else modeHint = `SL — отвечено за ≤ ${billingSlSeconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь`;
+
+    let tiles = [];
+    if (billingTotals && billingMode !== 'detail') {
+      if (!cfg.hasBillingTalkTime) {
+        tiles = [
+          { key: 'chats', label: 'Поступило', value: formatInt(billingTotals.chats) },
+          { key: 'answered', label: 'Обслужено', value: formatInt(billingTotals.answered) },
+          { key: 'no-reply', label: 'Без ответа', value: formatInt(billingTotals.no_reply), tone: Number(billingTotals.no_reply || 0) > 0 ? 'rose' : 'slate' },
+          { key: 'first', label: 'Ср. реакция на 1 сообщение', value: formatChatBillingMinutesUnit(billingChatAverages.firstReplySeconds) },
+          { key: 'sl', label: 'SL', value: billingChatSlRatio === null ? '—' : formatPercent(billingChatSlRatio, 1), hint: `реакция ≤ ${billingSlSeconds} сек`, tone: phoneSlTone(billingChatSlRatio) },
+          { key: 'inner', label: 'Ср. ответ внутри чата', value: formatChatBillingMinutesUnit(billingChatAverages.innerReplySeconds) },
+          {
+            key: 'rating',
+            label: 'Ср. оценка водителей',
+            value: formatChatBillingRating(billingChatAverages.rating),
+            hint: Number(billingTotals.rated) > 0 ? `оценок ${formatInt(billingTotals.rated)}` : 'оценок нет',
+          },
+        ];
+      } else if (billingMode === 'operator') {
+        tiles = [
+          { key: 'served', label: 'Обслужено', value: formatInt(billingTotals.served) },
+          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_in_seconds), hint: `исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}` },
+          { key: 'att', label: 'ATT', value: billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds), hint: billingAttSeconds === null ? null : `${formatInt(billingAttSeconds)} сек` },
+          { key: 'aht', label: 'AHT', value: billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds) },
+          { key: 'occ', label: 'OCC', value: billingOperatorTotals?.occ == null ? '—' : formatPercent(billingOperatorTotals.occ, 1) },
+          { key: 'utz', label: 'UTZ', value: billingOperatorTotals?.utz == null ? '—' : formatPercent(billingOperatorTotals.utz, 1) },
+        ];
+      } else {
+        tiles = [
+          { key: 'arrived', label: 'Поступило', value: formatInt(billingTotals.arrived) },
+          { key: 'served', label: 'Обслужено', value: formatInt(billingTotals.served) },
+          { key: 'lost', label: 'Потеряно', value: formatInt(billingTotals.lost), tone: Number(billingTotals.lost || 0) > 0 ? 'rose' : 'slate' },
+          { key: 'ar', label: 'AR', value: billingArRatio === null ? '—' : formatPercent(billingArRatio, 1), tone: phoneArTone(billingArRatio) },
+          { key: 'sl', label: 'SL', value: billingSlRatio === null ? '—' : formatPercent(billingSlRatio, 1), hint: `ответ ≤ ${billingSlSeconds} сек`, tone: phoneSlTone(billingSlRatio) },
+          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: `общее ${formatDurationHms(billingTotals.total_seconds)}` },
+        ];
+      }
+    }
+
+    return (
+      <>
+        <RfPhoneGroup
+          label="Отчёт"
+          hint={billingRangeError ? <span className="text-rose-600">{billingRangeError}</span> : null}
+        >
+          <RfPhoneRow title="Период" value={formatPhoneRange(billingFrom, billingTo)} onClick={() => setPhoneScreen('billing-period')} chevron />
+          <RfPhoneRow title="Время" value={`${billingTimeFrom}–${billingTimeTo}`} onClick={() => setPhoneScreen('billing-time')} chevron />
+          {billingMode === 'grouping' && cfg.billing.groupingByPark ? (
+            <RfPhoneSelectRow
+              label="Таксопарк"
+              value={billingGroupingPark}
+              options={billingGroupingParkOptions.map((option) => [option.value, option.label])}
+              onChange={selectBillingGroupingPark}
+              disabled={isBillingLoading}
+            />
+          ) : null}
+          {cfg.hasBillingExportTypes ? (
+            <RfPhoneSelectRow
+              label="Выгрузка Excel"
+              subtitle={billingExportType === 'efficiency' ? 'За полные дни, без фильтра времени' : null}
+              value={billingExportType}
+              options={[['general', 'Общая'], ['efficiency', 'По эффективности']]}
+              onChange={setBillingExportType}
+              disabled={isBillingExporting || isBillingLoading}
+            />
+          ) : null}
+        </RfPhoneGroup>
+
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)' }}>
+          <button
+            type="button"
+            onClick={buildBillingReport}
+            disabled={isBillingLoading || Boolean(billingRangeError)}
+            className={RF_PHONE_BUTTON.blue}
+          >
+            {isBillingLoading ? 'Загрузка…' : 'Сформировать'}
+          </button>
+          <button
+            type="button"
+            onClick={exportBillingExcel}
+            disabled={
+              isBillingExporting
+              || isBillingLoading
+              || Boolean(billingRangeError)
+              || (billingExportType === 'general' && !billingReport)
+            }
+            className={RF_PHONE_BUTTON.white}
+          >
+            {isBillingExporting ? 'Выгрузка…' : 'Excel'}
+          </button>
+        </div>
+
+        <RfPhonePills
+          items={cfg.billing.modes.map((item) => ({ value: item.key, label: item.label }))}
+          value={billingMode}
+          onChange={setBillingMode}
+          ariaLabel="Разрез биллинга"
+        />
+
+        {billingError ? <RfPhoneNote tone="rose">{billingError}</RfPhoneNote> : null}
+
+        {isBillingLoading ? (
+          <RfPhoneEmpty title={cfg.billing.loadingText} />
+        ) : null}
+
+        {hasReport ? (
+          <>
+            <RfPhoneTiles items={tiles} />
+            {modeHint ? <p className="-mt-2 px-1 text-[13px] leading-snug text-slate-500">{modeHint}</p> : null}
+
+            {billingMode === 'detail' ? (
+              <RfPhoneSection
+                label={cfg.billing.detailTitle}
+                hint={cfg.billing.detailNote}
+              >
+                <RfPhoneTable>
+                  <BillingRowsTable rows={billingDetailRows} />
+                </RfPhoneTable>
+                <div className={`${iosCard} px-3 py-2`}>
+                  <IosPager
+                    page={billingDetailCurrentPage}
+                    pageCount={billingDetailTotalPages}
+                    total={formatInt(billingDetailTotal)}
+                    from={formatInt(billingDetailPageStart)}
+                    to={formatInt(billingDetailPageEnd)}
+                    onPage={(page) => fetchBillingReport('detail', { page, snapshotId: billingReport.snapshot_id })}
+                  />
+                </div>
+              </RfPhoneSection>
+            ) : (
+              <>
+                {billingMode !== 'grouping' ? (
+                  <RfPhoneSection
+                    label={cfg.billing.summaryTitle(billingMode)}
+                    hint={`${formatPhoneRange(billingReport.date_from, billingReport.date_to)} · ${billingReport.time_from}–${billingReport.time_to}`}
+                  >
+                    <RfPhoneTable>
+                      {billingMode === 'operator' ? (
+                        <BillingPeopleTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
+                      ) : (
+                        <BillingSummaryTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
+                      )}
+                    </RfPhoneTable>
+                  </RfPhoneSection>
+                ) : null}
+
+                <RfPhoneGroup label="По дням">
+                  {billingDays.map((day) => {
+                    const showOcc = cfg.hasBillingTalkTime && billingMode === 'operator';
+                    const showAr = cfg.hasBillingTalkTime && billingMode !== 'operator';
+                    const daySl = !cfg.hasBillingTalkTime
+                      ? safeRatio(day.totals?.answered_sl, day.totals?.chats)
+                      : billingMode !== 'operator' ? safeRatio(day.totals?.served_sl, day.totals?.arrived) : null;
+                    const dayAr = showAr ? safeRatio(day.totals?.lost, day.totals?.arrived) : null;
+                    const dayOcc = showOcc ? billingOperatorActivity(day.totals || {}).occ : null;
+                    let badge = '';
+                    let badgeClass = 'text-slate-500';
+                    if (showOcc) badge = `OCC ${dayOcc === null ? '—' : formatPercent(dayOcc, 1)}`;
+                    else if (showAr) {
+                      badge = `AR ${dayAr === null ? '—' : formatPercent(dayAr, 1)}`;
+                      badgeClass = cfg.billing.arClass(dayAr) || badgeClass;
+                    } else {
+                      badge = `SL ${daySl === null ? '—' : formatPercent(daySl, 1)}`;
+                      badgeClass = billingSlClass(daySl) || badgeClass;
+                    }
+                    return (
+                      <RfPhoneRow
+                        key={day.date}
+                        title={formatPhoneDayTitle(day.date)}
+                        subtitle={cfg.billing.daySummary(billingMode, day)}
+                        value={badge}
+                        valueClassName={`text-[14px] font-semibold ${badgeClass}`}
+                        onClick={() => setPhoneBillingDay(day.date)}
+                        chevron
+                      />
+                    );
+                  })}
+                </RfPhoneGroup>
+              </>
+            )}
+          </>
+        ) : null}
+
+        {!isBillingLoading && billingReport && !hasReport ? (
+          <RfPhoneEmpty title="Нет данных за выбранный период" text={cfg.billing.emptyText} />
+        ) : null}
+        {!isBillingLoading && !billingReport && !billingError ? (
+          <RfPhoneEmpty title="Отчет еще не сформирован" text="Задайте период и время и нажмите «Сформировать»." />
+        ) : null}
+      </>
+    );
+  };
+
+  const renderPhoneSettings = () => (
+    <>
+      {isChat && settingsDraft ? (
+        <>
+          <RfPhoneGroup
+            label="Цели по сервису"
+            hint="Ответ внутри чата — рычаг расчёта, из него выводится ёмкость. Первый ответ — то, что мы меряем по базе, по нему считается «в цель»."
+          >
+            <RfPhoneInputRow
+              label="Ответ внутри чата, сек"
+              subtitle={`сейчас ${describeChatTarget(settingsDraft?.target_reply_seconds)}`}
+              value={settingsDraft?.target_reply_seconds}
+              inputMode="numeric"
+              onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), target_reply_seconds: value === '' ? '' : Number(value) }))}
+            />
+            <RfPhoneInputRow
+              label="Первый ответ, сек"
+              subtitle={`сейчас ${describeChatTarget(settingsDraft?.target_first_reply_seconds)}`}
+              value={settingsDraft?.target_first_reply_seconds}
+              inputMode="numeric"
+              onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), target_first_reply_seconds: value === '' ? '' : Number(value) }))}
+            />
+          </RfPhoneGroup>
+
+          <RfPhoneGroup
+            label="Ёмкость"
+            hint={`${chatCapacityExplain.source === 'manual'
+              ? 'Задана вручную и перебивает вывод из цели.'
+              : chatCapacityExplain.source === 'first_reply'
+                ? 'Связала цель первого ответа — она жёстче ответа внутри чата.'
+                : 'Выведена из цели «ответ внутри чата» по замеренной кривой.'} Из цели: ${formatNumber(chatCapacityExplain.derived, 2)}${chatCapacityExplain.derived_first_reply ? `, по первому ответу: ${formatNumber(chatCapacityExplain.derived_first_reply, 2)}` : ''}.`}
+          >
+            <RfPhoneRow
+              title="Чатов в час на человека"
+              value={formatNumber(chatCapacityExplain.used ?? chatCapacityPerHourValue, 2)}
+              valueClassName="font-semibold text-slate-900"
+            />
+            {chatCapacityIsManual ? (
+              <>
+                <RfPhoneInputRow
+                  label="Вручную"
+                  value={settingsDraft?.capacity_manual}
+                  onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), capacity_manual: value === '' ? '' : Number(value) }))}
+                />
+                <RfPhoneRow
+                  title={<span className="text-blue-600">Вернуть вывод из цели</span>}
+                  onClick={() => setSettingsDraft((current) => ({ ...(current || {}), capacity_manual: null }))}
+                />
+              </>
+            ) : (
+              <RfPhoneRow
+                title={<span className="text-blue-600">Задать вручную</span>}
+                onClick={() => setSettingsDraft((current) => ({
+                  ...(current || {}),
+                  capacity_manual: Number(chatCapacityExplain.used ?? chatCapacityPerHourValue),
+                }))}
+              />
+            )}
+            <RfPhoneRow
+              title={<span className="text-blue-600">{isFittingFirstReply ? 'Замеряем…' : 'Замерить кривую первого ответа'}</span>}
+              onClick={handleFitFirstReplyCurve}
+              disabled={isFittingFirstReply}
+            />
+          </RfPhoneGroup>
+
+          {chatCapacityExplain.first_reply_target_unreachable ? (
+            <RfPhoneNote tone="rose" title="Цель первого ответа не достигается наращиванием людей">
+              Даже в самой разгруженной полосе первый ответ не укладывается в {describeChatTarget(chatTargetFirstSeconds)}.
+              Рычагом остаётся «ответ внутри чата».
+            </RfPhoneNote>
+          ) : null}
+
+          <RfPhoneGroup label="Вводные расчёта">
+            <RfPhoneInputRow
+              label="Коэффициент усушки"
+              value={settingsDraft?.shrinkage_coeff}
+              onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), shrinkage_coeff: value === '' ? '' : Number(value) }))}
+            />
+            <RfPhoneInputRow
+              label="Часов в неделю"
+              value={settingsDraft?.weekly_hours_per_operator}
+              inputMode="numeric"
+              onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), weekly_hours_per_operator: value === '' ? '' : Number(value) }))}
+            />
+            <RfPhoneInputRow
+              label="Недель в базе прогноза"
+              value={settingsDraft?.base_weeks}
+              inputMode="numeric"
+              onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), base_weeks: value === '' ? '' : Number(value) }))}
+            />
+            <RfPhoneSelectRow
+              label="Округление потребности"
+              value={settingsDraft?.fte_rounding || 'half'}
+              options={CHAT_FTE_ROUNDING_LABELS}
+              onChange={(value) => setSettingsDraft((current) => ({ ...(current || {}), fte_rounding: value }))}
+            />
+          </RfPhoneGroup>
+          <button type="button" onClick={handleSaveSettings} disabled={!settingsDraft} className={RF_PHONE_BUTTON.blue}>
+            Сохранить и пересчитать
+          </button>
+        </>
+      ) : null}
+
+      {!isChat && settingsDraft ? (
+        <>
+          <RfPhoneGroup label="Настройки расчета">
+            {[
+              ['answer_rate', 'Принято'],
+              ['occ', 'OCC'],
+              ['ur', 'UR'],
+              ['shrinkage_coeff', 'Усушка'],
+              ['weekly_hours_per_operator', 'Часов в неделю'],
+            ].map(([key, label]) => (
+              <RfPhoneInputRow
+                key={key}
+                label={label}
+                value={settingsDraft[key]}
+                onChange={(value) => setSettingsDraft((current) => ({ ...current, [key]: value }))}
+              />
+            ))}
+            <RfPhoneSelectRow
+              label="Округление FTE"
+              value={settingsDraft.fte_rounding || 'none'}
+              options={[['none', 'без округления'], ['ceil', 'вверх'], ['round', 'математическое'], ['floor', 'вниз']]}
+              onChange={(value) => setSettingsDraft((current) => ({ ...current, fte_rounding: value }))}
+            />
+            <RfPhoneSelectRow
+              label="Округление смен"
+              value={settingsDraft.shift_rounding || 'ceil'}
+              options={[['ceil', 'вверх'], ['none', 'без округления'], ['round', 'математическое'], ['floor', 'вниз']]}
+              onChange={(value) => setSettingsDraft((current) => ({ ...current, shift_rounding: value }))}
+            />
+          </RfPhoneGroup>
+          {cfg.hasDirectionPicker ? (
+            <RfPhoneGroup
+              label="Направления для текущего FTE"
+              right={<RfPhoneGroupAction label="Все" onClick={() => setSettingsDraft((current) => ({ ...current, selected_direction_ids: [] }))} />}
+              hint={resourceDirections.length
+                ? 'Если ничего не выбрано, считается сумма ставок всех активных операторов.'
+                : 'Активные направления не найдены.'}
+            >
+              {resourceDirections.map((item) => {
+                const checked = selectedDirectionSet.has(Number(item.id));
+                return (
+                  <RfPhoneCheckRow
+                    key={item.id}
+                    title={item.name}
+                    checked={checked}
+                    onClick={() => toggleResourceDirection(item.id, !checked)}
+                  />
+                );
+              })}
+            </RfPhoneGroup>
+          ) : null}
+          <button type="button" onClick={handleSaveSettings} className={RF_PHONE_BUTTON.blue}>
+            Сохранить
+          </button>
+        </>
+      ) : null}
+
+      {cfg.displayGroups.map((group, index) => (
+        <RfPhoneGroup
+          key={group.title}
+          label={group.title}
+          right={index === 0 ? (
+            <RfPhoneGroupAction label="Сбросить" onClick={() => setDisplayOptions({ ...cfg.defaultDisplayOptions })} />
+          ) : null}
+          hint={index === 0 ? 'Что показывать на вкладках. Настройки общие с компьютером.' : null}
+        >
+          {group.items.map(([key, label]) => (
+            <RfPhoneToggleRow
+              key={key}
+              title={label}
+              toggle={<IosToggle checked={Boolean(displayOptions[key])} onChange={(value) => toggleDisplayOption(key, value)} />}
+            />
+          ))}
+        </RfPhoneGroup>
+      ))}
+    </>
+  );
+
+  const renderPhoneOperatorDetails = () => {
+    const forecast = operatorDetailsForecast;
+    const details = Array.isArray(forecast?.periodOperatorAvailabilityDetails) ? forecast.periodOperatorAvailabilityDetails : [];
+    const offScaleDetails = Array.isArray(forecast?.periodOffScaleOperatorDetails) ? forecast.periodOffScaleOperatorDetails : [];
+    const rates = Array.isArray(forecast?.periodAvailableOperatorRates) ? forecast.periodAvailableOperatorRates : [];
+    const statusEntries = operatorStatusEntries(forecast?.periodOperatorStatusSummary || {});
+    const requiredFte = Number(forecast?.operatorsWithShrinkage || 0);
+    const availableFte = Number(forecast?.periodAvailableOperatorFte || 0);
+    const gap = Number(forecast?.periodAvailableOperatorFteGap ?? (availableFte - requiredFte));
+    const periodDays = Number(forecast?.periodDays || forecast?.period_day_count || details[0]?.totalDays || 0);
+    const threshold = Number(forecast?.periodWorkingDaysThreshold || (periodDays ? periodDays / 2 : 0));
+
+    const renderOperator = (operator, offScale = false) => {
+      const statuses = operatorStatusEntries(operator.statusDays)
+        .map((item) => `${OPERATOR_STATUS_LABELS[item.status] || item.status} ${formatInt(item.days)}`)
+        .join(', ');
+      const included = operator.included && !offScale;
+      const rateControl = canEditOperatorRates ? (
+        <span className={`relative flex h-8 shrink-0 items-center gap-1 rounded-full px-3 text-[15px] font-semibold tabular-nums ${
+          operator.rateOverridden ? 'bg-blue-50 text-blue-700' : 'bg-slate-100 text-slate-800'
+        }`}
+        >
+          {savingRateOperatorId === operator.operatorId ? '…' : formatNumber(operator.rate, 2)}
+          <ChevronDown size={14} className="opacity-60" aria-hidden="true" />
+          <select
+            value={String(operator.rate ?? '')}
+            disabled={savingRateOperatorId === operator.operatorId}
+            onChange={(event) => handleOperatorRateChange(operator, event.target.value)}
+            aria-label={`Ставка: ${operator.name || operator.operatorId}`}
+            className="rf-m-wheel"
+          >
+            {RATE_OVERRIDE_CHOICES.map((value) => (
+              <option key={value} value={String(value)}>{formatNumber(value, 2)}</option>
+            ))}
+            {operator.rateOverridden ? <option value="">Вернуть {formatNumber(operator.baseRate, 2)}</option> : null}
+          </select>
+        </span>
+      ) : null;
+      // Вклад — строкой под именем, а справа только ставка: два «1,00» подряд в
+      // одной строке (вклад и ставка) читались как одно число, повторённое дважды.
+      const contribution = offScale
+        ? 'вне ставок направления'
+        : (included ? `вклад ${formatNumber(operator.fteContribution, 2)}` : 'не засчитан');
+      return (
+        <RfPhoneRow
+          key={`${offScale ? 'off' : 'in'}-${operator.operatorId}`}
+          title={operator.name || `ID ${operator.operatorId}`}
+          subtitle={[operator.directionName, operator.supervisorName].filter(Boolean).join(' · ') || null}
+          value={canEditOperatorRates ? null : formatNumber(operator.rate, 2)}
+          trailing={rateControl}
+        >
+          <span className="block truncate text-[13px] tabular-nums text-slate-500">
+            <span className={included ? 'text-slate-700' : 'text-slate-400'}>{contribution}</span>
+            {` · Working ${formatInt(operator.workingDays)}/${formatInt(operator.totalDays)}${statuses ? ` · ${statuses}` : ''}`}
+          </span>
+        </RfPhoneRow>
+      );
+    };
+
+    return (
+      <div className="space-y-5">
+        <RfPhoneTiles
+          items={[
+            { key: 'need', label: 'Нужно с усушкой', value: formatNumber(requiredFte, 2), hint: `без усушки ${formatNumber(forecast?.baseOperators, 2)}` },
+            { key: 'available', label: 'Доступно', value: formatNumber(availableFte, 2), hint: `${formatInt(forecast?.periodAvailableOperatorCount)} сотрудников`, tone: gap < 0 ? 'rose' : 'emerald' },
+            { key: 'gap', label: 'Разница', value: formatSignedNumber(gap, 2), tone: gap < 0 ? 'rose' : 'emerald' },
+            { key: 'current', label: `Текущий ${cfg.unit.fteWord}`, value: formatNumber(forecast?.currentOperatorFte, 2) },
+          ]}
+        />
+        <p className="-mt-2 px-1 text-[13px] leading-snug text-slate-500">
+          Ставка входит, если Working больше {formatNumber(threshold, 1)} из {formatInt(periodDays)} дн.
+          {canEditOperatorRates ? ' Ставку на период можно сменить в строке — она действует только в расчёте и аукционе.' : ''}
+        </p>
+        {isOperatorDetailsLoading ? <RfPhoneNote tone="blue">Загрузка детализации…</RfPhoneNote> : null}
+        {operatorDetailsError ? <RfPhoneNote tone="rose">{operatorDetailsError}</RfPhoneNote> : null}
+        {rates.length ? (
+          <RfPhoneGroup label="Разбивка по ставкам">
+            {rates.map((item) => (
+              <RfPhoneRow
+                key={item.rate}
+                title={`Ставка ${formatNumber(item.rate, 2)}`}
+                value={`${formatInt(item.count)} / ${formatInt(item.total_count ?? item.count)} чел.`}
+              >
+                <RfPhoneBar
+                  percent={(Number(item.count || 0) / Math.max(1, Number(item.total_count || item.count || 0))) * 100}
+                  className="bg-emerald-500"
+                />
+              </RfPhoneRow>
+            ))}
+          </RfPhoneGroup>
+        ) : null}
+        {statusEntries.length ? (
+          <RfPhoneGroup label="Дни по статусам">
+            {statusEntries.map((item) => (
+              <RfPhoneRow key={item.status} title={OPERATOR_STATUS_LABELS[item.status] || item.status} value={`${formatInt(item.days)} дн.`} />
+            ))}
+          </RfPhoneGroup>
+        ) : null}
+        <RfPhoneGroup
+          label={`${cfg.unit.operators} в расчете · ${formatInt(details.length)}`}
+          hint={!isOperatorDetailsLoading && !details.length ? 'Нет данных по операторам.' : null}
+        >
+          {details.slice(0, phoneOperatorLimit).map((operator) => renderOperator(operator))}
+          {details.length > phoneOperatorLimit ? (
+            <RfPhoneRow
+              title={<span className="text-blue-600">Показать ещё {formatInt(Math.min(OPERATOR_DETAILS_PAGE_SIZE, details.length - phoneOperatorLimit))}</span>}
+              onClick={() => setPhoneOperatorLimit((current) => current + OPERATOR_DETAILS_PAGE_SIZE)}
+            />
+          ) : null}
+        </RfPhoneGroup>
+        {canEditOperatorRates && offScaleDetails.length ? (
+          <RfPhoneGroup
+            label={`Не в расчёте: ставка не из направления · ${formatInt(offScaleDetails.length)}`}
+            hint="Такой ставки в направлении нет: человек не идёт ни в расчёт, ни в график, ни в норму аукциона. Поставьте ему ставку направления на период — и он вернётся в расчёт."
+          >
+            {offScaleDetails.map((operator) => renderOperator(operator, true))}
+          </RfPhoneGroup>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderPhoneScreens = () => {
+    const today = readToday();
+    const lineDayTone = cfg.hasHistoryPairs
+      ? (iso) => (isForecastDayHistoryComplete(iso, loadedReportDateSet) ? 'font-semibold text-emerald-600' : '')
+      : null;
+    const displayActualOn = showForecastActualLoad && selectedForecastHasActualLoad;
+    const billingDay = phoneBillingDayData;
+    return (
+      <>
+        <MobileActionSheet
+          open={phoneSheet === 'actions'}
+          onClose={() => setPhoneSheet('')}
+          actions={[
+            { key: 'refresh', label: isLoading ? 'Обновляем…' : 'Обновить данные', disabled: isLoading, onClick: () => { setPhoneSheet(''); fetchOverview(); } },
+            cfg.hasUpload ? {
+              key: 'upload',
+              label: 'Загрузить CSV',
+              onClick: () => {
+                setPhoneSheet('');
+                setUploadFile(null);
+                setIsUploadModalOpen(true);
+              },
+            } : null,
+            cfg.hasOktellSync ? {
+              key: 'oktell',
+              label: 'Синхронизация с Oktell',
+              onClick: () => {
+                setPhoneSheet('');
+                setOktellSyncFrom(_yesterdayIso());
+                setOktellSyncTo(_yesterdayIso());
+                setIsOktellSyncModalOpen(true);
+              },
+            } : null,
+          ].filter(Boolean)}
+        />
+
+        <IosModal open={phoneScreen === 'history-period'} onClose={closePhoneScreen} title={cfg.historyPickerLabel} subtitle={cfg.historyPickerHint}>
+          <RfPhoneCalendar
+            startValue={dateFrom}
+            endValue={dateTo}
+            todayIso={today}
+            markedDates={loadedReportDateSet}
+            onRangeChange={(start, end) => {
+              setDateFrom(start);
+              setDateTo(end);
+              closePhoneScreen();
+            }}
+            quickActions={[{
+              label: '14 дней',
+              onClick: () => {
+                setDateFrom(addDaysIso(today, -13));
+                setDateTo(today);
+                closePhoneScreen();
+              },
+            }]}
+          />
+        </IosModal>
+
+        <IosModal
+          open={phoneScreen === 'forecast-period'}
+          onClose={closePhoneScreen}
+          title="Период прогноза"
+          subtitle={cfg.hasHistoryPairs ? 'зелёный день — истории хватает' : 'точка — есть чаты'}
+        >
+          <RfPhoneCalendar
+            startValue={forecastPeriodStart}
+            endValue={forecastPeriodEnd}
+            todayIso={today}
+            markedDates={cfg.hasHistoryPairs ? null : loadedReportDateSet}
+            dayTone={lineDayTone}
+            onRangeChange={(start, end) => {
+              setSelectedForecastWeekStart(start);
+              setSelectedForecastPeriodEnd(end);
+              setSelectedForecastDate(start);
+              closePhoneScreen();
+            }}
+            quickActions={[{
+              label: 'Неделя',
+              onClick: () => {
+                const weekStart = getWeekStartIso(forecastPeriodStart || today);
+                setSelectedForecastWeekStart(weekStart);
+                setSelectedForecastPeriodEnd(addDaysIso(weekStart, 6));
+                setSelectedForecastDate(weekStart);
+                closePhoneScreen();
+              },
+            }]}
+          />
+        </IosModal>
+
+        {isChat ? (
+          <IosModal open={phoneScreen === 'analytics-period'} onClose={closePhoneScreen} title="Период аналитики" subtitle={cfg.historyPickerHint}>
+            <RfPhoneCalendar
+              startValue={analyticsFrom}
+              endValue={analyticsTo}
+              todayIso={today}
+              markedDates={loadedReportDateSet}
+              onRangeChange={(start, end) => {
+                setAnalyticsFrom(start);
+                setAnalyticsTo(end);
+                closePhoneScreen();
+              }}
+              quickActions={[{
+                label: '14 дней',
+                onClick: () => {
+                  setAnalyticsFrom(addDaysIso(today, -13));
+                  setAnalyticsTo(today);
+                  closePhoneScreen();
+                },
+              }]}
+            />
+          </IosModal>
+        ) : null}
+
+        <IosModal open={phoneScreen === 'billing-period'} onClose={closePhoneScreen} title="Период отчета">
+          <RfPhoneCalendar
+            startValue={billingFrom}
+            endValue={billingTo}
+            todayIso={today}
+            onRangeChange={(start, end) => {
+              setBillingFrom(start);
+              setBillingTo(end);
+              closePhoneScreen();
+            }}
+            quickActions={[{
+              label: '7 дней',
+              onClick: () => {
+                setBillingFrom(addDaysIso(todayIso(), -6));
+                setBillingTo(todayIso());
+                closePhoneScreen();
+              },
+            }]}
+          />
+        </IosModal>
+
+        <IosModal
+          open={phoneScreen === 'billing-time'}
+          onClose={closePhoneScreen}
+          title="Время отчета"
+          subtitle="Границы включительно, по минутам"
+          footer={<button type="button" onClick={closePhoneScreen} className={RF_PHONE_BUTTON.blue}>Готово</button>}
+        >
+          <div className="space-y-5">
+            <div className="flex flex-wrap gap-2">
+              {BILLING_TIME_PRESETS.map((preset) => {
+                const active = preset.from === billingTimeFrom && preset.to === billingTimeTo;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      setBillingTimeFrom(preset.from);
+                      setBillingTimeTo(preset.to);
+                    }}
+                    aria-pressed={active}
+                    className={`h-9 rounded-full px-4 text-[15px] font-semibold ${active ? 'bg-slate-900 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200/70'}`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+            <RfPhoneGroup>
+              {[['start', 'С', billingTimeFrom], ['end', 'По', billingTimeTo]].map(([which, label, value]) => (
+                <label key={which} className="rf-m-row flex w-full items-center gap-3 px-4 py-2">
+                  <span className="min-w-0 flex-1 text-[16px] text-slate-900">{label}</span>
+                  <input
+                    type="time"
+                    value={value}
+                    step={60}
+                    onChange={(event) => {
+                      const [start, end] = orderPhoneTimeRange(which, event.target.value, billingTimeFrom, billingTimeTo);
+                      setBillingTimeFrom(start);
+                      setBillingTimeTo(end);
+                    }}
+                    className="rf-m-input h-9 shrink-0 rounded-lg bg-slate-100 px-3 text-center text-[16px] font-semibold tabular-nums text-slate-900 outline-none focus:ring-2 focus:ring-blue-500/60"
+                  />
+                </label>
+              ))}
+            </RfPhoneGroup>
+          </div>
+        </IosModal>
+
+        <IosModal open={phoneScreen === 'forecast-display'} onClose={closePhoneScreen} title="Показатели прогноза">
+          <div className="space-y-5">
+            {(cfg.forecastPanelGroups || []).map((group) => {
+              const items = group.items.filter(([, , requires]) => {
+                if (requires === 'uplift') return incidentUpliftAvailable;
+                if (requires === 'actual') return displayActualOn;
+                return true;
+              });
+              if (!items.length) return null;
+              return (
+                <RfPhoneGroup key={group.title} label={group.title}>
+                  {items.map(([key, label]) => {
+                    const disabled = key === 'forecastShowActualLoad' && !forecastActualLoadAvailable && !displayOptions[key];
+                    return (
+                      <RfPhoneToggleRow
+                        key={key}
+                        title={label}
+                        subtitle={disabled ? 'В периоде нет прошедших дней с отчетом' : null}
+                        toggle={<IosToggle checked={Boolean(displayOptions[key])} disabled={disabled} onChange={(value) => toggleDisplayOption(key, value)} />}
+                      />
+                    );
+                  })}
+                </RfPhoneGroup>
+              );
+            })}
+          </div>
+        </IosModal>
+
+        {cfg.hasUpload ? (
+          <IosModal
+            open={isUploadModalOpen}
+            onClose={() => {
+              if (isUploading) return false;
+              setUploadFile(null);
+              setIsUploadModalOpen(false);
+              return undefined;
+            }}
+            title="Загрузка отчета"
+            subtitle="CSV: дата + час"
+            footer={(
+              <button type="button" onClick={handleUpload} disabled={isUploading || !uploadFile} className={RF_PHONE_BUTTON.blue}>
+                {isUploading ? 'Загрузка…' : 'Загрузить отчет'}
+              </button>
+            )}
+          >
+            <RfPhoneGroup hint="Каждая строка файла — дата и час. Старый формат без колонки «Дата» не принимается. Система сама обновит все даты из файла.">
+              <label className="rf-m-row flex w-full items-center gap-3 px-4 py-2.5">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[16px] text-slate-900">{selectedFileName}</span>
+                  <span className="block text-[13px] text-slate-500">Поддерживается .csv</span>
+                </span>
+                <span className="shrink-0 text-[16px] font-semibold text-blue-600">Выбрать</span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
+                  className="hidden"
+                />
+              </label>
+            </RfPhoneGroup>
+          </IosModal>
+        ) : null}
+
+        {cfg.hasOktellSync ? (
+          <IosModal
+            open={isOktellSyncModalOpen}
+            onClose={() => (isOktellSyncing ? false : setIsOktellSyncModalOpen(false))}
+            title="Синхронизация с Oktell"
+            subtitle={formatPhoneRange(oktellSyncFrom, oktellSyncTo)}
+            footer={(
+              <button type="button" onClick={handleOktellSync} disabled={isOktellSyncing} className={RF_PHONE_BUTTON.blue}>
+                {isOktellSyncing ? 'Синхронизация…' : 'Синхронизировать'}
+              </button>
+            )}
+          >
+            <div className="space-y-2">
+              <RfPhoneCalendar
+                startValue={oktellSyncFrom}
+                endValue={oktellSyncTo}
+                todayIso={today}
+                markedDates={loadedReportDateSet}
+                onRangeChange={(start, end) => {
+                  setOktellSyncFrom(start);
+                  setOktellSyncTo(end);
+                }}
+              />
+              <p className="px-1 text-[13px] leading-snug text-slate-500">
+                Часовая статистика входящих, до 31 дня. Прогноз пересчитается сам. Точка — отчёт уже загружен.
+              </p>
+            </div>
+          </IosModal>
+        ) : null}
+
+        <IosModal
+          open={isOperatorDetailsOpen}
+          onClose={() => {
+            setIsOperatorDetailsOpen(false);
+            setPhoneOperatorLimit(OPERATOR_DETAILS_PAGE_SIZE);
+          }}
+          title="Детализация доступного FTE"
+          subtitle={formatPhoneRange(operatorDetailsForecast?.period_start || operatorDetailsForecast?.week_start, operatorDetailsForecast?.period_end || operatorDetailsForecast?.week_end)}
+        >
+          {isOperatorDetailsOpen ? renderPhoneOperatorDetails() : null}
+        </IosModal>
+
+        {cfg.hasBilling ? (
+          <IosModal
+            open={Boolean(phoneBillingDay) && Boolean(billingDays.find((day) => day.date === phoneBillingDay))}
+            onClose={() => setPhoneBillingDay('')}
+            title={billingDay ? formatPhoneDayTitle(billingDay.date) : ''}
+            subtitle={billingDay ? cfg.billing.daySummary(billingMode, billingDay) : ''}
+          >
+            {billingDay ? (
+              <div className="space-y-2">
+                <RfPhoneTable>{renderPhoneBillingTable(billingDay)}</RfPhoneTable>
+                {billingMode === 'grouping' && cfg.hasBillingTalkTime ? (
+                  <p className="px-1 text-[13px] leading-snug text-slate-500">Комментарий к часу — нажатие на его ячейку в последней колонке.</p>
+                ) : null}
+              </div>
+            ) : null}
+          </IosModal>
+        ) : null}
+
+        {phoneCommentEditor ? (
+          <BillingGroupingCommentPhoneScreen
+            key={`${phoneCommentEditor.date}|${phoneCommentEditor.hourFrom}|${phoneCommentEditor.hourTo}`}
+            open={billingMode === 'grouping' && Boolean(billingCommentEditor)}
+            editor={phoneCommentEditor}
+            hours={(billingDays.find((day) => day.date === phoneCommentEditor.date)?.hours || []).map((item) => item.hour)}
+            saving={isBillingCommentSaving}
+            onSave={saveBillingGroupingComment}
+            onClose={() => setBillingCommentEditor(null)}
+          />
+        ) : null}
+      </>
+    );
+  };
+
+  if (isMobileShell) {
+    let phoneTab = null;
+    if (activeDashboardView === 'overview') phoneTab = renderPhoneOverview();
+    else if (activeDashboardView === 'next_week') phoneTab = renderPhoneForecast();
+    else if (activeDashboardView === 'losses') phoneTab = isChat ? renderPhoneChats() : renderPhoneLosses();
+    else if (activeDashboardView === BILLING_VIEW_KEY && cfg.hasBilling) phoneTab = renderPhoneBilling();
+    else if (activeDashboardView === 'settings') phoneTab = renderPhoneSettings();
+    else if (activeDashboardView === 'schedule_planner') {
+      phoneTab = (
+        <ResourceSchedulePlanner
+          apiRoot={apiRoot}
+          apiPrefix={cfg.apiPrefix}
+          enableShiftAuction={cfg.hasShiftAuction}
+          buildHeaders={buildHeaders}
+          selectedWeekStart={selectedForecastWeekStart}
+          selectedPeriodEnd={selectedForecastPeriodEnd}
+          onWeekStartChange={(value) => setSelectedForecastWeekStart(value)}
+          onPeriodChange={(start, end) => {
+            setSelectedForecastWeekStart(start);
+            setSelectedForecastPeriodEnd(end);
+            setSelectedForecastDate(start);
+          }}
+          phoneDayTone={cfg.hasHistoryPairs
+            ? (iso) => (isForecastDayHistoryComplete(iso, loadedReportDateSet) ? 'font-semibold text-emerald-600' : '')
+            : null}
+          notify={notify}
+          onOpenShiftAuction={cfg.hasShiftAuction ? onOpenShiftAuction : undefined}
+        />
+      );
+    }
+    return (
+      <div className="rf-m-root min-h-screen bg-slate-100" style={{ fontFamily: APPLE_FONT }}>
+        <div className="flex w-full flex-col gap-5 px-4 pb-8 pt-3">
+          {renderPhoneTop()}
+          {phoneTab}
+        </div>
+        {renderPhoneScreens()}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">

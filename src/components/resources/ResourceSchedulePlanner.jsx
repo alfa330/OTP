@@ -16,6 +16,33 @@ import {
   Undo2,
   Wand2,
 } from 'lucide-react';
+import useIsMobileShell from '../common/useIsMobileShell';
+import MobileActionSheet from '../common/MobileActionSheet';
+import { IosModal, IosSegmented, IosToggle } from '../ui/ios';
+import {
+  RF_PHONE_BUTTON,
+  RfPhoneCalendar,
+  RfPhoneDayStrip,
+  RfPhoneEmpty,
+  RfPhoneGroup,
+  RfPhoneGroupAction,
+  RfPhoneNote,
+  RfPhonePeriodStepper,
+  RfPhoneRow,
+  RfPhoneSection,
+  RfPhoneSelectRow,
+  RfPhoneTiles,
+  RfPhoneToggleRow,
+  useRfPhoneLastPresent,
+} from './ResourceFteMobile';
+import {
+  formatPhoneDayTitle,
+  formatPhoneRange,
+  formatPhoneShortDate,
+  formatPhoneWeekday,
+  phoneMinutesToClock,
+  phoneShiftEditRange,
+} from './resourceFtePhone';
 
 const TEMPLATE_STORAGE_KEY = 'otp_resource_schedule_templates_v1';
 const SNAP_MINUTES = 30;
@@ -1543,6 +1570,9 @@ const ResourceSchedulePlanner = ({
   // Аукцион смен пока только у линии. У чата он будет ОТДЕЛЬНЫЙ (решение владельца
   // 28.08.2026), поэтому здешнего касаться нельзя: график чата никуда не отправляется.
   enableShiftAuction = true,
+  // Телефон: класс дня в календаре периода (у линии зелёным — дни, для которых
+  // хватает истории; на компьютере то же показывает WeekForecastPicker).
+  phoneDayTone = null,
 }) => {
   const [templates, setTemplates] = useState(() => loadStoredTemplates(apiPrefix));
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
@@ -1573,6 +1603,14 @@ const ResourceSchedulePlanner = ({
   const [auctionLoadedAt, setAuctionLoadedAt] = useState(null);
   const [historyPast, setHistoryPast] = useState([]);
   const [historyFuture, setHistoryFuture] = useState([]);
+  // Телефон: открытый экран (календарь периода, шаблоны, добавление смены), лист
+  // действий дня и правка времени смены полями «Начало/Конец» вместо перетаскивания.
+  const isMobileShell = useIsMobileShell();
+  const [phoneScreen, setPhoneScreen] = useState('');
+  const [phoneSheet, setPhoneSheet] = useState('');
+  const [phoneShiftEdit, setPhoneShiftEdit] = useState(null);
+  const [phoneTemplateId, setPhoneTemplateId] = useState('');
+  const phoneShiftEditShown = useRfPhoneLastPresent(phoneShiftEdit);
   const timelineRefs = useRef(new Map());
   const plannerDaysRef = useRef(plannerDays);
   const dragStartSnapshotRef = useRef(null);
@@ -2553,6 +2591,580 @@ const ResourceSchedulePlanner = ({
     if (typeof window !== 'undefined') window.localStorage.removeItem(templateStorageKey(apiPrefix));
     loadDefaultTemplates();
   }, [apiPrefix, loadDefaultTemplates]);
+
+  // ── Телефон ───────────────────────────────────────────────────────────────
+  // На компьютере смены тянут мышью по полотну суток шириной 980 px на день, с
+  // ручками по краям в 8 px и разрезом правой кнопкой. На телефоне ни мыши, ни
+  // правой кнопки нет, а палец на полотне двигал бы и смену, и страницу. Поэтому
+  // день здесь — список смен: нажатие открывает экран со временем начала и конца,
+  // запись идёт теми же updateShift и историей правок, что и перетаскивание, а
+  // покрытие по часам — сеткой суток. Полотно на телефоне не монтируется вовсе.
+  if (isMobileShell) {
+    const rates = templateRatesFor(apiPrefix);
+    const enabledTemplates = templates.filter((template) => template.enabled !== false);
+    const periodStart = selectedWeekStart || computedDays[0]?.date || '';
+    const periodEnd = selectedPeriodEnd || lastScheduleDate || periodStart;
+    const shiftPeriod = (deltaDays) => {
+      if (!periodStart) return;
+      const start = addIsoDays(periodStart, deltaDays);
+      const end = addIsoDays(periodEnd || periodStart, deltaDays);
+      if (typeof onPeriodChange === 'function') onPeriodChange(start, end);
+      else if (typeof onWeekStartChange === 'function') onWeekStartChange(start);
+    };
+    const dayShifts = activeDay?.shifts || [];
+    const editableDay = !activeDayIsReadOnly && activeDayIndex < plannerDays.length;
+    const shiftTimeLabel = (shift) => {
+      const start = Number(shift.startMinute || 0);
+      const end = Number(shift.endMinute || start + MIN_SHIFT_MINUTES);
+      return `${formatTime(start)}–${formatTime(end)}${end > 1440 ? ' +1' : ''}`;
+    };
+
+    const openShiftEdit = (shift) => {
+      setPhoneShiftEdit({
+        dayIndex: activeDayIndex,
+        shiftId: shift.id,
+        start: phoneMinutesToClock(shift.startMinute),
+        end: phoneMinutesToClock(shift.endMinute),
+        rate: shift.rate,
+      });
+    };
+    const editShown = phoneShiftEditShown;
+    const editRange = editShown ? phoneShiftEditRange(editShown.start, editShown.end) : null;
+    const saveShiftEdit = () => {
+      if (!phoneShiftEdit || !editRange?.valid) return;
+      const current = plannerDaysRef.current[phoneShiftEdit.dayIndex]?.shifts?.find((shift) => shift.id === phoneShiftEdit.shiftId);
+      if (current && !isLockedPlannerShift(current)
+        && (Number(current.startMinute) !== editRange.startMinute || Number(current.endMinute) !== editRange.endMinute)) {
+        pushHistorySnapshot();
+        updateShift(phoneShiftEdit.dayIndex, phoneShiftEdit.shiftId, () => ({
+          startMinute: editRange.startMinute,
+          endMinute: editRange.endMinute,
+        }));
+      }
+      setPhoneShiftEdit(null);
+    };
+
+    // Правка шаблонов — те же действия, что у ShiftTemplateEditor на компьютере.
+    const updateTemplate = (id, patch) => applyTemplates(
+      templates.map((template) => (template.id === id ? { ...template, ...patch } : template)),
+    );
+    const addTemplate = () => {
+      const source = enabledTemplates[0] || templates[0] || null;
+      const label = String(source?.label || '9*18');
+      const rate = rates.includes(Number(source?.rate)) ? Number(source.rate) : rates[0];
+      const item = { id: `local-${Date.now()}`, rate, label, enabled: true, ...parseTemplateLabel(label) };
+      applyTemplates([...templates, item]);
+      setPhoneTemplateId(item.id);
+    };
+    const removeTemplate = (id) => {
+      applyTemplates(templates.filter((template) => template.id !== id));
+      setPhoneTemplateId('');
+    };
+    const editedTemplate = templates.find((template) => template.id === phoneTemplateId) || null;
+    const editedTemplateParsed = editedTemplate ? parseTemplateLabel(editedTemplate.label) : null;
+
+    const summaryTiles = [
+      {
+        key: 'covered',
+        label: 'Покрыто',
+        value: `${formatFte(summary.roundedCoveredFteHours ?? summary.coveredFteHours)} FTE-ч`,
+        hint: `без округления ${formatNumber(summary.realCoveredFteHours ?? summary.coveredFteHours, 2)}`,
+      },
+      {
+        key: 'needed',
+        label: 'Нужно',
+        value: `${formatFte(summary.roundedNeededFteHours ?? summary.neededFteHours)} FTE-ч`,
+        hint: `без округления ${formatNumber(summary.realNeededFteHours ?? summary.neededFteHours, 2)}`,
+      },
+      {
+        key: 'uplift',
+        label: includeIncidentUplift ? 'Прирост учтен' : 'Риск прироста',
+        value: `+${formatNumber(displayedIncidentUpliftFteHours, 1)} FTE-ч`,
+        hint: includeIncidentUplift ? `база ${formatNumber(summary.baseRealNeededFteHours, 2)} FTE-ч` : 'не в основном графике',
+        tone: includeIncidentUplift ? 'emerald' : 'slate',
+      },
+      {
+        key: 'deficit',
+        label: 'Дефицит',
+        value: `${formatNumber(summary.deficitFteHours, 1)} FTE-ч`,
+        tone: Number(summary.deficitFteHours || 0) > 0.05 ? 'rose' : 'slate',
+      },
+      { key: 'coverage', label: 'Закрытие', value: `${formatNumber(summary.coveragePercent, 1)}%`, tone: 'emerald' },
+    ];
+
+    const coverageHours = activeDay?.coverage || [];
+    const auctionTotal = auctionClaimedCount + auctionAvailableCount;
+
+    return (
+      <div className="flex flex-col gap-5">
+        <RfPhonePeriodStepper
+          label="Период графика"
+          value={formatPhoneRange(periodStart, periodEnd)}
+          caption={hasScheduleToSave ? (hasUnsavedScheduleChanges ? 'Есть несохраненные изменения' : 'График сохранен') : null}
+          onPrev={() => shiftPeriod(-7)}
+          onNext={() => shiftPeriod(7)}
+          onOpen={() => setPhoneScreen('period')}
+          prevLabel="Неделя назад"
+          nextLabel="Неделя вперёд"
+        />
+
+        <button
+          type="button"
+          onClick={generatePreview}
+          disabled={isGenerating || !templates.length}
+          className={computedDays.length ? RF_PHONE_BUTTON.white : RF_PHONE_BUTTON.blue}
+        >
+          <Wand2 size={18} aria-hidden="true" />
+          {isGenerating ? 'Расчет…' : computedDays.length ? 'Сгенерировать заново' : 'Сгенерировать'}
+        </button>
+
+        {errorText ? <RfPhoneNote tone="rose">{errorText}</RfPhoneNote> : null}
+
+        <RfPhoneGroup>
+          <RfPhoneRow
+            title="Шаблоны смен"
+            value={`${enabledTemplates.length} из ${templates.length}`}
+            onClick={() => setPhoneScreen('templates')}
+            chevron
+          />
+          {enableShiftAuction && typeof onOpenShiftAuction === 'function' ? (
+            <RfPhoneRow
+              title="Аукцион смен"
+              onClick={() => onOpenShiftAuction({
+                dateFrom: selectedWeekStart || '',
+                dateTo: selectedPeriodEnd || selectedWeekStart || '',
+                direction: auctionDirectionFor(apiPrefix),
+              })}
+              chevron
+            />
+          ) : null}
+        </RfPhoneGroup>
+
+        {scheduleVariants.length ? (
+          <RfPhoneGroup>
+            <RfPhoneToggleRow
+              title="С учетом прироста"
+              subtitle={`+${formatNumber(displayedIncidentUpliftFteHours, 1)} FTE-ч${incidentUpliftAvailable ? '' : ' · прироста нет'}`}
+              toggle={(
+                <IosToggle
+                  checked={includeIncidentUplift}
+                  disabled={!incidentUpliftAvailable || isGenerating}
+                  onChange={switchIncidentUpliftMode}
+                />
+              )}
+            />
+            {visibleScheduleVariants.length > 1 ? (
+              <div className="rf-m-row px-3 py-2.5">
+                <div className="overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                  <IosSegmented
+                    value={selectedVariantKey}
+                    onChange={selectGeneratedVariant}
+                    ariaLabel="Вариант графика"
+                    options={visibleScheduleVariants.map((variant) => ({ value: variant.key, label: variant.label || variant.key }))}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </RfPhoneGroup>
+        ) : null}
+
+        {computedDays.length ? (
+          <>
+            <RfPhoneTiles items={summaryTiles} />
+
+            {serverSummary || capacityInfo?.rates?.length ? (
+              <RfPhoneGroup label="Расчет">
+                {serverSummary ? (
+                  <RfPhoneRow
+                    title="Исходный расчет"
+                    subtitle={`нужно ${formatFte(serverSummary.roundedNeededFteHours ?? serverSummary.neededFteHours)} · покрыто ${formatFte(serverSummary.roundedCoveredFteHours ?? serverSummary.coveredFteHours)} · перепокрытие ${formatNumber(serverSummary.overFteHours, 1)} FTE-ч`}
+                    value={`${formatNumber(serverSummary.coveragePercent, 1)}%`}
+                  />
+                ) : null}
+                {(capacityInfo?.rates || []).map((item) => {
+                  const overCapacity = Number(item.weeklyShiftsOverCapacity || 0);
+                  return (
+                    <RfPhoneRow
+                      key={item.rate}
+                      title={`Ставка ${formatFte(item.rate)}`}
+                      subtitle={`${Number(item.count || 0)} чел.${overCapacity > 0 ? ` · +${overCapacity} сверх ресурса` : ''}`}
+                      value={`${Number(item.weeklyShiftsUsed || 0)} / ${Number(item.weeklyShiftCapacity || 0)} смен`}
+                      valueClassName={overCapacity > 0 ? 'text-rose-600' : 'text-slate-500'}
+                    />
+                  );
+                })}
+              </RfPhoneGroup>
+            ) : null}
+
+            <RfPhoneSection label="Дни">
+              <RfPhoneDayStrip
+                ariaLabel="Дни графика"
+                onSelect={(item) => setSelectedDayIndex(item.index)}
+                days={displayDays.map((day, index) => ({
+                  key: day.date || String(index),
+                  index,
+                  top: formatPhoneWeekday(day.date) || day.short,
+                  main: formatPhoneShortDate(day.date).slice(0, 2),
+                  bottom: day.isCoverageProjection ? 'расчет' : `${formatNumber(day.stats?.coveragePercent, 0)}%`,
+                  active: index === activeDayIndex,
+                  accentClassName: '',
+                  style: index === activeDayIndex ? undefined : { backgroundColor: coverageDayCardStyle(day.stats).backgroundColor },
+                  ariaLabel: `${formatPhoneDayTitle(day.date)}: закрытие ${formatNumber(day.stats?.coveragePercent, 0)}%, дефицит ${formatNumber(day.stats?.deficitFteHours, 1)} FTE-ч`,
+                }))}
+              />
+            </RfPhoneSection>
+
+            {activeDay ? (
+              <>
+                <RfPhoneGroup
+                  label={formatPhoneDayTitle(activeDay.date) || activeDay.short}
+                  right={editableDay ? (
+                    <RfPhoneGroupAction label="Действия" onClick={() => setPhoneSheet('day')} />
+                  ) : null}
+                  hint={activeDay.isCoverageProjection ? 'Расчетный день следующей недели — только для просмотра.' : null}
+                >
+                  <RfPhoneRow
+                    title="Покрытие"
+                    subtitle={`без округления ${formatNumber(activeDay.stats?.realCoveredFteHours, 2)} / ${formatNumber(activeDay.stats?.realNeededFteHours, 2)} FTE-ч`}
+                    value={`${formatFte(activeDay.stats?.roundedCoveredFteHours ?? activeDay.stats?.coveredFteHours)} / ${formatFte(activeDay.stats?.roundedNeededFteHours ?? activeDay.stats?.neededFteHours)}`}
+                    valueClassName="font-semibold text-slate-900"
+                  />
+                  <RfPhoneRow
+                    title="Дефицит"
+                    value={`${formatNumber(activeDay.stats?.deficitFteHours, 1)} FTE-ч`}
+                    valueClassName={Number(activeDay.stats?.deficitFteHours || 0) > 0.05 ? 'text-rose-600' : 'text-slate-500'}
+                  />
+                </RfPhoneGroup>
+
+                {enableShiftAuction ? (
+                  <div className="flex flex-col gap-1.5">
+                    <IosSegmented
+                      value={coverageSource}
+                      onChange={setCoverageSource}
+                      stretch
+                      size="lg"
+                      ariaLabel="Источник покрытия"
+                      options={[
+                        { value: 'planner', label: 'Расписание' },
+                        { value: 'auction', label: auctionTotal > 0 ? `Аукцион ${auctionClaimedCount}/${auctionTotal}` : 'Аукцион' },
+                      ]}
+                    />
+                    {coverageSource === 'auction' ? (
+                      <p className="px-1 text-[13px] leading-snug text-slate-500">
+                        {auctionError
+                          ? <span className="text-rose-600">{auctionError}</span>
+                          : auctionLoading && !auctionLoadedAt
+                            ? 'Загружаю смены аукциона…'
+                            : auctionTotal > 0
+                              ? `Покрытие учитывает ${auctionClaimedCount} взятых смен${auctionAvailableCount > 0 ? `, ещё ${auctionAvailableCount} свободно` : ''}.`
+                              : 'В аукционе пока нет лотов.'}
+                        {' '}
+                        <button type="button" onClick={fetchAuctionLots} disabled={auctionLoading} className="font-semibold text-blue-600 disabled:opacity-50">
+                          {auctionLoading ? 'Обновляю…' : 'Обновить'}
+                        </button>
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {coverageHours.length ? (
+                  <RfPhoneSection label="Покрытие по часам" hint="В клетке — покрыто и сколько нужно, FTE">
+                    <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
+                      {coverageHours.map((row) => (
+                        <div
+                          key={row.hour}
+                          className="rounded-xl border px-1 py-1.5 text-center"
+                          style={coverageCellStyle(row)}
+                          aria-label={`${String(row.hour).padStart(2, '0')}:00 — покрыто ${formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))} из ${formatFte(row.needed || 0)}`}
+                        >
+                          {/* Покрыто — крупно, «из N» — строкой ниже: дробь «25,5/20,5» в
+                              клетку шестой части экрана не помещалась и рвалась посреди числа. */}
+                          <div className="text-[11px] tabular-nums opacity-70">{String(row.hour).padStart(2, '0')}</div>
+                          <div className="text-[15px] font-semibold leading-5 tabular-nums">
+                            {formatFte(row.coveredRounded ?? roundMathFte(row.covered || 0))}
+                          </div>
+                          <div className="whitespace-nowrap text-[11px] leading-4 tabular-nums opacity-80">из {formatFte(row.needed || 0)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </RfPhoneSection>
+                ) : null}
+
+                <RfPhoneGroup
+                  label={`Смены · ${dayShifts.length}`}
+                  right={editableDay && coverageSource !== 'auction' ? (
+                    <RfPhoneGroupAction label="Добавить" onClick={() => setPhoneScreen('add')} disabled={!enabledTemplates.length} />
+                  ) : null}
+                  hint={dayShifts.length ? null : 'Смен на этот день нет.'}
+                >
+                  {dayShifts.map((shift) => {
+                    const isAuctionShift = shift.source === 'auction';
+                    const locked = isAuctionShift || isLockedPlannerShift(shift);
+                    const phone = isPhoneShift(shift);
+                    const uplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
+                    const duration = Math.max(0, Number(shift.endMinute || 0) - Number(shift.startMinute || 0));
+                    let dotClass = 'bg-blue-500';
+                    // У сгенерированной смены подпись — то же время («07:00-16:00»):
+                    // повторять его под временем незачем, ставка говорит больше.
+                    const labelIsTime = /^\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}$/.test(String(shift.label || '').trim());
+                    const rateNote = Number(shift.rate) > 0 ? `ставка ${formatFte(shift.rate)}` : '';
+                    let note = labelIsTime ? rateNote : [shift.label, rateNote].filter(Boolean).join(' · ');
+                    if (isAuctionShift) {
+                      dotClass = shift.auctionStatus === 'claimed' ? (shift.isAdded ? 'bg-violet-500' : 'bg-emerald-500') : 'bg-slate-300';
+                      note = `${shift.auctionStatus === 'claimed' ? shift.claimedBy || 'Занято' : 'Свободно'}${shift.isAdded ? ` · доп., ${shift.addedBy || '—'}` : ''}`;
+                    } else if (phone) {
+                      dotClass = 'bg-emerald-600';
+                      note = 'телефонная, в расчет не входит';
+                    } else if (isLockedPlannerShift(shift)) {
+                      dotClass = 'bg-slate-400';
+                      note = [note, 'из графика работы'].filter(Boolean).join(' · ');
+                    } else if (uplift) {
+                      dotClass = 'bg-emerald-400';
+                      note = [note, 'под прирост'].filter(Boolean).join(' · ');
+                    }
+                    const canEdit = editableDay && !locked;
+                    return (
+                      <RfPhoneRow
+                        key={shift.id}
+                        leading={<span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dotClass}`} aria-hidden="true" />}
+                        title={shiftTimeLabel(shift)}
+                        strong
+                        subtitle={[formatDurationHours(duration), note].filter(Boolean).join(' · ')}
+                        onClick={canEdit ? () => openShiftEdit(shift) : null}
+                        chevron={canEdit}
+                      />
+                    );
+                  })}
+                </RfPhoneGroup>
+              </>
+            ) : null}
+          </>
+        ) : (
+          <RfPhoneEmpty
+            title="Графика на период нет"
+            text="Нажмите «Сгенерировать», чтобы построить смены по прогнозу периода."
+          />
+        )}
+
+        {/* Кнопка появляется, только когда есть что сохранять: «График сохранен»
+            висел бы поверх смен погашенной плашкой, а то же самое уже сказано
+            подписью под периодом. */}
+        {hasUnsavedScheduleChanges ? (
+          <div className="rf-m-savebar">
+            <button type="button" onClick={saveCurrentSchedule} disabled={!canSaveSchedule} className={RF_PHONE_BUTTON.blue}>
+              <Save size={18} aria-hidden="true" />
+              {isSavingSchedule ? 'Сохранение…' : 'Сохранить график'}
+            </button>
+          </div>
+        ) : null}
+
+        <MobileActionSheet
+          open={phoneSheet === 'day'}
+          onClose={() => setPhoneSheet('')}
+          actions={[
+            { key: 'undo', label: 'Отменить правку', disabled: !historyPast.length, onClick: () => { setPhoneSheet(''); undoPlannerChange(); } },
+            { key: 'redo', label: 'Вернуть правку', disabled: !historyFuture.length, onClick: () => { setPhoneSheet(''); redoPlannerChange(); } },
+            { key: 'sort', label: 'Сортировать смены', disabled: dayShifts.length < 2, onClick: () => { setPhoneSheet(''); sortSelectedDayShifts(); } },
+          ]}
+        />
+
+        <IosModal open={phoneScreen === 'period'} onClose={() => setPhoneScreen('')} title="Период графика" subtitle={phoneDayTone ? 'зелёный день — истории хватает' : null}>
+          <RfPhoneCalendar
+            startValue={periodStart}
+            endValue={periodEnd}
+            dayTone={phoneDayTone}
+            onRangeChange={(start, end) => {
+              if (typeof onPeriodChange === 'function') onPeriodChange(start, end);
+              else if (typeof onWeekStartChange === 'function') onWeekStartChange(start);
+              setPhoneScreen('');
+            }}
+          />
+        </IosModal>
+
+        <IosModal
+          open={phoneScreen === 'templates' || phoneScreen === 'template'}
+          onClose={() => setPhoneScreen('')}
+          onBack={phoneScreen === 'template' ? () => setPhoneScreen('templates') : null}
+          title={phoneScreen === 'template' ? (editedTemplate?.label || 'Шаблон') : 'Шаблоны смен'}
+          subtitle={phoneScreen === 'template' ? (editedTemplateParsed ? `${editedTemplateParsed.start}–${editedTemplateParsed.end}` : 'Формат: 8*17 или 9*15/30') : `Включено ${enabledTemplates.length} из ${templates.length}`}
+        >
+          {phoneScreen === 'template' && editedTemplate ? (
+            <div className="space-y-5">
+              <RfPhoneGroup hint={editedTemplateParsed ? `${formatDurationHours(editedTemplateParsed.durationMinutes)}${editedTemplateParsed.overnight ? ', до следующего дня' : ''}` : <span className="text-rose-600">Не разобрать время: пишите начало*конец, например 8*17 или 9*15/30</span>}>
+                <label className="rf-m-row flex w-full items-center gap-3 px-4 py-2">
+                  <span className="min-w-0 flex-1 text-[16px] text-slate-900">Шаблон</span>
+                  <input
+                    value={editedTemplate.label || ''}
+                    onChange={(event) => {
+                      const nextLabel = event.target.value;
+                      updateTemplate(editedTemplate.id, { label: nextLabel, ...(parseTemplateLabel(nextLabel) || {}) });
+                    }}
+                    className={`rf-m-input h-9 shrink-0 rounded-lg px-3 text-right text-[16px] font-semibold tabular-nums outline-none focus:ring-2 focus:ring-blue-500/60 ${editedTemplateParsed ? 'bg-slate-100 text-slate-900' : 'bg-rose-50 text-rose-700'}`}
+                  />
+                </label>
+                <RfPhoneSelectRow
+                  label="Ставка"
+                  value={String(editedTemplate.rate || 1)}
+                  options={rates.map((rate) => [String(rate), String(rate)])}
+                  onChange={(value) => updateTemplate(editedTemplate.id, { rate: Number(value) })}
+                />
+                <RfPhoneToggleRow
+                  title="Используется"
+                  toggle={<IosToggle checked={editedTemplate.enabled !== false} onChange={(checked) => updateTemplate(editedTemplate.id, { enabled: checked })} />}
+                />
+              </RfPhoneGroup>
+              <RfPhoneGroup>
+                <RfPhoneRow
+                  title={<span className="text-rose-600">Удалить шаблон</span>}
+                  onClick={() => {
+                    removeTemplate(editedTemplate.id);
+                    setPhoneScreen('templates');
+                  }}
+                />
+              </RfPhoneGroup>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {rates.map((rate) => {
+                const rateTemplates = templates.filter((template) => Number(template.rate) === Number(rate));
+                if (!rateTemplates.length) return null;
+                return (
+                  <RfPhoneGroup key={rate} label={`Ставка ${rate}`}>
+                    {rateTemplates.map((template) => {
+                      const parsed = parseTemplateLabel(template.label);
+                      return (
+                        <RfPhoneRow
+                          key={template.id}
+                          title={template.label || '—'}
+                          subtitle={parsed ? `${parsed.start}–${parsed.end} · ${formatDurationHours(parsed.durationMinutes)}` : 'Ошибка в шаблоне'}
+                          muted={template.enabled === false}
+                          onClick={() => {
+                            setPhoneTemplateId(template.id);
+                            setPhoneScreen('template');
+                          }}
+                          value={template.enabled === false ? 'выкл.' : null}
+                          chevron
+                        />
+                      );
+                    })}
+                  </RfPhoneGroup>
+                );
+              })}
+              <RfPhoneGroup>
+                <RfPhoneRow
+                  title={<span className="text-blue-600">Добавить шаблон</span>}
+                  onClick={() => {
+                    addTemplate();
+                    setPhoneScreen('template');
+                  }}
+                />
+                <RfPhoneRow
+                  title={<span className="text-blue-600">{isTemplatesLoading ? 'Загружаю…' : 'Загрузить шаблоны направления'}</span>}
+                  onClick={loadDefaultTemplates}
+                  disabled={isTemplatesLoading}
+                />
+                <RfPhoneRow title={<span className="text-rose-600">Сбросить к стандартным</span>} onClick={resetTemplates} />
+              </RfPhoneGroup>
+            </div>
+          )}
+        </IosModal>
+
+        <IosModal
+          open={phoneScreen === 'add'}
+          onClose={() => setPhoneScreen('')}
+          title="Добавить смену"
+          subtitle={activeDay ? formatPhoneDayTitle(activeDay.date) : ''}
+        >
+          <div className="space-y-5">
+            {rates.map((rate) => {
+              const rateTemplates = enabledTemplates.filter((template) => Number(template.rate) === Number(rate));
+              if (!rateTemplates.length) return null;
+              return (
+                <RfPhoneGroup key={rate} label={`Ставка ${rate}`}>
+                  {rateTemplates.map((template) => {
+                    const parsed = parseTemplateLabel(template.label);
+                    return (
+                      <RfPhoneRow
+                        key={template.id}
+                        title={parsed ? `${parsed.start}–${parsed.end}` : template.label}
+                        subtitle={`${template.label}${parsed ? ` · ${formatDurationHours(parsed.durationMinutes)}` : ''}`}
+                        onClick={() => {
+                          addShift(activeDayIndex, template.id);
+                          setPhoneScreen('');
+                        }}
+                      />
+                    );
+                  })}
+                </RfPhoneGroup>
+              );
+            })}
+            {phoneShiftsEnabled ? (
+              <RfPhoneGroup label="Телефонная смена" hint="Телефонные смены не входят в расчет ресурсов.">
+                {PHONE_SHIFT_MENU_ITEMS.map((item) => (
+                  <RfPhoneRow
+                    key={item.id}
+                    leading={<span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-600" aria-hidden="true" />}
+                    title={item.timeLabel}
+                    subtitle={item.durationLabel}
+                    onClick={() => {
+                      addShift(activeDayIndex, item.id, { phoneTemplate: item });
+                      setPhoneScreen('');
+                    }}
+                  />
+                ))}
+              </RfPhoneGroup>
+            ) : null}
+          </div>
+        </IosModal>
+
+        <IosModal
+          open={Boolean(phoneShiftEdit)}
+          onClose={() => setPhoneShiftEdit(null)}
+          title="Смена"
+          subtitle={editShown && plannerDays[editShown.dayIndex]
+            ? [formatPhoneDayTitle(plannerDays[editShown.dayIndex].date), Number(editShown.rate) > 0 ? `ставка ${formatFte(editShown.rate)}` : ''].filter(Boolean).join(' · ')
+            : ''}
+          footer={(
+            <button type="button" onClick={saveShiftEdit} disabled={!editRange?.valid} className={RF_PHONE_BUTTON.blue}>
+              Готово
+            </button>
+          )}
+        >
+          {editShown ? (
+            <div className="space-y-5">
+              <RfPhoneGroup
+                hint={editRange?.valid
+                  ? `${formatDurationHours(editRange.endMinute - editRange.startMinute)}${editRange.overnight ? ', до следующего дня' : ''}. Время округляется до 30 минут, перерывы расставятся заново.`
+                  : <span className="text-rose-600">{editRange?.error}</span>}
+              >
+                {[['start', 'Начало'], ['end', 'Конец']].map(([key, label]) => (
+                  <label key={key} className="rf-m-row flex w-full items-center gap-3 px-4 py-2">
+                    <span className="min-w-0 flex-1 text-[16px] text-slate-900">{label}</span>
+                    <input
+                      type="time"
+                      step={1800}
+                      value={editShown[key]}
+                      onChange={(event) => setPhoneShiftEdit((current) => (current ? { ...current, [key]: event.target.value } : current))}
+                      className="rf-m-input h-9 shrink-0 rounded-lg bg-slate-100 px-3 text-center text-[16px] font-semibold tabular-nums text-slate-900 outline-none focus:ring-2 focus:ring-blue-500/60"
+                    />
+                  </label>
+                ))}
+              </RfPhoneGroup>
+              <RfPhoneGroup>
+                <RfPhoneRow
+                  title={<span className="text-rose-600">Удалить смену</span>}
+                  onClick={() => {
+                    if (phoneShiftEdit) deleteShift(phoneShiftEdit.dayIndex, phoneShiftEdit.shiftId);
+                    setPhoneShiftEdit(null);
+                  }}
+                />
+              </RfPhoneGroup>
+            </div>
+          ) : null}
+        </IosModal>
+      </div>
+    );
+  }
 
   return (
     <div className={`space-y-4 ${hasScheduleToSave ? 'pb-24' : ''}`}>

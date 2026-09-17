@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus, Search } from 'lucide-react';
 import { iosCard, iosGroupLabel } from '../ui/ios';
 
 /*
@@ -618,3 +618,81 @@ export const AuctionPhoneGauge = ({ percent, tone = 'slate', text, ariaLabel }) 
     </div>
   );
 };
+
+/*
+ * Вкладки руководителя. Пять разделов («Настройки · Смены · Таблица · Прогресс ·
+ * Журнал») со счётчиками в сегментный переключатель на 358 px не помещались:
+ * подписи налезали друг на друга («Прогресс 3Журнал 16»). Здесь это ряд пилюль,
+ * который едет вбок; выбранная доезжает до середины экрана.
+ */
+export const AuctionPhoneTabs = ({ items = [], value, onChange, ariaLabel }) => {
+  const scrollRef = useRef(null);
+  useEffect(() => {
+    const strip = scrollRef.current;
+    const node = strip?.querySelector('[aria-selected="true"]');
+    if (!strip || !node) return;
+    strip.scrollLeft = Math.max(0, node.offsetLeft - (strip.clientWidth - node.offsetWidth) / 2);
+  }, [value]);
+  const visible = items.filter(Boolean);
+  if (!visible.length) return null;
+  return (
+    <div ref={scrollRef} role="tablist" aria-label={ariaLabel} className="sa-m-chips flex gap-2 overflow-x-auto" style={NO_WRAP}>
+      {visible.map((item) => {
+        const active = item.value === value;
+        return (
+          <button
+            key={item.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange?.(item.value)}
+            className={`flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-4 text-[15px] font-semibold transition ${
+              active ? 'bg-slate-900 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200/70'
+            }`}
+          >
+            {item.label}
+            {Number(item.count) > 0 ? (
+              <span className={`text-[13px] tabular-nums ${active ? 'text-white/60' : 'text-slate-400'}`}>{item.count}</span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
+/* Строка выбора с галочкой справа — участники аукциона, период, состав группы. */
+export const AuctionPhoneCheckRow = ({ title, subtitle = null, checked = false, onClick, badge = null, disabled = false }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    disabled={disabled}
+    aria-pressed={checked}
+    className="sa-m-row flex w-full items-center gap-3 px-4 py-2.5 text-left disabled:opacity-50"
+  >
+    <span className="min-w-0 flex-1">
+      <span className="block truncate text-[16px] text-slate-900">{title}</span>
+      {subtitle ? <span className="block truncate text-[13px] text-slate-500">{subtitle}</span> : null}
+    </span>
+    {/* Ширина стилем: общий слой разделов переписывает max-width у всего с «w-[» в классе. */}
+    {badge ? <span className="shrink-0 truncate rounded-md bg-slate-100 px-1.5 py-0.5 text-[12px] font-semibold text-slate-600" style={{ maxWidth: '40%' }}>{badge}</span> : null}
+    <span className="grid h-6 w-6 shrink-0 place-items-center text-blue-600" aria-hidden="true">
+      {checked ? <Check size={20} strokeWidth={2.5} /> : null}
+    </span>
+  </button>
+);
+
+/* Поле поиска — серая плашка со значком лупы, как в «Настройках» телефона.
+   16 px — порог, ниже которого iOS приближает страницу при фокусе. */
+export const AuctionPhoneSearch = ({ value, onChange, placeholder = 'Поиск' }) => (
+  <label className="flex h-10 w-full items-center gap-2 rounded-xl bg-slate-200/70 px-3">
+    <Search size={17} className="shrink-0 text-slate-500" aria-hidden="true" />
+    <input
+      type="search"
+      value={value}
+      onChange={(event) => onChange?.(event.target.value)}
+      placeholder={placeholder}
+      className="h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-[16px] text-slate-900 outline-none placeholder:text-slate-500"
+    />
+  </label>
+);

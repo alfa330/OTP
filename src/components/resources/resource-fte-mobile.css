@@ -1,0 +1,198 @@
+/* ── «Расчет ресурсов» и «Графики» на телефоне ─────────────────────────────
+
+   Разметка — ResourceFteMobile.jsx и ветки isMobileShell в ResourceFteView.jsx
+   и ResourceSchedulePlanner.jsx. Здесь только то, чего утилитами не сделать:
+   кегль заголовков поверх общего слоя, поля «от края до края», разделители
+   строк, закреплённая колонка таблиц и прозрачный системный список.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_resource_fte_mobile.py).
+
+   ВЕС. Общий слой разделов (mobile-shell.css) задаёт h1/h2/h3 внутри
+   .main-content весом (0,2,2) — заголовки раздела перебиваются правилом с
+   тремя классами. Своих цветов здесь нет: тёмный слой портала перекрашивает
+   утилиты Tailwind и переменные листов (--sheet-*), а hex из этого файла он не
+   видит. */
+
+body.mobile-shell .main-content .rf-m-root .rf-m-title {
+    font-size: 32px;
+    line-height: 38px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .main-content .rf-m-root .rf-m-card-title {
+    font-size: 17px;
+    line-height: 22px;
+    font-weight: 600;
+}
+
+/* Подпись группы — капитель 13 px, как «ОСНОВНЫЕ» в настройках телефона. */
+body.mobile-shell .main-content .rf-m-root .rf-m-group__label {
+    font-size: 13px;
+    line-height: 18px;
+    letter-spacing: 0.02em;
+}
+
+/* ── Ленты во всю ширину ── */
+
+/* Лента вкладок и полоса дней начинаются от поля страницы, а уезжают под край
+   экрана — иначе обрываются на 16 px от него. Отрицательное поле задано здесь,
+   а не классом -mx-*: общий слой разделов переписывает такие классы. */
+body.mobile-shell .rf-m-root .rf-m-bleed {
+    margin-inline: -16px;
+    padding-inline: 16px;
+}
+
+body.mobile-shell .rf-m-root .rf-m-bleed::-webkit-scrollbar,
+body.mobile-shell .rf-m-root .rf-m-table__scroll::-webkit-scrollbar {
+    display: none;
+}
+
+/* День в полосе — одной ширины, чтобы ряд не плясал от «9,5» к «275,66». */
+body.mobile-shell .rf-m-root .rf-m-day {
+    min-width: 64px;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Строки ── */
+
+body.mobile-shell .rf-m-root .rf-m-row {
+    position: relative;
+    min-height: 48px;
+}
+
+/* Разделитель отступает от левого края до текста — примета списка телефона. */
+body.mobile-shell .rf-m-root .rf-m-row + .rf-m-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep, rgba(60, 60, 67, 0.2));
+    pointer-events: none;
+}
+
+/* Числовое поле строки: ширина под «0,95» и «3600». Минимальная ширина — здесь,
+   а не утилитой min-w-[…]: общий слой обнуляет её у всех, кто её объявил. */
+body.mobile-shell .rf-m-root .rf-m-input {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 96px;
+    min-width: 96px;
+    font-size: 16px;
+}
+
+/* Системное поле времени шире числа: в нём ещё значок часов, и в 96 px от
+   «23:59» оставалось «23:5». */
+body.mobile-shell .rf-m-root .rf-m-input[type="time"] {
+    width: 120px;
+    min-width: 120px;
+}
+
+/* ── Системный список поверх подписи ──
+
+   Видна подпись со стрелкой, а поверх неё — прозрачный системный список (на
+   iOS это колесо). Вес выше, чем у .main-content select из mobile-motion.css
+   (0,2,2): иначе список получил бы рамку, поле и высоту 40 px. */
+body.mobile-shell .main-content .rf-m-root select.rf-m-wheel {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    opacity: 0;
+    font-size: 16px;
+}
+
+/* ── Графики ── */
+
+/* Касание графика выбирает день или час; серая вспышка поверх плота читается
+   как сбой отрисовки. */
+body.mobile-shell .rf-m-root .rf-m-chart {
+    -webkit-tap-highlight-color: transparent;
+}
+
+body.mobile-shell .rf-m-root .rf-m-chart .recharts-surface:focus,
+body.mobile-shell .rf-m-root .rf-m-chart .recharts-wrapper:focus {
+    outline: none;
+}
+
+/* ── Таблицы ── */
+
+/* Общий слой разделов обнуляет min-w-[…] у всех таблиц: двенадцать колонок
+   биллинга сжимались в ширину экрана, и числа ложились друг на друга. Здесь
+   таблица снова шире экрана и едет вбок внутри карточки. Два !important против
+   двух: решает вес, у общего правила он (0,2,1). */
+body.mobile-shell .main-content .rf-m-root .rf-m-table table {
+    width: max-content !important;
+    min-width: 100% !important;
+    font-size: 14px;
+}
+
+body.mobile-shell .main-content .rf-m-root .rf-m-table th,
+body.mobile-shell .main-content .rf-m-root .rf-m-table td {
+    padding: 9px 12px;
+    white-space: nowrap;
+}
+
+body.mobile-shell .main-content .rf-m-root .rf-m-table thead th {
+    font-size: 12px;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+/* Первая колонка — имя парка, час или оператор — стоит на месте, пока числа
+   едут вбок: без неё строку не отличить от соседней. Фон — переменная листа,
+   которую перекрашивает тёмный слой. */
+body.mobile-shell .main-content .rf-m-root .rf-m-table th:first-child,
+body.mobile-shell .main-content .rf-m-root .rf-m-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--sheet-card, rgb(255, 255, 255));
+    box-shadow: 0.5px 0 0 var(--sheet-sep, rgba(60, 60, 67, 0.2));
+}
+
+/* Шапка и строка итогов — одним серым полотном листа. У настольных таблиц на
+   них утилита bg-slate-50, а у закреплённой ячейки свой непрозрачный фон, и
+   первая колонка шапки выделялась бы тёмной плашкой. */
+body.mobile-shell .main-content .rf-m-root .rf-m-table thead,
+body.mobile-shell .main-content .rf-m-root .rf-m-table thead tr,
+body.mobile-shell .main-content .rf-m-root .rf-m-table thead th,
+body.mobile-shell .main-content .rf-m-root .rf-m-table thead th:first-child,
+body.mobile-shell .main-content .rf-m-root .rf-m-table tfoot tr,
+body.mobile-shell .main-content .rf-m-root .rf-m-table tfoot td,
+body.mobile-shell .main-content .rf-m-root .rf-m-table tfoot td:first-child {
+    background: var(--sheet-bg, rgb(242, 242, 247));
+}
+
+/* Объединённая ячейка комментария «Группировки» — не первая колонка, хотя в
+   строке, где она продолжается, первой ячейкой стоит час. */
+body.mobile-shell .main-content .rf-m-root .rf-m-table td[rowspan] {
+    position: static;
+    white-space: normal;
+    min-width: 200px;
+    box-shadow: none;
+}
+
+/* ── Сохранение графика ──
+
+   «Сохранить график» едет вместе с экраном над баром разделов: смены правят
+   внизу длинной страницы, и кнопка в начале графика оказывалась бы за
+   несколько экранов от правки. Липнет к НИЖНЕЙ грани (верхнюю занимает стекло
+   под часами iOS — к ней на телефоне ничего не прибиваем) и не выходит за
+   пределы планировщика: в конце страницы встаёт на своё место. */
+body.mobile-shell .rf-m-root .rf-m-savebar {
+    position: sticky;
+    bottom: calc(var(--mtb-lift-bottom, 0px) + 10px);
+    z-index: 20;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+}
