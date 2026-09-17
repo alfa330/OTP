@@ -3091,6 +3091,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_c2d_requests_client_phone
                 ON c2d_requests(client_phone);
             """)
+            # «Ответ внутри чата» для биллинга (задача #343): сколько раз оператор
+            # отвечал и среднее время между репликой клиента и ответом — колонки
+            # request_stats `replies` и `average_replies_time`, по которым сверяются
+            # супервайзеры. Среднее пишется только при replies > 0: ноль ответов —
+            # это «не отвечал», а не «ответил мгновенно». replies IS NULL — строка
+            # сохранена до появления колонок и ещё не пересинхронизирована.
+            cursor.execute("""
+                ALTER TABLE c2d_requests ADD COLUMN IF NOT EXISTS replies INTEGER;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_requests ADD COLUMN IF NOT EXISTS average_replies_time REAL;
+            """)
             # Снапшот переписки заявки: тянется из API один раз при выборе чата и
             # дальше служит источником и для оценки СВ, и для просмотра ЧМ — даже
             # если Chat2Desk удалит историю. Ретеншн 180 дней (~полгода).
@@ -24019,6 +24031,7 @@ class Database:
                 row.get('operator_id'),
                 row.get('incoming_messages'), row.get('outgoing_messages'),
                 row.get('rating_score'), row.get('rating_text'),
+                row.get('replies'), row.get('average_replies_time'),
             ))
         if not values:
             return 0
@@ -24029,7 +24042,8 @@ class Database:
                     reaction_time, request_type, transport, channel_id, channel_name,
                     client_id, client_name, client_phone, c2d_operator_id,
                     c2d_operator_name, operator_id, incoming_messages,
-                    outgoing_messages, rating_score, rating_text)
+                    outgoing_messages, rating_score, rating_text,
+                    replies, average_replies_time)
                 VALUES %s
                 ON CONFLICT (request_id) DO UPDATE SET
                     day = EXCLUDED.day,
@@ -24051,6 +24065,8 @@ class Database:
                     outgoing_messages = EXCLUDED.outgoing_messages,
                     rating_score = EXCLUDED.rating_score,
                     rating_text = EXCLUDED.rating_text,
+                    replies = EXCLUDED.replies,
+                    average_replies_time = EXCLUDED.average_replies_time,
                     synced_at = now()
             """, values)
         return len(values)

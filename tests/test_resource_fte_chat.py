@@ -493,7 +493,7 @@ class ChatSectionFrontendTests(unittest.TestCase):
         backend = _read(BACKEND)
         block = backend[backend.index("def api_resource_fte_chat_billing_export"):]
         block = block[:block.index("@app.route('/api/resource_fte/chat/day/")]
-        self.assertIn("mode not in ('park', 'operator', 'detail')", block)
+        self.assertIn("mode not in ('park', 'operator', 'detail', 'grouping')", block)
         self.assertIn("get_chat_billing_operators", block)
         self.assertNotIn("list(rows[0].keys())", block,
                          "заголовки Excel снова берутся из ключей словаря")

@@ -128,8 +128,20 @@ class BillingGroupingFrontendTests(unittest.TestCase):
                          ["park", "line", "operator", "detail", "grouping"])
         self.assertIn("{ key: 'grouping', label: 'Группировка' }", block)
 
-    def test_chat_billing_has_no_grouping(self):
-        self.assertNotIn("grouping", self._block("const CHAT_BILLING_MODES = [", "];"))
+    def test_chat_grouping_is_hourly_by_park_without_shifts(self):
+        # Задача #343: у чата своя «Группировка» — часы по всему чату или одному
+        # таксопарку. Смен и комментариев линии у неё нет, таблица — чатовая.
+        self.assertEqual(re.findall(r"key: '(\w+)'", self._block("const CHAT_BILLING_MODES = [", "];")),
+                         ["park", "operator", "detail", "grouping"])
+        self.assertIn('<ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode="grouping" />',
+                      self.source)
+        self.assertIn("billingMode === 'grouping' && !cfg.hasBillingTalkTime ? (", self.source)
+        self.assertIn("params.park = requestedPark", self.source)
+        self.assertIn("@app.route('/api/resource_fte/chat/billing_grouping', methods=['GET', 'OPTIONS'])",
+                      self.backend)
+        picker = self._block("{cfg.billing.groupingByPark && billingMode === 'grouping' ? (", ") : null}")
+        self.assertIn('variant="ios"', picker)
+        self.assertNotIn("<select", picker)
 
     def test_grouping_goes_to_its_own_routes_and_export(self):
         self.assertIn("${cfg.billing.endpoint}_grouping`", self.source)

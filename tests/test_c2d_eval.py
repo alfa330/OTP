@@ -132,6 +132,24 @@ class C2dEvalHelpersTests(unittest.TestCase):
         self.assertEqual(row["transport"], "wa_dialog")
         self.assertEqual(row["client_phone"], "77000000108")
 
+    def test_build_request_rows_inner_reply_time(self):
+        """«Ответ внутри чата» для биллинга — по правилу почасового отчёта и табло."""
+        build = self.ns["_chat2desk_build_request_rows"]
+        base = {"request_start": "2026-09-16 10:00:00", "operator_name": ""}
+        rows = build("2026-09-16", [
+            {**base, "request_id": 1, "replies": "2", "average_replies_time": "9",
+             "total_replies_time": "18"},
+            # Колонки среднего нет — считаем сами из суммы.
+            {**base, "request_id": 2, "replies": 4, "average_replies_time": None,
+             "total_replies_time": "50"},
+            # Ответов не было: ноль — это «не отвечал», а не «ответил мгновенно».
+            {**base, "request_id": 3, "replies": "0", "average_replies_time": "0"},
+            # Строка без колонок вовсе.
+            {**base, "request_id": 4},
+        ], self.lookup, self.index)
+        self.assertEqual([(r["replies"], r["average_replies_time"]) for r in rows],
+                         [(2, 9.0), (4, 12.5), (0, None), (None, None)])
+
     def test_build_request_rows_skips_and_unmatched(self):
         rows = self.ns["_chat2desk_build_request_rows"]("2026-07-16", [
             {"operator_name": "Кто-то", "request_start": "2026-07-16 10:00:00"},  # без request_id

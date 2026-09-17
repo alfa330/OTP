@@ -1907,10 +1907,17 @@ def get_chat_overview(db, week_start_value: Any = None,
 #
 # Колонки читаются так же, как на линии, только по-чатовому:
 #   Поступило → чатов; Обслужено → отвечено (reaction_time есть); Потеряно → без ответа;
-#   Ср. ожидание → средний первый ответ; AR → доля отвеченных;
-#   SL → доля первых ответов в пределах порога.
+#   Ср. ожидание → средняя первая реакция; SL → доля первых ответов в пределах порога.
 # Колонок «Ср. разговор», «Время разговора» и «Общее время» здесь НЕТ: это время
 # обработки, которого в чатовой модели быть не должно (см. шапку модуля).
+#
+# Задача #343 добавила то, по чему СЗоВ отчитывается перед таксопарками:
+#   Ср. время ответа — `average_replies_time` (время между репликой клиента и ответом
+#     оператора внутри чата), простое среднее по обращениям, где ответы были;
+#   Ср. оценка — `rating_score` водителя, простое среднее по оценённым обращениям.
+# Оценка привязана к обращению, то есть к дню и часу его НАЧАЛА — как и всё остальное в
+# биллинге. Официальная оценка чатника в «Учёте часов» раскладывается по времени самой
+# оценки и за вычетом необоснованных, поэтому за день может отличаться на единицы.
 
 CHAT_BILLING_MAX_RANGE_DAYS = 31
 CHAT_BILLING_SL_SECONDS_LIMITS = (1, 600)
@@ -1924,9 +1931,11 @@ CHAT_BILLING_NO_PARK = "Без парка"
 CHAT_BILLING_NO_TRANSPORT = "Без канала"
 
 # Счётчики сырые: доли и средние считает витрина, как у линии, — иначе одно и то же
-# число округлялось бы дважды и таблица не сходилась бы с итогом.
+# число округлялось бы дважды и таблица не сходилась бы с итогом. Средние за период
+# поэтому считаются по ОБРАЩЕНИЯМ всех дней (сумма / сколько), а не средним средних.
 CHAT_BILLING_METRICS = (
     "chats", "answered", "no_reply", "answered_sl", "first_reply_seconds",
+    "inner_reply_seconds", "inner_replied", "rating_sum", "rated",
 )
 CHAT_BILLING_OPERATOR_METRICS = CHAT_BILLING_METRICS + (
     "incoming_messages", "outgoing_messages",
@@ -1938,6 +1947,20 @@ _CHAT_BILLING_PARK_SQL = "COALESCE(NULLIF(r.channel_name, ''), '%s')" % CHAT_BIL
 _CHAT_BILLING_TRANSPORT_SQL = (
     "COALESCE(NULLIF(r.transport, ''), '%s')" % CHAT_BILLING_NO_TRANSPORT)
 _CHAT_BILLING_OPERATOR_SQL = "COALESCE(NULLIF(u.name, ''), NULLIF(r.c2d_operator_name, ''))"
+
+# Восемь агрегатов в порядке _chat_billing_metrics_row. Один %s — порог SL, поэтому
+# параметры запроса всегда начинаются с него.
+_CHAT_BILLING_METRICS_SQL = """
+    COUNT(*)::int,
+    COUNT(r.reaction_time)::int,
+    COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
+    COALESCE(SUM(r.reaction_time), 0)::float,
+    COALESCE(SUM(r.average_replies_time), 0)::float,
+    COUNT(r.average_replies_time)::int,
+    COALESCE(SUM(r.rating_score), 0)::float,
+    COUNT(r.rating_score)::int
+"""
+_CHAT_BILLING_METRICS_SQL_WIDTH = 8
 
 
 def _chat_billing_window(day_from: date, day_to: date,
@@ -1966,6 +1989,29 @@ def _chat_billing_merge(target: Dict[str, int], row: Dict[str, int],
         target[key] += row[key]
 
 
+def _chat_billing_metrics_row(values: Tuple[Any, ...]) -> Dict[str, Any]:
+    """Счётчики из восьми агрегатов _CHAT_BILLING_METRICS_SQL."""
+    (chats, answered, answered_sl, reply_sum,
+     inner_sum, inner_replied, rating_sum, rated) = values
+    chats = max(0, int(chats or 0))
+    answered = max(0, int(answered or 0))
+    return {
+        "chats": chats,
+        "answered": answered,
+        # «Потеряно» в чате — это чат, на который так и не ответили. Он не
+        # теряется, как звонок: он висит открытым, пока клиент ждёт.
+        "no_reply": max(0, chats - answered),
+        "answered_sl": max(0, int(answered_sl or 0)),
+        "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
+        "inner_reply_seconds": int(round(_to_float(inner_sum, 0.0))),
+        "inner_replied": max(0, int(inner_replied or 0)),
+        # Сумма оценок дробная не бывает, но колонка REAL — округляем, чтобы в
+        # ответ не уезжал хвост двоичной дроби.
+        "rating_sum": round(_to_float(rating_sum, 0.0), 4),
+        "rated": max(0, int(rated or 0)),
+    }
+
+
 def _chat_billing_rows_tx(cursor, day_from: date, day_to: date, minute_from: int,
                           minute_to: int, sl_seconds: int,
                           group_by: str) -> List[Tuple[Any, ...]]:
@@ -1977,10 +2023,7 @@ def _chat_billing_rows_tx(cursor, day_from: date, day_to: date, minute_from: int
         SELECT r.day,
                {_CHAT_BILLING_PARK_SQL} AS park,
                {transport_sql} AS transport_name,
-               COUNT(*)::int,
-               COUNT(r.reaction_time)::int,
-               COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
-               COALESCE(SUM(r.reaction_time), 0)::float
+               {_CHAT_BILLING_METRICS_SQL}
         FROM c2d_requests r
         WHERE {where}
         GROUP BY 1, 2, 3
@@ -2004,18 +2047,9 @@ def get_chat_billing_report(db, day_from: date, day_to: date, minute_from: int =
     days_map: Dict[str, Dict[Tuple[str, str], Dict[str, int]]] = {}
     parks_map: Dict[Tuple[str, str], Dict[str, int]] = {}
     totals = _chat_billing_blank(CHAT_BILLING_METRICS)
-    for day_value, park, transport_name, chats, answered, answered_sl, reply_sum in raw_rows:
-        chats = max(0, int(chats or 0))
-        answered = max(0, int(answered or 0))
-        row = {
-            "chats": chats,
-            "answered": answered,
-            # «Потеряно» в чате — это чат, на который так и не ответили. Он не
-            # теряется, как звонок: он висит открытым, пока клиент ждёт.
-            "no_reply": max(0, chats - answered),
-            "answered_sl": max(0, int(answered_sl or 0)),
-            "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
-        }
+    for raw in raw_rows:
+        day_value, park, transport_name = raw[:3]
+        row = _chat_billing_metrics_row(raw[3:3 + _CHAT_BILLING_METRICS_SQL_WIDTH])
         key = (str(park or ""), str(transport_name or "") if include_transport else "")
         day_key = day_value.isoformat()
         _chat_billing_merge(days_map.setdefault(day_key, {}).setdefault(
@@ -2061,10 +2095,7 @@ def get_chat_billing_operators(db, day_from: date, day_to: date, minute_from: in
             f"""
             SELECT r.day,
                    {_CHAT_BILLING_OPERATOR_SQL} AS operator_name,
-                   COUNT(*)::int,
-                   COUNT(r.reaction_time)::int,
-                   COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
-                   COALESCE(SUM(r.reaction_time), 0)::float,
+                   {_CHAT_BILLING_METRICS_SQL},
                    COALESCE(SUM(r.incoming_messages), 0)::int,
                    COALESCE(SUM(r.outgoing_messages), 0)::int
             FROM c2d_requests r
@@ -2080,16 +2111,12 @@ def get_chat_billing_operators(db, day_from: date, day_to: date, minute_from: in
     days_map: Dict[str, Dict[str, Dict[str, int]]] = {}
     operators_map: Dict[str, Dict[str, int]] = {}
     totals = _chat_billing_blank(CHAT_BILLING_OPERATOR_METRICS)
-    for (day_value, operator_name, chats, answered, answered_sl,
-         reply_sum, incoming, outgoing) in raw_rows:
-        chats = max(0, int(chats or 0))
-        answered = max(0, int(answered or 0))
+    for raw in raw_rows:
+        day_value, operator_name = raw[:2]
+        metrics_end = 2 + _CHAT_BILLING_METRICS_SQL_WIDTH
+        incoming, outgoing = raw[metrics_end:metrics_end + 2]
         row = {
-            "chats": chats,
-            "answered": answered,
-            "no_reply": max(0, chats - answered),
-            "answered_sl": max(0, int(answered_sl or 0)),
-            "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
+            **_chat_billing_metrics_row(raw[2:metrics_end]),
             "incoming_messages": max(0, int(incoming or 0)),
             "outgoing_messages": max(0, int(outgoing or 0)),
         }
@@ -2115,9 +2142,117 @@ def get_chat_billing_operators(db, day_from: date, day_to: date, minute_from: in
     return {"days": days, "operators": operators, "totals": totals}
 
 
+def _chat_billing_hour_blank() -> Dict[str, Any]:
+    return _chat_billing_blank(CHAT_BILLING_METRICS)
+
+
+def build_chat_billing_grouping(raw_rows: List[Tuple[Any, ...]], minute_from: int = 0,
+                                minute_to: int = 1439,
+                                park: Optional[str] = None) -> Dict[str, Any]:
+    """«Группировка» из строк (день, час, парк, восемь агрегатов).
+
+    `parks` — все таксопарки периода по убыванию объёма, независимо от выбранного:
+    по нему строится список выбора, и он не должен сжиматься до одного пункта.
+    Часы берутся все в окне времени, включая пустые, — как у линии: пропавшая
+    строка читается как «данных нет», а ноль чатов — это цифра.
+    """
+    first_hour = max(0, int(minute_from) // 60)
+    last_hour = min(23, int(minute_to) // 60)
+    selected = str(park or "").strip()
+
+    park_volume: Dict[str, int] = {}
+    days_map: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    totals = _chat_billing_hour_blank()
+    for raw in raw_rows:
+        day_value, hour_value, park_name = raw[:3]
+        try:
+            hour = int(hour_value)
+        except (TypeError, ValueError):
+            continue
+        if not first_hour <= hour <= last_hour or day_value is None:
+            continue
+        park_name = str(park_name or "")
+        row = _chat_billing_metrics_row(raw[3:3 + _CHAT_BILLING_METRICS_SQL_WIDTH])
+        park_volume[park_name] = park_volume.get(park_name, 0) + row["chats"]
+        if selected and park_name != selected:
+            continue
+        day_key = day_value.isoformat() if hasattr(day_value, "isoformat") else str(day_value)
+        target = days_map.setdefault(day_key, {}).setdefault(hour, _chat_billing_hour_blank())
+        _chat_billing_merge(target, row, CHAT_BILLING_METRICS)
+        _chat_billing_merge(totals, row, CHAT_BILLING_METRICS)
+
+    days = []
+    for day_key in sorted(days_map):
+        hours = [{"hour": hour, **days_map[day_key].get(hour, _chat_billing_hour_blank())}
+                 for hour in range(first_hour, last_hour + 1)]
+        day_totals = _chat_billing_hour_blank()
+        for item in hours:
+            _chat_billing_merge(day_totals, item, CHAT_BILLING_METRICS)
+        days.append({"date": day_key, "hours": hours, "totals": day_totals})
+
+    parks = [{"park": name, "chats": chats} for name, chats in park_volume.items()]
+    parks.sort(key=lambda item: (-item["chats"], item["park"]))
+    return {"days": days, "totals": totals, "parks": parks, "park": selected}
+
+
+def _chat_billing_grouping_rows_tx(cursor, day_from: date, day_to: date, minute_from: int,
+                                   minute_to: int, sl_seconds: int) -> List[Tuple[Any, ...]]:
+    """Строки (день x час начала x парк) за период — одним запросом на все парки."""
+    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    cursor.execute(
+        f"""
+        SELECT r.day,
+               EXTRACT(HOUR FROM r.request_start)::int AS hour,
+               {_CHAT_BILLING_PARK_SQL} AS park,
+               {_CHAT_BILLING_METRICS_SQL}
+        FROM c2d_requests r
+        WHERE {where}
+        GROUP BY 1, 2, 3
+        ORDER BY 1, 2, 3
+        """,
+        [int(sl_seconds)] + params,
+    )
+    return cursor.fetchall()
+
+
+def get_chat_billing_grouping(db, day_from: date, day_to: date, minute_from: int = 0,
+                              minute_to: int = 1439,
+                              sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS,
+                              park: Optional[str] = None) -> Dict[str, Any]:
+    """{days: [{date, hours, totals}], totals, parks, park} — день x час, весь чат или один парк."""
+    with db._get_cursor() as cursor:
+        raw_rows = _chat_billing_grouping_rows_tx(cursor, day_from, day_to, minute_from,
+                                                  minute_to, sl_seconds)
+    return build_chat_billing_grouping(raw_rows, minute_from, minute_to, park)
+
+
+def get_chat_billing_grouping_by_park(db, day_from: date, day_to: date, minute_from: int = 0,
+                                      minute_to: int = 1439,
+                                      sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS,
+                                      park: Optional[str] = None
+                                      ) -> List[Tuple[Optional[str], Dict[str, Any]]]:
+    """Отчёты для выгрузки: [(парк, отчёт)], где парк None — все таксопарки вместе.
+
+    Выбран парк — только он. Не выбран — сначала общий отчёт, за ним по отчёту на
+    каждый парк периода. Запрос в базу один: парки режутся из тех же строк.
+    """
+    with db._get_cursor() as cursor:
+        raw_rows = _chat_billing_grouping_rows_tx(cursor, day_from, day_to, minute_from,
+                                                  minute_to, sl_seconds)
+    selected = str(park or "").strip()
+    if selected:
+        return [(selected, build_chat_billing_grouping(raw_rows, minute_from, minute_to, selected))]
+    overall = build_chat_billing_grouping(raw_rows, minute_from, minute_to)
+    reports: List[Tuple[Optional[str], Dict[str, Any]]] = [(None, overall)]
+    for item in overall["parks"]:
+        reports.append((item["park"], build_chat_billing_grouping(
+            raw_rows, minute_from, minute_to, item["park"])))
+    return reports
+
+
 def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str, Any]:
-    (request_id, started_at, park, transport_name, client, operator_name,
-     reply_seconds, incoming, outgoing) = raw
+    (request_id, started_at, park, transport_name, client, client_number, operator_name,
+     reply_seconds, inner_reply_seconds, rating, incoming, outgoing) = raw
     answered = reply_seconds is not None
     return {
         "id": int(request_id or 0),
@@ -2125,8 +2260,14 @@ def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str,
         "park": str(park or ""),
         "transport": str(transport_name or ""),
         "client": str(client or ""),
+        # Номер отдельной колонкой: витрина и выгрузка давно показывали «Номер»,
+        # но сервер его не отдавал, и колонка всегда стояла пустой.
+        "client_number": str(client_number or ""),
         "operator": str(operator_name or ""),
         "first_reply_seconds": int(reply_seconds) if answered else None,
+        "inner_reply_seconds": (float(inner_reply_seconds)
+                                if inner_reply_seconds is not None else None),
+        "rating": float(rating) if rating is not None else None,
         "no_reply": 0 if answered else 1,
         "answered_sl": 1 if answered and int(reply_seconds) <= int(sl_seconds) else 0,
         "incoming_messages": max(0, int(incoming or 0)),
@@ -2139,9 +2280,12 @@ _CHAT_BILLING_DETAIL_SELECT = f"""
     r.request_start,
     {_CHAT_BILLING_PARK_SQL} AS park,
     {_CHAT_BILLING_TRANSPORT_SQL} AS transport_name,
-    COALESCE(NULLIF(r.client_name, ''), NULLIF(r.client_phone, ''), '') AS client,
+    COALESCE(NULLIF(r.client_name, ''), '') AS client,
+    COALESCE(NULLIF(r.client_phone, ''), '') AS client_number,
     COALESCE({_CHAT_BILLING_OPERATOR_SQL}, '') AS operator_name,
     r.reaction_time,
+    r.average_replies_time,
+    r.rating_score,
     r.incoming_messages,
     r.outgoing_messages
 """

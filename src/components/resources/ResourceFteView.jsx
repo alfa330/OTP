@@ -2,6 +2,14 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import axios from 'axios';
 import { createPortal } from 'react-dom';
 import ResourceSchedulePlanner from './ResourceSchedulePlanner';
+import CustomSelect from '../ui/CustomSelect';
+import {
+  chatBillingAverages,
+  chatBillingHourLabel,
+  formatChatBillingMinutes,
+  formatChatBillingMinutesUnit,
+  formatChatBillingRating,
+} from './chatBillingMetrics';
 import {
   BILLING_GROUPING_COLUMNS,
   BILLING_GROUPING_SHIFT_KEYS,
@@ -37,6 +45,7 @@ import {
   PhoneMissed,
   Plus,
   ShieldAlert,
+  Star,
   Target,
   Timer,
   TrendingUp,
@@ -1652,21 +1661,24 @@ const adaptChatDay = (day) => (day ? {
 // чате нет, поэтому колонок про длительность здесь тоже нет. Считаются объём
 // обращений и скорость первого ответа.
 
+// «Группировка» у чата — почасовая таблица дня по всему чату или по одному таксопарку
+// (задача #343). Смен и комментариев, как у линии, у неё нет: постановка про обращения.
 const CHAT_BILLING_MODES = [
   { key: 'park', label: 'Таксопарки' },
   { key: 'operator', label: 'Чатники' },
   { key: 'detail', label: 'Детализация' },
+  { key: 'grouping', label: 'Группировка' },
 ];
 
 // Порог «в цель» по умолчанию — тот же, что у ручки биллинга чата на сервере.
 const CHAT_BILLING_SL_DEFAULT_SECONDS = 60;
 
-// Средний первый ответ: сумма реакций делится на тех, кому ответили. Делить на
+// Средняя первая реакция: сумма реакций делится на тех, кому ответили. Делить на
 // все обращения нельзя — оставшиеся без ответа не имеют времени реакции вовсе.
-const chatBillingReplyLabel = (item) => {
-  const seconds = safeRatio(item?.first_reply_seconds, item?.answered);
-  return seconds === null ? '—' : formatDurationHms(seconds);
-};
+// Время в биллинге чата — только минуты (требование постановки #343).
+const chatBillingReplyLabel = (item) => formatChatBillingMinutesUnit(
+  chatBillingAverages(item).firstReplySeconds,
+);
 
 // Единственная доля, которая у чата есть, — SL. AR («доля отвеченных») отсюда
 // убрана: решение владельца 29.08.2026 — «AR такого понятия на чатах нет, так как
@@ -1680,29 +1692,45 @@ const chatBillingShareClass = billingSlClass;
 // Колонки таблицы обязаны идти ровно в том же порядке, что ячейки
 // renderMetricsCells ниже: заголовки и тело собираются раздельно, и разъехавшийся
 // список молча сдвинет подписи. Колонки «AR» здесь нет — см. комментарий выше.
+// Подсказки колонок — в title шапки: определение нужно тому, кто сверяет цифры,
+// а постоянной строкой под таблицей оно было бы шумом.
 const CHAT_BILLING_COLUMNS = [
   { key: 'chats', label: 'Поступило' },
   { key: 'answered', label: 'Обслужено' },
   { key: 'no_reply', label: 'Без ответа' },
-  { key: 'first_reply', label: 'Ср. первый ответ' },
+  { key: 'first_reply', label: 'Ср. первая реакция, мин', hint: 'От первого сообщения клиента до первого ответа оператора' },
   { key: 'sl', label: 'SL' },
+  { key: 'inner_reply', label: 'Ср. время ответа, мин', hint: 'Между сообщением клиента и ответом оператора внутри чата' },
+  { key: 'rating', label: 'Ср. оценка', hint: 'Оценка водителя после чата, по пятибалльной шкале' },
 ];
 
-const chatBillingRowKey = (item, mode) => (mode === 'operator'
-  ? String(item.operator || '')
-  : String(item.park || ''));
+const chatBillingRowKey = (item, mode) => {
+  if (mode === 'operator') return String(item.operator || '');
+  if (mode === 'grouping') return String(item.hour);
+  return String(item.park || '');
+};
+
+const chatBillingFirstCell = (item, mode) => {
+  if (mode === 'operator') return item.operator || '—';
+  if (mode === 'grouping') return chatBillingHourLabel(item.hour);
+  return billingParkLabel(item.park);
+};
 
 const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' }) => {
   const renderMetricsCells = (item) => {
-    const slRatio = safeRatio(item.answered_sl, item.chats);
+    const averages = chatBillingAverages(item);
     return (
       <>
         <td className="px-3 py-2.5 text-right font-semibold text-slate-900">{formatInt(item.chats)}</td>
         <td className="px-3 py-2.5 text-right text-emerald-700">{formatInt(item.answered)}</td>
         <td className="px-3 py-2.5 text-right text-rose-600">{formatInt(item.no_reply)}</td>
-        <td className="px-3 py-2.5 text-right text-slate-700">{chatBillingReplyLabel(item)}</td>
-        <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(slRatio)}`}>
-          {slRatio === null ? '—' : formatPercent(slRatio, 1)}
+        <td className="px-3 py-2.5 text-right text-slate-700">{formatChatBillingMinutes(averages.firstReplySeconds)}</td>
+        <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(averages.sl)}`}>
+          {averages.sl === null ? '—' : formatPercent(averages.sl, 1)}
+        </td>
+        <td className="px-3 py-2.5 text-right text-slate-700">{formatChatBillingMinutes(averages.innerReplySeconds)}</td>
+        <td className="px-3 py-2.5 text-right text-slate-700" title={averages.rating === null ? undefined : `Оценок: ${formatInt(item.rated)}`}>
+          {formatChatBillingRating(averages.rating)}
         </td>
       </>
     );
@@ -1710,24 +1738,24 @@ const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'pa
 
   const firstColumnLabel = mode === 'operator'
     ? 'Чатник'
-    : 'Таксопарк';
+    : mode === 'grouping' ? 'Час' : 'Таксопарк';
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] divide-y divide-slate-200 text-sm tabular-nums">
+      <table className="w-full min-w-[980px] divide-y divide-slate-200 text-sm tabular-nums">
         <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2.5 text-left font-semibold">{firstColumnLabel}</th>
             {CHAT_BILLING_COLUMNS.map((column) => (
-              <th key={column.key} className="px-3 py-2.5 text-right font-semibold">{column.label}</th>
+              <th key={column.key} className="px-3 py-2.5 text-right font-semibold" title={column.hint}>{column.label}</th>
             ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {rows.map((item) => (
             <tr key={chatBillingRowKey(item, mode)} className="transition hover:bg-slate-50/70">
-              <td className="px-3 py-2.5 font-medium text-slate-900">
-                {mode === 'operator' ? (item.operator || '—') : billingParkLabel(item.park)}
+              <td className={`whitespace-nowrap px-3 py-2.5 font-medium ${mode === 'grouping' && !item.chats ? 'text-slate-400' : 'text-slate-900'}`}>
+                {chatBillingFirstCell(item, mode)}
               </td>
               {renderMetricsCells(item)}
             </tr>
@@ -1753,7 +1781,7 @@ const ChatBillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) 
 
 const ChatBillingDetailTable = ({ rows }) => (
   <div className="overflow-x-auto">
-    <table className="w-full min-w-[980px] divide-y divide-slate-200 text-sm tabular-nums">
+    <table className="w-full min-w-[1180px] divide-y divide-slate-200 text-sm tabular-nums">
       <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
         <tr>
           <th className="px-3 py-2.5 text-left font-semibold">Дата</th>
@@ -1761,8 +1789,10 @@ const ChatBillingDetailTable = ({ rows }) => (
           <th className="px-3 py-2.5 text-left font-semibold">Номер</th>
           <th className="px-3 py-2.5 text-left font-semibold">Клиент</th>
           <th className="px-3 py-2.5 text-left font-semibold">Чатник</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="Время до первого ответа оператора">Первый ответ</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="Первый ответ уложился в цель">В цель</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="От первого сообщения клиента до первого ответа оператора">Первая реакция, мин</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Первая реакция уложилась в цель">В цель</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Между сообщением клиента и ответом оператора внутри чата">Время ответа, мин</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Оценка водителя после чата">Оценка</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100">
@@ -1770,15 +1800,15 @@ const ChatBillingDetailTable = ({ rows }) => (
           <tr key={item.id} className="transition hover:bg-slate-50/70">
             <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{billingOccurredAtLabel(item.started_at)}</td>
             <td className="px-3 py-2.5 font-medium text-slate-900">{billingParkLabel(item.park)}</td>
-            <td className="px-3 py-2.5 text-slate-700">{item.client_number || '—'}</td>
+            {/* Номер как у Chat2Desk: среди водителей есть иностранные, и приведение
+                к «8 + 10 цифр», как у линии, исказило бы их. */}
+            <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{item.client_number || '—'}</td>
             <td className="px-3 py-2.5 text-slate-700">{item.client || '—'}</td>
             <td className="px-3 py-2.5 text-slate-700">{item.operator || '—'}</td>
-            <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium text-slate-900">
-              {item.first_reply_seconds === null || item.first_reply_seconds === undefined
-                ? '—'
-                : formatDurationHms(item.first_reply_seconds)}
-            </td>
+            <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium text-slate-900">{formatChatBillingMinutes(item.first_reply_seconds)}</td>
             <td className="px-3 py-2.5 text-right text-emerald-700">{Number(item.answered_sl) > 0 ? '1' : '—'}</td>
+            <td className="whitespace-nowrap px-3 py-2.5 text-right text-slate-700">{formatChatBillingMinutes(item.inner_reply_seconds)}</td>
+            <td className="px-3 py-2.5 text-right text-slate-700">{item.rating === null || item.rating === undefined ? '—' : formatNumber(item.rating, 0)}</td>
           </tr>
         ))}
       </tbody>
@@ -1860,31 +1890,41 @@ const CHAT_DIRECTION = {
     slDefaultSeconds: CHAT_BILLING_SL_DEFAULT_SECONDS,
     arClass: chatBillingShareClass,
     title: 'Биллинг чатов',
-    text: 'Обращения из базы: объём и скорость первого ответа по дням за выбранный период и окно времени.',
+    text: 'Обращения из базы: объём, скорость ответа и оценки водителей по дням за выбранный период и окно времени.',
     loadingText: 'Собираем обращения...',
     errorText: 'Не удалось получить данные по обращениям',
     detailTitle: 'Детализация обращений',
-    detailNote: 'Одна строка — одно обращение; «первый ответ» — время реакции оператора, «в цель» — попадание в порог.',
+    detailNote: 'Одна строка — одно обращение; время — в минутах, «в цель» — первая реакция уложилась в порог.',
+    // «Группировка» чата строится по всему чату или по одному таксопарку: выбор
+    // парка стоит рядом с разрезами, и выгрузка слушает его.
+    groupingByPark: true,
     emptyText: 'За выбранный период и окно времени обращений не нашлось.',
     idleText: 'Отчёт соберётся сам. Чтобы сменить период или окно времени, задайте их сверху и нажмите «Сформировать».',
     summaryTitle: (mode) => (mode === 'operator'
       ? 'Итоги за период по чатникам'
       : 'Итоги за период по таксопаркам'),
     daySummary: (mode, day) => (mode === 'operator'
-      ? `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. первый ответ ${chatBillingReplyLabel(day.totals)}`
+      ? `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. первая реакция ${chatBillingReplyLabel(day.totals)}`
       : `Поступило ${formatInt(day.totals?.chats)} · Обслужено ${formatInt(day.totals?.answered)} · Без ответа ${formatInt(day.totals?.no_reply)}`),
     modeHint: (mode, slSeconds) => {
-      const sl = `SL — доля обращений, где первый ответ уложился в ≤ ${slSeconds} сек, от всех поступивших`;
+      const sl = `SL — доля обращений, где первая реакция уложилась в ≤ ${slSeconds} сек, от всех поступивших`;
       if (mode === 'detail') return 'Одна строка — одно обращение; на странице 25 строк';
       // «Поступило» в этом разрезе меньше, чем в «Таксопарках», и это не ошибка:
       // ручка отбрасывает чаты без привязки к человеку (chat.py, WHERE … operator
       // IS NOT NULL). Раньше расхождение висело на экране без единого слова.
       if (mode === 'operator') return `${sl}. Считаются только обращения, привязанные к чатнику, поэтому «Поступило» здесь меньше, чем по таксопаркам`;
+      if (mode === 'grouping') return `${sl}. Час — по началу обращения`;
       return sl;
     },
-    // Разрез в имени файла: выгрузка теперь слушает mode, и три разных отчёта
-    // за один период не должны ложиться в папку под одним именем.
-    exportFileName: (mode, applied) => `chat_billing_${mode}_${applied.from}_${applied.to}.xlsx`,
+    // Разрез в имени файла: выгрузка теперь слушает mode, и разные отчёты за один
+    // период не должны ложиться в папку под одним именем. У «Группировки» по одному
+    // таксопарку в имени ещё и парк — файлы по паркам уходят по отдельности.
+    exportFileName: (mode, applied, park) => {
+      const parkPart = mode === 'grouping' && park
+        ? `_${String(park).replace(/[\\/:*?"<>|]+/g, ' ').trim()}`
+        : '';
+      return `chat_billing_${mode}${parkPart}_${applied.from}_${applied.to}.xlsx`;
+    },
   },
   ...CHAT_TELEPHONY_OFF,
   // Единственное исключение из набора выше: вкладка биллинга у чата своя — те же
@@ -3221,6 +3261,12 @@ const ResourceFteView = ({
   // Открытый редактор комментария «Группировки»: день, отрезок часов и ячейка-якорь.
   const [billingCommentEditor, setBillingCommentEditor] = useState(null);
   const [isBillingCommentSaving, setIsBillingCommentSaving] = useState(false);
+  // «Группировка» чата: выбранный таксопарк ('' — все) и список парков периода.
+  // Список живёт отдельно от отчёта: пока отчёт по новому парку грузится, выбор
+  // не должен схлопываться до пустого.
+  const [billingGroupingPark, setBillingGroupingPark] = useState('');
+  const [billingGroupingParks, setBillingGroupingParks] = useState([]);
+  const billingGroupingParkRef = useRef('');
   const billingAttemptedRef = useRef({});
   // Метки актуальности загрузок. Быстрый перещёлк периода держит в полёте
   // несколько запросов, и поздний ответ на РАННИЙ запрос затирал свежие данные.
@@ -3399,9 +3445,20 @@ const ResourceFteView = ({
       } else if (targetMode === 'park' || targetMode === 'line') {
         params.group_by = targetMode;
       }
+      const requestedPark = targetMode === 'grouping' && cfg.billing.groupingByPark ? billingGroupingPark : '';
+      if (requestedPark) params.park = requestedPark;
       const response = await axios.get(endpoint, { params, headers: buildHeaders() });
       const payload = response.data || {};
+      // Парк сменили, пока шёл запрос: ответ про прежний парк отбрасываем. Загрузка
+      // снимется в finally, и эффект запросит отчёт по новому выбору.
+      if (targetMode === 'grouping' && requestedPark !== billingGroupingParkRef.current) {
+        billingAttemptedRef.current.grouping = undefined;
+        return;
+      }
       setBillingReports((current) => ({ ...current, [targetMode]: payload }));
+      if (targetMode === 'grouping' && Array.isArray(payload.parks)) {
+        setBillingGroupingParks(payload.parks);
+      }
       if (targetMode === 'detail') {
         setBillingDetailPage(Math.max(1, Number(payload.pagination?.page || page)));
       } else {
@@ -3409,13 +3466,30 @@ const ResourceFteView = ({
         setBillingExpandedDays(new Set(dayKeys.length <= 3 ? dayKeys : []));
       }
     } catch (error) {
+      if (targetMode === 'grouping' && cfg.billing.groupingByPark
+        && billingGroupingPark !== billingGroupingParkRef.current) {
+        billingAttemptedRef.current.grouping = undefined;
+        return;
+      }
       setBillingReports((current) => ({ ...current, [targetMode]: null }));
       const message = error?.response?.data?.error || cfg.billing.errorText;
       setBillingErrors((current) => ({ ...current, [targetMode]: message }));
     } finally {
       setIsBillingLoading(false);
     }
-  }, [apiRoot, billingApplied, billingAppliedKey, buildHeaders, cfg]);
+  }, [apiRoot, billingApplied, billingAppliedKey, billingGroupingPark, buildHeaders, cfg]);
+
+  // Смена таксопарка перезапрашивает только «Группировку»: остальные разрезы от
+  // парка не зависят, и их уже загруженные отчёты остаются.
+  const selectBillingGroupingPark = useCallback((park) => {
+    const next = String(park || '');
+    if (next === billingGroupingPark) return;
+    billingGroupingParkRef.current = next;
+    billingAttemptedRef.current.grouping = undefined;
+    setBillingGroupingPark(next);
+    setBillingReports((current) => ({ ...current, grouping: null }));
+    setBillingErrors((current) => ({ ...current, grouping: '' }));
+  }, [billingGroupingPark]);
 
   const buildBillingReport = useCallback(() => {
     billingAttemptedRef.current = {};
@@ -3438,6 +3512,9 @@ const ResourceFteView = ({
           time_to: billingApplied.timeTo,
           mode: billingMode,
           report_type: billingExportType,
+          ...(billingMode === 'grouping' && cfg.billing.groupingByPark && billingGroupingPark
+            ? { park: billingGroupingPark }
+            : {}),
         },
         headers: buildHeaders(),
         responseType: 'blob',
@@ -3447,7 +3524,7 @@ const ResourceFteView = ({
       link.href = url;
       link.download = billingExportType === 'efficiency'
         ? `operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx`
-        : cfg.billing.exportFileName(billingMode, billingApplied);
+        : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -3464,7 +3541,7 @@ const ResourceFteView = ({
     } finally {
       setIsBillingExporting(false);
     }
-  }, [apiRoot, billingApplied, billingExportType, billingMode, buildHeaders, cfg, notify]);
+  }, [apiRoot, billingApplied, billingExportType, billingGroupingPark, billingMode, buildHeaders, cfg, notify]);
 
   const saveBillingGroupingComment = useCallback(async ({ hourFrom, hourTo, comment }) => {
     const editor = billingCommentEditor;
@@ -3574,7 +3651,17 @@ const ResourceFteView = ({
   // кому ответили. Времени разговора и обработки в чатовой модели нет.
   const billingChatArRatio = billingTotals ? safeRatio(billingTotals.answered, billingTotals.chats) : null;
   const billingChatSlRatio = billingTotals ? safeRatio(billingTotals.answered_sl, billingTotals.chats) : null;
-  const billingChatReplySeconds = billingTotals ? safeRatio(billingTotals.first_reply_seconds, billingTotals.answered) : null;
+  const billingChatAverages = chatBillingAverages(billingTotals || {});
+  // Выбор таксопарка «Группировки»: парки периода по объёму, а выбранный — даже если
+  // в новом периоде его нет, иначе поле показало бы пустоту вместо выбора.
+  const billingGroupingParkOptions = useMemo(() => {
+    const names = billingGroupingParks.map((item) => String(item.park || ''));
+    if (billingGroupingPark && !names.includes(billingGroupingPark)) names.push(billingGroupingPark);
+    return [
+      { value: '', label: 'Все таксопарки' },
+      ...names.map((name) => ({ value: name, label: billingParkLabel(name) })),
+    ];
+  }, [billingGroupingPark, billingGroupingParks]);
   const billingSlSeconds = billingReport?.sl_threshold_seconds ?? cfg.billing.slDefaultSeconds;
   // Таблицы биллинга у направлений свои: у чата в них нет колонок о длительности.
   const BillingSummaryTable = cfg.hasBillingTalkTime ? BillingTable : ChatBillingTable;
@@ -5824,21 +5911,36 @@ const ResourceFteView = ({
                 </div>
               </div>
               <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="inline-flex max-w-full w-fit shrink-0 overflow-x-auto rounded-xl bg-slate-100 p-1">
-                  {cfg.billing.modes.map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      onClick={() => setBillingMode(item.key)}
-                      className={`h-9 rounded-lg px-4 text-sm font-semibold transition ${
-                        billingMode === item.key
-                          ? 'bg-white text-slate-950 shadow-sm'
-                          : 'text-slate-500 hover:text-slate-800'
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+                {/* Не сжимается: рядом длинная подсказка, и сжатая обёртка резала
+                    последнюю вкладку переключателя («Группиров…»). */}
+                <div className="flex shrink-0 flex-wrap items-center gap-3">
+                  <div className="inline-flex max-w-full w-fit shrink-0 overflow-x-auto rounded-xl bg-slate-100 p-1">
+                    {cfg.billing.modes.map((item) => (
+                      <button
+                        key={item.key}
+                        type="button"
+                        onClick={() => setBillingMode(item.key)}
+                        className={`h-9 rounded-lg px-4 text-sm font-semibold transition ${
+                          billingMode === item.key
+                            ? 'bg-white text-slate-950 shadow-sm'
+                            : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                  {cfg.billing.groupingByPark && billingMode === 'grouping' ? (
+                    <CustomSelect
+                      variant="ios"
+                      value={billingGroupingPark}
+                      onChange={selectBillingGroupingPark}
+                      options={billingGroupingParkOptions}
+                      disabled={isBillingLoading}
+                      ariaLabel="Таксопарк группировки"
+                      className="w-full sm:w-[240px]"
+                    />
+                  ) : null}
                 </div>
                 <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                   <span className="tabular-nums">{billingPeriodDays > 0 ? `${billingPeriodDays} дн. · ${formatDate(billingFrom)} — ${formatDate(billingTo)}` : 'Период не выбран'}</span>
@@ -5882,33 +5984,53 @@ const ResourceFteView = ({
             ) && (
               <>
                 {billingMode !== 'detail' && (!cfg.hasBillingTalkTime ? (
-                  // Пять карточек, а не шесть: AR у чата нет (см. chatBillingShareClass).
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-                    <StatCard icon={MessageSquare} label="Поступило" value={formatInt(billingTotals.chats)} hint="Обращения за период" tone="blue" />
-                    <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.answered)} hint="Получили ответ оператора" tone="emerald" />
-                    <StatCard
-                      icon={ShieldAlert}
-                      label="Без ответа"
-                      value={formatInt(billingTotals.no_reply)}
-                      // Не «Потеряно»: обращение никуда не девается, оно висит открытым,
-                      // пока клиент не получит ответ. Терять в чате нечего.
-                      hint="Ни одной реплики оператора"
-                      tone="rose"
-                    />
-                    <StatCard
-                      icon={Clock3}
-                      label="Ср. первый ответ"
-                      value={billingChatReplySeconds === null ? '—' : formatDurationHms(billingChatReplySeconds)}
-                      hint="По обращениям, где ответ был"
-                      tone="slate"
-                    />
-                    <StatCard
-                      icon={TrendingUp}
-                      label="SL"
-                      value={billingChatSlRatio === null ? '—' : formatPercent(billingChatSlRatio, 1)}
-                      hint={`Первый ответ за ≤ ${billingSlSeconds} сек от поступивших`}
-                      tone={billingChatSlRatio !== null && billingChatSlRatio >= 0.8 ? 'emerald' : billingChatSlRatio !== null && billingChatSlRatio >= 0.6 ? 'amber' : 'rose'}
-                    />
+                  // AR у чата нет (см. chatBillingShareClass). Семь карточек — двумя полными
+                  // рядами: объём и скорость с оценкой. Одной сеткой седьмая осталась бы
+                  // одна в ряду, а пустая ячейка читается как «сюда что-то не приехало».
+                  <div className="space-y-3">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <StatCard icon={MessageSquare} label="Поступило" value={formatInt(billingTotals.chats)} hint="Обращения за период" tone="blue" />
+                      <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.answered)} hint="Получили ответ оператора" tone="emerald" />
+                      <StatCard
+                        icon={ShieldAlert}
+                        label="Без ответа"
+                        value={formatInt(billingTotals.no_reply)}
+                        // Не «Потеряно»: обращение никуда не девается, оно висит открытым,
+                        // пока клиент не получит ответ. Терять в чате нечего.
+                        hint="Ни одной реплики оператора"
+                        tone="rose"
+                      />
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <StatCard
+                        icon={Clock3}
+                        label="Ср. первая реакция"
+                        value={formatChatBillingMinutesUnit(billingChatAverages.firstReplySeconds)}
+                        hint="До первого ответа оператора"
+                        tone="slate"
+                      />
+                      <StatCard
+                        icon={TrendingUp}
+                        label="SL"
+                        value={billingChatSlRatio === null ? '—' : formatPercent(billingChatSlRatio, 1)}
+                        hint={`Первая реакция за ≤ ${billingSlSeconds} сек от поступивших`}
+                        tone={billingChatSlRatio !== null && billingChatSlRatio >= 0.8 ? 'emerald' : billingChatSlRatio !== null && billingChatSlRatio >= 0.6 ? 'amber' : 'rose'}
+                      />
+                      <StatCard
+                        icon={Timer}
+                        label="Ср. время ответа"
+                        value={formatChatBillingMinutesUnit(billingChatAverages.innerReplySeconds)}
+                        hint="Между сообщением клиента и ответом"
+                        tone="slate"
+                      />
+                      <StatCard
+                        icon={Star}
+                        label="Ср. оценка"
+                        value={formatChatBillingRating(billingChatAverages.rating)}
+                        hint={Number(billingTotals.rated) > 0 ? `Оценок водителей: ${formatInt(billingTotals.rated)}` : 'Оценок за период нет'}
+                        tone="slate"
+                      />
+                    </div>
                   </div>
                 ) : billingMode === 'operator' ? (
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
@@ -6089,6 +6211,8 @@ const ResourceFteView = ({
                               <div className="border-t border-slate-100">
                                 {billingMode === 'operator' ? (
                                   <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
+                                ) : billingMode === 'grouping' && !cfg.hasBillingTalkTime ? (
+                                  <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode="grouping" />
                                 ) : billingMode === 'grouping' ? (
                                   <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />
                                 ) : (
