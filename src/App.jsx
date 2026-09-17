@@ -16915,6 +16915,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [currentDate]);
 
             const visibleRange = useMemo(() => (viewMode === 'day' ? dayRange : viewMode === 'week' ? weekRange : monthRange), [viewMode, dayRange, weekRange, monthRange]);
+            /* Сколько смен стоит на каждый день периода — по тем же отфильтрованным
+               людям, что и строки сетки. Смена относится к дню своего начала: ночная
+               20:00 — 02:00 считается один раз, как и в ячейках недели и месяца. */
+            const plannerShiftCountByDate = useMemo(() => {
+                const counts = new Map();
+                visibleRange.forEach(d => {
+                    counts.set(d, filteredOperators.reduce((acc, op) => {
+                        const dayShifts = op?.shifts?.[d];
+                        return acc + (Array.isArray(dayShifts) ? dayShifts.length : 0);
+                    }, 0));
+                });
+                return counts;
+            }, [filteredOperators, visibleRange]);
             const plannerStatusFetchRange = useMemo(() => {
                 const normalizedVisibleDays = (Array.isArray(visibleRange) ? visibleRange : [])
                     .map(day => String(day || '').trim())
@@ -29681,24 +29694,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className="w-64 sticky left-0 top-0 z-10 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
                                 <div className="flex-1" style={{ overflow: 'visible' }}>
                                 <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
-                                    {visibleRange.map(d => (
+                                    {visibleRange.map(d => {
+                                    const dayShiftCount = plannerShiftCountByDate.get(d) || 0;
+                                    // Ноль не пишем: пустой день и так виден по прочеркам в ячейках.
+                                    const dayShiftCountBadge = dayShiftCount > 0 ? (
+                                        <span
+                                            className="shrink-0 text-xs font-normal text-slate-400 tabular-nums"
+                                            data-schedule-tooltip={`Смен в этот день с учётом фильтров: ${dayShiftCount}`}
+                                        >
+                                            {dayShiftCount}
+                                        </span>
+                                    ) : null;
+                                    return (
                                     <div
                                         key={d}
                                         className="text-center text-sm font-medium border rounded p-1 bg-white border-slate-300 cursor-pointer hover:border-slate-500 hover:shadow-sm"
                                         style={viewMode === 'day' ? {flex:1} : {minWidth: cellMinWidth, width: cellMinWidth, flex: '0 0 auto'}}
                                     >
                                         {viewMode === 'day' ? (
-                                        d
+                                        <div className="flex items-baseline justify-center gap-2">
+                                            <span>{d}</span>
+                                            {dayShiftCountBadge}
+                                        </div>
                                         ) : (
+                                        // Ширина колонки жёсткая: дата подрезается, счётчик не сжимается,
+                                        // и шапка не разъезжается с ячейками ряда.
                                         <button
-                                            className="w-full text-left rounded hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                                            className="w-full flex items-baseline justify-between gap-1 min-w-0 text-left rounded hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400"
                                             onClick={(e) => { e.stopPropagation(); setViewMode('day'); setCurrentDate(parseDateStr(d)); }}
                                         >
-                                            {parseDateStr(d).getDate() + ' ' + parseDateStr(d).toLocaleString('ru-RU', { month: 'short' })}
+                                            <span className="truncate">{parseDateStr(d).getDate() + ' ' + parseDateStr(d).toLocaleString('ru-RU', { month: 'short' })}</span>
+                                            {dayShiftCountBadge}
                                         </button>
                                         )}
                                     </div>
-                                    ))}
+                                    );
+                                    })}
                                 </div>
 
                                 {viewMode === 'day' && (
