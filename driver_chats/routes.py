@@ -317,10 +317,10 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
 
         client_name = None
         if client_id is None:
-            # У вендора фильтр `phone` ТОЧНЫЙ, поэтому девять цифр без кода
-            # страны спрашивать бесполезно — и незачем: вызов стоит квоты,
-            # общей с ночным синком метрик отдела. Такой номер мы либо нашли
-            # хвостом по своей базе, либо честно говорим «не нашли».
+            # У вендора фильтры `phone` и `client_phone` ТОЧНЫЕ, поэтому девять
+            # цифр без кода страны спрашивать бесполезно — и незачем: вызов
+            # стоит квоты, общей с ночным синком метрик отдела. Такой номер мы
+            # либо нашли хвостом по своей базе, либо честно говорим «не нашли».
             found = chat2desk.find_client(phone) if phone else None
             if not found or not found.get('id'):
                 with db._get_cursor() as cursor:

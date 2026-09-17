@@ -148,6 +148,17 @@ DDL = (
     CREATE INDEX IF NOT EXISTS idx_c2d_requests_phone_tail
     ON c2d_requests (right(regexp_replace(client_phone, '\D', '', 'g'), 9))
     """,
+
+    # Тот же хвост по assigned_phone — номеру водителя, который пришёл в WhatsApp
+    # идентификатором вместо номера (с 02.09.2026, каждое шестое обращение
+    # «Ноль такси»). Запрос по хвосту ищет в обеих колонках, и без второго
+    # индекса его половина по assigned_phone шла бы полным проходом. Колонку
+    # добавляет блок c2d_requests в database.py — он выполняется раньше схемы
+    # раздела в том же _init_db.
+    r"""
+    CREATE INDEX IF NOT EXISTS idx_c2d_requests_assigned_phone_tail
+    ON c2d_requests (right(regexp_replace(assigned_phone, '\D', '', 'g'), 9))
+    """,
 )
 
 

@@ -131,6 +131,23 @@ class C2dEvalHelpersTests(unittest.TestCase):
         self.assertEqual(row["rating_score"], 4.0)
         self.assertEqual(row["transport"], "wa_dialog")
         self.assertEqual(row["client_phone"], "77000000108")
+        self.assertIsNone(row["assigned_phone"])  # колонки в строке нет
+
+    def test_build_request_rows_whatsapp_identifier_keeps_the_number(self):
+        """С 02.09.2026 водитель может прийти в WhatsApp идентификатором: в `phone`
+        лежит «[wa_gupshup] KZ.…», а номер — только в `assigned_phone`. По нему
+        «Чаты водителей» находят такого водителя без вызова API."""
+        rows = self.ns["_chat2desk_build_request_rows"]("2026-09-16", [{
+            "request_id": 76000001,
+            "request_start": "2026-09-16 17:33:38",
+            "transport": "wa_gupshup",
+            "client_id": 124000001,
+            "phone": "[wa_gupshup] KZ.1000000000000001",
+            "assigned_phone": " 77000000105 ",
+            "operator_name": "",
+        }], self.lookup, self.index)
+        self.assertEqual(rows[0]["client_phone"], "[wa_gupshup] KZ.1000000000000001")
+        self.assertEqual(rows[0]["assigned_phone"], "77000000105")
 
     def test_build_request_rows_inner_reply_time(self):
         """«Ответ внутри чата» для биллинга — по правилу почасового отчёта и табло."""

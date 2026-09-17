@@ -468,7 +468,7 @@ class PhoneTailLookupTests(unittest.TestCase):
         """Телефон отдаётся В ТОЙ записи, в какой лежит у нас: под ней потом
         сохраняется кеш и пишется журнал, а повторный поиск того же водителя
         попадает уже в точный путь."""
-        cursor = self._Cursor([(124223666, '905317298361')])
+        cursor = self._Cursor([(124223666, '905317298361', date(2026, 9, 8))])
         self.assertEqual(queries.local_client_by_tail(cursor, '317298361'),
                          (124223666, '905317298361'))
         self.assertEqual(cursor.params, {'tail': '317298361'})
@@ -480,15 +480,41 @@ class PhoneTailLookupTests(unittest.TestCase):
     def test_two_drivers_behind_one_tail_stop_the_search(self):
         """Такого на живой базе нет ни разу, но если случится — показать
         переписку соседа нельзя. Раздел обязан спросить номер целиком."""
-        cursor = self._Cursor([(1, '905317298361'), (2, '77071234567')])
+        cursor = self._Cursor([(1, '905317298361', date(2026, 9, 8)),
+                               (2, '77071234567', date(2026, 9, 7))])
         self.assertEqual(queries.local_client_by_tail(cursor, '317298361'),
                          ('ambiguous', None))
+
+    def test_one_number_behind_two_vendor_clients_is_one_driver(self):
+        """С 02.09.2026 водитель может прийти в WhatsApp идентификатором, и у
+        вендора появляется второй клиент с тем же номером (в assigned_phone).
+        Номер один — водитель один: переспрашивать «номер целиком» тут не о чем,
+        берём самого свежего клиента, как и точный поиск. Строки запрос отдаёт
+        уже от свежей к старой, а «+» в записи номера другим номером не делает."""
+        cursor = self._Cursor([(2, '77000000105', date(2026, 9, 16)),
+                               (1, '+77000000105', date(2026, 9, 1))])
+        self.assertEqual(queries.local_client_by_tail(cursor, '000000105'),
+                         (2, '77000000105'))
+        self.assertIn('ORDER BY max(day) DESC', queries._LOCAL_CLIENT_BY_TAIL_SQL)
 
     def test_messenger_identifiers_are_excluded_from_the_lookup(self):
         """В той же колонке вендор держит идентификаторы мессенджеров на 14-15
         знаков (852 строки). У них тоже есть девять последних цифр, и без
-        отсечки поиск выдал бы за водителя чужой диалог."""
+        отсечки поиск выдал бы за водителя чужой диалог. Отсечка стоит в обеих
+        колонках, где ищется номер."""
         self.assertIn("client_phone ~ '^[+]?[0-9]{10,15}$'",
+                      queries._LOCAL_CLIENT_BY_TAIL_SQL)
+        self.assertIn("assigned_phone ~ '^[+]?[0-9]{10,15}$'",
+                      queries._LOCAL_CLIENT_BY_TAIL_SQL)
+
+    def test_whatsapp_identifier_driver_is_found_by_the_number_in_assigned_phone(self):
+        """С 02.09.2026 у клиента, пришедшего в WhatsApp идентификатором, в
+        client_phone лежит «[wa_gupshup] KZ.…», а номер — только в
+        assigned_phone. Каждое шестое обращение «Ноль такси» такое, и ни
+        точный поиск, ни хвост его по одной client_phone не находили."""
+        self.assertIn('assigned_phone = ANY(%(variants)s)', queries._LOCAL_CLIENT_SQL)
+        self.assertIn('client_phone = ANY(%(variants)s)', queries._LOCAL_CLIENT_SQL)
+        self.assertIn(r"right(regexp_replace(assigned_phone, '\D', '', 'g'), 9)",
                       queries._LOCAL_CLIENT_BY_TAIL_SQL)
 
     def test_the_query_and_the_index_speak_the_same_expression(self):
@@ -500,6 +526,11 @@ class PhoneTailLookupTests(unittest.TestCase):
         ddl = '\n'.join(schema.DDL)
         self.assertIn('idx_c2d_requests_phone_tail', ddl)
         self.assertIn(expression, ddl)
+        # Вторая колонка с номером — свой индекс по тому же выражению.
+        assigned = expression.replace('client_phone', 'assigned_phone')
+        self.assertIn(assigned, queries._LOCAL_CLIENT_BY_TAIL_SQL)
+        self.assertIn('idx_c2d_requests_assigned_phone_tail', ddl)
+        self.assertIn(assigned, ddl)
         # Длина хвоста в SQL — та же, что в питоне: девять.
         self.assertIn(', %d)' % chat2desk.PHONE_TAIL_DIGITS,
                       queries._LOCAL_CLIENT_BY_TAIL_SQL)
@@ -508,6 +539,113 @@ class PhoneTailLookupTests(unittest.TestCase):
         """Схема раздела разворачивается на КАЖДОМ старте."""
         ddl = '\n'.join(schema.DDL)
         self.assertIn('CREATE INDEX IF NOT EXISTS idx_c2d_requests_phone_tail', ddl)
+        self.assertIn('CREATE INDEX IF NOT EXISTS idx_c2d_requests_assigned_phone_tail', ddl)
+
+
+class VendorClientLookupTests(unittest.TestCase):
+    """Клиент у вендора: номер лежит в `phone` ИЛИ в `client_phone`.
+
+    Владелец 17.09.2026: «не отображаются чаты по Ноль такси». Причина — с
+    02.09.2026 водитель может прийти в WhatsApp идентификатором вместо номера:
+    у такого клиента `phone` = «[wa_gupshup] KZ.…», а номер лежит только в
+    `client_phone`. Раздел искал фильтром `phone` и отвечал «не найдено», хотя
+    переписка у вендора была (номер искали 24 раза три оператора). Проверено
+    живьём: `phone` — 0 клиентов, `client_phone` — 1. У обычного клиента
+    наоборот: `client_phone` бывает пустым, и один `client_phone` его потеряет.
+    """
+
+    def calls(self, answers):
+        """Подменяет вендора: answers — {(фильтр, номер): [строки клиентов]}."""
+        made = []
+
+        def _request(method, path, *, params=None, json_body=None, timeout=30):
+            self.assertEqual((method, path), ('GET', '/v1/clients'))
+            (field, value), = [(k, v) for k, v in params.items() if k != 'limit']
+            made.append((field, value))
+            return {'data': answers.get((field, value), [])}
+
+        original = chat2desk._request
+        chat2desk._request = _request
+        self.addCleanup(setattr, chat2desk, '_request', original)
+        return made
+
+    def test_number_is_asked_in_phone_first_then_in_client_phone(self):
+        self.assertEqual(chat2desk.client_lookups('8 700 000 01 05'), [
+            ('phone', '77000000105'),
+            ('client_phone', '77000000105'),
+            ('phone', '+77000000105'),
+        ])
+
+    def test_lookups_never_exceed_the_quota_cap(self):
+        """Квота Chat2Desk общая с ночным синком метрик отдела."""
+        for raw in ('87000000105', '905000000105', '7000000105'):
+            with self.subTest(raw=raw):
+                self.assertLessEqual(len(chat2desk.client_lookups(raw)),
+                                     chat2desk.MAX_CLIENT_LOOKUPS)
+        self.assertEqual(chat2desk.client_lookups('мусор'), [])
+
+    def test_regular_client_costs_one_call(self):
+        made = self.calls({('phone', '77000000105'): [
+            {'id': 501, 'name': 'Водитель', 'phone': '77000000105', 'client_phone': None}]})
+        self.assertEqual(chat2desk.find_client('87000000105'),
+                         {'id': 501, 'name': 'Водитель', 'phone': '77000000105'})
+        self.assertEqual(made, [('phone', '77000000105')])
+
+    def test_whatsapp_identifier_client_is_found_by_client_phone(self):
+        made = self.calls({('client_phone', '77000000105'): [
+            {'id': 502, 'name': 'alidriver',
+             'phone': '[wa_gupshup] KZ.1000000000000001',
+             'client_phone': '77000000105'}]})
+        found = chat2desk.find_client('87000000105')
+        self.assertEqual(found['id'], 502)
+        # Номер цифрами, а не идентификатор: под ним ложатся кеш и журнал.
+        self.assertEqual(found['phone'], '77000000105')
+        self.assertEqual(made, [('phone', '77000000105'), ('client_phone', '77000000105')])
+
+    def test_client_with_another_number_is_never_taken(self):
+        """Неизвестный фильтр вендор молча игнорирует и отдаёт всех клиентов
+        подряд. Первая строка тогда — чужой водитель, и оператор унёс бы его
+        переписку."""
+        stranger = [{'id': 999, 'name': 'Чужой', 'phone': '77000000999',
+                     'client_phone': None}]
+        made = self.calls({lookup: stranger
+                           for lookup in chat2desk.client_lookups('77000000105')})
+        self.assertIsNone(chat2desk.find_client('77000000105'))
+        self.assertEqual(len(made), chat2desk.MAX_CLIENT_LOOKUPS)
+
+
+class WhatsAppIdentifierSyncTests(unittest.TestCase):
+    """Ночной синк сохраняет номер водителя, пришедшего идентификатором.
+
+    Без этого такой водитель находится только вызовом вендора (квота на исходе
+    уже к середине месяца), а по хвосту иностранного номера — не находится
+    вовсе: хвост к вендору не уходит.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        cls.bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+
+    def test_column_is_added_by_alter_with_its_own_index(self):
+        self.assertIn('ALTER TABLE c2d_requests ADD COLUMN IF NOT EXISTS assigned_phone TEXT',
+                      self.database)
+        self.assertIn('idx_c2d_requests_assigned_phone', self.database)
+        # Колонка обязана появиться раньше, чем схема раздела строит по ней
+        # индекс хвоста: оба шага идут в одном _init_db.
+        self.assertLess(self.database.index('ADD COLUMN IF NOT EXISTS assigned_phone'),
+                        self.database.index('self._init_driver_chats_schema_tx(cursor)'))
+
+    def test_sync_takes_assigned_phone_from_request_stats(self):
+        build = self.bot.split('def _chat2desk_build_request_rows')[1].split('\ndef ')[0]
+        self.assertIn("'assigned_phone': str(row.get('assigned_phone') or '').strip() or None",
+                      build)
+
+    def test_upsert_writes_and_refreshes_the_column(self):
+        save = self.database.split('def save_c2d_requests')[1].split('\n    def ')[0]
+        self.assertIn("row.get('assigned_phone')", save)
+        self.assertIn('replies, average_replies_time, assigned_phone)', save)
+        self.assertIn('assigned_phone = EXCLUDED.assigned_phone', save)
 
 
 class ForeignPhoneSearchTests(unittest.TestCase):

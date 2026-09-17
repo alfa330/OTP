@@ -35163,6 +35163,10 @@ def _chat2desk_build_request_rows(day_str, request_stats_rows, operator_lookup, 
             'client_id': as_int(row.get('client_id')),
             'client_name': str(row.get('client_name') or '').strip() or None,
             'client_phone': str(row.get('phone') or '').strip() or None,
+            # У клиента WhatsApp, пришедшего идентификатором, в `phone` лежит
+            # «[wa_gupshup] KZ.…», а номер — только здесь. По нему «Чаты
+            # водителей» находят такого водителя без вызова API.
+            'assigned_phone': str(row.get('assigned_phone') or '').strip() or None,
             'c2d_operator_id': as_int(row.get('operator_id')),
             'c2d_operator_name': str(raw_name or '').strip() or None,
             'operator_id': int(op_id) if op_id is not None else None,

@@ -3103,6 +3103,19 @@ class Database:
             cursor.execute("""
                 ALTER TABLE c2d_requests ADD COLUMN IF NOT EXISTS average_replies_time REAL;
             """)
+            # Настоящий номер водителя, который пришёл в WhatsApp идентификатором:
+            # с 02.09.2026 у такого клиента в client_phone лежит
+            # «[wa_gupshup] KZ.1000000000000001», а номер — только в колонке
+            # request_stats `assigned_phone`. Без неё «Чаты водителей» не находят
+            # по номеру каждое шестое обращение «Ноль такси». NULL — строка
+            # синхронизирована до появления колонки.
+            cursor.execute("""
+                ALTER TABLE c2d_requests ADD COLUMN IF NOT EXISTS assigned_phone TEXT;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_requests_assigned_phone
+                ON c2d_requests(assigned_phone);
+            """)
             # Снапшот переписки заявки: тянется из API один раз при выборе чата и
             # дальше служит источником и для оценки СВ, и для просмотра ЧМ — даже
             # если Chat2Desk удалит историю. Ретеншн 180 дней (~полгода).
@@ -24040,6 +24053,7 @@ class Database:
                 row.get('incoming_messages'), row.get('outgoing_messages'),
                 row.get('rating_score'), row.get('rating_text'),
                 row.get('replies'), row.get('average_replies_time'),
+                row.get('assigned_phone'),
             ))
         if not values:
             return 0
@@ -24051,7 +24065,7 @@ class Database:
                     client_id, client_name, client_phone, c2d_operator_id,
                     c2d_operator_name, operator_id, incoming_messages,
                     outgoing_messages, rating_score, rating_text,
-                    replies, average_replies_time)
+                    replies, average_replies_time, assigned_phone)
                 VALUES %s
                 ON CONFLICT (request_id) DO UPDATE SET
                     day = EXCLUDED.day,
@@ -24075,6 +24089,7 @@ class Database:
                     rating_text = EXCLUDED.rating_text,
                     replies = EXCLUDED.replies,
                     average_replies_time = EXCLUDED.average_replies_time,
+                    assigned_phone = EXCLUDED.assigned_phone,
                     synced_at = now()
             """, values)
         return len(values)

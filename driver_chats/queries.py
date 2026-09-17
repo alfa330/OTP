@@ -12,6 +12,7 @@ messages вендор не даёт), поэтому запись в журна�
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 
 from . import access
@@ -88,14 +89,20 @@ def load_access_context(cursor, user_id):
 # разных клиентов (проверено запросом с HAVING count(DISTINCT client_id) > 1).
 #
 # Ретеншн таблицы 45 дней, поэтому мост находится примерно для 61 % номеров;
-# остальным (тем, кто пишет впервые) client_id добирается одним вызовом
-# /v1/clients?phone=. Это единственное место, где раздел вообще может потратить
-# квоту на ПОИСК.
+# остальным (тем, кто пишет впервые) client_id добирается вызовом /v1/clients.
+# Это единственное место, где раздел вообще может потратить квоту на ПОИСК.
+#
+# НОМЕР ЛЕЖИТ В ОДНОЙ ИЗ ДВУХ КОЛОНОК. С 02.09.2026 водитель может прийти в
+# WhatsApp идентификатором вместо номера: тогда в client_phone стоит
+# «[wa_gupshup] KZ.1000000000000001», а номер — только в assigned_phone (синк
+# пишет её начиная со среза за 17.09.2026). У «Ноль такси» так приходит каждое
+# шестое обращение, у iTaxi и Jana — каждое восьмое.
+# Ищем по обеим колонкам, у каждой свой индекс.
 
 _LOCAL_CLIENT_SQL = """
     SELECT client_id
       FROM c2d_requests
-     WHERE client_phone = ANY(%(variants)s)
+     WHERE (client_phone = ANY(%(variants)s) OR assigned_phone = ANY(%(variants)s))
        AND client_id IS NOT NULL
      ORDER BY day DESC
      LIMIT 1
@@ -124,22 +131,35 @@ def local_client_id(cursor, variants):
 # возьмёт и уйдёт в полный проход по 86 тыс. строк (замер: 0,2 с против единиц
 # миллисекунд).
 #
-# LIMIT 3, а не 1: по одному хвосту НЕ должно находиться двух разных водителей
-# (проверено на всей базе — 16 421 хвост, ни одного совпадения), но если это
-# однажды случится, раздел обязан заметить и спросить номер целиком, а не
-# показать переписку соседа.
+# Номер ищется в ОБЕИХ колонках — client_phone и assigned_phone (см. мост
+# выше), у каждой свой индекс по тому же выражению.
+#
+# Несколько строк, а не одна: по одному хвосту НЕ должно находиться двух разных
+# водителей (проверено на всей базе — 16 421 хвост, ни одного совпадения), но
+# если это однажды случится, раздел обязан заметить и спросить номер целиком, а
+# не показать переписку соседа.
 _LOCAL_CLIENT_BY_TAIL_SQL = r"""
-    SELECT client_id, min(client_phone)
-      FROM c2d_requests
-     WHERE right(regexp_replace(client_phone, '\D', '', 'g'), 9) = %(tail)s
-       AND client_id IS NOT NULL
-       -- Только то, что и правда номер. В этой же колонке вендор держит
-       -- идентификаторы WhatsApp («[wa_gupshup] KZ.926590227191272», 852
-       -- строки): у них тоже есть девять последних цифр, и без этого условия
-       -- поиск мог бы выдать за водителя чужой диалог мессенджера.
-       AND client_phone ~ '^[+]?[0-9]{10,15}$'
-     GROUP BY client_id
-     LIMIT 3
+    SELECT client_id, phone, max(day)
+      FROM (
+        SELECT client_id, client_phone AS phone, day
+          FROM c2d_requests
+         WHERE right(regexp_replace(client_phone, '\D', '', 'g'), 9) = %(tail)s
+           AND client_id IS NOT NULL
+           -- Только то, что и правда номер. В этой же колонке вендор держит
+           -- идентификаторы WhatsApp («[wa_gupshup] KZ.1000000000000001», 881
+           -- клиент с 02.09.2026): у них тоже есть девять последних цифр, и без
+           -- этого условия поиск выдал бы за водителя чужой диалог.
+           AND client_phone ~ '^[+]?[0-9]{10,15}$'
+        UNION ALL
+        SELECT client_id, assigned_phone, day
+          FROM c2d_requests
+         WHERE right(regexp_replace(assigned_phone, '\D', '', 'g'), 9) = %(tail)s
+           AND client_id IS NOT NULL
+           AND assigned_phone ~ '^[+]?[0-9]{10,15}$'
+      ) found
+     GROUP BY client_id, phone
+     ORDER BY max(day) DESC
+     LIMIT 5
 """
 
 
@@ -148,8 +168,14 @@ def local_client_by_tail(cursor, tail):
 
     Возвращает:
         None                — не нашли;
-        (client_id, phone)  — нашли ровно одного;
+        (client_id, phone)  — нашли ровно одного водителя;
         ('ambiguous', None) — хвост делят несколько водителей.
+
+    Водитель — это НОМЕР, а не клиент вендора. Пришёл тот же человек и с
+    номером, и идентификатором WhatsApp — у вендора это два клиента, но
+    переспрашивать номер целиком тут не о чем: берём самого свежего, как и
+    точный поиск (local_client_id). «Несколько водителей» — только когда за
+    хвостом стоят разные номера.
 
     Телефон отдаём В ТОЙ ЗАПИСИ, в какой он лежит у нас: под ней потом
     сохраняется кеш и пишется журнал, и повторный поиск того же водителя
@@ -158,10 +184,12 @@ def local_client_by_tail(cursor, tail):
     if not tail:
         return None
     cursor.execute(_LOCAL_CLIENT_BY_TAIL_SQL, {'tail': str(tail)})
+    # Строки уже идут от свежей к старой — ORDER BY в самом запросе.
     rows = [r for r in cursor.fetchall() if r and r[0] is not None]
     if not rows:
         return None
-    if len(rows) > 1:
+    numbers = {re.sub(r'\D', '', str(row[1] or '')) for row in rows}
+    if len(numbers) > 1:
         return ('ambiguous', None)
     return (int(rows[0][0]), rows[0][1])
 
