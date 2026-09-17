@@ -793,7 +793,7 @@ def test_install_hands_over_to_the_installed_copy():
     временную папку успевает занять антивирус, и упаковщик показывает
     «Failed to remove temporary directory» — пугающее окно на ровном месте."""
     source = Path(agent.__file__).read_text(encoding="utf-8")
-    handover = source.index('subprocess.Popen([str(target), "--install"]')
+    handover = source.index('subprocess.Popen([str(target), "--install"')
     message = source.index('"Программа установлена и уже работает')
     assert handover < message, "передача установки должна идти до показа окна"
 
@@ -1115,3 +1115,209 @@ def test_agent_backs_off_when_watchdog_will_not_start():
     assert "watchdog_skip" in body
     assert "watchdog_failures" in body
     assert "if watchdog_skip > 0:" in body
+
+
+# --------------------------------------------------------------------------- #
+# Установка на весь компьютер (MSI, групповая политика)
+# --------------------------------------------------------------------------- #
+
+def test_machine_copy_installs_when_user_has_none_or_older():
+    assert agent.machine_logon_plan("1.0.16", "", False) == "install"
+    assert agent.machine_logon_plan("1.0.16", "1.0.15.0", True) == "install"
+    # Сборки до 1.0.16 без ресурса версии: пусто значит «старее».
+    assert agent.machine_logon_plan("1.0.16", "", True) == "install"
+
+
+def test_machine_copy_never_rolls_back_updated_user_copy():
+    """Копия пользователя обновляется сама и уходит вперёд машинной. Перезапись
+    откатывала бы её при каждом входе, а автообновление качало бы заново."""
+    assert agent.machine_logon_plan("1.0.16", "1.0.17.0", True) == "keep"
+    assert agent.machine_logon_plan("1.0.16", "1.0.16.0", True) == "keep"
+
+
+def test_orphan_only_when_marker_names_missing_machine_copy(tmp_path):
+    present = tmp_path / "OktellRecallGuard.exe"
+    present.write_bytes(b"MZ")
+    assert agent.deployment_orphaned({}) is False, "ручная установка без метки не снимается"
+    assert agent.deployment_orphaned({"machine_exe": str(present)}) is False
+    assert agent.deployment_orphaned({"machine_exe": str(tmp_path / "нет.exe")}) is True
+
+
+def _machine_logon_stage(monkeypatch, tmp_path, *, user_version, watchdog_running=False):
+    machine = tmp_path / "Program Files" / "OktellRecallGuard.exe"
+    machine.parent.mkdir()
+    machine.write_bytes(b"MZ new")
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    calls = {"popen": [], "stopped": [], "shortcut": [], "autostart_removed": 0}
+    monkeypatch.setattr(agent.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(agent, "setup_logging", lambda cfg, name: None)
+    monkeypatch.setattr(agent, "program_path", lambda: machine)
+    monkeypatch.setattr(agent, "app_dir", lambda: user_dir)
+    monkeypatch.setattr(agent, "installed_path", lambda: user_dir / "OktellRecallGuard.exe")
+    monkeypatch.setattr(agent, "file_version", lambda path: user_version)
+    monkeypatch.setattr(agent, "is_network_path", lambda path: False)
+    monkeypatch.setattr(agent, "_stop_installed_copies", lambda target: calls["stopped"].append(target))
+    monkeypatch.setattr(agent, "_remove_task", lambda: None)
+    monkeypatch.setattr(agent, "_remove_autostart",
+                        lambda: calls.__setitem__("autostart_removed", calls["autostart_removed"] + 1))
+    monkeypatch.setattr(agent, "shortcut_path", lambda: tmp_path / "Desktop" / "Oktell.lnk")
+    monkeypatch.setattr(agent, "_create_shortcut", lambda target: calls["shortcut"].append(target) or True)
+    monkeypatch.setattr(agent, "is_running_by_mutex", lambda name: watchdog_running)
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    monkeypatch.setattr(agent.subprocess, "Popen", lambda args, **kw: calls["popen"].append(args))
+    return machine, user_dir, calls
+
+
+def test_machine_logon_puts_copy_to_user_and_starts_it(monkeypatch, tmp_path):
+    machine, user_dir, calls = _machine_logon_stage(monkeypatch, tmp_path, user_version="")
+
+    assert agent.run_machine_logon({}) == 0
+
+    target = user_dir / "OktellRecallGuard.exe"
+    assert target.read_bytes() == b"MZ new"
+    assert calls["stopped"] == [target], "перед заменой файла копии пользователя гасятся"
+    marker = json.loads((user_dir / "deployment.json").read_text(encoding="utf-8"))
+    assert marker["machine_exe"] == str(machine)
+    assert calls["autostart_removed"] == 1, "личный Run поднимал бы вторую копию в ту же секунду"
+    assert calls["shortcut"] == [target]
+    assert calls["popen"] == [[str(target)]]
+
+
+def test_machine_logon_keeps_newer_user_copy_and_running_watchdog(monkeypatch, tmp_path):
+    _machine, user_dir, calls = _machine_logon_stage(
+        monkeypatch, tmp_path, user_version="1.0.99.0", watchdog_running=True)
+    target = user_dir / "OktellRecallGuard.exe"
+    target.write_bytes(b"MZ updated by itself")
+    (tmp_path / "Desktop").mkdir()
+    (tmp_path / "Desktop" / "Oktell.lnk").write_bytes(b"lnk")
+
+    assert agent.run_machine_logon({}) == 0
+
+    assert target.read_bytes() == b"MZ updated by itself"
+    assert calls["stopped"] == [], "работающую новую копию не трогаем"
+    assert calls["shortcut"] == [], "ярлык на месте — PowerShell не запускаем"
+    assert calls["popen"] == [], "сторож уже работает"
+    assert (user_dir / "deployment.json").exists()
+
+
+def test_machine_logon_from_network_share_is_plain_quiet_install(monkeypatch, tmp_path):
+    """Метка с сетевым путём сняла бы программу при первом же обрыве сети."""
+    _machine, user_dir, calls = _machine_logon_stage(monkeypatch, tmp_path, user_version="")
+    monkeypatch.setattr(agent, "is_network_path", lambda path: True)
+    seen = {}
+    monkeypatch.setattr(agent, "run_install", lambda cfg, **kw: seen.update(kw) or 0)
+
+    assert agent.run_machine_logon({}) == 0
+
+    assert seen == {"quiet": True}
+    assert not (user_dir / "deployment.json").exists()
+
+
+def test_orphaned_user_copy_removes_itself_instead_of_opening(monkeypatch, tmp_path):
+    """IT сняло пакет, а ярлык «Oktell» остался и поднимал бы контроль снова."""
+    (tmp_path / "deployment.json").write_text(
+        json.dumps({"machine_exe": str(tmp_path / "снятый.exe")}), encoding="utf-8")
+    monkeypatch.setattr(agent.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(agent, "is_installed_copy", lambda: True)
+    monkeypatch.setattr(agent, "run_orphan_cleanup", lambda cfg: 7)
+    monkeypatch.setattr(agent, "run_open", lambda cfg: pytest.fail("снятая программа открыла Oktell"))
+    monkeypatch.setattr(agent, "run_watchdog", lambda cfg: pytest.fail("снятая программа подняла сторожа"))
+
+    assert agent.main(["--open"]) == 7
+    assert agent.main([]) == 7
+    monkeypatch.setattr(agent, "run_status", lambda cfg: 0)
+    assert agent.main(["--status"]) == 0, "диагностика работает и у снятой копии"
+
+
+def test_orphan_cleanup_disables_but_keeps_logs(monkeypatch, tmp_path):
+    (tmp_path / "deployment.json").write_text(json.dumps({"machine_exe": "C:/нет.exe"}), encoding="utf-8")
+    (tmp_path / "agent.log").write_text("история", encoding="utf-8")
+    done = []
+    monkeypatch.setattr(agent, "setup_logging", lambda cfg, name: None)
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(agent, "_remove_autostart", lambda: done.append("run"))
+    monkeypatch.setattr(agent, "_remove_shortcut", lambda: done.append("lnk"))
+    monkeypatch.setattr(agent, "_stop_installed_copies", lambda target: done.append("stop"))
+
+    assert agent.run_orphan_cleanup({}) == 0
+
+    assert done == ["run", "lnk", "stop"]
+    assert not (tmp_path / "deployment.json").exists()
+    assert (tmp_path / "agent.log").exists()
+
+
+def _install_stage(monkeypatch, tmp_path, *, same_path):
+    source = tmp_path / "Downloads" / "Oktell-Perezvon-Setup.exe"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ")
+    target = source if same_path else tmp_path / "user" / "OktellRecallGuard.exe"
+    messages, popen = [], []
+    monkeypatch.setattr(agent.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(agent, "setup_logging", lambda cfg, name: None)
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(agent, "program_path", lambda: source)
+    monkeypatch.setattr(agent, "installed_path", lambda: target)
+    monkeypatch.setattr(agent, "_stop_installed_copies", lambda target: None)
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    monkeypatch.setattr(agent, "_register_autostart", lambda target: True)
+    monkeypatch.setattr(agent, "_remove_task", lambda: None)
+    monkeypatch.setattr(agent, "_create_shortcut", lambda target: True)
+    monkeypatch.setattr(agent, "show_message", lambda text, **kw: messages.append(text))
+    monkeypatch.setattr(agent.subprocess, "Popen", lambda args, **kw: popen.append(args))
+    return messages, popen
+
+
+def test_quiet_install_shows_no_windows(monkeypatch, tmp_path):
+    """Скрипт IT окно не закроет — процесс висел бы на нём до перезагрузки."""
+    messages, _ = _install_stage(monkeypatch, tmp_path, same_path=True)
+    assert agent.run_install({}, start=False, quiet=True) == 0
+    assert messages == []
+    assert agent.run_install({}, start=False) == 0
+    assert len(messages) == 1, "ручная установка по-прежнему говорит, что всё готово"
+
+
+def test_quiet_is_handed_over_to_installed_copy(monkeypatch, tmp_path):
+    _, popen = _install_stage(monkeypatch, tmp_path, same_path=False)
+    monkeypatch.setattr(agent, "file_version", lambda path: "")
+    assert agent.run_install({}, quiet=True) == 0
+    assert popen and popen[0][1:] == ["--install", "--quiet"]
+
+
+def test_install_never_rolls_back_updated_copy(monkeypatch, tmp_path):
+    """Давно скачанный файл, запущенный повторно, не откатывает программу,
+    которая уже обновилась сама."""
+    _, popen = _install_stage(monkeypatch, tmp_path, same_path=False)
+    target = tmp_path / "user" / "OktellRecallGuard.exe"
+    target.parent.mkdir()
+    target.write_bytes(b"MZ newer")
+    monkeypatch.setattr(agent, "file_version", lambda path: "9.0.0.0")
+    monkeypatch.setattr(agent, "_stop_installed_copies", lambda t: pytest.fail("новую копию погасили"))
+
+    assert agent.run_install({}) == 0
+
+    assert target.read_bytes() == b"MZ newer"
+    assert popen and popen[0][0] == str(target), "установку всё равно доводит установленная копия"
+
+
+def test_stop_copies_spares_own_loader_and_lets_loaders_clean_up():
+    """Копия — это загрузчик упаковщика плюс интерпретатор. Убитый загрузчик
+    оставляет в %TEMP% папку _MEI на 14 МБ; свой загрузчик убивать нельзя вовсе."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def _stop_installed_copies("):source.index("def _ps_quote(")]
+    assert "os.getppid()" in body
+    assert "Wait-Process" in body
+    assert body.index("foreach($i in $py)") < body.index("foreach($i in $boot)")
+
+
+def test_ps_quote_survives_apostrophe_in_user_name():
+    assert agent._ps_quote(r"C:\Users\O'Neil\Desktop") == r"'C:\Users\O''Neil\Desktop'"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ресурс версии читается через version.dll")
+def test_file_version_reads_resource_without_running_file(tmp_path):
+    assert agent.file_version(Path(sys.executable)).startswith(f"{sys.version_info.major}.")
+    plain = tmp_path / "plain.exe"
+    plain.write_bytes(b"MZ")
+    assert agent.file_version(plain) == ""

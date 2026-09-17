@@ -19,6 +19,15 @@ echo SERVER_URL = "%OKTELL_GUARD_SERVER%" >> _build_token.py
 
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
+REM Ресурс версии: по нему машинная копия из MSI узнаёт версию копии
+REM пользователя, не запуская её, а IT видит издателя в свойствах файла.
+python -X utf8 version_info.py
+if errorlevel 1 (
+  del _build_token.py >nul 2>nul
+  echo Build failed: version_info.py
+  pause
+  exit /b 1
+)
 REM setuptools/pkg_resources агенту не нужны — их НЕ импортирует ни одна строка
 REM исходников, PyInstaller тянет их сам, раз они стоят в окружении сборки.
 REM 07.09.2026 из-за них сборка выросла на 2,2 МБ и начала падать: хук
@@ -34,6 +43,7 @@ python -m PyInstaller --onefile --noconsole --name OktellRecallGuard ^
   --exclude-module pkg_resources ^
   --exclude-module setuptools ^
   --exclude-module pip ^
+  --version-file version_info.txt ^
   agent.py
 set BUILD_RESULT=%errorlevel%
 
@@ -46,11 +56,34 @@ if not "%BUILD_RESULT%"=="0" (
   exit /b 1
 )
 
+REM Подпись — ДО публикации и до упаковки в MSI: иначе на машины уедет
+REM неподписанный файл. Сертификат задаётся OKTELL_GUARD_SIGN_THUMBPRINT или
+REM OKTELL_GUARD_SIGN_PFX (см. sign_file.py); без них шаг только предупреждает.
+python -X utf8 sign_file.py dist\OktellRecallGuard.exe
+if errorlevel 1 (
+  echo Подпись не удалась — не публикую.
+  pause
+  exit /b 1
+)
+
 REM Выкладываем свежую сборку на сервер сами: сотрудники обновятся автоматически,
 REM никому не нужно ничего загружать руками. Без токена публикации шаг пропустится.
 python -X utf8 publish_release.py
+if errorlevel 1 (
+  echo Публикация не удалась.
+  pause
+  exit /b 1
+)
+
+REM Пакет для IT: раскатка групповой политикой (DEPLOY_GPO.md).
+python -X utf8 build_msi.py
+if errorlevel 1 (
+  echo MSI не собран.
+  pause
+  exit /b 1
+)
 
 echo.
-echo Готово: dist\OktellRecallGuard.exe
-echo Один файл. Сотрудник запускает его двойным кликом — программа ставит себя сама.
+echo Готово: dist\OktellRecallGuard.exe и dist\OktellRecallGuard-*.msi
+echo exe — для скачивания из iCORE, msi — для IT (групповая политика).
 pause

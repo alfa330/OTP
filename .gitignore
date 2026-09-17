@@ -46,6 +46,7 @@ oktell_recall_guard/chrome-profile/
 oktell_recall_guard/dev_harness/config.real.json
 oktell_recall_guard/dev_harness/*.log
 oktell_recall_guard/_build_token.py
+oktell_recall_guard/version_info.txt
 
 # Секреты шлюза в корпоративную сеть (см. приватный репозиторий otp-gateway).
 # Закрытый ключ подписи моста и его настройки живут в /etc/otp-gateway на самой

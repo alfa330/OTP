@@ -27,6 +27,9 @@ force-install), агент сам запускает Chrome: свой профи
     OktellRecallGuard.exe --open      -> открыть управляемое окно Oktell и выйти
     OktellRecallGuard.exe --logout-now-> ручной разлогин (проверка на месте)
     OktellRecallGuard.exe --status    -> состояние в JSON (диагностика)
+    OktellRecallGuard.exe --install --quiet -> установка без окон (скрипт IT)
+    OktellRecallGuard.exe --deployed  -> вход пользователя на компьютере, куда
+                                         программу поставил MSI (групповая политика)
 
 Не читает клавиатуру, не делает скриншотов, не собирает содержимое страниц:
 наружу уходят только имя машины, пользователь Windows, факт наличия сессии
@@ -55,7 +58,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.15"
+VERSION = "1.0.16"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -700,16 +703,43 @@ def _stop_installed_copies(target: Path) -> None:
     Скачанный сотрудником файл называется так же, поэтому `taskkill /IM` убивал
     сам установщик, и установка молча не происходила: лог обрывался на первой
     строке. Свой собственный PID исключаем в любом случае.
+
+    Каждая копия — ДВА процесса: загрузчик упаковщика и интерпретатор под ним.
+    Поэтому исключаем и своего родителя (иначе копия убивала собственный
+    загрузчик), а чужие гасим с интерпретаторов: загрузчик, дождавшись конца
+    интерпретатора, сам удаляет папку распаковки _MEI и выходит. Убитый первым
+    загрузчик оставлял её в %TEMP% — 14 МБ на каждую погашенную копию.
     """
     if not IS_WINDOWS:
         return
-    own = os.getpid()
     script = (
-        "Get-CimInstance Win32_Process -Filter \"Name='" + INSTALLED_NAME + "'\" | "
-        "Where-Object { $_.ExecutablePath -eq '" + str(target) + "' -and $_.ProcessId -ne " + str(own) + " } | "
-        "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }"
+        "$all=@(Get-CimInstance Win32_Process -Filter \"Name='" + INSTALLED_NAME + "'\" | "
+        "Where-Object { $_.ExecutablePath -eq " + _ps_quote(target) + " -and $_.ProcessId -ne " + str(os.getpid()) +
+        " -and $_.ProcessId -ne " + str(os.getppid()) + " });"
+        # Кто загрузчик, а кто интерпретатор, видно по глубине в цепочке наших
+        # процессов: корень — всегда загрузчик, под ним интерпретатор, под тем
+        # (сторож запускает агента) снова загрузчик. «Родитель — тоже наша
+        # копия» признаком не годится: у загрузчика агента он такой же.
+        "$map=@{}; foreach($x in $all){ $map[[int]$x.ProcessId]=[int]$x.ParentProcessId };"
+        "$py=@(); $boot=@();"
+        "foreach($x in $all){ $d=0; $p=[int]$x.ParentProcessId;"
+        " while($map.ContainsKey($p) -and $d -lt 64){ $d++; $p=$map[$p] };"
+        " if($d % 2){ $py+=[int]$x.ProcessId } else { $boot+=[int]$x.ProcessId } };"
+        "foreach($i in $py){ try { Stop-Process -Id $i -Force -ErrorAction Stop } catch {} };"
+        # Загрузчику даём убрать за собой; добиваем только тех, кто не вышел.
+        "if($boot.Count){ Wait-Process -Id $boot -Timeout 5 -ErrorAction SilentlyContinue };"
+        "foreach($i in $boot){ try { Stop-Process -Id $i -Force -ErrorAction Stop } catch {} }"
     )
     _run_hidden(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], timeout=25)
+
+
+def _ps_quote(value: Any) -> str:
+    """Строка для PowerShell в одинарных кавычках.
+
+    Путь идёт через профиль пользователя, а в имени бывает апостроф (O'Neil):
+    без удвоения он обрывал команду, и ярлык молча не появлялся.
+    """
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _remove_task() -> None:
@@ -723,25 +753,46 @@ def _remove_task() -> None:
     _run_hidden(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
 
 
+def desktop_dir() -> Path:
+    r"""Рабочий стол так, как его видит Проводник.
+
+    Папку перенаправляют (OneDrive, групповая политика), и тогда
+    `%USERPROFILE%\Desktop` указывает мимо: ярлык создавался в одном месте, а
+    искался и удалялся в другом.
+    """
+    if IS_WINDOWS:
+        try:
+            CSIDL_DESKTOPDIRECTORY = 0x0010
+            buffer = ctypes.create_unicode_buffer(260)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, CSIDL_DESKTOPDIRECTORY, None, 0, buffer) == 0 and buffer.value:
+                return Path(buffer.value)
+        except Exception:  # noqa: BLE001
+            logging.debug("Рабочий стол не определён через Проводник", exc_info=True)
+    return Path(os.environ.get("USERPROFILE") or str(Path.home())) / "Desktop"
+
+
+def shortcut_path() -> Path:
+    return desktop_dir() / "Oktell.lnk"
+
+
 def _create_shortcut(target: Path) -> bool:
     """Ярлык «Oktell» на рабочем столе: сотрудник открывает Oktell через него,
     и окно сразу управляемое."""
     if not IS_WINDOWS:
         return False
     script = (
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut("
-        "[Environment]::GetFolderPath('Desktop')+'\\Oktell.lnk');"
-        f"$s.TargetPath='{target}';$s.Arguments='--open';"
-        f"$s.IconLocation='{target},0';$s.Description='Oktell';$s.Save()"
+        f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({_ps_quote(shortcut_path())});"
+        f"$s.TargetPath={_ps_quote(target)};$s.Arguments='--open';"
+        f"$s.IconLocation={_ps_quote(f'{target},0')};$s.Description='Oktell';$s.Save()"
     )
     return _run_hidden(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
 
 
 def _remove_shortcut() -> None:
     try:
-        desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop" / "Oktell.lnk"
-        if desktop.exists():
-            desktop.unlink()
+        link = shortcut_path()
+        if link.exists():
+            link.unlink()
     except Exception:  # noqa: BLE001
         pass
 
@@ -765,17 +816,25 @@ def show_message(text: str, title: str = APP_NAME, error: bool = False) -> None:
         logging.debug("Окно с сообщением не показалось", exc_info=True)
 
 
-def run_install(cfg: dict, start: bool = True) -> int:
+def run_install(cfg: dict, start: bool = True, quiet: bool = False) -> int:
     """Разложить себя по местам. Ровно то, что делали install_*.bat.
 
     Скачанная копия делает МИНИМУМ: копирует себя и передаёт установку уже
     установленной копии, после чего немедленно завершается. Так её одноразовая
     папка распаковки живёт секунды и успевает удалиться — иначе упаковщик
     показывал пугающее «Failed to remove temporary directory».
+
+    quiet — установка скриптом IT: окно с итогом закрыть некому, и процесс
+    висел бы на нём до перезагрузки. Итог в этом случае только в install.log.
     """
     setup_logging(cfg, "install.log")
     target = installed_path()
     source = program_path()
+
+    def tell(text: str, error: bool = False) -> None:
+        (logging.error if error else logging.info)("%s", " ".join(text.split()))
+        if not quiet:
+            show_message(text, error=error)
 
     if not getattr(sys, "frozen", False):
         logging.error("Установка имеет смысл только для собранного exe")
@@ -784,17 +843,25 @@ def run_install(cfg: dict, start: bool = True) -> int:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.resolve() != target.resolve():
-            # Работающую копию нельзя перезаписать — сначала гасим её (только её).
-            _stop_installed_copies(target)
-            time.sleep(1.5)
-            shutil.copy2(source, target)
-            logging.info("Скопирован в %s", target)
+            installed_version = file_version(target) if target.exists() else ""
+            if installed_version and _version_key(installed_version) > _version_key(VERSION):
+                # Обновление только вверх и здесь: давно скачанный файл,
+                # запущенный повторно, откатил бы обновившуюся программу.
+                logging.info("Установлена версия %s новее этой (%s) — файл не заменяю",
+                             installed_version, VERSION)
+            else:
+                # Работающую копию нельзя перезаписать — сначала гасим её (только её).
+                _stop_installed_copies(target)
+                time.sleep(1.5)
+                shutil.copy2(source, target)
+                logging.info("Скопирован в %s", target)
             # Дальше всё делает установленная копия: автозапуск, ярлык, окно с
             # результатом. Мы уходим сразу и ничего не держим.
             try:
                 flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
-                subprocess.Popen([str(target), "--install"], cwd=str(target.parent),
-                                 creationflags=flags, close_fds=True, env=child_env())
+                subprocess.Popen([str(target), "--install", *(["--quiet"] if quiet else [])],
+                                 cwd=str(target.parent), creationflags=flags, close_fds=True,
+                                 env=child_env())
                 return 0
             except Exception:  # noqa: BLE001
                 logging.exception("Не удалось передать установку установленной копии")
@@ -806,7 +873,7 @@ def run_install(cfg: dict, start: bool = True) -> int:
             shutil.copy2(local_cfg, target.parent / "config.json")
     except Exception as exc:  # noqa: BLE001
         logging.exception("Не удалось скопировать себя в %s", target)
-        show_message(
+        tell(
             f"Не удалось установить программу.\n\n{exc}\n\nПодробности: {app_dir() / 'install.log'}",
             error=True,
         )
@@ -818,14 +885,14 @@ def run_install(cfg: dict, start: bool = True) -> int:
     logging.info("Автозапуск: %s | ярлык: %s", ok_run, ok_link)
 
     if ok_run:
-        show_message(
+        tell(
             "Программа установлена и уже работает.\n\n"
             "Она будет запускаться сама при входе в Windows.\n"
             "На рабочем столе появился ярлык «Oktell» — открывайте Oktell через него.\n\n"
             "Ничего настраивать не нужно."
         )
     else:
-        show_message(
+        tell(
             "Программа скопирована, но не смогла прописаться в автозапуск.\n"
             f"Подробности: {app_dir() / 'install.log'}",
             error=True,
@@ -848,8 +915,201 @@ def run_uninstall(cfg: dict) -> int:
     _remove_autostart()
     _remove_task()
     _remove_shortcut()
+    _remove_deployment_marker()
     logging.info("Удалено: автозапуск, задача, ярлык")
     # Гасим последними и не себя: иначе не дописали бы лог.
+    _stop_installed_copies(installed_path())
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Установка на весь компьютер: MSI через групповую политику
+# --------------------------------------------------------------------------- #
+#
+# MSI кладёт программу в Program Files и пишет в HKLM\...\Run запуск с
+# --deployed. Работать прямо оттуда агент не может: обычный пользователь не
+# пишет в Program Files, и автообновление не заменило бы файл. Поэтому при входе
+# каждого пользователя машинная копия кладёт ему рабочую в %LOCALAPPDATA% —
+# только если там нет такой же или новее — и запускает её. Дальше всё как после
+# ручной установки, включая автообновление. Так устроен и машинный установщик
+# Teams.
+#
+# Файлы, разложенные групповой политикой, не несут пометки «скачано из
+# интернета», и SmartScreen такой путь не проверяет вовсе.
+
+DEPLOYED_ARG = "--deployed"
+
+
+def deployment_marker_path() -> Path:
+    return app_dir() / "deployment.json"
+
+
+def read_deployment_marker() -> dict:
+    try:
+        data = json.loads(deployment_marker_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 — нет метки = ручная установка
+        return {}
+
+
+def _remove_deployment_marker() -> None:
+    try:
+        deployment_marker_path().unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        logging.debug("Метка установки на компьютер не удалена", exc_info=True)
+
+
+def file_version(path: Path) -> str:
+    """Версия из ресурса exe («1.0.16.0»). Пусто — ресурса нет или файл не читается.
+
+    Ресурс версии появился в 1.0.16: у прежних сборок его нет, и пустая строка
+    для них честно означает «старее».
+    """
+    if not IS_WINDOWS:
+        return ""
+
+    class VS_FIXEDFILEINFO(ctypes.Structure):
+        _fields_ = [
+            ("dwSignature", ctypes.c_uint32), ("dwStrucVersion", ctypes.c_uint32),
+            ("dwFileVersionMS", ctypes.c_uint32), ("dwFileVersionLS", ctypes.c_uint32),
+        ]
+
+    try:
+        api = ctypes.windll.version
+        size = api.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return ""
+        block = ctypes.create_string_buffer(size)
+        if not api.GetFileVersionInfoW(str(path), 0, size, block):
+            return ""
+        pointer = ctypes.c_void_p()
+        length = ctypes.c_uint()
+        if not api.VerQueryValueW(block, "\\", ctypes.byref(pointer), ctypes.byref(length)) or not pointer.value:
+            return ""
+        info = VS_FIXEDFILEINFO.from_address(pointer.value)
+        if info.dwSignature != 0xFEEF04BD:
+            return ""
+        ms, ls = info.dwFileVersionMS, info.dwFileVersionLS
+        return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+    except Exception:  # noqa: BLE001
+        logging.debug("Версия файла %s не прочитана", path, exc_info=True)
+        return ""
+
+
+def _version_key(text: str) -> tuple:
+    """«1.0.16» и «1.0.16.0» — одна версия, а кортежи разной длины так не считают."""
+    parts = list(parse_version(text))
+    return tuple(parts + [0] * (4 - len(parts)))
+
+
+def machine_logon_plan(own_version: str, installed_version: str, installed_exists: bool) -> str:
+    """'install' — положить пользователю свою копию, 'keep' — оставить его.
+
+    Копия пользователя обновляется сама и уходит вперёд машинной, которую IT
+    переустанавливает редко. Безусловная перезапись откатывала бы версию при
+    каждом входе в Windows, а автообновление тут же качало бы её заново.
+    """
+    if not installed_exists:
+        return "install"
+    return "install" if _version_key(own_version) > _version_key(installed_version) else "keep"
+
+
+def deployment_orphaned(marker: dict) -> bool:
+    """Копию пользователю положила установка на компьютер, а её уже сняли."""
+    machine_exe = str((marker or {}).get("machine_exe") or "")
+    return bool(machine_exe) and not Path(machine_exe).exists()
+
+
+def is_network_path(path: Path) -> bool:
+    """Общая папка или сетевой диск."""
+    text = str(path)
+    if text.startswith("\\\\"):
+        return True
+    if not IS_WINDOWS:
+        return False
+    try:
+        DRIVE_REMOTE = 4
+        return ctypes.windll.kernel32.GetDriveTypeW(Path(text).anchor) == DRIVE_REMOTE
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def run_machine_logon(cfg: dict) -> int:
+    """Вход пользователя на компьютере, куда программу поставил MSI.
+
+    Окон не показывает ни при каком исходе: это вход в Windows, а не действие
+    человека. Неудача пишется в install.log, следующий вход пробует снова.
+    """
+    setup_logging(cfg, "install.log")
+    source = program_path()
+    target = installed_path()
+
+    if not getattr(sys, "frozen", False):
+        logging.error("%s имеет смысл только для собранного exe", DEPLOYED_ARG)
+        return 2
+    if is_network_path(source):
+        # Копия пользователя снимает себя, когда машинной копии больше нет.
+        # Общая папка «пропадает» при каждом обрыве сети — ноутбук вне офиса
+        # удалил бы программу сам. Из сети ставим обычной тихой установкой.
+        logging.warning("%s запущен из сети (%s) — ставлю тихой установкой без метки", DEPLOYED_ARG, source)
+        return run_install(cfg, quiet=True)
+    if source.resolve() == target.resolve():
+        logging.error("%s запущен из копии пользователя, а он для машинной копии", DEPLOYED_ARG)
+        return 2
+
+    exists = target.exists()
+    installed_version = file_version(target) if exists else ""
+    plan = machine_logon_plan(VERSION, installed_version, exists)
+    logging.info("Вход пользователя: машинная копия %s, у пользователя %s → %s",
+                 VERSION, installed_version or ("без версии" if exists else "нет"), plan)
+    if plan == "install":
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _stop_installed_copies(target)
+            time.sleep(1.5)
+            shutil.copy2(source, target)
+        except Exception:  # noqa: BLE001
+            logging.exception("Не удалось положить копию пользователю в %s", target)
+            return 1
+        _remove_task()   # у прежних установок она есть — снимаем
+
+    try:
+        deployment_marker_path().write_text(
+            json.dumps({"machine_exe": str(source)}, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        logging.exception("Метка установки на компьютер не записана")
+    # Запуск теперь из HKLM\...\Run. Личный от прежней ручной установки поднимал
+    # бы вторую копию в ту же секунду и мешал подмене файла.
+    _remove_autostart()
+    if not shortcut_path().exists():
+        logging.info("Ярлык Oktell создан: %s", _create_shortcut(target))
+
+    if not is_running_by_mutex(WATCHDOG_MUTEX_NAME):
+        try:
+            flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
+            subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags,
+                             close_fds=True, env=child_env())
+            logging.info("Копия пользователя запущена: %s", target)
+        except Exception:  # noqa: BLE001
+            logging.exception("Копия пользователя не запустилась")
+            return 1
+    return 0
+
+
+def run_orphan_cleanup(cfg: dict) -> int:
+    """Установку на компьютер сняли — снять и копию пользователя.
+
+    Иначе программа, удалённая IT, продолжала бы работать: ярлык «Oktell» ведёт
+    в копию пользователя и поднимает контроль снова. Файлы и логи остаются —
+    выключает программу не их удаление, а разбирать случившееся без логов нечем.
+    """
+    setup_logging(cfg, "install.log")
+    logging.warning("Установка на компьютер снята (%s нет) — снимаю копию пользователя",
+                    read_deployment_marker().get("machine_exe"))
+    _remove_autostart()
+    _remove_shortcut()
+    _remove_deployment_marker()
     _stop_installed_copies(installed_path())
     return 0
 
@@ -2786,6 +3046,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--logout-now", action="store_true", help="разлогинить прямо сейчас (проверка)")
     parser.add_argument("--status", action="store_true", help="состояние в JSON")
     parser.add_argument("--install", action="store_true", help="установить себя и запустить")
+    parser.add_argument("--quiet", action="store_true", help="с --install: без окон (скрипт IT)")
+    parser.add_argument(DEPLOYED_ARG, dest="deployed", action="store_true",
+                        help="вход пользователя на компьютере, куда программу поставил MSI")
     parser.add_argument("--uninstall", action="store_true", help="удалить автозапуск, задачу и ярлык")
     parser.add_argument("--config", default=None, help="путь к config.json")
     parser.add_argument("--version", action="store_true")
@@ -2798,17 +3061,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config(Path(args.config) if args.config else None)
 
     if args.install:
-        return run_install(cfg)
+        return run_install(cfg, quiet=args.quiet)
+    if args.deployed:
+        return run_machine_logon(cfg)
     if args.uninstall:
         return run_uninstall(cfg)
-    if args.agent:
-        return run_agent(cfg)
-    if args.open:
-        return run_open(cfg)
     if args.logout_now:
         return run_logout_now(cfg)
     if args.status:
         return run_status(cfg)
+    # Всё ниже поднимает контроль. Копия пользователя от снятой установки на
+    # компьютер делать этого не должна — её снимаем вместо запуска.
+    if getattr(sys, "frozen", False) and is_installed_copy() and deployment_orphaned(read_deployment_marker()):
+        return run_orphan_cleanup(cfg)
+    if args.agent:
+        return run_agent(cfg)
+    if args.open:
+        return run_open(cfg)
     # Запуск без аргументов из папки «Загрузки» = сотрудник скачал файл с iCORE
     # и кликнул по нему. Ставим себя сами: никаких .bat и распаковок.
     if getattr(sys, "frozen", False) and not args.watchdog and not is_installed_copy():

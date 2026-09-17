@@ -57,6 +57,18 @@ def main() -> int:
     if not exe.exists():
         sys.exit(f"Файл не найден: {exe}")
 
+    sys.path.insert(0, str(HERE))
+    import sign_file
+
+    settings = sign_file.signing_settings(os.environ)
+    if settings:
+        # Подпись настроена — значит неподписанный файл сюда попал по ошибке
+        # (пересобрали без подписи). Автообновление разнесло бы его на все
+        # машины, и правила IT «доверять издателю» перестали бы его пускать.
+        problem = sign_file.signature_problem(sign_file.signature_status(exe), settings.get("thumbprint", ""))
+        if problem:
+            sys.exit(f"{exe.name}: {problem} — не публикую")
+
     version = args.version.strip() or agent_version()
     payload = exe.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
