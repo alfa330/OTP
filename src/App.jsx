@@ -3689,7 +3689,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     />
                                 </div>
                             )}
-                            <div className="max-h-64 overflow-y-auto" role="listbox">
+                            <div className="hours-scroll max-h-64 overflow-y-auto" role="listbox">
                                 {filtered.length === 0 ? (
                                     <div className="px-3 py-3 text-center text-[13px] text-slate-400">Ничего не найдено</div>
                                 ) : (
@@ -7560,11 +7560,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         }
 
-        /* Раздел лежит прямо на полотне страницы, без внешней белой карточки
-           (#344): её поля съедали ширину у таблицы, а прокручиваться вбок
-           должна только сама таблица, у которой своя подложка. */
+        /* Раздел лежит прямо на полотне страницы одной карточкой, как окно macOS
+           (#344): сверху шапка и фильтры, под волосяной линией — таблица до краёв
+           карточки. Раньше рамок было две (карточка раздела и рамка таблицы),
+           без обеих раздел терялся на сером полотне. Карточка не выше окна:
+           длинная таблица прокручивается внутри, короткая — по содержимому. */
         return (
-            <div className="flex h-full min-h-0 min-w-0 flex-col" style={{ fontFamily: APPLE_FONT }}>
+            <div className="flex max-h-full min-h-0 min-w-0 flex-col rounded-2xl bg-white pt-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70" style={{ fontFamily: APPLE_FONT }}>
             <input
                 ref={chatMetricsInputRef}
                 type="file"
@@ -7573,7 +7575,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 onChange={handleChatMetricsFileChange}
             />
             {(chatMetricsImportState.summary || chatMetricsImportState.error) && (
-                <div className={`mb-3 rounded-2xl px-3.5 py-2.5 text-xs ring-1 ${chatMetricsImportState.error ? 'bg-rose-50 text-rose-700 ring-rose-100' : 'bg-cyan-50 text-cyan-900 ring-cyan-100'}`}>
+                <div className={`mx-5 mb-3 rounded-2xl px-3.5 py-2.5 text-xs ring-1 ${chatMetricsImportState.error ? 'bg-rose-50 text-rose-700 ring-rose-100' : 'bg-cyan-50 text-cyan-900 ring-cyan-100'}`}>
                     {chatMetricsImportState.error ? (
                         <>
                             <FaIcon className="fas fa-triangle-exclamation mr-1"></FaIcon>
@@ -7893,8 +7895,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             {/* Шапка раздела: название слева, месяц и действия справа. Подписи
                 «Параметры», «Действия», «Операторы» над группами кнопок убраны —
                 кнопки говорят сами за себя, а подписи только добавляли шум (#344). */}
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2 px-1">
+            <div className="mx-5 mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
                     <h2 className="text-[22px] font-semibold tracking-tight text-slate-900">Учёт часов</h2>
                     <IosHint
                         label="Как выбрать несколько ячеек"
@@ -7927,7 +7929,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
 
             {/* Второй ряд: отбор строк слева, показатель справа */}
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="mx-5 mb-4 flex flex-wrap items-center justify-between gap-2">
                 {/* === Отбор: вид отчёта, группа, статус, направления === */}
                 <div className="flex flex-wrap items-center gap-2">
                     <IosSegmented
@@ -8013,7 +8015,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </button>
 
                         <div className={`tab-dropdown ${openMenu === DIRECTIONS_MENU_ID ? `open${openMenuAlignEnd ? ' tab-dropdown--end' : ''}` : ''}`} role="menu">
-                            <div className="flex max-h-[280px] min-w-[220px] flex-col overflow-y-auto workhours-modal-scroll">
+                            <div className="hours-scroll flex max-h-[280px] min-w-[220px] flex-col overflow-y-auto">
                                 <button
                                     type="button"
                                     role="menuitemcheckbox"
@@ -8409,7 +8411,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 «i» рядом с названием раздела: постоянная строка-подсказка над
                 таблицей была шумом для всех, кто мультивыбором не пользуется. */}
             {selectedHourCells.length > 0 && (
-            <div className="mb-3 flex flex-wrap items-center gap-3 rounded-2xl bg-blue-50/80 px-3.5 py-2 ring-1 ring-blue-100">
+            <div className="mx-5 mb-3 flex flex-wrap items-center gap-3 rounded-2xl bg-blue-50/80 px-3.5 py-2 ring-1 ring-blue-100">
                 <span className="text-[13px] font-semibold tabular-nums text-blue-900">
                     Выбрано ячеек: {selectedHourCells.length}
                 </span>
@@ -8954,7 +8956,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             {/* Общий план отдела ОП: считается на бэке (сумма ставок работавших в
                 месяце × план на 1 FTE × 0,8) и приходит вместе с планом на 1 FTE. */}
             {selectedTab === 'tez_successes' && tezPlanSummary && (
-            <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl bg-white px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70">
+            <div className="mx-5 mb-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl bg-slate-50 px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
                     <FaIcon className="fas fa-bullseye text-slate-400" aria-hidden="true" />
                     Общий план отдела
@@ -8990,11 +8992,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             )}
 
             {/* Table */}
-            {/* Таблица забирает высоту, оставшуюся от шапки раздела (корень — колонка
-                высотой в окно): шапка дней и строка «Итого» закреплены, а полоса
-                прокрутки вбок всегда на экране — раньше до неё приходилось листать
-                страницу в самый низ. Короткая таблица остаётся по содержимому. */}
-            <div className="min-h-[240px] overflow-auto rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70">
+            {/* Таблица забирает высоту, оставшуюся в карточке от шапки раздела:
+                шапка дней и строка «Итого» закреплены, а полоса прокрутки вбок
+                всегда на экране — раньше до неё приходилось листать страницу в
+                самый низ. isolate: липкие шапка и столбец держат свои z-index
+                внутри таблицы — иначе шапка дней накрывала подсказку «i». */}
+            <div className="hours-scroll hours-table-scroll isolate min-h-[240px] overflow-auto rounded-b-2xl border-t border-slate-200/70">
                 <div className="min-w-max tabular-nums">
                 {/* Header row */}
                 <div className="sticky top-0 z-30 flex w-max border-b border-slate-200/80 bg-slate-50 text-[12px] font-medium text-slate-500">
@@ -51988,7 +51991,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
-                                        : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
+                                        : `p-8 bg-gray-50 min-h-screen overflow-y-auto${view === 'sv_hours' ? ' hours-scroll' : ''}`
                         }`}
                         style={isCallEvaluationView ? { backgroundColor: callEvaluationCanvas } : undefined}
                     >

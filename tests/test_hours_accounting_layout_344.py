@@ -43,18 +43,25 @@ def _css_rule(selector):
 
 
 class OuterContainerTests(unittest.TestCase):
-    def test_section_has_no_outer_card(self):
+    def test_section_is_one_card_not_two(self):
+        """Две рамки (карточка раздела + рамка таблицы) были лишними, без обеих раздел
+        терялся на сером полотне. Остаётся одна — карточка раздела, таблица в ней
+        под волосяной линией до краёв."""
         markup = _desktop_markup()
-        root = markup[markup.index("return ("):][:200]
-        self.assertIn('<div className="flex h-full min-h-0 min-w-0 flex-col" style={{ fontFamily: APPLE_FONT }}>', root)
-        self.assertNotIn("bg-white p-5 rounded-xl shadow-md", markup)
-
-    def test_table_keeps_its_own_surface_and_scroll(self):
-        """Без карточки строки таблицы легли бы на серое полотно — подложка у самой таблицы."""
+        root = markup[markup.index("return ("):][:400]
         self.assertIn(
-            'min-h-[240px] overflow-auto rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70',
-            _desktop_markup(),
+            '<div className="flex max-h-full min-h-0 min-w-0 flex-col rounded-2xl bg-white pt-4 '
+            'shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70"',
+            root,
         )
+        self.assertNotIn("bg-white p-5 rounded-xl shadow-md", markup)
+        table = markup[markup.index("{/* Table */}"):]
+        table_box = table[table.index("<div className="):table.index("<div className=\"min-w-max")]
+        self.assertIn("rounded-b-2xl border-t border-slate-200/70", table_box)
+        self.assertNotIn("ring-1", table_box)
+
+    def test_plan_strip_is_flat_inside_the_card(self):
+        self.assertIn('<div className="mx-5 mb-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl bg-slate-50 px-4 py-3">', _desktop_markup())
 
 
 class MacStyleLayoutTests(unittest.TestCase):
@@ -87,9 +94,9 @@ class MacStyleLayoutTests(unittest.TestCase):
 
     def test_header_and_totals_stay_on_screen(self):
         markup = _desktop_markup()
-        # Корень — колонка высотой в окно, таблица — сжимаемый прокручиваемый элемент.
-        self.assertIn('<div className="flex h-full min-h-0 min-w-0 flex-col"', markup)
-        self.assertIn('<div className="min-h-[240px] overflow-auto rounded-2xl', markup)
+        # Карточка не выше окна, таблица — сжимаемый прокручиваемый элемент.
+        self.assertIn('<div className="flex max-h-full min-h-0 min-w-0 flex-col', markup)
+        self.assertIn('hours-scroll hours-table-scroll isolate min-h-[240px] overflow-auto', markup)
         self.assertIn('className="sticky top-0 z-30 flex w-max', markup)
         self.assertIn('className="sticky bottom-0 z-30 flex w-max', markup)
 
@@ -104,6 +111,30 @@ class MacStyleLayoutTests(unittest.TestCase):
         renderer = APP[start:APP.index("function getTrainingsFor(opId, day) {", start)]
         self.assertNotIn("bg-gray-400 text-white", renderer)
         self.assertIn("bg-slate-100 text-slate-400", renderer)
+
+
+class ScrollbarsAndHintTests(unittest.TestCase):
+    """«Сделай кастомные скролы» и «i при наведении выходит некорректно»."""
+
+    def test_hint_is_not_covered_by_the_sticky_day_header(self):
+        """Шапка дней (z-30) и столбец имён (z-40) без isolate соревновались с
+        подсказкой «i» (z-30) на уровне страницы и накрывали её низ на 1920 px."""
+        self.assertIn("hours-table-scroll isolate", _desktop_markup())
+
+    def test_custom_scrollbars_use_webkit_pseudo_elements_only(self):
+        body = _css_rule(".hours-scroll::-webkit-scrollbar-thumb")
+        self.assertIn("border-radius: 9999px;", body)
+        self.assertIn("background-clip: padding-box;", body)
+        # scrollbar-color в обычном правиле выключил бы ::-webkit-scrollbar в Chrome 121+.
+        plain = re.search(r"\n    \.hours-scroll\s*\{", STYLES)
+        self.assertIsNone(plain)
+        self.assertIn("@supports not selector(::-webkit-scrollbar)", STYLES[STYLES.index(".hours-scroll::-webkit-scrollbar {"):])
+
+    def test_scrollbars_cover_table_lists_and_page(self):
+        markup = _desktop_markup()
+        self.assertIn('<div className="hours-scroll max-h-64 overflow-y-auto" role="listbox">', APP)
+        self.assertIn('<div className="hours-scroll flex max-h-[280px] min-w-[220px] flex-col overflow-y-auto">', markup)
+        self.assertIn("overflow-y-auto${view === 'sv_hours' ? ' hours-scroll' : ''}", APP)
 
 
 class ClosedMenuTakesNoSpaceTests(unittest.TestCase):

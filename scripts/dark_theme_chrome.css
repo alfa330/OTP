@@ -131,6 +131,22 @@ html[data-otp-theme="dark"] .tab-dropdown {
     box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.55), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
 }
 
+/* ── Полосы прокрутки «Учёта часов» (.hours-scroll в src/styles.css) ──
+   На тёмном полотне серый ползунок светлой темы почти не виден — берём светлее.
+   Только ::-webkit-scrollbar-thumb: scrollbar-color отключил бы в Chrome всю
+   webkit-стилизацию, и полоса стала бы штатной. */
+html[data-otp-theme="dark"] .hours-scroll::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.35);
+}
+html[data-otp-theme="dark"] .hours-scroll::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(148, 163, 184, 0.6);
+}
+@supports not selector(::-webkit-scrollbar) {
+    html[data-otp-theme="dark"] .hours-scroll {
+        scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+    }
+}
+
 /* ── Раздел «Обращения» и док переписки ── */
 html[data-otp-theme="dark"] .chat-dock,
 html[data-otp-theme="dark"] .crm-aside {
