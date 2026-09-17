@@ -110,6 +110,56 @@ def _as_day(value):
     return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
 
 
+# ── Снимок посреди дня против итога ──────────────────────────────────────────
+#
+# Строка суточного итога бывает двух сортов, и по одному наличию строки их не
+# отличить. ИТОГ снят, когда сутки уже кончились, — его задним числом не трогают.
+# СНИМОК снят, пока сутки шли (кнопка «Обновить» воронки, автодочитка раздела
+# «Касания»), — это полдня, и первый же прогон после конца суток обязан его
+# переписать.
+#
+# Раньше признаком «сутки зафиксированы» было само наличие строк, и снимок
+# застревал навсегда. Замерено 17.09.2026: у «Основы» 16.09 остался срезом 14:15
+# (340 сделок вместо полного дня), 15.09 — срезом 22:34; у «Потока» 15.09 старые
+# строки остались срезом 10:39, а ночь дописала рядом только новых операторов.
+#
+# Отметки пишет база своим NOW(), а база живёт в UTC (SHOW TimeZone = UTC, проверено
+# 17.09.2026); сутки отдела — Алматы, UTC+5 без перевода часов.
+_DB_TO_LOCAL = timedelta(hours=5)
+
+# SQL-двойник `_is_snapshot`: одно правило в двух местах, поэтому рядом.
+_SNAPSHOT_SQL = ("(COALESCE(recaptured_at, captured_at) + interval '5 hours')::date"
+                 " <= work_day")
+
+
+def _is_snapshot(work_day, captured):
+    """Снята ли строка, пока её сутки ещё шли. Отметки нет — считаем итогом: не
+    знаешь — не размораживай."""
+    if captured is None:
+        return False
+    if isinstance(captured, str):
+        try:
+            captured = datetime.fromisoformat(captured[:26])
+        except ValueError:
+            return False
+    if not isinstance(captured, datetime):
+        return False
+    if captured.tzinfo is not None:
+        captured = (captured - captured.utcoffset()).replace(tzinfo=None)
+    return (captured + _DB_TO_LOCAL).date() <= _as_day(work_day)
+
+
+def snapshot_days(cursor, direction_code, day_from, day_to):
+    """Сутки периода, в которых есть хоть одна строка-снимок: их итог так и не был
+    зафиксирован, и прогон вправе переписать их целиком — без force и без дрейфа."""
+    cursor.execute(
+        "SELECT DISTINCT work_day FROM op_funnel_daily "
+        "WHERE direction_code = %s AND work_day BETWEEN %s AND %s AND " + _SNAPSHOT_SQL,
+        (direction_code, day_from, day_to),
+    )
+    return {_as_day(row['work_day']) for row in _rows(cursor)}
+
+
 # ── Контекст доступа ─────────────────────────────────────────────────────────
 
 def load_access_context(cursor, user_id):
@@ -605,8 +655,13 @@ _DAILY_COLUMNS = (
 )
 
 
-def freeze_daily(cursor, rows, force=False, run_id=None, today=None):
+def freeze_daily(cursor, rows, force=False, run_id=None, today=None, reopen_days=None):
     """Зафиксировать суточные итоги. Возвращает {'frozen', 'redone', 'drift'}.
+
+    `reopen_days` — сутки, итог которых так и не был зафиксирован (в них есть строки,
+    снятые посреди дня, см. `snapshot_days`). Их строки переписываются без force и
+    без дрейфа. Вызывающий передаёт их, посчитав ДО сноса строк-сирот; не передал —
+    определяются здесь по отметкам уже лежащих строк.
 
     Три режима, и разница между ними принципиальная:
 
@@ -634,7 +689,8 @@ def freeze_daily(cursor, rows, force=False, run_id=None, today=None):
     keys = [(row['direction_code'], row['work_day'], row['user_id']) for row in rows]
     cursor.execute(
         """
-        SELECT direction_code, work_day, user_id, %s
+        SELECT direction_code, work_day, user_id, %s,
+               COALESCE(recaptured_at, captured_at) AS captured_at
         FROM op_funnel_daily
         WHERE (direction_code, work_day, user_id) IN %%s
         """ % ', '.join(DRIFT_METRICS),
@@ -644,6 +700,12 @@ def freeze_daily(cursor, rows, force=False, run_id=None, today=None):
         (row['direction_code'], row['work_day'], row['user_id']): row
         for row in _rows(cursor)
     }
+    if reopen_days is None:
+        reopen = {(key[0], _as_day(key[1])) for key, was in existing.items()
+                  if _is_snapshot(key[1], was.get('captured_at'))}
+    else:
+        directions = {row['direction_code'] for row in rows}
+        reopen = {(code, _as_day(day)) for code in directions for day in reopen_days}
 
     fresh, redo, drift = [], [], []
     for row in rows:
@@ -654,6 +716,11 @@ def freeze_daily(cursor, rows, force=False, run_id=None, today=None):
             continue
         # Сутки ещё идут — обновляем всегда и молча: это не дрейф, а свежий снимок.
         if _as_day(row['work_day']) >= today:
+            redo.append(row)
+            continue
+        # Сутки кончились, но их итог так и не зафиксировали: лежит снимок посреди
+        # дня. Переписываем тоже молча — дрейфом источника это не является.
+        if (row['direction_code'], _as_day(row['work_day'])) in reopen:
             redo.append(row)
             continue
         if not force:
@@ -722,11 +789,16 @@ def frozen_days(cursor, direction_code, day_from, day_to):
 
     Нужны, чтобы не переписывать лиды и разбивку причин под уже названными
     числами: таблица и расшифровка за ними обязаны описывать один снимок.
+
+    Зафиксированы только сутки, в которых НЕТ ни одной строки-снимка: сутки со
+    снимком посреди дня итога не имеют и переписываются (см. `_SNAPSHOT_SQL`).
     """
     cursor.execute(
         """
-        SELECT DISTINCT work_day FROM op_funnel_daily
+        SELECT work_day FROM op_funnel_daily
         WHERE direction_code = %s AND work_day BETWEEN %s AND %s
+        GROUP BY work_day
+        HAVING NOT bool_or(""" + _SNAPSHOT_SQL + """)
         """,
         (direction_code, day_from, day_to),
     )

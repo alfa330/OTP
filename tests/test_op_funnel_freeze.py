@@ -19,7 +19,7 @@
 import os
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,10 +40,12 @@ class FakeCursor:
         self.statements.append((' '.join(sql.split()), args))
         text = sql.strip().upper()
         if text.startswith('SELECT') and 'OP_FUNNEL_DAILY' in sql.upper():
-            names = ['direction_code', 'work_day', 'user_id'] + list(queries.DRIFT_METRICS)
+            names = (['direction_code', 'work_day', 'user_id'] + list(queries.DRIFT_METRICS)
+                     + ['captured_at'])
             self.description = [(name,) for name in names]
             self._rows = [
-                tuple([key[0], key[1], key[2]] + [row.get(m, 0) for m in queries.DRIFT_METRICS])
+                tuple([key[0], key[1], key[2]] + [row.get(m, 0) for m in queries.DRIFT_METRICS]
+                      + [row.get('captured_at')])
                 for key, row in self.existing.items()
             ]
         else:
@@ -126,6 +128,64 @@ class FreezeTests(unittest.TestCase):
         result = queries.freeze_daily(cursor, [daily_row(TODAY, handled=120)], today=TODAY)
         self.assertEqual(result['drift'], 0)
         self.assertEqual(cursor.inserted_into('op_funnel_drift'), [])
+
+
+class SnapshotDayTests(unittest.TestCase):
+    """Снимок посреди дня — не итог (замерено на проде 17.09.2026).
+
+    Признаком «сутки зафиксированы» было наличие строк. Кнопка «Обновить» воронки и
+    автодочитка раздела «Касания» пишут строки, пока сутки идут, — и ночной прогон
+    после конца суток уже не мог их переписать: у «Основы» 16.09 навсегда остался
+    срезом 14:15 (340 сделок вместо полного дня), у «Потока» 15.09 — срезом 10:39.
+    Отметки базы в UTC, сутки отдела — Алматы (UTC+5).
+    """
+
+    def test_РЕГРЕССИЯ_снимок_посреди_дня_переписывается_после_конца_суток(self):
+        # 09:15 UTC = 14:15 Алматы того же дня — снимок.
+        existing = {('op_potok', YESTERDAY, 7): {
+            'handled': 12, 'reached': 5,
+            'captured_at': datetime.combine(YESTERDAY, datetime.min.time()) + timedelta(hours=9)}}
+        cursor = FakeCursor(existing)
+        result = queries.freeze_daily(cursor, [daily_row(YESTERDAY, handled=40, reached=20)],
+                                      today=TODAY)
+        self.assertEqual(result['redone'], 1, 'снимок обязан переписаться без force')
+        self.assertEqual(result['drift'], 0, 'дописанный день — не дрейф источника')
+        self.assertEqual(cursor.inserted_into('op_funnel_drift'), [])
+
+    def test_итог_снятый_после_конца_суток_не_трогается(self):
+        # 00:20 UTC следующего дня = 05:20 Алматы — ночная выгрузка, это итог.
+        existing = {('op_potok', YESTERDAY, 7): {
+            'handled': 12, 'captured_at': datetime.combine(TODAY, datetime.min.time())
+            + timedelta(minutes=20)}}
+        cursor = FakeCursor(existing)
+        result = queries.freeze_daily(cursor, [daily_row(YESTERDAY, handled=40)], today=TODAY)
+        self.assertEqual((result['frozen'], result['redone']), (0, 0))
+
+    def test_граница_суток_по_алматы(self):
+        day = date(2026, 9, 16)
+        late = datetime(2026, 9, 16, 18, 59, 59)     # 23:59:59 Алматы — ещё те же сутки
+        after = datetime(2026, 9, 16, 19, 0, 0)      # 00:00 Алматы следующих суток
+        self.assertTrue(queries._is_snapshot(day, late))
+        self.assertFalse(queries._is_snapshot(day, after))
+        self.assertFalse(queries._is_snapshot(day, None), 'без отметки — не размораживать')
+
+    def test_переданные_сутки_переоткрываются_даже_без_отметок(self):
+        # sync считает сутки со снимком ДО сноса сирот и передаёт их явно.
+        existing = {('op_potok', YESTERDAY, 7): {'handled': 12}}
+        cursor = FakeCursor(existing)
+        result = queries.freeze_daily(cursor, [daily_row(YESTERDAY, handled=40)], today=TODAY,
+                                      reopen_days={YESTERDAY})
+        self.assertEqual(result['redone'], 1)
+        self.assertEqual(result['drift'], 0)
+
+    def test_зафиксированными_считаются_только_сутки_без_снимков(self):
+        cursor = FakeCursor()
+        queries.frozen_days(cursor, 'op_osnova', YESTERDAY, TODAY)
+        sql = cursor.statements[-1][0]
+        self.assertIn('bool_or', sql)
+        self.assertIn("interval '5 hours'", sql)
+        queries.snapshot_days(cursor, 'op_osnova', YESTERDAY, TODAY)
+        self.assertIn("interval '5 hours'", cursor.statements[-1][0])
 
 
 class OrphanDailyTests(unittest.TestCase):

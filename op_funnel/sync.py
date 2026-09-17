@@ -534,6 +534,9 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
             # Снести строки, которых новый расчёт больше не даёт, — иначе строка
             # «Не сопоставлен» остаётся висеть после того, как операторов
             # связали, и удваивает итог суток.
+            # Сутки со снимком посреди дня считаем ДО сноса сирот: снимок мог лежать
+            # как раз в строке-сироте, и после сноса сутки выглядели бы итогом.
+            reopen_days = queries.snapshot_days(cursor, direction_code, day_from, day_to)
             writable_days = _writable_days(cursor, direction_code, day_from, day_to, force)
             if writable_days:
                 queries.drop_orphan_daily(
@@ -541,7 +544,7 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
                     {(row['work_day'], row['user_id']) for row in daily})
 
             frozen = queries.freeze_daily(cursor, daily, force=force, run_id=run_id,
-                                          today=date.today())
+                                          today=date.today(), reopen_days=reopen_days)
             summary['days_frozen'] = frozen['frozen']
             summary['days_redone'] = frozen['redone']
             summary['drift_rows'] = frozen['drift']
