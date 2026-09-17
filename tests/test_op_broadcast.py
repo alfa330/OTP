@@ -14,6 +14,7 @@
 """
 
 import ast
+import asyncio
 import re
 import unittest
 from datetime import date, datetime, timedelta
@@ -27,7 +28,7 @@ DB_PATH = ROOT / "database.py"
 
 HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
            "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
-           "_op_broadcast_attach_period"}
+           "_op_broadcast_attach_period", "_op_broadcast_caption"}
 CONSTANTS = {"_OP_BROADCAST_TABLE_ROWS"}
 
 
@@ -244,6 +245,92 @@ class PeriodTests(unittest.TestCase):
                          (['100', '0'], ['4,0 %', '—'], ['90,0 %', '—'], ['1:05', '—']))
 
 
+class CaptionTests(unittest.TestCase):
+    """Владелец 17.09.2026: в отбивке ОП — только картинки и «Обратите внимание», если есть.
+    Заголовок, таблица и строка о людях из подписи убраны: цифры уже на картинках."""
+
+    def setUp(self):
+        self.ns = _namespace()
+        self.caption = self.ns["_op_broadcast_caption"]
+
+    def test_no_deviations_means_no_caption(self):
+        self.assertEqual(self.caption(snapshot()), '')
+
+    def test_caption_is_only_the_deviations(self):
+        data = snapshot(arrived=100, missed=9, sl=0.7)
+        self.assertEqual(self.caption(data).split('\n'), self.ns["_op_broadcast_deviations"](data))
+        for noise in ('Табло ОП', '<pre>', 'Онлайн', 'Входящих'):
+            self.assertNotIn(noise, self.caption(data))
+
+
+class _FakeInputFile:
+    def __init__(self, file, filename=None):
+        self.filename = filename
+
+
+class _FakeMediaGroup:
+    def __init__(self):
+        self.photos = []
+
+    def attach_photo(self, photo, caption=None, parse_mode=None):
+        self.photos.append((photo.filename, caption, parse_mode))
+
+
+class _FakeBot:
+    def __init__(self, fail_media=False):
+        self.calls = []
+        self.fail_media = fail_media
+
+    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None):
+        if self.fail_media:
+            raise RuntimeError('photo rejected')
+        self.calls.append(('photo', photo.filename, caption, parse_mode))
+
+    async def send_media_group(self, chat_id, group):
+        if self.fail_media:
+            raise RuntimeError('album rejected')
+        self.calls.append(('album', group.photos))
+
+    async def send_message(self, chat_id, text, parse_mode=None):
+        self.calls.append(('message', text, parse_mode))
+
+
+class DeliveryTests(unittest.TestCase):
+    """Общая доставка отбивок: пустая подпись — картинки без подписи, а не ошибка Telegram."""
+
+    def deliver(self, bot, text, media):
+        node = next(n for n in _module().body
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "_szov_broadcast_deliver")
+        types = type('types', (), {'InputFile': _FakeInputFile, 'MediaGroup': _FakeMediaGroup})
+        namespace = {"bot": bot, "types": types, "BytesIO": lambda blob: blob,
+                     "logging": type('log', (), {'error': staticmethod(lambda *a, **k: None)})}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
+        return asyncio.run(namespace["_szov_broadcast_deliver"](-1, text, media))
+
+    def test_album_without_caption(self):
+        bot = _FakeBot()
+        self.deliver(bot, '', [('op_board.png', b'1'), ('op_hour.png', b'2')])
+        self.assertEqual(bot.calls, [('album', [('op_board.png', None, None), ('op_hour.png', None, None)])])
+
+    def test_album_with_deviations_caption_on_the_first_picture(self):
+        bot = _FakeBot()
+        self.deliver(bot, 'Обратите внимание: SL 70,0 %', [('op_board.png', b'1'), ('op_hour.png', b'2')])
+        self.assertEqual(bot.calls, [('album', [('op_board.png', 'Обратите внимание: SL 70,0 %', 'HTML'),
+                                                ('op_hour.png', None, None)])])
+
+    def test_failed_pictures_without_text_do_not_send_an_empty_message(self):
+        bot = _FakeBot(fail_media=True)
+        with self.assertRaises(RuntimeError):
+            self.deliver(bot, '', [('op_board.png', b'1'), ('op_hour.png', b'2')])
+        self.assertEqual(bot.calls, [])
+
+    def test_failed_pictures_with_text_still_send_the_text(self):
+        # Так живут «Линия» и «Чат»: их текст никогда не пустой, и поведение не поменялось.
+        bot = _FakeBot(fail_media=True)
+        self.deliver(bot, '<b>Табло</b>', [('board.png', b'1')])
+        self.assertEqual(bot.calls, [('message', '<b>Табло</b>', 'HTML')])
+
+
 class WiringTests(unittest.TestCase):
     def setUp(self):
         self.source = BOT_PATH.read_text(encoding="utf-8-sig")
@@ -284,6 +371,9 @@ class WiringTests(unittest.TestCase):
         prepare = prepare[:prepare.index("\n\n\n")]
         self.assertIn("('op_board.png', _op_render_wallboard_png)", prepare)
         self.assertIn("('op_hour.png', _op_render_hour_png)", prepare)
+        # Подпись — только отклонения; полный текст — лишь когда картинки не собрались.
+        self.assertIn("text = _op_broadcast_caption(data) if media else _op_broadcast_text(data)", prepare)
+        self.assertLess(prepare.index("_op_render_hour_png"), prepare.index("text = "))
         preview = self.source[self.source.index("def _op_broadcast_preview"):]
         self.assertIn("'hour': _op_render_hour_png", preview[:1200])
 

@@ -38650,22 +38650,30 @@ async def _szov_broadcast_deliver(chat_id, text, media):
 
     Одна картинка уходит send_photo, две и больше — альбомом: sendMediaGroup у Telegram
     принимает от ДВУХ вложений и на одном честно падает. Направление «Чат» присылает одну
-    картинку, «Линия» — две, поэтому развилка здесь, а не у каждого вызывающего."""
+    картинку, «Линия» — две, поэтому развилка здесь, а не у каждого вызывающего.
+
+    Пустой текст — картинки без подписи (у «Табло ОП» подпись есть только при отклонениях).
+    Если такие картинки не ушли, текстом слать нечего: ошибка поднимается к вызывающему и
+    ложится в его лог, а не превращается в «message text is empty» от Telegram."""
     if media:
+        caption = text or None
         try:
             if len(media) == 1:
                 name, blob = media[0]
                 await bot.send_photo(chat_id, types.InputFile(BytesIO(blob), filename=name),
-                                     caption=text, parse_mode='HTML')
+                                     caption=caption, parse_mode='HTML' if caption else None)
                 return
             group = types.MediaGroup()
             for index, (name, blob) in enumerate(media):
+                first = index == 0 and caption is not None
                 group.attach_photo(types.InputFile(BytesIO(blob), filename=name),
-                                   caption=text if index == 0 else None,
-                                   parse_mode='HTML' if index == 0 else None)
+                                   caption=caption if first else None,
+                                   parse_mode='HTML' if first else None)
             await bot.send_media_group(chat_id, group)
             return
         except Exception as exc:
+            if not text:
+                raise
             logging.error("Отбивка табло: альбом не ушёл, отправляю текстом: %s", exc)
     await bot.send_message(chat_id, text, parse_mode='HTML')
 
@@ -42111,12 +42119,20 @@ def _op_broadcast_table(data):
     return lines
 
 
+def _op_broadcast_caption(data):
+    """Подпись к картинкам отбивки ОП — только отклонения («Обратите внимание…»), если они есть.
+
+    Решение владельца 17.09.2026: цифры дня и часа уже на двух картинках, и заголовок, таблица
+    и строка о людях в подписи были повтором. Отклонений нет — картинки уходят без подписи."""
+    return '\n'.join(_op_broadcast_deviations(data))
+
+
 def _op_broadcast_text(data):
-    """Текст отбивки ОП. HTML parse_mode: заголовок жирный.
+    """Полный текст отбивки ОП — только на случай, когда картинки не собрались (нет шрифта,
+    сбой отрисовки): тогда цифры уходят текстом, а не пропадают. HTML parse_mode.
 
     Итоги дня и последнего полного часа — таблицей, как в отбивке по лидам; под ней
-    отклонения (по итогам дня, как и раньше) и дежурная строка о людях: этого хватает, чтобы
-    понять положение без картинок.
+    отклонения (по итогам дня, как и раньше) и дежурная строка о людях.
     Разреза по линиям (очередям станции) нет нигде — ни на экране, ни здесь: решение
     владельца 16.09.2026, номера очередей вида 3010 читались как шум."""
     now = data.get('now') or {}
@@ -42209,7 +42225,8 @@ def _op_broadcast_preview():
         return response
     regular, _bold = _szov_font_paths()
     return jsonify({
-        "text": _op_broadcast_text(data),
+        # Ровно то, что уйдёт: с картинками — подпись из одних отклонений, без них — полный текст.
+        "text": _op_broadcast_caption(data) if regular else _op_broadcast_text(data),
         "font_path": regular,
         "images_available": bool(regular),
         "deviations": _op_broadcast_deviations(data),
@@ -42218,20 +42235,22 @@ def _op_broadcast_preview():
 
 
 async def _op_broadcast_prepare(scheduled=False):
-    """Собрать отбивку ОП целиком: данные, текст и картинку. Снимок читается из базы
+    """Собрать отбивку ОП целиком: данные, картинки и подпись. Снимок читается из базы
     синхронно — в пуле потоков, а не на event loop бота."""
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(executor_pool, _op_broadcast_collect, scheduled)
-    text = _op_broadcast_text(data)
     media = []
     # Картинка дня первой (под ней подпись альбома), часа — второй. Каждая рисуется отдельно:
-    # сбой одной не отнимает другую, а без обеих текст всё равно уходит — цифры важнее картинок.
+    # сбой одной не отнимает другую.
     for name, render in (('op_board.png', _op_render_wallboard_png),
                          ('op_hour.png', _op_render_hour_png)):
         try:
             media.append((name, await loop.run_in_executor(executor_pool, render, data)))
         except Exception as exc:
             logging.error("Отбивка табло ОП: не удалось собрать картинку %s: %s", name, exc)
+    # Подпись — только отклонения (владелец, 17.09.2026). Без картинок уходит полный текст с
+    # таблицей: цифры важнее картинок.
+    text = _op_broadcast_caption(data) if media else _op_broadcast_text(data)
     return data, text, media
 
 
