@@ -1,28 +1,26 @@
 # -*- coding: utf-8 -*-
-"""«Уведомления об изменениях» — суточная сводка правок графика в Telegram.
+"""«Уведомления об изменениях» — суточная сводка изменений графика в Telegram.
 
 Что здесь сторожится и почему именно это.
 
-Требование владельца к этой сводке было сформулировано отдельной фразой:
-«нельзя, чтобы это выглядело как спам». На боевых данных за сутки в журнале
-79–585 строк, до 92 затронутых сотрудников и до 63 разных дней графика — то
-есть наивная сводка «строка на каждого» не просто нечитаема, она физически не
-уходит: потолок сообщения Telegram 4096 символов, и превышение означает не
-обрезку, а несостоявшуюся отправку. Поэтому тесты держат четыре вещи:
+С 17.09.2026 сводка — одна таблица по макету владельца: «Сотрудник · Группа ·
+Было · Стало · Кто изменил». Самое дорогое в ней — неправда в ячейках «Было» и
+«Стало», и она тут возникает легко: журнал пишет только ОТЛИЧИЯ дня, а таблица
+показывает день целиком. Сняли одну смену из двух — в журнале одна строка
+'removed', и честное «Стало» получается только откатом от текущего графика.
+Поэтому тесты держат:
 
-* единицу счёта — «правка» = сотрудник + день графика + операция, а не строка
-  журнала: одна загрузка файла пишет 369 строк, и по строкам автор выглядел бы
-  как человек, поменявший график 369 раз;
-* разделение массовых операций и ручных правок — иначе импорт вытесняет из
-  сводки всех, кто правил смены руками;
-* молчание операторских обменов в списке имён — за сутки их полтора десятка,
-  и это чужие имена в сводке для руководителя;
-* бюджет символов на заведомо огромных сутках.
+* откат: весь день, а не изменённые строки; правки после окна откатываются;
+  смена вида при тех же часах видна; несошедшийся откат не выдумывает «нет смены»;
+* строку — сотрудник + день, итог за сутки, и выпадение дня, вернувшегося как был;
+* первичное внесение графика — не изменение, но перенос смены на пустой день и
+  добор оператора — изменение;
+* потолки rich-сообщения и обычного текста на заведомо огромных сутках.
 
 Отдельно сторожится граница суток (`changed_at` лежит в алматинском времени без
 пояса, а сессия Postgres на Render — в UTC) и область получателя: правило
 раздела, а не правило остальных Telegram-отчётов портала. Разница не
-академическая — на бою все шесть глав отделов имеют роль `admin`, и по правилу
+академическая — на бою все главы отделов имеют роль `admin`, и по правилу
 отчётов каждый из них получал бы сводку по всей компании.
 
 Тест герметичен: `database.py` и `bot_schedule2.py` не импортируются (на
@@ -36,7 +34,8 @@ import html.parser
 import re
 import types
 import unittest
-from datetime import date, datetime, timedelta
+from contextlib import contextmanager
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -68,28 +67,60 @@ def _source_of(path, name, class_name=None):
     return ast.get_source_segment(source, node)
 
 
-def entry(operator_id, operator_name, shift_date, action, source, actor_id,
-          actor_name, actor_role, changed_at, **extra):
-    row = {
-        'operator_id': operator_id,
-        'operator_name': operator_name,
-        'shift_date': shift_date,
-        'action': action,
-        'source': source,
-        'actor_id': actor_id,
-        'actor_name': actor_name,
-        'actor_role': actor_role,
-        'changed_at': changed_at,
-        'start': None, 'end': None, 'prev_start': None, 'prev_end': None,
-    }
-    row.update(extra)
-    return row
-
-
-DAY = date(2026, 9, 14)
+DAY = date(2026, 9, 14)            # сутки сводки
+D18 = date(2026, 9, 18)            # день графика
+D19 = date(2026, 9, 19)
 T1 = datetime(2026, 9, 14, 10, 0, 0, 111111)
 T2 = datetime(2026, 9, 14, 11, 0, 0, 222222)
 T3 = datetime(2026, 9, 14, 12, 0, 0, 333333)
+LATER = datetime(2026, 9, 15, 8, 0, 0, 444444)   # после окна сводки
+
+_ids = iter(range(1, 10 ** 6))
+
+
+def journal(operator_id, shift_date, action, changed_at=T1, *, source='supervisor',
+            actor_id=7, actor_name='Петров Пётр', start=None, end=None,
+            prev_start=None, prev_end=None, shift_type=None, prev_shift_type=None,
+            day_was_empty=False, operator_name=None, group_name='Поток 1'):
+    """Строка журнала в том виде, в каком её отдаёт get_schedule_change_report_entries."""
+    if action in ('added', 'changed') and shift_type is None:
+        shift_type = 'regular'
+    if action in ('removed', 'changed') and prev_shift_type is None:
+        prev_shift_type = 'regular'
+    return {
+        'id': next(_ids),
+        'operator_id': operator_id,
+        'operator_name': operator_name or 'Оператор %d' % operator_id,
+        'group_name': group_name,
+        'shift_date': shift_date,
+        'action': action,
+        'source': source,
+        'start': start, 'end': end, 'prev_start': prev_start, 'prev_end': prev_end,
+        'shift_type': shift_type, 'prev_shift_type': prev_shift_type,
+        'actor_id': actor_id,
+        'actor_name': actor_name,
+        'actor_role': 'sv',
+        'changed_at': changed_at,
+        'day_was_empty': day_was_empty,
+    }
+
+
+def fill(operator_id, shift_date, source='supervisor', changed_at=T1, actor_id=7,
+         action='added', day_was_empty=True, **extra):
+    """Заполнение дня — как его пишет дифф после 17.09.2026."""
+    extra.setdefault('start', '09:00')
+    extra.setdefault('end', '18:00')
+    return journal(operator_id, shift_date, action, changed_at, source=source,
+                   actor_id=actor_id, day_was_empty=day_was_empty, **extra)
+
+
+def state(*shifts, day_off=False):
+    return {'shifts': [(start, end, kind) for start, end, kind in shifts], 'day_off': day_off}
+
+
+def one_row(entries, current, later=None):
+    rows, _ = digest.build_rows(entries, current, later)
+    return rows
 
 
 class DayWindowTests(unittest.TestCase):
@@ -117,207 +148,421 @@ class DayWindowTests(unittest.TestCase):
         self.assertEqual(digest.previous_day(datetime(2026, 9, 15, 23, 59)), DAY)
 
 
-class ChangeUnitTests(unittest.TestCase):
-    """Единица счёта. Правка — сотрудник + день графика + операция."""
+class BeforeAfterTests(unittest.TestCase):
+    """«Было» и «Стало» — весь день, восстановленный откатом журнала."""
 
-    def test_rows_of_one_operation_on_one_day_are_one_change(self):
-        # Реальный случай: смену подвинули и сняли выходной — журнал пишет две
-        # строки об одном действии человека.
+    def test_moved_shift(self):
+        rows = one_row(
+            [journal(1, D18, 'changed', start='12:00', end='21:00',
+                     prev_start='09:00', prev_end='18:00', operator_name='Иванов Иван')],
+            {(1, D18): state(('12:00', '21:00', 'regular'))})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['operator_name'], 'Иванов Иван')
+        self.assertEqual(rows[0]['group_name'], 'Поток 1')
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–18:00')
+        self.assertEqual(rows[0]['after'], '18.09, 12:00–21:00')
+        self.assertEqual(rows[0]['actors'], 'Петров Пётр')
+
+    def test_removing_one_of_two_shifts_keeps_the_other_in_both_cells(self):
+        """Журнал знает только снятую смену. «Стало: нет смены» было бы
+        неправдой — утренняя смена осталась."""
+        rows = one_row(
+            [journal(1, D18, 'removed', prev_start='18:00', prev_end='22:00')],
+            {(1, D18): state(('09:00', '13:00', 'regular'))})
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–13:00, 18:00–22:00')
+        self.assertEqual(rows[0]['after'], '18.09, 09:00–13:00')
+
+    def test_day_off_over_a_shift(self):
+        rows = one_row(
+            [journal(1, D18, 'removed', prev_start='09:00', prev_end='18:00'),
+             journal(1, D18, 'day_off_set')],
+            {(1, D18): state(day_off=True)})
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–18:00')
+        self.assertEqual(rows[0]['after'], '18.09 — выходной')
+
+    def test_shift_removed_to_nothing(self):
+        rows = one_row(
+            [journal(1, D18, 'removed', prev_start='09:00', prev_end='18:00')],
+            {(1, D18): state()})
+        self.assertEqual(rows[0]['after'], '18.09 — нет смены')
+
+    def test_shift_type_change_with_the_same_hours_is_visible(self):
+        """88 таких правок на бою: без вида смены «Было» и «Стало» совпали бы."""
+        rows = one_row(
+            [journal(1, D18, 'changed', start='09:00', end='18:00', prev_start='09:00',
+                     prev_end='18:00', shift_type='office_practice', prev_shift_type='regular')],
+            {(1, D18): state(('09:00', '18:00', 'office_practice'))})
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–18:00')
+        self.assertEqual(rows[0]['after'], '18.09, 09:00–18:00 (практика в офисе)')
+
+    def test_changes_made_after_the_window_are_rolled_back(self):
+        """Сводка уходит в 09:45 — к этому времени смену могли подвинуть ещё
+        раз. «Стало» — конец отчётных суток, а не текущий график."""
+        # Вечернюю смену сняли в отчётные сутки, утреннюю подвинули уже утром
+        # в день рассылки. Без отката поздней правки обе ячейки показали бы
+        # сегодняшнее 10:00–14:00, которого вчера ещё не было.
+        window = [journal(1, D18, 'removed', T1, prev_start='18:00', prev_end='22:00')]
+        later = [journal(1, D18, 'changed', LATER, start='10:00', end='14:00',
+                         prev_start='09:00', prev_end='13:00')]
+        rows = one_row(window, {(1, D18): state(('10:00', '14:00', 'regular'))}, later)
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–13:00, 18:00–22:00')
+        self.assertEqual(rows[0]['after'], '18.09, 09:00–13:00')
+
+    def test_database_time_values(self):
+        rows = one_row(
+            [journal(1, D18, 'changed', start=time(12, 0), end=time(21, 0),
+                     prev_start=time(9, 0), prev_end=time(18, 0))],
+            {(1, D18): state((time(12, 0), time(21, 0), 'regular'))})
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–18:00')
+
+    def test_night_shift(self):
+        rows = one_row(
+            [journal(1, D18, 'changed', start='21:00', end='03:00',
+                     prev_start='20:00', prev_end='02:00')],
+            {(1, D18): state(('21:00', '03:00', 'regular'))})
+        self.assertEqual(rows[0]['after'], '18.09, 21:00–03:00')
+
+    def test_unmatched_journal_does_not_invent_an_empty_day(self):
+        """Правка мимо журнала: в графике нет смены, которую журнал называет
+        добавленной. Откату верить нельзя — видны только изменённые смены, а
+        пустая сторона не превращается в «нет смены»."""
+        rows = one_row(
+            [journal(1, D18, 'added', start='18:00', end='22:00')],
+            {(1, D18): state()})
+        self.assertEqual(rows[0]['before'], '18.09')
+        self.assertEqual(rows[0]['after'], '18.09, 18:00–22:00')
+
+
+class RowTests(unittest.TestCase):
+    """Строка — сотрудник + день графика, итог за сутки."""
+
+    def test_several_edits_of_one_day_are_one_row(self):
         entries = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'changed', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(1, 'Иванов', date(2026, 9, 16), 'day_off_cleared', 'supervisor', 7, 'Петров', 'sv', T1),
+            journal(1, D18, 'changed', T1, start='12:00', end='21:00',
+                    prev_start='09:00', prev_end='18:00'),
+            journal(1, D18, 'changed', T2, start='10:00', end='19:00',
+                    prev_start='12:00', prev_end='21:00', actor_id=8, actor_name='Сабыр Азана'),
         ]
-        stats = digest.summarize(entries)
-        self.assertEqual(stats['total'], 1)
-        self.assertEqual(stats['actors'][0]['changes'], 1)
-        self.assertEqual(stats['operators'][0]['changes'], 1)
+        rows = one_row(entries, {(1, D18): state(('10:00', '19:00', 'regular'))})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–18:00')
+        self.assertEqual(rows[0]['after'], '18.09, 10:00–19:00')
+        self.assertEqual(rows[0]['actors'], 'Петров Пётр, Сабыр Азана')
 
-    def test_same_day_touched_twice_counts_twice(self):
-        # Два захода в тот же день того же человека — это два раза, а не один:
-        # иначе «кому сколько раз меняли» перестаёт отвечать на свой вопрос.
+    def test_day_returned_as_it_was_has_no_row(self):
         entries = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'changed', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(1, 'Иванов', date(2026, 9, 16), 'changed', 'supervisor', 7, 'Петров', 'sv', T2),
+            journal(1, D18, 'removed', T1, prev_start='09:00', prev_end='18:00'),
+            fill(1, D18, changed_at=T2),
         ]
-        self.assertEqual(digest.summarize(entries)['total'], 2)
+        rows, first = digest.build_rows(entries, {(1, D18): state(('09:00', '18:00', 'regular'))})
+        self.assertEqual(rows, [])
+        # Заполнение шло ПОСЛЕ снятия — это не внесение графика.
+        self.assertEqual(first, [])
 
-    def test_same_microsecond_different_actors_are_different_operations(self):
-        # Ключ операции — пара (автор, время), а не одно время.
+    def test_day_filled_and_then_moved_shows_the_move_only(self):
         entries = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(1, 'Иванов', date(2026, 9, 16), 'added', 'supervisor', 8, 'Сидоров', 'sv', T1),
+            fill(1, D18, source='import', changed_at=T1, actor_id=5, actor_name='Кастек Гаухар'),
+            journal(1, D18, 'changed', T2, start='10:00', end='19:00',
+                    prev_start='09:00', prev_end='18:00'),
         ]
-        stats = digest.summarize(entries)
-        self.assertEqual(stats['total'], 2)
-        self.assertEqual(len(stats['actors']), 2)
+        rows, first = digest.build_rows(entries, {(1, D18): state(('10:00', '19:00', 'regular'))})
+        self.assertEqual(rows[0]['before'], '18.09, 09:00–18:00')
+        self.assertEqual(rows[0]['after'], '18.09, 10:00–19:00')
+        self.assertEqual(rows[0]['actors'], 'Петров Пётр')
+        self.assertEqual(len(first), 1)
 
-    def test_counts_add_up(self):
-        """Сумма по авторам плюс операторские операции равна шапке.
+    def test_only_entries_give_no_rows(self):
+        entries = [fill(operator_id, D18, source='import') for operator_id in range(1, 6)]
+        current = {(operator_id, D18): state(('09:00', '18:00', 'regular'))
+                   for operator_id in range(1, 6)}
+        rows, first = digest.build_rows(entries, current)
+        self.assertEqual(rows, [])
+        self.assertEqual(len(first), 5)
 
-        Руководитель складывает числа в сообщении; если они не сходятся,
-        сводке перестают верить целиком."""
+    def test_transfer_to_an_empty_day_keeps_both_days(self):
         entries = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(2, 'Сидорова', date(2026, 9, 17), 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(3, 'Кимов', date(2026, 9, 18), 'added', 'swap', 3, 'Кимов', 'operator', T2),
-            entry(4, 'Ли', date(2026, 9, 19), 'added', 'auction_topup', 4, 'Ли', 'operator', T3),
+            journal(1, D18, 'removed', T1, prev_start='09:00', prev_end='18:00'),
+            fill(1, D19, changed_at=T1),
         ]
-        stats = digest.summarize(entries)
-        by_actor = sum(row['changes'] for row in stats['actors'])
-        self.assertEqual(by_actor + stats['self_total'], stats['total'])
+        current = {(1, D18): state(), (1, D19): state(('09:00', '18:00', 'regular'))}
+        rows = one_row(entries, current)
+        self.assertEqual([(row['before'], row['after']) for row in rows], [
+            ('18.09, 09:00–18:00', '18.09 — нет смены'),
+            ('19.09 — нет смены', '19.09, 09:00–18:00'),
+        ])
 
-
-class AntiSpamTests(unittest.TestCase):
-    """Всё, что мешает сводке превратиться в простыню."""
-
-    def _mass_import(self, operators=54, days=7):
-        rows = []
-        for operator_id in range(1, operators + 1):
-            for offset in range(days):
-                rows.append(entry(operator_id, 'Оператор %d' % operator_id,
-                                  DAY + timedelta(days=offset), 'added', 'import',
-                                  7, 'Кастек Гаухар', 'sv', T1))
-        return rows
-
-    def test_mass_operation_is_one_line_with_its_way_and_run_count(self):
-        text = digest.build_digest(DAY, self._mass_import(), 'СЗоВ', escape=html.escape)
-        self.assertIn('Кастек Гаухар', text)
-        # Способ назван, и видно, что это ОДИН заход, а не 378 правок руками.
-        self.assertIn('загрузка из файла (1 заход)', text)
-        # Одна строка на автора, а не строка на каждого затронутого оператора.
-        self.assertEqual(text.count('👤'), 1)
-
-    def test_manual_work_is_not_drowned_by_a_mass_operation(self):
-        rows = self._mass_import()
-        rows += [
-            entry(900, 'Петрова', DAY + timedelta(days=i), 'changed', 'supervisor',
-                  8, 'Элекова Арайлым', 'sv', datetime(2026, 9, 14, 13, i, 0, i + 1))
-            for i in range(12)
+    def test_way_is_named_unless_it_is_manual(self):
+        entries = [
+            fill(1, D18, source='auction_topup', actor_id=1, actor_name='Ли Анна',
+                 start='18:00', end='22:00'),
+            journal(2, D18, 'removed', source='swap', actor_id=3, actor_name='Ким Ольга',
+                    prev_start='09:00', prev_end='18:00'),
         ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        self.assertIn('Элекова Арайлым', text)
-        self.assertIn('вручную (12 заходов)', text)
+        current = {(1, D18): state(('18:00', '22:00', 'regular')), (2, D18): state()}
+        rows = {row['operator_id']: row for row in one_row(entries, current)}
+        # Добор на свободный день — изменение, а не внесение.
+        self.assertEqual(rows[1]['before'], '18.09 — нет смены')
+        self.assertEqual(rows[1]['actors'], 'Ли Анна (добор с аукциона)')
+        self.assertEqual(rows[2]['actors'], 'Ким Ольга (обмен сменами)')
 
-    def test_operator_self_service_has_no_names(self):
-        """Обмены и доборы — счётчиком. Действующее лицо там механика, а не
-        автор: ровно так же устроен экран истории (IMPERSONAL_SOURCES)."""
+    def test_one_author_with_two_ways(self):
+        entries = [
+            journal(1, D18, 'changed', T1, source='import', start='10:00', end='19:00',
+                    prev_start='09:00', prev_end='18:00', actor_name='Кастек Гаухар'),
+            journal(1, D18, 'changed', T2, start='11:00', end='20:00',
+                    prev_start='10:00', prev_end='19:00', actor_name='Кастек Гаухар'),
+        ]
+        rows = one_row(entries, {(1, D18): state(('11:00', '20:00', 'regular'))})
+        self.assertEqual(rows[0]['actors'], 'Кастек Гаухар (загрузка из файла, вручную)')
+
+    def test_rows_go_by_group_then_name_then_day_and_groupless_last(self):
+        def move(operator_id, day, name, group):
+            return journal(operator_id, day, 'removed', prev_start='09:00', prev_end='18:00',
+                           operator_name=name, group_name=group)
+        entries = [
+            move(1, D19, 'Борисов', 'Поток 1'),
+            move(2, D18, 'Акимова', ''),
+            move(1, D18, 'Борисов', 'Поток 1'),
+            move(3, D18, 'Аринов', 'Поток 1'),
+            move(4, D18, 'Яковлев', 'Основа'),
+        ]
+        current = {(entry['operator_id'], entry['shift_date']): state() for entry in entries}
+        rows = one_row(entries, current)
+        self.assertEqual([(row['operator_name'], row['shift_date']) for row in rows], [
+            ('Яковлев', D18), ('Аринов', D18), ('Борисов', D18), ('Борисов', D19), ('Акимова', D18),
+        ])
+
+
+class FirstEntryTests(unittest.TestCase):
+    """Первичное внесение графика — не изменение (постановка 17.09.2026).
+
+    На боевом журнале 24.08–17.09.2026 заполнение пустых дней — 3549
+    «правок» из 5635: загрузка файла на месяц вперёд выглядела в сводке как
+    перетряска графика. Рядом сторожится обратная ошибка — спрятать настоящую
+    правку, похожую на внесение."""
+
+    def test_loading_an_empty_month_is_not_a_change(self):
+        rows = [fill(operator_id, DAY + timedelta(days=offset), source='import')
+                for operator_id in range(1, 55) for offset in range(7)]
+        changes, first = digest.split_first_entries(rows)
+        self.assertEqual(changes, [])
+        self.assertEqual(len(first), len(rows))
+
+    def test_filling_by_hand_and_publishing_the_auction_are_entries_too(self):
         rows = [
-            entry(i, 'Оператор %d' % i, DAY, 'added', 'swap', i, 'Оператор %d' % i,
-                  'operator', datetime(2026, 9, 14, 10, i, 0, i + 1))
-            for i in range(1, 17)
+            fill(1, D18, source='supervisor'),
+            fill(2, D18, source='auction'),
+            fill(3, D18, source='supervisor', action='day_off_set'),
         ]
-        rows += [
-            entry(100, 'Начальникова', DAY, 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(101, 'Начальникова2', DAY, 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(102, 'Начальникова3', DAY, 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(103, 'Начальникова4', DAY, 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(104, 'Начальникова5', DAY, 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(105, 'Начальникова6', DAY, 'added', 'supervisor', 7, 'Петров', 'sv', T1),
-        ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        actors_block = text.split('<b>Кому меняли</b>')[0]
-        self.assertIn('Петров', actors_block)
-        for i in range(1, 17):
-            self.assertNotIn('Оператор %d,' % i, actors_block)
-        self.assertIn('обмен сменами — 16', text)
+        changes, first = digest.split_first_entries(rows)
+        self.assertEqual(changes, [])
+        self.assertEqual(len(first), 3)
 
-    def test_empty_day_says_so_and_stays_short(self):
-        text = digest.build_digest(DAY, [], 'Тез КЦ', escape=html.escape)
-        self.assertIn('никто не менял', text)
-        self.assertNotIn('Кто менял', text)
-        self.assertLess(len(text), 200)
-
-    def test_few_changes_are_listed_instead_of_three_echoing_blocks(self):
+    def test_edits_of_a_filled_day_stay(self):
         rows = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'changed', 'supervisor', 7, 'Петров', 'sv', T1,
-                  start='10:00', end='19:00', prev_start='09:00', prev_end='18:00'),
-            entry(2, 'Сидорова', date(2026, 9, 17), 'day_off_set', 'supervisor', 7, 'Петров', 'sv', T2),
+            journal(1, D18, 'changed', start='10:00', end='19:00', prev_start='09:00', prev_end='18:00'),
+            journal(2, D18, 'removed', prev_start='09:00', prev_end='18:00'),
+            journal(3, D18, 'day_off_cleared'),
         ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        self.assertNotIn('<b>Кто менял</b>', text)
-        self.assertNotIn('<b>Кому меняли</b>', text)
-        self.assertIn('Иванов', text)
-        self.assertIn('09:00—18:00 → 10:00—19:00', text)
+        changes, first = digest.split_first_entries(rows)
+        self.assertEqual(len(changes), 3)
+        self.assertEqual(first, [])
 
-    def test_huge_day_still_fits_into_one_telegram_message(self):
-        """Потолок 4096 — жёсткий: сообщение сверх него просто не уходит."""
-        rows = []
-        stamp = 0
-        for operator_id in range(1, 121):
-            for offset in range(-30, 33):
-                stamp += 1
-                rows.append(entry(
-                    operator_id,
-                    'Сотрудник с очень длинной фамилией номер %d' % operator_id,
-                    DAY + timedelta(days=offset), 'changed', 'supervisor',
-                    1000 + (operator_id % 30),
-                    'Руководитель с длинным именем номер %d' % (operator_id % 30),
-                    'sv', datetime(2026, 9, 14, 8, 0, 0, stamp)))
-        text = digest.build_digest(DAY, rows, 'СЗоВ — Служба заботы о водителях',
-                                   generated_label='15.09.2026 09:45', escape=html.escape)
-        self.assertLess(len(text), 4096)
-        # И при этом сводка осталась сводкой, а не обрубком.
-        self.assertIn('<b>Кто менял</b>', text)
-        self.assertIn('… и ещё', text)
+    def test_second_shift_on_a_filled_day_is_a_change(self):
+        """Тот же 'added', что у внесения, но день уже был заполнен."""
+        changes, first = digest.split_first_entries([fill(1, D18, day_was_empty=False)])
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(first, [])
 
-    def test_long_lists_are_cut_with_an_honest_tail(self):
+    def test_operator_actions_on_an_empty_day_are_changes(self):
+        """Добор почти всегда ложится на свободный день, обмен отдаёт смену
+        тому, у кого её не было. Это правки уже внесённого графика."""
+        for source in ('swap', 'auction_topup', 'auction_admin', 'shift_request'):
+            with self.subTest(source):
+                changes, first = digest.split_first_entries([fill(1, D18, source=source)])
+                self.assertEqual(len(changes), 1)
+                self.assertEqual(first, [])
+
+    def test_unknown_source_is_never_hidden(self):
+        changes, _ = digest.split_first_entries([fill(1, D18, source='что_то_новое')])
+        self.assertEqual(len(changes), 1)
+
+    def test_rows_written_before_the_flag_are_judged_by_actions(self):
         rows = [
-            entry(i, 'Оператор %d' % i, DAY, 'added', 'supervisor', 7, 'Петров', 'sv',
-                  datetime(2026, 9, 14, 10, 0, 0, i))
-            for i in range(1, 41)
+            fill(1, D18, day_was_empty=None),
+            fill(2, D18, source='import', action='day_off_set', day_was_empty=None),
+            journal(3, D18, 'removed', prev_start='09:00', prev_end='18:00', day_was_empty=None),
+            journal(3, D18, 'day_off_set', day_was_empty=None),
         ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        operators_block = text.split('<b>Кому меняли</b>')[1]
-        self.assertEqual(operators_block.count('\n• '), digest.OPERATORS_LIMIT)
-        self.assertIn('… и ещё 28 сотрудников', operators_block)
+        changes, first = digest.split_first_entries(rows)
+        self.assertEqual([row['operator_id'] for row in first], [1, 2])
+        self.assertEqual([row['operator_id'] for row in changes], [3, 3])
+
+    def test_one_change_is_never_split_between_the_halves(self):
+        """Две пачки строк одной транзакции по одному дню: у второй флаг
+        честный True, но правка целиком — не внесение."""
+        rows = [
+            fill(1, D18, day_was_empty=True),
+            fill(1, D18, action='day_off_set', day_was_empty=False),
+        ]
+        changes, first = digest.split_first_entries(rows)
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(first, [])
+
+    def test_transfer_is_one_edit_and_one_fill_in_one_operation(self):
+        transfer = [journal(1, D18, 'removed', prev_start='09:00', prev_end='18:00'), fill(1, D19)]
+        changes, first = digest.split_first_entries(transfer)
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(first, [])
+        # Два заполнения одной операцией — это внесение, а не перенос.
+        changes, first = digest.split_first_entries([fill(1, D18), fill(1, D19)])
+        self.assertEqual((len(changes), len(first)), (0, 2))
+        # Массовая операция на неделю переносом не считается.
+        week = [journal(1, D18, 'removed', prev_start='09:00', prev_end='18:00')]
+        week += [fill(1, D18 + timedelta(days=offset)) for offset in range(1, 4)]
+        changes, first = digest.split_first_entries(week)
+        self.assertEqual((len(changes), len(first)), (1, 3))
+
+    def test_order_is_kept(self):
+        rows = [
+            journal(1, D18, 'changed', T1, start='10:00', end='19:00', prev_start='09:00', prev_end='18:00'),
+            fill(2, D18, changed_at=T1),
+            journal(3, D18, 'removed', T2, prev_start='09:00', prev_end='18:00'),
+            fill(4, D18, changed_at=T3),
+            journal(5, D18, 'changed', T3, start='10:00', end='19:00', prev_start='09:00', prev_end='18:00'),
+        ]
+        changes, first = digest.split_first_entries(rows)
+        self.assertEqual([row['operator_id'] for row in changes], [1, 3, 5])
+        self.assertEqual([row['operator_id'] for row in first], [2, 4])
+
+    def test_day_of_only_entries_names_them_instead_of_saying_nobody_changed(self):
+        first = [fill(operator_id, DAY + timedelta(days=offset), source='import')
+                 for operator_id in (1, 2) for offset in range(3)]
+        for build in (digest.build_digest, digest.build_digest_rich):
+            with self.subTest(build.__name__):
+                text = build(DAY, [], escape=html.escape, first_entries=first)
+                self.assertIn('Первичное внесение графика — 6 дней у 2 сотрудников', text)
+                self.assertNotIn('никто не менял', text)
 
 
-class TextTests(unittest.TestCase):
+class _TagBalance(html.parser.HTMLParser):
+    """Разметка rich-сообщения сбалансирована: Telegram не принимает сообщение
+    с оборванным тегом целиком."""
+
+    VOID = {'br'}
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.errors = []
+        self.tags = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag)
+        if tag not in self.VOID:
+            self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if not self.stack or self.stack[-1] != tag:
+            self.errors.append(tag)
+        else:
+            self.stack.pop()
+
+
+def _check_markup(testcase, markup):
+    parser = _TagBalance()
+    parser.feed(markup)
+    parser.close()
+    testcase.assertEqual(parser.errors, [])
+    testcase.assertEqual(parser.stack, [])
+    return parser.tags
+
+
+def table_row(operator_id=1, name='Иванов Иван', group='Поток 1', before='18.09, 09:00–18:00',
+              after='18.09, 12:00–21:00', actors='Петров Пётр'):
+    return {'operator_id': operator_id, 'operator_name': name, 'group_name': group,
+            'shift_date': D18, 'before': before, 'after': after, 'actors': actors}
+
+
+class RichTableTests(unittest.TestCase):
+    """Таблица по макету владельца — rich-сообщение (sendRichMessage, поле html)."""
+
+    def test_title_and_columns_follow_the_mockup(self):
+        markup = digest.build_digest_rich(DAY, [table_row()], escape=html.escape)
+        _check_markup(self, markup)
+        self.assertEqual(
+            markup,
+            '<h3>🔔 Изменения графика — 14.09.2026</h3>'
+            '<table><tr><th>Сотрудник</th><th>Группа</th><th>Было: дата и время</th>'
+            '<th>Стало: дата и время</th><th>Кто изменил</th></tr>'
+            '<tr><td>Иванов Иван</td><td>Поток 1</td><td>18.09, 09:00–18:00</td>'
+            '<td>18.09, 12:00–21:00</td><td>Петров Пётр</td></tr></table>')
+        # Причины портал не хранит, а «СВ» заменён на того, кто правил.
+        self.assertNotIn('Причина', markup)
+        self.assertNotIn('<th>СВ</th>', markup)
+
+    def test_employee_without_group_gets_a_dash(self):
+        markup = digest.build_digest_rich(DAY, [table_row(group='')], escape=html.escape)
+        self.assertIn('<td>Иванов Иван</td><td>—</td>', markup)
 
     def test_values_are_escaped(self):
-        rows = [
-            entry(1, '<b>Хакер</b> & Co', DAY, 'added', 'supervisor', 7, 'a<script>', 'sv',
-                  datetime(2026, 9, 14, 10, 0, 0, i))
-            for i in range(1, 12)
-        ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ & Ко', escape=html.escape)
-        self.assertNotIn('<script>', text)
-        self.assertNotIn('<b>Хакер', text)
-        self.assertIn('&amp;', text)
+        markup = digest.build_digest_rich(
+            DAY, [table_row(name='<b>Хакер</b> & Co', group='a<script>', actors='x</td>')],
+            escape=html.escape)
+        _check_markup(self, markup)
+        self.assertNotIn('<script>', markup)
+        self.assertNotIn('<b>Хакер', markup)
+        self.assertIn('&amp; Co', markup)
 
-    def test_header_separates_the_two_date_axes(self):
-        """`changed_at` — когда правили, `shift_date` — что правили. Даты из
-        октября под сентябрьским заголовком не должны читаться как ошибка."""
-        rows = [
-            entry(i, 'Оператор %d' % i, date(2026, 10, 5), 'added', 'supervisor', 7,
-                  'Петров', 'sv', datetime(2026, 9, 14, 10, 0, 0, i))
-            for i in range(1, 12)
-        ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        self.assertIn('Изменения в графике за 14 сентября 2026', text)
-        self.assertIn('Дни графика, которых коснулись правки', text)
-        self.assertIn('05.10', text)
+    def test_huge_day_stays_under_rich_message_limits_with_an_honest_tail(self):
+        """32 768 символов и 500 блоков (строка таблицы — тоже блок). Сверх
+        потолка Telegram сообщение не принимает целиком."""
+        long_name = 'Я' * 255
+        rows = [table_row(operator_id=index, name=long_name, group=long_name, actors=long_name)
+                for index in range(1000)]
+        markup = digest.build_digest_rich(DAY, rows, escape=html.escape)
+        tags = _check_markup(self, markup)
+        self.assertLess(len(markup), digest.RICH_TEXT_LIMIT)
+        self.assertLess(sum(1 for tag in tags if tag in ('h3', 'p', 'table', 'tr')),
+                        digest.RICH_BLOCK_LIMIT)
+        shown = markup.count('<tr>') - 2   # без заголовка и хвоста
+        rest = 1000 - shown
+        self.assertIn('<td colspan="5"><i>… и ещё %d %s' % (rest, digest.changes_word(rest)), markup)
 
-    def test_plural_forms(self):
-        self.assertEqual(digest.changes_word(1), 'правка')
-        self.assertEqual(digest.changes_word(573), 'правки')
-        self.assertEqual(digest.changes_word(12), 'правок')
-        self.assertEqual(digest.people_counted(1), 'сотрудник')
-        self.assertEqual(digest.people_counted(73), 'сотрудника')
-        self.assertEqual(digest.people_counted(15), 'сотрудников')
-        self.assertEqual(digest.people_word(21), 'сотрудника')
+    def test_many_short_rows_are_capped_by_blocks(self):
+        rows = [table_row(operator_id=index, name='И', group='', actors='П') for index in range(1000)]
+        markup = digest.build_digest_rich(DAY, rows, escape=html.escape)
+        self.assertLess(markup.count('<tr>') + 2, digest.RICH_BLOCK_LIMIT)
+        self.assertIn('… и ещё', markup)
 
-    def test_unknown_source_still_names_the_author(self):
-        """Набор источников пополняется без миграции (см. DDL журнала).
-        Незнакомый код обязан попасть в сводку, а не исчезнуть из неё."""
-        rows = [
-            entry(i, 'Оператор %d' % i, DAY, 'added', 'что_то_новое', 7, 'Петров', 'sv',
-                  datetime(2026, 9, 14, 10, 0, 0, i))
-            for i in range(1, 12)
-        ]
-        stats = digest.summarize(rows)
-        self.assertEqual(stats['self_total'], 0)
-        self.assertEqual(stats['actors'][0]['name'], 'Петров')
+    def test_no_line_breaks_between_blocks(self):
+        markup = digest.build_digest_rich(DAY, [table_row(), table_row(2)], escape=html.escape)
+        self.assertNotIn('\n', markup)
+
+    def test_empty_day_stays_short(self):
+        markup = digest.build_digest_rich(DAY, [], escape=html.escape)
+        _check_markup(self, markup)
+        self.assertIn('никто не менял', markup)
+        self.assertNotIn('<table', markup)
+
+
+class TextFallbackTests(unittest.TestCase):
+    """Запасной текст: уходит, только если Telegram rich-сообщение не принял."""
+
+    def test_row_reads_as_before_arrow_after(self):
+        text = digest.build_digest(DAY, [table_row()], escape=html.escape)
+        self.assertIn('<b>🔔 Изменения графика — 14.09.2026</b>', text)
+        self.assertIn('• <b>Иванов Иван</b> · Поток 1\n'
+                      '   18.09, 09:00–18:00 → 18.09, 12:00–21:00\n'
+                      '   Петров Пётр', text)
+
+    def test_huge_day_fits_into_one_message(self):
+        """Потолок 4096 — жёсткий: сообщение сверх него просто не уходит."""
+        rows = [table_row(operator_id=index, name='Сотрудник с длинной фамилией %d' % index)
+                for index in range(300)]
+        text = digest.build_digest(DAY, rows, escape=html.escape)
+        self.assertLess(len(text), 4096)
+        self.assertIn('… и ещё', text)
 
 
 class ScheduleContractTests(unittest.TestCase):
@@ -366,11 +611,6 @@ class DeliveryContractTests(unittest.TestCase):
         self.assertNotIn("release_schedule_change_report_send",
                          empty_branch.split("else:")[0])
 
-    def test_empty_day_is_silent_unless_forced(self):
-        source = _source_of(BOT_PATH, "_send_schedule_change_report_to")
-        self.assertIn("if not entries and not force:", source)
-        self.assertIn("'empty'", source)
-
     def test_routes_check_the_same_predicate_as_the_menu(self):
         for name in ("work_schedule_change_report_subscription",
                      "work_schedule_change_report_preview"):
@@ -386,6 +626,222 @@ class DeliveryContractTests(unittest.TestCase):
     def test_trainer_is_excluded_from_the_subscription(self):
         source = _source_of(BOT_PATH, "_schedule_change_report_scope")
         self.assertIn("'trainer'", source)
+
+    def test_claim_failure_does_not_stop_the_rest(self):
+        source = _source_of(BOT_PATH, "sync_send_schedule_change_report")
+        before_claim = source[:source.index("claim_schedule_change_report_send")]
+        self.assertGreater(before_claim.rfind("try:"),
+                           before_claim.rfind("for recipient in recipients:"))
+
+
+class RichDeliveryTests(unittest.TestCase):
+    """Доставка: функции монолита исполняются по-настоящему, сеть и база — подставные."""
+
+    @staticmethod
+    def _function(name, namespace, class_name=None):
+        source = _source_of(BOT_PATH if class_name is None else DATABASE_PATH, name, class_name)
+        exec(compile(ast.parse(source.strip() if class_name is None else _dedent(source)),
+                     name, 'exec'), namespace)
+        return namespace[name]
+
+    def _send(self, payload, rich_result, force=False):
+        calls = []
+        namespace = {
+            'logging': types.SimpleNamespace(warning=lambda *args, **kwargs: None),
+            '_build_schedule_change_report_payload': lambda *args: payload,
+            '_tg_send_rich_message': lambda chat_id, markup: calls.append('rich') or rich_result,
+            '_tg_send_message': lambda chat_id, text: calls.append('text') or ({}, None),
+        }
+        send = self._function('_send_schedule_change_report_to', namespace)
+        result = send({'id': 1, 'telegram_id': 55}, DAY, force=force)
+        return result, calls
+
+    def test_rich_message_goes_first(self):
+        result, calls = self._send(([{}], '<h3>…</h3>', 'текст'), ({}, None, False))
+        self.assertEqual(result, (True, 'sent'))
+        self.assertEqual(calls, ['rich'])
+
+    def test_refused_rich_message_falls_back_to_text(self):
+        result, calls = self._send(([{}], '<h3>…</h3>', 'текст'),
+                                   (None, "Bad Request: can't parse rich message", True))
+        self.assertEqual(result, (True, 'sent'))
+        self.assertEqual(calls, ['rich', 'text'])
+
+    def test_network_failure_is_not_retried_as_text(self):
+        """Таймаут не значит «не дошло»: повтор текстом прислал бы сводку дважды."""
+        result, calls = self._send(([{}], '<h3>…</h3>', 'текст'), (None, 'Read timed out', False))
+        self.assertEqual(result, (False, 'send_failed'))
+        self.assertEqual(calls, ['rich'])
+
+    def test_day_without_rows_is_silent_unless_forced(self):
+        result, calls = self._send(([], '<h3>…</h3>', 'текст'), ({}, None, False))
+        self.assertEqual(result, (False, 'empty'))
+        self.assertEqual(calls, [])
+        result, calls = self._send(([], '<h3>…</h3>', 'текст'), ({}, None, False), force=True)
+        self.assertEqual(result, (True, 'sent'))
+
+    def test_payload_rolls_back_from_the_schedule_after_the_window(self):
+        loaded = [
+            fill(1, D18, source='import'),
+            journal(3, D18, 'changed', start='10:00', end='19:00', prev_start='09:00',
+                    prev_end='18:00', operator_name='Иванов Иван'),
+        ]
+        asked = {}
+
+        def day_states(keys, since):
+            asked['keys'], asked['since'] = set(keys), since
+            return ({(1, D18): state(('09:00', '18:00', 'regular')),
+                     (3, D18): state(('10:00', '19:00', 'regular'))}, [])
+
+        namespace = {
+            'db': types.SimpleNamespace(
+                get_schedule_change_report_entries=lambda *args, **kwargs: loaded,
+                get_schedule_change_report_day_states=day_states),
+            'schedule_change_digest': digest,
+            '_escape_telegram_html': html.escape,
+        }
+        build = self._function('_build_schedule_change_report_payload', namespace)
+        rows, markup, text = build(DAY, [1])
+        self.assertEqual([row['operator_id'] for row in rows], [3])
+        self.assertEqual(asked['keys'], {(1, D18), (3, D18)})
+        self.assertEqual(asked['since'], datetime(2026, 9, 15))
+        self.assertIn('<td>18.09, 09:00–18:00</td><td>18.09, 10:00–19:00</td>', markup)
+        self.assertIn('18.09, 09:00–18:00 → 18.09, 10:00–19:00', text)
+
+    def test_empty_window_does_not_query_the_schedule(self):
+        def day_states(keys, since):
+            raise AssertionError('лишний запрос к базе')
+
+        namespace = {
+            'db': types.SimpleNamespace(
+                get_schedule_change_report_entries=lambda *args, **kwargs: [],
+                get_schedule_change_report_day_states=day_states),
+            'schedule_change_digest': digest,
+            '_escape_telegram_html': html.escape,
+        }
+        rows, _, _ = self._function('_build_schedule_change_report_payload', namespace)(DAY, None)
+        self.assertEqual(rows, [])
+
+    def test_rich_sender_tells_refusal_from_network_failure(self):
+        sent = []
+
+        class Response:
+            def __init__(self, body, status_code):
+                self.body = body
+                self.status_code = status_code
+
+            def json(self):
+                return self.body
+
+        def make(answer, status_code=400):
+            def post(url, json=None, timeout=None):
+                sent.append((url, json))
+                if isinstance(answer, Exception):
+                    raise answer
+                return Response(answer, status_code)
+            namespace = {
+                'os': types.SimpleNamespace(getenv=lambda key: 'TOKEN'),
+                'requests': types.SimpleNamespace(post=post),
+                '_telegram_exception_text': str,
+            }
+            return self._function('_tg_send_rich_message', namespace)
+
+        self.assertEqual(make({'ok': False, 'description': 'Bad Request'})(55, '<p>x</p>'),
+                         (None, 'Bad Request', True))
+        self.assertEqual(make(TimeoutError('Read timed out'))(55, '<p>x</p>'),
+                         (None, 'Read timed out', False))
+        # Ошибка на стороне Telegram — не отказ: сообщение могло уйти.
+        self.assertEqual(make({'ok': False, 'description': 'Internal Server Error'}, 500)(55, '<p>x</p>'),
+                         (None, 'Internal Server Error', False))
+        self.assertEqual(make({'ok': True, 'result': {'message_id': 9}}, 200)(55, '<p>x</p>'),
+                         ({'message_id': 9}, None, False))
+        url, payload = sent[0]
+        self.assertTrue(url.endswith('/botTOKEN/sendRichMessage'))
+        self.assertEqual(payload['rich_message']['html'], '<p>x</p>')
+        self.assertTrue(payload['rich_message']['skip_entity_detection'])
+
+
+def _dedent(source):
+    import textwrap
+    return textwrap.dedent(source)
+
+
+class _FakeCursor:
+    """Курсор, отвечающий на запросы метода по тексту SQL."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.queries = []
+        self._last = None
+
+    def execute(self, sql, params=None):
+        self.queries.append(sql)
+        self._last = next((rows for marker, rows in self.answers if marker in sql), [])
+
+    def fetchall(self):
+        return self._last
+
+
+class DayStatesQueryTests(unittest.TestCase):
+    """get_schedule_change_report_day_states — исполняется по-настоящему на подставном курсоре."""
+
+    def _run(self, keys, answers):
+        _, module = _parsed(DATABASE_PATH)
+        class_node = next(node for node in module.body
+                          if isinstance(node, ast.ClassDef) and node.name == 'Database')
+        source, _ = _parsed(DATABASE_PATH)
+        namespace = {}
+        for name in ('get_schedule_change_report_day_states', '_schedule_change_report_entry'):
+            node = next(item for item in class_node.body
+                        if isinstance(item, ast.FunctionDef) and item.name == name)
+            fresh = ast.parse(_dedent(ast.get_source_segment(source, node))).body[0]
+            fresh.decorator_list = []
+            exec(compile(ast.Module(body=[fresh], type_ignores=[]), name, 'exec'), namespace)
+        columns = next(
+            item for item in class_node.body
+            if isinstance(item, ast.Assign)
+            and any(getattr(target, 'id', None) == 'SCHEDULE_CHANGE_REPORT_COLUMNS' for target in item.targets))
+        cursor = _FakeCursor(answers)
+
+        @contextmanager
+        def get_cursor():
+            yield cursor
+
+        fake = types.SimpleNamespace(
+            _get_cursor=get_cursor,
+            SCHEDULE_CHANGE_REPORT_COLUMNS=ast.literal_eval(columns.value),
+            _schedule_change_report_entry=namespace['_schedule_change_report_entry'],
+        )
+        result = namespace['get_schedule_change_report_day_states'](fake, keys, datetime(2026, 9, 15))
+        return result, cursor
+
+    def _journal_row(self, operator_id, shift_date):
+        return (99, operator_id, 'Оператор', shift_date, 'changed', 'supervisor',
+                time(10), time(19), time(9), time(18), 'regular', 'regular',
+                7, 'Петров Пётр', 'sv', LATER, False)
+
+    def test_cross_product_is_cut_to_the_asked_days(self):
+        (states, later), cursor = self._run(
+            {(1, D18), (2, D19)},
+            [('FROM work_shifts', [(1, D18, time(9), time(18), 'regular'),
+                                   (1, D19, time(8), time(17), 'regular')]),
+             ('FROM days_off', [(2, D19), (2, D18)]),
+             ('FROM work_shift_changes', [self._journal_row(1, D18), self._journal_row(2, D18)])])
+        self.assertEqual(set(states), {(1, D18), (2, D19)})
+        self.assertEqual(states[(1, D18)]['shifts'], [(time(9), time(18), 'regular')])
+        self.assertTrue(states[(2, D19)]['day_off'])
+        self.assertFalse(states[(1, D18)]['day_off'])
+        self.assertEqual([(row['operator_id'], row['shift_date']) for row in later], [(1, D18)])
+        self.assertEqual(later[0]['prev_shift_type'], 'regular')
+
+    def test_schedule_and_journal_are_read_in_one_snapshot(self):
+        _, cursor = self._run({(1, D18)}, [])
+        self.assertIn('REPEATABLE READ', cursor.queries[0])
+        self.assertIn('c.changed_at >= %s', cursor.queries[-1])
+
+    def test_no_keys_no_queries(self):
+        (states, later), cursor = self._run(set(), [])
+        self.assertEqual((states, later, cursor.queries), ({}, [], []))
 
 
 class ScopeTests(unittest.TestCase):
@@ -464,6 +920,12 @@ class ScopeTests(unittest.TestCase):
         # Отдел — оператора, а не автора правки.
         self.assertIn("op.department_id = ANY", source)
 
+    def test_group_is_the_one_on_the_schedule_day(self):
+        source = _source_of(DATABASE_PATH, "get_schedule_change_report_entries", "Database")
+        self.assertIn("m.start_date <= c.shift_date", source)
+        self.assertIn("m.end_date >= c.shift_date", source)
+        self.assertIn("LIMIT 1", source)
+
     def test_empty_department_scope_returns_nothing(self):
         source = _source_of(DATABASE_PATH, "get_schedule_change_report_entries", "Database")
         self.assertIn("return []", source)
@@ -537,428 +999,23 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("response.status === 403", loader)
         self.assertIn("canSubscribe: false", loader)
 
-
-class ReviewFixesTests(unittest.TestCase):
-    """Дефекты, найденные разбором перед выкладкой. У каждого реальный
-    сценарий, поэтому каждый держится своим тестом."""
-
-    def test_detailed_list_is_one_bullet_per_change(self):
-        # Выходной на день со сменой: журнал пишет две строки об одном действии,
-        # а шапка считает одну правку — перечень обязан с ней совпасть.
-        rows = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'removed', 'supervisor', 7, 'Петров', 'sv', T1,
-                  prev_start='09:00', prev_end='18:00'),
-            entry(1, 'Иванов', date(2026, 9, 16), 'day_off_set', 'supervisor', 7, 'Петров', 'sv', T1),
-        ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        self.assertIn('Правок: <b>1</b>', text)
-        self.assertEqual(text.count('\n• '), 1)
-        self.assertIn('смена удалена 09:00—18:00, проставлен выходной', text)
-
-    def test_split_shift_keeps_both_parts(self):
-        rows = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'added', 'supervisor', 7, 'Петров', 'sv', T1,
-                  start='09:00', end='13:00'),
-            entry(1, 'Иванов', date(2026, 9, 16), 'added', 'supervisor', 7, 'Петров', 'sv', T1,
-                  start='18:00', end='22:00'),
-        ]
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        self.assertIn('09:00—13:00', text)
-        self.assertIn('18:00—22:00', text)
-
-    def test_detailed_list_respects_the_budget(self):
-        long_name = 'Очень-очень длинное имя сотрудника ' * 10
-        rows = []
-        for index in range(5):
-            for action in ('removed', 'added', 'changed', 'day_off_set'):
-                rows.append(entry(
-                    index, long_name + str(index), date(2026, 9, 16), action, 'supervisor',
-                    7, long_name, 'sv', datetime(2026, 9, 14, 10, 0, 0, index + 1),
-                    start='09:00', end='18:00', prev_start='08:00', prev_end='17:00'))
-        text = digest.build_digest(DAY, rows, 'СЗоВ', '15.09.2026 09:45', escape=html.escape)
-        self.assertLess(len(text), 4096)
-        self.assertIn('… и ещё', text)
-
-    def test_claim_failure_does_not_stop_the_rest(self):
-        source = _source_of(BOT_PATH, "sync_send_schedule_change_report")
-        before_claim = source[:source.index("claim_schedule_change_report_send")]
-        self.assertGreater(before_claim.rfind("try:"),
-                           before_claim.rfind("for recipient in recipients:"))
-
     def test_toggle_takes_telegram_state_from_the_response(self):
-        source = APP_PATH.read_text(encoding="utf-8-sig")
+        source = self._app_source()
         toggle = source[source.index("const toggleChangeReport"):]
         toggle = toggle[:toggle.index("}, [changeReportSaving]);")]
         self.assertIn("data?.telegram_connected", toggle)
 
     def test_opening_the_window_rereads_the_state(self):
-        source = APP_PATH.read_text(encoding="utf-8-sig")
+        source = self._app_source()
         block = source[source.index("{changeReport.canSubscribe && ("):]
         block = block[:block.index("setShowChangeReportModal(true)")]
         self.assertIn("loadChangeReportState()", block)
 
     def test_disabled_send_button_looks_disabled(self):
-        source = APP_PATH.read_text(encoding="utf-8-sig")
+        source = self._app_source()
         button = source[:source.index("onClick={sendChangeReportNow}")]
         button = button[button.rfind("<button"):]
         self.assertIn("disabled:opacity-40", button)
-
-
-def fill(operator_id, shift_date, source='supervisor', changed_at=T1, actor_id=7,
-         action='added', day_was_empty=True, **extra):
-    """Строка журнала с флагом пустоты дня — как её пишет дифф после 17.09.2026."""
-    row = entry(operator_id, 'Оператор %d' % operator_id, shift_date, action, source,
-                actor_id, 'Петров', 'sv', changed_at, **extra)
-    if day_was_empty is not None:
-        row['day_was_empty'] = day_was_empty
-    return row
-
-
-class FirstEntryTests(unittest.TestCase):
-    """Первичное внесение графика — не изменение (постановка 17.09.2026).
-
-    На боевом журнале 24.08–17.09.2026 заполнение пустых дней — 3549
-    «правок» из 5635: загрузка файла на месяц вперёд выглядела в сводке как
-    перетряска графика. Рядом сторожится обратная ошибка — спрятать настоящую
-    правку, похожую на внесение."""
-
-    def test_loading_an_empty_month_is_not_a_change(self):
-        rows = [fill(operator_id, DAY + timedelta(days=offset), source='import')
-                for operator_id in range(1, 55) for offset in range(7)]
-        changes, first = digest.split_first_entries(rows)
-        self.assertEqual(changes, [])
-        self.assertEqual(len(first), len(rows))
-
-    def test_filling_by_hand_and_publishing_the_auction_are_entries_too(self):
-        rows = [
-            fill(1, DAY, source='supervisor'),
-            fill(2, DAY, source='auction'),
-            fill(3, DAY, source='supervisor', action='day_off_set'),
-        ]
-        changes, first = digest.split_first_entries(rows)
-        self.assertEqual(changes, [])
-        self.assertEqual(len(first), 3)
-
-    def test_edits_of_a_filled_day_stay(self):
-        rows = [
-            fill(1, DAY, action='changed', day_was_empty=False,
-                 start='10:00', end='19:00', prev_start='09:00', prev_end='18:00'),
-            fill(2, DAY, action='removed', day_was_empty=False),
-            fill(3, DAY, action='day_off_cleared', day_was_empty=False),
-        ]
-        changes, first = digest.split_first_entries(rows)
-        self.assertEqual(len(changes), 3)
-        self.assertEqual(first, [])
-
-    def test_second_shift_on_a_filled_day_is_a_change(self):
-        """Тот же 'added', что у внесения, но день уже был заполнен."""
-        changes, first = digest.split_first_entries([fill(1, DAY, day_was_empty=False)])
-        self.assertEqual(len(changes), 1)
-        self.assertEqual(first, [])
-
-    def test_operator_actions_on_an_empty_day_are_changes(self):
-        """Добор почти всегда ложится на свободный день, обмен отдаёт смену
-        тому, у кого её не было. Это правки уже внесённого графика — иначе
-        из сводки пропали бы доборы и половина каждого обмена."""
-        for source in ('swap', 'auction_topup', 'auction_admin', 'shift_request'):
-            with self.subTest(source):
-                changes, first = digest.split_first_entries([fill(1, DAY, source=source)])
-                self.assertEqual(len(changes), 1)
-                self.assertEqual(first, [])
-
-    def test_unknown_source_is_never_hidden(self):
-        changes, _ = digest.split_first_entries([fill(1, DAY, source='что_то_новое')])
-        self.assertEqual(len(changes), 1)
-
-    def test_rows_written_before_the_flag_are_judged_by_actions(self):
-        rows = [
-            fill(1, DAY, day_was_empty=None),
-            fill(2, DAY, source='import', action='day_off_set', day_was_empty=None),
-            fill(3, DAY, action='removed', day_was_empty=None),
-            fill(3, DAY, action='day_off_set', day_was_empty=None),
-        ]
-        changes, first = digest.split_first_entries(rows)
-        self.assertEqual([row['operator_id'] for row in first], [1, 2])
-        self.assertEqual([row['operator_id'] for row in changes], [3, 3])
-
-    def test_one_change_is_never_split_between_the_halves(self):
-        """Две пачки строк одной транзакции по одному дню: у второй флаг
-        честный True, но правка целиком — не внесение."""
-        rows = [
-            fill(1, DAY, day_was_empty=True, start='09:00', end='13:00'),
-            fill(1, DAY, action='day_off_set', day_was_empty=False),
-        ]
-        changes, first = digest.split_first_entries(rows)
-        self.assertEqual(len(changes), 2)
-        self.assertEqual(first, [])
-
-    def test_order_is_kept(self):
-        rows = [
-            fill(1, DAY, action='changed', day_was_empty=False, changed_at=T1),
-            fill(2, DAY, changed_at=T1),
-            fill(3, DAY, action='removed', day_was_empty=False, changed_at=T2),
-            fill(4, DAY, changed_at=T3),
-            fill(5, DAY, action='changed', day_was_empty=False, changed_at=T3),
-        ]
-        changes, first = digest.split_first_entries(rows)
-        self.assertEqual([row['operator_id'] for row in changes], [1, 3, 5])
-        self.assertEqual([row['operator_id'] for row in first], [2, 4])
-
-    def test_day_of_only_entries_names_them_instead_of_saying_nobody_changed(self):
-        first = [fill(operator_id, DAY + timedelta(days=offset), source='import')
-                 for operator_id in (1, 2) for offset in range(3)]
-        for build in (digest.build_digest, digest.build_digest_rich):
-            with self.subTest(build.__name__):
-                text = build(DAY, [], 'СЗоВ', escape=html.escape, first_entries=first)
-                self.assertIn('Первичное внесение графика — 6 дней у 2 сотрудников', text)
-                self.assertNotIn('никто не менял', text)
-
-
-class _TagBalance(html.parser.HTMLParser):
-    """Проверка, что разметка rich-сообщения сбалансирована: Telegram не
-    принимает сообщение с оборванным тегом целиком."""
-
-    VOID = {'br'}
-
-    def __init__(self):
-        super().__init__()
-        self.stack = []
-        self.errors = []
-        self.tags = []
-
-    def handle_starttag(self, tag, attrs):
-        self.tags.append(tag)
-        if tag not in self.VOID:
-            self.stack.append(tag)
-
-    def handle_endtag(self, tag):
-        if not self.stack or self.stack[-1] != tag:
-            self.errors.append(tag)
-        else:
-            self.stack.pop()
-
-
-def _check_markup(testcase, markup):
-    parser = _TagBalance()
-    parser.feed(markup)
-    parser.close()
-    testcase.assertEqual(parser.errors, [])
-    testcase.assertEqual(parser.stack, [])
-    return parser.tags
-
-
-class RichDigestTests(unittest.TestCase):
-    """Сводка таблицами — rich-сообщение Telegram (sendRichMessage, поле html)."""
-
-    def _busy_day(self):
-        rows = []
-        for operator_id in range(1, 41):
-            rows.append(entry(operator_id, 'Оператор %d' % operator_id, DAY + timedelta(days=operator_id % 15),
-                              'changed', 'supervisor', 7 + operator_id % 12, 'Автор %d' % (operator_id % 12),
-                              'sv', datetime(2026, 9, 14, 10, 0, 0, operator_id)))
-        rows += [
-            entry(100 + i, 'Оператор %d' % (100 + i), DAY, 'added', 'swap', 100 + i,
-                  'Оператор %d' % (100 + i), 'operator', datetime(2026, 9, 14, 11, 0, 0, i + 1))
-            for i in range(4)
-        ]
-        return rows
-
-    def test_sections_are_tables_with_named_columns(self):
-        markup = digest.build_digest_rich(DAY, self._busy_day(), 'СЗоВ',
-                                          generated_label='15.09.2026 09:45', escape=html.escape)
-        _check_markup(self, markup)
-        self.assertTrue(markup.startswith('<h3>🗓 Изменения в графике за 14 сентября 2026</h3>'))
-        for title in ('Кто менял', 'Кому меняли', 'Дни графика, которых коснулись правки',
-                      'Операторы сами'):
-            self.assertIn('<h4>%s</h4><table bordered compact><tr>' % title, markup)
-        self.assertIn('<th>Автор</th><th align="right">Правок</th>'
-                      '<th align="right">Сотрудников</th><th>Способ</th>', markup)
-        self.assertIn('<td>обмен сменами</td><td align="right">4</td><td align="right">4</td>', markup)
-        self.assertIn('<footer>Сформировано 15.09.2026 09:45</footer>', markup)
-        # Ни одной Markdown-таблицы и ни одного перевода строки между блоками.
-        self.assertNotIn('|', markup)
-        self.assertNotIn('\n', markup)
-
-    def test_tails_are_full_width_rows(self):
-        markup = digest.build_digest_rich(DAY, self._busy_day(), 'СЗоВ', escape=html.escape)
-        operators = markup.split('<h4>Кому меняли</h4>')[1].split('</table>')[0]
-        self.assertEqual(operators.count('<tr>'), 1 + digest.OPERATORS_LIMIT + 1)
-        self.assertIn('<td colspan="2"><i>… и ещё 32 сотрудника — 32 правки</i></td>', operators)
-        days = markup.split('<h4>Дни графика, которых коснулись правки</h4>')[1].split('</table>')[0]
-        self.assertIn('<td colspan="2"><i>… и ещё 3 дня', days)
-
-    def test_days_carry_the_weekday(self):
-        markup = digest.build_digest_rich(DAY, self._busy_day(), 'СЗоВ', escape=html.escape)
-        # 14.09.2026 — понедельник.
-        self.assertIn('<td>14.09, пн</td>', markup)
-
-    def test_few_changes_are_one_table_row_each(self):
-        rows = [
-            entry(1, 'Иванов', date(2026, 9, 16), 'removed', 'supervisor', 7, 'Петров', 'sv', T1,
-                  prev_start='09:00', prev_end='18:00'),
-            entry(1, 'Иванов', date(2026, 9, 16), 'day_off_set', 'supervisor', 7, 'Петров', 'sv', T1),
-            entry(2, 'Ли', date(2026, 9, 17), 'added', 'auction_topup', 2, 'Ли', 'operator', T2,
-                  start='18:00', end='22:00'),
-        ]
-        markup = digest.build_digest_rich(DAY, rows, 'СЗоВ', escape=html.escape)
-        _check_markup(self, markup)
-        self.assertNotIn('<h4>', markup)
-        self.assertEqual(markup.count('<table'), 1)
-        self.assertEqual(markup.count('<tr>'), 1 + 2)
-        self.assertIn('<th>Сотрудник</th><th>День графика</th><th>Что сделано</th><th>Автор</th>', markup)
-        self.assertIn('<td>Иванов</td><td>16.09, ср</td>'
-                      '<td>смена удалена 09:00—18:00, проставлен выходной</td>'
-                      '<td>Петров, супервайзер</td>', markup)
-        # Добор — без имени автора, как везде в сводке.
-        self.assertIn('<td>добор с аукциона 18:00—22:00</td><td>—</td>', markup)
-
-    def test_numbers_match_the_fallback_text(self):
-        rows = self._busy_day()
-        markup = digest.build_digest_rich(DAY, rows, 'СЗоВ', escape=html.escape)
-        text = digest.build_digest(DAY, rows, 'СЗоВ', escape=html.escape)
-        head = re.search(r'Правок: <b>\d+</b> · сотрудников: <b>\d+</b>( · менявших: <b>\d+</b>)?', text)
-        self.assertIsNotNone(head)
-        self.assertIn(head.group(0), markup)
-
-    def test_values_are_escaped(self):
-        rows = [
-            entry(1, '<b>Хакер</b> & Co', DAY, 'added', 'supervisor', 7, 'a<script>', 'sv',
-                  datetime(2026, 9, 14, 10, 0, 0, i))
-            for i in range(1, 12)
-        ]
-        markup = digest.build_digest_rich(DAY, rows, 'СЗоВ & Ко', escape=html.escape)
-        _check_markup(self, markup)
-        self.assertNotIn('<script>', markup)
-        self.assertNotIn('<b>Хакер', markup)
-        self.assertIn('СЗоВ &amp; Ко', markup)
-
-    def test_worst_case_stays_under_rich_message_limits(self):
-        """32 768 символов и 500 блоков (строка таблицы — тоже блок). Сверх
-        потолка Telegram сообщение не принимает целиком."""
-        long_name = 'Я' * 255
-        rows = []
-        stamp = 0
-        for operator_id in range(1, 121):
-            for offset in range(-30, 33):
-                stamp += 1
-                rows.append(entry(operator_id, long_name, DAY + timedelta(days=offset), 'changed',
-                                  'supervisor' if operator_id % 3 else 'import', 1000 + operator_id % 30,
-                                  long_name, 'sv', datetime(2026, 9, 14, 8, 0, 0, stamp)))
-        for index, source in enumerate(digest.SELF_SERVICE_SOURCES):
-            rows.append(entry(900 + index, long_name, DAY, 'added', source, 900 + index, long_name,
-                              'operator', datetime(2026, 9, 14, 9, 0, 0, index + 1)))
-        markup = digest.build_digest_rich(DAY, rows, long_name, generated_label='15.09.2026 09:45',
-                                          escape=html.escape)
-        tags = _check_markup(self, markup)
-        self.assertLess(len(markup), digest.RICH_TEXT_LIMIT)
-        blocks = sum(1 for tag in tags if tag in ('h3', 'h4', 'p', 'table', 'tr', 'footer'))
-        self.assertLess(blocks, digest.RICH_BLOCK_LIMIT)
-
-    def test_empty_day_stays_short(self):
-        markup = digest.build_digest_rich(DAY, [], 'Тез КЦ', escape=html.escape)
-        _check_markup(self, markup)
-        self.assertIn('никто не менял', markup)
-        self.assertNotIn('<table', markup)
-
-
-class RichDeliveryTests(unittest.TestCase):
-    """Доставка: функции монолита исполняются по-настоящему, сеть и база — подставные."""
-
-    @staticmethod
-    def _function(name, namespace):
-        exec(_source_of(BOT_PATH, name), namespace)
-        return namespace[name]
-
-    def _send(self, payload, rich_result, force=False):
-        calls = []
-        namespace = {
-            'logging': types.SimpleNamespace(warning=lambda *args, **kwargs: None),
-            '_build_schedule_change_report_payload': lambda *args: payload,
-            '_tg_send_rich_message': lambda chat_id, markup: calls.append('rich') or rich_result,
-            '_tg_send_message': lambda chat_id, text: calls.append('text') or ({}, None),
-        }
-        send = self._function('_send_schedule_change_report_to', namespace)
-        result = send({'id': 1, 'telegram_id': 55}, DAY, datetime(2026, 9, 15, 9, 45), force=force)
-        return result, calls
-
-    def test_rich_message_goes_first(self):
-        result, calls = self._send(([{}], '<h3>…</h3>', 'текст'), ({}, None, False))
-        self.assertEqual(result, (True, 'sent'))
-        self.assertEqual(calls, ['rich'])
-
-    def test_refused_rich_message_falls_back_to_text(self):
-        result, calls = self._send(([{}], '<h3>…</h3>', 'текст'),
-                                   (None, "Bad Request: can't parse rich message", True))
-        self.assertEqual(result, (True, 'sent'))
-        self.assertEqual(calls, ['rich', 'text'])
-
-    def test_network_failure_is_not_retried_as_text(self):
-        """Таймаут не значит «не дошло»: повтор текстом прислал бы сводку дважды."""
-        result, calls = self._send(([{}], '<h3>…</h3>', 'текст'), (None, 'Read timed out', False))
-        self.assertEqual(result, (False, 'send_failed'))
-        self.assertEqual(calls, ['rich'])
-
-    def test_day_of_only_entries_is_silent(self):
-        result, calls = self._send(([], '<h3>…</h3>', 'текст'), ({}, None, False))
-        self.assertEqual(result, (False, 'empty'))
-        self.assertEqual(calls, [])
-
-    def test_payload_cuts_first_entries_before_the_emptiness_check(self):
-        loaded = [
-            fill(1, DAY, source='import'),
-            fill(2, DAY, source='import'),
-            fill(3, DAY, action='changed', day_was_empty=False,
-                 start='10:00', end='19:00', prev_start='09:00', prev_end='18:00'),
-        ]
-        namespace = {
-            'db': types.SimpleNamespace(get_schedule_change_report_entries=lambda *args, **kwargs: loaded),
-            'schedule_change_digest': digest,
-            '_escape_telegram_html': html.escape,
-        }
-        build = self._function('_build_schedule_change_report_payload', namespace)
-        changes, markup, text = build(DAY, [1], 'СЗоВ', '15.09.2026 09:45')
-        self.assertEqual([row['operator_id'] for row in changes], [3])
-        self.assertIn('Правок: <b>1</b>', markup)
-        self.assertIn('Правок: <b>1</b>', text)
-        self.assertNotIn('Оператор 1', markup)
-
-    def test_rich_sender_tells_refusal_from_network_failure(self):
-        sent = []
-
-        class Response:
-            def __init__(self, body, status_code):
-                self.body = body
-                self.status_code = status_code
-
-            def json(self):
-                return self.body
-
-        def make(answer, status_code=400):
-            def post(url, json=None, timeout=None):
-                sent.append((url, json))
-                if isinstance(answer, Exception):
-                    raise answer
-                return Response(answer, status_code)
-            namespace = {
-                'os': types.SimpleNamespace(getenv=lambda key: 'TOKEN'),
-                'requests': types.SimpleNamespace(post=post),
-                '_telegram_exception_text': str,
-            }
-            return self._function('_tg_send_rich_message', namespace)
-
-        self.assertEqual(make({'ok': False, 'description': 'Bad Request'})(55, '<p>x</p>'),
-                         (None, 'Bad Request', True))
-        self.assertEqual(make(TimeoutError('Read timed out'))(55, '<p>x</p>'),
-                         (None, 'Read timed out', False))
-        # Ошибка на стороне Telegram — не отказ: сообщение могло уйти.
-        self.assertEqual(make({'ok': False, 'description': 'Internal Server Error'}, 500)(55, '<p>x</p>'),
-                         (None, 'Internal Server Error', False))
-        self.assertEqual(make({'ok': True, 'result': {'message_id': 9}}, 200)(55, '<p>x</p>'),
-                         ({'message_id': 9}, None, False))
-        url, payload = sent[0]
-        self.assertTrue(url.endswith('/botTOKEN/sendRichMessage'))
-        self.assertEqual(payload['rich_message']['html'], '<p>x</p>')
-        self.assertTrue(payload['rich_message']['skip_entity_detection'])
 
 
 if __name__ == "__main__":

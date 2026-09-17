@@ -36251,9 +36251,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
 
                         <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12px] leading-relaxed text-slate-500 ring-1 ring-slate-200/70">
-                            Кто и сколько раз менял график, кому меняли и какие дни
-                            задело. Массовые операции идут одной строкой, обмены и
-                            доборы операторов — счётчиком без имён. Перерывы не входят.
+                            Таблица: сотрудник, группа, как было и как стало, кто
+                            изменил. Первичное внесение графика и перерывы не входят.
                         </div>
 
                         {!changeReport.telegramConnected && (

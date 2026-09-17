@@ -2,109 +2,84 @@
 """Сводка изменений графика работы за сутки — «Уведомления об изменениях».
 
 Постановка (владелец): в разделе «Графики работы» в меню «3 точки» —
-переключатель, по которому в Telegram приходит сводка за день: кто сколько раз
-менял график, кому сколько раз меняли и по каким дням были изменения. Главам
-отделов — только по своему отделу. И отдельным требованием: «нельзя, чтобы это
-выглядело как спам».
+переключатель, по которому в Telegram приходит сводка за день. Главам отделов —
+только по своему отделу. И отдельным требованием: «нельзя, чтобы это выглядело
+как спам».
 
-Здесь только чистая логика: границы суток, группировка записей и текст
-сообщения. Кому и когда отправлять — в bot_schedule2, данные — в database.py.
-Модуль не знает ни про Telegram, ни про базу, поэтому весь он проверяется
-тестами без сети и без подключения.
+Здесь только чистая логика: границы суток, правило первичного внесения,
+восстановление дня «было / стало» и вёрстка. Кому и когда отправлять — в
+bot_schedule2, данные — в database.py. Модуль не знает ни про Telegram, ни про
+базу, поэтому весь он проверяется тестами без сети и без подключения.
 
 Ключевые решения
 ────────────────
 
-**Единица счёта — «правка», а не строка журнала.** `work_shift_changes` пишет
-строку на каждое отличие дня: подвинули смену и сняли выходной — две строки об
-одном действии. Правкой считается тройка «сотрудник + день графика +
-операция», где операция — это `changed_at`: он не передаётся в INSERT и
-приходит из DEFAULT `CURRENT_TIMESTAMP`, то есть равен времени НАЧАЛА
-транзакции и у всей пачки строк одной операции совпадает до микросекунды.
-На боевых данных (5704 строки, 24.08–15.09.2026) строк на 5 % больше, чем
-правок, у обменов — на 20 %.
+**Формат — одна таблица «Сотрудник · Группа · Было · Стало · Кто изменил».**
+Макет владельца от 17.09.2026 (без столбца «Причина»: причину правки портал не
+хранит; «СВ» заменён на «Кто изменил» — в журнале записан тот, кто правил, а не
+супервайзер группы). Аналитические блоки прежней версии («кто сколько менял»,
+«дни графика») сняты вместе с ним.
 
-**Ключ операции — пара (автор, changed_at), а не один `changed_at`.** Два
-человека теоретически попадают в одну микросекунду, и тогда их правки слиплись
-бы в одну.
+**Строка — сотрудник + день графика, итог за сутки.** Руководитель, трижды
+двигавший одну смену, дал бы три строки подряд, из которых важна только
+разница между первой и последней. Поэтому «Было» — день до первой правки за
+сутки, «Стало» — после последней, в «Кто изменил» — все авторы по порядку.
+Если к вечеру день вернули как был, строки нет: изменения по итогу не
+случилось.
 
-**Массовые операции не считаются наравне с ручными.** Одна загрузка из файла —
-это 369 правок у 54 сотрудников (реальный случай 11.09.2026), одна публикация
-аукциона — 143. Если не разделять, шапка сводки будет «Изменений: 585», а
-человека, который весь день правил смены руками, в списке не станет видно.
-Поэтому у каждого автора рядом с числом правок стоит СПОСОБ и число заходов:
-«369 правок · загрузка из файла (1 раз)» против «147 правок · вручную
-(18 заходов)».
-
-**Операторы, меняющие график сами, не попадают в список имён.** Обмены сменами
-и доборы с аукциона пишутся от имени самого оператора: за сутки это полтора
-десятка человек, каждый со своей единственной правкой. В списке «кто менял»
-они вытеснили бы руководителей, ради которых сводка и собирается. Поэтому они
-уходят одной строкой-счётчиком. Принцип тот же, что у экрана истории, где для
-механики ФИО не показывается (`IMPERSONAL_SOURCES` в
-`src/components/schedule/shiftHistoryFormat.js`), но наборы не совпадают и не
-должны: экран описывает ОДНУ ячейку, и там публикация аукциона безлична, а
-обмен подписан; сводка отвечает руководителю «кто менял график», и там
-публикацию сделал конкретный администратор, а обмены — полтора десятка
-операторов, чьи имена в сводке — шум.
+**«Было» и «Стало» — весь день, а не изменённые строки журнала.** Журнал пишет
+только отличия: сняли одну смену из двух — в журнале одна строка 'removed', и
+«Стало: нет смены» было бы неправдой (на бою в сентябре 72 дня из 1903 — с
+двумя-тремя сменами). Полное состояние восстанавливается откатом: текущий
+график минус все правки, внесённые после. На боевом журнале 24.08–17.09.2026
+откат сошёлся на 5631 операции из 5635; где не сходится (правка мимо журнала),
+строка честно показывает только изменённые смены.
 
 **Первичное внесение графика — не изменение.** Постановка владельца
-(17.09.2026): сводка про изменения, и если первое внесение графика тоже
-считается, его убрать. Журнал пишет дифф дня, поэтому заполнение пустого дня
-ложилось в сводку наравне с правками — на боевых данных 24.08–17.09.2026 это
-3549 «правок» из 5635. Внесением считается операция, которая заполнила день,
-где до неё не было ни смены, ни выходного, и сделана способом, которым график
-вносят: вручную, загрузкой файла или публикацией аукциона. Обмены, доборы,
-выдача с аукциона и заявки операторов правят уже внесённый график, даже когда
-смена ложится на пустой день: добор почти всегда именно так и выглядит, и
-без этого исключения из сводки пропали бы доборы и половина каждого обмена.
-Пустоту дня до операции журнал хранит отдельной колонкой (`day_was_empty`):
-по одним действиям её не определить — вторая смена в день, где смена уже
-стоит, пишется тем же 'added' (на бою таких правок 40). Для строк, записанных
-до колонки, решают действия: одни 'added' / 'day_off_set' — внесение.
-
-**Мало правок — никаких разбивок.** При пяти и менее правках три блока («кто
-менял», «кому меняли», «дни») пересказали бы друг друга тремя строками каждый.
-Тогда печатается просто перечень: что, кому, на какой день и кто сделал.
-
-**Таблицы — rich-сообщением.** Сводка уходит методом `sendRichMessage`
-(Bot API 10.1) в разметке HTML: числа по авторам, сотрудникам и дням стоят
-столбцами, а не строками через тире. HTML, а не Markdown: фамилия с «|»
-разломала бы Markdown-таблицу, а экранирование HTML у бота уже есть. Прежний
-текст (`build_digest`) остаётся запасным: если Telegram rich-сообщение не
-примет, сводка уйдёт им, а не пропадёт.
+(17.09.2026). Журнал пишет дифф дня, поэтому заполнение пустого дня ложилось в
+сводку наравне с правками — на боевых данных 24.08–17.09.2026 это 3549
+«правок» из 5635. Внесением считается операция, которая заполнила день, где до
+неё не было ни смены, ни выходного, и сделана способом, которым график вносят:
+вручную, загрузкой файла или публикацией аукциона. Обмены, доборы, выдача с
+аукциона и заявки операторов правят уже внесённый график, даже когда смена
+ложится на пустой день: добор почти всегда именно так и выглядит. Пустоту дня
+до операции журнал хранит колонкой `day_was_empty`: по одним действиям её не
+определить — вторая смена в заполненный день пишется тем же 'added' (на бою
+40 таких правок). Для строк, записанных до колонки, решают действия.
+Исключение — перенос: одна операция сняла смену с одного дня и поставила на
+другой, пустой. Второй день — половина переноса, а не внесение.
 
 **Сутки — закрытые, вчерашние.** Сводка уходит утром про вчера. «С начала
 сегодняшнего дня» означало бы, что вечерние правки не попадут никуда, а
 граница суток зависела бы от минуты запуска.
 
-**Две оси дат разведены в тексте намеренно.** `changed_at` — когда правку
-внесли (это период сводки), `shift_date` — какой день графика она затронула
-(это блок «дни»). Они расходятся: на бою правки задним числом доходят до −80
-дней, вперёд — до +31. Заголовок «Изменения, внесённые 14 сентября» и строка
-«Дни графика, которых коснулись правки» подписаны так, чтобы даты из октября
-под сентябрьским заголовком не читались как ошибка данных.
+**Таблица — rich-сообщением.** Сводка уходит методом `sendRichMessage`
+(Bot API 10.1) в разметке HTML. HTML, а не Markdown: фамилия с «|» разломала
+бы Markdown-таблицу, а экранирование HTML у бота уже есть. Текст
+(`build_digest`) остаётся запасным: если Telegram rich-сообщение не примет,
+сводка уйдёт им, а не пропадёт.
 
 **Чего сводка не покрывает.** Пересчёт перерывов и снятие статус-периода
 историю не пишут сознательно (см. `database.py`), поэтому нигде не сказано
 «все изменения графика» — только «изменения», как их видит журнал.
 """
 
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 
 # ── Источники правок ────────────────────────────────────────────────────────
 
-# Способ, которым правка попала в график. Коды — те же, что в
-# database.WORK_SHIFT_CHANGE_SOURCES; подписи повторяют формулировки экрана
-# истории (src/components/schedule/shiftHistoryFormat.js), чтобы сводка и
-# журнал в интерфейсе говорили об одном и том же одинаково.
+# Способ, которым правка попала в график, — в скобках после автора. Коды — те
+# же, что в database.WORK_SHIFT_CHANGE_SOURCES; подписи повторяют формулировки
+# экрана истории (src/components/schedule/shiftHistoryFormat.js), кроме
+# статуса: «Кастек Гаухар (статусом)» не читается.
 SOURCE_LABELS = {
     'supervisor': 'вручную',
     'import': 'загрузка из файла',
     'auction': 'публикация аукциона',
     'auction_admin': 'выдача с аукциона',
-    'status_period': 'статусом',
+    'status_period': 'период статуса',
     'shift_request': 'заявка оператора',
     'swap': 'обмен сменами',
     'auction_topup': 'добор с аукциона',
@@ -112,11 +87,9 @@ SOURCE_LABELS = {
     'system': 'системой',
 }
 
-# Правки, которые оператор делает сам себе. Имён не печатаем — см. докстроку.
-# Всё остальное (в том числе незнакомый код) считается решением руководителя и
-# попадает в «Кто менял» с именем: пропустить правку молча хуже, чем назвать
-# её общим словом.
-SELF_SERVICE_SOURCES = ('swap', 'auction_topup', 'auction_topup_cancel')
+# Ручная правка — способ по умолчанию, в «Кто изменил» он не подписывается:
+# «(вручную)» у каждой второй строки — шум.
+MANUAL_SOURCE = 'supervisor'
 
 # Способы, которыми график ВНОСЯТ. Заполнение пустого дня одним из них —
 # первичное внесение, в сводку оно не идёт (см. докстроку модуля). Незнакомый
@@ -127,51 +100,12 @@ ENTRY_SOURCES = ('supervisor', 'import', 'auction')
 # day_was_empty операция из одних таких действий считается заполнением.
 FILL_ACTIONS = ('added', 'day_off_set')
 
-# Роль автора одним словом перед фамилией. Тот же словарь, что на экране
-# истории (ROLE_PREFIXES), только в родительном падеже строки «кто менял».
-ROLE_LABELS = {
-    'super_admin': 'администратор',
-    'admin': 'администратор',
-    'sv': 'супервайзер',
-    'trainer': 'тренер',
-    'operator': 'оператор',
-    'trainee': 'стажёр',
-}
-
-ACTION_LABELS = {
-    'added': 'смена добавлена',
-    'removed': 'смена удалена',
-    'changed': 'смена изменена',
-    'day_off_set': 'проставлен выходной',
-    'day_off_cleared': 'выходной снят',
-}
-
-# Пара «действие·источник» там, где источник меняет смысл фразы. Список — копия
-# ACTION_SOURCE_LABELS с экрана истории, дополненная заявками операторов:
-# в JS-словаре источника 'shift_request' нет вовсе.
-ACTION_SOURCE_LABELS = {
-    'added·auction': 'взята с аукциона',
-    'added·auction_topup': 'добор с аукциона',
-    'added·auction_admin': 'выдана с аукциона',
-    'added·swap': 'получена при обмене',
-    'added·import': 'загружена из файла',
-    'added·shift_request': 'добавлена по заявке',
-    'removed·auction': 'снята публикацией аукциона',
-    'removed·auction_topup_cancel': 'добор отменён',
-    'removed·auction_admin': 'снята с аукциона',
-    'removed·swap': 'отдана при обмене',
-    'removed·import': 'убрана загрузкой из файла',
-    'removed·status_period': 'снята статусом',
-    'removed·shift_request': 'снята по заявке',
-    'changed·auction': 'пересобрана публикацией аукциона',
-    'changed·auction_topup': 'расширена добором',
-    'changed·auction_topup_cancel': 'урезана отменой добора',
-    'changed·swap': 'пересобрана обменом',
-    'changed·import': 'заменена загрузкой из файла',
-    'changed·shift_request': 'изменена по заявке',
-    'day_off_set·auction': 'выходной с аукциона',
-    'day_off_set·import': 'выходной из файла',
-    'day_off_set·swap': 'выходной после обмена',
+# Вид смены в скобках после времени. Обычная смена не подписывается. Подписи —
+# как в планировщике (PLANNER_SHIFT_TYPE_*_LABEL в src/App.jsx).
+SHIFT_TYPE_REGULAR = 'regular'
+SHIFT_TYPE_LABELS = {
+    'office_practice': 'практика в офисе',
+    'phone_shift': 'смена на телефонах',
 }
 
 
@@ -217,18 +151,12 @@ def almaty_now():
 
     У Казахстана с 01.03.2024 одна зона UTC+5 без перевода часов. Откат на
     `datetime.now()` при недоступном tzdata отдал бы время контейнера, то есть UTC,
-    и «Сформировано» в сводке разошлось бы с часами получателя на пять часов.
+    и дата в заголовке сводки разошлась бы с часами получателя.
     """
     return datetime.now(timezone(timedelta(hours=5)))
 
 
 # ── Форматирование ──────────────────────────────────────────────────────────
-
-MONTHS_GENITIVE = (
-    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
-)
-
 
 def plural_ru(count, one, few, many):
     count = abs(int(count))
@@ -240,7 +168,7 @@ def plural_ru(count, one, few, many):
 
 
 def changes_word(count):
-    return plural_ru(count, 'правка', 'правки', 'правок')
+    return plural_ru(count, 'изменение', 'изменения', 'изменений')
 
 
 def people_word(count):
@@ -248,26 +176,14 @@ def people_word(count):
     return plural_ru(count, 'сотрудника', 'сотрудников', 'сотрудников')
 
 
-def people_counted(count):
-    """Счётная форма: «73 сотрудника», «5 сотрудников», «1 сотрудник»."""
-    return plural_ru(count, 'сотрудник', 'сотрудника', 'сотрудников')
+def format_date(day):
+    """«16.09.2026» — дата в заголовке, как в макете."""
+    return '%02d.%02d.%d' % (day.day, day.month, day.year)
 
 
-def format_day(day):
-    return '%d %s' % (day.day, MONTHS_GENITIVE[day.month - 1])
-
-
-def format_day_full(day):
-    return '%d %s %d' % (day.day, MONTHS_GENITIVE[day.month - 1], day.year)
-
-
-def format_day_range(start, end):
-    """«14–20 сентября», «29 сентября — 3 октября», «14 сентября»."""
-    if start == end:
-        return format_day(start)
-    if start.month == end.month and start.year == end.year:
-        return '%d–%d %s' % (start.day, end.day, MONTHS_GENITIVE[end.month - 1])
-    return '%s — %s' % (format_day(start), format_day(end))
+def format_day_short(day):
+    """«18.09» — день графика в ячейке: год там всегда очевиден."""
+    return '%02d.%02d' % (day.day, day.month)
 
 
 def _time_label(value):
@@ -278,57 +194,69 @@ def _time_label(value):
     return str(value)[:5]
 
 
-def shift_times_label(entry):
-    """«09:00—18:00» или «09:00—18:00 → 10:00—19:00» для изменённой смены."""
-    nxt = ''
-    if entry.get('start') is not None and entry.get('end') is not None:
-        nxt = '%s—%s' % (_time_label(entry.get('start')), _time_label(entry.get('end')))
-    prev = ''
-    if entry.get('prev_start') is not None and entry.get('prev_end') is not None:
-        prev = '%s—%s' % (_time_label(entry.get('prev_start')), _time_label(entry.get('prev_end')))
-    if prev and nxt and prev != nxt:
-        return '%s → %s' % (prev, nxt)
-    return nxt or prev
+def _shift_type(value):
+    return str(value or '').strip().lower() or SHIFT_TYPE_REGULAR
 
 
-def entry_action_label(entry):
-    key = '%s·%s' % (entry.get('action') or '', entry.get('source') or '')
-    return (ACTION_SOURCE_LABELS.get(key)
-            or ACTION_LABELS.get(entry.get('action') or '')
-            or str(entry.get('action') or '—'))
+def _shift_item(start, end, shift_type):
+    return (_time_label(start), _time_label(end), _shift_type(shift_type))
 
 
-def actor_label(name, role):
-    """«Кастек Гаухар, супервайзер». Роль нужна, чтобы в списке не гадать,
-    правил это руководитель отдела или сам сотрудник."""
-    name = str(name or '').strip() or 'Без автора'
-    role_label = ROLE_LABELS.get(str(role or '').strip().lower())
-    return '%s, %s' % (name, role_label) if role_label else name
+def shift_label(item):
+    """«09:00–18:00» или «09:00–18:00 (практика в офисе)»."""
+    start, end, shift_type = item
+    text = '%s–%s' % (start, end)
+    if shift_type != SHIFT_TYPE_REGULAR:
+        text += ' (%s)' % SHIFT_TYPE_LABELS.get(shift_type, shift_type)
+    return text
 
 
-def format_day_short(day):
-    """«14.09» — в списке дней месяц повторялся бы по десять раз подряд."""
-    return '%02d.%02d' % (day.day, day.month)
+def day_state_label(day, shifts, day_off):
+    """Ячейка «Было» / «Стало»: «18.09, 09:00–18:00», «18.09 — выходной»,
+    «18.09 — нет смены». Смены — по времени начала."""
+    parts = [shift_label(item) for item in sorted(shifts)]
+    if parts:
+        # Смена и выходной в одном дне схемой не запрещены — показываем оба.
+        if day_off:
+            parts.append('выходной')
+        return '%s, %s' % (format_day_short(day), ', '.join(parts))
+    if day_off:
+        return '%s — выходной' % format_day_short(day)
+    return '%s — нет смены' % format_day_short(day)
 
 
-WEEKDAYS_SHORT = ('пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс')
+def empty_day_text(first_entries=None):
+    """Строка для суток без изменений — её видит только разовая отправка по кнопке.
 
-
-def format_day_weekday(day):
-    """«14.09, пн» — в таблице дней по дню недели видно, что перетряхнули выходные."""
-    return '%s, %s' % (format_day_short(day), WEEKDAYS_SHORT[day.weekday()])
+    Если за сутки график только вносили, «никто не менял» звучало бы как сбой
+    сводки у человека, который вчера загрузил файл. Поэтому внесение названо.
+    """
+    days = {(entry.get('operator_id'), entry.get('shift_date')) for entry in first_entries or []}
+    if not days:
+        return 'За эти сутки график никто не менял.'
+    people = len({operator_id for operator_id, _ in days})
+    return ('Изменений не было. Первичное внесение графика — %d %s у %d %s — '
+            'в сводку не входит.' % (
+                len(days), plural_ru(len(days), 'день', 'дня', 'дней'),
+                people, people_word(people),
+            ))
 
 
 # ── Первичное внесение ──────────────────────────────────────────────────────
 
 def _change_key(entry):
-    """Правка — сотрудник + день графика + операция (автор, changed_at)."""
+    """Правка — сотрудник + день графика + операция (автор, changed_at).
+
+    `changed_at` не передаётся в INSERT и приходит из DEFAULT — это начало
+    транзакции, у всех строк одной операции совпадает до микросекунды. Автор в
+    ключе — чтобы два человека в одну микросекунду не слиплись в одну правку.
+    """
     actor_id = entry.get('actor_id')
     return (entry.get('operator_id'), entry.get('shift_date'),
             actor_id if actor_id is not None else -1, entry.get('changed_at'))
 
 
-def _is_first_entry(rows):
+def _is_fill(rows):
     """Строки ОДНОЙ правки заполнили пустой день способом внесения графика.
 
     Все три условия обязательны. Действия проверяются и при известном
@@ -353,564 +281,311 @@ def split_first_entries(entries):
     groups = {}
     for entry in entries or []:
         groups.setdefault(_change_key(entry), []).append(entry)
-    first_keys = {key for key, rows in groups.items() if _is_first_entry(rows)}
+    fill_keys = {key for key, rows in groups.items() if _is_fill(rows)}
+
+    # Перенос: одна операция по сотруднику тронула ровно два дня — один
+    # правкой, другой заполнением. Заполненный день — вторая половина
+    # переноса, и без неё в сводке осталась бы только снятая смена.
+    days_by_operation = {}
+    for operator_id, shift_date, actor_id, changed_at in groups:
+        days_by_operation.setdefault((operator_id, actor_id, changed_at), []).append(shift_date)
+    for (operator_id, actor_id, changed_at), days in days_by_operation.items():
+        if len(days) != 2:
+            continue
+        keys = [(operator_id, day, actor_id, changed_at) for day in days]
+        if sum(1 for key in keys if key in fill_keys) == 1:
+            fill_keys.difference_update(keys)
 
     changes = []
     first = []
     for entry in entries or []:
-        (first if _change_key(entry) in first_keys else changes).append(entry)
+        (first if _change_key(entry) in fill_keys else changes).append(entry)
     return changes, first
 
 
-def empty_day_text(first_entries=None):
-    """Строка для суток без правок — её видит только разовая отправка по кнопке.
+# ── Было / стало ────────────────────────────────────────────────────────────
 
-    Если за сутки график только вносили, «никто не менял» звучало бы как сбой
-    сводки у человека, который вчера загрузил файл. Поэтому внесение названо.
+def _entry_order(entry):
+    # Само время, а не его строка: у времени без микросекунд str() короче, и
+    # строковое сравнение разошлось бы с хронологией.
+    return (entry.get('changed_at') or datetime.min, entry.get('id') or 0)
+
+
+def _undo(state, entry):
+    """Откатить одну строку журнала на состоянии дня. False — не сошлось:
+    в дне нет смены, которую строка называет добавленной."""
+    shifts = state['shifts']
+    action = entry.get('action')
+    new_item = _shift_item(entry.get('start'), entry.get('end'), entry.get('shift_type'))
+    # Для 'changed' вид «до» пишется всегда; подстраховка на случай его пустоты.
+    prev_type = entry.get('prev_shift_type') or entry.get('shift_type')
+    prev_item = _shift_item(entry.get('prev_start'), entry.get('prev_end'), prev_type)
+    consistent = True
+    if action in ('added', 'changed'):
+        if shifts[new_item] > 0:
+            shifts[new_item] -= 1
+        else:
+            consistent = False
+    if action in ('removed', 'changed'):
+        shifts[prev_item] += 1
+    if action == 'day_off_set':
+        consistent = consistent and state['day_off']
+        state['day_off'] = False
+    if action == 'day_off_cleared':
+        consistent = consistent and not state['day_off']
+        state['day_off'] = True
+    return consistent
+
+
+def _frozen(state):
+    shifts = []
+    for item, count in state['shifts'].items():
+        shifts.extend([item] * max(0, count))
+    return tuple(sorted(shifts)), bool(state['day_off'])
+
+
+def reconstruct_days(entries, current_states, later_entries=None):
+    """Состояние дня до и после каждой правки — откатом журнала от текущего графика.
+
+    entries — строки окна сводки, later_entries — строки тех же дней,
+    внесённые после окна, current_states — {(operator_id, shift_date):
+    {'shifts': [(start, end, shift_type)], 'day_off': bool}} на момент запроса.
+    Возвращает {ключ правки: (до, после, сошлось ли)}, где состояние —
+    (кортеж смен, выходной).
+
+    Откат идёт от новых правок к старым: «после» правки — состояние перед её
+    откатом, «до» — после. Не сошлось однажды — всё, что раньше в этом дне,
+    помечено несошедшимся: оно выведено из уже неверного состояния.
     """
-    days = {(entry.get('operator_id'), entry.get('shift_date')) for entry in first_entries or []}
-    if not days:
-        return 'За эти сутки график никто не менял.'
-    people = len({operator_id for operator_id, _ in days})
-    return ('Изменений не было. Первичное внесение графика — %d %s у %d %s — '
-            'в сводку не входит.' % (
-                len(days), plural_ru(len(days), 'день', 'дня', 'дней'),
-                people, people_word(people),
-            ))
+    by_day = {}
+    for entry in list(entries or []) + list(later_entries or []):
+        by_day.setdefault((entry.get('operator_id'), entry.get('shift_date')), []).append(entry)
+
+    result = {}
+    for day_key, day_entries in by_day.items():
+        current = (current_states or {}).get(day_key) or {}
+        state = {
+            'shifts': Counter(_shift_item(*item) for item in current.get('shifts') or []),
+            'day_off': bool(current.get('day_off')),
+        }
+        operations = {}
+        for entry in sorted(day_entries, key=_entry_order):
+            operations.setdefault(_change_key(entry), []).append(entry)
+        consistent = True
+        for key in reversed(list(operations)):
+            after = _frozen(state)
+            for entry in sorted(operations[key], key=_entry_order, reverse=True):
+                consistent = _undo(state, entry) and consistent
+            result[key] = (_frozen(state), after, consistent)
+    return result
 
 
-# ── Группировка ─────────────────────────────────────────────────────────────
+def _journal_parts(rows, side):
+    """Запасная ячейка, когда откат не сошёлся: только смены из строк журнала."""
+    shifts = []
+    day_off = False
+    for row in rows:
+        action = row.get('action')
+        if side == 'before':
+            if action in ('removed', 'changed'):
+                shifts.append(_shift_item(row.get('prev_start'), row.get('prev_end'),
+                                          row.get('prev_shift_type') or row.get('shift_type')))
+            day_off = day_off or action == 'day_off_cleared'
+        else:
+            if action in ('added', 'changed'):
+                shifts.append(_shift_item(row.get('start'), row.get('end'), row.get('shift_type')))
+            day_off = day_off or action == 'day_off_set'
+    return tuple(sorted(shifts)), day_off
 
-def summarize(entries):
-    """Свести записи журнала к числам сводки.
 
-    entries — записи за отчётные сутки: словари с ключами operator_id,
-    operator_name, shift_date, action, source, actor_id, actor_name,
-    actor_role, changed_at (плюс времена смены для мелкой сводки). Первичное
-    внесение отсекается ДО этой функции (split_first_entries): доставке нужно
-    знать, остались ли правки, раньше, чем собирается текст.
+def _journal_parts_label(day, shifts, day_off):
+    """Как day_state_label, но пустая сторона — просто дата: что ещё было в
+    дне, при несошедшемся откате неизвестно, и «нет смены» было бы догадкой."""
+    if not shifts and not day_off:
+        return format_day_short(day)
+    return day_state_label(day, shifts, day_off)
 
-    Правка — тройка «сотрудник + день графика + операция», операция — пара
-    «автор + changed_at» (см. докстроку модуля).
+
+def _actors_label(operations):
+    """«Кастек Гаухар (загрузка из файла), Сабыр Азана» — авторы по порядку.
+
+    Ручная правка не подписывается, остальные способы — в скобках: по ним
+    видно, что смену взял сам оператор с аукциона или отдал в обмен.
     """
-    total = set()
-    actors = {}
-    operators = {}
-    days = {}
-    self_service = {}
+    order = []
+    ways = {}
+    for rows in operations:
+        first = rows[0]
+        name = str(first.get('actor_name') or '').strip() or 'Без автора'
+        if name not in ways:
+            order.append(name)
+            ways[name] = []
+        source = str(first.get('source') or 'system').strip() or 'system'
+        label = SOURCE_LABELS.get(source, source)
+        if label not in ways[name]:
+            ways[name].append(label)
+    parts = []
+    for name in order:
+        labels = ways[name]
+        if labels == [SOURCE_LABELS[MANUAL_SOURCE]]:
+            parts.append(name)
+        else:
+            parts.append('%s (%s)' % (name, ', '.join(labels)))
+    return ', '.join(parts)
 
-    for entry in entries or []:
-        operator_id = entry.get('operator_id')
-        shift_date = entry.get('shift_date')
-        changed_at = entry.get('changed_at')
-        source = str(entry.get('source') or 'system').strip() or 'system'
-        # actor_id допускает NULL по схеме (ON DELETE SET NULL), и тогда пары
-        # «автор + время» не выйдет — подставляем заведомо невозможный id.
-        actor_id = entry.get('actor_id')
-        operation = (actor_id if actor_id is not None else -1, changed_at)
-        change = (operator_id, shift_date, operation)
 
-        total.add(change)
+def build_rows(entries, current_states=None, later_entries=None):
+    """(строки таблицы, отсечённое первичное внесение).
 
-        day_bucket = days.setdefault(shift_date, set())
-        day_bucket.add((operator_id, operation))
+    Строка — сотрудник + день графика: «Было» до первой правки за сутки,
+    «Стало» после последней. Первичное внесение отсекается только В НАЧАЛЕ
+    дня: если день сперва заполнили, а потом подвинули, «Было» — заполненный
+    день, а не пустой. Строки, где к концу суток день вернули как был,
+    выпадают.
+    """
+    changes, first_entries = split_first_entries(entries)
+    fill_keys = {_change_key(entry) for entry in first_entries}
+    states = reconstruct_days(entries, current_states, later_entries)
 
-        operator_bucket = operators.setdefault(operator_id, {
-            'name': entry.get('operator_name') or '',
-            'changes': set(),
-        })
-        operator_bucket['changes'].add((shift_date, operation))
+    operations_by_day = {}
+    for entry in sorted(entries or [], key=_entry_order):
+        day_key = (entry.get('operator_id'), entry.get('shift_date'))
+        operations = operations_by_day.setdefault(day_key, {})
+        operations.setdefault(_change_key(entry), []).append(entry)
 
-        if source in SELF_SERVICE_SOURCES:
-            bucket = self_service.setdefault(source, {'changes': set(), 'people': set()})
-            bucket['changes'].add(change)
-            bucket['people'].add(operator_id)
+    rows = []
+    dropped_fills = []
+    for (operator_id, shift_date), operations in operations_by_day.items():
+        keys = list(operations)
+        leading = 0
+        while leading < len(keys) and keys[leading] in fill_keys:
+            leading += 1
+        for key in keys[:leading]:
+            dropped_fills.extend(operations[key])
+        kept = keys[leading:]
+        if not kept:
             continue
 
-        actor_bucket = actors.setdefault(operation[0], {
-            'name': entry.get('actor_name') or '',
-            'role': entry.get('actor_role') or '',
-            'changes': set(),
-            'operators': set(),
-            'sources': {},
+        before, _, first_ok = states.get(kept[0], (None, None, False))
+        _, after, last_ok = states.get(kept[-1], (None, None, False))
+        label = day_state_label
+        if not (first_ok and last_ok):
+            before = _journal_parts(operations[kept[0]], 'before')
+            after = _journal_parts(operations[kept[-1]], 'after')
+            label = _journal_parts_label
+        if before == after:
+            continue
+
+        sample = operations[kept[0]][0]
+        rows.append({
+            'operator_id': operator_id,
+            'operator_name': str(sample.get('operator_name') or '').strip() or 'Без имени',
+            'group_name': str(sample.get('group_name') or '').strip(),
+            'shift_date': shift_date,
+            'before': label(shift_date, *before),
+            'after': label(shift_date, *after),
+            'actors': _actors_label(operations[key] for key in kept),
         })
-        # Имя автора хранится копией в каждой строке: если человека потом
-        # переименовали, свежая строка принесёт новое написание — берём его.
-        if entry.get('actor_name'):
-            actor_bucket['name'] = entry.get('actor_name')
-        if entry.get('actor_role'):
-            actor_bucket['role'] = entry.get('actor_role')
-        actor_bucket['changes'].add(change)
-        actor_bucket['operators'].add(operator_id)
-        source_bucket = actor_bucket['sources'].setdefault(source, {
-            'changes': set(), 'operations': set(),
-        })
-        source_bucket['changes'].add(change)
-        source_bucket['operations'].add(operation)
 
-    actor_rows = []
-    for actor_id, bucket in actors.items():
-        ways = sorted(
-            (
-                {
-                    'source': source,
-                    'changes': len(data['changes']),
-                    'operations': len(data['operations']),
-                }
-                for source, data in bucket['sources'].items()
-            ),
-            key=lambda item: (-item['changes'], item['source']),
-        )
-        actor_rows.append({
-            'actor_id': actor_id,
-            'name': bucket['name'],
-            'role': bucket['role'],
-            'changes': len(bucket['changes']),
-            'operators': len(bucket['operators']),
-            'ways': ways,
-        })
-    actor_rows.sort(key=lambda item: (-item['changes'], item['name']))
-
-    operator_rows = [
-        {'operator_id': operator_id, 'name': bucket['name'], 'changes': len(bucket['changes'])}
-        for operator_id, bucket in operators.items()
-    ]
-    operator_rows.sort(key=lambda item: (-item['changes'], item['name']))
-
-    self_rows = sorted(
-        (
-            {'source': source, 'changes': len(data['changes']), 'people': len(data['people'])}
-            for source, data in self_service.items()
-        ),
-        key=lambda item: (-item['changes'], item['source']),
-    )
-
-    return {
-        'total': len(total),
-        'actors': actor_rows,
-        'operators': operator_rows,
-        'days': {day: len(bucket) for day, bucket in days.items()},
-        'self_service': self_rows,
-        'self_total': sum(row['changes'] for row in self_rows),
-    }
+    # Внутри группы — по сотруднику и дню: так супервайзер читает свою группу
+    # подряд, а у одного человека дни идут по порядку. Без группы — в конце.
+    rows.sort(key=lambda row: (not row['group_name'], row['group_name'].lower(),
+                               row['operator_name'].lower(), row['shift_date']))
+    return rows, dropped_fills
 
 
-# ── Текст сообщения ─────────────────────────────────────────────────────────
+# ── Rich-сообщение ──────────────────────────────────────────────────────────
 
-# Потолок сообщения Telegram — 4096 символов, и сообщение сверх него просто не
-# уходит. Держим запас на разметку и на хвост «и ещё N».
-TELEGRAM_TEXT_BUDGET = 3600
+# Потолки sendRichMessage: 32 768 символов и 500 блоков, где блок — в том числе
+# каждая строка таблицы. Держим запас на заголовок и строку-хвост «… и ещё N».
+RICH_TEXT_LIMIT = 32768
+RICH_BLOCK_LIMIT = 500
+RICH_TEXT_BUDGET = 30000
+RICH_ROWS_LIMIT = 450
 
-# Сколько строк печатать в разбивках. Боевые максимумы за сутки: 24 автора,
-# 92 затронутых сотрудника, 63 разных дня графика — без потолка сводка в
-# сообщение не влезает.
-ACTORS_LIMIT = 10
-OPERATORS_LIMIT = 12
-DAY_GROUPS_LIMIT = 12
-
-# До этого числа правок разбивки не печатаются — вместо них перечень самих
-# правок: три блока по одной строке пересказали бы друг друга.
-DETAILED_MAX_CHANGES = 5
+RICH_COLUMNS = ('Сотрудник', 'Группа', 'Было: дата и время', 'Стало: дата и время', 'Кто изменил')
 
 
 def _plain(value):
     return str(value if value is not None else '')
 
 
-def _text_length(lines):
-    return sum(len(line) + 1 for line in lines)
+def _title(day):
+    return '🔔 Изменения графика — %s' % format_date(day)
 
 
-def _fits(lines, block):
-    return _text_length(lines) + _text_length(block) <= TELEGRAM_TEXT_BUDGET
+def build_digest_rich(day, rows, escape=None, first_entries=None):
+    """Сводка rich-сообщением (поле `html` у sendRichMessage): одна таблица.
 
-
-def _head_counts(stats):
-    head = 'Правок: <b>%d</b> · сотрудников: <b>%d</b>' % (
-        stats['total'], len(stats['operators']),
-    )
-    # Третье число ставим, только если оно не повторяет соседнее: одинаковые
-    # числа подряд читаются как ошибка, а не как сводка.
-    if stats['actors'] and len(stats['actors']) != len(stats['operators']):
-        head += ' · менявших: <b>%d</b>' % len(stats['actors'])
-    return head
-
-
-def build_digest(day, entries, scope_label, generated_label=None, escape=None,
-                 first_entries=None):
-    """Текст сводки за сутки (parse_mode=HTML) — запасной к build_digest_rich.
-
-    escape — экранирование подставляемых значений; приходит аргументом, чтобы
-    модуль не тянул за собой bot_schedule2. Экранировать обязательно: один «<»
-    в фамилии роняет ВСЁ сообщение, а не одну строку.
-    first_entries — отсечённое первичное внесение; нужно только, чтобы назвать
-    его в сообщении за сутки без правок.
+    Теги идут вплотную, без переводов строк: как rich-разметка обходится с ними
+    между блоками, документация не говорит, а пустой абзац был бы шумом.
     """
     esc = escape or _plain
-    stats = summarize(entries)
-    total = stats['total']
-
-    lines = ['🗓 <b>Изменения в графике за %s</b>' % esc(format_day_full(day))]
-    lines.append('Область: %s' % esc(scope_label or 'Все отделы'))
-    if not total:
+    parts = ['<h3>%s</h3>' % esc(_title(day))]
+    if not rows:
         # Сюда доходит только разовая отправка по кнопке: регулярная рассылка
-        # за пустые сутки молчит и до текста не добирается.
-        lines.append('')
-        lines.append(empty_day_text(first_entries))
-        return '\n'.join(lines)
+        # за пустые сутки молчит и до вёрстки не добирается.
+        parts.append('<p>%s</p>' % esc(empty_day_text(first_entries)))
+        return ''.join(parts)
 
-    lines.append(_head_counts(stats))
-
-    if total <= DETAILED_MAX_CHANGES:
-        lines.append('')
-        rows = _detailed_lines(entries, esc)
-        shown = 0
-        # Бюджет и здесь: правок не больше пяти, но в каждой бывает по
-        # несколько действий и два длинных ФИО, а сообщение сверх потолка
-        # Telegram не обрезается, а не уходит совсем.
-        for row in rows:
-            if not _fits(lines, [row, '… и ещё 5 правок']):
-                break
-            lines.append(row)
-            shown += 1
-        if shown < len(rows):
-            rest = len(rows) - shown
-            lines.append('… и ещё %d %s' % (rest, changes_word(rest)))
-        if generated_label:
-            lines.append('')
-            lines.append('<i>Сформировано %s</i>' % esc(generated_label))
-        return '\n'.join(lines)
-
-    for block in (
-        _actors_block(stats, esc),
-        _operators_block(stats, esc),
-        _days_block(stats, esc),
-        _self_service_block(stats, esc),
-    ):
-        if block and _fits(lines, block):
-            lines.append('')
-            lines.extend(block)
-
-    if generated_label:
-        lines.append('')
-        lines.append('<i>Сформировано %s</i>' % esc(generated_label))
-    return '\n'.join(lines)
-
-
-def _detailed_lines(entries, esc):
-    """Перечень правок, когда их единицы: что, кому, на какой день и кто сделал.
-
-    Строка на ПРАВКУ — ту же единицу, что в шапке, — а не на строку журнала.
-    Поставили выходной на день со сменой: журнал пишет «смена удалена» и
-    «проставлен выходной» двумя строками, а человек сделал одно действие.
-    И наоборот, разбитая смена (09:00—13:00 и 18:00—22:00) — две строки с
-    одинаковым действием, и ни одну из них терять нельзя.
-    """
-    rows = []
-    for group in _changes_in_order(entries):
-        first = group[0]
-        shift_date = first.get('shift_date')
-        row = '• <b>%s</b> · %s — %s' % (
-            esc(first.get('operator_name') or 'Без имени'),
-            esc(format_day(shift_date)) if shift_date else '—',
-            esc(_change_actions_label(group)),
-        )
-        if str(first.get('source') or '') not in SELF_SERVICE_SOURCES:
-            row += '\n   %s' % esc(actor_label(first.get('actor_name'), first.get('actor_role')))
-        rows.append(row)
-    return rows
-
-
-def _changes_in_order(entries):
-    """Строки журнала, собранные в правки, по времени внесения."""
-    changes = {}
-    for entry in entries or []:
-        changes.setdefault(_change_key(entry), []).append(entry)
-    return sorted(changes.values(),
-                  key=lambda group: (_plain(group[0].get('changed_at')),
-                                     _plain(group[0].get('operator_name'))))
-
-
-def _change_actions_label(group):
-    """«смена удалена 09:00—18:00, проставлен выходной» — все действия одной правки.
-
-    Сначала действия со временем смены, потом выходные: так пара читается
-    как одно событие.
-    """
-    actions = []
-    for item in sorted(group, key=lambda row: (0 if shift_times_label(row) else 1,
-                                               _plain(row.get('start') or row.get('prev_start')),
-                                               _plain(row.get('action')))):
-        label = entry_action_label(item)
-        times = shift_times_label(item)
-        actions.append('%s %s' % (label, times) if times else label)
-    return ', '.join(actions)
-
-
-def _ways_label(ways, esc):
-    """«вручную (18 заходов)» — способ и сколько раз к нему прибегали.
-
-    Число заходов отделяет одну загрузку файла от полутора сотен ручных правок:
-    без него и то и другое выглядит как «369 правок», и человек, правивший
-    смены весь день, теряется за тем, кто один раз нажал «Импорт».
-    """
-    parts = []
-    for way in ways[:2]:
-        label = SOURCE_LABELS.get(way['source'], way['source'])
-        operations = way['operations']
-        parts.append('%s (%d %s)' % (esc(label), operations,
-                                     plural_ru(operations, 'заход', 'захода', 'заходов')))
-    if len(ways) > 2:
-        rest = len(ways) - 2
-        parts.append('и ещё %d %s' % (rest, plural_ru(rest, 'способ', 'способа', 'способов')))
-    return ', '.join(parts)
-
-
-def _actors_block(stats, esc):
-    rows = stats['actors']
-    if not rows:
-        return []
-    block = ['<b>Кто менял</b>']
-    for row in rows[:ACTORS_LIMIT]:
-        line = '👤 %s — <b>%d</b> %s' % (
-            esc(actor_label(row['name'], row['role'])), row['changes'],
-            changes_word(row['changes']),
-        )
-        if row['operators'] > 1:
-            line += ' у %d %s' % (row['operators'], people_word(row['operators']))
-        ways = _ways_label(row['ways'], esc)
-        if ways:
-            line += '\n   %s' % ways
-        block.append(line)
-    tail = rows[ACTORS_LIMIT:]
-    if tail:
-        block.append('… и ещё %d — %d %s' % (
-            len(tail), sum(item['changes'] for item in tail),
-            changes_word(sum(item['changes'] for item in tail)),
-        ))
-    return block
-
-
-def _operators_block(stats, esc):
-    rows = stats['operators']
-    if not rows:
-        return []
-    block = ['<b>Кому меняли</b>']
-    for row in rows[:OPERATORS_LIMIT]:
-        block.append('• %s — %d' % (esc(row['name'] or 'Без имени'), row['changes']))
-    tail = rows[OPERATORS_LIMIT:]
-    if tail:
-        block.append('… и ещё %d %s — %d %s' % (
-            len(tail), people_counted(len(tail)),
-            sum(item['changes'] for item in tail),
-            changes_word(sum(item['changes'] for item in tail)),
-        ))
-    return block
-
-
-def _days_block(stats, esc):
-    """Дни ГРАФИКА, которых коснулись правки, — не день, за который сводка.
-
-    Показываем по дню, а не диапазоном: диапазон «4–20 сентября — 573» короче,
-    но прячет ровно то, ради чего блок и нужен — в какой день графика пришлась
-    основная перетряска. За сутки разных дней бывает до 63 (боевой максимум),
-    поэтому берём самые нагруженные, а печатаем их по порядку дат.
-    """
-    if not stats['days']:
-        return []
-
-    shown, tail_days, tail_changes = _days_shown(stats)
-    line = ' · '.join('%s — %d' % (esc(format_day_short(day)), count)
-                      for day, count in shown)
-    if tail_days:
-        line += ' · … и ещё %d %s — %d %s' % (
-            tail_days, plural_ru(tail_days, 'день', 'дня', 'дней'),
-            tail_changes, changes_word(tail_changes),
-        )
-    return ['<b>Дни графика, которых коснулись правки</b>', line]
-
-
-def _days_shown(stats):
-    """(показанные дни по порядку дат, сколько дней в хвосте, сколько в нём правок)."""
-    days = stats['days']
-    ordered = sorted(days.items())
-    if len(ordered) <= DAY_GROUPS_LIMIT:
-        return ordered, 0, 0
-    keep = set(sorted(days, key=lambda day: -days[day])[:DAY_GROUPS_LIMIT])
-    shown = [(day, count) for day, count in ordered if day in keep]
-    tail_changes = sum(count for day, count in ordered if day not in keep)
-    return shown, len(ordered) - len(shown), tail_changes
-
-
-def _self_service_block(stats, esc):
-    rows = stats['self_service']
-    if not rows:
-        return []
-    # Одной строкой и без имён: см. докстроку модуля.
-    parts = []
+    header = '<tr>%s</tr>' % ''.join('<th>%s</th>' % esc(title) for title in RICH_COLUMNS)
+    parts.extend(['<table>', header])
+    used = sum(len(part) for part in parts) + len('</table>')
+    shown = 0
+    tail_reserve = 120
     for row in rows:
-        parts.append('%s — %d (%d %s)' % (
-            esc(SOURCE_LABELS.get(row['source'], row['source'])),
-            row['changes'], row['people'], people_counted(row['people']),
-        ))
-    return ['<b>Операторы сами</b>', '🔄 ' + ' · '.join(parts)]
-
-
-# ── Rich-сообщение: таблицы ─────────────────────────────────────────────────
-
-# Потолки sendRichMessage: 32 768 символов и 500 блоков, где блок — в том числе
-# каждая строка таблицы. Пределы ACTORS/OPERATORS/DAY_GROUPS держат сводку
-# далеко под ними даже на именах предельной длины (VARCHAR 255), это сторожит
-# тест — отдельный бюджет, как у текста, здесь не нужен.
-RICH_TEXT_LIMIT = 32768
-RICH_BLOCK_LIMIT = 500
-
-# Рамки нужны, чтобы столбцы читались на телефоне. Полос нет: чередующаяся
-# заливка на таблице в десяток строк — цвет без смысла.
-RICH_TABLE_OPEN = '<table bordered compact>'
-
-
-def _rich_cell(value, header=False, numeric=False, colspan=None):
-    tag = 'th' if header else 'td'
-    attrs = ''
-    if colspan:
-        attrs += ' colspan="%d"' % colspan
-    if numeric:
-        attrs += ' align="right"'
-    return '<%s%s>%s</%s>' % (tag, attrs, value, tag)
-
-
-def _rich_table(columns, rows, tail=None):
-    """columns — [(заголовок, числовой ли столбец)], rows — уже экранированные
-    ячейки. tail — строка «… и ещё N» во всю ширину таблицы."""
-    numeric = [flag for _, flag in columns]
-    parts = [RICH_TABLE_OPEN, '<tr>']
-    parts.extend(_rich_cell(title, header=True, numeric=flag) for title, flag in columns)
-    parts.append('</tr>')
-    for row in rows:
-        parts.append('<tr>')
-        parts.extend(_rich_cell(value, numeric=flag) for value, flag in zip(row, numeric))
-        parts.append('</tr>')
-    if tail:
-        parts.append('<tr>%s</tr>' % _rich_cell('<i>%s</i>' % tail, colspan=len(columns)))
+        cells = (row['operator_name'], row['group_name'] or '—', row['before'], row['after'],
+                 row['actors'])
+        markup = '<tr>%s</tr>' % ''.join('<td>%s</td>' % esc(value) for value in cells)
+        if shown >= RICH_ROWS_LIMIT or used + len(markup) + tail_reserve > RICH_TEXT_BUDGET:
+            break
+        parts.append(markup)
+        used += len(markup)
+        shown += 1
+    rest = len(rows) - shown
+    if rest:
+        parts.append('<tr><td colspan="%d"><i>… и ещё %d %s — полностью они в «Истории» '
+                     'раздела «Графики работы»</i></td></tr>'
+                     % (len(RICH_COLUMNS), rest, changes_word(rest)))
     parts.append('</table>')
     return ''.join(parts)
 
 
-def build_digest_rich(day, entries, scope_label, generated_label=None, escape=None,
-                      first_entries=None):
-    """Сводка за сутки rich-сообщением (поле `html` у sendRichMessage).
+# ── Запасной текст ──────────────────────────────────────────────────────────
 
-    Состав и пороги те же, что у build_digest, и числа считает тот же
-    summarize: таблицы и запасной текст не могут разойтись. Блоки идут
-    вплотную, без переводов строк между тегами: как rich-разметка обходится с
-    ними между блоками, документация не говорит, а пустой абзац между
-    таблицами был бы шумом.
+# Потолок обычного сообщения Telegram — 4096 символов, и сообщение сверх него
+# не обрезается, а не уходит совсем. Запас — на разметку и хвост «… и ещё N».
+TELEGRAM_TEXT_BUDGET = 3600
+
+
+def build_digest(day, rows, escape=None, first_entries=None):
+    """Та же сводка обычным сообщением (parse_mode=HTML) — если rich не примут.
+
+    escape — экранирование подставляемых значений; приходит аргументом, чтобы
+    модуль не тянул за собой bot_schedule2. Экранировать обязательно: один «<»
+    в фамилии роняет ВСЁ сообщение, а не одну строку.
     """
     esc = escape or _plain
-    stats = summarize(entries)
-
-    parts = ['<h3>🗓 Изменения в графике за %s</h3>' % esc(format_day_full(day))]
-    scope = 'Область: %s' % esc(scope_label or 'Все отделы')
-    if not stats['total']:
-        # Как и у текста: сюда доходит только разовая отправка по кнопке.
-        parts.append('<p>%s<br>%s</p>' % (scope, esc(empty_day_text(first_entries))))
-        return ''.join(parts)
-
-    parts.append('<p>%s<br>%s</p>' % (scope, _head_counts(stats)))
-    if stats['total'] <= DETAILED_MAX_CHANGES:
-        parts.append(_rich_detailed_table(entries, esc))
-    else:
-        for title, table in (
-            ('Кто менял', _rich_actors_table(stats, esc)),
-            ('Кому меняли', _rich_operators_table(stats, esc)),
-            ('Дни графика, которых коснулись правки', _rich_days_table(stats, esc)),
-            ('Операторы сами', _rich_self_service_table(stats, esc)),
-        ):
-            if table:
-                parts.append('<h4>%s</h4>%s' % (title, table))
-    if generated_label:
-        parts.append('<footer>Сформировано %s</footer>' % esc(generated_label))
-    return ''.join(parts)
-
-
-def _rich_detailed_table(entries, esc):
-    """Правок единицы — строка на правку, как в перечне у текста."""
-    rows = []
-    for group in _changes_in_order(entries):
-        first = group[0]
-        shift_date = first.get('shift_date')
-        # Обмены и доборы — без имени автора, как везде в сводке.
-        author = '—'
-        if str(first.get('source') or '') not in SELF_SERVICE_SOURCES:
-            author = esc(actor_label(first.get('actor_name'), first.get('actor_role')))
-        rows.append([
-            esc(first.get('operator_name') or 'Без имени'),
-            esc(format_day_weekday(shift_date)) if shift_date else '—',
-            esc(_change_actions_label(group)),
-            author,
-        ])
-    return _rich_table(
-        [('Сотрудник', False), ('День графика', False), ('Что сделано', False), ('Автор', False)],
-        rows,
-    )
-
-
-def _rich_actors_table(stats, esc):
-    rows = stats['actors']
+    lines = ['<b>%s</b>' % esc(_title(day)), '']
     if not rows:
-        return ''
-    body = [
-        [esc(actor_label(row['name'], row['role'])), str(row['changes']),
-         str(row['operators']), _ways_label(row['ways'], esc) or '—']
-        for row in rows[:ACTORS_LIMIT]
-    ]
-    tail = None
-    rest = rows[ACTORS_LIMIT:]
+        lines.append(esc(empty_day_text(first_entries)))
+        return '\n'.join(lines)
+
+    used = sum(len(line) + 1 for line in lines)
+    shown = 0
+    for row in rows:
+        head = '• <b>%s</b>' % esc(row['operator_name'])
+        if row['group_name']:
+            head += ' · %s' % esc(row['group_name'])
+        block = '%s\n   %s → %s\n   %s' % (head, esc(row['before']), esc(row['after']),
+                                          esc(row['actors']))
+        if used + len(block) + 1 + 80 > TELEGRAM_TEXT_BUDGET:
+            break
+        lines.append(block)
+        used += len(block) + 1
+        shown += 1
+    rest = len(rows) - shown
     if rest:
-        changes = sum(item['changes'] for item in rest)
-        tail = '… и ещё %d — %d %s' % (len(rest), changes, changes_word(changes))
-    return _rich_table(
-        [('Автор', False), ('Правок', True), ('Сотрудников', True), ('Способ', False)],
-        body, tail,
-    )
-
-
-def _rich_operators_table(stats, esc):
-    rows = stats['operators']
-    if not rows:
-        return ''
-    body = [[esc(row['name'] or 'Без имени'), str(row['changes'])]
-            for row in rows[:OPERATORS_LIMIT]]
-    tail = None
-    rest = rows[OPERATORS_LIMIT:]
-    if rest:
-        changes = sum(item['changes'] for item in rest)
-        tail = '… и ещё %d %s — %d %s' % (len(rest), people_counted(len(rest)),
-                                           changes, changes_word(changes))
-    return _rich_table([('Сотрудник', False), ('Правок', True)], body, tail)
-
-
-def _rich_days_table(stats, esc):
-    if not stats['days']:
-        return ''
-    shown, tail_days, tail_changes = _days_shown(stats)
-    body = [[esc(format_day_weekday(day)), str(count)] for day, count in shown]
-    tail = None
-    if tail_days:
-        tail = '… и ещё %d %s — %d %s' % (
-            tail_days, plural_ru(tail_days, 'день', 'дня', 'дней'),
-            tail_changes, changes_word(tail_changes),
-        )
-    return _rich_table([('День графика', False), ('Правок', True)], body, tail)
-
-
-def _rich_self_service_table(stats, esc):
-    rows = stats['self_service']
-    if not rows:
-        return ''
-    # Без имён: см. докстроку модуля.
-    body = [[esc(SOURCE_LABELS.get(row['source'], row['source'])),
-             str(row['changes']), str(row['people'])]
-            for row in rows]
-    return _rich_table([('Способ', False), ('Правок', True), ('Сотрудников', True)], body)
+        lines.append('… и ещё %d %s — полностью они в «Истории» раздела «Графики работы»'
+                     % (rest, changes_word(rest)))
+    return '\n'.join(lines)

@@ -48691,42 +48691,141 @@ class Database:
                 return []
 
         with self._get_cursor() as cursor:
+            # Группа — на день графика: оператора переводят между группами, и
+            # правка на прошлую неделю относится к той группе, где он тогда был.
+            # Если на тот день членства нет (день до зачисления), берётся
+            # ближайшее — пустая ячейка сказала бы меньше, чем прежняя группа.
             cursor.execute("""
-                SELECT c.operator_id, op.name, c.shift_date, c.action, c.source,
-                       c.start_time, c.end_time, c.prev_start_time, c.prev_end_time,
-                       c.actor_id,
-                       COALESCE(NULLIF(c.actor_name, ''), actor.name, ''),
-                       COALESCE(c.actor_role, ''),
-                       c.changed_at,
-                       c.day_was_empty
+                SELECT """ + self.SCHEDULE_CHANGE_REPORT_COLUMNS + """,
+                       COALESCE(grp.name, '')
                   FROM work_shift_changes c
                   JOIN users op ON op.id = c.operator_id
                   LEFT JOIN users actor ON actor.id = c.actor_id
+                  LEFT JOIN LATERAL (
+                        SELECT g.name
+                          FROM group_operator_memberships m
+                          JOIN groups g ON g.id = m.group_id
+                         WHERE m.operator_id = c.operator_id
+                         ORDER BY (m.start_date <= c.shift_date
+                                   AND (m.end_date IS NULL OR m.end_date >= c.shift_date)) DESC,
+                                  (m.end_date IS NULL) DESC,
+                                  m.start_date DESC
+                         LIMIT 1
+                  ) grp ON TRUE
                  WHERE c.changed_at >= %s AND c.changed_at < %s
                    AND (%s::INTEGER[] IS NULL OR op.department_id = ANY(%s::INTEGER[]))
                  ORDER BY c.changed_at, c.id
             """, (window_start, window_end, department_ids, department_ids))
             rows = cursor.fetchall() or []
 
-        return [
-            {
-                'operator_id': int(row[0]),
-                'operator_name': row[1] or '',
-                'shift_date': row[2],
-                'action': row[3],
-                'source': row[4],
-                'start': row[5],
-                'end': row[6],
-                'prev_start': row[7],
-                'prev_end': row[8],
-                'actor_id': int(row[9]) if row[9] is not None else None,
-                'actor_name': row[10] or '',
-                'actor_role': row[11] or '',
-                'changed_at': row[12],
-                'day_was_empty': row[13],
-            }
-            for row in rows
-        ]
+        entries = []
+        for row in rows:
+            entry = self._schedule_change_report_entry(row)
+            entry['group_name'] = row[-1] or ''
+            entries.append(entry)
+        return entries
+
+    # Колонки журнала для сводки — одним списком на оба запроса: окно сводки и
+    # правки, внесённые после окна. Откат складывает их строки в одну цепочку,
+    # и разойтись по составу полей им нельзя.
+    SCHEDULE_CHANGE_REPORT_COLUMNS = """
+                       c.id, c.operator_id, op.name, c.shift_date, c.action, c.source,
+                       c.start_time, c.end_time, c.prev_start_time, c.prev_end_time,
+                       c.shift_type, c.prev_shift_type,
+                       c.actor_id,
+                       COALESCE(NULLIF(c.actor_name, ''), actor.name, ''),
+                       COALESCE(c.actor_role, ''),
+                       c.changed_at,
+                       c.day_was_empty"""
+
+    @staticmethod
+    def _schedule_change_report_entry(row):
+        return {
+            'id': int(row[0]),
+            'operator_id': int(row[1]),
+            'operator_name': row[2] or '',
+            'shift_date': row[3],
+            'action': row[4],
+            'source': row[5],
+            'start': row[6],
+            'end': row[7],
+            'prev_start': row[8],
+            'prev_end': row[9],
+            'shift_type': row[10],
+            'prev_shift_type': row[11],
+            'actor_id': int(row[12]) if row[12] is not None else None,
+            'actor_name': row[13] or '',
+            'actor_role': row[14] or '',
+            'changed_at': row[15],
+            'day_was_empty': row[16],
+        }
+
+    def get_schedule_change_report_day_states(self, keys, since):
+        """Для отката «было / стало»: (текущее состояние дней, правки после since).
+
+        keys — пары (operator_id, shift_date) из окна сводки. Возвращает
+        ({(operator_id, shift_date): {'shifts': [(start, end, shift_type)],
+        'day_off': bool}}, [строки журнала тех дней с changed_at >= since]).
+
+        График и журнал читаются одним снимком базы (REPEATABLE READ): в READ
+        COMMITTED у каждого запроса свой снимок, и правка, внесённая между ними,
+        попала бы в журнал без графика или в график без журнала — «Стало» тихо
+        показало бы чужое изменение или задвоенную смену.
+        """
+        pairs = set()
+        for operator_id, shift_date in keys or []:
+            try:
+                pairs.add((int(operator_id), shift_date))
+            except (TypeError, ValueError):
+                continue
+        if not pairs:
+            return {}, []
+        operator_ids = sorted({operator_id for operator_id, _ in pairs})
+        dates = sorted({shift_date for _, shift_date in pairs})
+
+        states = {pair: {'shifts': [], 'day_off': False} for pair in pairs}
+        with self._get_cursor() as cursor:
+            # Первой командой транзакции — иначе Postgres уровень не сменит.
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            # Запросы по всей паре списков, а не по каждому дню: пар за сутки
+            # сотни. Лишние пересечения отсекаются здесь же.
+            cursor.execute("""
+                SELECT operator_id, shift_date, start_time, end_time, shift_type
+                  FROM work_shifts
+                 WHERE operator_id = ANY(%s) AND shift_date = ANY(%s)
+            """, (operator_ids, dates))
+            for operator_id, shift_date, start_time, end_time, shift_type in (cursor.fetchall() or []):
+                state = states.get((int(operator_id), shift_date))
+                if state is not None:
+                    # Вид — как лежит: нормализация с исключением уронила бы
+                    # сводку на одной испорченной строке графика.
+                    state['shifts'].append((start_time, end_time, shift_type))
+
+            cursor.execute("""
+                SELECT operator_id, day_off_date
+                  FROM days_off
+                 WHERE operator_id = ANY(%s) AND day_off_date = ANY(%s)
+            """, (operator_ids, dates))
+            for operator_id, day_off_date in (cursor.fetchall() or []):
+                state = states.get((int(operator_id), day_off_date))
+                if state is not None:
+                    state['day_off'] = True
+
+            cursor.execute("""
+                SELECT """ + self.SCHEDULE_CHANGE_REPORT_COLUMNS + """
+                  FROM work_shift_changes c
+                  JOIN users op ON op.id = c.operator_id
+                  LEFT JOIN users actor ON actor.id = c.actor_id
+                 WHERE c.changed_at >= %s
+                   AND c.operator_id = ANY(%s) AND c.shift_date = ANY(%s)
+                 ORDER BY c.changed_at, c.id
+            """, (since, operator_ids, dates))
+            later = [
+                self._schedule_change_report_entry(row)
+                for row in (cursor.fetchall() or [])
+                if (int(row[1]), row[3]) in pairs
+            ]
+        return states, later
 
     def claim_schedule_change_report_send(self, period_start, user_id) -> bool:
         """Занять отправку сводки за сутки: True — отправляем, False — уже ушла.

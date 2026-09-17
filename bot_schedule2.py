@@ -61892,22 +61892,21 @@ def training_report_preview():
 # ── «Уведомления об изменениях» графика работы ──────────────────────────────
 #
 # Постановка (владелец): в разделе «Графики работы», в меню «3 точки», —
-# переключатель, по которому в Telegram приходит сводка за день: кто сколько
-# раз менял график, кому сколько раз меняли и по каким дням были изменения.
-# Главам отделов — только по своему отделу. И отдельным требованием: «нельзя,
-# чтобы это выглядело как спам».
+# переключатель, по которому в Telegram приходит сводка изменений графика за
+# день. Главам отделов — только по своему отделу. И отдельным требованием:
+# «нельзя, чтобы это выглядело как спам».
 #
-# Против спама здесь работают четыре вещи, и убирать их поодиночке нельзя:
+# С 17.09.2026 сводка — одна таблица «Сотрудник · Группа · Было · Стало · Кто
+# изменил» по макету владельца. Против спама здесь работают четыре вещи, и
+# убирать их поодиночке нельзя:
 #   одно письмо в сутки вместо уведомления на каждую правку;
 #   сутки без изменений молчат совсем;
-#   массовые операции (загрузка файла, публикация аукциона) свёрнуты в строку
-#     со способом и числом заходов, иначе одна загрузка даёт «369 изменений»;
-#   обмены и доборы, которые операторы делают сами, идут счётчиком без имён.
-# Первичное внесение графика (заполнение пустого дня) изменением не считается
-# и отсекается до проверки на пустые сутки: день, когда график только внесли,
-# молчит. Сводка уходит rich-сообщением с таблицами, прежний текст — запасной.
-# Сама вёрстка и все пороги — в work_schedules/change_digest.py, тесты
-# на них не требуют ни базы, ни сети. Здесь только доставка и расписание.
+#   строка — сотрудник и день, итог за сутки, а не каждая правка подряд;
+#   первичное внесение графика (заполнение пустого дня) изменением не считается,
+#     иначе одна загрузка файла на месяц даёт таблицу на сотни строк.
+# Таблица уходит rich-сообщением, обычный текст — запасной. Сама вёрстка и
+# правила — в work_schedules/change_digest.py, тесты на них не требуют ни базы,
+# ни сети. Здесь только сбор данных, доставка и расписание.
 
 def _schedule_change_report_scope(requester_id, requester):
     """Область сводки для одного человека: (можно ли подписаться, id отделов,
@@ -61940,28 +61939,26 @@ def _schedule_change_report_scope(requester_id, requester):
     return False, None, None
 
 
-def _build_schedule_change_report_payload(day, department_ids, scope_label, generated_label):
-    """(правки без первичного внесения, rich-HTML, запасной текст) для одной области."""
+def _build_schedule_change_report_payload(day, department_ids):
+    """(строки таблицы, rich-HTML, запасной текст) для одной области видимости."""
     window_start, window_end = schedule_change_digest.day_window(day)
     entries = db.get_schedule_change_report_entries(
         window_start, window_end, department_ids=department_ids)
-    changes, first_entries = schedule_change_digest.split_first_entries(entries)
+    states, later = {}, []
+    if entries:
+        # «Было / стало» — откатом от текущего графика: всё, что правили в
+        # эти дни после окна, откатывается тоже.
+        keys = {(entry['operator_id'], entry['shift_date']) for entry in entries}
+        states, later = db.get_schedule_change_report_day_states(keys, window_end)
+    rows, first_entries = schedule_change_digest.build_rows(entries, states, later)
     rich_html = schedule_change_digest.build_digest_rich(
-        day, changes, scope_label,
-        generated_label=generated_label,
-        escape=_escape_telegram_html,
-        first_entries=first_entries,
-    )
+        day, rows, escape=_escape_telegram_html, first_entries=first_entries)
     text = schedule_change_digest.build_digest(
-        day, changes, scope_label,
-        generated_label=generated_label,
-        escape=_escape_telegram_html,
-        first_entries=first_entries,
-    )
-    return changes, rich_html, text
+        day, rows, escape=_escape_telegram_html, first_entries=first_entries)
+    return rows, rich_html, text
 
 
-def _send_schedule_change_report_to(recipient, day, now_dt, force=False, cache=None):
+def _send_schedule_change_report_to(recipient, day, force=False, cache=None):
     """Отправить сводку одному получателю.
 
     force=True — разовая отправка по кнопке «Отправить сейчас»: тогда сводка
@@ -61976,25 +61973,21 @@ def _send_schedule_change_report_to(recipient, day, now_dt, force=False, cache=N
         return False, 'no_telegram'
 
     department_ids = recipient.get('department_ids')
-    scope_label = recipient.get('scope_label') or 'Все отделы'
-    generated_label = now_dt.strftime('%d.%m.%Y %H:%M')
-
     key = None if department_ids is None else tuple(sorted(int(v) for v in department_ids))
     if cache is not None and key in cache:
-        entries, rich_html, text = cache[key]
+        rows, rich_html, text = cache[key]
     else:
-        entries, rich_html, text = _build_schedule_change_report_payload(
-            day, department_ids, scope_label, generated_label)
+        rows, rich_html, text = _build_schedule_change_report_payload(day, department_ids)
         if cache is not None:
-            cache[key] = (entries, rich_html, text)
+            cache[key] = (rows, rich_html, text)
 
     # Пустые сутки молчат. Проверка стоит ПОСЛЕ сборки, чтобы кеш области
     # использовался и для получателей, у которых пусто. По области это не
     # редкость: на бою в любой день изменения есть у одного-двух отделов из
     # четырёх, а у глав Маркетинга и HR операторов с графиками нет вовсе.
-    # entries здесь — уже без первичного внесения: сутки, когда график
-    # только вносили, тоже пустые.
-    if not entries and not force:
+    # Пусто — это нет строк таблицы: сутки, когда график только вносили или
+    # к вечеру вернули как было, тоже молчат.
+    if not rows and not force:
         return False, 'empty'
 
     _, error, refused = _tg_send_rich_message(chat_id, rich_html)
@@ -62048,7 +62041,7 @@ def sync_send_schedule_change_report():
                 continue
             try:
                 ok, reason = _send_schedule_change_report_to(
-                    recipient, day, now_dt, cache=cache)
+                    recipient, day, cache=cache)
                 if ok:
                     sent += 1
                 elif reason == 'empty':
@@ -62180,7 +62173,7 @@ def work_schedule_change_report_preview():
             'department_ids': department_ids,
             'scope_label': scope_label,
         }
-        ok, reason = _send_schedule_change_report_to(recipient, day, now_dt, force=True)
+        ok, reason = _send_schedule_change_report_to(recipient, day, force=True)
         if not ok:
             return jsonify({
                 "error": "Не удалось отправить сводку в Telegram",
