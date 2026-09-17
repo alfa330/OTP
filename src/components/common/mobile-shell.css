@@ -277,8 +277,13 @@ body.mobile-shell {
    фоном, и WebKit, найдя его у верхней грани, заливал полосу с часами цветом
    листа (правило — «Верх экрана отдан стеклу iOS 26»). Слой выше окна больше
    чем на 5% WebKit панелью не считает и пропускает. Лишнее уходит за нижнюю
-   грань под бар разделов, нижнее поле списка растёт на столько же, а
-   приближение при появлении считается от середины ЭКРАНА, не листа. */
+   грань под бар разделов, нижнее поле списка растёт на столько же.
+
+   ПРИБЛИЖЕНИЕ — ОТ ВЕРХНЕЙ КРОМКИ. От середины лист на 97% отходил от верхней
+   грани на 13 px и открывал там затемнение (.sidebar-overlay); WebKit находил
+   его у края, заливал полосу с часами серым (#808080 — снимок владельца
+   17.09.2026) и держал заливку, пока затемнение живо. Покадровый замер: так на
+   каждом открытии. */
 body.mobile-shell .sidebar {
     --sheet-overhang: 20vh;
     top: 0;
@@ -287,7 +292,7 @@ body.mobile-shell .sidebar {
     bottom: auto;
     width: 100% !important;
     height: calc(100% + var(--sheet-overhang));
-    transform-origin: 50% calc(50% - var(--sheet-overhang) / 2);
+    transform-origin: 50% 0;
     max-height: none;
     z-index: 65;
     /* ПОЯВЛЕНИЕ, А НЕ ВЫЕЗД СНИЗУ. Лист занимает весь экран, и поездка от
@@ -798,18 +803,25 @@ body[data-tabbar-side="left"].mobile-shell .mobile-sheet-hero__login {
 }
 
 /* Затемнение под шторкой. Появляется вместе с ней, а не мгновенно: резкая
-   заливка на телефоне читается как перезагрузка страницы. */
+   заливка на телефоне читается как перезагрузка страницы.
+
+   Погасшее — ещё и visibility: hidden. Найдя затемнение у верхней грани, WebKit
+   заливает полосу с часами серым и держит заливку, пока элемент в дереве и
+   видим; opacity: 0 для этого «видим» (см. «Верх экрана отдан стеклу iOS 26»). */
 body.mobile-shell .sidebar-overlay {
     display: block;
     z-index: 64;
     opacity: 0;
+    visibility: hidden;
     pointer-events: none;
-    transition: opacity 0.28s ease;
+    transition: opacity 0.28s ease, visibility 0s linear 0.28s;
 }
 
 body.mobile-shell .sidebar-overlay.active {
     opacity: 1;
+    visibility: visible;
     pointer-events: auto;
+    transition: opacity 0.28s ease, visibility 0s;
 }
 
 /* Выпадающие подменю («Учет сотрудников», «Расчет ресурсов») в шторке. Их
@@ -2744,42 +2756,51 @@ body.mobile-shell .mobile-crop__card[data-busy] .mobile-crop__stage {
 
 /* ── Имя в шапке профиля при прокрутке ──────────────────────────────────── */
 
-/* Образец тот же: пока крупное имя видно — шапки нет вовсе, а как только оно
-   уходит вверх, над списком проявляется стеклянная полоса с именем. Полоса
-   ЛИПКАЯ и лежит прямо в прокручиваемом листе, поэтому держится сама, без
-   единого обработчика прокрутки. */
-/* Полоса прилипает ПОД ВЫРЕЗОМ, а не к самому верху листа: полоса с часами
-   над ней — место стекла iOS 26, а прибитая к нулю липкая полоса во всю ширину
-   заменяла это стекло сплошной заливкой (17.09.2026, см. «Верх экрана отдан
-   стеклу iOS 26»). У прокручиваемого блока сверху поле под колокол —
-   отрицательный top снимает его ровно до выреза. flex-shrink: 0 — лист
-   flex-колонка, и без запрета полоса сжималась (замер: 34 px вместо 44). */
+/* Образец — настройки Telegram на iOS 26 (снимки владельца 17.09.2026: «сделай
+   все как в телеграмме, чтобы было ликвид гласс, и имя переливалось в бокс
+   плавно»). Шапка — это строка имени под вырезом и стекло над ней и под ней;
+   пока список в начале, её не видно вовсе, а по мере прокрутки крупное имя
+   ПЕРЕТЕКАЕТ в строку: одним движением, привязанным к пальцу. Долю пути
+   (--sheet-title, --sheet-glass, --sheet-avatar, от 0 до 1) пишет
+   MobileSheetTitle на прокручиваемый блок, здесь по ней только рисуем.
+
+   Шапка прибита к ЛИСТУ (position: absolute, отсчёт от .sidebar), а не липкая:
+   липкая во всю ширину у верхней грани гасила стекло iOS 26 над часами
+   (см. «Верх экрана отдан стеклу iOS 26»), а абсолютную правило WebKit не
+   видит. Из потока она ушла — место под неё держит отступ шапки аккаунта. */
 body.mobile-shell .mobile-sheet-topbar {
-    position: sticky;
-    top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)) - 8px);
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
     z-index: 4;
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: center;
-    flex-shrink: 0;
-    height: 44px;
-    /* Поля по бокам — ВНУТРЕННИЕ. Отрицательные внешние выносили полосу за края
-       листа, и лист начинал ездить вбок: владелец 11.09.2026 — «имеется боковой
-       скролл в профиле, он не нужен». */
-    padding: 0 56px 8px;
-    margin: 0 0 2px;
-    /* Полоса не должна перехватывать нажатия по тому, что под ней. */
+    /* Строка — в рост колокола и на его уровне: вырез, затем 44 px. */
+    height: calc(max(10px, env(safe-area-inset-top)) + 44px);
+    /* Поля по бокам — ВНУТРЕННИЕ (владелец 11.09.2026: «имеется боковой скролл
+       в профиле»); справа место под колокол. */
+    padding: max(10px, env(safe-area-inset-top)) 56px 0;
+    /* Шапка не должна перехватывать нажатия по тому, что под ней. */
     pointer-events: none;
-    background: transparent;
-    transition: background 0.22s ease;
 }
 
-body.mobile-shell .mobile-sheet-topbar[data-shown] {
-    /* Ни линии снизу, ни белой подложки: в образце полоса — это размытая
-       страница, и строки под ней видно насквозь. */
+/* СТЕКЛО — ОТДЕЛЬНЫМ СЛОЕМ, как у полосы дней аукциона: у самой шапки фильтра
+   нет, иначе она стала бы корнем подложки и имя размывало бы пустоту. Книзу
+   стекло растворяется, а не обрывается линией — так выглядит край прокрутки
+   в iOS 26. Непрозрачность — доля пути: пока под шапкой ровный лист, мутить
+   нечего. */
+body.mobile-shell .mobile-sheet-topbar__glass {
+    position: absolute;
+    inset: 0 0 -24px;
+    z-index: -1;
     background: var(--sheet-bar);
     backdrop-filter: saturate(180%) blur(22px);
     -webkit-backdrop-filter: saturate(180%) blur(22px);
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+    opacity: var(--sheet-glass, 0);
 }
 
 body.mobile-shell .mobile-sheet-topbar__name {
@@ -2787,18 +2808,33 @@ body.mobile-shell .mobile-sheet-topbar__name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 17px;
+    /* Набор — как у крупного имени (кегль, интервал, высота строки), а до 17 px
+       строку доводит масштаб из MobileSheetTitle: набранные разными кеглями,
+       в момент смены слова расходились по ширине — двоение на кадре. */
+    font-size: 21px;
+    line-height: 1.2;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.02em;
     color: var(--sheet-text);
-    opacity: 0;
-    transform: translateY(7px);
-    transition: opacity 0.22s ease, transform 0.22s ease;
+    /* Стоит на месте крупного имени и в его размере, пока то едет к строке, и
+       проступает, когда они совпали: одно имя въезжает в строку, двоения нет. */
+    opacity: var(--sheet-title, 0);
+    transform: translateY(calc(var(--sheet-title-y, 0) * 1px)) scale(var(--sheet-title-scale, 0.81));
 }
 
-body.mobile-shell .mobile-sheet-topbar[data-shown] .mobile-sheet-topbar__name {
-    opacity: 1;
-    transform: none;
+body.mobile-shell .mobile-sheet-topbar + .mobile-sheet-account {
+    margin-top: 46px;
+}
+
+body.mobile-shell .mobile-sheet-hero__name {
+    opacity: calc(1 - var(--sheet-title, 0));
+    transform: scale(var(--sheet-name-scale, 1));
+}
+
+body.mobile-shell .mobile-sheet-hero__avatar {
+    transform-origin: 50% 100%;
+    opacity: calc(1 - 0.9 * var(--sheet-avatar, 0));
+    transform: scale(calc(1 - 0.45 * var(--sheet-avatar, 0)));
 }
 
 /* Красная строка в профиле — «Удалить фотографию». */

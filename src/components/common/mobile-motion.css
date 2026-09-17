@@ -279,11 +279,13 @@ body.mobile-shell .sidebar.mobile-open {
 
 /* Подложка шторки гаснет ровно столько же, сколько сама шторка. */
 body.mobile-shell .sidebar-overlay {
-    transition: opacity var(--ios-sheet-out) var(--ios-exit);
+    transition: opacity var(--ios-sheet-out) var(--ios-exit),
+                visibility 0s linear var(--ios-sheet-out);
 }
 
 body.mobile-shell .sidebar-overlay.active {
-    transition: opacity var(--ios-sheet-in) var(--ios-move);
+    transition: opacity var(--ios-sheet-in) var(--ios-move),
+                visibility 0s;
 }
 
 body.mobile-shell .notifications-backdrop {

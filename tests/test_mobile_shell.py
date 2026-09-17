@@ -1557,21 +1557,39 @@ class AccountScreenTests(unittest.TestCase):
 
     def test_name_stays_in_the_sheet_header_on_scroll(self):
         """Образец — настройки Telegram (видео владельца 11.09.2026): прокрутив
-        список, человек теряет всякий признак того, чей это профиль. Полоса
-        ЛИПКАЯ и лежит в самом листе, а показывается, когда крупное имя ушло под
-        неё; наблюдатель за пересечением, а не обработчик прокрутки — он
-        срабатывает на событии, а не на каждом кадре движения пальца."""
+        список, человек теряет всякий признак того, чей это профиль.
+
+        ПЕРЕДЕЛАНО 17.09.2026 (снимки Telegram на iOS 26: «имя переливалось в
+        бокс плавно»). Раньше полоса проявлялась разом по наблюдателю за
+        пересечением; теперь крупное имя ПЕРЕТЕКАЕТ в строку одним движением,
+        привязанным к пальцу. Доля пути нужна на каждом кадре — поэтому
+        пассивный слушатель прокрутки, не чаще кадра и без React-состояния:
+        перерисовок нет."""
         title = (ROOT / 'src' / 'components' / 'common' / 'MobileSheetTitle.jsx').read_text(encoding='utf-8')
-        self.assertIn('new IntersectionObserver(', title)
         self.assertIn(".mobile-sheet-hero__name", title)
+        self.assertIn("scroller.addEventListener('scroll', schedule, { passive: true });", title)
+        self.assertIn('if (!frame) frame = requestAnimationFrame(paint);', title)
+        self.assertIn("style.setProperty('--sheet-title', title.toFixed(3));", title)
+        self.assertNotIn('useState', title)
         self.assertIn('<MobileSheetTitle name={user?.name', APP)
         self.assertIn('open={mobileMenuOpen} />', APP)
         bar = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar {', 1100)
-        self.assertIn('position: sticky;', bar)
-        # Прилипает под вырезом, а не к верхней грани листа: полоса с часами —
-        # место стекла iOS 26 (tests/test_mobile_status_bar_glass.py).
-        self.assertIn('top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)) - 8px);', bar)
+        # Прибита к листу, а не липкая: липкая во всю ширину у верхней грани
+        # гасит стекло iOS 26 (tests/test_mobile_status_bar_glass.py).
+        self.assertIn('position: absolute;', bar)
+        self.assertNotIn('sticky', bar)
         self.assertIn('pointer-events: none;', bar)
+        name = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar__name {', 900)
+        self.assertIn('opacity: var(--sheet-title, 0);', name)
+        self.assertIn('transform: translateY(calc(var(--sheet-title-y, 0) * 1px)) scale(var(--sheet-title-scale, 0.81));', name)
+        hero = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-hero__name {', 300)
+        self.assertIn('opacity: calc(1 - var(--sheet-title, 0));', hero)
+        # Одно имя, а не два: маленькое стоит на месте крупного и в его размере,
+        # сменяют друг друга, когда совпали (кадры 17.09.2026 — двоение).
+        self.assertIn("style.setProperty('--sheet-title-y', Math.max(0, below).toFixed(1));", title)
+        self.assertIn('const nameScale = 1 - (1 - endScale) * travel;', title)
+        # Одним кеглем: набранные разными, слова расходились по ширине.
+        self.assertIn('font-size: 21px;', name)
 
     def test_photo_lives_behind_one_row(self):
         """ПЕРЕДЕЛАНО 11.09.2026 по второму видео. Было две строки подряд —
@@ -1789,18 +1807,22 @@ class AccountScreenTests(unittest.TestCase):
         чужая плашка."""
         self.assertIn('--sheet-bar: rgba(242, 242, 247, 0.72);', SHELL_CSS)
         self.assertIn('--sheet-bar: rgba(0, 0, 0, 0.7);', SHELL_CSS)
-        shown = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar[data-shown] {', 400)
-        self.assertIn('background: var(--sheet-bar);', shown)
-        self.assertNotIn('border-bottom-color', shown)
+        glass = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar__glass {', 700)
+        self.assertIn('background: var(--sheet-bar);', glass)
+        self.assertNotIn('border-bottom-color', glass)
+        # Книзу стекло растворяется, а не обрывается линией (край прокрутки iOS 26).
+        self.assertIn('mask-image: linear-gradient(to bottom, #000', glass)
         self.assertIn('background: var(--sheet-bar);', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__head {', 700))
 
     def test_sheet_bar_does_not_widen_the_list(self):
         """«Имеется боковой скролл в профиле, он не нужен». Полоса выносилась за
         края листа отрицательными полями, и лист начинал ездить вбок; замер:
         scrollWidth 404 при ширине 390."""
-        bar = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar {', 900)
+        bar = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar {', 1100)
         self.assertNotIn('calc(var(--sheet-gutter) * -1)', bar)
-        self.assertIn('margin: 0 0 2px;', bar)
+        self.assertNotIn('margin', bar.split('}')[0])
+        self.assertIn('left: 0;', bar)
+        self.assertIn('right: 0;', bar)
 
     def test_account_layer_is_locked_to_the_shell(self):
         """Ни одно правило этих экранов не должно действовать на компьютере."""

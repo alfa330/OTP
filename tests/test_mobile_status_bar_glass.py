@@ -129,8 +129,18 @@ class SheetGlassTests(unittest.TestCase):
         self.assertIn('--sheet-overhang: 20vh;', body)
         self.assertIn('height: calc(100% + var(--sheet-overhang));', body)
         self.assertIn('bottom: auto;', body)
-        # Приближение при появлении — от середины экрана, а не вытянутого листа.
-        self.assertIn('transform-origin: 50% calc(50% - var(--sheet-overhang) / 2);', body)
+        # Приближение — от верхней кромки: от середины лист отходил от верхней
+        # грани и открывал там затемнение (серая полоса на снимке владельца).
+        self.assertIn('transform-origin: 50% 0;', body)
+
+    def test_hidden_dimmer_is_not_visible_to_webkit(self):
+        """Покадровый замер 17.09.2026: при каждом открытии WebKit находил
+        затемнение под шторкой у верхней грани и держал серую заливку, пока
+        элемент видим — а opacity: 0 для этого «видим»."""
+        self.assertIn('visibility: hidden;', rule_body(SHELL_CSS, 'body.mobile-shell .sidebar-overlay'))
+        self.assertIn('visibility: visible;', rule_body(SHELL_CSS, 'body.mobile-shell .sidebar-overlay.active'))
+        motion = (ROOT / 'src' / 'components' / 'common' / 'mobile-motion.css').read_text(encoding='utf-8')
+        self.assertIn('visibility 0s linear var(--ios-sheet-out);', rule_body(motion, 'body.mobile-shell .sidebar-overlay'))
 
     def test_last_row_stays_above_the_bar(self):
         """Лишнее уходит за нижнюю грань — нижнее поле списка растёт на столько
@@ -147,13 +157,22 @@ class SheetGlassTests(unittest.TestCase):
         self.assertIn('minHeight: style.minHeight,', self.LOCK)
         self.assertIn('style.minHeight = savedStyle.minHeight;', self.LOCK)
 
-    def test_name_bar_sticks_below_the_notch(self):
+    def test_name_bar_is_pinned_to_the_sheet_not_sticky(self):
+        """Липкая шапка во всю ширину у верхней грани — тот же fixed/sticky, что
+        гасит стекло. Абсолютную от листа правило WebKit не видит, а стоит она
+        так же неподвижно: отсчёт от .sidebar, не от прокручиваемого блока."""
         body = rule_body(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar')
-        self.assertIn('top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)) - 8px);', body)
-        self.assertIn('height: 44px;', body)
-        self.assertIn('flex-shrink: 0;', body)
-        # Имя показывается, когда крупное имя ушло под НИЗ прилипшей полосы.
-        self.assertIn('rootMargin: `-${Math.round(stuckBottom)}px 0px 0px 0px`', self.TITLE)
+        self.assertIn('position: absolute;', body)
+        self.assertIn('top: 0;', body)
+        self.assertIn('height: calc(max(10px, env(safe-area-inset-top)) + 44px);', body)
+        # Из потока шапка ушла — портрет стоит на прежнем месте.
+        self.assertIn('margin-top: 46px;', rule_body(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar + .mobile-sheet-account'))
+        # Стекло — отдельным слоем (как у полосы дней аукциона) и по доле пути.
+        glass = rule_body(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar__glass')
+        self.assertIn('opacity: var(--sheet-glass, 0);', glass)
+        self.assertIn('backdrop-filter: saturate(180%) blur(22px);', glass)
+        self.assertNotIn('backdrop-filter', body)
+        self.assertIn('<span className="mobile-sheet-topbar__glass" aria-hidden="true" />', self.TITLE)
 
 
 class AuctionStripGlassTests(unittest.TestCase):
