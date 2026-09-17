@@ -26,7 +26,7 @@ def strip_comments(source):
 def hours_view():
     """Тело HoursAccountingView — от объявления до настольного return."""
     start = APP.index('const HoursAccountingView = ({')
-    end = APP.index('<div className="bg-white p-5 rounded-xl shadow-md">', start)
+    end = APP.index('/* Раздел лежит прямо на полотне страницы', start)
     return APP[start:end]
 
 
@@ -105,9 +105,9 @@ class PhoneBranchTests(unittest.TestCase):
     def test_desktop_table_stays_as_it_was(self):
         """Настольный вид — та же таблица: широкая сетка, липкая первая колонка,
         подвал «Итого» и окно ячейки."""
-        self.assertIn('<div className="bg-white p-5 rounded-xl shadow-md">', APP)
+        self.assertIn('/* Раздел лежит прямо на полотне страницы', APP)
         self.assertIn('{/* Table */}', APP)
-        self.assertIn('<div className="overflow-auto border rounded-md">', APP)
+        self.assertIn('<div className="overflow-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70">', APP)
         self.assertIn('{/* FOOTER: итоговые строки */}', APP)
         self.assertIn('Мультивыбор ячеек:', APP)
         self.assertIn('{selectedCell && cellModel && (', APP)

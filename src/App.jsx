@@ -3900,6 +3900,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
         }, [openMenu, closeMenus]);
 
+        // Сторона раскрытия меню: панель шире своей шапки, и у шапки возле
+        // правого края раздела, прижатая влево, она уходила за окно. Меряем до
+        // отрисовки, поэтому меню сразу встаёт на нужную сторону без прыжка.
+        const [openMenuAlignEnd, setOpenMenuAlignEnd] = useState(false);
+        useLayoutEffect(() => {
+            if (!openMenu) return;
+            const host = Array.from(document.querySelectorAll('[data-hours-menu]'))
+                .find(element => element.getAttribute('data-hours-menu') === openMenu);
+            const panel = host ? host.querySelector(':scope > .tab-dropdown') : null;
+            if (!panel) return;
+            const hostRect = host.getBoundingClientRect();
+            const scroller = host.closest('.main-content');
+            const scrollerLeft = scroller ? scroller.getBoundingClientRect().left : 0;
+            const rightEdge = scroller ? scrollerLeft + scroller.clientWidth : document.documentElement.clientWidth;
+            const width = panel.offsetWidth;
+            const fitsToRight = hostRect.left + width <= rightEdge - 8;
+            const fitsToLeft = hostRect.right - width >= scrollerLeft + 8;
+            setOpenMenuAlignEnd(!fitsToRight && fitsToLeft);
+        }, [openMenu]);
+
         useEffect(() => () => clearMenuHoverTimeout(), [clearMenuHoverTimeout]);
 
         // Training modal component resolver: avoid direct identifier access to prevent TDZ in prod bundles
@@ -6517,6 +6537,131 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return `rgb(${r},${g},${b})`;
         }
 
+        // ====== ИТОГ ПО ДНЮ: клетки строки «Итого» под колонками дней (#344) ======
+        // Строки те же, что у итога месяца (filteredOperators), формула та же,
+        // что у клетки оператора на этой вкладке: часы, штуки и деньги
+        // складываются, а доля и средние считаются из сумм дня, а не средним по
+        // строкам — иначе оператор с одним чатом весил бы как оператор со ста.
+        // Чужие дни переведённого сотрудника (замок в клетке) в итог не входят.
+        // Считается только выбранная вкладка; пустой день — null, клетка пустая.
+        const hoursDayTotals = useMemo(() => {
+            const additiveDailyKeys = new Set(['break_time', 'calls', 'chats', 'dial_time', 'talk_time']);
+            const countKeys = new Set(['calls', 'chats', 'tez_successes']);
+            const moneyKeys = new Set(['bonuses', 'fines']);
+            const sumBy = (items, fn) => (Array.isArray(items) ? items : []).reduce((acc, item) => acc + (Number(fn(item)) || 0), 0);
+            const isForeignDay = (op, day) => {
+                if (!selectedGroupId) return false;
+                const segs = Array.isArray(op?.group_segments) ? op.group_segments : [];
+                const seg = segs.find(s => day >= s.start_day && day <= s.end_day);
+                return !!(seg && !seg.is_current);
+            };
+
+            const totals = {};
+            for (const day of daysArray) {
+                const dayKey = String(day);
+                let sum = 0;
+                let base = 0; // знаменатель доли эффективности и взвешенного времени ответа
+                let hasBase = false;
+                let responseSum = 0;
+                let responseWeighted = 0;
+                let responseChats = 0;
+                let responseCount = 0;
+                let responseAllWeighted = true;
+                const chatDays = [];
+
+                for (const op of filteredOperators) {
+                    if (isForeignDay(op, day)) continue;
+                    const d = op.daily?.[dayKey];
+                    const trainings = trainingsMap[op.operator_id]?.[day] || [];
+                    const technicalIssues = technicalIssuesMap[op.operator_id]?.[day] || [];
+                    const offlineActivities = offlineActivitiesMap[op.operator_id]?.[day] || [];
+
+                    if (selectedTab === 'work_time') {
+                        sum += Number(d?.work_time || 0)
+                            + computeUniqueTrainingDurationHours(trainings, t => t && t.count_in_hours !== false)
+                            + sumBy(technicalIssues, computeTechnicalIssueDurationHours)
+                            + sumBy(offlineActivities, computeOfflineActivityDurationHours);
+                    } else if (selectedTab === 'trainings') {
+                        sum += computeUniqueTrainingDurationHours(trainings);
+                    } else if (selectedTab === 'technical_issues') {
+                        sum += sumBy(technicalIssues, computeTechnicalIssueDurationHours);
+                    } else if (selectedTab === 'offline_activity') {
+                        sum += sumBy(offlineActivities, computeOfflineActivityDurationHours);
+                    } else if (selectedTab === 'no_phone') {
+                        sum += computeNoPhoneHoursFromDaily(d);
+                    } else if (selectedTab === 'tez_successes') {
+                        sum += Number(tezSuccessMap?.[String(op.operator_id)]?.[dayKey]) || 0;
+                    } else if (selectedTab === 'bonuses') {
+                        sum += sumBy(d?.bonuses, b => b?.amount);
+                    } else if (selectedTab === 'fines') {
+                        // Как в итоге месяца: список штрафов, у старых строк — одна сумма дня.
+                        sum += Array.isArray(d?.fines)
+                            ? sumBy(d.fines, f => f?.amount || f?.fine_amount)
+                            : (Number(d?.fine_amount) || 0);
+                    } else if (selectedTab === 'efficiency') {
+                        const work = Number(d?.work_time || 0);
+                        if (work > 0) {
+                            sum += Number(d?.efficiency || 0);
+                            base += work;
+                            hasBase = true;
+                        }
+                    } else if (selectedTab === 'avg_score') {
+                        if (d?.chat_metrics) chatDays.push(d.chat_metrics);
+                    } else if (selectedTab === 'response_time') {
+                        const seconds = Number(d?.chat_metrics?.avg_response_time_seconds);
+                        if (Number.isFinite(seconds) && seconds > 0) {
+                            const chats = Number(d.chat_metrics.chats_count);
+                            responseSum += seconds;
+                            responseCount += 1;
+                            if (Number.isFinite(chats) && chats > 0) {
+                                responseWeighted += seconds * chats;
+                                responseChats += chats;
+                            } else {
+                                responseAllWeighted = false;
+                            }
+                        }
+                    } else if (additiveDailyKeys.has(selectedTab)) {
+                        sum += Number(d?.[selectedTab]) || 0;
+                    }
+                }
+
+                let cell = null;
+                if (selectedTab === 'efficiency') {
+                    if (hasBase) {
+                        const pct = Math.max(0, Math.min(100, (sum / base) * 100));
+                        cell = {
+                            text: `${pct.toFixed(0)}%`,
+                            title: `Эффективность за день: ${sum.toFixed(2)} ч из ${base.toFixed(2)} ч работы`,
+                        };
+                    }
+                } else if (selectedTab === 'avg_score') {
+                    const avg = calculateWeightedChatAverage(chatDays);
+                    if (avg != null) cell = { text: avg.toFixed(2), title: 'Средняя оценка за день по всем оценкам' };
+                } else if (selectedTab === 'response_time') {
+                    if (responseCount > 0) {
+                        const weighted = responseAllWeighted && responseChats > 0;
+                        const avg = weighted ? responseWeighted / responseChats : responseSum / responseCount;
+                        cell = {
+                            text: String(Math.round(avg)),
+                            unit: ' с',
+                            title: weighted
+                                ? 'Среднее время ответа за день с учётом числа чатов'
+                                : 'Среднее время ответа за день по сотрудникам',
+                        };
+                    }
+                } else if (sum > 0) {
+                    const text = moneyKeys.has(selectedTab)
+                        ? formatMoney(sum)
+                        : countKeys.has(selectedTab)
+                            ? Math.round(sum).toLocaleString('ru-RU')
+                            : sum.toFixed(2);
+                    cell = { text, title: text };
+                }
+                totals[dayKey] = cell;
+            }
+            return totals;
+        }, [filteredOperators, daysArray, selectedTab, selectedGroupId, trainingsMap, technicalIssuesMap, offlineActivitiesMap, tezSuccessMap]);
+
         // render cell with trainings marker and trainings-tab rendering
         function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
             const dayKey = String(day);
@@ -7365,8 +7510,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         }
 
+        /* Раздел лежит прямо на полотне страницы, без внешней белой карточки
+           (#344): её поля съедали ширину у таблицы, а прокручиваться вбок
+           должна только сама таблица, у которой своя подложка. */
         return (
-            <div className="bg-white p-5 rounded-xl shadow-md">
+            <div className="min-w-0">
             <input
                 ref={chatMetricsInputRef}
                 type="file"
@@ -7848,7 +7996,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         </button>
 
-                        <div className={`tab-dropdown ${openMenu === DIRECTIONS_MENU_ID ? 'open' : ''}`} role="menu">
+                        <div className={`tab-dropdown ${openMenu === DIRECTIONS_MENU_ID ? `open${openMenuAlignEnd ? ' tab-dropdown--end' : ''}` : ''}`} role="menu">
                             <div className="flex flex-col min-w-[200px] max-h-[250px] overflow-y-auto workhours-modal-scroll">
                                 <button
                                     type="button"
@@ -7954,7 +8102,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </button>
 
-                                    <div className={`tab-dropdown ${isOpen ? 'open' : ''}`} role="menu">
+                                    <div className={`tab-dropdown ${isOpen ? `open${openMenuAlignEnd ? ' tab-dropdown--end' : ''}` : ''}`} role="menu">
                                         <div className="flex flex-col min-w-[200px]">
                                             {group.tabs.map(tab => {
                                                 const isSelected = selectedTab === tab.key;
@@ -8853,7 +9001,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             )}
 
             {/* Table */}
-            <div className="overflow-auto border rounded-md">
+            <div className="overflow-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70">
                 <div className="min-w-max">
                 {/* Header row */}
                 <div className="flex w-max sticky top-0 bg-gray-50 border-b z-30">
@@ -9339,9 +9487,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                         )}
 
-                        {daysArray.map(day => (
-                        <div key={`f-${day}`} className={hoursDayColClass}>&nbsp;</div>
-                        ))}
+                        {daysArray.map(day => {
+                            const dayTotal = hoursDayTotals[String(day)];
+                            return (
+                            <div
+                                key={`f-${day}`}
+                                className={`${hoursDayColClass} truncate text-xs tabular-nums text-slate-800`}
+                                title={dayTotal ? `${formatHeaderLabel(day)}: ${dayTotal.title}` : undefined}
+                            >
+                                {dayTotal ? (
+                                    <>
+                                        {dayTotal.text}
+                                        {dayTotal.unit && <span className="text-[10px] font-normal text-slate-400">{dayTotal.unit}</span>}
+                                    </>
+                                ) : ' '}
+                            </div>
+                            );
+                        })}
 
                         {selectedTab === 'work_time' && (
                         <>

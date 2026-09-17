@@ -40,7 +40,7 @@ class HoursFooterFteTests(unittest.TestCase):
         self.assertIn("hasRateRows,", totals)
 
     def test_footer_rate_cell_shows_total_fte(self):
-        footer = _between(self.app, "{/* FOOTER: итоговые строки */}", "{daysArray.map(day => (")
+        footer = _between(self.app, "{/* FOOTER: итоговые строки */}", "{daysArray.map(day => {")
         self.assertIn("footerTotals.sumRate.toLocaleString('ru-RU', { maximumFractionDigits: 2 })", footer)
         self.assertIn(" FTE`", footer)
         self.assertNotIn("<div className={hoursRateColClass}>—</div>", footer)
