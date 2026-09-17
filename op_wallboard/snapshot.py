@@ -291,14 +291,52 @@ def attach_answer_moments(touches, phone_events, ext_by_operator, is_talking,
     return out
 
 
+def _count_incoming(bucket, answered, talk, wait, sl_seconds):
+    """Один входящий в разрез: итоги дня и час считаются одним и тем же правилом."""
+    bucket['arrived'] += 1
+    if not answered:
+        bucket['missed'] += 1
+        return
+    bucket['answered'] += 1
+    bucket['talk_seconds'] += talk
+    if wait is not None:
+        bucket['waited'] += 1
+        bucket['wait_seconds'] += max(0, wait)
+        bucket['talk_measured_seconds'] += talk
+        if wait <= sl_seconds:
+            bucket['served_sl'] += 1
+
+
+# Дальше этого от начала строки станции момент входа или прихода не уводим: так далеко
+# ожидание не длится, и linkedid, значит, чужой.
+_HOUR_MOMENT_MAX_DRIFT = timedelta(hours=1)
+
+
+def _incoming_hour(touch, started):
+    """Час входящего в разрезе по часам — час входа в очередь, а не начала строки станции.
+
+    Строка станции у долгого ожидания начинается за пару секунд до ответа (докстринг модуля):
+    звонок, пришедший в 09:58 и принятый в 10:01, по ней ушёл бы в десятый час вместе со своим
+    ожиданием, и SL часа считался бы не за тот час. Без входа — приход по linkedid, без него —
+    начало строки. Момент из других суток (пришёл в 23:59:50, в очередь попал после полуночи)
+    остаётся в сутках касания: разрез суточный."""
+    moment = _parse(touch.get('queued_at')) or arrival_from_linkedid(touch.get('linkedid')) or started
+    if moment.date() != started.date() or abs(moment - started) > _HOUR_MOMENT_MAX_DRIFT:
+        moment = started
+    return moment.hour
+
+
 def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
     """Итоги, разрез по часам, счётчики по внутренним номерам.
+
+    Час разреза считается теми же правилами, что итоги дня (AR, SL, ожидание, разговор):
+    отбивка шлёт показатели последнего часа рядом с итогами дня (владелец, 17.09.2026).
 
     Разреза по линиям (очередям станции) нет — решение владельца 16.09.2026: номера
     очередей вида 3010 на стене и в отбивке читались как шум. Поле `queue` касания
     на итоги не влияет."""
     totals = _bucket()
-    hourly = [dict(hour=h, arrived=0, answered=0, missed=0, outgoing=0) for h in range(24)]
+    hourly = [_bucket() for _ in range(24)]
     by_ext = defaultdict(lambda: {'answered': 0, 'missed': 0, 'outgoing': 0,
                                   'outgoing_answered': 0, 'talk_seconds': 0,
                                   'calls': 0, 'last_call_at': ''})
@@ -310,7 +348,6 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
         call_type = touch.get('call_type') or ''
         talk = int(touch.get('talk_seconds') or 0)
         ext = str(touch.get('ext') or '')
-        hour = hourly[started.hour]
         person = by_ext[ext] if ext else None
         if person is not None:
             person['calls'] += 1
@@ -318,9 +355,9 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
 
         if call_type == touches_mod.TYPE_OUT:
             answered = talk > 0
-            totals['outgoing'] += 1
-            totals['outgoing_answered'] += 1 if answered else 0
-            hour['outgoing'] += 1
+            for bucket in (totals, hourly[started.hour]):
+                bucket['outgoing'] += 1
+                bucket['outgoing_answered'] += 1 if answered else 0
             if person is not None:
                 person['outgoing'] += 1
                 person['outgoing_answered'] += 1 if answered else 0
@@ -339,27 +376,15 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
         # Ожидание — от входа в очередь (queued_at), а без него — от начала строки.
         queued = _parse(touch.get('queued_at')) or started
         wait = int((answered_at - queued).total_seconds()) if (answered and answered_at) else None
-        totals['arrived'] += 1
-        if answered:
-            totals['answered'] += 1
-            totals['talk_seconds'] += talk
-            if wait is not None:
-                totals['waited'] += 1
-                totals['wait_seconds'] += max(0, wait)
-                totals['talk_measured_seconds'] += talk
-                if wait <= sl_seconds:
-                    totals['served_sl'] += 1
-        else:
-            totals['missed'] += 1
-        hour['arrived'] += 1
-        hour['answered' if answered else 'missed'] += 1
+        for bucket in (totals, hourly[_incoming_hour(touch, started)]):
+            _count_incoming(bucket, answered, talk, wait, sl_seconds)
         if person is not None:
             person['answered' if answered else 'missed'] += 1
             person['talk_seconds'] += talk if answered else 0
 
     return {
         'totals': _finish(totals),
-        'hourly': hourly,
+        'hourly': [dict(_finish(bucket), hour=hour) for hour, bucket in enumerate(hourly)],
         'by_ext': dict(by_ext),
     }
 

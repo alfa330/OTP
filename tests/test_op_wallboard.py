@@ -122,6 +122,43 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual((hourly[9]['arrived'], hourly[9]['answered']), (1, 1))
         self.assertEqual((hourly[14]['arrived'], hourly[14]['missed']), (1, 1))
 
+    def test_hour_has_the_same_metrics_as_the_day(self):
+        """Владелец 17.09.2026: отбивка шлёт показатели последнего часа — тем же расчётом."""
+        touches = [
+            touch(started='2026-09-15 09:10:00', answered='2026-09-15 09:10:05', talk=60),  # 5 с
+            touch(started='2026-09-15 09:20:00', answered='2026-09-15 09:20:40', talk=30),  # 40 с
+            touch(call_type='Входящий (не приняли)', talk=0, started='2026-09-15 09:30:00'),
+            touch(started='2026-09-15 10:05:00', answered='2026-09-15 10:05:03', talk=90),  # 3 с
+            touch(call_type='Исходящий', talk=20, started='2026-09-15 09:40:00'),
+        ]
+        parts = S.aggregate(touches, sl_seconds=20)
+        hour = parts['hourly'][9]
+        self.assertEqual((hour['hour'], hour['arrived'], hour['answered'], hour['missed']), (9, 3, 2, 1))
+        self.assertAlmostEqual(hour['ar'], 1 / 3)
+        self.assertAlmostEqual(hour['sl'], (1 / 2) * (2 / 3))
+        self.assertEqual((hour['avg_wait_seconds'], hour['avg_talk_seconds'], hour['wait_measured']),
+                         (22, 45, 2))
+        self.assertEqual((hour['outgoing'], hour['outgoing_answered']), (1, 1))
+        self.assertAlmostEqual(parts['hourly'][10]['sl'], 1.0)
+        self.assertIsNone(parts['hourly'][3]['sl'])
+        self.assertEqual(parts['totals']['arrived'], sum(h['arrived'] for h in parts['hourly']))
+
+    def test_incoming_hour_is_the_queue_entry_not_the_station_row(self):
+        # Пришёл 09:58:30, автоинформатор 26 с, ждал до 10:01:30. Станция отдала строку с началом
+        # за две секунды до ответа — по ней звонок ушёл бы в десятый час вместе с ожиданием.
+        call = touch(started='2026-09-15 10:01:28', answered='2026-09-15 10:01:30', talk=40,
+                     queue='3041', linkedid=linkedid_at('2026-09-15 09:58:30'))
+        call['dial_seconds'] = 42
+        parts = S.aggregate(S.attach_queue_entry([call], {'3041': 26}), sl_seconds=20)
+        self.assertEqual((parts['hourly'][9]['arrived'], parts['hourly'][10]['arrived']), (1, 0))
+        self.assertEqual(parts['hourly'][9]['served_sl'], 0)
+
+    def test_arrival_before_midnight_stays_in_the_touch_day(self):
+        call = touch(started='2026-09-15 00:00:18', answered='2026-09-15 00:00:20', talk=40,
+                     queue='3000', linkedid=linkedid_at('2026-09-14 23:59:50'))
+        parts = S.aggregate([call])
+        self.assertEqual((parts['hourly'][0]['arrived'], parts['hourly'][23]['arrived']), (1, 0))
+
     def test_per_ext_counters(self):
         parts = S.aggregate([touch(ext='6650'), touch(ext='6650', call_type='Исходящий', talk=5),
                              touch(ext='6651', call_type='Входящий (не приняли)', talk=0)])
@@ -369,7 +406,13 @@ class RouteTests(unittest.TestCase):
 
         self.touches = [touch()]
         self.phone_events = []
-        for name, value in (('day_touches_compact', lambda cursor, day: list(self.touches)),
+        self.touch_days = []
+
+        def day_touches(cursor, day):
+            self.touch_days.append(day)
+            return list(self.touches)
+
+        for name, value in (('day_touches_compact', day_touches),
                             ('agent_state', lambda cursor: {'connected': True, 'live_at': None,
                                                             'last_seen_at': None}),
                             ('load_directory', lambda cursor: {})):
@@ -401,7 +444,7 @@ class RouteTests(unittest.TestCase):
             headed_department_id=lambda uid: self.requester['headed'],
             is_supervisor_role=lambda role: role in ('sv', 'supervisor'))
         app = Flask(__name__)
-        app.register_blueprint(op_routes.build_op_wallboard_blueprint(
+        app.register_blueprint(self._build_blueprint(
             db=self.db, require_api_key=lambda fn: fn,
             build_cors_preflight_response=lambda: ('', 204), guard=guard,
             department_id=department_id, snapshot_with_cache=fetch_guarded_cache,
@@ -412,6 +455,25 @@ class RouteTests(unittest.TestCase):
             live_statuses=lambda ids: {1: {'status_key': 'готов', 'seconds': 5}}))
         app.config['TESTING'] = True
         self.client = app.test_client()
+
+    def _build_blueprint(self, **kwargs):
+        self.bp = op_routes.build_op_wallboard_blueprint(**kwargs)
+        return self.bp
+
+    def test_day_parts_count_a_past_day_the_same_way(self):
+        """Отбивке в полночь нужны итоги закончившихся суток — тем же расчётом, что снимок:
+        вход в очередь по автоинформатору, ответ по телефону, разрез по часам."""
+        self.touches = [touch(started='2026-09-16 23:10:00', answered='', talk=70, queue='3034',
+                              linkedid=linkedid_at('2026-09-16 23:10:00'))]
+        self.announcement_deltas = [('3034', 0, 100), ('3034', 10, 80)]
+        self.phone_events = [event(1, datetime(2026, 9, 16, 23, 10, 15)),
+                             event(1, datetime(2026, 9, 16, 23, 11, 11), 'готов')]
+        parts = self.bp.day_parts(date(2026, 9, 16))
+        self.assertEqual(self.touch_days, [date(2026, 9, 16)])
+        self.assertEqual(parts['day'], '2026-09-16')
+        self.assertEqual(parts['totals']['avg_wait_seconds'], 5)   # 15 с от прихода − 10 с сообщения
+        self.assertEqual(parts['hourly'][23]['arrived'], 1)
+        self.assertAlmostEqual(parts['hourly'][23]['sl'], 1.0)
 
     def test_operator_is_refused(self):
         self.assertEqual(self.client.get('/api/op_wallboard/snapshot').status_code, 403)

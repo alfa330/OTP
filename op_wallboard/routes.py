@@ -165,28 +165,53 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         announce_cache.update(ts=now_ts, day=day, value=value)
         return value
 
+    def _measured_touches(cursor, day, people, announce_seconds):
+        """Касания суток с входом в очередь и моментом ответа — общее для снимка и для
+        итогов прошлых суток, чтобы отбивка в полночь считала ровно так же, как экран."""
+        operator_ids = [p['id'] for p in people if p.get('id') is not None]
+        ext_by_operator = {p['id']: str(p['sip_number']) for p in people
+                           if p.get('id') is not None and p.get('sip_number')}
+        touches = queries.day_touches_compact(cursor, day)
+        try:
+            phone_events = load_phone_events(cursor, operator_ids, day)
+        except Exception:  # noqa: BLE001
+            # Без событий телефонов теряются только SL, ожидание и точный разговор —
+            # снимок отдаёт их прочерком, а не уносит с собой всё табло.
+            log.exception('%s: события iCORE Phone не прочитались', label)
+            phone_events = []
+        touches = snapshot_mod.attach_queue_entry(touches, announce_seconds)
+        return snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
+                                                  _is_talking)
+
+    def _day_parts(day):
+        """Итоги и разрез по часам за ЛЮБЫЕ сутки, мимо кэша снимка.
+
+        Нужны отбивке в полночь: в 00:00 последний полный час (23:00–24:00) и итог дня
+        относятся к закончившимся суткам, а снимок табло уже живёт новыми. Длины
+        автоинформаторов считаются на те сутки заново и в часовой кэш снимка не пишутся."""
+        dept = department_id()
+        people = load_people(dept, day) if dept is not None else []
+        with db._get_cursor() as cursor:
+            try:
+                announce_seconds = snapshot_mod.announcement_seconds_from_deltas(
+                    load_announcement_deltas(cursor, day))
+            except Exception:  # noqa: BLE001
+                log.exception('%s: длины автоинформаторов за %s не посчитались', label, day)
+                announce_seconds = {}
+            touches = _measured_touches(cursor, day, people, announce_seconds)
+        parts = snapshot_mod.aggregate(touches, sl_seconds)
+        return {'day': day.isoformat(), 'totals': parts['totals'], 'hourly': parts['hourly']}
+
     def _fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
         dept = department_id()
         people = load_people(dept, day) if dept is not None else []
         operator_ids = [p['id'] for p in people if p.get('id') is not None]
-        ext_by_operator = {p['id']: str(p['sip_number']) for p in people
-                           if p.get('id') is not None and p.get('sip_number')}
         with db._get_cursor() as cursor:
-            touches = queries.day_touches_compact(cursor, day)
             bridge_state = queries.agent_state(cursor)
             announce_seconds = _announcement_seconds(cursor, day, time.time())
-            try:
-                phone_events = load_phone_events(cursor, operator_ids, day)
-            except Exception:  # noqa: BLE001
-                # Без событий телефонов теряются только SL, ожидание и точный разговор —
-                # снимок отдаёт их прочерком, а не уносит с собой всё табло.
-                log.exception('%s: события iCORE Phone не прочитались', label)
-                phone_events = []
-        touches = snapshot_mod.attach_queue_entry(touches, announce_seconds)
-        touches = snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
-                                                     _is_talking)
+            touches = _measured_touches(cursor, day, people, announce_seconds)
         try:
             statuses = live_statuses(operator_ids)
         except Exception:  # noqa: BLE001
@@ -212,8 +237,10 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             after=lambda data, at: persist_cache(cache, 'op', persist_interval_seconds,
                                                  data, at, label))
 
-    # Отбивка в Telegram берёт снимок отсюда же, чтобы картинка не расходилась с экраном.
+    # Отбивка в Telegram берёт снимок отсюда же, чтобы картинка не расходилась с экраном,
+    # а в полночь — итоги закончившихся суток тем же расчётом.
     bp.snapshot = _snapshot
+    bp.day_parts = _day_parts
 
     @bp.route('/snapshot', methods=['GET', 'OPTIONS'])
     @require_api_key

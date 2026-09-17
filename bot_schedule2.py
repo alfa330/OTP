@@ -41971,15 +41971,55 @@ def _op_broadcast_send_times():
     return _szov_broadcast_parse_times(OP_BROADCAST_SEND_TIMES, "Отбивка табло ОП")
 
 
-def _op_broadcast_collect(scheduled=False):
-    """Снимок табло ОП из общего кэша раздела: ровно то, что видят на стене."""
+# Пояс снимка табло ОП (op_wallboard.routes): сутки и часы отбивки обязаны совпадать с его сутками.
+OP_BROADCAST_TIMEZONE = 'Asia/Almaty'
+
+
+def _op_broadcast_attach_period(data, now, day_parts):
+    """Дописать к снимку период отбивки: итоги дня и последний полный час.
+
+    Владелец 17.09.2026: кроме накопительных итогов с 00:00 нужны показатели часа N−1…N,
+    чтобы видеть, что происходит каждый час. Час — последний ПОЛНЫЙ относительно момента
+    отправки: плановая в 10:00 и ручная в 10:37 говорят о 09:00–10:00. В полночь этот час
+    (23:00–24:00) и итог дня принадлежат закончившимся суткам, а снимок табло к этому моменту
+    может жить уже новыми — тогда итоги и часы берутся расчётом тех суток (`day_parts`), иначе
+    в 00:00 уходили бы нули нового дня. Люди «на сейчас» и пульс моста остаются из снимка."""
+    out = dict(data)
+    hour_end = now.replace(minute=0, second=0, microsecond=0)
+    hour_start = hour_end - timedelta(hours=1)
+    report_day = hour_start.date()
+    if str(out.get('day') or '') != report_day.isoformat():
+        parts = day_parts(report_day)
+        out.update(day=parts['day'], totals=parts['totals'], hourly=parts['hourly'])
+    out['day_closed'] = report_day != now.date()
+    out['day_label'] = ('За %s' % report_day.strftime('%d.%m')) if out['day_closed'] else 'За день'
+    out['hour_label'] = '%02d:00–%02d:00' % (hour_start.hour, hour_start.hour + 1)
+    out['hour_day'] = report_day.strftime('%d.%m')
+    # Снимок, сохранённый до появления показателей по часам, отдаёт час без AR и SL — пусть
+    # это будут прочерки, а не падение отбивки.
+    out['hour_totals'] = next((dict(item) for item in (out.get('hourly') or [])
+                               if item.get('hour') == hour_start.hour), {})
+    return out
+
+
+def _op_broadcast_collect(scheduled=False, now=None):
+    """Снимок табло ОП из общего кэша раздела: ровно то, что видят на стене, плюс период
+    отбивки — итоги дня и последний полный час (`_op_broadcast_attach_period`)."""
     provider = globals().get('_op_wallboard_snapshot')
     if provider is None:
         raise RuntimeError('Табло ОП не подключено — отбивке нечего собирать')
     data = dict(provider())
     stamp = str(data.get('captured_at') or '')
     data['stamp'] = ('%s.%s %s' % (stamp[8:10], stamp[5:7], stamp[11:16])) if len(stamp) >= 16 else ''
-    return data
+    now = now or datetime.now(ZoneInfo(OP_BROADCAST_TIMEZONE)).replace(tzinfo=None)
+
+    def day_parts(day):
+        loader = globals().get('_op_wallboard_day_parts')
+        if loader is None:
+            raise RuntimeError('Табло ОП не подключено — итогов прошлых суток взять негде')
+        return loader(day)
+
+    return _op_broadcast_attach_period(data, now, day_parts)
 
 
 def _op_broadcast_percent(ratio):
@@ -42034,11 +42074,21 @@ def _op_broadcast_deviations(data):
     return notes
 
 
+def _op_broadcast_totals_line(label, totals):
+    """«<период>: входящих … · принято … · потеряно … · AR … · SL …» — одна форма на день и час."""
+    return ('%s: входящих %d · принято %d · потеряно %d · AR %s · SL %s'
+            % (label, _szov_wallboard_int(totals.get('arrived')),
+               _szov_wallboard_int(totals.get('answered')),
+               _szov_wallboard_int(totals.get('missed')),
+               _op_broadcast_percent(totals.get('ar')), _op_broadcast_percent(totals.get('sl'))))
+
+
 def _op_broadcast_text(data):
     """Текст отбивки ОП. HTML parse_mode: заголовок жирный.
 
-    Итоги дня повторяются картинкой, поэтому в тексте — отклонения, итоги одной строкой
-    и дежурная строка о людях: этого хватает, чтобы понять положение без картинки.
+    Итоги повторяются картинками, поэтому в тексте — отклонения, по строке на итоги дня и на
+    последний полный час и дежурная строка о людях: этого хватает, чтобы понять положение без
+    картинок. Отклонения считаются по итогам дня, как и раньше.
     Разреза по линиям (очередям станции) нет нигде — ни на экране, ни здесь: решение
     владельца 16.09.2026, номера очередей вида 3010 читались как шум."""
     totals = data.get('totals') or {}
@@ -42049,11 +42099,10 @@ def _op_broadcast_text(data):
         lines.append('')
         lines.extend(notes)
     lines.append('')
-    lines.append('Входящих %d · принято %d · потеряно %d · AR %s · SL %s'
-                 % (_szov_wallboard_int(totals.get('arrived')),
-                    _szov_wallboard_int(totals.get('answered')),
-                    _szov_wallboard_int(totals.get('missed')),
-                    _op_broadcast_percent(totals.get('ar')), _op_broadcast_percent(totals.get('sl'))))
+    lines.append(_op_broadcast_totals_line(data.get('day_label') or 'За день', totals))
+    if data.get('hour_label'):
+        lines.append(_op_broadcast_totals_line('За %s' % data['hour_label'],
+                                               data.get('hour_totals') or {}))
     lines.append('Онлайн %d · в разговоре %d · на перерыве %d'
                  % (_szov_wallboard_int(now.get('operators_online')),
                     _szov_wallboard_int(now.get('operators_talking')),
@@ -42061,10 +42110,8 @@ def _op_broadcast_text(data):
     return '\n'.join(lines)
 
 
-def _op_render_wallboard_png(data):
-    """PNG «Табло ОП»: те же плитки, что на стене, тем же рисовальщиком, что у СЗоВ."""
-    totals = data.get('totals') or {}
-    now = data.get('now') or {}
+def _op_broadcast_key_tiles(totals, data):
+    """Четыре крупные плитки (входящих, принято, потеряно, AR) — одни на день и на час."""
     ar = totals.get('ar')
     ar_min = float(data.get('ar_min_percent') or 0)
     ar_max = float(data.get('ar_max_percent') or 100)
@@ -42082,8 +42129,14 @@ def _op_render_wallboard_png(data):
         ('AR', _op_broadcast_percent(ar), ar_colors),
     ]
     # Кортежи выравниваем к форме (подпись, значение, фон, цвет текста).
-    key_tiles = [(t[0], t[1], *(t[2] if isinstance(t[2], tuple) else (t[2], t[3])))
-                 for t in key_tiles]
+    return [(t[0], t[1], *(t[2] if isinstance(t[2], tuple) else (t[2], t[3])))
+            for t in key_tiles]
+
+
+def _op_render_wallboard_png(data):
+    """PNG «Табло ОП»: те же плитки, что на стене, тем же рисовальщиком, что у СЗоВ."""
+    totals = data.get('totals') or {}
+    now = data.get('now') or {}
     stat_tiles = [
         ('SL', _op_broadcast_percent(totals.get('sl'))),
         ('Разговор', _op_broadcast_duration(totals.get('avg_talk_seconds'))),
@@ -42092,8 +42145,24 @@ def _op_render_wallboard_png(data):
         ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break')))),
         ('Исходящих', str(_szov_wallboard_int(totals.get('outgoing')))),
     ]
-    return _szov_render_tiles_png('Табло ОП', 'Отдел продаж · %s' % (data.get('stamp') or ''),
-                                  key_tiles, stat_tiles)
+    period = (data.get('day_label') or 'За день').lower()
+    return _szov_render_tiles_png('Табло ОП', 'Отдел продаж · %s · %s' % (period, data.get('stamp') or ''),
+                                  _op_broadcast_key_tiles(totals, data), stat_tiles)
+
+
+def _op_render_hour_png(data):
+    """PNG «Табло ОП · за час»: плитки последнего полного часа. Люди «на сейчас» (онлайн,
+    перерыв) к часу не относятся и остаются только на картинке дня."""
+    hour = data.get('hour_totals') or {}
+    stat_tiles = [
+        ('SL', _op_broadcast_percent(hour.get('sl'))),
+        ('Разговор', _op_broadcast_duration(hour.get('avg_talk_seconds'))),
+        ('Исходящих', str(_szov_wallboard_int(hour.get('outgoing')))),
+    ]
+    return _szov_render_tiles_png('Табло ОП · за час',
+                                  'Отдел продаж · %s · %s' % (data.get('hour_label') or '',
+                                                              data.get('hour_day') or ''),
+                                  _op_broadcast_key_tiles(hour, data), stat_tiles)
 
 
 def _op_broadcast_preview():
@@ -42104,9 +42173,11 @@ def _op_broadcast_preview():
     except Exception as exc:
         logging.error("Предпросмотр отбивки (ОП): данные не собрались: %s", exc)
         return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
-    if (request.args.get('image') or '').strip() == 'board':
+    renderers = {'board': _op_render_wallboard_png, 'hour': _op_render_hour_png}
+    renderer = renderers.get((request.args.get('image') or '').strip())
+    if renderer is not None:
         try:
-            blob = _op_render_wallboard_png(data)
+            blob = renderer(data)
         except Exception as exc:
             return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
         response = Response(blob, mimetype='image/png')
@@ -42118,6 +42189,7 @@ def _op_broadcast_preview():
         "font_path": regular,
         "images_available": bool(regular),
         "deviations": _op_broadcast_deviations(data),
+        "hour": data.get('hour_label'),
     })
 
 
@@ -42128,12 +42200,14 @@ async def _op_broadcast_prepare(scheduled=False):
     data = await loop.run_in_executor(executor_pool, _op_broadcast_collect, scheduled)
     text = _op_broadcast_text(data)
     media = []
-    try:
-        board_png = await loop.run_in_executor(executor_pool, _op_render_wallboard_png, data)
-        media = [('op_board.png', board_png)]
-    except Exception as exc:
-        # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинки.
-        logging.error("Отбивка табло ОП: не удалось собрать картинку: %s", exc)
+    # Картинка дня первой (под ней подпись альбома), часа — второй. Каждая рисуется отдельно:
+    # сбой одной не отнимает другую, а без обеих текст всё равно уходит — цифры важнее картинок.
+    for name, render in (('op_board.png', _op_render_wallboard_png),
+                         ('op_hour.png', _op_render_hour_png)):
+        try:
+            media.append((name, await loop.run_in_executor(executor_pool, render, data)))
+        except Exception as exc:
+            logging.error("Отбивка табло ОП: не удалось собрать картинку %s: %s", name, exc)
     return data, text, media
 
 
@@ -59690,6 +59764,8 @@ try:
     # Снимок из того же кэша — отбивке (op_broadcast_job): картинка в Telegram обязана
     # совпадать с экраном, а второй запрос к базе ради этого не нужен.
     _op_wallboard_snapshot = _op_wallboard_bp.snapshot
+    # Итоги закончившихся суток тем же расчётом — отбивке в полночь (_op_broadcast_attach_period).
+    _op_wallboard_day_parts = _op_wallboard_bp.day_parts
     app.register_blueprint(_op_wallboard_bp)
     logging.info("Табло ОП: Blueprint подключён на /api/op_wallboard")
 except Exception:
