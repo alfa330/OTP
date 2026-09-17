@@ -14,6 +14,7 @@
 """
 
 import ast
+import re
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -25,8 +26,9 @@ BOT_PATH = ROOT / "bot_schedule2.py"
 DB_PATH = ROOT / "database.py"
 
 HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
-           "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_totals_line",
+           "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
            "_op_broadcast_attach_period"}
+CONSTANTS = {"_OP_BROADCAST_TABLE_ROWS"}
 
 
 def _module():
@@ -37,6 +39,10 @@ def _namespace(min_calls=20, sl_min=80.0, stale=600):
     functions = [node for node in _module().body
                  if isinstance(node, ast.FunctionDef) and node.name in HELPERS]
     assert len(functions) == len(HELPERS)
+    constants = [node for node in _module().body
+                 if isinstance(node, ast.Assign)
+                 and any(getattr(target, 'id', None) in CONSTANTS for target in node.targets)]
+    assert len(constants) == len(CONSTANTS)
     namespace = {
         "OP_BROADCAST_MIN_CALLS": min_calls,
         "OP_BROADCAST_SL_MIN_PERCENT": sl_min,
@@ -44,8 +50,21 @@ def _namespace(min_calls=20, sl_min=80.0, stale=600):
         "_szov_wallboard_int": lambda v: int(v or 0),
         "timedelta": timedelta,
     }
-    exec(compile(ast.Module(body=functions, type_ignores=[]), str(BOT_PATH), "exec"), namespace)
+    exec(compile(ast.Module(body=constants + functions, type_ignores=[]), str(BOT_PATH), "exec"),
+         namespace)
     return namespace
+
+
+def table(text):
+    """Таблица из <pre> отбивки: (заголовки столбцов, {показатель: [значения]}, строки как есть).
+    Столбцы разделены двумя и более пробелами — внутри «4,0 %» пробел один."""
+    block = text[text.index('<pre>') + len('<pre>'):text.index('</pre>')].strip('\r\n').splitlines()
+    header = re.split(r'\s{2,}', block[0].strip())
+    rows = {}
+    for line in block[1:]:
+        label, *values = re.split(r'\s{2,}', line.strip())
+        rows[label] = values
+    return header, rows, block
 
 
 def snapshot(arrived=100, missed=4, sl=0.9, live_age=30, online=5, talking=2, on_break=1):
@@ -91,7 +110,7 @@ class DeviationTests(unittest.TestCase):
         # «SL 0 % при норме 80 %» на этом было бы ложной тревогой в каждой отбивке.
         self.assertEqual(self.deviations(snapshot(sl=None)), [])
         text = self.ns["_op_broadcast_text"](snapshot(sl=None))
-        self.assertIn('SL —', text)
+        self.assertEqual(table(text)[1]['SL'], ['—'])
 
     def test_small_sample_does_not_wake_anyone(self):
         # Утро: 7 входящих, 1 потерян — 14 % AR, но это не показатель.
@@ -111,7 +130,9 @@ class DeviationTests(unittest.TestCase):
         """Разрез по линиям снят целиком (владелец, 16.09.2026): ни на экране, ни в тексте."""
         text = self.ns["_op_broadcast_text"](snapshot())
         self.assertTrue(text.startswith('<b>Табло ОП</b> (15.09 18:00):'))
-        self.assertIn('За день: входящих 100 · принято 96 · потеряно 4', text)
+        header, rows, _ = table(text)
+        self.assertEqual(header, ['День'])
+        self.assertEqual((rows['Входящих'], rows['Принято'], rows['Потеряно']), (['100'], ['96'], ['4']))
         self.assertIn('Онлайн 5 · в разговоре 2 · на перерыве 1', text)
         self.assertNotIn('Линия', text)
         self.assertNotIn('def _op_broadcast_lines', BOT_PATH.read_text(encoding="utf-8-sig"))
@@ -175,12 +196,35 @@ class PeriodTests(unittest.TestCase):
         self.assertTrue(out['day_closed'])
         self.assertEqual(out['day_label'], 'За 16.09')
 
-    def test_text_has_a_line_for_the_day_and_for_the_hour(self):
+    def test_text_is_a_table_of_the_day_and_the_hour(self):
+        """Владелец 17.09.2026: текст — таблицей, как в отбивке по лидам."""
         out = self.attach(self.today(), datetime(2026, 9, 17, 10, 0), self.day_parts)
         text = self.ns["_op_broadcast_text"](out)
-        self.assertIn('За день: входящих 100 · принято 96 · потеряно 4 · AR 4,0 % · SL 90,0 %', text)
-        self.assertIn('За 09:00–10:00: входящих 30 · принято 27 · потеряно 3 · AR 10,0 % · SL 70,0 %', text)
-        self.assertLess(text.index('За день'), text.index('За 09:00–10:00'))
+        header, rows, block = table(text)
+        self.assertEqual(header, ['День', '09–10'])
+        self.assertEqual(list(rows), ['Входящих', 'Принято', 'Потеряно', 'AR', 'SL', 'Разговор',
+                                      'Исходящих'])
+        self.assertEqual((rows['Входящих'], rows['Принято'], rows['Потеряно']),
+                         (['100', '30'], ['96', '27'], ['4', '3']))
+        self.assertEqual((rows['AR'], rows['SL']), (['4,0 %', '10,0 %'], ['90,0 %', '70,0 %']))
+        self.assertEqual((rows['Разговор'], rows['Исходящих']), (['1:05', '1:00'], ['12', '0']))
+        # Столбцы выровнены по правому краю, строка помещается в телефон.
+        self.assertEqual(len({len(line) for line in block}), 1)
+        self.assertLessEqual(max(len(line) for line in block), 32)
+
+    def test_table_goes_first_then_deviations_then_people(self):
+        data = self.today()
+        data['totals'] = dict(data['totals'], sl=0.7)
+        text = self.ns["_op_broadcast_text"](self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts))
+        self.assertTrue(text.startswith('<b>Табло ОП</b> (15.09 18:00):\n\n<pre>'))
+        self.assertLess(text.index('</pre>'), text.index('Обратите внимание: SL 70,0 %'))
+        self.assertLess(text.index('Обратите внимание'), text.index('Онлайн 5 · в разговоре 2'))
+
+    def test_midnight_table_is_titled_by_the_day_that_ended(self):
+        out = self.attach(self.today('2026-09-17'), datetime(2026, 9, 17, 0, 0, 3), self.day_parts)
+        header, rows, _ = table(self.ns["_op_broadcast_text"](out))
+        self.assertEqual(header, ['16.09', '23–24'])
+        self.assertEqual(rows['Входящих'], ['400', '12'])
 
     def test_hour_is_not_a_deviation_on_its_own(self):
         # Отклонения — по итогам дня, как и раньше: плохой час в хороший день режим
@@ -195,8 +239,9 @@ class PeriodTests(unittest.TestCase):
         data['hourly'] = [{'hour': h, 'arrived': 0, 'answered': 0, 'missed': 0, 'outgoing': 0}
                           for h in range(24)]
         out = self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts)
-        self.assertIn('За 09:00–10:00: входящих 0 · принято 0 · потеряно 0 · AR — · SL —',
-                      self.ns["_op_broadcast_text"](out))
+        rows = table(self.ns["_op_broadcast_text"](out))[1]
+        self.assertEqual((rows['Входящих'], rows['AR'], rows['SL'], rows['Разговор']),
+                         (['100', '0'], ['4,0 %', '—'], ['90,0 %', '—'], ['1:05', '—']))
 
 
 class WiringTests(unittest.TestCase):

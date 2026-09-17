@@ -41995,6 +41995,9 @@ def _op_broadcast_attach_period(data, now, day_parts):
     out['day_label'] = ('За %s' % report_day.strftime('%d.%m')) if out['day_closed'] else 'За день'
     out['hour_label'] = '%02d:00–%02d:00' % (hour_start.hour, hour_start.hour + 1)
     out['hour_day'] = report_day.strftime('%d.%m')
+    # Заголовки столбцов таблицы в тексте — короче подписей картинок: строка обязана влезть в телефон.
+    out['day_column'] = report_day.strftime('%d.%m') if out['day_closed'] else 'День'
+    out['hour_column'] = '%02d–%02d' % (hour_start.hour, hour_start.hour + 1)
     # Снимок, сохранённый до появления показателей по часам, отдаёт час без AR и SL — пусть
     # это будут прочерки, а не падение отбивки.
     out['hour_totals'] = next((dict(item) for item in (out.get('hourly') or [])
@@ -42074,35 +42077,56 @@ def _op_broadcast_deviations(data):
     return notes
 
 
-def _op_broadcast_totals_line(label, totals):
-    """«<период>: входящих … · принято … · потеряно … · AR … · SL …» — одна форма на день и час."""
-    return ('%s: входящих %d · принято %d · потеряно %d · AR %s · SL %s'
-            % (label, _szov_wallboard_int(totals.get('arrived')),
-               _szov_wallboard_int(totals.get('answered')),
-               _szov_wallboard_int(totals.get('missed')),
-               _op_broadcast_percent(totals.get('ar')), _op_broadcast_percent(totals.get('sl'))))
+# Строки таблицы отбивки: подпись и как достать значение из итогов периода. Те же показатели,
+# что на картинках, кроме людей «на сейчас» — у часа их нет.
+_OP_BROADCAST_TABLE_ROWS = (
+    ('Входящих', lambda t: str(_szov_wallboard_int(t.get('arrived')))),
+    ('Принято', lambda t: str(_szov_wallboard_int(t.get('answered')))),
+    ('Потеряно', lambda t: str(_szov_wallboard_int(t.get('missed')))),
+    ('AR', lambda t: _op_broadcast_percent(t.get('ar'))),
+    ('SL', lambda t: _op_broadcast_percent(t.get('sl'))),
+    ('Разговор', lambda t: _op_broadcast_duration(t.get('avg_talk_seconds'))),
+    ('Исходящих', lambda t: str(_szov_wallboard_int(t.get('outgoing')))),
+)
+
+
+def _op_broadcast_table(data):
+    """Таблица «показатель × день, час» моноширинным блоком — как в отбивке по лидам
+    (владелец, 17.09.2026). Столбцы разделены двумя пробелами: «100,0 %» занимает всю ширину
+    столбца, и с одним пробелом числа слипались бы с соседним столбцом. Ширина строки ~27
+    знаков — помещается в телефон без переноса."""
+    columns = [(data.get('day_column') or 'День', data.get('totals') or {})]
+    if data.get('hour_column'):
+        columns.append((data['hour_column'], data.get('hour_totals') or {}))
+    label_width = max(len(label) for label, _ in _OP_BROADCAST_TABLE_ROWS)
+    cells = [[title for title, _ in columns]]
+    cells += [[read(totals) for _, totals in columns] for _, read in _OP_BROADCAST_TABLE_ROWS]
+    value_width = max(len(value) for row in cells for value in row)
+    labels = [''] + [label for label, _ in _OP_BROADCAST_TABLE_ROWS]
+    lines = ['<pre>']
+    for label, row in zip(labels, cells):
+        lines.append('%-*s' % (label_width, label)
+                     + ''.join('  %*s' % (value_width, value) for value in row))
+    lines.append('</pre>')
+    return lines
 
 
 def _op_broadcast_text(data):
     """Текст отбивки ОП. HTML parse_mode: заголовок жирный.
 
-    Итоги повторяются картинками, поэтому в тексте — отклонения, по строке на итоги дня и на
-    последний полный час и дежурная строка о людях: этого хватает, чтобы понять положение без
-    картинок. Отклонения считаются по итогам дня, как и раньше.
+    Итоги дня и последнего полного часа — таблицей, как в отбивке по лидам; под ней
+    отклонения (по итогам дня, как и раньше) и дежурная строка о людях: этого хватает, чтобы
+    понять положение без картинок.
     Разреза по линиям (очередям станции) нет нигде — ни на экране, ни здесь: решение
     владельца 16.09.2026, номера очередей вида 3010 читались как шум."""
-    totals = data.get('totals') or {}
     now = data.get('now') or {}
-    lines = ['<b>Табло ОП</b> (%s):' % (data.get('stamp') or '')]
+    lines = ['<b>Табло ОП</b> (%s):' % (data.get('stamp') or ''), '']
+    lines.extend(_op_broadcast_table(data))
     notes = _op_broadcast_deviations(data)
     if notes:
         lines.append('')
         lines.extend(notes)
     lines.append('')
-    lines.append(_op_broadcast_totals_line(data.get('day_label') or 'За день', totals))
-    if data.get('hour_label'):
-        lines.append(_op_broadcast_totals_line('За %s' % data['hour_label'],
-                                               data.get('hour_totals') or {}))
     lines.append('Онлайн %d · в разговоре %d · на перерыве %d'
                  % (_szov_wallboard_int(now.get('operators_online')),
                     _szov_wallboard_int(now.get('operators_talking')),
