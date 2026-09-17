@@ -1,11 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
-import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
+import { APPLE_FONT, IosSegmented, iosCard, iosBtnGhost } from '../ui/ios';
 import { formatInt, wallboardStaleNotice } from './szovWallboardShared';
 import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
 import { BroadcastControls, WidgetButton } from './SzovWallboardView';
+import OpStatusJournalPanel from './OpStatusJournal';
+import { OP_GROUP_ALL, opEntryTime, opGroupOptions, opGroupView, opSelectedGroup } from './opWallboardGroups';
 import {
     OP_METRIC_MAP,
     formatCount,
@@ -28,10 +30,27 @@ import {
  *
  * Разреза «по линиям» нет нигде — ни здесь, ни в снимке, ни в отбивке (снят 16.09.2026 по
  * решению владельца): очереди станции — это внутренние номера вида 3010, они читались как шум.
+ *
+ * ТЗ #339: фильтр по группам пересчитывает всё табло сразу (разрезы приезжают в том же снимке),
+ * в списке — время входа, а ФИО открывает журнал статусов боковой панелью здесь же.
  */
 
 const FULLSCREEN_Z = 150;
+// Журнал поверх табло: на странице — ниже модальных окон (z 90), на весь экран — над полотном.
+const JOURNAL_Z = 85;
 const SOURCE_LABEL = 'мост «Касаний»';
+
+// Выбранная группа — удобство зрителя (стена ОП утром включается на своей группе), а не общая
+// настройка: живёт в браузере и молча отступает на «Все», если хранилище недоступно.
+const GROUP_STORAGE_KEY = 'otp.opWallboard.group';
+
+const readStoredGroup = () => {
+    try {
+        return window.localStorage.getItem(GROUP_STORAGE_KEY) || OP_GROUP_ALL;
+    } catch (storageError) {
+        return OP_GROUP_ALL;
+    }
+};
 
 const MetricKeyTile = ({ metricKey, snapshot, scale = 1 }) => {
     const metric = OP_METRIC_MAP[metricKey];
@@ -91,11 +110,23 @@ const HourlyLegend = () => (
     </div>
 );
 
-/** Поимённый список: статус телефона и счётчики дня. Порядок — по разряду статуса. */
-const OperatorsTable = ({ snapshot, scale = 1 }) => {
+/*
+ * Поимённый список: статус телефона, время входа и счётчики дня. Порядок — по разряду статуса.
+ * Столбец «Группа» есть только в «Все»: внутри выбранной группы он повторял бы фильтр в каждой
+ * строке. ФИО — кнопка журнала, но только у тех, от чьего телефона были статусы: у «Нет событий»
+ * журнал всегда пуст, а два десятка синих имён, ведущих в пустоту, — шум. У номера вне состава
+ * журнала нет тоже (нет сотрудника).
+ */
+const OperatorsTable = ({ snapshot, scale = 1, showGroup = false, selectedId = null, onOpenJournal = null }) => {
     const rows = snapshot?.operators || [];
     if (!rows.length) {
-        return <div className="text-[13px] text-slate-500">В составе отдела нет сотрудников с внутренним номером.</div>;
+        return (
+            <div className="text-[13px] text-slate-500">
+                {showGroup || !snapshot?.groups?.length
+                    ? 'В составе отдела нет сотрудников с внутренним номером.'
+                    : 'В группе нет сотрудников.'}
+            </div>
+        );
     }
     const cell = 'px-3 py-2 text-right tabular-nums';
     return (
@@ -105,7 +136,9 @@ const OperatorsTable = ({ snapshot, scale = 1 }) => {
                     <tr>
                         <th className="px-3 py-2">Сотрудник</th>
                         <th className="px-3 py-2">Внутренний</th>
+                        {showGroup ? <th className="px-3 py-2">Группа</th> : null}
                         <th className="px-3 py-2">Статус</th>
+                        <th className="px-3 py-2">Время входа</th>
                         <th className={cell}>Принято</th>
                         <th className={cell}>Потеряно</th>
                         <th className={cell}>Исходящих</th>
@@ -115,15 +148,33 @@ const OperatorsTable = ({ snapshot, scale = 1 }) => {
                 <tbody>
                     {rows.map((row) => {
                         const chip = opStatusChip(row);
+                        const entry = opEntryTime(row.entry_at, snapshot?.day);
+                        const selected = row.id != null && row.id === selectedId;
                         return (
-                            <tr key={`${row.id ?? 'ext'}-${row.ext}`} className={`border-t border-slate-100 ${chip.muted ? 'text-slate-400' : ''}`}>
-                                <td className="px-3 py-2 font-medium">{row.name}</td>
+                            <tr key={`${row.id ?? 'ext'}-${row.ext}`} className={`border-t border-slate-100 ${selected ? 'bg-blue-50/70' : ''} ${chip.muted ? 'text-slate-400' : ''}`}>
+                                <td className="px-3 py-2 font-medium">
+                                    {row.id != null && row.status_key !== 'unknown' && onOpenJournal ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => onOpenJournal(row)}
+                                            title="Журнал статусов"
+                                            className="text-left font-medium text-blue-600 underline-offset-2 transition-colors hover:text-blue-700 hover:underline"
+                                        >
+                                            {row.name}
+                                        </button>
+                                    ) : row.name}
+                                </td>
                                 <td className="px-3 py-2 tabular-nums">{row.ext || '—'}</td>
+                                {showGroup ? <td className="px-3 py-2 text-slate-500">{row.group_label || '—'}</td> : null}
                                 <td className="px-3 py-2">
                                     <span className={`inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 ${chip.className}`}>
                                         {chip.label}
                                         {row.status_seconds ? <span className="opacity-70 tabular-nums">{formatSeconds(row.status_seconds)}</span> : null}
                                     </span>
+                                </td>
+                                <td className="px-3 py-2 tabular-nums">
+                                    {entry.time}
+                                    {entry.previousDay ? <span className="ml-1.5 text-slate-400">вчера</span> : null}
                                 </td>
                                 <td className={cell}>{formatCount(row.answered)}</td>
                                 <td className={`${cell} ${row.missed ? 'text-amber-700' : ''}`}>{formatCount(row.missed)}</td>
@@ -142,7 +193,7 @@ const OperatorsTable = ({ snapshot, scale = 1 }) => {
 };
 
 /** Тело табло — одно и то же встроенным и на весь экран, различается только масштабом. */
-function OpWallboardBody({ snapshot, scale = 1 }) {
+function OpWallboardBody({ snapshot, scale = 1, showGroup = false, selectedId = null, onOpenJournal = null }) {
     return (
         <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
@@ -173,7 +224,8 @@ function OpWallboardBody({ snapshot, scale = 1 }) {
                 <HourlyBars snapshot={snapshot} scale={scale} />
             </Section>
             <Section icon="fa-users" title="Сотрудники" right={<span className="text-[12px] text-slate-500">статусы — iCORE Phone, счётчики — касания за день</span>}>
-                <OperatorsTable snapshot={snapshot} scale={scale} />
+                <OperatorsTable snapshot={snapshot} scale={scale} showGroup={showGroup}
+                                selectedId={selectedId} onOpenJournal={onOpenJournal} />
             </Section>
         </div>
     );
@@ -194,6 +246,33 @@ export default function OpWallboardView({
 }) {
     const { snapshot, error, loading, refresh } = useOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
+    const [groupKey, setGroupKey] = useState(readStoredGroup);
+    const [journalOperatorId, setJournalOperatorId] = useState(null);
+
+    const chooseGroup = useCallback((value) => {
+        setGroupKey(value);
+        try {
+            window.localStorage.setItem(GROUP_STORAGE_KEY, value);
+        } catch (storageError) {
+            // Приватное окно или запрет хранилища: фильтр работает, просто не запомнится.
+        }
+    }, []);
+
+    // Группа, которой больше нет в снимке, читается как «Все» — без эффекта и без мигания.
+    const group = useMemo(() => opSelectedGroup(snapshot, groupKey), [groupKey, snapshot]);
+    const view = useMemo(() => opGroupView(snapshot, group), [group, snapshot]);
+    const groupOptions = useMemo(() => opGroupOptions(snapshot), [snapshot]);
+    const showGroupColumn = !group && groupOptions.length > 1;
+
+    // Строку журнала берём из полного снимка, а не из отфильтрованного: смена группы на экране
+    // не закрывает журнал человека, которого сейчас смотрят.
+    const journalRow = useMemo(
+        () => (snapshot?.operators || []).find((row) => row.id != null && row.id === journalOperatorId) || null,
+        [journalOperatorId, snapshot],
+    );
+    const journalRefreshKey = journalRow ? `${snapshot?.day}|${journalRow.status_key}|${journalRow.status_at}` : '';
+    const openJournal = useCallback((row) => setJournalOperatorId(row.id), []);
+    const closeJournal = useCallback(() => setJournalOperatorId(null), []);
 
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, SOURCE_LABEL), [error, snapshot]);
     const freshness = useMemo(() => opFreshnessNotice(snapshot), [snapshot]);
@@ -201,6 +280,15 @@ export default function OpWallboardView({
     // Прочерк в SL и ожидании без объяснения читался бы как поломка табло: причина — в данных
     // станции, и сказать об этом надо один раз, серым, рядом с заголовком.
     const dataGap = useMemo(() => opDataGapNotice(snapshot), [snapshot]);
+
+    const groupSwitch = groupOptions.length > 1 ? (
+        <IosSegmented
+            value={group ? String(group.id) : OP_GROUP_ALL}
+            options={groupOptions}
+            onChange={chooseGroup}
+            ariaLabel="Группа"
+        />
+    ) : null;
 
     const header = (
         <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
@@ -249,6 +337,7 @@ export default function OpWallboardView({
                     На стену
                 </button>
             </div>
+            {groupSwitch ? <div className="basis-full">{groupSwitch}</div> : null}
         </div>
     );
 
@@ -266,21 +355,34 @@ export default function OpWallboardView({
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
-            <OpWallboardBody snapshot={snapshot} scale={1} />
+            <OpWallboardBody snapshot={view} scale={1} showGroup={showGroupColumn}
+                             selectedId={journalRow?.id ?? null} onOpenJournal={openJournal} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
                     open
                     wide
                     z={FULLSCREEN_Z}
                     icon="fa-tachometer-alt"
-                    title="Табло ОП"
+                    title={group ? `Табло ОП · ${group.label}` : 'Табло ОП'}
                     subtitle={`${clockLabel(snapshot) ? `${clockLabel(snapshot)} · ` : ''}Esc чтобы выйти`}
+                    actions={groupSwitch}
+                    // Esc при открытом журнале закрывает журнал, а не всю стену разом.
+                    closeOnEscape={!journalRow}
                     onClose={() => setFullscreen(false)}
                 >
-                    <OpWallboardBody snapshot={snapshot} scale={1.5} />
+                    <OpWallboardBody snapshot={view} scale={1.5} showGroup={showGroupColumn}
+                                     selectedId={journalRow?.id ?? null} onOpenJournal={openJournal} />
                 </FullscreenSheet>,
                 document.body,
             ) : null}
+            <OpStatusJournalPanel
+                operator={journalRow}
+                refreshKey={journalRefreshKey}
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                onClose={closeJournal}
+                z={fullscreen ? FULLSCREEN_Z + 10 : JOURNAL_Z}
+            />
         </div>
     );
 }

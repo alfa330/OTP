@@ -288,3 +288,6 @@ export const OP_WALLBOARD_DIRECTIONS = {
 };
 
 export const opWallboardDirection = (key) => OP_WALLBOARD_DIRECTIONS[key] || OP_WALLBOARD_DIRECTIONS.op;
+
+// Журнал статусов сотрудника (ТЗ #339): боковая панель, OpStatusJournal.jsx.
+export const OP_JOURNAL_PATH = '/api/op_wallboard/journal';

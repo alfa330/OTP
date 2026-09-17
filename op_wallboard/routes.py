@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """HTTP «Табло ОП»: один снимок для всех зрителей.
 
-    GET /api/op_wallboard/snapshot   снимок дня: итоги, часы, люди
+    GET /api/op_wallboard/snapshot   снимок дня: итоги, часы, люди, разрезы по группам
+    GET /api/op_wallboard/journal    журнал статусов одного сотрудника за сутки (?operator_id=)
 
 Доступ — как у табло Тез КЦ и СЗоВ: глобальные админы, глава отдела продаж и его
 супервайзеры. Граница отдела строгая. Зависимости приходят аргументами фабрики:
@@ -30,13 +31,17 @@ _DEPARTMENT_CACHE_TTL = 600  # отделы меняются раз в нико�
 _ALMATY = ZoneInfo('Asia/Almaty')
 
 
-def load_phone_events(cursor, operator_ids, day):
+def load_phone_events(cursor, operator_ids, day, lookback_hours=0):
     """События телефонов операторов за сутки табло: {operator_id, event_at, status_key}.
 
     Только живые события iCORE Phone (`client_event_id IS NOT NULL`) — в той же таблице
     лежат сегменты ночных импортов, а они не про секунду ответа. Окно с запасом на
     рассинхрон часов до полуночи и на звонок, начатый в 23:59 и закончившийся после.
-    Индекс (operator_id, event_at) есть; за сутки ОП это единицы тысяч строк."""
+    Индекс (operator_id, event_at) есть; за сутки ОП это единицы тысяч строк.
+
+    `lookback_hours` раздвигает окно назад: снимку нужен вечер прошлых суток, чтобы вход
+    ночной смены лёг на её начало, а не на полночь (`snapshot.entry_moment`). Сопоставлению
+    ответов лишние вечерние события не мешают — касания у него только из этих суток."""
     ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
     if not ids:
         return []
@@ -48,9 +53,65 @@ def load_phone_events(cursor, operator_ids, day):
            AND client_event_id IS NOT NULL
            AND event_at >= %s AND event_at < %s
          ORDER BY event_at, id
-    """, (ids, day_start - timedelta(minutes=1), day_start + timedelta(hours=25)))
+    """, (ids, day_start - timedelta(minutes=1, hours=lookback_hours),
+          day_start + timedelta(hours=25)))
     return [{'operator_id': row[0], 'event_at': row[1], 'status_key': row[2]}
             for row in cursor.fetchall()]
+
+
+def load_journal_events(cursor, operator_id, day, lookback_hours=snapshot_mod.ENTRY_LOOKBACK_HOURS):
+    """События телефона одного сотрудника для журнала: [(время, ключ)] с вечера прошлых суток.
+
+    То же окно и тот же фильтр, что у снимка, — иначе вход в журнале и в столбце разошёлся бы."""
+    day_start = datetime.combine(day, datetime.min.time())
+    cursor.execute("""
+        SELECT event_at, status_key
+          FROM operator_status_events
+         WHERE operator_id = %s
+           AND client_event_id IS NOT NULL
+           AND event_at >= %s AND event_at < %s
+         ORDER BY event_at, id
+    """, (int(operator_id), day_start - timedelta(minutes=1, hours=lookback_hours),
+          day_start + timedelta(hours=25)))
+    return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def load_group_memberships(cursor, operator_ids, day):
+    """{operator_id: {group_id, group_name, model}} — группа сотрудника на сутки табло.
+
+    Та же выборка членства, что у состава Тез КЦ (`get_tez_wallboard_operators`): действующее на
+    дату, при пересечении — с самым поздним началом. Индекс (operator_id, start_date) есть."""
+    ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT DISTINCT ON (m.operator_id)
+               m.operator_id, g.id, g.name, LOWER(COALESCE(g.calculation_model_code, ''))
+          FROM group_operator_memberships m
+          JOIN groups g ON g.id = m.group_id
+         WHERE m.operator_id = ANY(%s)
+           AND m.start_date <= %s
+           AND (m.end_date IS NULL OR m.end_date >= %s)
+         ORDER BY m.operator_id, m.start_date DESC, m.id DESC
+    """, (ids, day, day))
+    return {int(row[0]): {'group_id': int(row[1]), 'group_name': row[2] or '', 'model': row[3] or ''}
+            for row in cursor.fetchall()}
+
+
+def load_queue_answers(cursor, day, days=snapshot_mod.QUEUE_OWNER_LOOKBACK_DAYS):
+    """Тройки (очередь, внутренний номер, принятых) за неделю — сырьё для
+    `snapshot.queue_owner_groups`. Тот же проход по call_day, что у длин автоинформаторов."""
+    cursor.execute("""
+        SELECT queue, ext, count(*)
+          FROM cdr_touches
+         WHERE call_day BETWEEN %s AND %s
+           AND call_type = %s
+           AND talk_seconds > 0
+           AND queue <> ''
+           AND ext <> ''
+         GROUP BY 1, 2
+    """, (day - timedelta(days=days), day, snapshot_mod.touches_mod.TYPE_IN))
+    return [(row[0], row[1], int(row[2])) for row in cursor.fetchall()]
 
 
 ANNOUNCEMENT_LOOKBACK_DAYS = 7
@@ -165,20 +226,25 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         announce_cache.update(ts=now_ts, day=day, value=value)
         return value
 
-    def _measured_touches(cursor, day, people, announce_seconds):
-        """Касания суток с входом в очередь и моментом ответа — общее для снимка и для
-        итогов прошлых суток, чтобы отбивка в полночь считала ровно так же, как экран."""
+    def _phone_events(cursor, people, day, lookback_hours=0):
         operator_ids = [p['id'] for p in people if p.get('id') is not None]
+        try:
+            return load_phone_events(cursor, operator_ids, day, lookback_hours=lookback_hours)
+        except Exception:  # noqa: BLE001
+            # Без событий телефонов теряются только SL, ожидание, точный разговор и время
+            # входа — снимок отдаёт их прочерком, а не уносит с собой всё табло.
+            log.exception('%s: события iCORE Phone не прочитались', label)
+            return []
+
+    def _measured_touches(cursor, day, people, announce_seconds, phone_events=None):
+        """Касания суток с входом в очередь и моментом ответа — общее для снимка и для
+        итогов прошлых суток, чтобы отбивка в полночь считала ровно так же, как экран.
+        События телефонов снимок читает сам (ему нужно окно шире) и передаёт сюда."""
         ext_by_operator = {p['id']: str(p['sip_number']) for p in people
                            if p.get('id') is not None and p.get('sip_number')}
         touches = queries.day_touches_compact(cursor, day)
-        try:
-            phone_events = load_phone_events(cursor, operator_ids, day)
-        except Exception:  # noqa: BLE001
-            # Без событий телефонов теряются только SL, ожидание и точный разговор —
-            # снимок отдаёт их прочерком, а не уносит с собой всё табло.
-            log.exception('%s: события iCORE Phone не прочитались', label)
-            phone_events = []
+        if phone_events is None:
+            phone_events = _phone_events(cursor, people, day)
         touches = snapshot_mod.attach_queue_entry(touches, announce_seconds)
         return snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
                                                   _is_talking)
@@ -202,16 +268,49 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         parts = snapshot_mod.aggregate(touches, sl_seconds)
         return {'day': day.isoformat(), 'totals': parts['totals'], 'hourly': parts['hourly']}
 
+    # Кто какую очередь принимает — тоже свойство недели, а не десяти секунд: сырьё раз в час.
+    # Хозяин очереди считается на каждый снимок заново — он зависит от состава групп.
+    queue_answers_cache = {'ts': 0.0, 'day': None, 'value': []}
+
+    def _queue_answers(cursor, day, now_ts):
+        if queue_answers_cache['day'] == day and now_ts - queue_answers_cache['ts'] < 3600:
+            return queue_answers_cache['value']
+        try:
+            value = load_queue_answers(cursor, day)
+        except Exception:  # noqa: BLE001
+            # Без хозяев очередей брошенные до звонка человеку видны только в «Все» —
+            # остальное в разрезах по группам верно.
+            log.exception('%s: очереди групп не посчитались', label)
+            value = queue_answers_cache['value'] or []
+        queue_answers_cache.update(ts=now_ts, day=day, value=value)
+        return value
+
+    def _memberships(cursor, people, day):
+        try:
+            return load_group_memberships(cursor, [p.get('id') for p in people], day)
+        except Exception:  # noqa: BLE001
+            # Без групп табло остаётся табло отдела: фильтр просто не появляется.
+            log.exception('%s: группы сотрудников не прочитались', label)
+            return {}
+
     def _fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
         dept = department_id()
         people = load_people(dept, day) if dept is not None else []
-        operator_ids = [p['id'] for p in people if p.get('id') is not None]
         with db._get_cursor() as cursor:
+            memberships = _memberships(cursor, people, day)
+            people = snapshot_mod.on_board(people, memberships)
             bridge_state = queries.agent_state(cursor)
             announce_seconds = _announcement_seconds(cursor, day, time.time())
-            touches = _measured_touches(cursor, day, people, announce_seconds)
+            catalog = snapshot_mod.group_catalog(memberships)
+            queue_owners = snapshot_mod.queue_owner_groups(
+                _queue_answers(cursor, day, time.time()) if catalog else [],
+                snapshot_mod.group_ext_map(people, memberships, catalog))
+            phone_events = _phone_events(cursor, people, day,
+                                         lookback_hours=snapshot_mod.ENTRY_LOOKBACK_HOURS)
+            touches = _measured_touches(cursor, day, people, announce_seconds, phone_events)
+        operator_ids = [p['id'] for p in people if p.get('id') is not None]
         try:
             statuses = live_statuses(operator_ids)
         except Exception:  # noqa: BLE001
@@ -224,7 +323,8 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             status_entry=status_entry, resolve_name=_resolve_name(),
             bridge_state=bridge_state, now=now, sl_seconds=sl_seconds,
             ar_min_percent=ar_min_percent, ar_max_percent=ar_max_percent,
-            announce_seconds=announce_seconds)
+            announce_seconds=announce_seconds, memberships=memberships,
+            queue_owners=queue_owners, phone_events=phone_events)
 
     def _snapshot():
         """Снимок из общего кэша — один на всех зрителей и на отбивку. Бросает, если
@@ -258,5 +358,49 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             log.warning('%s: снимок недоступен: %s', label, exc)
             return jsonify({"error": str(exc)[:200]}), 503
         return jsonify(payload)
+
+    @bp.route('/journal', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    def api_journal():
+        """Журнал статусов сотрудника за сутки: отрезки «статус, начало, конец, длительность».
+
+        Без кэша: запрос точечный (один человек, индекс по operator_id и времени), а панель
+        перечитывает журнал только когда в снимке у человека сменился статус. Открыть можно лишь
+        того, кто стоит на табло, — граница отдела та же, что у снимка, и чужие события телефона
+        через эту ручку не читаются."""
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        _, refusal = guard()
+        if refusal is not None:
+            return refusal
+        try:
+            operator_id = int(str(request.args.get('operator_id') or '').strip())
+        except ValueError:
+            return jsonify({"error": "Не указан сотрудник"}), 400
+        try:
+            payload = _snapshot()
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": str(exc)[:200]}), 503
+        row = next((item for item in payload.get('operators') or []
+                    if item.get('id') == operator_id), None)
+        if row is None:
+            return jsonify({"error": "Сотрудника нет на табло"}), 404
+        now = datetime.now(_ALMATY).replace(tzinfo=None)
+        day = now.date()
+        try:
+            with db._get_cursor() as cursor:
+                events = load_journal_events(cursor, operator_id, day)
+        except Exception:  # noqa: BLE001
+            log.exception('%s: журнал статусов %s не прочитался', label, operator_id)
+            return jsonify({"error": "Журнал статусов сейчас недоступен"}), 503
+        entry, segments = snapshot_mod.status_journal(events, day, now, status_entry)
+        return jsonify({
+            'operator_id': operator_id,
+            'name': row.get('name') or '',
+            'day': day.isoformat(),
+            'captured_at': now.strftime('%Y-%m-%dT%H:%M:%S'),
+            'entry_at': entry.strftime('%Y-%m-%dT%H:%M:%S') if entry else None,
+            'segments': segments,
+        })
 
     return bp

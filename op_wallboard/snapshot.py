@@ -463,12 +463,20 @@ def count_now(people_rows):
 def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
              bridge_state, now, sl_seconds=DEFAULT_SL_SECONDS,
              ar_min_percent=DEFAULT_AR_MIN_PERCENT, ar_max_percent=DEFAULT_AR_MAX_PERCENT,
-             announce_seconds=None):
+             announce_seconds=None, memberships=None, queue_owners=None, phone_events=None):
     """Снимок целиком. `bridge_state` — строка `cdr_agent_state` (live_at, last_seen_at);
     `announce_seconds` — {очередь: длина автоинформатора}, по которой касаниям уже поставлен
-    `queued_at` (отдаётся в снимке для прозрачности: видно, от чего отсчитано ожидание)."""
+    `queued_at` (отдаётся в снимке для прозрачности: видно, от чего отсчитано ожидание).
+
+    `memberships` — {operator_id: группа} (`group_catalog`), `queue_owners` — {очередь: id группы}
+    (`queue_owner_groups`), `phone_events` — события телефонов с вечера прошлых суток: из них
+    разрезы по группам и время входа (ТЗ #339). Без них снимок прежний."""
     parts = aggregate(touches, sl_seconds)
     rows = build_people(people, live_statuses, status_entry, parts['by_ext'], resolve_name)
+    catalog = group_catalog(memberships)
+    attach_groups(rows, memberships, catalog)
+    attach_entry_times(rows, phone_events, day, status_entry)
+    groups = group_breakdown(touches, rows, people, memberships, catalog, queue_owners, sl_seconds)
     live_at = _parse(bridge_state.get('live_at')) if bridge_state else None
     live_age = int((now - live_at).total_seconds()) if live_at else None
     return {
@@ -482,6 +490,7 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
         'hourly': parts['hourly'],
         'now': count_now(rows),
         'operators': rows,
+        'groups': groups,
         'bridge': {
             'connected': bool(bridge_state and bridge_state.get('connected')),
             'last_seen_at': _local_stamp((bridge_state or {}).get('last_seen_at')),
@@ -489,3 +498,255 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
             'live_age_seconds': live_age,
         },
     }
+
+
+# ── Группы, время входа и журнал статусов (ТЗ #339) ──────────────────────────────────────────
+#
+# Фильтр «Все / Основа / ЯР / Поток 1 / Поток 2» пересчитывает всё табло: плитки «сейчас», итоги
+# дня, часы и список людей. Разрезы считаются здесь же, в том же снимке, а не отдельным запросом
+# на группу: снимок один на всех зрителей и кэшируется, переключение на экране мгновенное, а
+# отбивка и виджет по-прежнему читают итоги отдела целиком.
+
+# Подпись группы — по модели расчёта, а не по имени группы: в имени стоит ФИО супервайзера
+# («Ешан Алмас группа Основа»), и оно меняется вместе с людьми. «Яндекс Регистрация» — «ЯР», как
+# в ТЗ: полное имя на кнопке фильтра не встаёт в ряд с остальными.
+GROUP_MODEL_LABELS = {'op_osnova': 'Основа', 'op_yandex_reg': 'ЯР', 'op_potok': 'Поток'}
+GROUP_MODEL_ORDER = ('op_osnova', 'op_yandex_reg', 'op_potok')
+# Верификаторы работают в чатах Wazzup, на линии их нет: за 14 дней до 17.09.2026 у всех
+# четырнадцати ни звонка, ни события телефона. На телефонном табло они были четырнадцатью
+# строками «Нет событий», а в фильтре ТЗ их нет.
+OFF_BOARD_GROUP_MODELS = ('op_verificator',)
+
+_GROUP_HOURLY_FIELDS = ('hour', 'arrived', 'answered', 'missed', 'outgoing')
+
+
+def _membership(memberships, operator_id):
+    return (memberships or {}).get(operator_id) or {}
+
+
+def on_board(people, memberships):
+    """Состав табло без групп, которых на линии нет (верификаторы)."""
+    return [person for person in people or []
+            if _membership(memberships, person.get('id')).get('model') not in OFF_BOARD_GROUP_MODELS]
+
+
+def group_catalog(memberships):
+    """Группы табло в порядке показа: [{id, label}].
+
+    У двух групп одной модели — номер по возрастанию id: «Поток 1» — группа 14, «Поток 2» — 38,
+    так же их зовёт «Воронка ОП». Незнакомая модель подписывается именем группы и встаёт в конец."""
+    groups = {}
+    for item in (memberships or {}).values():
+        if item.get('group_id') is None or item.get('model') in OFF_BOARD_GROUP_MODELS:
+            continue
+        groups[int(item['group_id'])] = item
+    by_base = defaultdict(list)
+    for group_id, item in groups.items():
+        base = (GROUP_MODEL_LABELS.get(item.get('model'))
+                or str(item.get('group_name') or '').strip() or 'Группа %d' % group_id)
+        by_base[base].append(group_id)
+    order = {model: index for index, model in enumerate(GROUP_MODEL_ORDER)}
+    out = []
+    for base, ids in by_base.items():
+        ids.sort()
+        for number, group_id in enumerate(ids, 1):
+            out.append({'id': group_id, 'label': base if len(ids) == 1 else '%s %d' % (base, number),
+                        '_order': (order.get(groups[group_id].get('model'), len(order)), base, group_id)})
+    out.sort(key=lambda group: group['_order'])
+    return [{'id': group['id'], 'label': group['label']} for group in out]
+
+
+def attach_groups(rows, memberships, catalog):
+    """Группа строке списка: id и подпись. Вне каталога (нет группы, «Нет в составе») — пусто."""
+    labels = {group['id']: group['label'] for group in catalog}
+    for row in rows:
+        group_id = _membership(memberships, row.get('id')).get('group_id')
+        row['group_id'] = group_id if group_id in labels else None
+        row['group_label'] = labels.get(group_id, '')
+
+
+def group_ext_map(people, memberships, catalog):
+    """{внутренний номер: id группы} по составу табло."""
+    known = {group['id'] for group in catalog}
+    out = {}
+    for person in people or []:
+        ext = str(person.get('sip_number') or '')
+        group_id = _membership(memberships, person.get('id')).get('group_id')
+        if ext and group_id in known:
+            out[ext] = group_id
+    return out
+
+
+QUEUE_OWNER_LOOKBACK_DAYS = 7
+
+
+def queue_owner_groups(rows, ext_group):
+    """{очередь: id группы} из троек (очередь, внутренний номер, принятых) за неделю.
+
+    Нужна звонкам без внутреннего номера — брошенным в очереди раньше, чем станция позвала
+    кого-то из людей. Сотрудника у такого звонка нет, и к группе его можно отнести только через
+    очередь. Очередь принадлежит группе, которая приняла в ней БОЛЬШЕ ПОЛОВИНЫ звонков, принятых
+    людьми из состава; иначе очередь ничья, и её потери видны только в «Все». На 17.09.2026 все
+    очереди ОП принимала одна «Основа»: ЯР и оба потока работают исходящими."""
+    counts = defaultdict(lambda: defaultdict(int))
+    for queue, ext, count in rows or []:
+        group_id = (ext_group or {}).get(str(ext or ''))
+        key = _touch_queue(queue)
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            continue
+        if group_id is None or not key or count <= 0:
+            continue
+        counts[key][group_id] += count
+    owners = {}
+    for queue, by_group in counts.items():
+        group_id, best = max(by_group.items(), key=lambda item: (item[1], -item[0]))
+        if best * 2 > sum(by_group.values()):
+            owners[queue] = group_id
+    return owners
+
+
+def touch_group(touch, ext_group, queue_owners):
+    """Группа касания: по внутреннему номеру, а без номера — входящий по хозяину очереди.
+
+    Номер есть, но в составе табло не найден — касание ничьё: сотрудника в списке группы нет,
+    и его звонки в её итогах читались бы как чужие."""
+    ext = str(touch.get('ext') or '')
+    if ext:
+        return (ext_group or {}).get(ext)
+    if touch.get('call_type') in _INCOMING_TYPES:
+        return (queue_owners or {}).get(_touch_queue(touch.get('queue')))
+    return None
+
+
+def group_breakdown(touches, rows, people, memberships, catalog, queue_owners,
+                    sl_seconds=DEFAULT_SL_SECONDS):
+    """Разрезы по группам: [{id, label, totals, hourly, now}] — те же правила, что у отдела.
+
+    Час отдаётся только полями графика: полный набор показателей на каждую группу и каждый час
+    раздувал бы снимок, который опрашивается раз в десять секунд."""
+    if not catalog:
+        return []
+    ext_group = group_ext_map(people, memberships, catalog)
+    split = {group['id']: [] for group in catalog}
+    for touch in touches:
+        group_id = touch_group(touch, ext_group, queue_owners)
+        if group_id in split:
+            split[group_id].append(touch)
+    out = []
+    for group in catalog:
+        parts = aggregate(split[group['id']], sl_seconds)
+        out.append({
+            'id': group['id'],
+            'label': group['label'],
+            'totals': parts['totals'],
+            'hourly': [{key: bucket[key] for key in _GROUP_HOURLY_FIELDS} for bucket in parts['hourly']],
+            'now': count_now([row for row in rows if row.get('group_id') == group['id']]),
+        })
+    return out
+
+
+# Время входа — начало рабочего блока: события телефона подряд без паузы от SESSION_GAP_HOURS. Не «первое
+# событие суток»: ночная смена переходит через полночь (Кенжебай 17.09.2026: 19:53 → 08:00), и первое
+# событие после 00:00 назвало бы входом середину смены. Смена принадлежит дню своего начала — общее
+# правило проекта, — поэтому вход берётся из блока, начатого сегодня, а вчерашний (с пометкой «вчера»
+# на экране) — только если сегодняшнего нет: вечерняя смена, кончившаяся в 00:02, не подменяет собой
+# утренний вход в 08:28 (Артаев, тот же день).
+#
+# «Выключен» блок НЕ разрывает: телефон переподключается выходом и входом за пять секунд (тот же
+# Кенжебай в 07:01), и вход ночника уехал бы на 07:01. Обед с выходом из аккаунта входа тоже не
+# меняет. Четыре часа — по живым данным ОП и Тез КЦ за 10–17.09.2026: паузы внутри работы длиной
+# 1–3 ч встречались 112 раз, 3–4 ч — 2, а от 4 ч — это уже промежуток между сменами. Окно назад —
+# те же 16 часов, что у живого статуса.
+ENTRY_LOOKBACK_HOURS = 16
+SESSION_GAP_HOURS = 4
+
+
+def events_by_operator(phone_events):
+    """{operator_id: [(время, ключ статуса)]} по возрастанию времени; порядок базы при равном времени
+    сохраняется — сортировка устойчивая."""
+    out = defaultdict(list)
+    for event in phone_events or []:
+        at = _parse(event.get('event_at'))
+        if at is None or event.get('operator_id') is None:
+            continue
+        out[event['operator_id']].append((at, event.get('status_key')))
+    for events in out.values():
+        events.sort(key=lambda item: item[0])
+    return out
+
+
+def _is_offline(status_entry, key):
+    return status_entry(key)[1] == 'offline'
+
+
+def work_blocks(events, gap_hours=SESSION_GAP_HOURS):
+    """Рабочие блоки из событий одного телефона: новый блок — после паузы от `gap_hours`."""
+    gap = timedelta(hours=gap_hours)
+    blocks = []
+    for at, key in events:
+        if not blocks or at - blocks[-1][-1][0] >= gap:
+            blocks.append([])
+        blocks[-1].append((at, key))
+    return blocks
+
+
+def entry_moment(events, day, status_entry, gap_hours=SESSION_GAP_HOURS):
+    """Время входа: начало первого блока, начатого в эти сутки, а без него — начало вчерашнего
+    блока, в котором человек был на связи уже после полуночи."""
+    day_start = datetime.combine(day, datetime.min.time())
+    carried = None
+    for block in work_blocks(events, gap_hours):
+        if not any(at >= day_start and not _is_offline(status_entry, key) for at, key in block):
+            continue
+        if block[0][0] >= day_start:
+            return block[0][0]
+        carried = carried or block[0][0]
+    return carried
+
+
+def _stamp(value):
+    return value.strftime('%Y-%m-%dT%H:%M:%S') if value else None
+
+
+def attach_entry_times(rows, phone_events, day, status_entry):
+    """`entry_at` строке списка. Нет событий телефона в эти сутки — None, на экране прочерк."""
+    by_operator = events_by_operator(phone_events)
+    for row in rows:
+        events = by_operator.get(row.get('id')) if row.get('id') is not None else None
+        row['entry_at'] = _stamp(entry_moment(events, day, status_entry)) if events else None
+
+
+def status_journal(events, day, now, status_entry, gap_hours=SESSION_GAP_HOURS):
+    """(вход, отрезки) — журнал статусов сотрудника за сутки табло.
+
+    Сутки календарные, как у всего табло. Если в полночь человек был на связи (ночная смена),
+    первый отрезок начинается в 00:00 со статусом, перешедшим через полночь, — иначе утро ночника
+    начиналось бы с середины разговора. Соседние события с одним статусом сливаются: телефон шлёт
+    повтор при переподключении, а человек статус не менял. Последний отрезок открыт — `end_at` None,
+    секунды до `now` (экран дальше досчитывает их сам)."""
+    events = list(events or [])
+    day_start = datetime.combine(day, datetime.min.time())
+    today = [(at, key) for at, key in events if at >= day_start]
+    before = [(at, key) for at, key in events if at < day_start]
+    sequence = today
+    if before and not _is_offline(status_entry, before[-1][1]):
+        next_at = today[0][0] if today else now
+        if next_at - before[-1][0] < timedelta(hours=gap_hours):
+            sequence = [(day_start, before[-1][1])] + today
+    segments = []
+    for at, key in sequence:
+        label, style_key, _weight = status_entry(key)
+        if segments and (segments[-1]['status_key'], segments[-1]['status_label']) == (style_key, label):
+            continue
+        if segments:
+            segments[-1]['end'] = at
+        segments.append({'status_key': style_key, 'status_label': label, 'start': at, 'end': None})
+    return entry_moment(events, day, status_entry, gap_hours), [{
+        'status_key': segment['status_key'],
+        'status_label': segment['status_label'],
+        'start_at': _stamp(segment['start']),
+        'end_at': _stamp(segment['end']),
+        'seconds': max(0, int(((segment['end'] or now) - segment['start']).total_seconds())),
+    } for segment in segments]

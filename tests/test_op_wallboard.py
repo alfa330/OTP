@@ -9,12 +9,14 @@
   * люди сортируются по разряду статуса, а не по времени — строки на стене не прыгают;
   * номер, звонивший сегодня, но не найденный в составе отдела, показывается честно;
   * «онлайн» = свободные + в разговоре; перерыв, тренинг, тех.причина — «на перерыве»;
-  * ручка: 403 чужому, снимок админу, 503 словами, когда данных нет вовсе.
+  * ручка: 403 чужому, снимок админу, 503 словами, когда данных нет вовсе;
+  * ТЗ #339: разрезы по группам в том же снимке и в сумме — отдел, время входа — начало смены
+    (ночник — вчерашним временем), журнал статусов — за календарные сутки, только тем, кто на табло.
 """
 
 import unittest
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -366,6 +368,158 @@ class PeopleTests(unittest.TestCase):
         self.assertEqual(snap['bridge']['last_seen_at'], '2026-09-16T01:19:00')
 
 
+class GroupTests(unittest.TestCase):
+    """ТЗ #339: фильтр «Все / Основа / ЯР / Поток 1 / Поток 2» пересчитывает всё табло."""
+
+    MEMBERSHIPS = {
+        1: {'group_id': 36, 'group_name': 'Ешан Алмас группа Основа', 'model': 'op_osnova'},
+        2: {'group_id': 15, 'group_name': 'Айтқалиев Айдын Беркінұлы группа ЯР', 'model': 'op_yandex_reg'},
+        3: {'group_id': 38, 'group_name': 'Айткалиев Айдын - Поток 2', 'model': 'op_potok'},
+        4: {'group_id': 14, 'group_name': 'Шыңғысбаева Ақерке Жасұланқызы группа', 'model': 'op_potok'},
+        5: {'group_id': 13, 'group_name': 'Адилет группа Верификатор', 'model': 'op_verificator'},
+    }
+    PEOPLE = [{'id': 1, 'name': 'Основин', 'sip_number': '6650'},
+              {'id': 2, 'name': 'Яров', 'sip_number': '6651'},
+              {'id': 3, 'name': 'Второй', 'sip_number': '6652'},
+              {'id': 4, 'name': 'Первый', 'sip_number': '6653'},
+              {'id': 5, 'name': 'Верификатор', 'sip_number': None}]
+
+    def _snapshot(self, touches, queue_owners=None):
+        return S.assemble(day=date(2026, 9, 15), touches=touches,
+                          people=S.on_board(self.PEOPLE, self.MEMBERSHIPS),
+                          live_statuses={1: {'status_key': 'готов', 'seconds': 5},
+                                         2: {'status_key': 'занят', 'seconds': 9}},
+                          status_entry=status_entry, resolve_name=None, bridge_state=None,
+                          now=datetime(2026, 9, 15, 12, 0), memberships=self.MEMBERSHIPS,
+                          queue_owners=queue_owners or {}, phone_events=[])
+
+    def test_label_follows_the_model_and_potoks_are_numbered_by_group_id(self):
+        """Имя группы содержит ФИО супервайзера — подпись берётся из модели, как в «Воронке ОП»."""
+        self.assertEqual([(g['id'], g['label']) for g in S.group_catalog(self.MEMBERSHIPS)],
+                         [(36, 'Основа'), (15, 'ЯР'), (14, 'Поток 1'), (38, 'Поток 2')])
+        single = {k: v for k, v in self.MEMBERSHIPS.items() if k != 3}
+        self.assertIn({'id': 14, 'label': 'Поток'}, S.group_catalog(single))
+        stranger = {9: {'group_id': 70, 'group_name': 'Стажёры', 'model': ''}}
+        self.assertEqual(S.group_catalog(stranger), [{'id': 70, 'label': 'Стажёры'}])
+
+    def test_verificators_are_not_on_the_phone_board(self):
+        """На линии верификаторов нет: ни звонков, ни событий телефона за две недели."""
+        self.assertEqual([p['id'] for p in S.on_board(self.PEOPLE, self.MEMBERSHIPS)], [1, 2, 3, 4])
+        self.assertEqual(len(S.on_board([{'id': 99, 'sip_number': '7000'}], self.MEMBERSHIPS)), 1)
+
+    def test_queue_belongs_to_the_group_that_answers_most_of_it(self):
+        ext_group = {'6650': 36, '6651': 15}
+        rows = [('3010', '6650', 30), ('3010', '6651', 2),     # Основа
+                ('3001,3002', '6650', 5),                      # через две очереди — первая по номеру
+                ('3020', '6650', 3), ('3020', '6651', 3),       # ничья — очередь ничья
+                ('3030', '6999', 10)]                          # чужой номер не голосует
+        self.assertEqual(S.queue_owner_groups(rows, ext_group), {'3010': 36, '3001': 36})
+
+    def test_groups_sum_to_the_department_and_queue_drops_go_to_the_queue_owner(self):
+        touches = [
+            touch(ext='6650', queue='3010'),                                        # Основа приняла
+            touch(call_type='Входящий (не приняли)', talk=0, ext='', queue='3010'),  # брошен в очереди
+            touch(call_type='Исходящий', talk=30, ext='6651', queue=''),             # ЯР
+            touch(call_type='Исходящий', talk=0, ext='6653', queue=''),              # Поток 1
+        ]
+        snap = self._snapshot(touches, queue_owners={'3010': 36})
+        groups = {g['label']: g for g in snap['groups']}
+        self.assertEqual(list(groups), ['Основа', 'ЯР', 'Поток 1', 'Поток 2'])
+        self.assertEqual((groups['Основа']['totals']['arrived'], groups['Основа']['totals']['missed']), (2, 1))
+        self.assertAlmostEqual(groups['Основа']['totals']['ar'], 0.5)
+        self.assertEqual(groups['ЯР']['totals']['outgoing'], 1)
+        self.assertEqual(groups['Поток 1']['totals']['outgoing'], 1)
+        for key in ('arrived', 'answered', 'missed', 'outgoing'):
+            self.assertEqual(sum(g['totals'][key] for g in groups.values()), snap['totals'][key], key)
+        self.assertEqual(groups['Основа']['now']['operators_online'], 1)
+        self.assertEqual(groups['ЯР']['now']['operators_talking'], 1)
+        self.assertEqual(set(groups['Основа']['hourly'][10]), {'hour', 'arrived', 'answered', 'missed', 'outgoing'})
+        self.assertEqual(groups['Основа']['hourly'][10]['arrived'], 2)
+        labels = {row['name']: row['group_label'] for row in snap['operators']}
+        self.assertEqual(labels['Первый'], 'Поток 1')
+        self.assertNotIn('Верификатор', labels)
+
+    def test_unowned_queue_and_foreign_number_stay_only_in_all(self):
+        touches = [touch(call_type='Входящий (не приняли)', talk=0, ext='', queue='3099'),
+                   touch(ext='6999', queue='3010')]
+        snap = self._snapshot(touches, queue_owners={'3010': 36})
+        self.assertEqual(snap['totals']['arrived'], 2)
+        self.assertEqual(sum(g['totals']['arrived'] for g in snap['groups']), 0)
+
+    def test_without_memberships_the_board_has_no_groups(self):
+        snap = S.assemble(day=date(2026, 9, 15), touches=[touch()], people=self.PEOPLE[:1],
+                          live_statuses={}, status_entry=status_entry, resolve_name=None,
+                          bridge_state=None, now=datetime(2026, 9, 15, 12, 0))
+        self.assertEqual(snap['groups'], [])
+        self.assertEqual((snap['operators'][0]['group_label'], snap['operators'][0]['entry_at']), ('', None))
+
+
+def at(text):
+    return datetime.strptime(text, '%Y-%m-%d %H:%M:%S')
+
+
+class EntryAndJournalTests(unittest.TestCase):
+    """Время входа — начало смены, журнал — календарные сутки. Случаи — с прода 17.09.2026."""
+
+    DAY = date(2026, 9, 17)
+
+    def entry(self, events):
+        return S.entry_moment([(at(t), k) for t, k in events], self.DAY, status_entry)
+
+    def test_entry_is_the_start_of_todays_block_not_a_later_relogin(self):
+        events = [('2026-09-17 08:57:55', 'перезвон'), ('2026-09-17 08:59:56', 'готов'),
+                  ('2026-09-17 13:00:00', 'выключен'), ('2026-09-17 14:00:00', 'готов')]
+        self.assertEqual(self.entry(events), at('2026-09-17 08:57:55'))
+
+    def test_night_shift_keeps_its_start_yesterday_through_a_reconnect(self):
+        """Кенжебай: 19:53 → 08:00, в 07:01 телефон вышел и вошёл за пять секунд."""
+        events = [('2026-09-16 19:53:44', 'перезвон'), ('2026-09-16 21:36:53', 'перерыв'),
+                  ('2026-09-16 23:55:54', 'перерыв'),
+                  ('2026-09-17 00:02:36', 'готов'), ('2026-09-17 03:48:37', 'готов'),
+                  ('2026-09-17 06:08:57', 'занят'), ('2026-09-17 07:01:44', 'выключен'),
+                  ('2026-09-17 07:01:49', 'перезвон'), ('2026-09-17 08:00:03', 'выключен')]
+        self.assertEqual(self.entry(events), at('2026-09-16 19:53:44'))
+
+    def test_evening_shift_past_midnight_does_not_replace_the_morning_entry(self):
+        """Артаев: смена до 00:02, утром вход в 08:28 — входом сегодня считается утро."""
+        evening = [('2026-09-16 17:44:43', 'перезвон'), ('2026-09-16 20:30:00', 'занят'),
+                   ('2026-09-16 23:59:58', 'готов'),
+                   ('2026-09-17 00:00:14', 'занят'), ('2026-09-17 00:02:15', 'выключен')]
+        self.assertEqual(self.entry(evening + [('2026-09-17 08:28:08', 'занят')]), at('2026-09-17 08:28:08'))
+        self.assertEqual(self.entry(evening), at('2026-09-16 17:44:43'))
+
+    def test_phone_silent_since_yesterday_has_no_entry(self):
+        self.assertIsNone(self.entry([('2026-09-16 20:48:05', 'готов')]))
+        self.assertIsNone(self.entry([('2026-09-17 09:00:00', 'выключен')]))
+        self.assertIsNone(self.entry([]))
+
+    def test_entry_is_attached_to_rows(self):
+        rows = [{'id': 1}, {'id': 2}, {'id': None}]
+        S.attach_entry_times(rows, [event(1, '2026-09-17 08:00:00', 'готов')], self.DAY, status_entry)
+        self.assertEqual([r['entry_at'] for r in rows], ['2026-09-17T08:00:00', None, None])
+
+    def test_journal_starts_at_midnight_with_the_carried_status_and_merges_repeats(self):
+        events = [(at(t), k) for t, k in (
+            ('2026-09-16 19:53:44', 'перезвон'), ('2026-09-16 21:36:53', 'готов'),
+            ('2026-09-16 23:55:54', 'перерыв'), ('2026-09-17 00:02:36', 'готов'), ('2026-09-17 00:05:00', 'готов'),
+            ('2026-09-17 00:11:03', 'занят'))]
+        entry, segments = S.status_journal(events, self.DAY, at('2026-09-17 00:12:03'), status_entry)
+        self.assertEqual(entry, at('2026-09-16 19:53:44'))
+        self.assertEqual([(s['status_label'], s['start_at'], s['end_at'], s['seconds']) for s in segments], [
+            ('Перерыв', '2026-09-17T00:00:00', '2026-09-17T00:02:36', 156),
+            ('Активный', '2026-09-17T00:02:36', '2026-09-17T00:11:03', 507),
+            ('В разговоре', '2026-09-17T00:11:03', None, 60),
+        ])
+
+    def test_journal_after_logout_or_long_silence_starts_with_today(self):
+        now = at('2026-09-17 10:00:00')
+        logout = [(at('2026-09-16 23:00:00'), 'выключен'), (at('2026-09-17 09:00:00'), 'готов')]
+        self.assertEqual(S.status_journal(logout, self.DAY, now, status_entry)[1][0]['start_at'],
+                         '2026-09-17T09:00:00')
+        stale = [(at('2026-09-16 20:48:05'), 'готов')]
+        self.assertEqual(S.status_journal(stale, self.DAY, now, status_entry), (None, []))
+
+
 # ── ручка ─────────────────────────────────────────────────────────────────────
 
 class _FakeDb:
@@ -419,10 +573,17 @@ class RouteTests(unittest.TestCase):
             patcher = mock.patch.object(op_routes.queries, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = mock.patch.object(op_routes, 'load_phone_events',
-                                    lambda cursor, ids, day: list(self.phone_events))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.memberships = {}
+        self.queue_answers = []
+        self.journal_events = []
+        for name, value in (
+                ('load_phone_events', lambda cursor, ids, day, lookback_hours=0: list(self.phone_events)),
+                ('load_group_memberships', lambda cursor, ids, day: dict(self.memberships)),
+                ('load_queue_answers', lambda cursor, day, days=7: list(self.queue_answers)),
+                ('load_journal_events', lambda cursor, operator_id, day: list(self.journal_events))):
+            patcher = mock.patch.object(op_routes, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.announcement_deltas = []
         patcher = mock.patch.object(op_routes, 'load_announcement_deltas',
                                     lambda cursor, day, days=7: list(self.announcement_deltas))
@@ -524,6 +685,40 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(body['announcement_seconds'], {'3034': 10})
         self.assertEqual(body['totals']['avg_wait_seconds'], 5)   # 15 с от прихода − 10 с сообщения
 
+    def test_snapshot_carries_groups_and_entry_time(self):
+        """ТЗ #339: разрез группы и время входа приезжают в том же снимке, что и итоги отдела."""
+        self.requester['role'] = 'admin'
+        today = datetime.now(timezone(timedelta(hours=5))).date()
+        self.memberships = {1: {'group_id': 36, 'group_name': 'Ешан Алмас группа Основа',
+                                'model': 'op_osnova'}}
+        self.phone_events = [event(1, datetime.combine(today, time(0, 0, 1)), 'готов')]
+        body = self.client.get('/api/op_wallboard/snapshot').get_json()
+        self.assertEqual([(g['id'], g['label']) for g in body['groups']], [(36, 'Основа')])
+        self.assertEqual(body['groups'][0]['totals']['arrived'], body['totals']['arrived'])
+        row = body['operators'][0]
+        self.assertEqual((row['group_id'], row['group_label']), (36, 'Основа'))
+        self.assertEqual(row['entry_at'], '%sT00:00:01' % today.isoformat())
+
+    def test_journal_is_open_only_for_people_on_the_board(self):
+        self.assertEqual(self.client.get('/api/op_wallboard/journal?operator_id=1').status_code, 403)
+        self.requester['role'] = 'admin'
+        self.assertEqual(self.client.get('/api/op_wallboard/journal?operator_id=x').status_code, 400)
+        self.assertEqual(self.client.get('/api/op_wallboard/journal?operator_id=2').status_code, 404)
+
+    def test_journal_returns_segments_of_the_day(self):
+        self.requester['role'] = 'admin'
+        today = datetime.now(timezone(timedelta(hours=5))).date()
+        self.journal_events = [(datetime.combine(today, time(0, 0, 1)), 'готов'),
+                               (datetime.combine(today, time(0, 0, 5)), 'занят')]
+        response = self.client.get('/api/op_wallboard/journal?operator_id=1')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertEqual(body['name'], 'Иванов')
+        self.assertEqual(body['entry_at'], '%sT00:00:01' % today.isoformat())
+        self.assertEqual([(s['status_label'], s['seconds']) for s in body['segments']][:1],
+                         [('Активный', 4)])
+        self.assertIsNone(body['segments'][-1]['end_at'])
+
     def test_no_data_at_all_is_a_503_in_words(self):
         self.requester['role'] = 'admin'
         self.fail_fetch = True
@@ -598,6 +793,33 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn('title={metric.hint || metric.label}', self.widget)
         self.assertIn('config.freshnessNotice(snapshot)', self.widget)
         self.assertIn('config.clockLabel', self.widget)
+
+    def test_group_filter_recounts_the_whole_board_from_the_same_snapshot(self):
+        """ТЗ #339: плитки, график и список читают снимок группы; своего запроса у фильтра нет."""
+        self.assertIn('const view = useMemo(() => opGroupView(snapshot, group), [group, snapshot]);', self.view)
+        self.assertIn('<IosSegmented', self.view)
+        self.assertEqual(self.view.count('<OpWallboardBody snapshot={view}'), 2)   # страница и стена
+        groups = (MONITORING / 'opWallboardGroups.js').read_text(encoding='utf-8-sig')
+        self.assertIn("{ value: OP_GROUP_ALL, label: 'Все' }", groups)
+        self.assertIn('operators: (snapshot.operators || []).filter((row) => row.group_id === group.id)', groups)
+
+    def test_table_has_entry_time_and_group_column_only_in_all(self):
+        self.assertIn('<th className="px-3 py-2">Время входа</th>', self.view)
+        self.assertIn('{showGroup ? <th className="px-3 py-2">Группа</th> : null}', self.view)
+        self.assertIn('const showGroupColumn = !group && groupOptions.length > 1;', self.view)
+
+    def test_name_opens_the_journal_which_follows_status_changes_without_polling(self):
+        journal = (MONITORING / 'OpStatusJournal.jsx').read_text(encoding='utf-8-sig')
+        self.assertIn('onClick={() => onOpenJournal(row)}', self.view)
+        self.assertIn("row.id != null && row.status_key !== 'unknown' && onOpenJournal", self.view)
+        # Строка журнала — из полного снимка: смена группы не закрывает журнал.
+        self.assertIn('(snapshot?.operators || []).find((row) => row.id != null && row.id === journalOperatorId)', self.view)
+        self.assertIn('journalRow.status_key}|${journalRow.status_at}', self.view)
+        self.assertIn('}, [apiBaseUrl, operatorId, refreshKey]);', journal)
+        self.assertNotIn('setInterval(() => fetch', journal)
+        self.assertIn("export const OP_JOURNAL_PATH = '/api/op_wallboard/journal';", self.shared)
+        # Esc при открытом журнале на стене закрывает журнал, а не стену.
+        self.assertIn('closeOnEscape={!journalRow}', self.view)
 
     def test_app_wires_the_widget_with_the_sections_own_access(self):
         """Окно поверх других одно на приложение; право на него — у раздела «Табло ОП»."""
