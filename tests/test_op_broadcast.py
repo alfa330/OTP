@@ -29,7 +29,8 @@ DB_PATH = ROOT / "database.py"
 HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
            "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
            "_op_broadcast_attach_period", "_op_broadcast_caption", "_op_broadcast_period_notes",
-           "_op_broadcast_bridge_note", "_op_broadcast_notes"}
+           "_op_broadcast_bridge_note", "_op_broadcast_notes", "_wallboard_format_asa",
+           "_op_broadcast_key_tiles", "_op_render_wallboard_png", "_op_render_hour_png"}
 CONSTANTS = {"_OP_BROADCAST_TABLE_ROWS"}
 
 
@@ -76,7 +77,7 @@ def snapshot(arrived=100, missed=4, sl=0.9, live_age=30, online=5, talking=2, on
         'ar_min_percent': 3, 'ar_max_percent': 5,
         'totals': {'arrived': arrived, 'answered': answered, 'missed': missed,
                    'ar': (missed / arrived) if arrived else None, 'sl': sl,
-                   'avg_talk_seconds': 65, 'outgoing': 12},
+                   'avg_talk_seconds': 65, 'avg_wait_seconds': 6, 'outgoing': 12},
         'now': {'operators_online': online, 'operators_talking': talking,
                 'operators_on_break': on_break},
         'bridge': {'live_age_seconds': live_age, 'connected': True},
@@ -153,7 +154,8 @@ def hourly(day_hours):
         arrived, missed, sl = day_hours.get(hour, (0, 0, None))
         rows.append({'hour': hour, 'arrived': arrived, 'answered': arrived - missed, 'missed': missed,
                      'ar': (missed / arrived) if arrived else None, 'sl': sl,
-                     'avg_talk_seconds': 60 if arrived else None, 'outgoing': 0})
+                     'avg_talk_seconds': 60 if arrived else None,
+                     'avg_wait_seconds': 4 if arrived else None, 'outgoing': 0})
     return rows
 
 
@@ -211,11 +213,13 @@ class PeriodTests(unittest.TestCase):
         header, rows, block = table(text)
         self.assertEqual(header, ['День', '09–10'])
         self.assertEqual(list(rows), ['Входящих', 'Принято', 'Потеряно', 'AR', 'SL', 'Разговор',
-                                      'Исходящих'])
+                                      'ASA', 'Исходящих'])
         self.assertEqual((rows['Входящих'], rows['Принято'], rows['Потеряно']),
                          (['100', '30'], ['96', '27'], ['4', '3']))
         self.assertEqual((rows['AR'], rows['SL']), (['4,0 %', '10,0 %'], ['90,0 %', '70,0 %']))
         self.assertEqual((rows['Разговор'], rows['Исходящих']), (['1:05', '1:00'], ['12', '0']))
+        # ASA — голые целые секунды, как пишет владелец: «ASA 15»
+        self.assertEqual(rows['ASA'], ['6', '4'])
         # Столбцы выровнены по правому краю, строка помещается в телефон.
         self.assertEqual(len({len(line) for line in block}), 1)
         self.assertLessEqual(max(len(line) for line in block), 32)
@@ -280,8 +284,34 @@ class PeriodTests(unittest.TestCase):
                           for h in range(24)]
         out = self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts)
         rows = table(self.ns["_op_broadcast_text"](out))[1]
-        self.assertEqual((rows['Входящих'], rows['AR'], rows['SL'], rows['Разговор']),
-                         (['100', '0'], ['4,0 %', '—'], ['90,0 %', '—'], ['1:05', '—']))
+        self.assertEqual((rows['Входящих'], rows['AR'], rows['SL'], rows['Разговор'], rows['ASA']),
+                         (['100', '0'], ['4,0 %', '—'], ['90,0 %', '—'], ['1:05', '—'], ['6', '—']))
+
+    def _tiles(self, renderer, data):
+        """Плитки картинки: рисовальщик подменён, раскладка — настоящая."""
+        captured = {}
+        self.ns['_szov_render_tiles_png'] = lambda title, subtitle, key_tiles, stat_tiles: captured.update(
+            stat=stat_tiles) or b'png'
+        self.ns[renderer](data)
+        return captured['stat']
+
+    def test_day_picture_mirrors_the_wall_rows_with_asa(self):
+        """Второй ряд показателей дня — ровно как на стене (SL · разговор · ASA · исходящих),
+        люди «на сейчас» — отдельным рядом: седьмая плитка в одном ряду не читалась."""
+        out = self.attach(self.today(), datetime(2026, 9, 17, 10, 0), self.day_parts)
+        rows = self._tiles('_op_render_wallboard_png', out)
+        self.assertEqual([[label for label, _ in row] for row in rows], [
+            ['SL', 'Разговор', 'ASA', 'Исходящих'],
+            ['Онлайн', 'В разговоре', 'Перерыв'],
+        ])
+        self.assertEqual(rows[0][2], ('ASA', '6'))
+
+    def test_hour_picture_carries_asa(self):
+        out = self.attach(self.today(), datetime(2026, 9, 17, 10, 0), self.day_parts)
+        self.assertEqual(self._tiles('_op_render_hour_png', out),
+                         [('SL', '70,0 %'), ('Разговор', '1:00'), ('ASA', '4'), ('Исходящих', '0')])
+        quiet = self.attach(self.today(), datetime(2026, 9, 17, 5, 0), self.day_parts)
+        self.assertEqual(self._tiles('_op_render_hour_png', quiet)[2], ('ASA', '—'))
 
 
 class CaptionTests(unittest.TestCase):

@@ -701,7 +701,7 @@ const WallboardBody = ({ snapshot, scale }) => {
                     <MetricStatTile metricKey="served_pair" snapshot={snapshot} scale={scale} />
                     <MetricStatTile metricKey="lost" snapshot={snapshot} scale={scale} />
                     <MetricStatTile metricKey="sl_ratio" snapshot={snapshot} scale={scale} />
-                    <MetricStatTile metricKey="avg_wait_seconds" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="asa_seconds" snapshot={snapshot} scale={scale} />
                 </Grid>
             </Section>
 

@@ -282,7 +282,7 @@ class SzovWallboardSqlTests(unittest.TestCase):
         """Колонки итогов перечислены явно — потеря любой из них обнулит показатель на табло."""
         for column in ('oktell_now', 'queue_now', 'queue_max_wait_seconds', 'talking_now',
                        'arrived', 'served', 'lost', 'greet_drop', 'served_sl',
-                       'wait_seconds', 'max_wait_seconds', 'talk_seconds'):
+                       'wait_seconds', 'wait_served_seconds', 'max_wait_seconds', 'talk_seconds'):
             self.assertIn(f"t.{column}", self.snapshot_sql)
         for column in ('operator_name', 'state', 'icode', 'since', 'in_state_seconds'):
             self.assertIn(f"s.{column}", self.snapshot_sql)
@@ -473,6 +473,7 @@ class _SnapshotHarness:
         'greet_drop': 18,
         'served_sl': 309,
         'wait_seconds': 10000.0,
+        'wait_served_seconds': 5000.7,
         'max_wait_seconds': 376.063,
         'talk_seconds': 107708.0,
     }
@@ -526,6 +527,7 @@ class _SnapshotHarness:
             '_szov_wallboard_lock',
             '_szov_wallboard_int',
             '_szov_wallboard_ratio',
+            '_szov_wallboard_asa',
             '_szov_wallboard_department_id',
             '_szov_wallboard_operator_lookup',
             '_szov_wallboard_build_operators',
@@ -563,8 +565,24 @@ class SzovWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         self.assertAlmostEqual(today['ar_ratio'], 32 / 424)
         self.assertAlmostEqual(today['sl_ratio'], 309 / 424)
         self.assertAlmostEqual(today['avg_wait_seconds'], 10000.0 / 424)
+        # ASA — только на принятых (5000,7 / 392 = 12,76), секунды усечением
+        self.assertEqual(today['asa_seconds'], 12)
         self.assertEqual(today['max_wait_seconds'], 376)
         self.assertEqual(snap['sl_threshold_seconds'], 20)
+
+    def test_asa_is_the_owners_formula(self):
+        """Пример владельца: ответили через 5, 10, 15 и 30 с — ASA = 60 / 4 = 15."""
+        asa = self._namespace()['_szov_wallboard_asa']
+        self.assertEqual(asa(5 + 10 + 15 + 30, 4), 15)
+        self.assertEqual(asa(59.9, 4), 14)          # 14,975 — усечение, как у среднего разговора
+        self.assertIsNone(asa(0, 0))                # нет принятых — прочерк, а не ноль
+        self.assertIsNone(asa(None, 0))
+
+    def test_asa_counts_only_answered_calls(self):
+        """Потерянные ждали дольше всех, и в ASA они не входят — в отличие от «Ср. ожидания»."""
+        sql = self._namespace()['_oktell_wallboard_totals_sql'](20)
+        self.assertIn("x.call_result IN (5) THEN x.LenQueue ELSE 0 END), 0) AS wait_served_seconds", sql)
+        self.assertIn("x.call_result IN (13,19,5) THEN x.LenQueue ELSE 0 END), 0) AS wait_seconds", sql)
 
     def test_now_block_carries_queue_and_operator_counts(self):
         ns = self._namespace()
@@ -583,6 +601,7 @@ class SzovWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         self.assertIsNone(today['ar_ratio'])
         self.assertIsNone(today['sl_ratio'])
         self.assertIsNone(today['avg_wait_seconds'])
+        self.assertIsNone(today['asa_seconds'])
         self.assertIsNone(today['max_wait_seconds'])
         self.assertIsNone(today['avg_talk_seconds'])
         self.assertEqual(today['total'], 0)
@@ -999,7 +1018,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
     def test_view_renders_every_metric_of_the_layout(self):
         for label in (
             "В очереди", "AR", "Онлайн", "Перерыв",
-            "Принято / входящих", "Потеряно", "SL", "Ср. ожидание",
+            "Принято / входящих", "Потеряно", "SL", "ASA",
             "Свободны", "В разговоре", "Ср. разговор", "Перезвон",
         ):
             self.assertIn(label, self.shared, label)
@@ -1018,9 +1037,19 @@ class SzovWallboardWiringTests(unittest.TestCase):
         keys = re.findall(r'metricKey="([^"]+)"', self.view)
         self.assertEqual([self._metric_label(key) for key in keys], [
             "В очереди", "AR", "Онлайн", "Перерыв",
-            "Принято / входящих", "Потеряно", "SL", "Ср. ожидание",
+            "Принято / входящих", "Потеряно", "SL", "ASA",
             "Свободны", "В разговоре", "Ср. разговор", "Перезвон",
         ])
+
+    def test_asa_is_whole_seconds_and_a_dash_without_answered_calls(self):
+        """Владелец: «показатель пишется ASA 15» — голое число, не «0:15»."""
+        asa = self._metric('asa_seconds')
+        self.assertIn("value: formatAsa(today.asa_seconds)", asa)
+        self.assertNotIn("formatDuration", asa)
+        helper = re.search(r"export const formatAsa = .*?\n\);\n", self.shared, flags=re.DOTALL).group(0)
+        # null без проверки превратился бы в 0 — «ответили мгновенно»
+        self.assertIn("seconds === null || seconds === undefined", helper)
+        self.assertIn("Math.trunc(", helper)
 
     def test_only_key_tiles_are_coloured(self):
         """Цветные плитки — только в ключевых показателях; день и операторы белые."""
@@ -1116,8 +1145,9 @@ class SzovWallboardWiringTests(unittest.TestCase):
         for key in re.findall(r'metricKey="([^"]+)"', self.view):
             self.assertIn(key, keys, key)
         # показатели, которых на стене не было вовсе, — ради них виджет и настраивают
+        # «Ср. ожидание» со стены уступило место ASA (владелец, 17.09.2026), но в виджете осталось.
         for key in ("queue_max_wait", "talking_calls", "max_wait_seconds", "greet_drop",
-                    "break_list", "recall_list"):
+                    "avg_wait_seconds", "break_list", "recall_list"):
             self.assertIn(key, keys, key)
         for key in re.findall(r"^    '(\w+)',$", self.shared, flags=re.MULTILINE):
             self.assertIn(key, keys, f"набор по умолчанию ссылается на несуществующий {key}")
@@ -1206,9 +1236,12 @@ class SzovBroadcastTests(unittest.TestCase):
     """Отбивка показателей в Telegram: почасовая таблица, текст, примечания, расписание."""
 
     HOURLY_RAW = [
-        {'hh': 0, 'served': 35, 'arrived': 35, 'lost': 0, 'greet_drop': 0, 'talk_seconds': 6370},
-        {'hh': 1, 'served': 6, 'arrived': 25, 'lost': 19, 'greet_drop': 2, 'talk_seconds': 3456},
-        {'hh': 2, 'served': 9, 'arrived': 10, 'lost': 1, 'greet_drop': 0, 'talk_seconds': 3609},
+        {'hh': 0, 'served': 35, 'arrived': 35, 'lost': 0, 'greet_drop': 0, 'talk_seconds': 6370,
+         'wait_served_seconds': 70.0},
+        {'hh': 1, 'served': 6, 'arrived': 25, 'lost': 19, 'greet_drop': 2, 'talk_seconds': 3456,
+         'wait_served_seconds': 600.6},
+        {'hh': 2, 'served': 9, 'arrived': 10, 'lost': 1, 'greet_drop': 0, 'talk_seconds': 3609,
+         'wait_served_seconds': 90.0},
     ]
 
     def _namespace(self, hourly_raw=None, snapshot=None, shift_rows=None, break_violations=None):
@@ -1241,7 +1274,8 @@ class SzovBroadcastTests(unittest.TestCase):
             'SZOV_BROADCAST_TIMEZONE',
             'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT', 'SZOV_SL_MIN_PERCENT',
             'SZOV_BROADCAST_MODE_ALWAYS', 'SZOV_BROADCAST_MODE_DEVIATIONS',
-            '_szov_wallboard_int',
+            '_szov_wallboard_int', '_szov_wallboard_asa', '_wallboard_format_asa',
+            '_szov_render_wallboard_png', '_szov_render_hour_png',
             '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
             '_szov_broadcast_collect', 'OKTELL_BILLING_SL_DEFAULT_SECONDS',
             '_szov_broadcast_hour_block', '_szov_broadcast_safe_hour_block',
@@ -1307,6 +1341,73 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertEqual(totals['lost'], 20)
         self.assertEqual(totals['arrived'], totals['served'] + totals['lost'])
         self.assertEqual(totals['total'], 72)
+
+    def test_asa_of_the_day_is_summed_from_hours_not_averaged(self):
+        """ASA дня = (70 + 600,6 + 90) / 50 = 15,2 → 15. Среднее средних часов (2, 100, 10)
+        дало бы 37 — час с шестью звонками весил бы как час с тридцатью пятью."""
+        ns = self._namespace()
+        rows = ns['_szov_broadcast_hourly_rows']()
+        self.assertEqual([row['asa_seconds'] for row in rows], [2, 100, 10])
+        self.assertEqual(ns['_szov_broadcast_collect']()['totals']['asa_seconds'], 15)
+
+    def test_hour_without_answered_calls_has_no_asa(self):
+        ns = self._namespace(hourly_raw=[
+            {'hh': 3, 'served': 0, 'arrived': 2, 'lost': 2, 'greet_drop': 0, 'talk_seconds': 0,
+             'wait_served_seconds': 0},
+        ])
+        self.assertIsNone(ns['_szov_broadcast_hourly_rows']()[0]['asa_seconds'])
+        self.assertIsNone(ns['_szov_broadcast_collect']()['totals']['asa_seconds'])
+
+    def _tiles(self, renderer, data):
+        """Какие плитки рисует картинка: рисовальщик подменён, раскладка — настоящая."""
+        ns = self._namespace()
+        captured = {}
+        ns['_szov_render_tiles_png'] = lambda title, subtitle, key_tiles, stat_tiles: captured.update(
+            key=key_tiles, stat=stat_tiles) or b'png'
+        ns[renderer](data)
+        return captured
+
+    def test_day_picture_carries_asa_in_the_day_row(self):
+        """Два ряда, как секции экрана: звонки дня с ASA и операторы. Седьмая плитка в одном ряду
+        сужала плитку так, что «Принято / входящих» вылезало за край."""
+        ns = self._namespace()
+        tiles = self._tiles('_szov_render_wallboard_png', ns['_szov_broadcast_collect']())
+        self.assertEqual([[label for label, _ in row] for row in tiles['stat']], [
+            ['Принято / входящих', 'Потеряно', 'ASA'],
+            ['Свободны', 'В разговоре', 'Ср. разговор', 'Перезвон'],
+        ])
+        self.assertEqual(tiles['stat'][0][2], ('ASA', '15'))
+
+    def test_tile_rows_keep_the_one_row_picture_byte_for_byte(self):
+        """Ряды нужны картинкам дня ОП и СЗоВ; «Чат» и картинки часа шлют плоский список, и их
+        картинка обязана остаться прежней до байта. Второй ряд удлиняет картинку ровно на ряд."""
+        from io import BytesIO
+        ns = {'os': os, 'logging': logging, 'BytesIO': BytesIO}
+        _load_names((ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig"), {
+            '_SZOV_FONT_CANDIDATES', '_szov_font_paths_cache', '_szov_font_paths', '_szov_font',
+            '_szov_render_tiles_png',
+        }, ns)
+        if not ns['_szov_font_paths']()[0]:
+            self.skipTest('нет шрифта с кириллицей')
+        from PIL import Image
+        key = [('Онлайн', '5', '#dbeafe', '#1d4ed8')] * 4
+        row = [('SL', '81,0%'), ('ASA', '15'), ('Ср. разговор', '1:41')]
+        render = ns['_szov_render_tiles_png']
+        flat = render('Табло', 'Линия', key, row)
+        self.assertEqual(flat, render('Табло', 'Линия', key, [row]))
+        one = Image.open(BytesIO(flat)).size
+        two = Image.open(BytesIO(render('Табло', 'Линия', key, [row, row]))).size
+        self.assertEqual((two[0], two[1] - one[1]), (one[0], 130 + 16))
+
+    def test_hour_picture_carries_asa_next_to_sl(self):
+        ns = self._namespace()
+        data = ns['_szov_broadcast_collect'](now=datetime(2026, 9, 17, 2, 30))
+        tiles = self._tiles('_szov_render_hour_png', data)
+        # час 01:00–02:00: 600,6 с ожидания на 6 принятых
+        self.assertEqual(tiles['stat'][1], ('ASA', '100'))
+        self.assertEqual([label for label, _ in tiles['stat']], ['SL', 'ASA', 'Ср. разговор'])
+        data['hour'] = dict(data['hour'], served=0, asa_seconds=None)
+        self.assertEqual(self._tiles('_szov_render_hour_png', data)['stat'][1], ('ASA', '—'))
 
     def test_text_does_not_repeat_the_numbers_from_the_images(self):
         """Цифры уже есть на двух картинках сообщения — дублировать их текстом не надо."""
@@ -1495,6 +1596,8 @@ class SzovBroadcastTests(unittest.TestCase):
     def test_hourly_sql_counts_sl_the_same_way_as_the_wallboard(self):
         sql = self._namespace()['_oktell_wallboard_hourly_sql'](None)
         self.assertIn("t.LenQueue <= 20 THEN 1 ELSE 0 END), 0) AS served_sl", sql)
+        # числитель ASA — тем же правилом, что у снимка табло: ожидание только принятых
+        self.assertIn("t.call_result IN (5) THEN t.LenQueue ELSE 0 END), 0) AS wait_served_seconds", sql)
         self.assertIn("t.dt_insert >= CONVERT(date, GETDATE())", sql)
 
     def test_hourly_sql_for_an_explicit_day_does_not_trust_oktell_clock(self):
@@ -1550,7 +1653,8 @@ class SzovBroadcastTests(unittest.TestCase):
 
     def test_quiet_hour_is_zeros_not_a_missing_block(self):
         block, _ = self._block(None, datetime(2026, 9, 17, 4, 0))
-        self.assertEqual((block['label'], block['arrived'], block['sl_ratio']), ('03:00–04:00', 0, None))
+        self.assertEqual((block['label'], block['arrived'], block['sl_ratio'], block['asa_seconds']),
+                         ('03:00–04:00', 0, None, None))
 
     def test_failed_midnight_query_drops_only_the_hour_block(self):
         ns = self._namespace()

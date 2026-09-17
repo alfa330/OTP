@@ -72,6 +72,16 @@ export const formatDuration = (seconds) => {
     return `${minutes}:${String(secs).padStart(2, '0')}`;
 };
 
+/*
+ * ASA — голые целые секунды, как пишет владелец: «ASA 15». Не «0:15»: показатель общепринятый и
+ * читается числом. Нет принятых — прочерк: Number(null) дал бы 0, то есть «ответили мгновенно».
+ */
+export const formatAsa = (seconds) => (
+    seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))
+        ? '—'
+        : formatInt(Math.max(0, Math.trunc(Number(seconds))))
+);
+
 /** «12:07:18» из «2026-08-03 12:07:18» — на табло дата не нужна, только время источника. */
 export const formatClock = (value) => {
     const text = String(value || '').trim();
@@ -356,6 +366,17 @@ export const WALLBOARD_METRICS = [
         label: 'SL',
         hint: `Норма от ${Math.round(SL_GOOD_RATIO * 100)}%`,
         read: (now, today) => ({ value: formatPercent(today.sl_ratio), tone: slTone(today.sl_ratio) }),
+    },
+    /*
+     * ASA (владелец, 17.09.2026) — ожидание в очереди всех принятых / принятые. В отличие от
+     * «Ср. ожидания» потерянные сюда не входят: на стене стоит ASA, «Ср. ожидание» — в виджете.
+     */
+    {
+        key: 'asa_seconds',
+        group: 'today',
+        label: 'ASA',
+        hint: 'Ожидание до ответа на принятый звонок, сек',
+        read: (now, today) => ({ value: formatAsa(today.asa_seconds) }),
     },
     {
         key: 'avg_wait_seconds',

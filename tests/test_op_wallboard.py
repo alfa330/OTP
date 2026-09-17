@@ -14,6 +14,7 @@
     (ночник — вчерашним временем), журнал статусов — за календарные сутки, только тем, кто на табло.
 """
 
+import re
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
@@ -761,6 +762,18 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('wait_measured', self.shared)
         self.assertIn('{dataGap ? (', self.view)
         self.assertIn('opDataGapNotice(snapshot)', self.view)
+
+    def test_average_wait_tile_is_asa_not_a_second_tile(self):
+        """Владелец 17.09.2026: «ASA 15». avg_wait_seconds снимка и есть ASA (ожидание принятых /
+        принятые), поэтому плитка переименована, а не продублирована. Ключ прежний — по нему лежат
+        наборы виджета у пользователей."""
+        metric = re.search(r"key: 'op_avg_wait'.*?\n    \},", self.shared, flags=re.DOTALL).group(0)
+        self.assertIn("label: 'ASA'", metric)
+        self.assertIn('value: formatAsa(s.totals?.avg_wait_seconds)', metric)
+        self.assertNotIn('Среднее ожидание', self.shared)
+        self.assertEqual(self.shared.count('s.totals?.avg_wait_seconds'), 1)
+        self.assertEqual(self.view.count('metricKey="op_avg_wait"'), 1)
+        self.assertIn('SL и ASA не считаются', self.shared)
 
     def test_widget_button_is_the_same_as_szov(self):
         """Кнопка виджета — общая с СЗоВ (экспорт), а не третья копия."""

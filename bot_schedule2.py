@@ -37628,7 +37628,7 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         "SELECT CONVERT(varchar(19), GETDATE(), 120) AS oktell_now, "
         "q.queue_now, q.queue_max_wait_seconds, k.talking_now, "
         "t.arrived, t.served, t.lost, t.greet_drop, t.served_sl, "
-        "t.wait_seconds, t.max_wait_seconds, t.talk_seconds "
+        "t.wait_seconds, t.wait_served_seconds, t.max_wait_seconds, t.talk_seconds "
         "FROM ("
         "SELECT COUNT(*) AS queue_now, "
         "ISNULL(MAX(DATEDIFF(second, w.started, GETDATE())), 0) AS queue_max_wait_seconds "
@@ -37646,6 +37646,8 @@ def _oktell_wallboard_totals_sql(sl_seconds):
         f"ISNULL(SUM(CASE WHEN x.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
         f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) AND x.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END), 0) AS served_sl, "
         f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN x.LenQueue ELSE 0 END), 0) AS wait_seconds, "
+        # Числитель ASA: ожидание в очереди только у принятых — потерянные в него не входят.
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN x.LenQueue ELSE 0 END), 0) AS wait_served_seconds, "
         f"MAX(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN x.LenQueue END) AS max_wait_seconds, "
         f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN x.total_length ELSE 0 END), 0) AS talk_seconds "
         "FROM oktell.dbo.Call_Systems_hst x "
@@ -37693,7 +37695,7 @@ def _oktell_wallboard_snapshot_sql(sl_seconds):
     return (
         "SELECT t.oktell_now, t.queue_now, t.queue_max_wait_seconds, t.talking_now, "
         "t.arrived, t.served, t.lost, t.greet_drop, t.served_sl, "
-        "t.wait_seconds, t.max_wait_seconds, t.talk_seconds, "
+        "t.wait_seconds, t.wait_served_seconds, t.max_wait_seconds, t.talk_seconds, "
         "s.operator_name, s.state, s.icode, s.since, s.in_state_seconds "
         f"FROM ({_oktell_wallboard_totals_sql(sl_seconds)}) t "
         f"LEFT JOIN ({_oktell_wallboard_operator_states_sql()}) s ON 1 = 1 "
@@ -37714,6 +37716,21 @@ def _szov_wallboard_ratio(numerator, denominator):
     if den <= 0:
         return None
     return _szov_wallboard_int(numerator) / den
+
+
+def _szov_wallboard_asa(wait_served_seconds, served):
+    """ASA — среднее ожидание до ответа: ожидание в очереди всех принятых / принятые (владелец,
+    17.09.2026). Целые секунды усечением, как среднее время разговора. Без принятых — None.
+
+    Сумма берётся дробной (LenQueue у Oktell с долями секунды), а не округлённой: иначе ASA
+    на табло и в отбивке, где сумма складывается из часов, расходились бы на границе секунды."""
+    served = _szov_wallboard_int(served)
+    if served <= 0:
+        return None
+    try:
+        return max(0, int(float(wait_served_seconds or 0) / served))
+    except (TypeError, ValueError):
+        return None
 
 
 def _szov_wallboard_operator_lookup():
@@ -37846,6 +37863,8 @@ def _szov_wallboard_fetch_snapshot():
             'ar_ratio': _szov_wallboard_ratio(lost, arrived),
             'sl_ratio': _szov_wallboard_ratio(served_sl, arrived),
             'avg_wait_seconds': (wait_seconds / arrived) if arrived > 0 else None,
+            # ASA делится только на принятых — в отличие от avg_wait_seconds, где и потерянные.
+            'asa_seconds': _szov_wallboard_asa(totals.get('wait_served_seconds'), served),
             'max_wait_seconds': None if max_wait is None else _szov_wallboard_int(max_wait),
             'avg_talk_seconds': (_szov_wallboard_int(totals.get('talk_seconds')) / served) if served > 0 else None,
         },
@@ -38093,7 +38112,8 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
     уже вчерашний. Границы суток тогда задаются литералом из Python, а не GETDATE() Oktell —
     иначе отставшие на пару секунд часы сервера унесли бы запрос на позавчера.
     served_sl — принятые с ожиданием в очереди не дольше порога SL, тем же правилом, что у
-    снимка табло (_oktell_wallboard_totals_sql): SL часа и SL на экране не должны спорить."""
+    снимка табло (_oktell_wallboard_totals_sql): SL часа и SL на экране не должны спорить.
+    wait_served_seconds — ожидание принятых, числитель ASA; тоже правило снимка табло."""
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
@@ -38113,6 +38133,7 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19) THEN 1 ELSE 0 END), 0) AS lost, "
         f"ISNULL(SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {sl_seconds} THEN 1 ELSE 0 END), 0) AS served_sl, "
+        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END), 0) AS wait_served_seconds, "
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END), 0) AS talk_seconds "
         "FROM oktell.dbo.Call_Systems_hst t "
         "WHERE t.route = 'incoming' AND t.taxi_park <> '' "
@@ -38135,6 +38156,7 @@ def _szov_broadcast_hourly_rows(hour_to=None, day=None):
         lost = _szov_wallboard_int(item.get('lost'))
         served_sl = _szov_wallboard_int(item.get('served_sl'))
         talk = float(item.get('talk_seconds') or 0)
+        wait_served = float(item.get('wait_served_seconds') or 0)
         rows.append({
             'hour': _szov_wallboard_int(item.get('hh')),
             'served': served,
@@ -38144,6 +38166,9 @@ def _szov_broadcast_hourly_rows(hour_to=None, day=None):
             'served_sl': served_sl,
             # Секунды усечением, а не округлением — так же, как в исходном отчёте владельца.
             'avg_talk_seconds': int(talk / served) if served > 0 else 0,
+            # Сумма дробная: из неё складывается ASA дня, и среднее средних тут не годится.
+            'wait_served_seconds': wait_served,
+            'asa_seconds': _szov_wallboard_asa(wait_served, served),
             'ar_ratio': (lost / arrived) if arrived > 0 else None,
             # SL — как у снимка табло: принятые в пределах порога от всех дошедших до очереди.
             'sl_ratio': (served_sl / arrived) if arrived > 0 else None,
@@ -38169,7 +38194,8 @@ def _szov_broadcast_hour_block(hourly, hour_to, now, load_day_rows):
     row = next((dict(item) for item in rows or [] if item.get('hour') == hour_start.hour), None)
     if row is None:
         row = {'hour': hour_start.hour, 'served': 0, 'arrived': 0, 'lost': 0, 'greet_drop': 0,
-               'served_sl': 0, 'avg_talk_seconds': 0, 'ar_ratio': None, 'sl_ratio': None}
+               'served_sl': 0, 'avg_talk_seconds': 0, 'wait_served_seconds': 0.0,
+               'asa_seconds': None, 'ar_ratio': None, 'sl_ratio': None}
     row['label'] = '%02d:00–%02d:00' % (hour_start.hour, hour_start.hour + 1)
     row['day'] = hour_start.strftime('%d.%m')
     return row
@@ -38559,6 +38585,7 @@ def _szov_broadcast_collect(hour_to=None, scheduled=False, now=None):
     lost = sum(r['lost'] for r in hourly)
     greet_drop = sum(r['greet_drop'] for r in hourly)
     talk_total = sum(r['avg_talk_seconds'] * r['served'] for r in hourly)
+    wait_served_total = sum(float(r.get('wait_served_seconds') or 0) for r in hourly)
 
     snapshot = None
     try:
@@ -38579,6 +38606,7 @@ def _szov_broadcast_collect(hour_to=None, scheduled=False, now=None):
             'total': arrived + greet_drop,
             'ar_ratio': (lost / arrived) if arrived > 0 else None,
             'avg_talk_seconds': int(talk_total / served) if served > 0 else 0,
+            'asa_seconds': _szov_wallboard_asa(wait_served_total, served),
         },
         'operators': {
             'online': now_block.get('operators_online'),
@@ -38622,6 +38650,12 @@ def _szov_plural(count, one, few, many):
 def _szov_format_seconds_mmss(seconds):
     total = max(0, int(seconds or 0))
     return f"{total // 60}:{total % 60:02d}"
+
+
+def _wallboard_format_asa(seconds):
+    """ASA на картинках отбивки — голые целые секунды, как пишет владелец: «ASA 15».
+    Без принятых — прочерк: ноль читался бы как «ответили мгновенно»."""
+    return '—' if seconds is None else str(max(0, int(seconds)))
 
 
 def _szov_format_age_ru(seconds):
@@ -38931,16 +38965,19 @@ def _szov_render_hourly_table_png(rows):
 
 
 def _szov_render_tiles_png(title, subtitle, key_tiles, stat_tiles):
-    """PNG плиток табло: четыре крупные сверху, мелкие в ряд под ними.
+    """PNG плиток табло: четыре крупные сверху, мелкие рядами под ними.
 
     Общий на оба направления: картинки «Линии» и «Чата» лежат в одном чате рядом, и
     разъехавшееся оформление там сразу видно. key_tiles — (подпись, значение, фон, цвет
-    текста), stat_tiles — (подпись, значение); мелкие плитки делят ширину по числу."""
+    текста), stat_tiles — (подпись, значение) одним рядом или список рядов из таких пар;
+    мелкие плитки делят ширину своего ряда по числу. Рядами — когда плиток больше шести:
+    седьмая в том же ряду сужает плитку так, что подпись «Принято / входящих» не влезает."""
     from PIL import Image, ImageDraw
 
+    rows = stat_tiles if stat_tiles and isinstance(stat_tiles[0], list) else [stat_tiles]
     tile_w, tile_h, gap, margin = 250, 130, 16, 24
     width = margin * 2 + tile_w * 4 + gap * 3
-    height = margin * 2 + 56 + tile_h * 2 + gap * 2 + 40
+    height = margin * 2 + 56 + tile_h * (1 + len(rows)) + gap * (1 + len(rows)) + 40
     image = Image.new('RGB', (width, height), '#f8fafc')
     draw = ImageDraw.Draw(image)
 
@@ -38965,11 +39002,13 @@ def _szov_render_tiles_png(title, subtitle, key_tiles, stat_tiles):
     for index, (label, value, bg, fg) in enumerate(key_tiles):
         tile(margin + index * (tile_w + gap), top, label, value, bg, fg)
 
-    second = top + tile_h + gap
-    count = max(1, len(stat_tiles))
-    small_w = (tile_w * 4 + gap * 3 - gap * (count - 1)) // count
-    for index, (label, value) in enumerate(stat_tiles):
-        tile(margin + index * (small_w + gap), second, label, value, '#ffffff', '#0f172a', w=small_w)
+    row_top = top + tile_h + gap
+    for row in rows:
+        count = max(1, len(row))
+        small_w = (tile_w * 4 + gap * 3 - gap * (count - 1)) // count
+        for index, (label, value) in enumerate(row):
+            tile(margin + index * (small_w + gap), row_top, label, value, '#ffffff', '#0f172a', w=small_w)
+        row_top += tile_h + gap
 
     buffer = BytesIO()
     image.save(buffer, format='PNG')
@@ -38996,15 +39035,21 @@ def _szov_render_wallboard_png(data):
         ('Онлайн', str(_szov_wallboard_int(ops.get('online'))), '#dbeafe', '#1d4ed8'),
         ('Перерыв', str(_szov_wallboard_int(ops.get('on_break'))), '#fef3c7', '#b45309'),
     ]
+    # Два ряда, как секции на экране: звонки дня и операторы.
     stat_tiles = [
-        # Входящие — только дошедшие до очереди: сбросившие на приветствии до оператора
-        # не доходили. Тогда разрыв в паре равен ровно потерянным.
-        ('Принято / входящих', f"{totals['served']}/{totals['arrived']}"),
-        ('Потеряно', str(totals['lost'])),
-        ('Свободны', str(_szov_wallboard_int(ops.get('free')))),
-        ('В разговоре', str(_szov_wallboard_int(ops.get('talking')))),
-        ('Ср. разговор', _szov_format_seconds_mmss(totals['avg_talk_seconds'])),
-        ('Перезвон', str(_szov_wallboard_int(ops.get('on_recall')))),
+        [
+            # Входящие — только дошедшие до очереди: сбросившие на приветствии до оператора
+            # не доходили. Тогда разрыв в паре равен ровно потерянным.
+            ('Принято / входящих', f"{totals['served']}/{totals['arrived']}"),
+            ('Потеряно', str(totals['lost'])),
+            ('ASA', _wallboard_format_asa(totals.get('asa_seconds'))),
+        ],
+        [
+            ('Свободны', str(_szov_wallboard_int(ops.get('free')))),
+            ('В разговоре', str(_szov_wallboard_int(ops.get('talking')))),
+            ('Ср. разговор', _szov_format_seconds_mmss(totals['avg_talk_seconds'])),
+            ('Перезвон', str(_szov_wallboard_int(ops.get('on_recall')))),
+        ],
     ]
 
     return _szov_render_tiles_png(
@@ -39035,6 +39080,7 @@ def _szov_render_hour_png(data):
     ]
     stat_tiles = [
         ('SL', _szov_format_percent(hour.get('sl_ratio'))),
+        ('ASA', _wallboard_format_asa(hour.get('asa_seconds'))),
         ('Ср. разговор', _szov_format_seconds_mmss(hour.get('avg_talk_seconds'))
          if _szov_wallboard_int(hour.get('served')) else '—'),
     ]
@@ -42576,6 +42622,8 @@ _OP_BROADCAST_TABLE_ROWS = (
     ('AR', lambda t: _op_broadcast_percent(t.get('ar'))),
     ('SL', lambda t: _op_broadcast_percent(t.get('sl'))),
     ('Разговор', lambda t: _op_broadcast_duration(t.get('avg_talk_seconds'))),
+    # ASA у ОП — это avg_wait_seconds снимка: ожидание принятых от входа в очередь до ответа.
+    ('ASA', lambda t: _wallboard_format_asa(t.get('avg_wait_seconds'))),
     ('Исходящих', lambda t: str(_szov_wallboard_int(t.get('outgoing')))),
 )
 
@@ -42660,13 +42708,19 @@ def _op_render_wallboard_png(data):
     """PNG «Табло ОП»: те же плитки, что на стене, тем же рисовальщиком, что у СЗоВ."""
     totals = data.get('totals') or {}
     now = data.get('now') or {}
+    # Два ряда: второй ряд показателей дня — ровно как на стене, под ним люди «на сейчас».
     stat_tiles = [
-        ('SL', _op_broadcast_percent(totals.get('sl'))),
-        ('Разговор', _op_broadcast_duration(totals.get('avg_talk_seconds'))),
-        ('Онлайн', str(_szov_wallboard_int(now.get('operators_online')))),
-        ('В разговоре', str(_szov_wallboard_int(now.get('operators_talking')))),
-        ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break')))),
-        ('Исходящих', str(_szov_wallboard_int(totals.get('outgoing')))),
+        [
+            ('SL', _op_broadcast_percent(totals.get('sl'))),
+            ('Разговор', _op_broadcast_duration(totals.get('avg_talk_seconds'))),
+            ('ASA', _wallboard_format_asa(totals.get('avg_wait_seconds'))),
+            ('Исходящих', str(_szov_wallboard_int(totals.get('outgoing')))),
+        ],
+        [
+            ('Онлайн', str(_szov_wallboard_int(now.get('operators_online')))),
+            ('В разговоре', str(_szov_wallboard_int(now.get('operators_talking')))),
+            ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break')))),
+        ],
     ]
     period = (data.get('day_label') or 'За день').lower()
     return _szov_render_tiles_png('Табло ОП', 'Отдел продаж · %s · %s' % (period, data.get('stamp') or ''),
@@ -42680,6 +42734,7 @@ def _op_render_hour_png(data):
     stat_tiles = [
         ('SL', _op_broadcast_percent(hour.get('sl'))),
         ('Разговор', _op_broadcast_duration(hour.get('avg_talk_seconds'))),
+        ('ASA', _wallboard_format_asa(hour.get('avg_wait_seconds'))),
         ('Исходящих', str(_szov_wallboard_int(hour.get('outgoing')))),
     ]
     return _szov_render_tiles_png('Табло ОП · за час',

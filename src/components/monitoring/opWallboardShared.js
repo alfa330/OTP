@@ -1,6 +1,7 @@
 import {
     arTone,
     createSnapshotFeed,
+    formatAsa,
     formatClock,
     formatDuration,
     formatInt,
@@ -98,7 +99,7 @@ export const opAnswerMomentMissing = (snapshot) => (
 );
 
 export const opDataGapNotice = (snapshot) => (
-    opAnswerMomentMissing(snapshot) ? `SL и среднее ожидание не считаются: ${ANSWER_MOMENT_MISSING}` : null
+    opAnswerMomentMissing(snapshot) ? `SL и ASA не считаются: ${ANSWER_MOMENT_MISSING}` : null
 );
 
 /** «по 120 из 130 принятых» — когда момент ответа известен не у всех; иначе пусто. */
@@ -157,11 +158,14 @@ export const OP_METRICS = [
         read: (s) => ({ value: formatSeconds(s.totals?.avg_talk_seconds) }),
     },
     {
-        key: 'op_avg_wait', group: 'day', label: 'Среднее ожидание',
+        // ASA (владелец, 17.09.2026): ожидание принятых / принятые — ровно то, что сервер и раньше
+        // считал в avg_wait_seconds, поэтому это переименование плитки, а не вторая плитка с той же
+        // цифрой. Ключ прежний: по нему лежат наборы показателей виджета у пользователей.
+        key: 'op_avg_wait', group: 'day', label: 'ASA',
         hint: (s) => (opAnswerMomentMissing(s)
             ? ANSWER_MOMENT_MISSING
-            : `От входа в очередь (после автоинформатора) до ответа сотрудника${opMeasuredNote(s)}`),
-        read: (s) => ({ value: formatSeconds(s.totals?.avg_wait_seconds) }),
+            : `Ожидание до ответа на принятый звонок, сек: от входа в очередь (после автоинформатора)${opMeasuredNote(s)}`),
+        read: (s) => ({ value: formatAsa(s.totals?.avg_wait_seconds) }),
     },
     {
         key: 'op_outgoing', group: 'day', label: 'Исходящих',
