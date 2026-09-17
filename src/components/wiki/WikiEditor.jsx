@@ -828,7 +828,7 @@ export default function WikiEditor({
                     панель переставала липнуть и уезжала вверх вместе с карточкой.
                     Скругление верхних углов панели заменяет обрезку. */}
                 <div className={iosCard}>
-                    <div className="sticky top-0 z-20 flex flex-wrap items-center gap-0.5 rounded-t-2xl border-b border-slate-100 bg-white/95 px-2 py-1.5 backdrop-blur-xl">
+                    <div className="mobile-sticky-top sticky top-0 z-20 flex flex-wrap items-center gap-0.5 rounded-t-2xl border-b border-slate-100 bg-white/95 px-2 py-1.5 backdrop-blur-xl">
                         <ToolButton title="Отменить" onClick={() => editor.chain().focus().undo().run()}>
                             <Undo2 size={15} />
                         </ToolButton>

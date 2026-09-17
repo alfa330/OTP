@@ -433,7 +433,7 @@ export default function WikiAudit({ base, headers, showToast, structure, spaceId
                                 <section key={day.key}>
                                     {/* Заголовок дня липкий: пролистав сотню строк,
                                         человек всё ещё видит, какой это день. */}
-                                    <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-4 py-1.5 backdrop-blur">
+                                    <div className="mobile-sticky-top sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-4 py-1.5 backdrop-blur">
                                         <div className={iosGroupLabel}>{day.label}</div>
                                     </div>
                                     <ul className="divide-y divide-slate-100">

@@ -229,7 +229,7 @@ export default function MailingJournal({
             <div className={`${iosCard} [&>div:first-child>div]:rounded-t-2xl`}>
                 {days.map(({ day, rows }) => (
                     <div key={day}>
-                        <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-4 py-1.5 backdrop-blur">
+                        <div className="mobile-sticky-top sticky top-0 z-10 border-b border-slate-100 bg-white/90 px-4 py-1.5 backdrop-blur">
                             <span className={iosGroupLabel}>{day}</span>
                         </div>
                         <ul className="divide-y divide-slate-50">

@@ -549,7 +549,7 @@ const AdvertsPanel = ({
             </div>
 
             {selected.size > 0 && (
-                <div className={`${iosCard} sticky top-2 z-20 space-y-3 p-3 sm:p-4`}>
+                <div className={`${iosCard} mobile-sticky-top sticky top-2 z-20 space-y-3 p-3 sm:p-4`}>
                     <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="text-[13.5px] text-slate-700 tabular-nums">
                             Выбрано <b>{selected.size}</b>

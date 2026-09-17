@@ -36857,7 +36857,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         return (
             <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
             {/* Header */}
-            <div className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-10">
+            <div className="mobile-sticky-top bg-white border-b border-gray-200 shadow-sm sticky top-0 z-10">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">

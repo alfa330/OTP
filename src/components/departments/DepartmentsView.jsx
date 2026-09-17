@@ -211,7 +211,7 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
     return (
         <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
             {/* Header */}
-            <div className="sticky top-0 z-10 -mx-1 rounded-2xl border border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl">
+            <div className="mobile-sticky-top sticky top-0 z-10 -mx-1 rounded-2xl border border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-center gap-3">
                         <div className="grid h-10 w-10 place-items-center rounded-2xl bg-blue-50 text-blue-600">

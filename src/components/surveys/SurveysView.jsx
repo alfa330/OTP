@@ -3381,7 +3381,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         {/* Шапка прохождения, как на тестовых сайтах: сколько
                                             вопросов позади и сколько осталось времени. Без неё
                                             в длинном тесте непонятно, где ты и успеваешь ли. */}
-                                        <div className="sticky top-0 z-10 -mx-1 space-y-2 rounded-xl bg-white/90 px-3.5 py-2.5 ring-1 ring-slate-200/70 backdrop-blur">
+                                        <div className="mobile-sticky-top sticky top-0 z-10 -mx-1 space-y-2 rounded-xl bg-white/90 px-3.5 py-2.5 ring-1 ring-slate-200/70 backdrop-blur">
                                             <div className="flex items-center justify-between gap-3">
                                                 <div className="text-[13px] text-slate-600">
                                                     Отвечено{' '}

@@ -3948,7 +3948,7 @@ function TopNav({
 
   return (
     <header
-      className="fixed top-0 right-0 z-40 bg-white border-b border-slate-200 h-16"
+      className="mobile-sticky-top fixed top-0 right-0 z-40 bg-white border-b border-slate-200 h-16"
       style={{ left: "var(--main-content-sidebar-offset, 0px)" }}
     >
       <div className="lms-shell h-full flex items-center justify-between gap-4">
@@ -13139,7 +13139,7 @@ function AdminView({
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-              <div className="xl:col-span-5 flex flex-col gap-6 sticky top-6">
+              <div className="mobile-sticky-off xl:col-span-5 flex flex-col gap-6 sticky top-6">
                 <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col shadow-sm">
                   <div className="p-5 border-b border-slate-100 space-y-3">
                     <h3 className="text-sm font-semibold text-slate-900">Назначенные курсы</h3>

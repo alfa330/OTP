@@ -1207,6 +1207,43 @@ body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
    всё равно не будет: у такого раздела корень прозрачный, то есть сверху и под
    ним один и тот же цвет. */
 
+/* ── Верх экрана отдан стеклу iOS 26 ───────────────────────────────────── */
+
+/* С iOS 26 полосу с часами и зарядом в установленном приложении заливает сама
+   система: пока под ней едет страница, там размытое стекло (Liquid Glass).
+   Владелец 17.09.2026 прислал его снимок из вики и попросил, «чтобы ничего не
+   мешало iOS 26», во всех разделах.
+
+   Мешает стеклу ЛЮБОЙ наш элемент у верхней грани. WebKit смотрит в точку
+   посередине экрана в 4 px от края и ищет там position: fixed или sticky
+   шириной от 90% экрана; нашёл — заливает полосу сплошным цветом: его фоном, а
+   при backdrop-filter — цветом страницы. Найденный элемент держит заливку и
+   после того, как уехал от края, пока он в дереве и visibility: visible.
+   Источник — LocalFrameView::fixedContainerEdges и
+   Page::updateFixedContainerEdges в исходниках WebKit; theme-color здесь ни при
+   чём.
+
+   Поэтому на телефоне то, что прилипает к верху СТРАНИЦЫ, прилипает ниже
+   выреза: полоса над ним остаётся системе, а заголовки не уезжают под часы.
+   Высокие панели фильтров (260–410 px) на телефоне не липнут вовсе: ниже
+   выреза они закрывали бы полэкрана. Метку ставит разметка рядом со
+   `sticky top-0`. Таблицам со своей прокруткой (max-h + overflow-auto) метка не
+   нужна: они липнут к своему блоку, а не к экрану.
+
+   Окна, шторка разделов и листы поверх раздела красят полосу своим цветом, и
+   это не лечится: полноэкранный fixed-слой WebKit считает краем всегда. */
+body.mobile-shell .mobile-sticky-top {
+    top: env(safe-area-inset-top);
+}
+
+body.mobile-shell .mobile-sticky-top.top-2 {
+    top: calc(env(safe-area-inset-top) + 0.5rem);
+}
+
+body.mobile-shell .mobile-sticky-off {
+    position: relative;
+}
+
 /* ── Имя в шапке при прокрутке ─────────────────────────────────────────── */
 
 /* Единственное, что теперь рисуется сверху, и только когда есть что показать:
@@ -1214,12 +1251,16 @@ body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
    том же углу и обязан оставаться нажимаемым, место под него освобождает
    правое поле.
 
+   Полоса начинается ПОД вырезом, а не от верхней грани: прибитая к нулю, она
+   гасила стекло iOS 26 над часами (см. секцию выше). Строка имени стоит там же,
+   где стояла: высота и верхнее поле уменьшены ровно на вырез.
+
    Показывается признаком body[data-mobile-scrolled], который поднимает
    MobilePageChrome: своего состояния и своей подписки у имени нет вовсе,
    поэтому прокрутка не вызывает перерисовок. */
 .mobile-scroll-title {
     position: fixed;
-    top: 0;
+    top: env(safe-area-inset-top);
     left: 0;
     right: 0;
     z-index: 68;
@@ -1227,8 +1268,8 @@ body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
     align-items: center;
     justify-content: center;
     gap: 8px;
-    height: calc(46px + max(10px, env(safe-area-inset-top)));
-    padding: max(10px, env(safe-area-inset-top)) 62px 0 16px;
+    height: calc(46px + max(10px, env(safe-area-inset-top)) - env(safe-area-inset-top));
+    padding: calc(max(10px, env(safe-area-inset-top)) - env(safe-area-inset-top)) 62px 0 16px;
     background: color-mix(in srgb, var(--mobile-page-bg, #f9fafb) 72%, transparent);
     backdrop-filter: blur(22px) saturate(180%);
     -webkit-backdrop-filter: blur(22px) saturate(180%);

@@ -2161,7 +2161,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 </div>
 
                 {/* ── Filters card ── */}
-                <div className="sticky top-0 z-10 rounded-xl border border-blue-200 bg-blue-50/95 shadow px-4 py-3" style={{ backdropFilter: 'blur(6px)' }}>
+                <div className="mobile-sticky-off sticky top-0 z-10 rounded-xl border border-blue-200 bg-blue-50/95 shadow px-4 py-3" style={{ backdropFilter: 'blur(6px)' }}>
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                         {/* Date range */}
                         <div className="md:col-span-1">

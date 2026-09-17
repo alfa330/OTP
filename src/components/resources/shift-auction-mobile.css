@@ -78,13 +78,18 @@ body.mobile-shell .sa-m-root .sa-m-strip__glass {
     pointer-events: none;
 }
 
-/* Прилипшая полоса продолжает стекло до верхней грани экрана. Без этого в полосе
-   под колоколом (46 px + вырез) страница ехала на виду: над днями просвечивали
+/* Прилипшая полоса продолжает стекло вверх, до выреза. Без этого в полосе
+   под колоколом (46 px) страница ехала на виду: над днями просвечивали
    заголовки групп и кнопки «Вернуть». Признак data-stuck ставит сама полоса
    (AuctionPhoneDayStrip) — пока она в потоке, продолжение накрыло бы карточку
-   статуса над ней. */
+   статуса над ней.
+
+   До верхней грани экрана стекло НЕ тянется: полоса с часами — место стекла
+   iOS 26, и наш слой у самой грани заменял его сплошной заливкой (см. «Верх
+   экрана отдан стеклу iOS 26» в mobile-shell.css). То же у шапки со строкой
+   часов ниже. */
 body.mobile-shell .sa-m-root .sa-m-strip[data-stuck] .sa-m-strip__glass {
-    top: calc(-1 * (46px + max(10px, env(safe-area-inset-top))));
+    top: calc(env(safe-area-inset-top) - 46px - max(10px, env(safe-area-inset-top)));
     box-shadow: 0 0.5px 0 var(--sheet-sep, rgba(60, 60, 67, 0.2));
 }
 
@@ -99,7 +104,7 @@ body.mobile-shell .sa-m-root .sa-m-strip.sa-m-strip--bell {
 }
 
 body.mobile-shell .sa-m-root .sa-m-strip.sa-m-strip--bell[data-stuck] .sa-m-strip__glass {
-    top: calc(-1 * max(10px, env(safe-area-inset-top)));
+    top: calc(env(safe-area-inset-top) - max(10px, env(safe-area-inset-top)));
 }
 
 /* Правое поле под колокол (его отступ от края + 44 px + 8 px зазора) — только у
