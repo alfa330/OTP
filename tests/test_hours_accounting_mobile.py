@@ -107,7 +107,7 @@ class PhoneBranchTests(unittest.TestCase):
         подвал «Итого» и окно ячейки."""
         self.assertIn('/* Раздел лежит прямо на полотне страницы', APP)
         self.assertIn('{/* Table */}', APP)
-        self.assertIn('<div className="overflow-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70">', APP)
+        self.assertIn('min-h-[240px] overflow-auto rounded-2xl bg-white', APP)
         self.assertIn('{/* FOOTER: итоговые строки */}', APP)
         self.assertIn('Мультивыбор ячеек:', APP)
         self.assertIn('{selectedCell && cellModel && (', APP)

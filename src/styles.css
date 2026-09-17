@@ -1715,10 +1715,12 @@ html {
             margin-top: 6px;
             min-width: 220px;
             background: white;
-            border: 1px solid rgba(226, 232, 240, 0.9);
+            border: 1px solid rgba(226, 232, 240, 0.8);
             border-radius: 16px;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
-            padding: 8px 0;
+            /* Тень и обводка — как у поповера CustomSelect variant="ios":
+               одно меню на экране не должно выглядеть иначе, чем соседнее. */
+            box-shadow: 0 14px 40px rgba(15, 23, 42, 0.16);
+            padding: 6px;
             z-index: 100;
             /* Закрытое меню не занимает места. Прозрачная, но расставленная
                панель у правого края раздела вылезала за окно и давала всей

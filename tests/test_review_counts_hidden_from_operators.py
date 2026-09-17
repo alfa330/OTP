@@ -107,7 +107,11 @@ class EvaluationPlanIsGoneTests(unittest.TestCase):
 
     def test_reviewer_side_counters_survive(self):
         # Проверяющим количества нужны: бейдж раздела и числа в фильтрах.
-        self.assertIn("Низкие оценки{lowRatingAttentionCount ?", self.src)
+        self.assertIn(
+            "Низкие оценки\n"
+            "                                                            {lowRatingAttentionCount ? <span className=\"tabular-nums text-slate-400\">{lowRatingAttentionCount}</span> : null}",
+            self.src,
+        )
         self.assertIn("const lowRatingAttentionCount = lowRatingFilterCount('attention');", self.src)
 
 

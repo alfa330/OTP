@@ -46,15 +46,64 @@ class OuterContainerTests(unittest.TestCase):
     def test_section_has_no_outer_card(self):
         markup = _desktop_markup()
         root = markup[markup.index("return ("):][:200]
-        self.assertIn('<div className="min-w-0">', root)
+        self.assertIn('<div className="flex h-full min-h-0 min-w-0 flex-col" style={{ fontFamily: APPLE_FONT }}>', root)
         self.assertNotIn("bg-white p-5 rounded-xl shadow-md", markup)
 
     def test_table_keeps_its_own_surface_and_scroll(self):
         """Без карточки строки таблицы легли бы на серое полотно — подложка у самой таблицы."""
         self.assertIn(
-            '<div className="overflow-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70">',
+            'min-h-[240px] overflow-auto rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70',
             _desktop_markup(),
         )
+
+
+class MacStyleLayoutTests(unittest.TestCase):
+    """Второй заход по #344: «по внешке сделай более аккуратно, удобно, в стиле ios/macos»."""
+
+    def test_toolbar_has_no_captions_over_button_groups(self):
+        markup = _desktop_markup()
+        for caption in (">Параметры<", ">Действия<", ">Операторы</span>"):
+            self.assertNotIn(caption, markup)
+
+    def test_month_is_picked_by_the_shared_month_picker(self):
+        """Системное поле месяца рисует ОС — рядом с карточками оно деталь из другой программы."""
+        markup = _desktop_markup()
+        self.assertIn("<MonthPicker value={month} onChange={setMonth} allowFuture />", markup)
+        self.assertNotIn('type="month"', markup[:markup.index("{/* Table */}")])
+
+    def test_multiselect_hint_is_on_demand(self):
+        markup = _desktop_markup()
+        hint = markup.index("Мультивыбор ячеек:")
+        self.assertIn("<IosHint", markup[hint - 200:hint])
+        bar = markup.index("Выбрано ячеек:")
+        self.assertIn("{selectedHourCells.length > 0 && (", markup[bar - 700:bar])
+
+    def test_filters_are_segmented_controls_without_colour_fills(self):
+        markup = _desktop_markup()
+        self.assertIn('ariaLabel="Тип отчёта"', markup)
+        self.assertIn("{ value: 'active', label: 'Активные', count: activeCount }", markup)
+        self.assertNotIn("bg-green-600 text-white shadow", markup)
+        self.assertNotIn("bg-red-600 text-white shadow", markup)
+
+    def test_header_and_totals_stay_on_screen(self):
+        markup = _desktop_markup()
+        # Корень — колонка высотой в окно, таблица — сжимаемый прокручиваемый элемент.
+        self.assertIn('<div className="flex h-full min-h-0 min-w-0 flex-col"', markup)
+        self.assertIn('<div className="min-h-[240px] overflow-auto rounded-2xl', markup)
+        self.assertIn('className="sticky top-0 z-30 flex w-max', markup)
+        self.assertIn('className="sticky bottom-0 z-30 flex w-max', markup)
+
+    def test_day_header_is_number_and_weekday(self):
+        markup = _desktop_markup()
+        self.assertIn("HOURS_WEEKDAY_SHORT[new Date(monthParts.year, monthParts.monthNum - 1, day).getDay()]", markup)
+        self.assertIn("const HOURS_WEEKDAY_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];", APP)
+
+    def test_empty_days_are_quiet(self):
+        """Прошедший день без часов был тёмно-серой плашкой — на каждом выходном."""
+        start = APP.index("function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {")
+        renderer = APP[start:APP.index("function getTrainingsFor(opId, day) {", start)]
+        self.assertNotIn("bg-gray-400 text-white", renderer)
+        self.assertIn("bg-slate-100 text-slate-400", renderer)
 
 
 class ClosedMenuTakesNoSpaceTests(unittest.TestCase):

@@ -25,7 +25,9 @@ const shiftMonth = (month, delta) => {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 };
 
-export default function MonthPicker({ value, onChange, minYear = 2024 }) {
+/* allowFuture — будущие месяцы доступны. Тренингам наперёд не место, а учёт
+ * часов открывают и на следующий месяц: там уже стоят нормы и графики. */
+export default function MonthPicker({ value, onChange, minYear = 2024, allowFuture = false }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const buttonRef = useRef(null);
@@ -72,7 +74,7 @@ export default function MonthPicker({ value, onChange, minYear = 2024 }) {
         setOpen(true);
     };
 
-    const maxMonth = currentMonth;
+    const maxMonth = allowFuture ? '9999-12' : currentMonth;
     const canGoForward = value < maxMonth;
 
     const pick = (index) => {
@@ -143,7 +145,7 @@ export default function MonthPicker({ value, onChange, minYear = 2024 }) {
                             <button
                                 type="button"
                                 onClick={() => setShownYear((prev) => prev + 1)}
-                                disabled={shownYear >= Number(maxMonth.slice(0, 4))}
+                                disabled={!allowFuture && shownYear >= Number(maxMonth.slice(0, 4))}
                                 className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30"
                                 aria-label="Следующий год"
                             >

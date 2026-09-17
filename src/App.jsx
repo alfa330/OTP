@@ -91,6 +91,7 @@ import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSeco
 import { IosTimePicker } from './components/ui/TimePicker';
 import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
+import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
@@ -1781,6 +1782,24 @@ const RateSelfChangeCard = ({ user, currentRate, showToast, onChanged }) => {
 const RateChangeReportToggle = ({ user, showToast }) => {
     const [state, setState] = useState({ loaded: false, eligible: false, enabled: false, telegram: false, scopeLabel: '' });
     const [saving, setSaving] = useState(false);
+    // Настройку включают раз в жизни — в шапке раздела ей место иконкой, а не
+    // строкой с переключателем. Панель закрывается кликом мимо и Escape.
+    const [open, setOpen] = useState(false);
+    const rootRef = useRef(null);
+
+    useEffect(() => {
+        if (!open) return undefined;
+        const onPointerDown = (event) => {
+            if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
+        };
+        const onKeyDown = (event) => { if (event.key === 'Escape') setOpen(false); };
+        document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown, true);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [open]);
 
     useEffect(() => {
         let cancelled = false;
@@ -1823,22 +1842,43 @@ const RateChangeReportToggle = ({ user, showToast }) => {
     };
 
     return (
-        <div
-            className="flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-sm"
-            title={`Отчёт 2-го числа в 00:05 — итоги смен ставок за 1-е число${state.scopeLabel ? ` · ${state.scopeLabel}` : ''}.${!state.telegram ? ' Привяжите Telegram, чтобы получать отчёт.' : ''}`}
-        >
-            <FaIcon className="fab fa-telegram text-sky-500" />
-            <span className="font-medium text-gray-700 whitespace-nowrap">Отчёт о сменах ставок</span>
+        <div ref={rootRef} className="relative">
             <button
                 type="button"
-                onClick={toggle}
-                disabled={saving}
-                role="switch"
-                aria-checked={state.enabled}
-                className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors duration-200 ${state.enabled ? 'bg-blue-600' : 'bg-gray-300'} ${saving ? 'opacity-60' : ''}`}
+                onClick={() => setOpen(prev => !prev)}
+                aria-haspopup="dialog"
+                aria-expanded={open}
+                aria-label="Отчёт о сменах ставок в Telegram"
+                title="Отчёт о сменах ставок в Telegram"
+                className={`relative grid h-[34px] w-[34px] place-items-center rounded-xl transition-all active:scale-[0.98] ${
+                    open ? 'bg-slate-200 text-slate-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+                }`}
             >
-                <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 mt-0.5 ${state.enabled ? 'translate-x-[20px]' : 'translate-x-0.5'}`}></span>
+                <FaIcon className="fab fa-telegram" />
+                {state.enabled && (
+                    <span className="absolute right-[7px] top-[7px] h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-slate-100" aria-hidden="true" />
+                )}
             </button>
+            {open && (
+                <div
+                    role="dialog"
+                    aria-label="Отчёт о сменах ставок"
+                    className="absolute right-0 top-full z-50 mt-1.5 w-[288px] rounded-2xl bg-white p-3.5 text-left shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80"
+                >
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                            <div className="text-[13px] font-semibold text-slate-900">Отчёт о сменах ставок</div>
+                            <div className="mt-1 text-[12px] leading-snug text-slate-500">
+                                Приходит в Telegram 2-го числа в 00:05 — итоги смен ставок за 1-е число{state.scopeLabel ? ` · ${state.scopeLabel}` : ''}.
+                            </div>
+                        </div>
+                        <IosToggle checked={state.enabled} onChange={toggle} disabled={saving} />
+                    </div>
+                    {!state.telegram && (
+                        <div className="mt-2.5 text-[12px] text-amber-700">Привяжите Telegram, чтобы получать отчёт.</div>
+                    )}
+                </div>
+            )}
         </div>
     );
 };
@@ -3187,6 +3227,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // бэке само расширяет экран учёта часов.
         const LEGACY_TAB_MODEL_CODES = new Set(['', 'operator', 'chat_manager', 'tez_line', 'tez_op']);
 
+        // Дни недели для шапки таблицы учёта часов (индекс — Date.getDay()).
+        const HOURS_WEEKDAY_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
         function parseTimeToMinutes(t) {
         if (!t) return null;
         const m = t.match(/(\d{1,2}):(\d{2})/);
@@ -3608,64 +3651,64 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         onClick={() => { if (!disabled) setOpen(o => !o); }}
                         disabled={disabled}
                         aria-label={ariaLabel}
-                        className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-sm shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                        aria-haspopup="listbox"
+                        aria-expanded={open}
+                        className={`flex h-[34px] w-full items-center gap-2 rounded-xl px-3 text-[13px] font-medium ring-1 transition active:scale-[0.99] focus:outline-none ${
                             disabled
-                                ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
-                                : selectedLabel
-                                    ? 'border-blue-300 bg-white text-gray-800 hover:bg-blue-50/40'
-                                    : 'border-blue-200 bg-white text-gray-400 hover:bg-blue-50/40'
+                                ? 'cursor-not-allowed bg-slate-100 text-slate-400 ring-transparent'
+                                : open
+                                    ? 'bg-white text-slate-900 ring-2 ring-blue-500/60'
+                                    : `bg-white ring-slate-200/70 hover:bg-slate-50 ${selectedLabel ? 'text-slate-700' : 'text-slate-400'}`
                         }`}
                     >
                         {leadIcon && (
                             <FaIcon
-                                className={`fas ${leadIcon} ${disabled ? 'text-gray-300' : 'text-blue-400'} shrink-0`}
-                                style={{ width: '0.9em', height: '0.9em' }}
+                                className={`fas ${leadIcon} shrink-0 text-slate-400`}
+                                style={{ width: '0.85em', height: '0.85em' }}
                             />
                         )}
-                        <span className="flex-1 text-left truncate">{selectedLabel || placeholder}</span>
+                        <span className="flex-1 truncate text-left">{selectedLabel || placeholder}</span>
                         <FaIcon
-                            className={`fas fa-chevron-down ${disabled ? 'text-gray-300' : 'text-gray-400'} shrink-0`}
-                            style={{ width: '0.8em', height: '0.8em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}
+                            className="fas fa-chevron-down shrink-0 text-slate-400"
+                            style={{ width: '0.7em', height: '0.7em', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}
                         />
                     </button>
 
                     {open && !disabled && (
-                        <div className="absolute top-full left-0 right-0 z-50 mt-1 min-w-[220px] rounded-xl border border-blue-100 bg-white shadow-2xl overflow-hidden">
+                        <div className="absolute left-0 top-full z-50 mt-1.5 w-full min-w-[240px] overflow-hidden rounded-2xl bg-white p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80">
                             {searchable && (
-                                <div className="p-2 border-b border-blue-50">
-                                    <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-2 py-1.5">
-                                        <FaIcon className="fas fa-search text-blue-300" style={{ width: '0.8em', height: '0.8em' }} />
-                                        <input
-                                            ref={searchRef}
-                                            type="text"
-                                            value={search}
-                                            onChange={(e) => setSearch(e.target.value)}
-                                            placeholder="Поиск..."
-                                            className="flex-1 bg-transparent text-sm text-gray-700 focus:outline-none"
-                                        />
-                                    </div>
+                                <div className="mb-1 flex items-center gap-2 rounded-xl bg-slate-100 px-2.5 py-1.5">
+                                    <FaIcon className="fas fa-search text-slate-400" style={{ width: '0.75em', height: '0.75em' }} />
+                                    <input
+                                        ref={searchRef}
+                                        type="text"
+                                        value={search}
+                                        onChange={(e) => setSearch(e.target.value)}
+                                        placeholder="Поиск"
+                                        className="flex-1 bg-transparent text-[13px] text-slate-800 placeholder-slate-400 focus:outline-none"
+                                    />
                                 </div>
                             )}
-                            <div className="max-h-64 overflow-y-auto py-1">
+                            <div className="max-h-64 overflow-y-auto" role="listbox">
                                 {filtered.length === 0 ? (
-                                    <div className="px-3 py-3 text-sm text-gray-400 text-center">Ничего не найдено</div>
+                                    <div className="px-3 py-3 text-center text-[13px] text-slate-400">Ничего не найдено</div>
                                 ) : (
                                     filtered.map((opt, i) => {
                                         const selected = String(opt.value) === String(value);
                                         return (
                                             <div
                                                 key={`${opt.value}-${i}`}
+                                                role="option"
+                                                aria-selected={selected}
                                                 onClick={() => { onChange(opt.value); setOpen(false); setSearch(''); }}
-                                                className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors ${
-                                                    selected ? 'bg-blue-100 text-blue-800 font-semibold' : 'text-gray-700 hover:bg-blue-50'
+                                                className={`flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] transition-colors hover:bg-slate-100 ${
+                                                    selected ? 'font-semibold text-blue-600' : 'text-slate-700'
                                                 }`}
                                             >
-                                                <span className="w-4 shrink-0 text-center">
-                                                    {selected && (
-                                                        <FaIcon className="fas fa-check text-blue-600" style={{ width: '0.75em', height: '0.75em' }} />
-                                                    )}
-                                                </span>
                                                 <span className="flex-1 truncate">{opt.label}</span>
+                                                {selected && (
+                                                    <FaIcon className="fas fa-check shrink-0 text-blue-600" style={{ width: '0.75em', height: '0.75em' }} />
+                                                )}
                                             </div>
                                         );
                                     })
@@ -6717,7 +6760,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             ) : null;
 
-            const workTimeCellClass = `relative w-full h-8 rounded-md flex flex-col items-center px-1 ${workTimeMarkerDots.length > 0 ? 'justify-between py-1' : 'justify-center'}`;
+            const workTimeCellClass = `relative w-full h-8 rounded-lg flex flex-col items-center px-1 ${workTimeMarkerDots.length > 0 ? 'justify-between py-1' : 'justify-center'}`;
 
             // transfer-aware: к какому сегменту членства относится этот день; чужой день
             // (вне выбранной группы) — заблокирован, клик переключает на ту группу.
@@ -6729,7 +6772,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Имя группы перевода — в тултипе; клик переключает на эту группу.
                 return (
                     <div
-                        className={`${workTimeCellClass} bg-gray-200 text-gray-400 cursor-pointer`}
+                        className={`${workTimeCellClass} bg-slate-100 text-slate-300 cursor-pointer`}
                         title={`Переведён → ${daySeg.group_name}. Клик: открыть эту группу`}
                     >
                         <FaIcon className="fas fa-lock" style={{ fontSize: '11px' }} />
@@ -6741,14 +6784,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const count = tezSuccessMap?.[String(op.operator_id)]?.[String(day)] || 0;
                 if (count > 0) {
                     return (
-                        <div className="w-full h-8 rounded-md flex items-center justify-center bg-emerald-100 text-emerald-800 font-semibold"
+                        <div className="w-full h-8 rounded-lg flex items-center justify-center bg-emerald-100 text-emerald-800 font-semibold"
                              title={`Успешек в этот день: ${count}`}>
                             {count}
                         </div>
                     );
                 }
                 return (
-                    <div className={`w-full h-8 rounded-md flex items-center justify-center text-xs ${isFuture ? 'text-gray-300' : 'text-gray-400'}`}>
+                    <div className={`w-full h-8 rounded-lg flex items-center justify-center text-xs ${isFuture ? 'text-slate-300' : 'text-slate-400'}`}>
                         {isFuture ? '' : '·'}
                     </div>
                 );
@@ -6764,7 +6807,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!hasData && isPast) {
                 return (
-                <div className={`${workTimeCellClass} bg-gray-400 text-white`}>
+                <div className={`${workTimeCellClass} bg-slate-100 text-slate-400`}>
                     <span className="text-xs leading-none">—</span>
                     {renderWorkTimeMarkerRow()}
                 </div>
@@ -6772,7 +6815,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             if (!hasData && isFuture) {
                 return (
-                <div className={`${workTimeCellClass} bg-gray-200 text-gray-600`}>
+                <div className={`${workTimeCellClass} text-slate-300`}>
                     <span className="text-xs leading-none">—</span>
                     {renderWorkTimeMarkerRow()}
                 </div>
@@ -6780,7 +6823,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             if (!hasData && !isPast && !isFuture) {
                 return (
-                <div className={`${workTimeCellClass} bg-gray-100 text-gray-600`}>
+                <div className={`${workTimeCellClass} text-slate-300`}>
                     <span className="text-xs leading-none">—</span>
                     {renderWorkTimeMarkerRow()}
                 </div>
@@ -6802,7 +6845,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             if (selectedTab === 'trainings') {
-            if (!trainings || trainings.length === 0) return <div className="text-sm text-gray-400">—</div>;
+            if (!trainings || trainings.length === 0) return <div className="text-sm text-slate-300">—</div>;
 
             const countedHours = computeUniqueTrainingDurationHours(trainings, t => t && t.count_in_hours !== false);
             const notCountedHours = computeUniqueTrainingDurationHours(trainings, t => t && t.count_in_hours === false);
@@ -6831,7 +6874,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             if (selectedTab === 'technical_issues') {
-            if (!technicalIssues || technicalIssues.length === 0) return <div className="text-sm text-gray-400">—</div>;
+            if (!technicalIssues || technicalIssues.length === 0) return <div className="text-sm text-slate-300">—</div>;
 
             const totalTechHours = technicalIssues.reduce((acc, item) => acc + computeTechnicalIssueDurationHours(item), 0);
             const ratio = Math.min(1, totalTechHours / maxTechnicalIssuesHours);
@@ -6854,7 +6897,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             if (selectedTab === 'offline_activity') {
-            if (!offlineActivities || offlineActivities.length === 0) return <div className="text-sm text-gray-400">—</div>;
+            if (!offlineActivities || offlineActivities.length === 0) return <div className="text-sm text-slate-300">—</div>;
 
             const totalOfflineHours = offlineActivities.reduce((acc, item) => acc + computeOfflineActivityDurationHours(item), 0);
             const ratio = Math.min(1, totalOfflineHours / maxOfflineActivitiesHours);
@@ -6878,7 +6921,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (selectedTab === 'no_phone') {
             const noPhoneHours = computeNoPhoneHoursFromDaily(d);
-            if (!noPhoneHours) return <div className="text-sm text-gray-400">—</div>;
+            if (!noPhoneHours) return <div className="text-sm text-slate-300">—</div>;
 
             const ratio = Math.min(1, noPhoneHours / maxNoPhoneHours);
             const alpha = 0.18 + 0.77 * ratio;
@@ -6899,7 +6942,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             if (selectedTab === 'bonuses') {
-                if (!bonuses || bonuses.length === 0) return <div className="text-sm text-gray-400">—</div>;
+                if (!bonuses || bonuses.length === 0) return <div className="text-sm text-slate-300">—</div>;
 
                 let total = 0;
                 for (const b of bonuses) total += Number(b.amount || 0) || 0;
@@ -6929,7 +6972,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (selectedTab === 'fines') {
                 if (!fines || fines.length === 0) 
-                    return <div className="text-sm text-gray-400">—</div>;
+                    return <div className="text-sm text-slate-300">—</div>;
 
                 let total = 0;
                 for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
@@ -6964,7 +7007,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const work = d ? Number(d.work_time || 0) : 0;
                 const eff = d ? Number(d.efficiency || 0) : 0;
                 const hasData = work > 0 || eff > 0;
-                if (!hasData) return <div className="text-sm text-gray-400">—</div>;
+                if (!hasData) return <div className="text-sm text-slate-300">—</div>;
                 if (work <= 0) {
                     return (
                         <div
@@ -6991,16 +7034,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Чат-метрики живут вложенно в d.chat_metrics (не плоско), показываем по дню
             if (selectedTab === 'avg_score') {
                 const v = d && d.chat_metrics ? d.chat_metrics.avg_score : null;
-                if (v == null || v === '' || Number(v) <= 0) return <div className="text-sm text-gray-400">—</div>;
+                if (v == null || v === '' || Number(v) <= 0) return <div className="text-sm text-slate-300">—</div>;
                 return <div className="text-sm font-medium">{Number(v).toFixed(2)}</div>;
             }
             if (selectedTab === 'response_time') {
                 const v = d && d.chat_metrics ? d.chat_metrics.avg_response_time_seconds : null;
-                if (v == null || v === '' || Number(v) <= 0) return <div className="text-sm text-gray-400">—</div>;
+                if (v == null || v === '' || Number(v) <= 0) return <div className="text-sm text-slate-300">—</div>;
                 return <div className="text-sm font-medium">{Math.round(Number(v))}<span className="text-gray-400 text-[10px]"> с</span></div>;
             }
 
-            if (!d) return <div className="text-sm text-gray-400">—</div>;
+            if (!d) return <div className="text-sm text-slate-300">—</div>;
             const val = d[metricKey];
             if (metricKey === 'calls' || metricKey === 'chats') {
                 return <div className="text-sm font-medium">{Math.round(Number(val || 0))}</div>;
@@ -7330,11 +7373,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // ======= RENDER =======
         const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId;
         const isDayUploadDisabled = isChatModel || isAdminWithoutSupervisorSelected;
-        const hoursDayColClass = 'w-[72px] shrink-0 p-2 text-center border-l';
-        const hoursOperatorColClass = 'w-48 shrink-0 p-2 border-r';
-        const hoursRateColClass = 'w-28 shrink-0 p-2 text-center border-r';
-        const hoursNormColClass = 'w-36 shrink-0 p-2 text-center border-r';
-        const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l';
+        // Разделители колонок — волосяные, как в таблицах macOS: серые рамки
+        // по умолчанию делали сетку тяжелее самих чисел.
+        const hoursDayColClass = 'w-[72px] shrink-0 px-1.5 py-2 text-center border-l border-slate-100';
+        const hoursOperatorColClass = 'w-48 shrink-0 px-3 py-2 border-r border-slate-100';
+        const hoursRateColClass = 'w-28 shrink-0 p-2 text-center border-r border-slate-100';
+        const hoursNormColClass = 'w-36 shrink-0 p-2 text-center border-r border-slate-100';
+        const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l border-slate-100';
+        // Строка выпадающего меню раздела: выбранное — синим текстом с галочкой
+        // справа, без заливки (тот же язык, что у CustomSelect variant="ios").
+        const hoursMenuRowClass = (selected) => `flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors hover:bg-slate-100 ${
+            selected ? 'font-semibold text-blue-600' : 'text-slate-700'
+        }`;
         const lowRatingAttentionCount = lowRatingFilterCount('attention');
         const lowRatingUnreviewedCount = Number(lowRatingSummary?.unreviewed || 0);
 
@@ -7514,7 +7564,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
            (#344): её поля съедали ширину у таблицы, а прокручиваться вбок
            должна только сама таблица, у которой своя подложка. */
         return (
-            <div className="min-w-0">
+            <div className="flex h-full min-h-0 min-w-0 flex-col" style={{ fontFamily: APPLE_FONT }}>
             <input
                 ref={chatMetricsInputRef}
                 type="file"
@@ -7523,7 +7573,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 onChange={handleChatMetricsFileChange}
             />
             {(chatMetricsImportState.summary || chatMetricsImportState.error) && (
-                <div className={`mb-3 p-3 rounded-lg text-xs border ${chatMetricsImportState.error ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-cyan-50 border-cyan-200 text-cyan-800'}`}>
+                <div className={`mb-3 rounded-2xl px-3.5 py-2.5 text-xs ring-1 ${chatMetricsImportState.error ? 'bg-rose-50 text-rose-700 ring-rose-100' : 'bg-cyan-50 text-cyan-900 ring-cyan-100'}`}>
                     {chatMetricsImportState.error ? (
                         <>
                             <FaIcon className="fas fa-triangle-exclamation mr-1"></FaIcon>
@@ -7840,33 +7890,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     onDataChanged={() => setTezSuccessReloadKey((key) => key + 1)}
                 />
             </FullscreenSheet>
-            <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
-                {/* === Параметры (+ переключатель отчёта в той же линии) === */}
-                <div className="flex flex-wrap items-stretch gap-3">
-                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
-                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Параметры</span>
+            {/* Шапка раздела: название слева, месяц и действия справа. Подписи
+                «Параметры», «Действия», «Операторы» над группами кнопок убраны —
+                кнопки говорят сами за себя, а подписи только добавляли шум (#344). */}
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2 px-1">
+                    <h2 className="text-[22px] font-semibold tracking-tight text-slate-900">Учёт часов</h2>
+                    <IosHint
+                        label="Как выбрать несколько ячеек"
+                        text="Мультивыбор ячеек: Ctrl/Cmd + клик выбирает ячейку, Ctrl/Cmd + зажатая кнопка мыши — диапазон. Выбранное можно очистить разом; тренинги при этом не затрагиваются."
+                    />
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <RateChangeReportToggle user={user} showToast={showToast} />
+                    <button
+                        type="button"
+                        onClick={fetchDailyHoursAndTrainings}
+                        title="Обновить"
+                        aria-label="Обновить"
+                        className="grid h-[34px] w-[34px] place-items-center rounded-xl bg-slate-100 text-slate-500 transition-all hover:bg-slate-200 hover:text-slate-700 active:scale-[0.98]"
+                    >
+                        <FaIcon className={`fas fa-arrows-rotate ${isLoading ? 'fa-spin' : ''}`} />
+                    </button>
+                    <MonthPicker value={month} onChange={setMonth} allowFuture />
+                    <button
+                        type="button"
+                        onClick={downloadMonthlyReport}
+                        disabled={isDownloadingReport}
+                        title="Скачать месячный отчёт в XLSX"
+                        className="inline-flex h-[34px] items-center gap-2 rounded-xl bg-slate-100 px-3.5 text-[13px] font-semibold text-slate-700 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
+                    >
+                        <FaIcon className={`fas ${isDownloadingReport ? 'fa-spinner fa-spin' : 'fa-file-excel'} text-slate-500`} />
+                        {isDownloadingReport ? 'Формируется…' : 'Сформировать отчёт'}
+                    </button>
+                </div>
+            </div>
 
-                    <label className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 shadow-sm text-sm">
-                        <FaIcon className="fas fa-calendar-alt text-blue-400" style={{ width: '0.9em', height: '0.9em' }} />
-                        <input
-                            type="month"
-                            className="bg-transparent text-sm text-gray-800 focus:outline-none"
-                            value={month}
-                            onChange={e => setMonth(e.target.value)}
-                            aria-label="Месяц"
-                        />
-                    </label>
-
-                    <HoursCustomSelect
+            {/* Второй ряд: отбор строк слева, показатель справа */}
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                {/* === Отбор: вид отчёта, группа, статус, направления === */}
+                <div className="flex flex-wrap items-center gap-2">
+                    <IosSegmented
+                        ariaLabel="Тип отчёта"
                         value={reportScope}
                         onChange={(v) => setReportScope(v)}
                         options={[
                             { value: 'by_sv', label: 'По СВ' },
                             { value: 'all', label: 'Общий' },
                         ]}
-                        leadIcon="fa-filter"
-                        ariaLabel="Тип отчёта"
-                        className="min-w-[140px]"
                     />
 
                     {(groupsList || []).length > 0 && (
@@ -7893,132 +7964,73 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         searchable
                         disabled={reportScope === 'all'}
                         ariaLabel="Группа"
-                        className="min-w-[240px]"
+                        className="w-[248px]"
                     />
                     )}
-                </div>
 
-                    <RateChangeReportToggle user={user} showToast={showToast} />
-                </div>
-
-                {/* === Действия: обновить + выгрузить === */}
-                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
-                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Действия</span>
-
-                    <button
-                        onClick={fetchDailyHoursAndTrainings}
-                        className="inline-flex items-center gap-2 rounded-lg border border-blue-300 bg-white px-3 py-2 text-sm font-medium text-blue-700 shadow-sm transition hover:bg-blue-50"
-                    >
-                        <FaIcon className="fas fa-sync-alt" /> Обновить
-                    </button>
-
-                    <button
-                        onClick={downloadMonthlyReport}
-                        disabled={isDownloadingReport}
-                        className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white shadow-sm transition ${isDownloadingReport ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'}`}
-                        title="Скачать месячный отчёт в XLSX"
-                    >
-                        {isDownloadingReport ? (
-                            <>
-                                <FaIcon className="fas fa-spinner fa-spin" /> Формируется...
-                            </>
-                        ) : (
-                            <>
-                                <FaIcon className="fas fa-file-excel" /> Сформировать отчёт
-                            </>
-                        )}
-                    </button>
-                </div>
-            </div>
-
-            {/* Второй ряд: фильтры операторов и переключатель метрик */}
-            <div className="mb-4 flex flex-wrap items-stretch justify-between gap-3">
-                {/* === Операторы: статус + направления === */}
-                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2">
-                    <span className="px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Операторы</span>
-
-                    <button
-                        onClick={() => setOperatorsViewTab('active')}
-                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${operatorsViewTab === 'active' ? 'bg-green-600 text-white shadow' : 'bg-white border border-slate-200 text-gray-700 hover:bg-gray-50'}`}
-                        title="Показать активных операторов"
-                    >
-                        Активные <span className={`ml-2 inline-block px-2 py-0.5 text-xs rounded ${operatorsViewTab === 'active' ? 'bg-white text-gray-800' : 'bg-slate-100 text-gray-700'}`}>{activeCount}</span>
-                    </button>
-
-                    <button
-                        onClick={() => setOperatorsViewTab('fired')}
-                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${operatorsViewTab === 'fired' ? 'bg-red-600 text-white shadow' : 'bg-white border border-slate-200 text-gray-700 hover:bg-gray-50'}`}
-                        title="Показать уволенных операторов"
-                    >
-                        Уволенные <span className={`ml-2 inline-block px-2 py-0.5 text-xs rounded ${operatorsViewTab === 'fired' ? 'bg-white text-gray-800' : 'bg-slate-100 text-gray-700'}`}>{firedCount}</span>
-                    </button>
-
-                    <span className="mx-1 h-6 w-px bg-slate-300" aria-hidden="true" />
+                    <IosSegmented
+                        ariaLabel="Операторы"
+                        value={operatorsViewTab}
+                        onChange={setOperatorsViewTab}
+                        options={[
+                            { value: 'active', label: 'Активные', count: activeCount },
+                            { value: 'fired', label: 'Уволенные', count: firedCount },
+                        ]}
+                    />
 
                     <div
                         data-hours-menu="directions"
                         onMouseEnter={() => handleMenuMouseEnter(DIRECTIONS_MENU_ID)}
                         onMouseLeave={() => handleMenuMouseLeave(DIRECTIONS_MENU_ID)}
-                        className={`relative rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
-                            !selectedDirections.includes('all')
-                                ? 'border-blue-200 ring-1 ring-blue-100'
-                                : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'
-                        }`}
+                        className="relative"
                     >
                         <button
                             type="button"
                             onClick={() => toggleMenu(DIRECTIONS_MENU_ID)}
                             aria-haspopup="menu"
                             aria-expanded={openMenu === DIRECTIONS_MENU_ID}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors duration-200 focus:outline-none ${
+                            aria-label="Направления"
+                            className={`flex h-[34px] items-center gap-2 rounded-xl bg-white px-3 text-[13px] font-medium ring-1 transition active:scale-[0.99] ${
                                 openMenu === DIRECTIONS_MENU_ID
-                                    ? 'text-slate-700 bg-slate-50'
-                                    : !selectedDirections.includes('all')
-                                        ? 'text-blue-700 bg-blue-50/50'
-                                        : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+                                    ? 'text-slate-900 ring-2 ring-blue-500/60'
+                                    : 'text-slate-700 ring-slate-200/70 hover:bg-slate-50'
                             }`}
                         >
-                            <FaIcon className="fas fa-route text-blue-600" />
-                            <span className="text-slate-500">Направления</span>
-                            <span className="ml-1.5 px-2 py-0.5 text-[9px] font-bold bg-blue-600 text-white rounded-full normal-case tracking-normal">
+                            <FaIcon className="fas fa-route text-slate-400" style={{ width: '0.85em', height: '0.85em' }} />
+                            <span className="max-w-[200px] truncate">
                                 {selectedDirections.includes('all')
-                                    ? 'Все'
+                                    ? 'Все направления'
                                     : selectedDirections.length === 0
-                                        ? 'Ничего'
+                                        ? 'Направления не выбраны'
                                         : selectedDirections.length === 1
                                             ? selectedDirections[0]
-                                            : `Выбрано (${selectedDirections.length})`}
+                                            : `Направлений: ${selectedDirections.length}`}
                             </span>
                             <FaIcon
-                                className={`fas fa-chevron-down ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
-                                    openMenu === DIRECTIONS_MENU_ID ? 'rotate-180 text-blue-600' : ''
-                                }`}
+                                className={`fas fa-chevron-down text-slate-400 transition-transform duration-200 ${openMenu === DIRECTIONS_MENU_ID ? 'rotate-180' : ''}`}
+                                style={{ width: '0.7em', height: '0.7em' }}
                             />
                         </button>
 
                         <div className={`tab-dropdown ${openMenu === DIRECTIONS_MENU_ID ? `open${openMenuAlignEnd ? ' tab-dropdown--end' : ''}` : ''}`} role="menu">
-                            <div className="flex flex-col min-w-[200px] max-h-[250px] overflow-y-auto workhours-modal-scroll">
+                            <div className="flex max-h-[280px] min-w-[220px] flex-col overflow-y-auto workhours-modal-scroll">
                                 <button
                                     type="button"
+                                    role="menuitemcheckbox"
+                                    aria-checked={selectedDirections.includes('all')}
                                     onClick={() => {
                                         setSelectedDirections(['all']);
                                         // «Все направления» — конечный выбор, тут меню закрываем;
                                         // отдельные направления оставляют его открытым (мультивыбор).
                                         closeMenus();
                                     }}
-                                    className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
-                                        selectedDirections.includes('all')
-                                            ? 'text-blue-600 bg-blue-50/50 font-semibold'
-                                            : 'text-slate-700'
-                                    }`}
+                                    className={hoursMenuRowClass(selectedDirections.includes('all'))}
                                 >
                                     <span>Все направления</span>
-                                    {selectedDirections.includes('all') && (
-                                        <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
-                                    )}
+                                    {selectedDirections.includes('all') && <FaIcon className="fas fa-check text-[11px] text-blue-600" />}
                                 </button>
 
-                                <div className="h-px bg-slate-100 my-1" />
+                                <div className="mx-2.5 my-1 h-px bg-slate-100" />
 
                                 {directionOptions.map(d => {
                                     const isSelected = selectedDirections.includes(String(d));
@@ -8026,17 +8038,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <button
                                             key={d}
                                             type="button"
+                                            role="menuitemcheckbox"
+                                            aria-checked={isSelected}
                                             onClick={() => toggleDirectionSelection(d)}
-                                            className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
-                                                isSelected
-                                                    ? 'text-blue-600 bg-blue-50/50 font-semibold'
-                                                    : 'text-slate-700'
-                                            }`}
+                                            className={hoursMenuRowClass(isSelected)}
                                         >
-                                            <span>{d}</span>
-                                            {isSelected && (
-                                                <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
-                                            )}
+                                            <span className="truncate">{d}</span>
+                                            {isSelected && <FaIcon className="fas fa-check text-[11px] text-blue-600" />}
                                         </button>
                                     );
                                 })}
@@ -8045,21 +8053,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </div>
 
-                {/* === Группы показателей === */}
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-2 relative">
-                    <div className="flex flex-wrap items-center gap-2">
+                {/* === Показатель: группы вкладок сегментами, вкладки — в меню группы ===
+                    Активный сегмент подписан и группой, и выбранной вкладкой: так
+                    видно, что сейчас на экране, не открывая меню. */}
+                <div className="relative">
+                    <div className="inline-flex flex-wrap items-center rounded-[11px] bg-slate-100 p-[3px]" role="group" aria-label="Показатель">
                         {WORKHOURS_METRIC_GROUPS.map(group => {
                             const isIndicatorsGroup = group.label === 'Показатели';
                             const groupHasCalls = Array.isArray(group.tabs) && group.tabs.some(t => t && t.key === 'calls');
                             const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
+                            const activeTabLabel = activeInGroup ? group.tabs.find(t => t.key === selectedTab)?.label : '';
                             const validSurgeCount = cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows).filter(w => w.start && w.end).length;
-                            const groupIconClass = group.tone === 'cyan'
-                                ? 'text-cyan-600'
-                                : group.tone === 'emerald'
-                                    ? 'text-emerald-600'
-                                    : group.tone === 'slate'
-                                        ? 'text-slate-600'
-                                        : 'text-blue-600';
                             const isOpen = openMenu === group.label;
                             return (
                                 <div
@@ -8067,69 +8071,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     data-hours-menu={group.label}
                                     onMouseEnter={() => handleMenuMouseEnter(group.label)}
                                     onMouseLeave={() => handleMenuMouseLeave(group.label)}
-                                    className={`relative rounded-full border bg-white p-1 shadow-sm flex items-center transition-all duration-300 gap-1 ${
-                                        activeInGroup
-                                            ? 'border-blue-200 ring-1 ring-blue-100'
-                                            : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'
-                                    }`}
+                                    className="relative"
                                 >
                                     <button
                                         type="button"
                                         onClick={() => toggleMenu(group.label)}
                                         aria-haspopup="menu"
                                         aria-expanded={isOpen}
-                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold uppercase tracking-wide transition-colors duration-200 focus:outline-none ${
-                                            isOpen
-                                                ? 'text-slate-700 bg-slate-50'
-                                                : activeInGroup
-                                                    ? 'text-blue-700 bg-blue-50/50'
-                                                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
+                                        className={`flex items-center gap-1.5 whitespace-nowrap rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium transition-all active:scale-[0.98] ${
+                                            activeInGroup
+                                                ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                                : isOpen
+                                                    ? 'text-slate-900'
+                                                    : 'text-slate-500 hover:text-slate-800'
                                         }`}
                                     >
-                                        <FaIcon className={`fas ${group.icon} ${groupIconClass}`}></FaIcon>
                                         <span>{group.label}</span>
-                                        
-                                        {activeInGroup && (
-                                            <span className="ml-1.5 px-2 py-0.5 text-[9px] font-bold bg-blue-600 text-white rounded-full normal-case tracking-normal">
-                                                {group.tabs.find(t => t.key === selectedTab)?.label}
-                                            </span>
+                                        {activeInGroup && activeTabLabel && (
+                                            <span className="font-normal text-slate-500">· {activeTabLabel}</span>
                                         )}
-
                                         <FaIcon
-                                            className={`fas fa-chevron-down ml-1 text-[9px] text-slate-400 transition-transform duration-300 ${
-                                                isOpen ? 'rotate-180 text-blue-600' : ''
-                                            }`}
+                                            className={`fas fa-chevron-down text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+                                            style={{ width: '0.65em', height: '0.65em' }}
                                         />
                                     </button>
 
                                     <div className={`tab-dropdown ${isOpen ? `open${openMenuAlignEnd ? ' tab-dropdown--end' : ''}` : ''}`} role="menu">
-                                        <div className="flex flex-col min-w-[200px]">
+                                        <div className="flex min-w-[220px] flex-col">
                                             {group.tabs.map(tab => {
                                                 const isSelected = selectedTab === tab.key;
                                                 return (
                                                     <button
                                                         key={tab.key}
                                                         type="button"
+                                                        role="menuitemradio"
+                                                        aria-checked={isSelected}
                                                         onClick={() => {
                                                             setSelectedTab(tab.key);
                                                             closeMenus();
                                                         }}
-                                                        className={`flex items-center justify-between w-full px-4 py-2 text-left text-xs sm:text-sm font-medium transition-colors hover:bg-slate-50 ${
-                                                            isSelected 
-                                                                ? 'text-blue-600 bg-blue-50/50 font-semibold' 
-                                                                : 'text-slate-700'
-                                                        }`}
+                                                        className={hoursMenuRowClass(isSelected)}
                                                         title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
                                                     >
                                                         <span>{tab.label}</span>
-                                                        {isSelected && (
-                                                            <FaIcon className="fas fa-check text-blue-600 text-[10px] ml-2" />
-                                                        )}
+                                                        {isSelected && <FaIcon className="fas fa-check text-[11px] text-blue-600" />}
                                                     </button>
                                                 );
                                             })}
                                             {isChatModel && isIndicatorsGroup && (
-                                                <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
+                                                <div className="mt-1 flex flex-col border-t border-slate-100 pt-1">
                                                     <button
                                                         type="button"
                                                         onClick={(e) => {
@@ -8138,14 +8128,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             closeMenus();
                                                         }}
                                                         disabled={chatMetricsImportState.loading}
-                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
-                                                            chatMetricsImportState.loading 
-                                                                ? 'bg-cyan-50 border-cyan-100 text-cyan-400 cursor-not-allowed' 
-                                                                : 'bg-cyan-50 border-cyan-200 text-cyan-800 hover:bg-cyan-100'
-                                                        }`}
+                                                        className={`${hoursMenuRowClass(false)} disabled:cursor-not-allowed disabled:opacity-50`}
                                                     >
-                                                        <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`} />
-                                                        Синхронизация
+                                                        <span className="flex items-center gap-2.5">
+                                                            <FaIcon className={`fas ${chatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} w-4 text-slate-400`} />
+                                                            Синхронизация
+                                                        </span>
                                                     </button>
                                                     <button
                                                         type="button"
@@ -8160,14 +8148,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             setShowLowRatingReviews(prev => !prev);
                                                             closeMenus();
                                                         }}
-                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
-                                                            showLowRatingReviews
-                                                                ? 'bg-slate-900 border-slate-900 text-white'
-                                                                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                                                        }`}
+                                                        role="menuitemcheckbox"
+                                                        aria-checked={showLowRatingReviews}
+                                                        className={hoursMenuRowClass(showLowRatingReviews)}
                                                     >
-                                                        <FaIcon className="fas fa-star-half-alt" />
-                                                        Низкие оценки{lowRatingAttentionCount ? ` (${lowRatingAttentionCount})` : ''}
+                                                        <span className="flex items-center gap-2.5">
+                                                            <FaIcon className={`fas fa-star-half-alt w-4 ${showLowRatingReviews ? 'text-blue-600' : 'text-slate-400'}`} />
+                                                            Низкие оценки
+                                                            {lowRatingAttentionCount ? <span className="tabular-nums text-slate-400">{lowRatingAttentionCount}</span> : null}
+                                                        </span>
+                                                        {showLowRatingReviews && <FaIcon className="fas fa-check text-[11px] text-blue-600" />}
                                                     </button>
                                                     <button
                                                         type="button"
@@ -8177,19 +8167,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             setShowChatMetricsSurgeEditor(true);
                                                             closeMenus();
                                                         }}
-                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
-                                                            showChatMetricsSurgeEditor 
-                                                                ? 'bg-amber-600 border-amber-600 text-white' 
-                                                                : 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
-                                                        }`}
+                                                        className={hoursMenuRowClass(false)}
                                                     >
-                                                        <FaIcon className="fas fa-wave-square" />
-                                                        Наплывы{validSurgeCount ? ` (${validSurgeCount})` : ''}
+                                                        <span className="flex items-center gap-2.5">
+                                                            <FaIcon className="fas fa-wave-square w-4 text-slate-400" />
+                                                            Наплывы
+                                                            {validSurgeCount ? <span className="tabular-nums text-slate-400">{validSurgeCount}</span> : null}
+                                                        </span>
                                                     </button>
                                                 </div>
                                             )}
                                             {!isChatModel && !isTezOpContext && groupHasCalls && (
-                                                <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
+                                                <div className="mt-1 flex flex-col border-t border-slate-100 pt-1">
                                                     <button
                                                         type="button"
                                                         onClick={(e) => {
@@ -8198,20 +8187,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             closeMenus();
                                                         }}
                                                         disabled={oktellCallsSyncLoading}
-                                                        className={`flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border ${
-                                                            oktellCallsSyncLoading
-                                                                ? 'bg-sky-50 border-sky-100 text-sky-400 cursor-not-allowed'
-                                                                : 'bg-sky-50 border-sky-200 text-sky-800 hover:bg-sky-100'
-                                                        }`}
+                                                        className={`${hoursMenuRowClass(false)} disabled:cursor-not-allowed disabled:opacity-50`}
                                                         title="Подтянуть количество звонков по операторам из Oktell за выбранный период (до 31 дня). Чат-менеджеры не затрагиваются."
                                                     >
-                                                        <FaIcon className={`fas ${oktellCallsSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`} />
-                                                        Синхронизация с Oktell
+                                                        <span className="flex items-center gap-2.5">
+                                                            <FaIcon className={`fas ${oktellCallsSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'} w-4 text-slate-400`} />
+                                                            Синхронизация с Oktell
+                                                        </span>
                                                     </button>
                                                 </div>
                                             )}
                                             {isTezOpContext && groupHasCalls && (
-                                                <div className="border-t border-slate-100 mt-1 pt-1.5 px-2 flex flex-col gap-1">
+                                                <div className="mt-1 flex flex-col border-t border-slate-100 pt-1">
                                                     <button
                                                         type="button"
                                                         onClick={(e) => {
@@ -8219,11 +8206,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             setSalesOverlay('leads');
                                                             closeMenus();
                                                         }}
-                                                        className="flex items-center gap-1.5 px-3 py-1.5 text-left text-xs font-semibold rounded-lg transition border bg-indigo-50 border-indigo-200 text-indigo-800 hover:bg-indigo-100"
+                                                        className={hoursMenuRowClass(false)}
                                                         title="База лидов, план, воронка и успешки операторов ОП"
                                                     >
-                                                        <FaIcon className="fas fa-users" />
-                                                        База лидов и успешки
+                                                        <span className="flex items-center gap-2.5">
+                                                            <FaIcon className="fas fa-users w-4 text-slate-400" />
+                                                            База лидов и успешки
+                                                        </span>
                                                     </button>
                                                 </div>
                                             )}
@@ -8416,34 +8405,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             </div>
 
-            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2">
-                <span className="text-sm text-gray-700">
-                Мультивыбор ячеек: <span className="font-medium">Ctrl/Cmd + клик</span> или <span className="font-medium">Ctrl/Cmd + зажатый ЛКМ (диапазон)</span>
+            {/* Панель выбора — только когда ячейки выбраны. Как выбирать, объясняет
+                «i» рядом с названием раздела: постоянная строка-подсказка над
+                таблицей была шумом для всех, кто мультивыбором не пользуется. */}
+            {selectedHourCells.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center gap-3 rounded-2xl bg-blue-50/80 px-3.5 py-2 ring-1 ring-blue-100">
+                <span className="text-[13px] font-semibold tabular-nums text-blue-900">
+                    Выбрано ячеек: {selectedHourCells.length}
                 </span>
-                <span className="text-xs text-gray-500">Тренинги при удалении не затрагиваются</span>
-                {selectedHourCells.length > 0 && (
-                <>
-                    <span className="ml-auto text-sm font-medium text-blue-800">
-                    Выбрано: {selectedHourCells.length}
-                    </span>
+                <span className="text-[12px] text-blue-700">Тренинги при удалении не затрагиваются</span>
+                <div className="ml-auto flex items-center gap-2">
                     <button
-                    type="button"
-                    onClick={clearSelectedHourCells}
-                    className="px-3 py-1.5 text-sm rounded-md border bg-white hover:bg-gray-50"
+                        type="button"
+                        onClick={clearSelectedHourCells}
+                        className="h-8 rounded-lg px-3 text-[13px] font-medium text-blue-700 transition hover:bg-blue-100 active:scale-[0.98]"
                     >
-                    Снять выбор
+                        Снять выбор
                     </button>
                     <button
-                    type="button"
-                    onClick={bulkDeleteSelectedHourCells}
-                    disabled={isBulkDeletingHours || isLoading}
-                    className={`px-3 py-1.5 text-sm rounded-md text-white ${isBulkDeletingHours || isLoading ? 'bg-red-300 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}
+                        type="button"
+                        onClick={bulkDeleteSelectedHourCells}
+                        disabled={isBulkDeletingHours || isLoading}
+                        className="h-8 rounded-lg bg-rose-600 px-3 text-[13px] font-semibold text-white shadow-sm transition hover:bg-rose-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                    {isBulkDeletingHours ? 'Удаление...' : 'Удалить данные'}
+                        {isBulkDeletingHours ? 'Удаление…' : 'Удалить данные'}
                     </button>
-                </>
-                )}
+                </div>
             </div>
+            )}
 
             {isChatModel && showLowRatingReviews && (
                 <div className="fixed inset-0 z-[135] flex bg-slate-100">
@@ -8965,9 +8954,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             {/* Общий план отдела ОП: считается на бэке (сумма ставок работавших в
                 месяце × план на 1 FTE × 0,8) и приходит вместе с планом на 1 FTE. */}
             {selectedTab === 'tez_successes' && tezPlanSummary && (
-            <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+            <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl bg-white px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
-                    <FaIcon className="fas fa-bullseye text-teal-600" aria-hidden="true" />
+                    <FaIcon className="fas fa-bullseye text-slate-400" aria-hidden="true" />
                     Общий план отдела
                     <InfoHint side="right">
                         Сумма ставок операторов ОП, работавших в этом месяце
@@ -9001,119 +8990,133 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             )}
 
             {/* Table */}
-            <div className="overflow-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70">
-                <div className="min-w-max">
+            {/* Таблица забирает высоту, оставшуюся от шапки раздела (корень — колонка
+                высотой в окно): шапка дней и строка «Итого» закреплены, а полоса
+                прокрутки вбок всегда на экране — раньше до неё приходилось листать
+                страницу в самый низ. Короткая таблица остаётся по содержимому. */}
+            <div className="min-h-[240px] overflow-auto rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70">
+                <div className="min-w-max tabular-nums">
                 {/* Header row */}
-                <div className="flex w-max sticky top-0 bg-gray-50 border-b z-30">
-                    <div className={`${hoursOperatorColClass} sticky left-0 z-40 bg-gray-50 text-sm font-medium`}>Операторы</div>
+                <div className="sticky top-0 z-30 flex w-max border-b border-slate-200/80 bg-slate-50 text-[12px] font-medium text-slate-500">
+                    <div className={`${hoursOperatorColClass} sticky left-0 z-40 flex items-center bg-slate-50`}>Операторы</div>
 
-                    <div className={`${hoursRateColClass} bg-gray-50 text-sm`}>Ставка</div>
-                    <div className={`${hoursNormColClass} bg-gray-50 text-sm`}>Норма часов</div>
+                    <div className={`${hoursRateColClass} flex items-center justify-center bg-slate-50`}>Ставка</div>
+                    <div className={`${hoursNormColClass} flex items-center justify-center bg-slate-50`}>Норма часов</div>
                     {showTezPlanColumn && (
-                    <div className={`${hoursNormColClass} bg-gray-50 text-sm`} title="Индивидуальный план успешных сделок (модель ОП TEZ). Наведите на значение — покажем расчёт.">
+                    <div className={`${hoursNormColClass} flex items-center justify-center bg-slate-50`} title="Индивидуальный план успешных сделок (модель ОП TEZ). Наведите на значение — покажем расчёт.">
                         План успешек
                     </div>
                     )}
 
-                    {daysArray.map(day => (
-                    <div key={day} className={hoursDayColClass}>
+                    {/* День — числом и днём недели, как в календаре: «10-сен» в
+                        колонку 72 px не влезало и ломалось на две строки, а месяц
+                        и так выбран в шапке раздела. Сегодня — синим. */}
+                    {daysArray.map(day => {
+                        const weekday = HOURS_WEEKDAY_SHORT[new Date(monthParts.year, monthParts.monthNum - 1, day).getDay()];
+                        const isTodayColumn = monthRel === 0 && day === todayD;
+                        return (
+                    <div key={day} className={`${hoursDayColClass} flex items-center`}>
                         <button
+                        type="button"
                         onClick={() => {
                             if (isDayUploadDisabled) return;
                             openUploadForDay(day);
                         }}
                         disabled={isDayUploadDisabled}
-                        className={`text-xs font-semibold px-2 py-1 rounded ${isDayUploadDisabled ? 'text-gray-400 cursor-not-allowed' : 'hover:bg-gray-100'}`}
-                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Показатели → Синхронизация' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите группу' : 'Загрузить файл на выбранный день')}
+                        aria-label={`${formatHeaderLabel(day)}: загрузить файл учёта`}
+                        className={`flex w-full flex-col items-center gap-1 rounded-lg py-1 leading-none transition-colors ${isDayUploadDisabled ? 'cursor-default' : 'hover:bg-slate-100'}`}
+                        title={isChatModel ? 'Для чат-группы отчёты загружаются через Показатели → Синхронизация' : (isAdminWithoutSupervisorSelected ? 'Сначала выберите группу' : `${formatHeaderLabel(day)} — загрузить файл на этот день`)}
                         >
-                        {formatHeaderLabel(day)}
+                        <span className={`text-[13px] font-semibold ${isTodayColumn ? 'text-blue-600' : 'text-slate-700'}`}>{day}</span>
+                        <span className={`text-[10px] font-medium ${isTodayColumn ? 'text-blue-500' : 'text-slate-400'}`}>{weekday}</span>
                         </button>
                     </div>
-                    ))}
+                        );
+                    })}
 
                     {/* Right summary headers */}
                     {selectedTab === 'work_time' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого часов</div>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>База часов</div>
-                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>Вып. нормы (%)</div>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Выработка</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Итого часов</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>База часов</div>
+                        <div className={`${hoursSummaryColClass} w-32 flex items-center justify-center bg-slate-50`}>Вып. нормы (%)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Выработка</div>
                     </>
                     )}
                     {selectedTab === 'calls' && (
-                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>
+                    <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>
                         {isTezOpContext ? 'Всего звонков' : (isChatModel ? 'Кол-во чатов' : 'КВЗ')}
                     </div>
                     )}
                     {(selectedTab === 'dial_time' || selectedTab === 'talk_time') && (
-                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого (ч)</div>
+                    <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Итого (ч)</div>
                     )}
                     {selectedTab === 'chats' && (
-                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Всего чатов</div>
+                    <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Всего чатов</div>
                     )}
                     {/* Успешки: три отдельные колонки. Подписи стоят в шапке, а в
                         строках остаются только числа — иначе слова «Успешки» и
                         «Выполнение» повторялись бы в каждой строке таблицы. */}
                     {selectedTab === 'tez_successes' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-28 bg-gray-50 text-sm font-medium`}
+                        <div className={`${hoursSummaryColClass} w-28 flex items-center justify-center bg-slate-50`}
                              title="Успешки за месяц">
                             Успешки
                         </div>
-                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}
+                        <div className={`${hoursSummaryColClass} w-32 flex items-center justify-center bg-slate-50`}
                              title="Выполнение индивидуального плана успешек">
                             Выполнение
                         </div>
-                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}
+                        <div className={`${hoursSummaryColClass} w-32 flex items-center justify-center bg-slate-50`}
                              title="Успешки за месяц ÷ отработанные часы (те же часы, по которым считается план)">
                             Успешки в час
                         </div>
                     </>
                     )}
                     {selectedTab === 'avg_score' && (
-                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Средняя оценка</div>
+                    <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Средняя оценка</div>
                     )}
                     {selectedTab === 'response_time' && (
-                    <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Ср. время ответа (с)</div>
+                    <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Ср. время ответа (с)</div>
                     )}
                     {selectedTab === 'efficiency' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого (ч)</div>
-                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>OCC (%)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Итого (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-32 flex items-center justify-center bg-slate-50`}>OCC (%)</div>
                     </>
                     )}
                     {selectedTab === 'trainings' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Итого (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Итого (ч)</div>
                         {/*
-                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}>Засчитано (ч)</div>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Не засчитано (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-32 flex items-center justify-center bg-slate-50`}>Засчитано (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Не засчитано (ч)</div>
                         */}
                     </>
                     )}
                     {selectedTab === 'technical_issues' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Тех. сбои (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Тех. сбои (ч)</div>
                     </>
                     )}
                     {selectedTab === 'offline_activity' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Офлайн активность (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Офлайн активность (ч)</div>
                     </>
                     )}
                     {selectedTab === 'no_phone' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Без телефона (ч)</div>
+                        <div className={`${hoursSummaryColClass} w-36 flex items-center justify-center bg-slate-50`}>Без телефона (ч)</div>
                     </>
                     )}
                     {selectedTab === 'bonuses' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-44 bg-gray-50 text-sm font-medium`}>Бонусы (₸)</div>
+                        <div className={`${hoursSummaryColClass} w-44 flex items-center justify-center bg-slate-50`}>Бонусы (₸)</div>
                     </>
                     )}
                     {selectedTab === 'fines' && (
                     <>
-                        <div className={`${hoursSummaryColClass} w-44 bg-gray-50 text-sm font-medium`}>Штрафы (₸)</div>
+                        <div className={`${hoursSummaryColClass} w-44 flex items-center justify-center bg-slate-50`}>Штрафы (₸)</div>
                     </>
                     )}
                 </div>
@@ -9121,15 +9124,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 {/* Rows */}
                 <div>
                     {isLoading ? (
-                    <div className="p-4 text-gray-600">Загрузка данных...</div>
+                    <div className="px-4 py-12 text-[13px] text-slate-400"><FaIcon className="fas fa-spinner fa-spin mr-2" />Загрузка данных…</div>
                     ) : isAdminWithoutSupervisorSelected ? (
-                    <div className="p-4 text-gray-600">Выберите группу.</div>
+                    <div className="px-4 py-12 text-[13px] text-slate-400">Выберите группу.</div>
                     ) : filteredOperators.length === 0 ? (
-                    <div className="p-4 text-gray-600">Операторы не найдены.</div>
+                    <div className="px-4 py-12 text-[13px] text-slate-400">Операторы не найдены.</div>
                     ) : (
                     Object.keys(groupedByDirection).map(dirKey => (
                         <div key={`group-${dirKey}`} className="w-full">
-                        <div className="w-full p-2 bg-gray-100 text-sm font-semibold border-b">{dirKey} <span className="ml-2 text-xs text-gray-500">({groupedByDirection[dirKey].length})</span></div>
+                        <div className="w-full border-b border-slate-100 bg-slate-50/70 py-1.5 text-[12px] font-semibold text-slate-600">
+                            <span className="sticky left-0 inline-flex items-center gap-1.5 px-3">
+                                {dirKey}
+                                <span className="font-normal text-slate-400">{groupedByDirection[dirKey].length}</span>
+                            </span>
+                        </div>
                         {groupedByDirection[dirKey].map(op => {
                             const aggr = op.aggregates || {};
                             const regular = Number(aggr.regular_hours || 0);
@@ -9223,14 +9231,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             }
 
                             return (
-                            <div key={op.operator_id} className="flex w-max items-center border-b hover:bg-gray-50 relative">
+                            <div key={op.operator_id} className="group relative flex w-max items-center border-b border-slate-100 transition-colors hover:bg-slate-50">
                                 {/* Name */}
-                                <div className={`${hoursOperatorColClass} text-sm font-medium sticky left-0 z-20 bg-white`}>
+                                <div className={`${hoursOperatorColClass} sticky left-0 z-20 bg-white text-[13px] font-medium text-slate-800 transition-colors group-hover:bg-slate-50`}>
                                 <div className="flex items-center gap-1.5 min-w-0">
                                     <span className="truncate">{op.name}</span>
                                     {isFiredLikeOperator(op) && (
                                     <span
-                                        className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold leading-none border border-red-500 text-red-700 bg-red-50"
+                                        className="shrink-0 rounded-full bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-rose-600 ring-1 ring-rose-100"
                                         title={formatDismissalDate(op) ? `Уволен(а) с ${formatDismissalDate(op)}` : 'Уволен(а)'}
                                     >
                                         Уволен
@@ -9249,7 +9257,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                 {/* Rate */}
                                 <div className={`${hoursRateColClass} text-sm`}>
-                                <div className="text-sm text-gray-700">{op.rate ?? '—'}</div>
+                                <div className="text-[13px] text-slate-600">{op.rate ?? '—'}</div>
                                 </div>
 
                                 {/* Norm (editable) */}
@@ -9257,7 +9265,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <input
                                     type="number"
                                     step="0.1"
-                                    className="w-full p-1 border rounded-md text-center text-sm"
+                                    className="w-full rounded-lg bg-transparent px-2 py-1 text-center text-[13px] text-slate-800 ring-1 ring-transparent transition hover:bg-white hover:ring-slate-200/70 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+                                    aria-label={`Норма часов: ${op.name}`}
                                     value={op.norm_hours ?? 0}
                                     onChange={e => handleNormChange(op.operator_id, e.target.value)}
                                 />
@@ -9296,7 +9305,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     }}
                                     onMouseUp={finishHourSelectionDrag}
                                     onClick={(e) => handleHoursCellClick(e, op, day)}
-                                    className={`w-full h-8 rounded-md text-sm flex items-center justify-center ${isSelected ? 'ring-2 ring-blue-500 ring-offset-1 ring-offset-white bg-blue-50' : ''}`}
+                                    className={`w-full h-8 rounded-lg text-sm flex items-center justify-center ${isSelected ? 'ring-2 ring-blue-500 ring-offset-1 ring-offset-white bg-blue-50' : ''}`}
                                     title={isSelected ? 'Выбрано. Ctrl/Cmd+клик чтобы снять выбор' : 'Клик: открыть. Ctrl/Cmd+клик: выбрать. Ctrl/Cmd+зажатый ЛКМ: выделить диапазон'}
                                     aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}>
                                     {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
@@ -9315,7 +9324,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {norm > 0 ? `${((displayedTotal / norm) * 100).toFixed(2)}%` : '—'}
                                     </div>
                                     <div className={`${hoursSummaryColClass} w-36 text-sm`}>
-                                    <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}>
+                                    <div className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 ${productionColorClass(prodDiff, norm)}`}>
                                         <span className="font-medium">{formatNumber(prodDiff, 2)}</span>
                                         <span className="text-xs text-gray-500">ч</span>
                                     </div>
@@ -9466,8 +9475,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     {/* FOOTER: итоговые строки */}
                     {filteredOperators.length > 0 && (
-                    <div className="flex w-max items-center border-t bg-gray-50 text-sm font-semibold">
-                        <div className={`${hoursOperatorColClass} sticky left-0 z-20 bg-gray-50`}>Итого</div>
+                    <div className="sticky bottom-0 z-30 flex w-max items-center border-t border-slate-200/80 bg-slate-50 text-[13px] font-semibold text-slate-800">
+                        <div className={`${hoursOperatorColClass} sticky left-0 z-20 bg-slate-50`}>Итого</div>
                         <div className={hoursRateColClass} title="Общее FTE — сумма ставок сотрудников в таблице">
                             {footerTotals.hasRateRows
                                 ? `${footerTotals.sumRate.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} FTE`
