@@ -482,6 +482,11 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertIn("_chat_billing_daily_workbook(params, get_chat_billing_daily(", block)
         self.assertIn("attach_chat_billing_grouping_staff(", block)
         self.assertIn("park=_chat_billing_park_arg()", block)
+        # В модуле нет `import io` — только `from io import BytesIO`. Выгрузка биллинга
+        # чата падала NameError на io.BytesIO() в любом разрезе с самого появления.
+        self.assertNotIn("io.BytesIO", block)
+        self.assertIn("output = BytesIO()", block)
+        self.assertIn("\nfrom io import BytesIO", backend)
         route = backend[backend.index("def api_resource_fte_chat_billing_grouping"):]
         route = route[:route.index("# Выгрузка биллинга чата.")]
         self.assertIn("if not park:", route)

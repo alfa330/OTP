@@ -10512,7 +10512,7 @@ def api_resource_fte_chat_billing_export():
                 sl_seconds=params['sl_seconds'],
             )
             workbook = _chat_billing_export_workbook(mode, params, report, None)
-        output = io.BytesIO()
+        output = BytesIO()
         workbook.save(output)
         output.seek(0)
     except ValueError as error:
