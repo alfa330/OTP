@@ -75,7 +75,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Пакет для IT: раскатка групповой политикой (DEPLOY_GPO.md).
+REM Пакет для IT: раскатка групповой политикой (назначить компьютерам).
 python -X utf8 build_msi.py
 if errorlevel 1 (
   echo MSI не собран.
