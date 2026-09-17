@@ -12,6 +12,7 @@ from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 
+import xlsxwriter
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -19,6 +20,8 @@ from openpyxl.utils import get_column_letter
 from resource_fte.chat import (
     CHAT_BILLING_DETAIL_EXPORT_LIMIT,
     CHAT_BILLING_METRICS,
+    CHAT_BILLING_PARK_SHARES,
+    _chat_billing_plan_base_tx,
     _chat_billing_planned_staff,
     attach_chat_billing_grouping_staff,
     attach_chat_billing_plan,
@@ -61,6 +64,8 @@ CONST_NAMES = (
     "_CHAT_BILLING_MONTHS_RU",
     "_CHAT_BILLING_DAILY_COLUMNS",
     "_CHAT_BILLING_DAILY_DAY_KEYS",
+    "_CHAT_BILLING_DAILY_BASE_FMT",
+    "_CHAT_BILLING_DAILY_RED_HEADER_KEYS",
     "CHAT_BILLING_LOW_RATING",
     "_CHAT_BILLING_HOURLY_COLUMNS",
     "_CHAT_BILLING_HOURLY_STAFF_KEYS",
@@ -79,6 +84,7 @@ def _namespace():
               and any(getattr(t, "id", "") in CONST_NAMES for t in node.targets)]
     ns = {
         "math": math, "re": re, "datetime": datetime, "Workbook": Workbook,
+        "xlsxwriter": xlsxwriter, "BytesIO": BytesIO,
         "Alignment": Alignment, "Border": Border, "Font": Font, "PatternFill": PatternFill,
         "Side": Side, "get_column_letter": get_column_letter,
         "CHAT_BILLING_DETAIL_EXPORT_LIMIT": CHAT_BILLING_DETAIL_EXPORT_LIMIT,
@@ -295,30 +301,54 @@ class ChatBillingStaffTests(unittest.TestCase):
         self.assertIsNone(staff["2026-09-13"]["fact_heads"])
         self.assertIsNone(staff["2026-09-13"]["planned_heads"])
 
-    def test_plan_is_split_by_park_shares_and_keeps_park_order(self):
-        plan = {"days": {"2026-09-16": [10.0] * 24, "2026-09-17": [5.0] * 24},
-                "shares": {"Jana Taxi": 0.5, "Ноль такси": 0.3, "Tenge Taxi": 0.2}}
+    def test_plan_is_park_share_times_same_day_last_week(self):
         staff = {"2026-09-16": {"planned_hours": [2.0] * 24, "fact_hours": [1.5] * 24}}
-        report = attach_chat_billing_plan(_park_report(), plan, staff)
+        report = attach_chat_billing_plan(_park_report(), {"2026-09-16": 1000}, staff)
         day = report["days"][0]
-        self.assertEqual([item["park"] for item in day["parks"]], ["Jana Taxi", "Ноль такси", "Tenge Taxi"])
-        self.assertEqual([item["plan_chats"] for item in day["parks"]], [120.0, 72.0, 48.0])
-        # Парк из прогноза без обращений остаётся строкой с планом и нулевым фактом.
-        self.assertEqual(day["parks"][2]["chats"], 0)
-        self.assertEqual(day["totals"]["plan_chats"], 240.0)
+        fixed = [name for name, _ in CHAT_BILLING_PARK_SHARES]
+        # Сначала парки с долей в порядке файла, за ними парк без доли.
+        self.assertEqual([item["park"] for item in day["parks"]], fixed + ["Ноль такси"])
+        by_park = {item["park"]: item for item in day["parks"]}
+        self.assertEqual(by_park["Jana Taxi"]["plan_share"], 0.1469962424736294)
+        self.assertAlmostEqual(by_park["Jana Taxi"]["plan_chats"], 146.9962424736294)
+        # Парк с долей без обращений остаётся строкой с планом и нулевым фактом, как в файле.
+        self.assertEqual(by_park["Tenge Taxi"]["chats"], 0)
+        self.assertAlmostEqual(by_park["Tenge Taxi"]["plan_chats"], 69.03888813436553)
+        # У парка без доли плана нет, факт на месте.
+        self.assertEqual([by_park["Ноль такси"][key] for key in ("plan_share", "plan_chats", "chats")],
+                         [None, None, 30])
+        self.assertEqual(day["totals"]["plan_base_chats"], 1000)
+        # Доли файла в сумме 0,817 — план дня ниже прошлой недели, как в файле.
+        self.assertAlmostEqual(day["totals"]["plan_chats"], 816.8319072841684, places=9)
         self.assertEqual(day["staff"], {"planned_hours": 48.0, "fact_hours": 36.0})
+        # Второй день: чатов неделей раньше в базе нет — плана нет, доли на месте.
+        second = report["days"][1]
+        self.assertEqual([item["park"] for item in second["parks"]], fixed + ["Ноль такси"])
+        self.assertIsNone(second["totals"]["plan_chats"])
+        self.assertTrue(all(item["plan_chats"] is None for item in second["parks"]))
+        self.assertEqual(second["parks"][0]["plan_share"], 0.30798134818235323)
         self.assertEqual(report["days"][1]["staff"], {"planned_hours": None, "fact_hours": None})
-        # Во втором дне Ноль такси не писал, но строка на своём месте.
-        self.assertEqual([item["park"] for item in report["days"][1]["parks"]],
-                         ["Jana Taxi", "Ноль такси", "Tenge Taxi"])
-        self.assertEqual(report["totals"]["plan_chats"], 360.0)
-        self.assertEqual(report["parks"][0]["plan_chats"], 180.0)
+        self.assertEqual(report["totals"]["plan_chats"], 816.83)
+        self.assertEqual(report["parks"][1]["plan_chats"], 147.0)
         self.assertEqual(report["staff"], {"planned_hours": 48.0, "fact_hours": 36.0})
 
-    def test_plan_follows_the_time_window(self):
-        plan = {"days": {"2026-09-16": [1.0] * 24, "2026-09-17": [1.0] * 24}, "shares": {"Jana Taxi": 1.0}}
-        report = attach_chat_billing_plan(_park_report(), plan, {}, minute_from=8 * 60, minute_to=19 * 60 + 59)
-        self.assertEqual(report["days"][0]["totals"]["plan_chats"], 12.0)
+    def test_plan_matches_the_sample_file(self):
+        # «Ежедневный отчет Техподдержка чат», 01.09.2026: в «Нужно удалить» итога дня 1457,
+        # в «План (чатов)» Excel посчитал 1190,1240889130333.
+        report = attach_chat_billing_plan(_park_report(), {"2026-09-16": 1457}, {})
+        self.assertEqual(report["days"][0]["totals"]["plan_chats"], 1190.1240889130333)
+
+    def test_plan_base_is_the_same_day_last_week_in_the_same_window(self):
+        db = _RowsDb([(date(2026, 9, 9), 1636), (date(2026, 9, 10), 1420)])
+        with db._get_cursor() as cursor:
+            base = _chat_billing_plan_base_tx(cursor, date(2026, 9, 16), date(2026, 9, 17),
+                                              8 * 60, 19 * 60 + 59)
+        self.assertEqual(base, {"2026-09-16": 1636, "2026-09-17": 1420})
+        sql, params = db.cursor.calls[0]
+        # Тот же WHERE, что у факта: без опросов после чата и в том же окне времени.
+        self.assertIn("r.request_type = %s", sql)
+        self.assertIn("EXTRACT(HOUR FROM r.request_start)", sql)
+        self.assertEqual(params, ["common", date(2026, 9, 9), date(2026, 9, 10), 480, 1199])
 
     def test_grouping_staff_is_per_hour(self):
         report = build_chat_billing_grouping(GROUPING_ROWS)
@@ -392,48 +422,97 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertEqual(title("", used), "Без парка")
 
     def _daily_report(self):
-        plan = {"days": {"2026-09-16": [10.0] * 24, "2026-09-17": [5.0] * 24},
-                "shares": {"Jana Taxi": 0.5, "Ноль такси": 0.3, "Tenge Taxi": 0.2}}
         staff = {"2026-09-16": {"planned_hours": [2.5] * 24, "fact_hours": [2.0] * 24}}
-        return attach_chat_billing_plan(_park_report(), plan, staff)
+        return attach_chat_billing_plan(_park_report(), {"2026-09-16": 1000}, staff)
+
+    def _daily_books(self, report):
+        """Книга дважды: с формулами и со значениями, сохранёнными при сборке."""
+        content = self.ns["_chat_billing_daily_workbook"](self.params, report).getvalue()
+        return load_workbook(BytesIO(content)), load_workbook(BytesIO(content), data_only=True)
 
     def test_daily_workbook_follows_the_szov_sample(self):
-        workbook = self._load(self.ns["_chat_billing_daily_workbook"](self.params, self._daily_report()))
-        self.assertEqual(workbook.sheetnames, ["Сентябрь 2026"])
-        ws = workbook.active
+        formulas, values = self._daily_books(self._daily_report())
+        self.assertEqual(values.sheetnames, ["Сентябрь 2026"])
+        ws = values.active
         rows = [list(row) for row in ws.iter_rows(values_only=True)]
         self.assertEqual(rows[0], [
-            "Дата", "Название очереди", "План (чатов)", "факт (чатов)", "% совпадения прогноза",
+            "Дата", "Название очереди", "Нужно удалить", "План (чатов)", "факт (чатов)",
+            "% совпадения прогноза",
             "Среднее время реакции на 1 сообщение оператора (в минутах) в разрезе парков",
             "Среднее время ответа внутри чата (в минутах) в разрезе парков",
             "Сред оценка водителей в разрезе парков", "План по часам", "Факт по часам",
             "% Пере/Недоработки", "Комментарии",
         ])
-        self.assertNotIn("Нужно удалить", rows[0])
-        jana = rows[1]
+        # Заголовок служебной колонки красный, как в файле.
+        self.assertEqual(ws["C1"].font.color.rgb[-6:], "FF0000")
+        # Блок дня: 14 парков с долей, парк без доли, итог в 17-й строке.
+        self.assertEqual([row[1] for row in rows[1:16]],
+                         [name for name, _ in CHAT_BILLING_PARK_SHARES] + ["Ноль такси"])
+        self.assertEqual(rows[1][0], datetime(2026, 9, 16))
+        jana = rows[2]
+        self.assertEqual(jana[1:3], ["Jana Taxi", 0.1469962424736294])
+        self.assertAlmostEqual(jana[3], 146.9962424736294)
+        self.assertEqual(jana[4], 60)
+        self.assertAlmostEqual(jana[5], 60 / 146.9962424736294)
         # 3480 сек на 58 отвеченных = 1 мин; 9000 на 50 = 3 мин; 90 на 20 = 4,5.
-        self.assertEqual(jana[:8], [datetime(2026, 9, 16), "Jana Taxi", 120.0, 60, 0.5, 1.0, 3.0, 4.5])
-        self.assertEqual(jana[8:11], [60.0, 48.0, -0.2])
-        self.assertIn("Ежедневный отчет по чатам за 16.09.2026\nПлан чатов: 240\nФакт чатов: 90", jana[11])
-        tenge = rows[3]
-        self.assertEqual(tenge[1:5], ["Tenge Taxi", 48.0, None, 0.0])
-        total = rows[4]
-        self.assertEqual(total[:5], [datetime(2026, 9, 16), None, 240.0, 90, 0.375])
+        self.assertEqual(jana[6:9], [1.0, 3.0, 4.5])
+        self.assertEqual(ws["C3"].number_format, "0.0")
+        self.assertEqual(rows[1][9:12], [60.0, 48.0, -0.2])
+        self.assertIn("Ежедневный отчет по чатам за 16.09.2026\nПлан чатов: 817\nФакт чатов: 90",
+                      rows[1][12])
+        tenge = rows[4]
+        self.assertEqual(tenge[1:3], ["Tenge Taxi", 0.06903888813436553])
+        self.assertEqual((tenge[4], tenge[5]), (None, 0))
+        zero = rows[15]
+        self.assertEqual(zero[1:6], ["Ноль такси", None, None, 30, None])
+        total = rows[16]
+        self.assertEqual(total[:3], [datetime(2026, 9, 16), None, 1000])
+        self.assertEqual(ws["C17"].number_format, "0")
+        self.assertAlmostEqual(total[3], 816.8319072841684, places=9)
+        self.assertEqual(total[4], 90)
+        self.assertAlmostEqual(total[5], 90 / 816.8319072841684)
         # Итог дня — по обращениям всех парков: (3480+900) / 88 отвеченных.
-        self.assertEqual(total[5], round((3480 + 900) / 88 / 60, 1))
-        self.assertIn("A2:A4", [str(item) for item in ws.merged_cells.ranges])
-        self.assertIn("L2:L4", [str(item) for item in ws.merged_cells.ranges])
-        self.assertEqual(ws["A5"].fill.fgColor.rgb[-6:], "9DC3E6")
-        # Второй день: плана часов нет — пусто, а не ноль.
-        self.assertEqual(rows[5][8:11], [None, None, None])
+        self.assertEqual(total[6], round((3480 + 900) / 88 / 60, 1))
+        merged = [str(item) for item in ws.merged_cells.ranges]
+        self.assertIn("A2:A16", merged)
+        self.assertIn("M2:M16", merged)
+        self.assertEqual(ws["A17"].fill.fgColor.rgb[-6:], "9DC3E6")
+        self.assertEqual(ws["D17"].fill.fgColor.rgb[-6:], "9DC3E6")
+
+        # В ячейках — формулы файла: правка «Нужно удалить» пересчитывает план.
+        wf = formulas.active
+        self.assertEqual(wf["D3"].value, "=C3*$C$17")
+        self.assertEqual(wf["F3"].value, "=E3/D3")
+        self.assertEqual(wf["D17"].value, "=SUM(D2:D16)")
+        self.assertEqual(wf["F17"].value, "=E17/D17")
+        self.assertEqual(wf["C17"].value, 1000)
+        self.assertIsNone(wf["D16"].value)
+
+        # Второй день: чатов неделей раньше нет — доли стоят, плана и формул нет.
+        second = rows[17]
+        self.assertEqual(second[:2], [datetime(2026, 9, 17), "Техподдержка iTaxi"])
+        # xlsxwriter пишет число 16 значащими цифрами — 17-й знак доли файла теряется.
+        self.assertAlmostEqual(second[2], 0.30798134818235323, places=15)
+        self.assertEqual(second[3], None)
+        self.assertIsNone(wf["D18"].value)
+        self.assertEqual(rows[32][2:6], [None, None, 40, None])
+        self.assertIn("План чатов: —", rows[17][12])
+        # Плана часов нет — пусто, а не ноль.
+        self.assertEqual(second[9:12], [None, None, None])
 
     def test_daily_workbook_marks_low_rating(self):
         report = self._daily_report()
-        report["days"][0]["parks"][1]["rating_sum"] = 26.0  # 26 / 9 = 2,9
-        ws = self._load(self.ns["_chat_billing_daily_workbook"](self.params, report)).active
-        self.assertEqual(ws["H3"].value, 2.9)
-        self.assertEqual(ws["H3"].font.color.rgb[-6:], "9C0006")
-        self.assertNotEqual(str(getattr(ws["H2"].font.color, "rgb", ""))[-6:], "9C0006")
+        report["days"][0]["parks"][-1]["rating_sum"] = 26.0  # Ноль такси: 26 / 9 = 2,9
+        ws = self._daily_books(report)[1].active
+        self.assertEqual(ws["I16"].value, 2.9)
+        self.assertEqual(ws["I16"].font.color.rgb[-6:], "9C0006")
+        self.assertNotEqual(str(getattr(ws["I3"].font.color, "rgb", ""))[-6:], "9C0006")
+
+    def test_daily_workbook_keeps_park_names_as_text(self):
+        report = self._daily_report()
+        report["days"][0]["parks"][-1]["park"] = "=HYPERLINK(\"http://x\")"
+        ws = self._daily_books(report)[0].active
+        self.assertEqual(ws["B16"].data_type, "s")
 
     def test_hourly_workbook_follows_the_szov_sample(self):
         overall = build_chat_billing_grouping(GROUPING_ROWS)

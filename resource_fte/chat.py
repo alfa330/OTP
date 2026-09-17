@@ -2253,10 +2253,9 @@ def get_chat_billing_grouping_by_park(db, day_from: date, day_to: date, minute_f
 # --- «Биллинг чатов»: план и сотрудники в формате отчётов СЗоВ --------------------------
 # Образцы постановщика (#343): «Ежедневный отчёт по чатам» — парки дня с планом и фактом
 # чатов, план и факт часов работы; «Отчёт с группировкой по часам» — поступившие чаты и
-# сотрудники по часам. В ручных файлах план и сотрудники вбивались шаблоном (одинаковые
-# во всех днях), здесь они берутся из данных раздела:
-#   план чатов — прогноз раздела (среднее того же дня недели в базовых неделях), разложенный
-#     по паркам их долями в тех же неделях; в ручном отчёте доли стояли константами;
+# сотрудники по часам. В ручных файлах сотрудники вбивались шаблоном (одинаковые во всех
+# днях), здесь они берутся из данных раздела:
+#   план чатов — формулы ручного файла, см. CHAT_BILLING_PARK_SHARES;
 #   план сотрудников — выбранные смены аукциона чата (как «Запланировано смен» у линии);
 #   факт сотрудников — онлайн-статусы чатников. Головой часа считается тот, кто был онлайн
 #     хотя бы минуту: то же правило, что у табло СЗоВ по чату.
@@ -2265,38 +2264,54 @@ def get_chat_billing_grouping_by_park(db, day_from: date, day_to: date, minute_f
 CHAT_BILLING_STAFF_MIN_SECONDS = 60
 CHAT_BILLING_PHONE_SHIFT_KIND = "phone"
 
+# План чатов — формулы файла «Ежедневный отчет Техподдержка чат», как просил владелец
+# 17.09.2026. В колонке «Нужно удалить» у парка стоит постоянная доля, в итоге дня — чаты
+# того же дня прошлой недели; план парка = доля × эти чаты, план дня — сумма планов парков.
+# Доли в сумме дают 0,817, а не единицу: часть парков из файла убрали, не пересчитав
+# остальные, поэтому план дня ниже прошлой недели. Так считает файл — так и здесь.
+# Порядок — порядок строк парков в файле; «iPartner Astana» файла в базе зовётся «iPartner».
+CHAT_BILLING_PARK_SHARES = (
+    ("Техподдержка iTaxi", 0.30798134818235323),
+    ("Jana Taxi", 0.1469962424736294),
+    ("Честный", 0.08752471064028854),
+    ("Tenge Taxi", 0.06903888813436553),
+    ("Департамент", 0.041166794935639156),
+    ("Аманат", 0.04020100502512563),
+    ("Global", 0.028294626284576033),
+    ("Salam taxi", 0.026966665157619932),
+    ("QAZAQ", 0.017897294279203828),
+    ("Стабильный", 0.015015015015015015),
+    ("Такси24(Нуртакси)", 0.013883229963631973),
+    ("Халык", 0.0111518553729609),
+    ("iPartner", 0.00547783964869392),
+    ("Бизнес Партнер", 0.005236392171065538),
+)
+CHAT_BILLING_PLAN_BASE_DAYS_BACK = 7
+
 
 def _chat_billing_window_hours(minute_from: int, minute_to: int) -> Tuple[int, int]:
     return max(0, int(minute_from) // 60), min(23, int(minute_to) // 60)
 
 
-def get_chat_billing_plan(db, day_from: date, day_to: date) -> Dict[str, Any]:
-    """{"days": {день: [прогноз чатов по 24 часам]}, "shares": {парк: доля}}."""
-    forecast = build_chat_forecast(db, day_from, period_end_value=day_to)
-    days = {
-        item["forecast_date"]: [_to_float(row.get("forecast_chats"))
-                                for row in sorted(item["hourly_forecast"], key=lambda row: row["hour"])]
-        for item in forecast.get("days") or []
-    }
-    base = [value for value in (_parse_date(item) for item in forecast.get("base_week_starts") or [])
-            if value is not None]
-    shares: Dict[str, float] = {}
-    if base:
-        with db._get_cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT {_CHAT_BILLING_PARK_SQL} AS park, COUNT(*)::int
-                FROM c2d_requests r
-                WHERE r.request_type = %s AND r.day BETWEEN %s AND %s
-                GROUP BY 1
-                """,
-                (CHAT_REQUEST_TYPE, min(base), max(base) + timedelta(days=6)),
-            )
-            rows = cursor.fetchall()
-        total = sum(max(0, int(count or 0)) for _, count in rows)
-        if total > 0:
-            shares = {str(park): int(count) / total for park, count in rows if count}
-    return {"days": days, "shares": shares}
+def _chat_billing_plan_base_tx(cursor, day_from: date, day_to: date, minute_from: int,
+                               minute_to: int) -> Dict[str, int]:
+    """{день периода: чаты того же дня прошлой недели} в том же окне времени, что и факт.
+
+    База плана — «факт (чатов)» итога дня неделей раньше, поэтому считается тем же
+    WHERE, что и факт. День без обращений в базе отсутствует: плана на него нет."""
+    shift = timedelta(days=CHAT_BILLING_PLAN_BASE_DAYS_BACK)
+    where, params = _chat_billing_window(day_from - shift, day_to - shift, minute_from, minute_to)
+    cursor.execute(
+        f"""
+        SELECT r.day, COUNT(*)::int
+        FROM c2d_requests r
+        WHERE {where}
+        GROUP BY 1
+        """,
+        params,
+    )
+    return {(day_value + shift).isoformat(): int(count)
+            for day_value, count in cursor.fetchall() if count}
 
 
 def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date) -> List[Tuple[Any, ...]]:
@@ -2440,20 +2455,20 @@ def _chat_billing_sum_optional(values: List[Optional[float]]) -> Optional[float]
     return round(sum(present), 2) if present else None
 
 
-def attach_chat_billing_plan(report: Dict[str, Any], plan: Dict[str, Any],
+def attach_chat_billing_plan(report: Dict[str, Any], plan_base: Dict[str, int],
                              staff: Dict[str, Dict[str, Any]], minute_from: int = 0,
                              minute_to: int = 1439) -> Dict[str, Any]:
     """Дописывает к отчёту по паркам план чатов и часы работы дня.
 
-    Порядок парков в каждом дне один — по объёму за период, как в ручном отчёте, где
-    блоки дней сравниваются глазами строка к строке. Парк, у которого в прогнозе есть
-    доля, а обращений за день не было, остаётся строкой с планом и нулевым фактом."""
+    plan_base — {день: чаты того же дня прошлой недели}. Порядок парков в каждом дне один:
+    сначала парки с долей в порядке файла, за ними остальные по объёму за период — блоки
+    дней сравниваются глазами строка к строке. Парк с долей, у которого обращений за день
+    не было, остаётся строкой с планом и нулевым фактом, как в файле. У парка без доли
+    плана нет."""
     first_hour, last_hour = _chat_billing_window_hours(minute_from, minute_to)
-    shares = plan.get("shares") or {}
-    order = [item["park"] for item in report.get("parks") or []]
-    known = set(order)
-    order += [name for name, _ in sorted(shares.items(), key=lambda item: (-item[1], item[0]))
-              if name not in known]
+    shares = dict(CHAT_BILLING_PARK_SHARES)
+    order = [name for name, _ in CHAT_BILLING_PARK_SHARES]
+    order += [item["park"] for item in report.get("parks") or [] if item["park"] not in shares]
 
     period_parks: Dict[str, Dict[str, Any]] = {
         item["park"]: item for item in report.get("parks") or []}
@@ -2461,17 +2476,22 @@ def attach_chat_billing_plan(report: Dict[str, Any], plan: Dict[str, Any],
     day_plans: List[Optional[float]] = []
     day_staff: List[Dict[str, Optional[float]]] = []
     for day in report.get("days") or []:
-        hourly = (plan.get("days") or {}).get(day["date"])
-        day_plan = _chat_billing_window_sum(hourly, first_hour, last_hour)
+        base = plan_base.get(day["date"])
         existing = {item["park"]: item for item in day.get("parks") or []}
         parks = []
         for name in order:
             item = existing.get(name) or {"park": name, **_chat_billing_blank(CHAT_BILLING_METRICS)}
-            item["plan_chats"] = (round(day_plan * shares[name], 2)
-                                  if day_plan is not None and name in shares else None)
+            item["plan_share"] = shares.get(name)
+            # Без округления: в Excel план — формула, и её сохранённое значение обязано
+            # совпасть с тем, что Excel пересчитает сам.
+            item["plan_chats"] = base * shares[name] if base is not None and name in shares else None
             park_plans.setdefault(name, []).append(item["plan_chats"])
             parks.append(item)
         day["parks"] = parks
+        day["totals"]["plan_base_chats"] = base
+        # Итог плана — SUM колонки планов парков, как в файле.
+        day_plan = (sum(item["plan_chats"] for item in parks if item["plan_chats"] is not None)
+                    if base is not None else None)
         day["totals"]["plan_chats"] = day_plan
         day["staff"] = _chat_billing_day_staff(staff.get(day["date"]), first_hour, last_hour)
         day_plans.append(day_plan)
@@ -2480,6 +2500,7 @@ def attach_chat_billing_plan(report: Dict[str, Any], plan: Dict[str, Any],
     parks = []
     for name in order:
         item = period_parks.get(name) or {"park": name, **_chat_billing_blank(CHAT_BILLING_METRICS)}
+        item["plan_share"] = shares.get(name)
         item["plan_chats"] = _chat_billing_sum_optional(park_plans.get(name, []))
         parks.append(item)
     report["parks"] = parks
@@ -2516,9 +2537,10 @@ def get_chat_billing_daily(db, day_from: date, day_to: date, minute_from: int = 
     """«Таксопарки» в формате ежедневного отчёта: факт, план чатов по паркам и часы работы."""
     report = get_chat_billing_report(db, day_from, day_to, minute_from=minute_from,
                                      minute_to=minute_to, sl_seconds=sl_seconds)
+    with db._get_cursor() as cursor:
+        plan_base = _chat_billing_plan_base_tx(cursor, day_from, day_to, minute_from, minute_to)
     return attach_chat_billing_plan(
-        report, get_chat_billing_plan(db, day_from, day_to),
-        get_chat_billing_staff(db, day_from, day_to), minute_from, minute_to)
+        report, plan_base, get_chat_billing_staff(db, day_from, day_to), minute_from, minute_to)
 
 
 def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str, Any]:
