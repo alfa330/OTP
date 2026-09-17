@@ -162,6 +162,7 @@ class ScheduleDayDiffTests(unittest.TestCase):
         self.assertEqual(row[10], 7)
         self.assertEqual(row[11], "Иванов Иван")
         self.assertEqual(row[12], "sv")
+        self.assertIs(row[13], True)
 
     def test_removed_shift(self):
         rows = self._diff(_state((("09:00", "17:00", "regular"),)), _state())
@@ -171,6 +172,29 @@ class ScheduleDayDiffTests(unittest.TestCase):
         self.assertIsNone(row[5])
         self.assertEqual(row[6], _hhmm("09:00"))
         self.assertEqual(row[7], _hhmm("17:00"))
+        self.assertIs(row[13], False)
+
+    def test_row_remembers_whether_the_day_was_empty(self):
+        """По флагу сводка отличает первичное внесение от правки.
+
+        Из одних действий этого не видно: вторая смена в день, где смена уже
+        стоит, и смена на пустой день пишутся одинаковым 'added' — на бою таких
+        «вторых» смен 40, и без флага они пропали бы из сводки как внесение.
+        """
+        cases = (
+            ("смена на пустой день", _state(), _state((("09:00", "13:00", "regular"),)), True),
+            ("выходной на пустой день", _state(), _state(day_off=True), True),
+            ("вторая смена к имеющейся",
+             _state((("09:00", "13:00", "regular"),)),
+             _state((("09:00", "13:00", "regular"), ("18:00", "22:00", "regular"))), False),
+            ("смена поверх выходного", _state(day_off=True),
+             _state((("09:00", "17:00", "regular"),)), False),
+        )
+        for title, before, after, expected in cases:
+            with self.subTest(title):
+                rows = self._diff(before, after)
+                self.assertTrue(rows)
+                self.assertEqual({row[13] for row in rows}, {expected})
 
     def test_moved_shift_reads_as_single_change(self):
         """Сдвиг времени — одна правка, а не «удалили и добавили».
@@ -361,6 +385,25 @@ class ScheduleChangeSchemaTests(unittest.TestCase):
         self.assertIn("idx_work_shift_changes_operator_date", source)
         self.assertIn("idx_work_shift_changes_date", source)
         self.assertIn("CREATE INDEX IF NOT EXISTS idx_work_shift_changes_operator_date", source)
+
+    def test_day_was_empty_column_is_added_idempotently(self):
+        source = DATABASE_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn(
+            "ALTER TABLE work_shift_changes ADD COLUMN IF NOT EXISTS day_was_empty BOOLEAN NULL",
+            source)
+
+    def test_insert_columns_match_the_diff_row(self):
+        """Кортеж диффа и список колонок INSERT расходятся молча: execute_values
+        упадёт только на проде, на первой же правке графика."""
+        writer = _function_source(DATABASE_PATH, "_record_schedule_day_changes_tx", class_name="Database")
+        columns = writer[writer.index("INSERT INTO work_shift_changes ("):]
+        columns = columns[columns.index("(") + 1:columns.index(")")]
+        names = [name.strip() for name in columns.split(",") if name.strip()]
+        self.assertEqual(names[-1], "day_was_empty")
+
+        rows = _make_diff_dummy()._diff_schedule_day(
+            42, DAY, _state(), _state((("09:00", "17:00", "regular"),)), ACTOR)
+        self.assertEqual(len(rows[0]), len(names))
 
     def test_actor_name_is_denormalised(self):
         """Имя автора хранится копией: после увольнения и переименования

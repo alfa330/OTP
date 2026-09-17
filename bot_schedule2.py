@@ -31130,6 +31130,35 @@ def _tg_send_message(chat_id, text, parse_mode='HTML'):
         return None, _telegram_exception_text(e)
 
 
+def _tg_send_rich_message(chat_id, html_text):
+    """Rich-сообщение (Bot API 10.1, sendRichMessage) в разметке HTML — с таблицами.
+
+    Возвращает (result, error, refused). refused=True — Telegram отклонил сам
+    запрос (ответ 4xx: разметка, лимиты): его можно переслать обычным текстом
+    без риска дубля. При сетевом сбое, таймауте и 5xx refused=False — сообщение
+    могло и дойти, повтор другим форматом прислал бы его дважды.
+    """
+    token = os.getenv('BOT_TOKEN')
+    if not token:
+        return None, "BOT_TOKEN не настроен", False
+    payload = {
+        "chat_id": chat_id,
+        # Без автоопределения: время «09:45» и числа в таблицах не должны
+        # превращаться в ссылки на телефоны и команды.
+        "rich_message": {"html": html_text, "skip_entity_detection": True},
+    }
+    try:
+        resp = requests.post(f"https://api.telegram.org/bot{token}/sendRichMessage",
+                             json=payload, timeout=15)
+        data = resp.json()
+    except Exception as e:
+        return None, _telegram_exception_text(e), False
+    if not data.get("ok"):
+        refused = 400 <= int(resp.status_code or 0) < 500
+        return None, data.get("description") or f"HTTP {resp.status_code}", refused
+    return data.get("result") or {}, None, False
+
+
 ICORE_TICKET_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 IT_TICKET_ATTACH_MAX_BYTES = 20 * 1024 * 1024  # предел Telegram для загрузки ботом
 
@@ -61818,7 +61847,10 @@ def training_report_preview():
 #   массовые операции (загрузка файла, публикация аукциона) свёрнуты в строку
 #     со способом и числом заходов, иначе одна загрузка даёт «369 изменений»;
 #   обмены и доборы, которые операторы делают сами, идут счётчиком без имён.
-# Сама вёрстка текста и все пороги — в work_schedules/change_digest.py, тесты
+# Первичное внесение графика (заполнение пустого дня) изменением не считается
+# и отсекается до проверки на пустые сутки: день, когда график только внесли,
+# молчит. Сводка уходит rich-сообщением с таблицами, прежний текст — запасной.
+# Сама вёрстка и все пороги — в work_schedules/change_digest.py, тесты
 # на них не требуют ни базы, ни сети. Здесь только доставка и расписание.
 
 def _schedule_change_report_scope(requester_id, requester):
@@ -61853,16 +61885,24 @@ def _schedule_change_report_scope(requester_id, requester):
 
 
 def _build_schedule_change_report_payload(day, department_ids, scope_label, generated_label):
-    """(записи журнала, текст сообщения) для одной области видимости."""
+    """(правки без первичного внесения, rich-HTML, запасной текст) для одной области."""
     window_start, window_end = schedule_change_digest.day_window(day)
     entries = db.get_schedule_change_report_entries(
         window_start, window_end, department_ids=department_ids)
-    text = schedule_change_digest.build_digest(
-        day, entries, scope_label,
+    changes, first_entries = schedule_change_digest.split_first_entries(entries)
+    rich_html = schedule_change_digest.build_digest_rich(
+        day, changes, scope_label,
         generated_label=generated_label,
         escape=_escape_telegram_html,
+        first_entries=first_entries,
     )
-    return entries, text
+    text = schedule_change_digest.build_digest(
+        day, changes, scope_label,
+        generated_label=generated_label,
+        escape=_escape_telegram_html,
+        first_entries=first_entries,
+    )
+    return changes, rich_html, text
 
 
 def _send_schedule_change_report_to(recipient, day, now_dt, force=False, cache=None):
@@ -61885,21 +61925,30 @@ def _send_schedule_change_report_to(recipient, day, now_dt, force=False, cache=N
 
     key = None if department_ids is None else tuple(sorted(int(v) for v in department_ids))
     if cache is not None and key in cache:
-        entries, text = cache[key]
+        entries, rich_html, text = cache[key]
     else:
-        entries, text = _build_schedule_change_report_payload(
+        entries, rich_html, text = _build_schedule_change_report_payload(
             day, department_ids, scope_label, generated_label)
         if cache is not None:
-            cache[key] = (entries, text)
+            cache[key] = (entries, rich_html, text)
 
     # Пустые сутки молчат. Проверка стоит ПОСЛЕ сборки, чтобы кеш области
     # использовался и для получателей, у которых пусто. По области это не
     # редкость: на бою в любой день изменения есть у одного-двух отделов из
     # четырёх, а у глав Маркетинга и HR операторов с графиками нет вовсе.
+    # entries здесь — уже без первичного внесения: сутки, когда график
+    # только вносили, тоже пустые.
     if not entries and not force:
         return False, 'empty'
 
-    _, error = _tg_send_message(chat_id, text)
+    _, error, refused = _tg_send_rich_message(chat_id, rich_html)
+    if error and refused:
+        # Telegram rich-сообщение не принял — сводка всё равно обязана дойти,
+        # тем же отчётом прежним текстом. На сетевом сбое так не делаем:
+        # rich-сообщение могло дойти, и получатель увидел бы сводку дважды.
+        logging.warning("Сводка изменений графика: rich-сообщение не принято для %s (%s) — "
+                        "отправляю текстом", recipient.get('id'), error)
+        _, error = _tg_send_message(chat_id, text)
     if error:
         logging.warning("Сводка изменений графика: не отправлено получателю %s: %s",
                         recipient.get('id'), error)

@@ -48,9 +48,31 @@
 публикацию сделал конкретный администратор, а обмены — полтора десятка
 операторов, чьи имена в сводке — шум.
 
+**Первичное внесение графика — не изменение.** Постановка владельца
+(17.09.2026): сводка про изменения, и если первое внесение графика тоже
+считается, его убрать. Журнал пишет дифф дня, поэтому заполнение пустого дня
+ложилось в сводку наравне с правками — на боевых данных 24.08–17.09.2026 это
+3549 «правок» из 5635. Внесением считается операция, которая заполнила день,
+где до неё не было ни смены, ни выходного, и сделана способом, которым график
+вносят: вручную, загрузкой файла или публикацией аукциона. Обмены, доборы,
+выдача с аукциона и заявки операторов правят уже внесённый график, даже когда
+смена ложится на пустой день: добор почти всегда именно так и выглядит, и
+без этого исключения из сводки пропали бы доборы и половина каждого обмена.
+Пустоту дня до операции журнал хранит отдельной колонкой (`day_was_empty`):
+по одним действиям её не определить — вторая смена в день, где смена уже
+стоит, пишется тем же 'added' (на бою таких правок 40). Для строк, записанных
+до колонки, решают действия: одни 'added' / 'day_off_set' — внесение.
+
 **Мало правок — никаких разбивок.** При пяти и менее правках три блока («кто
 менял», «кому меняли», «дни») пересказали бы друг друга тремя строками каждый.
 Тогда печатается просто перечень: что, кому, на какой день и кто сделал.
+
+**Таблицы — rich-сообщением.** Сводка уходит методом `sendRichMessage`
+(Bot API 10.1) в разметке HTML: числа по авторам, сотрудникам и дням стоят
+столбцами, а не строками через тире. HTML, а не Markdown: фамилия с «|»
+разломала бы Markdown-таблицу, а экранирование HTML у бота уже есть. Прежний
+текст (`build_digest`) остаётся запасным: если Telegram rich-сообщение не
+примет, сводка уйдёт им, а не пропадёт.
 
 **Сутки — закрытые, вчерашние.** Сводка уходит утром про вчера. «С начала
 сегодняшнего дня» означало бы, что вечерние правки не попадут никуда, а
@@ -95,6 +117,15 @@ SOURCE_LABELS = {
 # попадает в «Кто менял» с именем: пропустить правку молча хуже, чем назвать
 # её общим словом.
 SELF_SERVICE_SOURCES = ('swap', 'auction_topup', 'auction_topup_cancel')
+
+# Способы, которыми график ВНОСЯТ. Заполнение пустого дня одним из них —
+# первичное внесение, в сводку оно не идёт (см. докстроку модуля). Незнакомый
+# код сюда не попадает: спрятать правку молча хуже, чем показать лишнюю.
+ENTRY_SOURCES = ('supervisor', 'import', 'auction')
+
+# Действия, которые возможны на пустом дне. Для строк журнала без колонки
+# day_was_empty операция из одних таких действий считается заполнением.
+FILL_ACTIONS = ('added', 'day_off_set')
 
 # Роль автора одним словом перед фамилией. Тот же словарь, что на экране
 # истории (ROLE_PREFIXES), только в родительном падеже строки «кто менял».
@@ -280,6 +311,74 @@ def format_day_short(day):
     return '%02d.%02d' % (day.day, day.month)
 
 
+WEEKDAYS_SHORT = ('пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс')
+
+
+def format_day_weekday(day):
+    """«14.09, пн» — в таблице дней по дню недели видно, что перетряхнули выходные."""
+    return '%s, %s' % (format_day_short(day), WEEKDAYS_SHORT[day.weekday()])
+
+
+# ── Первичное внесение ──────────────────────────────────────────────────────
+
+def _change_key(entry):
+    """Правка — сотрудник + день графика + операция (автор, changed_at)."""
+    actor_id = entry.get('actor_id')
+    return (entry.get('operator_id'), entry.get('shift_date'),
+            actor_id if actor_id is not None else -1, entry.get('changed_at'))
+
+
+def _is_first_entry(rows):
+    """Строки ОДНОЙ правки заполнили пустой день способом внесения графика.
+
+    Все три условия обязательны. Действия проверяются и при известном
+    day_was_empty: если одна транзакция дважды снимала дифф одного дня
+    (сначала сняли смену, потом поставили выходной), у второй пачки флаг
+    честный True, но правка в целом — не внесение.
+    """
+    if any(str(row.get('source') or '').strip() not in ENTRY_SOURCES for row in rows):
+        return False
+    if any(row.get('action') not in FILL_ACTIONS for row in rows):
+        return False
+    return not any(row.get('day_was_empty') is False for row in rows)
+
+
+def split_first_entries(entries):
+    """(правки, первичное внесение) — записи журнала, разведённые по правкам.
+
+    Порядок записей внутри каждой половины сохраняется. Правка уходит в одну
+    половину целиком: разрывать её строки значило бы посчитать одно действие
+    человека и там, и там.
+    """
+    groups = {}
+    for entry in entries or []:
+        groups.setdefault(_change_key(entry), []).append(entry)
+    first_keys = {key for key, rows in groups.items() if _is_first_entry(rows)}
+
+    changes = []
+    first = []
+    for entry in entries or []:
+        (first if _change_key(entry) in first_keys else changes).append(entry)
+    return changes, first
+
+
+def empty_day_text(first_entries=None):
+    """Строка для суток без правок — её видит только разовая отправка по кнопке.
+
+    Если за сутки график только вносили, «никто не менял» звучало бы как сбой
+    сводки у человека, который вчера загрузил файл. Поэтому внесение названо.
+    """
+    days = {(entry.get('operator_id'), entry.get('shift_date')) for entry in first_entries or []}
+    if not days:
+        return 'За эти сутки график никто не менял.'
+    people = len({operator_id for operator_id, _ in days})
+    return ('Изменений не было. Первичное внесение графика — %d %s у %d %s — '
+            'в сводку не входит.' % (
+                len(days), plural_ru(len(days), 'день', 'дня', 'дней'),
+                people, people_word(people),
+            ))
+
+
 # ── Группировка ─────────────────────────────────────────────────────────────
 
 def summarize(entries):
@@ -287,7 +386,9 @@ def summarize(entries):
 
     entries — записи за отчётные сутки: словари с ключами operator_id,
     operator_name, shift_date, action, source, actor_id, actor_name,
-    actor_role, changed_at (плюс времена смены для мелкой сводки).
+    actor_role, changed_at (плюс времена смены для мелкой сводки). Первичное
+    внесение отсекается ДО этой функции (split_first_entries): доставке нужно
+    знать, остались ли правки, раньше, чем собирается текст.
 
     Правка — тройка «сотрудник + день графика + операция», операция — пара
     «автор + changed_at» (см. докстроку модуля).
@@ -424,12 +525,26 @@ def _fits(lines, block):
     return _text_length(lines) + _text_length(block) <= TELEGRAM_TEXT_BUDGET
 
 
-def build_digest(day, entries, scope_label, generated_label=None, escape=None):
-    """Текст сводки за сутки (parse_mode=HTML).
+def _head_counts(stats):
+    head = 'Правок: <b>%d</b> · сотрудников: <b>%d</b>' % (
+        stats['total'], len(stats['operators']),
+    )
+    # Третье число ставим, только если оно не повторяет соседнее: одинаковые
+    # числа подряд читаются как ошибка, а не как сводка.
+    if stats['actors'] and len(stats['actors']) != len(stats['operators']):
+        head += ' · менявших: <b>%d</b>' % len(stats['actors'])
+    return head
+
+
+def build_digest(day, entries, scope_label, generated_label=None, escape=None,
+                 first_entries=None):
+    """Текст сводки за сутки (parse_mode=HTML) — запасной к build_digest_rich.
 
     escape — экранирование подставляемых значений; приходит аргументом, чтобы
     модуль не тянул за собой bot_schedule2. Экранировать обязательно: один «<»
     в фамилии роняет ВСЁ сообщение, а не одну строку.
+    first_entries — отсечённое первичное внесение; нужно только, чтобы назвать
+    его в сообщении за сутки без правок.
     """
     esc = escape or _plain
     stats = summarize(entries)
@@ -441,17 +556,10 @@ def build_digest(day, entries, scope_label, generated_label=None, escape=None):
         # Сюда доходит только разовая отправка по кнопке: регулярная рассылка
         # за пустые сутки молчит и до текста не добирается.
         lines.append('')
-        lines.append('За эти сутки график никто не менял.')
+        lines.append(empty_day_text(first_entries))
         return '\n'.join(lines)
 
-    head = 'Правок: <b>%d</b> · сотрудников: <b>%d</b>' % (
-        total, len(stats['operators']),
-    )
-    # Третье число ставим, только если оно не повторяет соседнее: одинаковые
-    # числа подряд читаются как ошибка, а не как сводка.
-    if stats['actors'] and len(stats['actors']) != len(stats['operators']):
-        head += ' · менявших: <b>%d</b>' % len(stats['actors'])
-    lines.append(head)
+    lines.append(_head_counts(stats))
 
     if total <= DETAILED_MAX_CHANGES:
         lines.append('')
@@ -498,38 +606,45 @@ def _detailed_lines(entries, esc):
     И наоборот, разбитая смена (09:00—13:00 и 18:00—22:00) — две строки с
     одинаковым действием, и ни одну из них терять нельзя.
     """
-    changes = {}
-    for entry in entries or []:
-        actor_id = entry.get('actor_id')
-        key = (entry.get('operator_id'), entry.get('shift_date'),
-               actor_id if actor_id is not None else -1, entry.get('changed_at'))
-        changes.setdefault(key, []).append(entry)
-
-    ordered = sorted(changes.values(),
-                     key=lambda group: (_plain(group[0].get('changed_at')),
-                                        _plain(group[0].get('operator_name'))))
     rows = []
-    for group in ordered:
+    for group in _changes_in_order(entries):
         first = group[0]
-        actions = []
-        # Сначала действия со временем смены, потом выходные: «смена удалена
-        # 09:00—18:00, проставлен выходной» читается как одно событие.
-        for item in sorted(group, key=lambda row: (0 if shift_times_label(row) else 1,
-                                                   _plain(row.get('start') or row.get('prev_start')),
-                                                   _plain(row.get('action')))):
-            label = entry_action_label(item)
-            times = shift_times_label(item)
-            actions.append('%s %s' % (label, times) if times else label)
         shift_date = first.get('shift_date')
         row = '• <b>%s</b> · %s — %s' % (
             esc(first.get('operator_name') or 'Без имени'),
             esc(format_day(shift_date)) if shift_date else '—',
-            esc(', '.join(actions)),
+            esc(_change_actions_label(group)),
         )
         if str(first.get('source') or '') not in SELF_SERVICE_SOURCES:
             row += '\n   %s' % esc(actor_label(first.get('actor_name'), first.get('actor_role')))
         rows.append(row)
     return rows
+
+
+def _changes_in_order(entries):
+    """Строки журнала, собранные в правки, по времени внесения."""
+    changes = {}
+    for entry in entries or []:
+        changes.setdefault(_change_key(entry), []).append(entry)
+    return sorted(changes.values(),
+                  key=lambda group: (_plain(group[0].get('changed_at')),
+                                     _plain(group[0].get('operator_name'))))
+
+
+def _change_actions_label(group):
+    """«смена удалена 09:00—18:00, проставлен выходной» — все действия одной правки.
+
+    Сначала действия со временем смены, потом выходные: так пара читается
+    как одно событие.
+    """
+    actions = []
+    for item in sorted(group, key=lambda row: (0 if shift_times_label(row) else 1,
+                                               _plain(row.get('start') or row.get('prev_start')),
+                                               _plain(row.get('action')))):
+        label = entry_action_label(item)
+        times = shift_times_label(item)
+        actions.append('%s %s' % (label, times) if times else label)
+    return ', '.join(actions)
 
 
 def _ways_label(ways, esc):
@@ -601,20 +716,10 @@ def _days_block(stats, esc):
     основная перетряска. За сутки разных дней бывает до 63 (боевой максимум),
     поэтому берём самые нагруженные, а печатаем их по порядку дат.
     """
-    days = stats['days']
-    if not days:
+    if not stats['days']:
         return []
 
-    ordered = sorted(days.items())
-    shown = ordered
-    tail_days = 0
-    tail_changes = 0
-    if len(ordered) > DAY_GROUPS_LIMIT:
-        keep = set(sorted(days, key=lambda day: -days[day])[:DAY_GROUPS_LIMIT])
-        shown = [(day, count) for day, count in ordered if day in keep]
-        tail_days = len(ordered) - len(shown)
-        tail_changes = sum(count for day, count in ordered if day not in keep)
-
+    shown, tail_days, tail_changes = _days_shown(stats)
     line = ' · '.join('%s — %d' % (esc(format_day_short(day)), count)
                       for day, count in shown)
     if tail_days:
@@ -623,6 +728,18 @@ def _days_block(stats, esc):
             tail_changes, changes_word(tail_changes),
         )
     return ['<b>Дни графика, которых коснулись правки</b>', line]
+
+
+def _days_shown(stats):
+    """(показанные дни по порядку дат, сколько дней в хвосте, сколько в нём правок)."""
+    days = stats['days']
+    ordered = sorted(days.items())
+    if len(ordered) <= DAY_GROUPS_LIMIT:
+        return ordered, 0, 0
+    keep = set(sorted(days, key=lambda day: -days[day])[:DAY_GROUPS_LIMIT])
+    shown = [(day, count) for day, count in ordered if day in keep]
+    tail_changes = sum(count for day, count in ordered if day not in keep)
+    return shown, len(ordered) - len(shown), tail_changes
 
 
 def _self_service_block(stats, esc):
@@ -637,3 +754,163 @@ def _self_service_block(stats, esc):
             row['changes'], row['people'], people_counted(row['people']),
         ))
     return ['<b>Операторы сами</b>', '🔄 ' + ' · '.join(parts)]
+
+
+# ── Rich-сообщение: таблицы ─────────────────────────────────────────────────
+
+# Потолки sendRichMessage: 32 768 символов и 500 блоков, где блок — в том числе
+# каждая строка таблицы. Пределы ACTORS/OPERATORS/DAY_GROUPS держат сводку
+# далеко под ними даже на именах предельной длины (VARCHAR 255), это сторожит
+# тест — отдельный бюджет, как у текста, здесь не нужен.
+RICH_TEXT_LIMIT = 32768
+RICH_BLOCK_LIMIT = 500
+
+# Рамки нужны, чтобы столбцы читались на телефоне. Полос нет: чередующаяся
+# заливка на таблице в десяток строк — цвет без смысла.
+RICH_TABLE_OPEN = '<table bordered compact>'
+
+
+def _rich_cell(value, header=False, numeric=False, colspan=None):
+    tag = 'th' if header else 'td'
+    attrs = ''
+    if colspan:
+        attrs += ' colspan="%d"' % colspan
+    if numeric:
+        attrs += ' align="right"'
+    return '<%s%s>%s</%s>' % (tag, attrs, value, tag)
+
+
+def _rich_table(columns, rows, tail=None):
+    """columns — [(заголовок, числовой ли столбец)], rows — уже экранированные
+    ячейки. tail — строка «… и ещё N» во всю ширину таблицы."""
+    numeric = [flag for _, flag in columns]
+    parts = [RICH_TABLE_OPEN, '<tr>']
+    parts.extend(_rich_cell(title, header=True, numeric=flag) for title, flag in columns)
+    parts.append('</tr>')
+    for row in rows:
+        parts.append('<tr>')
+        parts.extend(_rich_cell(value, numeric=flag) for value, flag in zip(row, numeric))
+        parts.append('</tr>')
+    if tail:
+        parts.append('<tr>%s</tr>' % _rich_cell('<i>%s</i>' % tail, colspan=len(columns)))
+    parts.append('</table>')
+    return ''.join(parts)
+
+
+def build_digest_rich(day, entries, scope_label, generated_label=None, escape=None,
+                      first_entries=None):
+    """Сводка за сутки rich-сообщением (поле `html` у sendRichMessage).
+
+    Состав и пороги те же, что у build_digest, и числа считает тот же
+    summarize: таблицы и запасной текст не могут разойтись. Блоки идут
+    вплотную, без переводов строк между тегами: как rich-разметка обходится с
+    ними между блоками, документация не говорит, а пустой абзац между
+    таблицами был бы шумом.
+    """
+    esc = escape or _plain
+    stats = summarize(entries)
+
+    parts = ['<h3>🗓 Изменения в графике за %s</h3>' % esc(format_day_full(day))]
+    scope = 'Область: %s' % esc(scope_label or 'Все отделы')
+    if not stats['total']:
+        # Как и у текста: сюда доходит только разовая отправка по кнопке.
+        parts.append('<p>%s<br>%s</p>' % (scope, esc(empty_day_text(first_entries))))
+        return ''.join(parts)
+
+    parts.append('<p>%s<br>%s</p>' % (scope, _head_counts(stats)))
+    if stats['total'] <= DETAILED_MAX_CHANGES:
+        parts.append(_rich_detailed_table(entries, esc))
+    else:
+        for title, table in (
+            ('Кто менял', _rich_actors_table(stats, esc)),
+            ('Кому меняли', _rich_operators_table(stats, esc)),
+            ('Дни графика, которых коснулись правки', _rich_days_table(stats, esc)),
+            ('Операторы сами', _rich_self_service_table(stats, esc)),
+        ):
+            if table:
+                parts.append('<h4>%s</h4>%s' % (title, table))
+    if generated_label:
+        parts.append('<footer>Сформировано %s</footer>' % esc(generated_label))
+    return ''.join(parts)
+
+
+def _rich_detailed_table(entries, esc):
+    """Правок единицы — строка на правку, как в перечне у текста."""
+    rows = []
+    for group in _changes_in_order(entries):
+        first = group[0]
+        shift_date = first.get('shift_date')
+        # Обмены и доборы — без имени автора, как везде в сводке.
+        author = '—'
+        if str(first.get('source') or '') not in SELF_SERVICE_SOURCES:
+            author = esc(actor_label(first.get('actor_name'), first.get('actor_role')))
+        rows.append([
+            esc(first.get('operator_name') or 'Без имени'),
+            esc(format_day_weekday(shift_date)) if shift_date else '—',
+            esc(_change_actions_label(group)),
+            author,
+        ])
+    return _rich_table(
+        [('Сотрудник', False), ('День графика', False), ('Что сделано', False), ('Автор', False)],
+        rows,
+    )
+
+
+def _rich_actors_table(stats, esc):
+    rows = stats['actors']
+    if not rows:
+        return ''
+    body = [
+        [esc(actor_label(row['name'], row['role'])), str(row['changes']),
+         str(row['operators']), _ways_label(row['ways'], esc) or '—']
+        for row in rows[:ACTORS_LIMIT]
+    ]
+    tail = None
+    rest = rows[ACTORS_LIMIT:]
+    if rest:
+        changes = sum(item['changes'] for item in rest)
+        tail = '… и ещё %d — %d %s' % (len(rest), changes, changes_word(changes))
+    return _rich_table(
+        [('Автор', False), ('Правок', True), ('Сотрудников', True), ('Способ', False)],
+        body, tail,
+    )
+
+
+def _rich_operators_table(stats, esc):
+    rows = stats['operators']
+    if not rows:
+        return ''
+    body = [[esc(row['name'] or 'Без имени'), str(row['changes'])]
+            for row in rows[:OPERATORS_LIMIT]]
+    tail = None
+    rest = rows[OPERATORS_LIMIT:]
+    if rest:
+        changes = sum(item['changes'] for item in rest)
+        tail = '… и ещё %d %s — %d %s' % (len(rest), people_counted(len(rest)),
+                                           changes, changes_word(changes))
+    return _rich_table([('Сотрудник', False), ('Правок', True)], body, tail)
+
+
+def _rich_days_table(stats, esc):
+    if not stats['days']:
+        return ''
+    shown, tail_days, tail_changes = _days_shown(stats)
+    body = [[esc(format_day_weekday(day)), str(count)] for day, count in shown]
+    tail = None
+    if tail_days:
+        tail = '… и ещё %d %s — %d %s' % (
+            tail_days, plural_ru(tail_days, 'день', 'дня', 'дней'),
+            tail_changes, changes_word(tail_changes),
+        )
+    return _rich_table([('День графика', False), ('Правок', True)], body, tail)
+
+
+def _rich_self_service_table(stats, esc):
+    rows = stats['self_service']
+    if not rows:
+        return ''
+    # Без имён: см. докстроку модуля.
+    body = [[esc(SOURCE_LABELS.get(row['source'], row['source'])),
+             str(row['changes']), str(row['people'])]
+            for row in rows]
+    return _rich_table([('Способ', False), ('Правок', True), ('Сотрудников', True)], body)

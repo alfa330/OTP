@@ -3509,6 +3509,14 @@ class Database:
                     changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+            # Был ли день сотрудника пуст (ни смены, ни выходного) ДО операции.
+            # По нему сводка отличает первичное внесение графика от правки:
+            # из одних строк журнала этого не видно — добавленная вторая смена
+            # и смена на пустой день пишутся одинаковым 'added'. NULL — строки,
+            # записанные до появления колонки: для них сводка судит по действиям.
+            cursor.execute("""
+                ALTER TABLE work_shift_changes ADD COLUMN IF NOT EXISTS day_was_empty BOOLEAN NULL;
+            """)
             # Заявка на отправку суточной сводки об изменениях графика
             # («Уведомления об изменениях» в меню раздела). Render поднимает
             # новый процесс до остановки старого, и если окно накрыло время
@@ -48312,11 +48320,15 @@ class Database:
                 None, None, None, None, None, None
             ))
 
+        # Первичное внесение или правка — решает сводка, здесь только факт.
+        day_was_empty = not before_map and not before_day_off
+
         return [
             (
                 int(operator_id), day, action, actor['source'],
                 start_time, end_time, prev_start_time, prev_end_time,
-                shift_type, prev_shift_type, actor['id'], actor['name'], actor.get('role') or ''
+                shift_type, prev_shift_type, actor['id'], actor['name'], actor.get('role') or '',
+                day_was_empty
             )
             for action, start_time, end_time, prev_start_time, prev_end_time, shift_type, prev_shift_type
             in entries
@@ -48339,7 +48351,8 @@ class Database:
             INSERT INTO work_shift_changes (
                 operator_id, shift_date, action, source,
                 start_time, end_time, prev_start_time, prev_end_time,
-                shift_type, prev_shift_type, actor_id, actor_name, actor_role
+                shift_type, prev_shift_type, actor_id, actor_name, actor_role,
+                day_was_empty
             )
             VALUES %s
         """, rows)
@@ -48684,7 +48697,8 @@ class Database:
                        c.actor_id,
                        COALESCE(NULLIF(c.actor_name, ''), actor.name, ''),
                        COALESCE(c.actor_role, ''),
-                       c.changed_at
+                       c.changed_at,
+                       c.day_was_empty
                   FROM work_shift_changes c
                   JOIN users op ON op.id = c.operator_id
                   LEFT JOIN users actor ON actor.id = c.actor_id
@@ -48709,6 +48723,7 @@ class Database:
                 'actor_name': row[10] or '',
                 'actor_role': row[11] or '',
                 'changed_at': row[12],
+                'day_was_empty': row[13],
             }
             for row in rows
         ]
