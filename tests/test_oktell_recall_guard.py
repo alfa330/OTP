@@ -979,6 +979,30 @@ def test_sign_out_takes_everything_down(tmp_path, monkeypatch):
     assert steps == ["разлогин в Oktell", "закрыто окно T1", "программа остановлена"], steps
 
 
+def test_the_press_is_picked_up_in_half_a_second_not_in_a_minute():
+    """Круг агента — минута, и пока разбор нажатия жил в нём, человек после
+    «Подтвердить» до минуты смотрел на «Отправляем…»: ни ответа, ни признака,
+    что его услышали. Ровно на это владелец и пожаловался."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    assert "def handle_news_press()" in body
+    assert "wait_for_next_round(poll_s)" in body, "спать целую минуту с открытым окном нельзя"
+    wait = body[body.index("def wait_for_next_round("):body.index("def adopt_new_login(")]
+    assert "handle_news_press()" in wait
+    assert "0.5" in wait
+
+
+def test_the_window_does_not_leave_the_operator_guessing():
+    """Забрать нажатие может оказаться некому: программу перезапустил сторож,
+    вкладка потеряла связь, сеть легла. Тогда окно обязано сказать об этом само,
+    а не висеть с «Отправляем…» до конца смены."""
+    html = agent.NEWS_JS_TEMPLATE
+    assert "Ответ не ушёл — нажмите ещё раз" in html
+    assert "state.waitTimer" in html
+    # И снимать страховку, когда ответ всё же пришёл.
+    assert "clearTimeout(state.waitTimer)" in html.split("state.feedback = function")[1]
+
+
 def test_being_kicked_out_does_not_kill_the_program():
     """Выброс по правилу — не выход. Оператор остаётся за машиной, и программа
     обязана продолжать считать: иначе один выброс снимал бы ограничитель до

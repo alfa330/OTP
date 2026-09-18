@@ -62,7 +62,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.18"
+VERSION = "1.0.19"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -2791,10 +2791,22 @@ NEWS_JS_TEMPLATE = r"""
     button.disabled = true;
     button.textContent = 'Отправляем…';
     state.result = { id: data.id, answers: state.answers };
+    // Страховка на случай, когда забрать нажатие некому: программа перезапущена
+    // сторожем, вкладка потеряла связь с ней, сеть легла. Без неё человек
+    // остаётся с вечным «Отправляем…» и не понимает, услышали его или нет.
+    if (state.waitTimer) { clearTimeout(state.waitTimer); }
+    state.waitTimer = setTimeout(function () {
+      if (!state.result) { return; }   // уже забрали, ответ просто в пути
+      state.result = null;
+      note.textContent = 'Ответ не ушёл — нажмите ещё раз';
+      note.style.color = '#d70015';
+      paint();
+    }, 20000);
   });
 
   // Сервер ответил отказом — показываем его словами, своего мнения не имеем.
   state.feedback = function (payload) {
+    if (state.waitTimer) { clearTimeout(state.waitTimer); state.waitTimer = null; }
     note.textContent = payload && payload.error ? payload.error : '';
     note.style.color = '#d70015';
     if (payload && payload.remaining_seconds) { left = Number(payload.remaining_seconds); }
@@ -3941,6 +3953,59 @@ def run_agent(cfg: dict) -> int:
         return rule_version({**(current.get("in_window_rule") or {}),
                              "dry_run": bool(current.get("dry_run"))})
 
+    def handle_news_press() -> bool:
+        """Разобрать нажатие «Подтвердить» в окне объявления. True — разобрали.
+
+        Вынесено из круга НАМЕРЕННО: круг у агента минута, и пока разбор жил в
+        нём, человек после нажатия до минуты смотрел на «Отправляем…» — ни
+        ответа, ни признака, что его вообще услышали. Теперь этой функции ждут
+        каждые полсекунды, пока объявление на экране (см. wait_for_next_round).
+        """
+        nonlocal active_news, training_set, next_news_check
+        if active_news is None:
+            return False
+        pressed = browser.news_result()
+        if not pressed:
+            return False
+        verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {})
+        if verdict.get("ok"):
+            browser.close_news()
+            # Возвращаем статус только если сами его и забрали: у того, кто к
+            # моменту объявления уже был на перерыве, статус не наш.
+            if training_set:
+                browser.set_operator_state(
+                    cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
+                training_set = False
+            logging.info("Объявление #%s подтверждено", pressed.get("id"))
+            active_news = None
+            next_news_check = time.time()   # очередь может быть длиннее одного
+        else:
+            browser.news_feedback(verdict)
+        return True
+
+    def wait_for_next_round(seconds: float) -> None:
+        """Пауза до следующего круга, но с ухом на окне объявления.
+
+        Спать целую минуту можно только когда на экране ничего не ждут ответа.
+        Пока объявление показано, режем сон на полсекунды и на каждой проверяем
+        нажатие: для человека это «нажал — ответили», а не «нажал — тишина».
+        """
+        if active_news is None:
+            time.sleep(seconds)
+            return
+        step = 0.5
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            time.sleep(min(step, max(0.0, deadline - time.time())))
+            try:
+                if handle_news_press() and active_news is None:
+                    # Подтвердили — дальше ждать нечего, идём на круг за
+                    # следующим объявлением очереди.
+                    return
+            except Exception:  # noqa: BLE001 — разбор нажатия не должен ронять цикл
+                logging.debug("Разбор нажатия не удался", exc_info=True)
+                return
+
     def adopt_new_login() -> bool:
         """Заметить вход, случившийся уже после старта агента.
 
@@ -4100,24 +4165,7 @@ def run_agent(cfg: dict) -> int:
                                     cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
                                 training_set = False
 
-                if active_news is not None:
-                    pressed = browser.news_result()
-                    if pressed:
-                        verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {})
-                        if verdict.get("ok"):
-                            browser.close_news()
-                            # Возвращаем статус только если сами его и забрали:
-                            # у того, кто к моменту объявления уже был на
-                            # перерыве, статус не наш.
-                            if training_set:
-                                browser.set_operator_state(
-                                    cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
-                                training_set = False
-                            logging.info("Объявление #%s подтверждено", pressed.get("id"))
-                            active_news = None
-                            next_news_check = time.time()   # очередь может быть длиннее одного
-                        else:
-                            browser.news_feedback(verdict)
+                handle_news_press()
 
                 if data:
                     server_interval = data.get("poll_interval_s")
@@ -4146,7 +4194,7 @@ def run_agent(cfg: dict) -> int:
                         )
                         logging.info("Команда %s (%s) → %s", command_id, command.get("type"), report.get("status"))
 
-                time.sleep(poll_s)
+                wait_for_next_round(poll_s)
             except KeyboardInterrupt:
                 logging.info("Агент остановлен с клавиатуры")
                 return 0
