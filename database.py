@@ -5287,6 +5287,24 @@ class Database:
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+            # Учётка личного кабинета Oktell. Отдельной таблицей по той же
+            # причине, что и у Binotel: строка user_sip_settings удаляется, как
+            # только у сотрудника не осталось SIP-переопределений, и сброс SIP
+            # унёс бы вместе с ней доступ в АТС.
+            #
+            # Зачем она вообще нужна серверу: клиент Oktell раздаётся с нашего
+            # сайта и спрашивает у человека логин от iCORE, а логин и пароль
+            # кабинета получает от нас ответом. То есть эта строка — то, что
+            # оператор больше не вводит руками и чего он может не знать вовсе.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oktell_user_accounts (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    cabinet_login VARCHAR(255) NOT NULL DEFAULT '',
+                    cabinet_password VARCHAR(255) NOT NULL DEFAULT '',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
             # Снятие общего яруса: раньше отдел без своей строки наследовал
             # sip_config. Ярус убираем — одна унификация на все отделы опасна, —
             # поэтому действующие значения переносим в строки отделов, иначе
@@ -24115,11 +24133,18 @@ class Database:
         Возвращает число обработанных строк."""
         if not rows:
             return 0
-        values = []
+        # Одно и то же обращение вендор иногда отдаёт дважды в одном отчёте (страницы
+        # съезжают, пока идёт листание). INSERT ... ON CONFLICT DO UPDATE, где одна
+        # строка задета дважды ОДНОЙ командой, Postgres отклоняет целиком
+        # («cannot affect row a second time»), и день не сохранялся вовсе: на 01.09.2026
+        # так потерялись все 1994 обращения, а в логе осталась одна строка исключения.
+        # Поэтому держим последнюю копию по request_id, как это уже делает
+        # save_chat_manager_low_ratings.
+        by_request_id = {}
         for row in rows:
             if not isinstance(row, dict) or row.get('request_id') is None:
                 continue
-            values.append((
+            by_request_id[int(row['request_id'])] = (
                 int(row['request_id']), row.get('day'),
                 row.get('request_start'), row.get('request_end'),
                 row.get('request_time'), row.get('reaction_time'),
@@ -24132,7 +24157,8 @@ class Database:
                 row.get('rating_score'), row.get('rating_text'),
                 row.get('replies'), row.get('average_replies_time'),
                 row.get('assigned_phone'),
-            ))
+            )
+        values = list(by_request_id.values())
         if not values:
             return 0
         with self._get_cursor() as cursor:
@@ -28568,14 +28594,18 @@ class Database:
             u.direction_id AS direction_id,
             COALESCE(dir.name, '') AS direction_name,
             -- Пароль кабинета наружу не отдаём никогда — только признак «задан».
-            -- Строго последней колонкой: _sip_operator_row читает row по индексам,
-            -- вставка в середину сдвинула бы все поля после неё.
-            (NULLIF(b.cabinet_password, '') IS NOT NULL) AS has_binotel_cabinet_password
+            -- Новые колонки дописываются ТОЛЬКО В КОНЕЦ: _sip_operator_row читает
+            -- row по индексам, и вставка в середину сдвинула бы всё после неё.
+            (NULLIF(b.cabinet_password, '') IS NOT NULL) AS has_binotel_cabinet_password,
+            -- Учётка кабинета Oktell: логин видно, пароль — только фактом.
+            COALESCE(ok.cabinet_login, '') AS oktell_cabinet_login,
+            (NULLIF(ok.cabinet_password, '') IS NOT NULL) AS has_oktell_cabinet_password
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
         LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
         LEFT JOIN binotel_user_accounts b ON b.user_id = u.id
+        LEFT JOIN oktell_user_accounts ok ON ok.user_id = u.id
         -- Только LEFT: у стажёра направления нет вовсе, и INNER выкинул бы его
         -- из раздела вместе с его номером.
         LEFT JOIN directions dir ON dir.id = u.direction_id
@@ -28637,8 +28667,13 @@ class Database:
             # (разные отделы, архивные версии), поэтому ключ — всегда id.
             "direction_id": row[32],
             "direction_name": row[33] or "",
-            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
             "has_binotel_cabinet_password": bool(row[34]),
+            # Кабинет Oktell: его логин и пароль клиент Oktell получает от нас
+            # после входа по учётке iCORE, поэтому логин показываем в карточке,
+            # а пароль — никогда, только признаком «задан».
+            "oktell_cabinet_login": row[35] or "",
+            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
+            "has_oktell_cabinet_password": bool(row[36]),
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -28919,6 +28954,23 @@ class Database:
             bool(cab_password),
         ))
 
+        # Учётка кабинета Oktell — ровно те же правила, но у ДРУГОГО провайдера:
+        # это отделы локальной АТС («Таксопарки»), а не Binotel. Пустой пароль
+        # снова значит «не менять»: иначе сохранение карточки ради телефона
+        # стирало бы человеку доступ в АТС, а заметил бы он это только на смене.
+        ok_login = _field('oktell_cabinet_login', current['oktell_cabinet_login'])
+        ok_password_raw = payload.get('oktell_cabinet_password')
+        ok_password = None if ok_password_raw is None else str(ok_password_raw).strip()
+        if binotel:
+            # У Теза кабинета Oktell нет. Поля игнорируем, но не стираем: отдел
+            # могли перевести с одной АТС на другую и обратно.
+            ok_login = current['oktell_cabinet_login']
+            ok_password = None
+        oktell_changed = (not binotel) and any((
+            ok_login != current['oktell_cabinet_login'],
+            bool(ok_password),
+        ))
+
         changed = any((
             sip_number != current['sip_number'],
             sip_password != current['sip_password'],
@@ -28934,6 +28986,7 @@ class Database:
             auto_answer != current.get('auto_answer'),
             auto_answer_delay != current.get('auto_answer_delay'),
             cabinet_changed,
+            oktell_changed,
         ))
         if not changed:
             return current
@@ -28994,6 +29047,22 @@ class Database:
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, (user_id, cab_login, cab_password, cab_employee, cab_url, changed_by))
+            if oktell_changed:
+                # Тот же приём, что у кабинета Binotel: пароль переписывается
+                # только когда его прислали, иначе остаётся прежний.
+                cur.execute("""
+                    INSERT INTO oktell_user_accounts (
+                        user_id, cabinet_login, cabinet_password, updated_by, updated_at)
+                    VALUES (%s, %s, COALESCE(%s, ''), %s,
+                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        cabinet_login = EXCLUDED.cabinet_login,
+                        cabinet_password = COALESCE(
+                            NULLIF(EXCLUDED.cabinet_password, ''),
+                            oktell_user_accounts.cabinet_password),
+                        updated_by = EXCLUDED.updated_by,
+                        updated_at = EXCLUDED.updated_at
+                """, (user_id, ok_login, ok_password, changed_by))
             cur.execute("""
                 INSERT INTO sip_config_history (changed_by, target_user_id, settings)
                 VALUES (%s, %s, %s::jsonb)
@@ -29007,6 +29076,9 @@ class Database:
                 "binotel_employee_id": cab_employee,
                 # Пароль кабинета в историю не попадает — только факт замены.
                 "binotel_cabinet_password_set": bool(cab_password),
+                "oktell_cabinet_login": ok_login,
+                # Пароль кабинета Oktell в историю не попадает — только факт замены.
+                "oktell_cabinet_password_set": bool(ok_password),
                 "autodial_number": autodial_number,
                 "autodial_password": self._mask_sip_secret(autodial_password),
                 "autodial_domain": autodial_domain,
@@ -29254,6 +29326,29 @@ class Database:
             # «me» кабинет понимает сам, поэтому ссылка работает и без employee_id.
             "status_url": "%s/f/pbx/#/settings/users/manage-users/%s" % (
                 base_url.rstrip('/'), employee_id or 'me'),
+        }
+
+    def get_oktell_account(self, user_id: int) -> Optional[dict]:
+        """Учётка кабинета Oktell вместе с паролем — только для самого оператора.
+
+        Панель руководителя пароль не получает никогда (там лишь признак
+        «задан»); клиент Oktell получает, потому что ради этого всё и заведено:
+        оператор скачивает клиент с нашего сайта, входит своей учёткой iCORE, а
+        логин и пароль АТС подставляются за него. Возвращаем None, пока логин не
+        задан, — пароль без логина не учётка.
+        """
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT cabinet_login, cabinet_password
+                  FROM oktell_user_accounts
+                 WHERE user_id = %s
+            """, (int(user_id),))
+            row = cur.fetchone()
+        if not row or not (row[0] or '').strip():
+            return None
+        return {
+            "cabinet_login": (row[0] or "").strip(),
+            "cabinet_password": row[1] or "",
         }
 
     def get_user_sip_account(self, user_id: int) -> dict:

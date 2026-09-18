@@ -259,5 +259,58 @@ class C2dEvalHelpersTests(unittest.TestCase):
         self.assertEqual(quotes, [])
 
 
+DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+
+
+def _database_method(method_name):
+    module = source_cache.parse(DATABASE_PATH.read_text(encoding="utf-8-sig"))
+    database_class = next(node for node in module.body
+                          if isinstance(node, ast.ClassDef) and node.name == "Database")
+    node = next(node for node in database_class.body
+                if isinstance(node, ast.FunctionDef) and node.name == method_name)
+    namespace = {"execute_values": lambda *args, **kwargs: None}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(DATABASE_PATH), "exec"), namespace)
+    return namespace[method_name]
+
+
+class SaveC2dRequestsTests(unittest.TestCase):
+    """Запись заявок в c2d_requests: пачка обязана пережить повтор от вендора."""
+
+    def _save(self, rows):
+        from contextlib import contextmanager
+        captured = {}
+
+        def fake_execute_values(_cursor, query, values, template=None, page_size=None):
+            captured["values"] = list(values)
+
+        class _Db:
+            @contextmanager
+            def _get_cursor(self):
+                yield object()
+
+        method = _database_method("save_c2d_requests")
+        method.__globals__["execute_values"] = fake_execute_values
+        db = _Db()
+        return method(db, rows), captured
+
+    def test_duplicate_request_id_does_not_break_the_batch(self):
+        """Chat2Desk отдаёт одно обращение дважды, когда страницы съезжают на
+        листании. Postgres отклоняет ВСЮ команду, если ON CONFLICT DO UPDATE
+        задевает строку второй раз, — и день не сохранялся целиком: 01.09.2026
+        так потерялись все обращения при живом ответе API."""
+        rows = [
+            {"request_id": 1, "day": "2026-09-01", "reaction_time": 10},
+            {"request_id": 2, "day": "2026-09-01", "reaction_time": 20},
+            {"request_id": 1, "day": "2026-09-01", "reaction_time": 15},
+        ]
+        processed, captured = self._save(rows)
+        self.assertEqual(processed, 2)
+        sent = captured["values"]
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len({row[0] for row in sent}), 2)
+        # Остаётся последняя копия: вендор дописывает данные по ходу дня.
+        self.assertEqual(next(row[5] for row in sent if row[0] == 1), 15)
+
+
 if __name__ == "__main__":
     unittest.main()
