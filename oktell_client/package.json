@@ -7,9 +7,39 @@
   "scripts": {
     "start": "electron .",
     "stub": "python3 dev_harness/stub_server.py",
-    "selftest": "ICORE_OKTELL_SELFTEST=1 electron ."
+    "selftest": "ICORE_OKTELL_SELFTEST=1 electron .",
+    "dist": "npx --yes electron-builder@25 --win nsis",
+    "publish-release": "node scripts/publish.js"
   },
   "dependencies": {
     "electron": "^33.4.11"
+  },
+  "build": {
+    "appId": "kz.icore.oktell",
+    "productName": "iCORE Oktell",
+    "artifactName": "iCORE-Oktell-Setup-${version}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "preload-oktell.js",
+      "update.js",
+      "renderer/**",
+      "config.example.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "Oktell"
+    }
   }
 }

@@ -46,6 +46,19 @@ QUIZ = [
 ]
 
 state = {'shown_at': None, 'confirmed': False}
+# Команды, которые клиент прислал АТС: кадры сокета и обращения к
+# wp_setuserstate. По ним проверяется, что оператора сняли с линии ДО показа.
+RECEIVED = []
+
+# Поддельный дистрибутив: содержимое произвольное, важен только его sha256 —
+# именно по нему клиент решает, ставить файл или выбросить.
+INSTALLER = b'FAKE-INSTALLER-' + b'x' * 512
+INSTALLER_SHA = hashlib.sha256(INSTALLER).hexdigest()
+RELEASE = {'version': '9.9.9', 'filename': 'iCORE-Oktell-Setup-9.9.9.exe',
+           'sha256': INSTALLER_SHA, 'size': len(INSTALLER), 'mandatory': False,
+           'notes': '', 'published_at': None}
+# Переключатель для проверки отказа: /stub/break_hash подсовывает чужой хэш.
+BROKEN = {'hash': False}
 
 
 def news_item():
@@ -130,6 +143,30 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith('/stub/break_hash'):
+            BROKEN['hash'] = True
+            return self._json({'status': 'ok'})
+        if self.path.startswith('/api/oktell_client/version'):
+            release = dict(RELEASE)
+            if BROKEN['hash']:
+                release['sha256'] = '0' * 64
+            return self._json({'status': 'success', 'release': release})
+        if self.path.startswith('/api/oktell_client/download'):
+            return self._json({'status': 'success',
+                               'url': f'http://127.0.0.1:{HTTP_PORT}/stub/installer'})
+        if self.path.startswith('/stub/installer'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(len(INSTALLER)))
+            self.end_headers()
+            self.wfile.write(INSTALLER)
+            return
+        if self.path.startswith('/stub/commands'):
+            return self._json({'commands': RECEIVED})
+        if self.path.startswith('/wp_setuserstate'):
+            RECEIVED.append({'kind': 'http', 'raw': self.path})
+            print(f'[stub] АТС: {self.path}')
+            return self._json({'status': 'ok'})
         if self.path.startswith('/api/operator/oktell_account'):
             return self._json({'status': 'success', 'account': CABINET})
         if self.path.startswith('/api/news/pending'):
@@ -179,6 +216,32 @@ def ws_frame(text):
     return header + data
 
 
+def ws_read(conn):
+    """Кадры ОТ клиента: команда смены статуса приходит именно так.
+
+    Клиентские кадры маскированы (RFC 6455), поэтому четыре байта ключа
+    обязательны — без размаскировки в журнале оказался бы мусор.
+    """
+    while True:
+        header = conn.recv(2)
+        if len(header) < 2:
+            return
+        length = header[1] & 0x7F
+        if length == 126:
+            length = struct.unpack('!H', conn.recv(2))[0]
+        elif length == 127:
+            length = struct.unpack('!Q', conn.recv(8))[0]
+        mask = conn.recv(4) if header[1] & 0x80 else b'\x00\x00\x00\x00'
+        payload = bytearray(conn.recv(length) if length else b'')
+        for index in range(len(payload)):
+            payload[index] ^= mask[index % 4]
+        if (header[0] & 0x0F) == 0x8:                 # close
+            return
+        text = payload.decode('utf-8', 'ignore')
+        RECEIVED.append({'kind': 'socket', 'raw': text})
+        print(f'[stub] кадр от клиента: {text}')
+
+
 def ws_client(conn):
     """Рукопожатие и поток статусов: готов → разговор → готов, по кругу."""
     try:
@@ -193,6 +256,7 @@ def ws_client(conn):
                    'Upgrade: websocket\r\nConnection: Upgrade\r\n'
                    f'Sec-WebSocket-Accept: {accept}\r\n\r\n').encode())
         print('[stub] сокет статусов подключён')
+        threading.Thread(target=ws_read, args=(conn,), daemon=True).start()
         for raw in _state_cycle():
             conn.send(ws_frame(json.dumps(['getuserstateresult',
                                            {'userstatestr': raw, 'userlogin': '6612'}])))

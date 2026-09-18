@@ -57,6 +57,11 @@ function readFrame(data) {
     } catch (error) { /* чужой формат — молча мимо */ }
 }
 
+// Живой сокет страницы. Держим последний открытый: через него же уходит команда
+// смены статуса — своего соединения мы не поднимаем, потому что сессию АТС знает
+// только сама страница, а второй логин занял бы место оператора.
+let liveSocket = null;
+
 try {
     const Native = window.WebSocket;
     if (Native && !Native.__icoreWrapped) {
@@ -64,6 +69,10 @@ try {
             const socket = protocols === undefined
                 ? new Native(url) : new Native(url, protocols);
             socket.addEventListener('message', (event) => readFrame(event.data));
+            socket.addEventListener('open', () => { liveSocket = socket; });
+            socket.addEventListener('close', () => {
+                if (liveSocket === socket) liveSocket = null;
+            });
             return socket;
         };
         Wrapped.prototype = Native.prototype;
@@ -76,6 +85,41 @@ try {
 } catch (error) {
     ipcRenderer.send('oktell:autologin', { filled: false, reason: 'сокет не обёрнут: ' + error.message });
 }
+
+/* ── Смена статуса оператора ──────────────────────────────────────────────
+ *
+ * Команду шлёт страница, а не наш сервер. Причина та же, по которой отсюда же
+ * читается статус: у сервера есть только read-only SQL-прокси, а у страницы —
+ * живая сессия АТС. Формат кадра лежит в конфиге: протокол веб-клиента Oktell
+ * вендор нигде не описывает, и подбирать его в коде значило бы пересобирать
+ * программу после каждого уточнения.
+ *
+ * Отвечаем ВСЕГДА, даже когда не вышло: главный процесс по этому ответу решает,
+ * снимать ли оператора с линии вторым способом (HTTP), и молчание он прочитал
+ * бы как успех.
+ */
+ipcRenderer.on('oktell:status', (_event, { id, frame, selector }) => {
+    const answer = (ok, how, reason) => {
+        try { ipcRenderer.send('oktell:status-result', { id, ok, how, reason: reason || '' }); }
+        catch (error) { /* некому отвечать — значит окно уже закрылось */ }
+    };
+    try {
+        // Сначала кадром: он доходит до АТС мгновенно и не зависит от вёрстки.
+        if (frame && liveSocket && liveSocket.readyState === 1) {
+            liveSocket.send(typeof frame === 'string' ? frame : JSON.stringify(frame));
+            return answer(true, 'socket');
+        }
+        // Запасной путь — нажать то, что нажал бы сам оператор.
+        if (selector) {
+            const node = document.querySelector(selector);
+            if (node) { node.click(); return answer(true, 'click'); }
+            return answer(false, 'click', 'кнопка статуса не найдена');
+        }
+        answer(false, 'socket', liveSocket ? 'сокет не открыт' : 'сокет не найден');
+    } catch (error) {
+        answer(false, 'socket', error.message);
+    }
+});
 
 /* ── Подстановка учётки ── */
 const account = options.account;

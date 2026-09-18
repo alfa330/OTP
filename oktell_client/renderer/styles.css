@@ -142,6 +142,21 @@ input:focus {
     padding: 28px 24px 20px;
 }
 
+.sheet-head { display: flex; align-items: center; justify-content: space-between; }
+
+.close {
+    border: none;
+    background: none;
+    color: var(--muted);
+    font-size: 16px;
+    line-height: 1;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.close:hover { background: rgba(127, 127, 127, .12); color: var(--text); }
+
 .badge {
     align-self: flex-start;
     font-size: 11.5px;

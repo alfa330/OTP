@@ -50,13 +50,19 @@
 
 <section id="news" class="screen">
     <div class="sheet">
-        <span class="badge" id="news-badge">Обязательно к прочтению</span>
+        <div class="sheet-head">
+            <span class="badge" id="news-badge">Обязательно к прочтению</span>
+            <!-- Крестик есть ТОЛЬКО у необязательного объявления: обязательное
+                 закрывается подтверждением, и другого выхода у него нет. -->
+            <button class="close" id="news-close" type="button" title="Закрыть" hidden>&#10005;</button>
+        </div>
         <h2 id="news-title"></h2>
         <div class="prose" id="news-body"></div>
         <div class="photos" id="news-photos"></div>
         <div class="quiz" id="news-quiz"></div>
         <div class="footer">
             <button class="btn" id="news-confirm" disabled>Ознакомлен</button>
+            <button class="btn btn-quiet" id="news-back" type="button" hidden>Перечитать новость</button>
             <p class="note" id="news-note"></p>
         </div>
     </div>

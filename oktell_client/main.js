@@ -32,6 +32,7 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const updater = require('./update');
 
 const SELFTEST = !!process.env.ICORE_OKTELL_SELFTEST;
 // Показать окно объявления, не дожидаясь публикации и не заводя звонок:
@@ -63,6 +64,36 @@ const DEFAULT_CONFIG = {
     news: {
         poll_seconds: 60,
         unknown_state_grace_seconds: 60,
+    },
+    // Автообновление. Раз в четыре часа — этого хватает: релизы выходят реже, а
+    // обязательный доедет ещё и на ближайшем запуске.
+    update: {
+        check_hours: 4,
+    },
+    // Снятие оператора с линии на время объявления. Кадр протокола вендор
+    // нигде не описывает, поэтому он в конфиге: уточнили — поправили строку, а
+    // не пересобрали программу. lunchreasonid = 3 — это «Тренинг» в справочнике
+    // подпричин перерыва (1 Тех.причина, 2 Перезвон, 3 Тренинг, 4 Перерыв); у
+    // него на табло СЗоВ свой счётчик и свой цвет, поэтому время обучения видно
+    // сразу и не путается с обычным перерывом.
+    status: {
+        enabled: true,
+        socket_frames: {
+            training: ['setuserstate', { onlunch: true, lunchreasonid: 3 }],
+            restore: ['setuserstate', { onlunch: false }],
+        },
+        // Кнопки статуса в самой странице — запасной путь, если кадр не подошёл.
+        selectors: { training: '', restore: '' },
+        // Серверная команда АТС. Наш сервер до неё не дотянется — он снаружи
+        // офисной сети, — а вот клиент стоит на машине оператора и дотянется.
+        // Проверено вживую 17.08.2026: снимает с линии (IsCC=false), но НЕ
+        // держится — оператор возвращается сам за минуту-полторы. Поэтому
+        // повторяем, пока объявление на экране.
+        http_fallback: true,
+        reapply_seconds: 30,
+        // Сертификат АТС внутри сети бывает самоподписанным. Включать осознанно
+        // и только ради адреса самой АТС.
+        allow_insecure_tls: false,
     },
 };
 
@@ -204,6 +235,7 @@ function createWindow() {
     win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
     win.once('ready-to-show', () => win.show());
     win.on('resize', layoutOktell);
+    win.on('blur', keepFocus);
     win.on('closed', () => { win = null; oktellView = null; stopNews(); });
 }
 
@@ -291,6 +323,132 @@ function send(channel, payload) {
     if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+// ── Снятие с линии и запирание экрана ───────────────────────────────────────
+/*
+ * Пока оператор читает обязательное объявление, он не должен ни получать новые
+ * звонки, ни добираться до чего-либо ещё на машине. Это два разных запрета, и
+ * держатся они по-разному.
+ *
+ * ЗВОНКИ снимает сама АТС — мы переводим оператора в перерыв «Тренинг». Двумя
+ * путями, потому что ни один не надёжен в одиночку: кадром через живой сокет
+ * страницы (быстро, но протокол вендор не описывает) и серверной командой
+ * wp_setuserstate (документирована и проверена вживую, но не держится — за
+ * минуту-полторы оператор возвращается на линию сам). Поэтому команду
+ * ПОВТОРЯЕМ, пока объявление на экране.
+ *
+ * ЭКРАН запирает окно: киоск, поверх всех, без кнопки в панели задач, и любой
+ * увод фокуса возвращается обратно. Честная граница: Ctrl+Alt+Del и
+ * переключение пользователя Windows этим не перехватываются — их не
+ * перехватывает ни одно приложение без драйвера, и обещать обратное нельзя.
+ */
+let statusRequestId = 0;
+const statusWaiters = new Map();
+let reapplyTimer = null;
+let lineReleased = false;
+
+function pageStatusCommand(kind) {
+    // Ответ страницы ждём не дольше секунды: она может быть занята, не
+    // загружена или вообще другой версии, и вешать на этом показ объявления
+    // нельзя.
+    if (!oktellView) return Promise.resolve({ ok: false, reason: 'страница АТС не открыта' });
+    const id = ++statusRequestId;
+    const frames = config.status?.socket_frames || {};
+    const selectors = config.status?.selectors || {};
+    oktellView.webContents.send('oktell:status', {
+        id,
+        frame: frames[kind] || null,
+        selector: selectors[kind] || '',
+    });
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            statusWaiters.delete(id);
+            resolve({ ok: false, reason: 'страница не ответила' });
+        }, 1000);
+        statusWaiters.set(id, (answer) => { clearTimeout(timer); resolve(answer); });
+    });
+}
+
+ipcMain.on('oktell:status-result', (_event, answer) => {
+    const waiter = statusWaiters.get(answer?.id);
+    if (!waiter) return;
+    statusWaiters.delete(answer.id);
+    waiter(answer);
+});
+
+async function httpStatusCommand(onLine) {
+    if (config.status?.http_fallback === false) return { ok: false, reason: 'запасной путь выключен' };
+    const login = pendingAccount?.cabinet_login;
+    const base = String(config.oktell?.url || '').trim();
+    if (!login || !base) return { ok: false, reason: 'нет логина или адреса АТС' };
+    try {
+        const url = new URL('wp_setuserstate', base.endsWith('/') ? base : base + '/');
+        url.searchParams.set('user', login);
+        url.searchParams.set('oncallcenter', onLine ? '1' : '0');
+        const response = await fetch(url.toString(), { method: 'GET' });
+        return { ok: response.ok, reason: response.ok ? '' : `АТС ответила ${response.status}` };
+    } catch (error) {
+        return { ok: false, reason: error.message };
+    }
+}
+
+async function setTraining(on) {
+    if (config.status?.enabled === false) return { ok: false, reason: 'смена статуса выключена' };
+    const viaPage = await pageStatusCommand(on ? 'training' : 'restore');
+    if (viaPage.ok) {
+        log(`статус: ${on ? 'тренинг' : 'возврат'} — ${viaPage.how}`);
+        lineReleased = on;
+        return viaPage;
+    }
+    const viaHttp = await httpStatusCommand(!on);
+    log(`статус: ${on ? 'тренинг' : 'возврат'} — страница не смогла (${viaPage.reason}), `
+        + `команда АТС ${viaHttp.ok ? 'прошла' : 'не прошла: ' + viaHttp.reason}`);
+    lineReleased = on && viaHttp.ok;
+    return viaHttp;
+}
+
+function startReapply() {
+    stopReapply();
+    const seconds = Math.max(5, Number(config.status?.reapply_seconds ?? 30));
+    // Повтор ровно потому, что wp_setuserstate не залипает: без него оператор
+    // вернётся на линию посреди чтения и получит звонок в закрытое окно.
+    reapplyTimer = setInterval(() => { httpStatusCommand(false); }, seconds * 1000);
+}
+
+function stopReapply() {
+    if (reapplyTimer) { clearInterval(reapplyTimer); reapplyTimer = null; }
+}
+
+let locked = false;
+
+function lockScreen(on) {
+    if (!win || locked === on) return;
+    locked = on;
+    if (on) {
+        win.setAlwaysOnTop(true, 'screen-saver');
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        win.setSkipTaskbar(true);
+        win.setMinimizable(false);
+        win.setClosable(false);
+        win.setKiosk(true);
+        win.show();
+        win.focus();
+    } else {
+        win.setKiosk(false);
+        win.setAlwaysOnTop(false);
+        win.setSkipTaskbar(false);
+        win.setMinimizable(true);
+        win.setClosable(true);
+    }
+}
+
+// Увели фокус — забираем обратно. Без этого Alt+Tab уводит оператора на рабочий
+// стол, и объявление превращается в окно, которое просто висит сзади.
+function keepFocus() {
+    if (!locked || !win || win.isDestroyed()) return;
+    win.show();
+    win.focus();
+}
+
 // ── Обязательные новости ────────────────────────────────────────────────────
 // Правило показа. Ждём, пока оператор занят разговором: окно закрывает собой
 // клиент АТС, и посреди консультации это отняло бы у него интерфейс. Но ждём не
@@ -321,8 +479,22 @@ async function pollNews() {
         return;
     }
     newsShown = true;
+    const item = items[0];
+    // Снимаем с линии и запираем экран ТОЛЬКО под обязательное объявление.
+    // Необязательное — это «к сведению»: закрывается крестиком, и уводить ради
+    // него человека с линии значило бы терять звонки на ровном месте.
+    if (item.is_mandatory) {
+        // Порядок важен и он такой: СНАЧАЛА снять с линии, потом показывать.
+        // Иначе между появлением окна и сменой статуса есть щель, в которую АТС
+        // успевает направить звонок — а окно АТС уже закрыто, и звонок пропадёт.
+        await setTraining(true);
+        startReapply();
+        lockScreen(true);
+    }
+    // Спрятать страницу АТС приходится в обоих случаях: свой интерфейс рисуется
+    // под ней, и другого места показать объявление у нас нет.
     showOktell(false);
-    send('news:show', items[0]);
+    send('news:show', item);
 }
 
 function startNews() {
@@ -337,11 +509,25 @@ function stopNews() {
     if (newsTimer) { clearInterval(newsTimer); newsTimer = null; }
 }
 
-function closeNews() {
+async function closeNews() {
     newsShown = false;
     waitingSince = 0;
+    stopReapply();
+    // Возвращаем прежнее состояние линии только если сами его и забрали: у
+    // оператора, который к моменту объявления уже был на перерыве, статус не
+    // наш, и «вернуть на линию» означало бы поднять его с обеда.
+    if (lineReleased) await setTraining(false);
+    lockScreen(false);
     showOktell(true);
     send('news:hide', {});
+    updater.onIdle();
+}
+
+/* Пауза, в которую можно переставить программу. Оба условия обязательны:
+   перезапуск посреди разговора оборвёт звонок, а посреди объявления — собьёт
+   чтение и оставит человека снятым с линии. */
+function updateIsSafeNow() {
+    return !operatorState.busy && !newsShown;
 }
 
 // ── Мост с интерфейсом ──────────────────────────────────────────────────────
@@ -367,6 +553,9 @@ ipcMain.handle('auth:login', async (_event, { login: loginValue, password, apiBa
     }
     const opened = openOktell(cabinet);
     startNews();
+    // Ссылку на дистрибутив дают только вошедшему, поэтому первую настоящую
+    // проверку делаем здесь, а не на старте.
+    updater.check();
     return {
         ok: true,
         user: result.user,
@@ -385,10 +574,18 @@ ipcMain.handle('news:confirm', async (_event, { id, answers }) => {
         // следующую, как это делает портал.
         newsShown = false;
         await pollNews();
-        if (!newsShown) closeNews();
+        if (!newsShown) await closeNews();
         return { ok: true };
     }
     return { ok: false, status, ...(payload || {}) };
+});
+
+// Крестик у НЕОБЯЗАТЕЛЬНОГО объявления: ничего не подтверждаем, просто
+// возвращаем человека к работе. Отметка «показали» уже стоит — её ставит
+// /pending, — поэтому повторно оно не всплывёт.
+ipcMain.handle('news:dismiss', async () => {
+    await closeNews();
+    return { ok: true };
 });
 
 ipcMain.handle('news:quiz', async (_event, { id, answers }) => {
@@ -406,6 +603,9 @@ ipcMain.on('oktell:state', (_event, { raw, busy }) => {
         // Разговор кончился — это единственный момент, когда ожидающее
         // объявление обязано появиться само, не дожидаясь следующего опроса.
         pollNews();
+        // И единственная пауза, которую стоит ловить для отложенного
+        // обновления: следующей может не быть до конца смены.
+        updater.onIdle();
     }
 });
 
@@ -451,19 +651,48 @@ function selftest() {
             say('учётка АТС выдана', account.ok && !!cabinet?.cabinet_login,
                 cabinet?.cabinet_login || String(account.status));
 
-            const pending = await request('GET', '/api/news/pending');
-            const item = pending.payload?.items?.[0];
-            say('объявление в очереди', !!item, item?.title || '');
-            say('тест приехал без верных ответов',
-                Array.isArray(item?.quiz) && item.quiz.length > 0
-                && item.quiz.every((q) => q.correct === undefined));
+            // Страница АТС нужна дальше всему: и статусу, и команде снятия с линии.
+            const seen = [];
+            ipcMain.on('oktell:state', (_event, payload) => seen.push(payload));
+            say('вид АТС создан', openOktell(cabinet) === true && !!oktellView);
+            await wait(4000);
+            say('статус оператора доехал из сокета страницы', seen.length > 0,
+                seen.map((item) => `${item.raw}${item.busy ? ' (занят)' : ''}`).join(', '));
+            say('подстановка учётки отработала', autologinSeen === true, String(autologinReason));
 
+            // Разговор: объявление обязано ждать, линию не трогаем.
+            operatorState = { busy: true, everSeen: true, raw: 'talk', since: Date.now() };
+            await pollNews();
+            say('во время разговора объявление не показано', newsShown === false);
+            say('во время разговора линию не трогали', lineReleased === false);
+
+            // Разговор кончился — снимаем с линии и показываем.
+            operatorState = { busy: false, everSeen: true, raw: 'usReady', since: Date.now() };
+            await pollNews();
+            say('после разговора объявление показано', newsShown === true);
+
+            const commands = await (await fetch(api('/stub/commands'))).json();
+            const training = (commands.commands || []).find(
+                (item) => String(item.raw).includes('lunchreasonid'))
+                || (commands.commands || []).find(
+                    (item) => String(item.raw).includes('oncallcenter=0'));
+            say('команда «Тренинг» ушла в АТС', !!training, training ? training.raw : 'ни одной');
+            say('снятие с линии засчитано', lineReleased === true);
+
+            const hidden = oktellView.getBounds();
+            say('страница АТС убрана с экрана',
+                oktellVisible === false && hidden.width === 0 && hidden.height === 0);
+            say('экран заперт', locked === true && win.isKiosk());
+            say('окно нельзя закрыть мимо подтверждения', win.isClosable() === false);
+
+            // Порядок отказов сервера: рано → неверный тест → успех.
+            const item = (await request('GET', '/api/news/pending')).payload?.items?.[0]
+                || { id: 501, quiz: [] };
             const early = await request('POST', `/api/news/${item.id}/read`,
                 { body: { answers: STUB_ANSWERS } });
             say('раннее подтверждение отвергнуто',
                 early.status === 409 && early.payload?.code === 'NEWS_TOO_EARLY',
                 `осталось ${early.payload?.remaining_seconds ?? '?'} с`);
-
             await wait(((early.payload?.remaining_seconds ?? 5) + 1) * 1000);
 
             const wrong = await request('POST', `/api/news/${item.id}/read`,
@@ -475,40 +704,74 @@ function selftest() {
                 { body: { answers: STUB_ANSWERS } });
             say('верный тест принят', done.ok);
 
-            const after = await request('GET', '/api/news/pending');
-            say('очередь опустела', (after.payload?.items || []).length === 0);
+            await closeNews();
+            const after = await (await fetch(api('/stub/commands'))).json();
+            const restored = (after.commands || []).find(
+                (cmd) => String(cmd.raw).includes('"onlunch":false')
+                      || String(cmd.raw).includes('oncallcenter=1'));
+            say('статус вернули после подтверждения', !!restored,
+                restored ? restored.raw : 'команды возврата нет');
+            say('экран отперт', locked === false && win.isClosable() === true);
+            say('страница АТС вернулась', oktellVisible === true
+                && oktellView.getBounds().width > 0);
 
-            // Страница АТС и статусы. Загружаем поддельный Oktell и ждём кадры.
-            const seen = [];
-            const collect = (_event, payload) => seen.push(payload);
-            ipcMain.on('oktell:state', collect);
-            const opened = openOktell(cabinet);
-            say('вид АТС создан', opened === true && !!oktellView);
-            await wait(4000);
-            say('статус оператора доехал из сокета страницы', seen.length > 0,
-                seen.map((s) => `${s.raw}${s.busy ? ' (занят)' : ''}`).join(', '));
-            say('подстановка учётки отработала', autologinSeen !== null,
-                autologinSeen === true ? 'поля заполнены' : String(autologinReason));
-
-            showOktell(false);
-            const hidden = oktellView.getBounds();
-            say('вид прячется под объявлением',
-                oktellVisible === false && hidden.width === 0 && hidden.height === 0);
-            showOktell(true);
-            const back = oktellView.getBounds();
-            say('вид возвращается', oktellVisible === true && back.width > 0);
-
-            // Правило показа считаем на живом объекте состояния.
+            // Правило показа во всех ветках.
             operatorState = { busy: true, everSeen: true, raw: 'talk', since: Date.now() };
             waitingSince = Date.now();
-            say('в разговоре объявление ждёт', canShowNews() === false);
+            say('правило: в разговоре ждём', canShowNews() === false);
             operatorState = { busy: false, everSeen: true, raw: 'usReady', since: Date.now() };
-            say('освободился — показываем', canShowNews() === true);
+            say('правило: освободился — показываем', canShowNews() === true);
             operatorState = { busy: false, everSeen: false, raw: '', since: Date.now() };
             waitingSince = Date.now();
-            say('состояние неизвестно — ждём', canShowNews() === false);
+            say('правило: состояние неизвестно — ждём', canShowNews() === false);
             waitingSince = Date.now() - (Number(config.news.unknown_state_grace_seconds) + 1) * 1000;
-            say('неизвестно дольше выдержки — показываем всё равно', canShowNews() === true);
+            say('правило: неизвестно дольше выдержки — показываем', canShowNews() === true);
+            // ── Автообновление ──
+            say('версии сравниваются числами, а не строкой',
+                updater.isNewer('0.10.0', '0.9.0') === true
+                && updater.isNewer('0.9.0', '0.10.0') === false);
+
+            updater.init({
+                apiBase: config.api_base_url,
+                getToken: () => auth?.token || null,
+                isIdle: updateIsSafeNow,
+                checkHours: 4,
+                log,
+            });
+
+            // Скачивание и проверка хэша.
+            await updater.check();
+            const stored = require('fs').existsSync(
+                require('path').join(app.getPath('userData'), 'updates', 'pending-update.json'));
+            say('новая версия скачана и проверена по sha256', stored === true);
+
+            // Пауза не наступила — ставить нельзя ни при какой обязательности.
+            operatorState = { busy: true, everSeen: true, raw: 'talk', since: Date.now() };
+            say('во время разговора обновление не ставится',
+                updateIsSafeNow() === false && updater.install() === false);
+            operatorState = { busy: false, everSeen: true, raw: 'usReady', since: Date.now() };
+            newsShown = true;
+            say('под объявлением обновление не ставится',
+                updateIsSafeNow() === false && updater.install() === false);
+            newsShown = false;
+            say('в паузе установка разрешена', updateIsSafeNow() === true);
+
+            // Подменённый файл ставиться не должен: хэш — единственная проверка.
+            require('fs').rmSync(
+                require('path').join(app.getPath('userData'), 'updates'),
+                { recursive: true, force: true });
+            await (await fetch(api('/stub/break_hash'))).json();
+            updater.init({
+                apiBase: config.api_base_url,
+                getToken: () => auth?.token || null,
+                isIdle: () => false,          // ставить всё равно запрещаем
+                checkHours: 4,
+                log,
+            });
+            await updater.check();
+            const afterBroken = require('fs').existsSync(
+                require('path').join(app.getPath('userData'), 'updates', 'pending-update.json'));
+            say('файл с чужим хэшем отброшен', afterBroken === false);
         } catch (error) {
             say('прогон без исключений', false, error.message);
         }
@@ -532,10 +795,26 @@ async function showcase() {
     newsShown = true;
     send('news:show', item);
     log('витрина: окно объявления показано');
+    // ICORE_OKTELL_SHOWCASE=quiz — сразу второй шаг: показать заказчику, как
+    // выглядит тест, не нажимая ничего руками.
+    if (String(process.env.ICORE_OKTELL_SHOWCASE).toLowerCase() === 'quiz') {
+        setTimeout(() => win.webContents.executeJavaScript(
+            "document.getElementById('news-confirm').click()"), 600);
+    }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
     createWindow();
+    updater.init({
+        apiBase: config.api_base_url,
+        getToken: () => auth?.token || null,
+        isIdle: updateIsSafeNow,
+        checkHours: config.update?.check_hours,
+        log,
+    });
+    // На старте оператор ещё не работает — обрывать нечего, и отложенное
+    // обновление ставится сразу, включая обязательное.
+    if (!SELFTEST) await updater.onStartup();
     if (SELFTEST) selftest();
     // Ждём, пока страница интерфейса подпишется на события, иначе показывать
     // объявление некому.

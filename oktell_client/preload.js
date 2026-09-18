@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('icore', {
     config: () => ipcRenderer.invoke('app:config'),
     login: (payload) => ipcRenderer.invoke('auth:login', payload),
     confirmNews: (payload) => ipcRenderer.invoke('news:confirm', payload),
+    dismissNews: () => ipcRenderer.invoke('news:dismiss'),
     passQuiz: (payload) => ipcRenderer.invoke('news:quiz', payload),
     onNewsShow: (fn) => ipcRenderer.on('news:show', (_e, item) => fn(item)),
     onNewsHide: (fn) => ipcRenderer.on('news:hide', () => fn()),

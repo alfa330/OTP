@@ -123,12 +123,19 @@ const newsBody = document.getElementById('news-body');
 const newsPhotos = document.getElementById('news-photos');
 const newsQuiz = document.getElementById('news-quiz');
 const newsConfirm = document.getElementById('news-confirm');
+const newsBack = document.getElementById('news-back');
+const newsClose = document.getElementById('news-close');
 const newsNote = document.getElementById('news-note');
 
 let current = null;
 let answers = {};
 let tick = null;
 let remaining = 0;
+/* Окно идёт двумя шагами: сначала текст, потом тест. Так требует постановка —
+   «после нажатия „Ознакомлен“ сотрудник переходит к тестированию», — и так же
+   устроен возврат при ошибке: не подсветка неверного варианта, а отправка
+   человека перечитать материал. */
+let step = 'read';
 
 function renderQuiz(quiz) {
     newsQuiz.innerHTML = '';
@@ -163,10 +170,32 @@ function quizAnswered() {
     return (current?.quiz || []).every((item) => Number.isInteger(answers[item.id]));
 }
 
+function hasQuiz() {
+    return Array.isArray(current?.quiz) && current.quiz.length > 0;
+}
+
 function updateConfirm() {
     const waiting = remaining > 0;
-    newsConfirm.disabled = waiting || !quizAnswered();
-    newsConfirm.textContent = waiting ? `Ознакомлен · ${remaining}` : 'Ознакомлен';
+    if (step === 'read') {
+        // Выдержку держим на первом шаге: она про то, что материал открыли и
+        // не пролистали за секунду, а не про скорость ответов.
+        newsConfirm.disabled = waiting;
+        newsConfirm.textContent = waiting ? `Ознакомлен · ${remaining}` : 'Ознакомлен';
+    } else {
+        newsConfirm.disabled = !quizAnswered();
+        newsConfirm.textContent = 'Подтвердить';
+    }
+}
+
+function goStep(next) {
+    step = next;
+    const reading = next === 'read';
+    newsBody.hidden = !reading;
+    newsPhotos.hidden = !reading;
+    newsQuiz.hidden = reading;
+    newsBack.hidden = reading;
+    if (reading) newsBody.scrollTop = 0;
+    updateConfirm();
 }
 
 window.icore.onNewsShow((item) => {
@@ -190,9 +219,11 @@ window.icore.onNewsShow((item) => {
     renderQuiz(item.quiz);
     newsNote.textContent = '';
     newsNote.className = 'note';
-    updateConfirm();
+    // Крестик — только у необязательного: обязательное закрывается
+    // подтверждением, и другого выхода у него нет.
+    newsClose.hidden = !!item.is_mandatory;
+    goStep('read');
     show('news');
-    newsBody.scrollTop = 0;
 
     if (tick) clearInterval(tick);
     if (remaining > 0) {
@@ -210,10 +241,23 @@ window.icore.onNewsHide(() => {
     show('idle');
 });
 
+newsBack.addEventListener('click', () => goStep('read'));
+
+newsClose.addEventListener('click', () => {
+    if (!current || current.is_mandatory) return;
+    window.icore.dismissNews();
+});
+
 newsConfirm.addEventListener('click', async () => {
     if (!current) return;
+    // Первый шаг не подтверждает ничего: он лишь открывает тест. Отправлять
+    // подтверждение вместе с пустыми ответами значило бы получить отказ
+    // сервера на ровном месте.
+    if (step === 'read' && hasQuiz()) {
+        goStep('quiz');
+        return;
+    }
     newsConfirm.disabled = true;
-    const previous = newsConfirm.textContent;
     newsConfirm.textContent = 'Отправляем…';
     try {
         const result = await window.icore.confirmNews({ id: current.id, answers });
@@ -235,7 +279,7 @@ newsConfirm.addEventListener('click', async () => {
             renderQuiz(current.quiz);
             newsNote.textContent = 'Есть неверные ответы — перечитайте новость и ответьте заново';
             newsNote.className = 'note error';
-            newsBody.scrollTop = 0;
+            goStep('read');
         } else {
             newsNote.textContent = result.error || 'Не удалось отправить подтверждение';
             newsNote.className = 'note error';
@@ -244,7 +288,6 @@ newsConfirm.addEventListener('click', async () => {
         newsNote.textContent = `Нет связи с iCORE: ${error.message}`;
         newsNote.className = 'note error';
     } finally {
-        newsConfirm.textContent = previous.startsWith('Ознакомлен') ? previous : 'Ознакомлен';
         updateConfirm();
     }
 });
