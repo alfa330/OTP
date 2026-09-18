@@ -24,10 +24,12 @@ def _status_import_namespace():
         "CHAT2DESK_IGNORED_STATUS_EVENTS",
         "CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS",
         "_KZ_TO_RU_FOLD",
+        "OPERATOR_NAME_VENDOR_MARK_RE",
     }
     wanted_functions = {
         "_status_import_normalize_key",
         "_status_import_normalize_header",
+        "_operator_name_strip_vendor_mark",
         "_status_import_normalize_operator_name",
         "_status_import_operator_name_variants",
         "_status_import_dedupe_operator_infos",
@@ -140,7 +142,9 @@ class StatusImportChat2DeskTests(unittest.TestCase):
 
         self.assertEqual(normalize_name("Асель Тестбаева"), "асел тестбаева")
         self.assertEqual(normalize_name("Асел Тестбаева"), "асел тестбаева")
-        self.assertEqual(normalize_name("Игорь"), "игор")
+        # Само написание ключа к делу не относится (внутри ещё и фолд «и»/«ы»),
+        # проверяем суть: оба варианта имени дают ОДИН ключ.
+        self.assertEqual(normalize_name("Игорь"), normalize_name("Игор"))
         # Внутрисловный мягкий знак не трогаем.
         self.assertEqual(normalize_name("Татьяна"), "татьяна")
 

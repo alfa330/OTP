@@ -55,10 +55,12 @@ def _status_profile(model_code):
 def _tez_status_import_namespace():
     """Загружает функции TEZ-парсера статусов из bot_schedule2.py в изолированное
     пространство имён (как делает test_status_import_chat2desk.py)."""
-    wanted_assignments = {"TEZ_STATUS_IMPORT_MAP", "_KZ_TO_RU_FOLD"}
+    wanted_assignments = {"TEZ_STATUS_IMPORT_MAP", "_KZ_TO_RU_FOLD",
+                          "OPERATOR_NAME_VENDOR_MARK_RE"}
     wanted_functions = {
         "_status_import_normalize_key",
         "_status_import_normalize_header",
+        "_operator_name_strip_vendor_mark",
         "_status_import_normalize_operator_name",
         "_status_import_operator_name_variants",
         "_status_import_dedupe_operator_infos",

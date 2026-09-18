@@ -32704,9 +32704,29 @@ _KZ_TO_RU_FOLD = str.maketrans({
 })
 
 
+# Chat2Desk дописывает к имени пометку о состоянии учётки — «Жанеля Нургазы
+# (deactivated)». Это не часть имени человека, а признак его аккаунта у вендора, и
+# приходит он сразу во ВСЕХ строках оператора, включая прошлые дни. С пометкой имя
+# перестаёт совпадать с `users.name`: чаты теряют operator_id, дневные метрики
+# чатника за эти дни не пишутся вовсе, а в отчётах вместо имени видно служебное
+# слово. Поэтому пометку снимаем и при сопоставлении, и при сохранении имени.
+OPERATOR_NAME_VENDOR_MARK_RE = re.compile(r'\s*\((?:de|in)activated\)\s*$', re.IGNORECASE)
+
+
+def _operator_name_strip_vendor_mark(value):
+    return OPERATOR_NAME_VENDOR_MARK_RE.sub('', str(value or '').strip()).strip()
+
+
 def _status_import_normalize_operator_name(value):
+    value = _operator_name_strip_vendor_mark(value)
     text = re.sub(r'\s+', ' ', str(value or '').strip()).replace('ё', 'е').replace('Ё', 'Е').lower()
     text = text.translate(_KZ_TO_RU_FOLD)
+    # Та же пара написаний, но внутри слова: «Арғымбек» в карточке сотрудника и
+    # «Аргимбек» в Chat2Desk — один человек. Сводим «и» и «ы» к одной букве, как
+    # выше сведены казахские буквы к русским. Проверено на всех операторах базы:
+    # ни одно имя не схлопывается с чужим и ни одно текущее сопоставление не
+    # меняется, а резолвер и так отдаёт совпадение только когда оно единственное.
+    text = text.replace('и', 'ы')
     # Имена в БД и Chat2Desk нередко расходятся на конечный мягкий/твёрдый знак
     # («Асель»/«Асел», «Игорь»/«Игор»), поэтому срезаем «ь»/«ъ» в конце
     # каждого слова — чтобы оба варианта матчились как один оператор.
@@ -34646,9 +34666,10 @@ def _chat2desk_operator_by_id(operator_id):
 
 
 def _chat2desk_rating_operator_name(row):
-    raw_name = _chat2desk_row_first(row, 'operator_name', 'score_operator_name', 'operator', 'name')
-    if str(raw_name or '').strip():
-        return str(raw_name or '').strip()
+    raw_name = _operator_name_strip_vendor_mark(
+        _chat2desk_row_first(row, 'operator_name', 'score_operator_name', 'operator', 'name'))
+    if raw_name:
+        return raw_name
     operator_id = _chat2desk_row_first(row, 'operator_id')
     operator_payload = _chat2desk_operator_by_id(operator_id)
     return _chat2desk_operator_display_name(operator_payload)
@@ -35154,7 +35175,8 @@ def _chat2desk_build_request_rows(day_str, request_stats_rows, operator_lookup, 
             continue
         start_dt = _chat2desk_parse_datetime(row.get('request_start'), target_tz=target_tz)
         end_dt = _chat2desk_parse_datetime(row.get('request_end'), target_tz=target_tz)
-        raw_name = _chat2desk_row_first(row, 'operator_name', 'operator', 'name')
+        raw_name = _operator_name_strip_vendor_mark(
+            _chat2desk_row_first(row, 'operator_name', 'operator', 'name'))
         op_id = None
         if raw_name:
             op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
@@ -40161,7 +40183,8 @@ def _chat_hourly_response_sums(rows):
 
 
 def _chat_hourly_operator_name(row):
-    return str(_chat2desk_row_first(row, 'operator_name', 'operator', 'name') or '').strip()
+    return _operator_name_strip_vendor_mark(
+        _chat2desk_row_first(row, 'operator_name', 'operator', 'name'))
 
 
 def _chat_hourly_collect(now=None):

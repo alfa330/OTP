@@ -33,11 +33,13 @@ def _chat_report_namespace():
         "CHAT2DESK_RATING_SOURCE_KEY_PREFIX",
         "CHAT2DESK_RATING_SHIFT_TOLERANCE_SECONDS",
         "_KZ_TO_RU_FOLD",
+        "OPERATOR_NAME_VENDOR_MARK_RE",
     }
     wanted_functions = {
         "_env_bool",
         "_env_int",
         "_status_import_normalize_header",
+        "_operator_name_strip_vendor_mark",
         "_status_import_normalize_operator_name",
         "_status_import_operator_name_variants",
         "_status_import_parse_datetime",
@@ -186,6 +188,32 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(resolve("Жанель С", self.lookup, self.index)[0], 4)
         # неизвестный — None
         self.assertEqual(resolve("Иван Иванов", self.lookup, self.index)[0], None)
+
+    def test_resolve_operator_ignores_vendor_account_mark(self):
+        """Пометка вендора о состоянии учётки не должна отрывать чаты от человека:
+        имя с «(deactivated)» не совпадало с `users.name` ни точно, ни по токенам,
+        и весь день оператора уходил в «не сматчено» — без метрик и без привязки."""
+        resolve = self.ns["_chat_report_resolve_operator"]
+        self.assertEqual(resolve("Ерсын Досанбаев (deactivated)", self.lookup, self.index)[0], 1)
+        self.assertEqual(resolve("Тестбаев Асан Тестович (Deactivated)", self.lookup, self.index)[0], 2)
+        # пометка снимается только с конца имени, само имя не трогаем
+        self.assertEqual(
+            self.ns["_operator_name_strip_vendor_mark"]("Жанель С (deactivated)"), "Жанель С")
+
+    def test_resolve_operator_matches_kazakh_and_russian_spelling(self):
+        """Карточка сотрудника — казахским написанием, Chat2Desk — русским:
+        «Арғымбек Дәулет» и «Даулет Аргимбек» — один человек. Пока «и» и «ы» не
+        сводились к одной букве, переименование карточки молча отрывало от него
+        все чаты: 1095 обращений за 10–17.09.2026 остались без оператора."""
+        resolve = self.ns["_chat_report_resolve_operator"]
+        lookup, index = {}, []
+        for oid, name in ((7, "Арғымбек Дәулет Архатұлы"),):
+            for key in self.ns["_status_import_operator_name_variants"](name):
+                lookup.setdefault(key, []).append({"id": oid, "name": name})
+            index.append({"id": oid, "name": name,
+                          "tokens": self.ns["_chat_report_name_tokens"](name)})
+        self.assertEqual(resolve("Даулет Аргимбек", lookup, index)[0], 7)
+        self.assertEqual(resolve("Арғымбек Дәулет", lookup, index)[0], 7)
 
     def test_tokens_match_prefix(self):
         match = self.ns["_chat_report_tokens_match"]

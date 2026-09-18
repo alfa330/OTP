@@ -30,6 +30,7 @@ NAMES = {
     'CHAT_HOURLY_CACHE_SECONDS', 'CHAT_HOURLY_BROADCAST_HOURS', 'CHAT_HOURLY_BROADCAST_MINUTE',
     '_chat_hourly_requests_cache', '_chat_hourly_report_cache', '_chat_hourly_lock',
     '_chat_hourly_number', '_chat_hourly_is_open', '_chat_hourly_request_start',
+    '_operator_name_strip_vendor_mark', 'OPERATOR_NAME_VENDOR_MARK_RE',
     '_chat_hourly_operator_name', '_chat_hourly_fetch_requests',
     '_chat_hourly_operator_states', '_chat_hourly_online',
     '_chat_hourly_response_times', '_chat_hourly_response_sums',

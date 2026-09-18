@@ -25,9 +25,10 @@ NAMES = {
     'SZOV_BREAK_KIND_OFF_SCHEDULE', 'SZOV_BREAK_KIND_NOT_PLANNED', 'SZOV_BREAK_KIND_NO_SHIFT',
     'SZOV_BREAK_DIRECTION_LINE', 'SZOV_BREAK_DIRECTION_CHAT',
     '_szov_chat_break_episodes', '_szov_chat_wallboard_resolve',
+    '_operator_name_strip_vendor_mark',
     '_status_import_normalize_operator_name', '_status_import_operator_name_variants',
     '_status_import_dedupe_operator_infos', '_status_import_resolve_operator_matches',
-    '_KZ_TO_RU_FOLD',
+    '_KZ_TO_RU_FOLD', 'OPERATOR_NAME_VENDOR_MARK_RE',
     '_oktell_break_episodes_sql', '_szov_break_parse_time', '_szov_break_merge_episodes',
     '_szov_break_planned_for_day', '_szov_break_classify', '_szov_break_on_shift',
     '_szov_break_violation_detail', '_szov_break_violation_notes',
@@ -312,7 +313,11 @@ class ChatBreakEpisodeTests(unittest.TestCase):
 
     def setUp(self):
         self.ns = _namespace()
-        self.lookup = {'иванов иван': [{'id': 11, 'name': 'Иванов Иван'}]}
+        # Ключи lookup строим тем же кодом, что и прод: нормализация имени —
+        # не константа, она сводит казахское и русское написание к одному виду.
+        self.lookup = {}
+        for key in self.ns['_status_import_operator_name_variants']('Иванов Иван'):
+            self.lookup.setdefault(key, []).append({'id': 11, 'name': 'Иванов Иван'})
 
     def _episodes(self, entries, day='2026-08-19'):
         return self.ns['_szov_chat_break_episodes'](

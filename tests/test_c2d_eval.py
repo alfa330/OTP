@@ -25,10 +25,12 @@ def _c2d_namespace():
         "CHAT2DESK_STORAGE_BASE_URL",
         "C2D_EVAL_MAX_MESSAGE_PAGES",
         "_KZ_TO_RU_FOLD",
+        "OPERATOR_NAME_VENDOR_MARK_RE",
     }
     wanted_functions = {
         "_env_bool",
         "_env_int",
+        "_operator_name_strip_vendor_mark",
         "_status_import_normalize_operator_name",
         "_status_import_operator_name_variants",
         "_status_import_parse_datetime",
@@ -132,6 +134,22 @@ class C2dEvalHelpersTests(unittest.TestCase):
         self.assertEqual(row["transport"], "wa_dialog")
         self.assertEqual(row["client_phone"], "77000000108")
         self.assertIsNone(row["assigned_phone"])  # колонки в строке нет
+
+    def test_build_request_rows_ignores_vendor_account_mark(self):
+        """Chat2Desk помечает имя деактивированной учётки — «Асель Тестбаева
+        (deactivated)». Пометка приходит сразу во всех строках оператора, включая
+        прошлые дни, и без её снятия чат терял operator_id: сотрудник (в том числе
+        работающий) выпадал из «Оценки чатов ЧМ», из метрик дня и из биллинга по
+        операторам, а в отчётах вместо имени показывалось служебное слово."""
+        rows = self.ns["_chat2desk_build_request_rows"]("2026-09-06", [{
+            "request_id": 75900001,
+            "request_start": "2026-09-06 10:15:00",
+            "request_type": "common",
+            "reaction_time": "30",
+            "operator_name": "Асель Тестбаева (deactivated)",
+        }], self.lookup, self.index)
+        self.assertEqual(rows[0]["operator_id"], 11)
+        self.assertEqual(rows[0]["c2d_operator_name"], "Асель Тестбаева")
 
     def test_build_request_rows_whatsapp_identifier_keeps_the_number(self):
         """С 02.09.2026 водитель может прийти в WhatsApp идентификатором: в `phone`
