@@ -588,30 +588,36 @@ def add_release(cursor, *, version, filename, sha256, size_bytes, gcs_bucket, gc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Личные токены и пометка «работал через наше приложение»
+# Кто за машиной и пометка «работал через наше приложение»
 # ─────────────────────────────────────────────────────────────────────────────
 
-def issue_token(cursor, user_id: int, token_hash: str, note: str = '') -> None:
-    """Выдать сотруднику личный токен (храним только отпечаток).
+def user_brief(cursor, user_id):
+    """Имя и SIP вошедшего. Форма та же, что была у user_by_token.
 
-    Прежние НЕ гасим. Сначала гасили — «один действующий на человека», — и это
-    оказалось ловушкой: каждое повторное скачивание убивало уже установленную
-    копию, агент начинал получать 401 и молча переставал работать. У человека
-    может быть несколько машин, и это нормально. Отзыв остаётся действием
-    по требованию, а не побочным эффектом скачивания.
+    SIP нужен не для красоты: по нему сверяется, про свой ли номер прислан факт
+    выброса. Поэтому брать человека `db.get_user` нельзя — там этой колонки нет.
     """
+    if not user_id:
+        return None
     cursor.execute(
         """
-        INSERT INTO oktell_guard_tokens (user_id, token_hash, note)
-        VALUES (%(user_id)s, %(token_hash)s, %(note)s)
-        ON CONFLICT (token_hash) DO UPDATE SET revoked_at = NULL
+        SELECT u.id AS user_id, u.name, COALESCE(u.sip_number, '') AS sip_number
+          FROM users u
+         WHERE u.id = %(user_id)s
         """,
-        {'user_id': int(user_id), 'token_hash': token_hash, 'note': note},
+        {'user_id': int(user_id)},
     )
+    return fetch_one(cursor)
 
 
 def user_by_token(cursor, token_hash: str):
-    """Кому принадлежит присланный токен. Отозванные не в счёт."""
+    """Кому принадлежит присланный токен. Отозванные не в счёт.
+
+    Осталось только ради сборок до 1.0.17: они шлют личный токен вместо токена
+    машины, и без этой проверки такая машина получала бы 401 до автообновления.
+    Новые токены не выдаются — кто за машиной, говорит вход по учётке iCORE.
+    Убрать вместе с ветвью в routes.agent_authorized.
+    """
     if not token_hash:
         return None
     cursor.execute(

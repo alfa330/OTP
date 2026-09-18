@@ -24,7 +24,7 @@ import time
 from datetime import date, timedelta
 from functools import wraps
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from . import access, queries, verify
 
@@ -122,12 +122,12 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     # ── вспомогательное ─────────────────────────────────────────────────────
 
     def agent_authorized() -> bool:
-        """Пропуск агента: общий токен сборки ИЛИ личный токен сотрудника.
+        """Пропуск МАШИНЫ: общий токен сборки.
 
-        Личные обязательно: файл, скачанный из раздела, несёт в имени именно
-        личный токен, и агент шлёт его. Пока проверка знала только общий,
-        КАЖДЫЙ скачанный агент получал 401 и был мёртв с рождения — это и
-        случилось на первой живой установке.
+        Человека этот токен не называет и называть не должен — он вшит в exe и
+        одинаков у всех. Его работа одна: не пускать к нашим ручкам посторонние
+        запросы из интернета, потому что они пишут в базу. Кто за машиной,
+        говорит сессия iCORE (agent_owner).
         """
         provided = (request.headers.get('X-Agent-Token') or '').strip()
         expected = (os.getenv(AGENT_TOKEN_ENV) or '').strip()
@@ -142,30 +142,41 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         if secrets.compare_digest(provided, expected):
             return True
 
+        # Переходное: сборки до 1.0.17 шлют сюда ЛИЧНЫЙ токен из имени файла.
+        # Опознавать по нему человека мы перестали, но отбить такую машину
+        # значило бы показать оператору окно «пропуск не действует» на все
+        # часы до автообновления. Убрать, когда в разделе не останется версий
+        # ниже 1.0.17 (вкладка «Сотрудники», колонка версии).
         digest = hashlib.sha256(provided.encode('utf-8')).hexdigest()
         try:
             with db._get_cursor() as cursor:
                 return bool(queries.user_by_token(cursor, digest))
         except Exception:
-            logging.exception("Ограничитель Перезвона: не удалось проверить личный токен")
+            logging.exception("Ограничитель Перезвона: не удалось проверить токен старой сборки")
             return False
 
     def agent_owner(cursor):
-        """Сотрудник, которому выдан этот агент. None — пришли общим токеном.
+        """Сотрудник за машиной — по сессии iCORE, которой он вошёл в программе.
 
-        Личный токен лежит в имени скачанного файла, поэтому сервер знает, кто
-        за машиной, ЕЩЁ ДО входа в Oktell. Именно на этом держится всё, что
-        добавлено поверх ограничителя: подставить учётку кабинета и показать
-        объявление можно только тому, кого мы опознали.
+        Агент входит окном (как iCORE Phone) и шлёт `Authorization: Bearer`;
+        глобальный before_request портала разбирает его и кладёт id в `g`. Здесь
+        остаётся только прочитать — своей проверки токена не заводим, иначе она
+        однажды разъедется с общей.
+
+        None — вошедшего нет. Это не ошибка: ограничитель работает и без входа,
+        просто объявления и учётку кабинета показывать некому.
+
+        До 1.0.17 человека называл личный токен в ИМЕНИ скачанного файла. Схема
+        держалась на том, что каждый скачает файл себе; на деле из 26 живых
+        машин токен носили 7, а учётка кабинета не уезжала никому.
         """
-        provided = (request.headers.get('X-Agent-Token') or '').strip()
-        if not provided:
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
             return None
-        digest = hashlib.sha256(provided.encode('utf-8')).hexdigest()
         try:
-            return queries.user_by_token(cursor, digest)
+            return queries.user_brief(cursor, user_id)
         except Exception:
-            logging.exception("Ограничитель Перезвона: не удалось опознать агента")
+            logging.exception("Ограничитель Перезвона: не удалось опознать вошедшего")
             return None
 
     def agent_route(rule, methods=('GET',), public=False):
@@ -242,8 +253,9 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         """Ссылка на файл в GCS. Отдаём её и агенту, и браузеру — качают они
         напрямую у Google, а не через наш единственный инстанс.
 
-        filename задаёт имя, под которым файл сохранится: в него уезжает личный
-        токен сотрудника. Сам объект в хранилище при этом один на всех.
+        filename задаёт имя, под которым файл сохранится у сотрудника. Имя
+        должно читаться человеком: случайный хвост рядом с предупреждением
+        Windows о неизвестном издателе выглядит как вирус.
         """
         if not release or not release.get('gcs_bucket') or not release.get('gcs_path'):
             return None
@@ -291,10 +303,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         """Настройки для конкретного сотрудника: порог персональный, если задан.
 
         Здесь же уезжает учётка кабинета Oktell — та, что заводят в «Настройках
-        SIP». Оператор её не вводит и не знает: он скачал файл и запустил, а
-        логин с паролем АТС подставляет агент. Отдаём ТОЛЬКО по личному токену:
-        общий токен сборки не говорит, кто за машиной, и отдавать по нему чужой
-        пароль нельзя.
+        SIP». Оператор её не вводит и не знает: он вошёл своей учёткой iCORE, а
+        логин с паролем АТС подставляет агент. Отдаём ТОЛЬКО вошедшему: токен
+        сборки один на всех и не говорит, кто за машиной, — отдавать по нему
+        чужой пароль от АТС нельзя.
         """
         sip = (request.args.get('login') or request.args.get('sip') or '').strip()
         with db._get_cursor() as cursor:
@@ -444,14 +456,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         return jsonify({"ok": True, "poll_interval_s": int(settings.get('heartbeat_interval_s') or 60)})
 
     def reporter_by_header():
-        """Кто прислал: по личному токену. Общий (вшитый в сборку) человека не
-        называет — тогда отправитель остаётся неизвестным, и это видно."""
-        raw = (request.headers.get('X-Agent-Token') or '').strip()
-        if not raw:
-            return None
-        digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        """Кто прислал факт — вошедший в программе. Не вошёл — отправитель
+        неизвестен, и это видно в отчёте, а не подменяется догадкой."""
         with db._get_cursor() as cursor:
-            return queries.user_by_token(cursor, digest)
+            return agent_owner(cursor)
 
     @agent_route('/violations', methods=('POST',))
     def oktell_guard_agent_violations():
@@ -573,36 +581,27 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
 
     @section_route('/download', gate=access.can_download_agent)
     def oktell_guard_download(requester_id, requester):
-        """«Скачать агента»: ссылка + личный токен в ИМЕНИ файла.
+        """«Скачать агента»: ссылка на один и тот же файл для всех.
 
-        Файл в хранилище один на всех, а токен персональный — он уезжает в имя
-        скачиваемого файла, агент читает его при первом запуске и запоминает.
-        Так присланное всегда подписано конкретным человеком: подделка
-        перестаёт быть анонимной, а токен можно отозвать. У нас хранится только
-        отпечаток, самого значения мы не знаем.
+        До 1.0.17 в ИМЯ файла уезжал личный токен: агент читал его при первом
+        запуске, и так сервер знал, кто за машиной, ещё до входа в Oktell. Схема
+        держалась на том, что каждый скачает файл себе. На деле файл ходил по
+        рукам: из 26 живых машин токен носили 7, остальным нельзя было ни
+        показать объявление, ни подставить учётку кабинета. Теперь человек
+        называет себя сам — окном входа в программе, учёткой iCORE, как в iCORE
+        Phone, — а файл снова один на всех.
 
-        С 07.09.2026 ручка открыта КАЖДОМУ оператору СЗоВ (access.can_download_agent),
-        а не только тем, кто видит раздел: пункт «Скачать Oktell» стоит у них в
-        меню, как «Скачать iCore Phone» у ОП и Тез КЦ. Это ещё и точнее по сути —
-        личный токен оказывается на самом человеке, а не на супервайзере, который
-        раздавал установщик за него: до этого присланные факты подписывались чужим
-        именем, и в отчёте появлялась пометка «агент принадлежит такому-то».
-        Секретного ничего не открывается: сам файл и так отдаёт публичная /version,
-        без неё не работало бы автообновление ни на одной машине.
+        Ручка открыта КАЖДОМУ оператору СЗоВ (access.can_download_agent), а не
+        только тем, кто видит раздел: пункт «Скачать Oktell» стоит у них в меню,
+        как «Скачать iCore Phone» у ОП и Тез КЦ. Секретного тут ничего нет: сам
+        файл и так отдаёт публичная /version, иначе не работало бы
+        автообновление ни на одной машине.
         """
         with db._get_cursor() as cursor:
             release = queries.current_release(cursor)
             if not release:
                 return jsonify({"error": "Версия агента ещё не загружена"}), 404
-            token = secrets.token_urlsafe(18).replace('-', '').replace('_', '')
-            queries.issue_token(
-                cursor, requester_id, hashlib.sha256(token.encode('utf-8')).hexdigest(),
-                note='выдан при скачивании из раздела',
-            )
-        # Имя должно выглядеть осмысленно: случайный хвост в имени файла
-        # человек читает как «вирус», а это и так первое, что он видит рядом с
-        # предупреждением Windows о неизвестном издателе.
-        filename = f"Oktell-Perezvon-Setup-{token}.exe"
+        filename = "Oktell-Perezvon-Setup.exe"
         url = signed_download_url(release, filename=filename)
         if not url:
             return jsonify({"error": "Ссылка на файл недоступна"}), 503

@@ -2895,9 +2895,9 @@ class OktellCabinetDeliveryTests(unittest.TestCase):
         self.assertNotIn("/api/operator/oktell_account", self.source)
         self.assertNotIn("operator_oktell_account_endpoint", self.source)
 
-    def test_the_agent_gets_it_by_a_personal_token(self):
+    def test_the_agent_gets_it_only_for_the_operator_who_logged_in(self):
         """Общий токен сборки не говорит, кто за машиной: по нему чужой пароль
-        отдавать нельзя."""
+        отдавать нельзя. Адресата называет вход по учётке iCORE (agent_owner)."""
         body = self.guard.split("def oktell_guard_agent_config", 1)[1].split("@agent_route", 1)[0]
         self.assertIn("agent_owner(cursor)", body)
         self.assertIn("db.get_oktell_account(owner['user_id'])", body)

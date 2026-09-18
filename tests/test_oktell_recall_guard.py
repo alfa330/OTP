@@ -663,48 +663,120 @@ def test_header_safe_helper():
 
 
 # --------------------------------------------------------------------------- #
-# Личный токен из имени файла
+# Сессия оператора в iCORE (вход окном, как в iCORE Phone)
 # --------------------------------------------------------------------------- #
 
-def test_token_extracted_from_download_filename():
-    """Скачанный файл называется OktellRecallGuard.<токен>.exe — так присланное
-    оказывается подписано конкретным человеком, хотя сам exe один на всех."""
-    assert agent.token_from_filename("OktellRecallGuard.abc123XYZ789.exe") == "abc123XYZ789"
-
-
-def test_plain_filename_has_no_token():
-    assert agent.token_from_filename("OktellRecallGuard.exe") == ""
-
-
-def test_browser_suffix_is_not_a_token():
-    """Второй скачанный файл браузер называет «...(1).exe» — это не токен."""
-    assert agent.token_from_filename("OktellRecallGuard.abc123XYZ789 (1).exe") == ""
-    assert agent.token_from_filename("OktellRecallGuard.short.exe") == ""
-
-
-def test_stored_token_survives_install(tmp_path, monkeypatch):
-    """Установка переименовывает файл, и токен из имени исчезает: если его не
-    сохранить, агент после первого же запуска станет анонимным."""
+def test_session_survives_a_save_and_load(tmp_path, monkeypatch):
+    """На Windows файл ложится под DPAPI, на прочих — открытым текстом; читаться
+    он должен одинаково, иначе вход пришлось бы повторять каждый запуск."""
     monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
-    agent.save_personal_token("tokenFromFilename1")
-    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.exe"))
-    assert agent.resolve_agent_token() == "tokenFromFilename1"
+    agent.save_session({"access_token": "a", "refresh_token": "r", "login": "6612"})
+    assert agent.load_session()["login"] == "6612"
+    agent.clear_session()
+    assert agent.load_session() == {}
 
 
-def test_filename_token_wins_over_build_token(tmp_path, monkeypatch):
+def test_session_goes_stale_after_twelve_hours():
+    """Порог тот же, что в iCORE Phone: вошёл утром — смену не трогаем, назавтра
+    окно снова."""
+    fresh = {"refresh_token": "r", "saved_at": 1000.0}
+    assert agent.session_is_fresh(fresh, now=1000.0 + 11 * 3600) is True
+    assert agent.session_is_fresh(fresh, now=1000.0 + 13 * 3600) is False
+
+
+def test_session_without_refresh_token_is_not_a_session():
+    assert agent.session_is_fresh({"saved_at": 1000.0}, now=1000.0) is False
+    assert agent.session_is_fresh({}, now=1000.0) is False
+
+
+def test_machine_token_goes_with_every_request_and_bearer_only_with_a_session():
+    """Два разных слоя: вшитый токен — замок машины, Bearer — имя человека.
+    Свести их в один заголовок значило бы отдавать пароль от АТС любому."""
+    cfg = {"agent_token": "machine-token"}
+    without = agent.agent_headers(cfg)
+    assert without["X-Agent-Token"] == "machine-token"
+    assert "Authorization" not in without
+
+    with_session = agent.agent_headers(cfg, {"access_token": "jwt-value"})
+    assert with_session["Authorization"] == "Bearer jwt-value"
+    assert with_session["X-Agent-Token"] == "machine-token"
+
+
+def test_expired_session_is_not_refreshed_into_immortality(tmp_path, monkeypatch):
+    """Refresh живёт 30 дней, порог — 12 часов. Обнови мы просроченную сессию,
+    порог не наступил бы никогда и вход перестал бы что-либо значить."""
     monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
-    monkeypatch.setattr(agent, "build_token", lambda: "baked-token")
-    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.person123456789.exe"))
-    assert agent.resolve_agent_token() == "person123456789"
-    # И сохранился, иначе установка его потеряет.
-    assert agent.load_personal_token() == "person123456789"
+    agent.save_session({"refresh_token": "r", "login": "6612", "saved_at": 0.0})
+    calls = []
+    monkeypatch.setattr(agent, "icore_refresh", lambda *a, **k: calls.append(a) or {})
+    assert agent.ensure_session({"server_url": "http://x"}, ask=False) == {}
+    assert calls == [], "просроченную сессию обновлять нельзя"
 
 
-def test_build_token_is_the_fallback(tmp_path, monkeypatch):
+def test_silent_mode_never_opens_the_login_window(tmp_path, monkeypatch):
+    """Фоновый агент окно не показывает: форма, всплывшая посреди разговора, —
+    ровно то, чего программа делать не должна."""
     monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
-    monkeypatch.setattr(agent, "build_token", lambda: "baked-token")
-    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.exe"))
-    assert agent.resolve_agent_token() == "baked-token"
+    monkeypatch.setattr(agent, "run_login_window",
+                        lambda *a, **k: pytest.fail("окно не должно открываться"))
+    assert agent.ensure_session({"server_url": "http://x"}, ask=False) == {}
+
+
+def test_a_network_hiccup_does_not_throw_the_operator_out(tmp_path, monkeypatch):
+    """Сервер не ответил — это не «сессия истекла». Иначе одна потеря связи
+    заставляла бы всю смену вводить пароль заново."""
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    session = {"refresh_token": "r", "access_token": "a", "saved_at": 1e12}
+    monkeypatch.setattr(agent, "session_is_fresh", lambda *a, **k: True)
+    monkeypatch.setattr(agent, "icore_refresh",
+                        lambda *a, **k: {"error": "Нет связи", "keep": True})
+    agent.save_session(session)
+    assert agent.ensure_session({"server_url": "http://x"}, ask=False)["access_token"] == "a"
+
+
+def test_cabinet_password_never_lands_in_the_plain_cache(tmp_path, monkeypatch):
+    """Кэш настроек — обычный файл в профиле, а кабинет это пароль от АТС.
+    Его место в session.json, который под DPAPI."""
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"oktell_url": "https://oktell/", "cabinet": {"login": "6612", "password": "секрет"}}
+
+    monkeypatch.setattr(agent, "load_session", lambda: {"login": "6612"})
+    saved = {}
+    monkeypatch.setattr(agent, "save_session", lambda data: saved.update(data))
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Response())
+
+    cfg = agent.load_config(tmp_path / "нет-такого.json")
+    cfg["server_url"] = "https://icore"
+    result = agent.fetch_server_config(cfg, session={"access_token": "jwt"})
+
+    assert result["cabinet"]["password"] == "секрет", "в памяти агента кабинет нужен"
+    cached = json.loads((tmp_path / "server_config.json").read_text(encoding="utf-8"))
+    assert "cabinet" not in cached
+    assert "секрет" not in (tmp_path / "server_config.json").read_text(encoding="utf-8")
+    assert saved["cabinet"]["password"] == "секрет", "кабинет должен уехать в сессию"
+
+
+def test_the_shortcut_refuses_to_open_oktell_without_a_login():
+    """Закрыл окно входа — Oktell не открываем: без учётки кабинета оператор
+    всё равно увидел бы форму с паролем, которого не знает. Так же ведёт себя
+    iCORE Phone (LoginDlg::OnCancel закрывает главное окно)."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_open("):source.index("def run_status(")]
+    login = body.index("ensure_session(cfg)")
+    browser = body.index("ManagedBrowser(")
+    assert login < browser, "вход должен идти до открытия окна Oktell"
+    assert "return 3" in body[login:browser]
 
 
 def test_placeholder_server_url_is_replaced_by_build_value(tmp_path, monkeypatch):
@@ -726,19 +798,51 @@ def test_build_server_url_empty_without_module():
     assert agent.build_server_url() == ""
 
 
-def test_token_from_new_filename_shape():
-    """Имя должно читаться человеком: случайный хвост рядом с предупреждением
-    Windows выглядит как вирус."""
-    assert agent.token_from_filename("Oktell-Perezvon-Setup-n8oZgJIxZBaYMhoXwULf.exe") == "n8oZgJIxZBaYMhoXwULf"
+def test_the_name_in_the_login_window_is_the_one_on_the_shortcut():
+    """Внутреннее имя оператор не видит нигде: он пришёл сюда по ярлыку
+    «Oktell», и в шапке окна должно стоять то же слово."""
+    assert agent.APP_NAME_SHORT == "Oktell"
+    assert "<title>Oktell</title>" in agent.build_login_html()
+    assert "Вход в Oktell" in agent.build_login_html()
 
 
-def test_old_filename_shape_still_understood():
-    """Уже скачанные копии не должны стать анонимными после обновления."""
-    assert agent.token_from_filename("OktellRecallGuard.n8oZgJIxZBaYMhoXwULf.exe") == "n8oZgJIxZBaYMhoXwULf"
+def test_the_login_page_never_sends_the_password_anywhere():
+    """Пароль со страницы забирает агент через CDP и сам идёт на https. Появись
+    здесь fetch — пара уходила бы в сеть из file://-страницы, мимо всего, что мы
+    об этом запросе знаем."""
+    html = agent.build_login_html()
+    for forbidden in ("fetch(", "XMLHttpRequest", "navigator.sendBeacon", "form action"):
+        assert forbidden not in html, forbidden
+    assert "window.__guardLogin" in html
 
 
-def test_plain_new_name_has_no_token():
-    assert agent.token_from_filename("Oktell-Perezvon-Setup.exe") == ""
+def test_the_remembered_login_is_escaped_before_it_goes_into_the_page():
+    """Логин приезжает из прошлой сессии, то есть с сервера. Подставлять его в
+    разметку как есть нельзя ни при каких «да кто туда напишет кавычку»."""
+    html = agent.build_login_html('6612" autofocus onfocus="alert(1)')
+    assert 'onfocus="alert(1)' not in html
+    assert "&quot;" in html
+
+
+def test_the_login_page_carries_the_version_like_the_phone_does():
+    """«Какая у тебя версия» спрашивают как раз когда человек ещё не вошёл."""
+    assert f"версия {agent.VERSION}" in agent.build_login_html()
+
+
+def test_the_server_speaks_english_and_the_operator_should_not_read_it():
+    """`/api/login` отвечает «Invalid credentials». Портал показывает это как
+    есть, но окно входа человек видит раньше всего остального — первым
+    сообщением чужой язык быть не должен."""
+    assert agent.login_error_text("Invalid credentials") == "Неправильный логин или пароль"
+    assert agent.login_error_text("User account is inactive").startswith("Учётная запись отключена")
+    assert "попыток входа" in agent.login_error_text("Too many login attempts. Please try again later.")
+
+
+def test_an_unknown_answer_is_shown_as_it_came():
+    """Соврать про причину хуже, чем показать строку, которую можно переслать
+    в IT."""
+    assert agent.login_error_text("Something new") == "Something new"
+    assert agent.login_error_text("", 503) == "Ошибка входа (код 503)"
 
 
 # --------------------------------------------------------------------------- #
@@ -771,21 +875,78 @@ def test_violations_path_is_configurable():
     assert cfg['violations_path'] == '/api/oktell_guard/violations'
 
 
-def test_fresh_filename_token_beats_stored_one(tmp_path, monkeypatch):
-    """Скачал заново — значит у человека новый пропуск, и цепляться за старый
-    нельзя: именно так установленная копия оставалась с отозванным токеном."""
-    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
-    agent.save_personal_token("oldTokenValue123")
-    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/Oktell-Perezvon-Setup-newTokenValue456.exe"))
-    assert agent.resolve_agent_token() == "newTokenValue456"
-    assert agent.load_personal_token() == "newTokenValue456"
+class _FormBrowser:
+    """Вкладка Oktell: сначала её нет, потом появляется форма входа."""
+
+    def __init__(self, states):
+        self.states = list(states)
+        self.filled = []
+
+    def probe(self):
+        return self.states.pop(0) if self.states else {}
+
+    def autologin(self, login, password):
+        self.filled.append((login, password))
+        return {"ok": True}
 
 
-def test_stored_token_used_when_filename_has_none(tmp_path, monkeypatch):
+def test_the_shortcut_fills_the_oktell_form_itself(monkeypatch):
+    """Подстановку делает процесс ярлыка, а не долгоживущий агент.
+
+    18.09.2026 на живой учётке она не сработала ни разу: агент читает сессию при
+    своём старте, то есть ДО входа, а вход идёт в процессе ярлыка. Даже научив
+    агента замечать вход, оставлять подстановку только ему нельзя — круг у него
+    минута, и всё это время человек смотрит на пустую форму.
+    """
+    monkeypatch.setattr(agent.time, "sleep", lambda _s: None)
+    browser = _FormBrowser([
+        {"window": False},
+        {"window": True, "login_form": True, "session": False},
+    ])
+    cfg = {"cabinet": {"login": "6554", "password": "секрет"}}
+    assert agent.fill_oktell_login(browser, cfg) is True
+    assert browser.filled == [("6554", "секрет")]
+
+
+def test_nothing_is_typed_into_a_session_that_is_already_open(monkeypatch):
+    """Chrome помнит прошлую сессию Oktell — формы нет, и лезть в неё нечего."""
+    monkeypatch.setattr(agent.time, "sleep", lambda _s: None)
+    browser = _FormBrowser([{"window": True, "session": True, "login_form": False}])
+    assert agent.fill_oktell_login(browser, {"cabinet": {"login": "a", "password": "b"}}) is True
+    assert browser.filled == []
+
+
+def test_without_a_cabinet_the_operator_fills_the_form_himself(monkeypatch):
+    """Учётка кабинета заведена у одного человека из 92: для остальных это
+    обычный путь, а не сбой."""
+    monkeypatch.setattr(agent.time, "sleep", lambda _s: None)
+    browser = _FormBrowser([{"window": True, "login_form": True}])
+    assert agent.fill_oktell_login(browser, {}) is False
+    assert browser.filled == []
+
+
+def test_the_running_agent_notices_a_login_that_happened_later():
+    """Сторож поднимает агента при входе в Windows — раньше, чем человек нажмёт
+    ярлык. Не замечай агент чужого входа, он навсегда оставался бы «без сессии»:
+    ходил бы за настройками без Bearer и не получал ни кабинета, ни объявлений.
+    """
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    assert "def adopt_new_login()" in body
+    assert "adopt_new_login()" in body.split("while True:", 1)[1], \
+        "проверять вход надо каждый круг, а не один раз на старте"
+    # И сразу перечитывать настройки: именно в них приезжает учётка кабинета.
+    assert "next_config_refresh = time.time()" in body
+
+
+def test_sign_out_forgets_the_operator(tmp_path, monkeypatch):
+    """«Выход» нужен на общей машине: вошёл не тот — и до порога в 12 часов ему
+    показывались бы чужие объявления и подставлялась чужая учётка АТС."""
     monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
-    agent.save_personal_token("storedTokenValue1")
-    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.exe"))
-    assert agent.resolve_agent_token() == "storedTokenValue1"
+    monkeypatch.setattr(agent, "setup_logging", lambda *a, **k: None)
+    agent.save_session({"refresh_token": "r", "login": "6612"})
+    assert agent.run_sign_out({}) == 0
+    assert agent.load_session() == {}
 
 
 def test_install_hands_over_to_the_installed_copy():

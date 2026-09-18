@@ -57,6 +57,10 @@ from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
+# Как программа называется ДЛЯ ОПЕРАТОРА: так подписан ярлык на рабочем столе и
+# пункт меню в iCORE. Внутреннее имя он нигде не видит, и в окне входа должно
+# стоять то же слово, что на ярлыке, по которому он сюда попал.
+APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
 VERSION = "1.0.17"
 
@@ -266,71 +270,223 @@ def build_token() -> str:
         return ""
 
 
-def token_from_filename(name: str) -> str:
-    """Достать личный токен из имени скачанного файла.
+# ─────────────────────────────────────────────────────────────────────────────
+# Сессия оператора в iCORE
+#
+# Кто за машиной, программа спрашивает у самого человека — окном входа, как
+# iCORE Phone (microsip-src/LoginDlg.cpp, iCoreAuth.cpp). До 1.0.17 это решалось
+# личным токеном в ИМЕНИ скачанного файла, и схема держалась на том, что каждый
+# скачает файл себе: на деле из 26 живых машин токен носили 7, остальные были
+# безымянными — объявления им не показывались, а учётку кабинета отдавать было
+# некому. Вход учёткой iCORE снимает это целиком: человек называет себя сам,
+# сессию можно отозвать в «Сессиях», а файл в раздаче снова один на всех.
+#
+# Сессия хранится ТОЛЬКО на машине оператора, в профиле пользователя Windows.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Ожидается `Oktell-Perezvon-Setup-<токен>.exe`; старый вид
-    `OktellRecallGuard.<токен>.exe` тоже понимается — иначе уже скачанные копии
-    после обновления стали бы анонимными.
+# Порог переспроса — тот же, что у телефона (kSessionMaxAgeSec): вошёл утром,
+# смену не трогаем, назавтра окно снова. Access живёт ~30 минут и обновляется
+# по refresh молча, так что за смену пароль не спрашивается ни разу.
+SESSION_MAX_AGE_S = 12 * 60 * 60
 
-    Токен в имени, а не внутри exe: файл в хранилище один на всех, пересобирать
-    его под каждого сотрудника абсурдно. Имя задаётся на скачивании — сотрудник
-    не делает ничего, а присланное потом подписано им.
+
+def session_path() -> Path:
+    return app_dir() / "session.json"
+
+
+def _dpapi(data: bytes, unprotect: bool) -> Optional[bytes]:
+    """CryptProtectData/CryptUnprotectData — привязка блоба к учётке Windows.
+
+    В реестре у телефона токены лежат открытым текстом, но у него и токен уже
+    SIP-пароль. Здесь в файле лежит refresh на 30 дней ко ВСЕМУ порталу, и
+    отдавать его любому, кто прочитает профиль, незачем. DPAPI ничего не
+    спрашивает у пользователя и не требует прав: ключ — сама учётка Windows.
+    None — DPAPI недоступна (не Windows), тогда работаем открытым текстом.
     """
-    stem = str(name or '')
-    if stem.lower().endswith('.exe'):
-        stem = stem[:-4]
-    for separator in ('-', '.'):
-        parts = stem.split(separator)
-        if len(parts) < 2:
+    if not IS_WINDOWS:
+        return None
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    src = Blob(len(data), ctypes.cast(ctypes.create_string_buffer(data, len(data)),
+                                      ctypes.POINTER(ctypes.c_char)))
+    out = Blob()
+    fn = (ctypes.windll.crypt32.CryptUnprotectData if unprotect
+          else ctypes.windll.crypt32.CryptProtectData)
+    # CRYPTPROTECT_UI_FORBIDDEN: сборка идёт --noconsole, и всплывший запрос
+    # DPAPI повис бы невидимым окном, а процесс — на нём.
+    try:
+        if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(out)):
+            return None
+        try:
+            return ctypes.string_at(out.pbData, out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(out.pbData)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load_session() -> dict:
+    """Сохранённая сессия оператора. Пустой словарь — входа не было."""
+    try:
+        raw = session_path().read_bytes()
+    except Exception:  # noqa: BLE001
+        return {}
+    for candidate in (_dpapi(raw, unprotect=True), raw):
+        if not candidate:
             continue
-        candidate = parts[-1].strip()
-        # Токен — латиница и цифры: всё прочее это часть имени вроде «(1)».
-        if len(candidate) >= 12 and candidate.isalnum() and candidate.isascii():
-            return candidate
-    return ''
+        try:
+            data = json.loads(candidate.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
-def personal_token_path() -> Path:
-    return app_dir() / "token.json"
-
-
-def load_personal_token() -> str:
+def save_session(session: dict) -> None:
     try:
-        data = json.loads(personal_token_path().read_text(encoding="utf-8"))
-        return str(data.get("token") or "").strip()
+        payload = json.dumps(session, ensure_ascii=False).encode("utf-8")
+        session_path().write_bytes(_dpapi(payload, unprotect=False) or payload)
     except Exception:  # noqa: BLE001
-        return ""
+        logging.debug("Сессия не сохранена", exc_info=True)
 
 
-def save_personal_token(token: str) -> None:
-    """Токен переживает установку: она переименовывает файл, и имя с токеном
-    исчезает — если не сохранить, агент станет анонимным после первого же
-    запуска."""
+def clear_session() -> None:
     try:
-        personal_token_path().write_text(
-            json.dumps({"token": token}, ensure_ascii=False), encoding="utf-8"
-        )
+        session_path().unlink()
+    except FileNotFoundError:
+        pass
     except Exception:  # noqa: BLE001
-        logging.debug("Личный токен не сохранён", exc_info=True)
+        logging.debug("Сессия не удалена", exc_info=True)
 
 
-def resolve_agent_token() -> str:
-    """Личный токен важнее вшитого: он называет человека, вшитый — нет.
+def session_is_fresh(session: dict, now: Optional[float] = None) -> bool:
+    """Свежая ли сессия. Считаем от МОМЕНТА ВХОДА, а не от последнего запроса.
 
-    Токен из ИМЕНИ файла важнее сохранённого: человек скачал заново — значит у
-    него новый токен, и цепляться за старый нельзя. Раньше цеплялись, и после
-    повторного скачивания агент продолжал ходить с прежним токеном.
+    Иначе порог не наступал бы никогда: агент ходит на сервер каждую минуту и
+    сам бы продлевал себе сутки за сутками.
     """
-    from_name = token_from_filename(program_path().name)
-    if from_name:
-        if from_name != load_personal_token():
-            save_personal_token(from_name)
-        return from_name
-    stored = load_personal_token()
-    if stored:
-        return stored
-    return build_token()
+    if not session.get("refresh_token"):
+        return False
+    try:
+        saved_at = float(session.get("saved_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    age = (time.time() if now is None else now) - saved_at
+    return 0 <= age < SESSION_MAX_AGE_S
+
+
+# Ответы /api/login приходят по-английски: сам портал показывает их как есть, и
+# оператор читает «Invalid credentials». Здесь так нельзя — окно входа человек
+# видит раньше всего остального, и первое же сообщение не должно быть чужим
+# языком. Незнакомый текст отдаём как есть: соврать про причину хуже, чем
+# показать английскую строку, которую можно переслать в IT.
+LOGIN_ERROR_TEXTS = {
+    "invalid credentials": "Неправильный логин или пароль",
+    "missing credentials": "Введите логин и пароль",
+    "user account is inactive": "Учётная запись отключена. Обратитесь к руководителю",
+    "too many login attempts. please try again later.":
+        "Слишком много попыток входа. Подождите несколько минут",
+    "internal server error": "Сервер не отвечает. Попробуйте ещё раз",
+}
+
+
+def login_error_text(message: str, status: int = 0) -> str:
+    known = LOGIN_ERROR_TEXTS.get(str(message or "").strip().lower())
+    if known:
+        return known
+    if not str(message or "").strip():
+        return f"Ошибка входа (код {status})" if status else "Ошибка входа"
+    return str(message)
+
+
+def icore_login(cfg: dict, login: str, password: str) -> dict:
+    """POST /api/login. Возвращает сессию либо {"error": "текст для человека"}.
+
+    Синхронно и небыстро: сервер на Render просыпается из холодного старта до
+    минуты, поэтому таймаут здесь свой, а не общий request_timeout_s, и звать
+    это можно только из рабочего потока.
+    """
+    base = str(cfg.get("server_url") or "").rstrip("/")
+    if not base:
+        return {"error": "Не задан адрес сервера iCORE"}
+    try:
+        import requests
+
+        response = requests.post(
+            f"{base}/api/login",
+            json={"login": login, "password": password, "auth_transport": "bearer"},
+            timeout=float(cfg.get("login_timeout_s", 90)),
+            verify=bool(cfg.get("verify_tls", True)),
+            headers={"User-Agent": f"OktellRecallGuard/{VERSION}"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Вход в iCORE не удался: %s", exc)
+        return {"error": "Нет связи с сервером iCORE"}
+
+    try:
+        data = response.json() or {}
+    except Exception:  # noqa: BLE001
+        data = {}
+    if response.status_code == 200 and data.get("access_token"):
+        user = data.get("user") or {}
+        return {
+            "access_token": str(data.get("access_token") or ""),
+            "refresh_token": str(data.get("refresh_token") or ""),
+            "user_id": user.get("id"),
+            "user_name": str(user.get("name") or ""),
+            "login": login,
+            "saved_at": time.time(),
+        }
+    if data.get("error"):
+        return {"error": login_error_text(str(data["error"]), response.status_code)}
+    if response.status_code == 401:
+        return {"error": "Неправильный логин или пароль"}
+    return {"error": f"Ошибка входа (код {response.status_code})"}
+
+
+def icore_refresh(cfg: dict, session: dict) -> dict:
+    """Обновить access по refresh. {"error": ...} — сессию надо спрашивать заново."""
+    refresh = str(session.get("refresh_token") or "")
+    if not refresh:
+        return {"error": "Сессии нет"}
+    base = str(cfg.get("server_url") or "").rstrip("/")
+    try:
+        import requests
+
+        response = requests.post(
+            f"{base}/api/auth/refresh",
+            json={"auth_transport": "bearer"},
+            timeout=float(cfg.get("request_timeout_s", 10)),
+            verify=bool(cfg.get("verify_tls", True)),
+            headers={
+                "X-Refresh-Token": refresh,
+                "X-Auth-Transport": "bearer",
+                "User-Agent": f"OktellRecallGuard/{VERSION}",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Сеть — не истёкшая сессия: старую не трогаем, попробуем в следующий круг.
+        logging.debug("Обновление сессии не удалось: %s", exc)
+        return {"error": "Нет связи с сервером iCORE", "keep": True}
+
+    try:
+        data = response.json() or {}
+    except Exception:  # noqa: BLE001
+        data = {}
+    if response.status_code == 200 and data.get("access_token"):
+        updated = dict(session)
+        updated["access_token"] = str(data["access_token"])
+        # refresh ротируется — новый храним, старый после ротации уже мёртв.
+        if data.get("refresh_token"):
+            updated["refresh_token"] = str(data["refresh_token"])
+        return updated
+    if response.status_code == 401:
+        return {"error": "Сессия истекла — нужен повторный вход"}
+    # 5xx и прочее временное: сессия, скорее всего, жива.
+    return {"error": f"Сессия не обновилась (код {response.status_code})", "keep": True}
 
 
 def load_config(path: Optional[Path] = None) -> dict:
@@ -396,9 +552,10 @@ def normalize_config(cfg: dict) -> dict:
     if not cfg["server_url"] or cfg["server_url"] == DEFAULT_CONFIG["server_url"].rstrip("/"):
         cfg["server_url"] = build_server_url() or cfg["server_url"]
     # Конфиг (у разработчика) перекрывает вшитый токен; у сотрудника конфига
-    # нет, и работает именно вшитый.
+    # нет, и работает именно вшитый. Человека этот токен не называет — кто за
+    # машиной, говорит сессия iCORE (см. выше).
     if not str(cfg.get("agent_token") or "").strip():
-        cfg["agent_token"] = resolve_agent_token()
+        cfg["agent_token"] = build_token()
     if cfg.get("agent_token") and not header_safe(cfg["agent_token"]):
         # Дальше он всё равно не уедет: лучше сказать прямо и работать без
         # токена, чем ронять каждый запрос кодировкой.
@@ -453,7 +610,8 @@ def is_configured(cfg: dict) -> bool:
     return bool(url) and bool(origin_of(url))
 
 
-def wait_for_configuration(cfg: dict, retry_s: float = 60.0) -> dict:
+def wait_for_configuration(cfg: dict, retry_s: float = 60.0,
+                           session: Optional[dict] = None) -> dict:
     """Ждём настройки с сервера, ничего не открывая и никого не трогая."""
     while not is_configured(cfg):
         logging.error(
@@ -463,11 +621,28 @@ def wait_for_configuration(cfg: dict, retry_s: float = 60.0) -> dict:
             cfg.get("server_url"),
         )
         time.sleep(retry_s)
-        cfg = fetch_server_config(cfg)
+        cfg = fetch_server_config(cfg, session=session)
     return cfg
 
 
-def fetch_server_config(cfg: dict, login: str = "") -> dict:
+def agent_headers(cfg: dict, session: Optional[dict] = None) -> dict:
+    """Заголовки к нашим ручкам: замок машины плюс, если есть, имя человека.
+
+    Два разных слоя, и путать их нельзя. `X-Agent-Token` вшит в сборку и один
+    на всех — он только отсекает посторонние запросы из интернета, человека не
+    называет. Кто за машиной, говорит `Authorization: Bearer` сессии iCORE.
+    """
+    headers = {
+        "X-Agent-Token": str(cfg.get("agent_token") or ""),
+        "User-Agent": f"OktellRecallGuard/{VERSION}",
+    }
+    access = str((session or {}).get("access_token") or "")
+    if access and header_safe(access):
+        headers["Authorization"] = f"Bearer {access}"
+    return headers
+
+
+def fetch_server_config(cfg: dict, login: str = "", session: Optional[dict] = None) -> dict:
     """Забрать настройки с сервера; при недоступности — из кэша.
 
     Смысл: сотрудник скачивает один exe и ничего не настраивает. Порог,
@@ -478,6 +653,9 @@ def fetch_server_config(cfg: dict, login: str = "") -> dict:
     общее правило, и личный порог из раздела «Сотрудники» не применялся НИКОГДА:
     на старте процесса вкладки ещё нет, а другого места, где спрашивают
     настройки, не было. Поэтому логин передаём, как только он становится известен.
+
+    `session` — сессия оператора в iCORE. Без неё сервер отдаёт только общие
+    настройки: учётку кабинета он выдаёт лишь тому, кто назвал себя.
     """
     url = str(cfg.get("config_url") or "")
     if not url:
@@ -492,14 +670,22 @@ def fetch_server_config(cfg: dict, login: str = "") -> dict:
                 params={"login": login} if login else None,
                 timeout=float(cfg.get("request_timeout_s", 10)),
                 verify=bool(cfg.get("verify_tls", True)),
-                headers={"X-Agent-Token": str(cfg.get("agent_token") or ""),
-                         "User-Agent": f"OktellRecallGuard/{VERSION}"},
+                headers=agent_headers(cfg, session),
             )
             response.raise_for_status()
             remote = response.json()
             if isinstance(remote, dict):
                 try:
-                    cached_config_path().write_text(json.dumps(remote, ensure_ascii=False), encoding="utf-8")
+                    # Учётку кабинета в открытый кэш НЕ кладём: это пароль от
+                    # АТС, а кэш лежит простым файлом в профиле. Её место —
+                    # session.json, он под DPAPI (см. save_session).
+                    cached = {k: v for k, v in remote.items() if k != "cabinet"}
+                    cached_config_path().write_text(json.dumps(cached, ensure_ascii=False), encoding="utf-8")
+                    if session is not None and remote.get("cabinet"):
+                        stored = load_session()
+                        if stored:
+                            stored["cabinet"] = remote["cabinet"]
+                            save_session(stored)
                 except Exception:  # noqa: BLE001
                     logging.debug("Кэш настроек не записан", exc_info=True)
                 logging.info("Настройки получены с сервера")
@@ -511,6 +697,11 @@ def fetch_server_config(cfg: dict, login: str = "") -> dict:
         if cached_config_path().exists():
             remote = json.loads(cached_config_path().read_text(encoding="utf-8"))
             if isinstance(remote, dict):
+                # Кабинет доклеиваем из сессии: в кэше его нет намеренно, а без
+                # него молчащий сервер означал бы ещё и «войди в Oktell руками».
+                saved_cabinet = (session or {}).get("cabinet") or load_session().get("cabinet")
+                if saved_cabinet and not remote.get("cabinet"):
+                    remote["cabinet"] = saved_cabinet
                 logging.info("Применил кэш настроек от %s", cached_config_path())
                 return apply_server_config(cfg, remote)
     except Exception:  # noqa: BLE001
@@ -820,6 +1011,405 @@ def show_message(text: str, title: str = APP_NAME, error: bool = False) -> None:
         )
     except Exception:  # noqa: BLE001
         logging.debug("Окно с сообщением не показалось", exc_info=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Окно входа
+#
+# Рисуем его страницей в том же Chromium, которым программа и так управляет, а
+# не своим окном на Tk: у экрана входа iCORE есть готовый вид (src/App.jsx,
+# ветка `if (!user)`), и человек должен видеть ровно его — он входит в тот же
+# iCORE, что и в браузере.
+#
+# Почему это не опаснее своего окна:
+#   * страница лежит ЛОКАЛЬНЫМ файлом в папке программы и открывается как
+#     file:// — в неё нечего внедрить по сети, и она сама никуда не ходит;
+#   * пароль страница НЕ отправляет: агент забирает его через CDP и сам стучится
+#     на https://…/api/login. В сети запроса от страницы нет вовсе, токен в её
+#     JS не попадает;
+#   * забрав пару, агент тут же стирает её из страницы; в лог и на диск пароль
+#     не попадает ни разу;
+#   * окно Oktell живёт на https-origin и прочитать file://-страницу не может;
+#   * порт отладки Chrome и так слушает петлю (127.0.0.1) и держит сессию
+#     Oktell — окно входа новой двери не открывает.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Дольше десяти минут окно висеть не должно: процесс от ярлыка ждёт ответа, и
+# забытая форма держала бы его до перезагрузки.
+LOGIN_WINDOW_TIMEOUT_S = 600
+
+LOGIN_PAGE_HTML = """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<!-- Значок в заголовке окна. Без него Chrome рисует глобус, и окно входа
+     выглядит как случайная страница из интернета, а не как наша программа.
+     Тот же контур, что и на карточке, — рисуем разметкой, файл не заводим. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 389 389'%3E%3Ccircle cx='194.5' cy='194.5' r='194.5' fill='%234338CA'/%3E%3Cpath fill='white' d='M49 193 C49 138 77 89 121 65 C165 41 220 41 264 62 C277 68 280 88 276 102 C272 116 259 121 240 121 C221 121 204 114 196 114 C155 117 121 152 121 194 C121 236 155 271 196 271 C237 271 269 239 269 204 C269 190 264 170 265 161 C267 149 277 140 292 140 C307 140 318 155 326 172 C334 189 333 200 333 215 C333 285 275 342 205 342 C127 342 49 271 49 193Z'/%3E%3Cellipse cx='199' cy='195' rx='39' ry='40' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --indigo-700: #4338CA; --indigo-600: #4F46E5; --indigo-500: #6366F1;
+    --slate-100: #F1F5F9; --slate-400: #94A3B8; --slate-500: #64748B;
+    --slate-900: #0F172A; --red-50: #FEF2F2; --red-600: #DC2626;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: linear-gradient(to bottom right, #DBEAFE, #F3E8FF);
+    -webkit-user-select: none; user-select: none;
+  }
+  .card {
+    width: 100%; max-width: 380px; padding: 28px 24px; border-radius: 28px;
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.16);
+    outline: 1px solid rgba(15, 23, 42, 0.05);
+  }
+  .brand { display: flex; align-items: center; justify-content: center; margin: 0 0 6px; }
+  .brand-word {
+    display: flex; align-items: stretch; font-size: 36px; font-weight: 800; line-height: 1;
+  }
+  .brand-word .word {
+    padding: 8px 12px; color: #fff; background: var(--indigo-700);
+    border: 1px solid var(--indigo-700); border-radius: 16px 0 0 16px;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+  }
+  .brand-word .mark {
+    display: grid; place-items: center; padding: 8px; margin-left: -1px; background: #fff;
+    border: 1px solid var(--indigo-700); border-left: none; border-radius: 0 16px 16px 0;
+  }
+  .brand-word .mark svg { width: 44px; height: 44px; color: var(--indigo-600); }
+  .subtitle { margin: 0 0 22px; text-align: center; font-size: 13px; color: var(--slate-500); }
+  .field { position: relative; display: block; margin-top: 10px; }
+  .field:first-of-type { margin-top: 0; }
+  .field .glyph {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+    width: 16px; height: 16px; color: var(--slate-400); pointer-events: none;
+  }
+  .field input {
+    width: 100%; height: 48px; padding: 0 16px 0 44px; border: none; outline: none;
+    border-radius: 14px; background: var(--slate-100); color: var(--slate-900);
+    font-size: 16px; font-family: inherit; transition: background .15s, box-shadow .15s;
+    -webkit-user-select: text; user-select: text;
+  }
+  .field input::placeholder { color: var(--slate-400); }
+  .field input:focus { background: #fff; box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.7); }
+  .field input:disabled { opacity: .6; }
+  #pass { padding-right: 48px; }
+  .eye {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
+    border: none; border-radius: 999px; background: transparent; cursor: pointer;
+    color: var(--slate-400); transition: background .15s, color .15s;
+  }
+  .eye:hover { background: rgba(226, 232, 240, 0.7); color: #475569; }
+  .eye svg { width: 16px; height: 16px; }
+  .slot { display: flex; align-items: center; justify-content: center; min-height: 60px; }
+  .slot p {
+    width: 100%; margin: 0; padding: 8px 12px; border-radius: 12px;
+    background: var(--red-50); color: var(--red-600);
+    font-size: 13px; font-weight: 500; text-align: center;
+  }
+  .slot p.calm { background: transparent; color: var(--slate-500); font-weight: 400; }
+  button.submit {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; height: 48px; border: none; border-radius: 14px;
+    background: var(--indigo-600); color: #fff; font-size: 15px; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: background .15s, transform .1s;
+  }
+  button.submit:hover:not(:disabled) { background: var(--indigo-700); }
+  button.submit:active:not(:disabled) { transform: scale(.99); }
+  button.submit:disabled { opacity: .6; cursor: not-allowed; }
+  .spinner {
+    width: 15px; height: 15px; border: 2px solid rgba(255, 255, 255, .4);
+    border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .version { margin: 14px 0 0; text-align: center; font-size: 12px; color: var(--slate-400); }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1 class="brand">
+      <span class="brand-word">
+        <span class="word">iCORE</span>
+        <span class="mark">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 389 389" aria-hidden="true">
+            <path fill="currentColor" d="M49 193 C49.04 185.71 49.82 178.36 50.92 171.14 C52.02 163.92 53.52 156.69 55.6 149.7 C57.69 142.71 60.32 135.79 63.43 129.18 C66.54 122.58 70.21 116.16 74.27 110.1 C78.33 104.03 82.88 98.18 87.79 92.79 C92.7 87.39 98.15 82.4 103.76 77.72 C109.36 73.05 115.25 68.59 121.43 64.72 C127.61 60.84 134.15 57.41 140.83 54.46 C147.5 51.51 154.44 48.94 161.47 47.01 C168.5 45.08 175.78 43.74 183.03 42.91 C190.27 42.07 197.66 41.74 204.95 42 C212.23 42.26 219.61 43 226.74 44.48 C233.87 45.97 241.1 47.95 247.72 50.92 C254.33 53.9 261.33 57.42 266.43 62.33 C271.53 67.23 276.72 73.77 278.31 80.35 C279.89 86.93 278.88 95.7 275.95 101.83 C273.02 107.96 266.8 113.86 260.73 117.13 C254.66 120.39 246.64 121.51 239.54 121.42 C232.44 121.32 225.33 117.77 218.14 116.56 C210.94 115.35 203.58 113.9 196.35 114.18 C189.13 114.46 181.69 115.99 174.8 118.24 C167.92 120.49 161.04 123.67 155.03 127.68 C149.03 131.69 143.43 136.77 138.77 142.3 C134.12 147.83 130.06 154.24 127.12 160.85 C124.17 167.45 122.12 174.77 121.1 181.93 C120.08 189.08 120.1 196.61 121.02 203.78 C121.93 210.95 123.77 218.31 126.6 224.95 C129.42 231.6 133.38 238.08 137.97 243.66 C142.55 249.23 148.11 254.38 154.1 258.4 C160.08 262.42 166.98 265.68 173.89 267.78 C180.79 269.88 188.32 270.95 195.54 271 C202.77 271.05 210.31 270.07 217.24 268.06 C224.17 266.05 231.12 262.89 237.13 258.91 C243.14 254.94 248.76 249.81 253.3 244.22 C257.84 238.63 261.75 232.07 264.37 225.37 C266.98 218.67 268.48 211.23 269 204.02 C269.52 196.82 268.17 189.41 267.49 182.16 C266.81 174.92 263.41 167.14 264.92 160.56 C266.44 153.97 271.11 146.05 276.57 142.64 C282.03 139.23 291.22 138.39 297.67 140.08 C304.12 141.77 310.49 147.5 315.25 152.77 C320.01 158.03 323.49 164.98 326.25 171.67 C329 178.36 330.66 185.7 331.78 192.89 C332.91 200.08 333.26 207.52 332.99 214.8 C332.73 222.08 331.72 229.43 330.18 236.56 C328.65 243.68 326.49 250.78 323.78 257.54 C321.06 264.31 317.74 270.94 313.91 277.14 C310.07 283.33 305.56 289.21 300.79 294.71 C296.01 300.22 290.83 305.47 285.26 310.17 C279.69 314.86 273.61 319.12 267.36 322.87 C261.1 326.63 254.5 329.99 247.73 332.7 C240.96 335.41 233.87 337.59 226.75 339.14 C219.63 340.69 212.29 341.56 205.01 342 C197.72 342.44 190.3 342.44 183.04 341.79 C175.77 341.14 168.47 339.88 161.39 338.09 C154.32 336.29 147.32 333.87 140.59 331.03 C133.86 328.2 127.27 324.86 121.02 321.09 C114.76 317.33 108.73 313.06 103.06 308.45 C97.4 303.85 91.92 298.87 87.02 293.47 C82.13 288.06 77.7 282.13 73.69 276.03 C69.68 269.94 66.02 263.51 62.95 256.89 C59.88 250.28 57.3 243.35 55.25 236.34 C53.21 229.34 51.7 222.1 50.66 214.88 C49.62 207.65 48.96 200.29 49 193Z"/>
+            <ellipse cx="199.15" cy="195.32" rx="39.43" ry="40.41" fill="currentColor"/>
+          </svg>
+        </span>
+      </span>
+    </h1>
+    <p class="subtitle">__SUBTITLE__</p>
+
+    <form id="form" autocomplete="off">
+      <label class="field">
+        <svg class="glyph" viewBox="0 0 448 512" aria-hidden="true"><path fill="currentColor" d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3 0 498.7 13.3 512 29.7 512H418.3c16.4 0 29.7-13.3 29.7-29.7 0-98.5-79.8-178.3-178.3-178.3H178.3z"/></svg>
+        <input id="login" type="text" placeholder="Логин" value="__PREFILL__"
+               autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <svg class="glyph" viewBox="0 0 448 512" aria-hidden="true"><path fill="currentColor" d="M144 144v48h160v-48c0-44.2-35.8-80-80-80s-80 35.8-80 80zM80 192v-48C80 64.5 144.5 0 224 0s144 64.5 144 144v48h16c35.3 0 64 28.7 64 64v192c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V256c0-35.3 28.7-64 64-64h16z"/></svg>
+        <input id="pass" type="password" placeholder="Пароль" autocomplete="off" enterkeyhint="go">
+        <button id="eye" class="eye" type="button" tabindex="-1" aria-label="Показать пароль">
+          <svg viewBox="0 0 576 512" aria-hidden="true"><path fill="currentColor" d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4 142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1 3.3-7.9 3.3-16.7 0-24.6-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM144 256a144 144 0 1 1 288 0 144 144 0 1 1-288 0zm144-64c0 35.3-28.7 64-64 64-7.1 0-13.9-1.2-20.2-3.3-5.5-1.8-11.9 1.6-11.7 7.4.3 6.9 1.3 13.8 3.2 20.7 13.7 51.2 66.4 81.6 117.6 67.9s81.6-66.4 67.9-117.6c-11.1-41.5-47.8-69.4-88.6-71.1-5.8-.2-9.2 6.1-7.4 11.7 2.1 6.3 3.3 13.1 3.3 20.2z"/></svg>
+        </button>
+      </label>
+
+      <div class="slot"><p id="status" class="calm" hidden></p></div>
+
+      <button id="submit" class="submit" type="submit">
+        <span id="spinner" class="spinner" hidden></span>
+        <span id="submit-text">Войти</span>
+      </button>
+    </form>
+    <p class="version">версия __VERSION__</p>
+  </main>
+
+<script>
+(function () {
+  // Единственный канал наружу. Пароль здесь и остаётся: страница его никуда не
+  // шлёт — забирает агент через CDP и стирает эту пару сразу же.
+  window.__guardLogin = { pending: null, closing: false };
+
+  var form = document.getElementById('form');
+  var login = document.getElementById('login');
+  var pass = document.getElementById('pass');
+  var eye = document.getElementById('eye');
+  var submit = document.getElementById('submit');
+  var submitText = document.getElementById('submit-text');
+  var spinner = document.getElementById('spinner');
+  var status = document.getElementById('status');
+
+  function say(text, isError) {
+    if (!text) { status.hidden = true; status.textContent = ''; return; }
+    status.hidden = false;
+    status.textContent = text;
+    status.className = isError ? '' : 'calm';
+  }
+
+  function busy(on) {
+    login.disabled = on;
+    pass.disabled = on;
+    submit.disabled = on;
+    spinner.hidden = !on;
+    submitText.textContent = on ? 'Вход…' : 'Войти';
+  }
+
+  // Агент зовёт это, когда сервер ответил.
+  window.__guardSay = function (text, isError) { busy(false); say(text, !!isError); };
+  window.__guardBusy = function (text) { busy(true); say(text || '', false); };
+
+  eye.addEventListener('click', function () {
+    var shown = pass.type === 'text';
+    pass.type = shown ? 'password' : 'text';
+    eye.setAttribute('aria-label', shown ? 'Показать пароль' : 'Скрыть пароль');
+  });
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (submit.disabled) { return; }
+    var user = login.value.trim();
+    var secret = pass.value;
+    if (!user || !secret) { say('Введите логин и пароль', true); return; }
+    busy(true);
+    say('Вход…', false);
+    window.__guardLogin.pending = { login: user, password: secret };
+  });
+
+  (login.value ? pass : login).focus();
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def login_page_path() -> Path:
+    return app_dir() / "login.html"
+
+
+def build_login_html(prefill: str = "") -> str:
+    """Страница входа с подставленным логином.
+
+    Значение экранируем сами: логин приходит из прошлой сессии, то есть с
+    сервера, и вставлять его в разметку как есть нельзя ни при каких «да кто
+    туда напишет кавычку».
+    """
+    safe = (str(prefill or "")
+            .replace("&", "&amp;").replace('"', "&quot;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+    return (LOGIN_PAGE_HTML
+            .replace("__TITLE__", APP_NAME_SHORT)
+            .replace("__SUBTITLE__", f"Вход в {APP_NAME_SHORT}")
+            .replace("__PREFILL__", safe)
+            .replace("__VERSION__", VERSION))
+
+
+def _login_target(browser: "ManagedBrowser", page_url: str) -> Optional[dict]:
+    needle = page_url.rsplit("/", 1)[-1].lower()
+    for target in browser.targets():
+        if str(target.get("type") or "") != "page":
+            continue
+        if needle in str(target.get("url") or "").lower():
+            return target
+    return None
+
+
+def _close_target(browser: "ManagedBrowser", target_id: str) -> None:
+    port = browser.devtools_port()
+    if not port or not target_id:
+        return
+    try:
+        import requests
+
+        requests.get(f"http://127.0.0.1:{port}/json/close/{target_id}", timeout=5)
+    except Exception:  # noqa: BLE001
+        logging.debug("Окно входа не закрылось само", exc_info=True)
+
+
+def run_login_window(cfg: dict, prefill: str = "") -> dict:
+    """Спросить учётку iCORE. Возвращает сессию либо {} — человек закрыл окно.
+
+    Закрытие — законный ответ «не буду», а не ошибка: выше по стеку оно значит
+    «Oktell не открываем».
+    """
+    browser = ManagedBrowser(cfg, heal=False)
+    chrome = browser.chrome_path()
+    if not chrome:
+        logging.error("Не найден ни Chrome, ни Edge — окно входа показать нечем")
+        show_message("Не найден браузер Chrome. Сообщите в IT.", error=True)
+        return {}
+
+    page_file = login_page_path()
+    try:
+        # Пишем страницу заново каждый раз: файл лежит в профиле пользователя, и
+        # опираться на то, что вчерашний остался нашим, незачем.
+        page_file.parent.mkdir(parents=True, exist_ok=True)
+        page_file.write_text(build_login_html(prefill), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        logging.exception("Страница входа не записалась")
+        return {}
+
+    page_url = page_file.resolve().as_uri()
+    args = [
+        str(chrome),
+        f"--user-data-dir={browser.profile_dir}",
+        f"--remote-debugging-port={int(browser.browser_cfg.get('cdp_port', 0) or 0)}",
+        "--remote-debugging-address=127.0.0.1",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-features=Translate,ChromeWhatsNewUI",
+        "--window-size=420,620",
+        f"--app={page_url}",
+    ]
+    browser.profile_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.Popen(args, creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0,
+                         close_fds=True, env=child_env())
+    except Exception:  # noqa: BLE001
+        logging.exception("Окно входа не запустилось")
+        return {}
+    logging.info("Показываю окно входа")
+
+    deadline = time.time() + LOGIN_WINDOW_TIMEOUT_S
+    page = None
+    target_id = ""
+    try:
+        while time.time() < deadline:
+            target = _login_target(browser, page_url)
+            if not target:
+                if page is not None:
+                    # Окно было и исчезло — человек его закрыл.
+                    logging.info("Окно входа закрыто без входа")
+                    return {}
+                time.sleep(0.4)
+                continue
+            if page is None or not getattr(page, "connected", False):
+                try:
+                    page = CdpPage(str(target["webSocketDebuggerUrl"]),
+                                   timeout=float(cfg.get("request_timeout_s", 10)))
+                    target_id = str(target.get("id") or "")
+                except Exception:  # noqa: BLE001
+                    time.sleep(0.4)
+                    continue
+
+            try:
+                pending = page.evaluate(
+                    "(function(){var s=window.__guardLogin;"
+                    "if(!s||!s.pending){return null;}"
+                    "var v=s.pending;s.pending=null;return v;})()"
+                )
+            except Exception:  # noqa: BLE001 — окно могли закрыть прямо сейчас
+                page = None
+                time.sleep(0.4)
+                continue
+
+            if not pending:
+                time.sleep(0.3)
+                continue
+
+            session = icore_login(cfg, str(pending.get("login") or ""),
+                                  str(pending.get("password") or ""))
+            # Пара больше не нужна нигде: в странице её уже стёрли, здесь —
+            # выходит из области видимости вместе с pending.
+            pending = None
+            if session.get("error"):
+                try:
+                    page.evaluate("window.__guardSay(%s, true)"
+                                  % json.dumps(str(session["error"]), ensure_ascii=False))
+                except Exception:  # noqa: BLE001
+                    page = None
+                continue
+            _close_target(browser, target_id)
+            return session
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            page_file.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    logging.info("Окно входа: ответа не дождались")
+    _close_target(browser, target_id)
+    return {}
+
+
+def ensure_session(cfg: dict, ask: bool = True) -> dict:
+    """Живая сессия оператора. {} — входа нет (и спросить было нельзя или отказались).
+
+    Порядок важен: сначала свежесть по времени входа, потом обновление access.
+    Просроченную по 12 часам сессию обновлять НЕЛЬЗЯ — refresh живёт 30 дней и
+    молча продлевал бы вход до бесконечности, а порог для того и заведён.
+    """
+    session = load_session()
+    if session_is_fresh(session):
+        refreshed = icore_refresh(cfg, session)
+        if not refreshed.get("error"):
+            save_session(refreshed)
+            return refreshed
+        if refreshed.get("keep"):
+            # Сервер молчит — со старым access ещё можно попробовать поработать.
+            return session
+        clear_session()
+        session = {}
+
+    if not ask:
+        return {}
+    fresh = run_login_window(cfg, prefill=str(session.get("login") or load_session().get("login") or ""))
+    if not fresh:
+        return {}
+    save_session(fresh)
+    logging.info("Вход выполнен: %s", fresh.get("user_name") or fresh.get("login") or "оператор")
+    return fresh
 
 
 def run_install(cfg: dict, start: bool = True, quiet: bool = False) -> int:
@@ -3067,7 +3657,7 @@ def build_heartbeat_payload(state: AgentState, cfg: dict, now_iso: str) -> dict:
 
 
 class ServerLink:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, session: Optional[dict] = None):
         self.cfg = cfg
         self.base = str(cfg.get("server_url") or "").rstrip("/")
         self.timeout = float(cfg.get("request_timeout_s", 10))
@@ -3075,13 +3665,44 @@ class ServerLink:
         import requests
 
         self._session = requests.Session()
-        self._session.headers.update(
-            {
-                "X-Agent-Token": str(cfg.get("agent_token") or ""),
-                "User-Agent": f"OktellRecallGuard/{VERSION}",
-                "Content-Type": "application/json",
-            }
-        )
+        self._session.headers.update({"Content-Type": "application/json"})
+        self.set_operator_session(session or {})
+
+    def set_operator_session(self, session: dict) -> None:
+        """Подменить сессию оператора (вход, обновление, выход)."""
+        self.operator_session = session or {}
+        self._session.headers.pop("Authorization", None)
+        self._session.headers.update(agent_headers(self.cfg, self.operator_session))
+
+    def _refresh_operator_session(self) -> bool:
+        """Обновить access по refresh. Зовётся ровно на 401 нашей ручки.
+
+        401 на агентской ручке — это не «токен машины неверен» (он вшит в exe и
+        не меняется), а истёкший access оператора: он живёт ~30 минут, а агент
+        работает сменами. Без этого объявления пропадали бы через полчаса после
+        входа, и выглядело бы это как «сервер их не отдаёт».
+        """
+        if not self.operator_session:
+            return False
+        updated = icore_refresh(self.cfg, self.operator_session)
+        if updated.get("error"):
+            if not updated.get("keep"):
+                logging.info("Сессия оператора истекла — работаем без неё до следующего входа")
+                clear_session()
+                self.set_operator_session({})
+            return False
+        save_session(updated)
+        self.set_operator_session(updated)
+        return True
+
+    def _request(self, method: str, url: str, **kwargs):
+        """Запрос с одной попыткой обновить сессию на 401."""
+        response = self._session.request(method, url, timeout=self.timeout,
+                                         verify=self.verify, **kwargs)
+        if response.status_code == 401 and self._refresh_operator_session():
+            response = self._session.request(method, url, timeout=self.timeout,
+                                             verify=self.verify, **kwargs)
+        return response
 
     def _url(self, path_key: str, default_path: str) -> str:
         path = str(self.cfg.get(path_key) or default_path)
@@ -3091,14 +3712,14 @@ class ServerLink:
 
     def heartbeat(self, payload: dict) -> Optional[dict]:
         url = self._url("heartbeat_path", "/api/oktell_guard/heartbeat")
-        response = self._session.post(url, json=payload, timeout=self.timeout, verify=self.verify)
+        response = self._request("POST", url, json=payload)
         response.raise_for_status()
         data = response.json()
         return data if isinstance(data, dict) else None
 
     def violations(self, payload: dict) -> bool:
         url = self._url("violations_path", "/api/oktell_guard/violations")
-        response = self._session.post(url, json=payload, timeout=self.timeout, verify=self.verify)
+        response = self._request("POST", url, json=payload)
         response.raise_for_status()
         return True
 
@@ -3106,7 +3727,7 @@ class ServerLink:
         """Что показать этому оператору. None — сервер недоступен."""
         url = self._url("news_path", "/api/oktell_guard/news")
         try:
-            response = self._session.get(url, timeout=self.timeout, verify=self.verify)
+            response = self._request("GET", url)
             response.raise_for_status()
             data = response.json()
             return data if isinstance(data, dict) else None
@@ -3118,8 +3739,7 @@ class ServerLink:
         """Подтверждение. Решение принимает сервер, мы только передаём ответ."""
         url = f"{self.base}/api/oktell_guard/news/{int(news_id)}/read"
         try:
-            response = self._session.post(url, json={"answers": answers or {}},
-                                          timeout=self.timeout, verify=self.verify)
+            response = self._request("POST", url, json={"answers": answers or {}})
             payload = {}
             try:
                 payload = response.json() or {}
@@ -3134,7 +3754,7 @@ class ServerLink:
     def ack(self, payload: dict) -> None:
         url = self._url("ack_path", "/api/oktell_guard/ack")
         try:
-            self._session.post(url, json=payload, timeout=self.timeout, verify=self.verify)
+            self._request("POST", url, json=payload)
         except Exception:  # noqa: BLE001 — ack не критичен, повтор придёт с командой
             logging.debug("ack не доставлен", exc_info=True)
 
@@ -3180,14 +3800,23 @@ def run_agent(cfg: dict) -> int:
     if cfg.get("dry_run"):
         logging.warning("DRY-RUN включён: команды разлогина будут только логироваться")
 
-    cfg = fetch_server_config(cfg)
-    cfg = wait_for_configuration(cfg)
+    # ask=False: окно входа поднимает только ярлык. Фоновый процесс, ткнувший
+    # оператору форму посреди разговора, — это ровно то, чего программа делать
+    # не должна; без сессии она работает как ограничитель и молчит.
+    session = ensure_session(cfg, ask=False)
+    if session:
+        logging.info("Сессия оператора: %s", session.get("user_name") or session.get("login") or "есть")
+    else:
+        logging.info("Сессии нет — работаю ограничителем, объявлений не показываю")
+
+    cfg = fetch_server_config(cfg, session=session)
+    cfg = wait_for_configuration(cfg, session=session)
     logging.info("Настройки применены. Oktell: %s | порог: %s с",
                  cfg.get("oktell_url"), (cfg.get("in_window_rule") or {}).get("threshold_s"))
     identity = current_identity(cfg)
     browser = ManagedBrowser(cfg)
     ledger = CommandLedger(app_dir() / "commands.json")
-    link = ServerLink(cfg)
+    link = ServerLink(cfg, session)
 
     browser_cfg = cfg.get("browser", {}) or {}
     if browser_cfg.get("launch_on_start", True):
@@ -3225,9 +3854,37 @@ def run_agent(cfg: dict) -> int:
         return rule_version({**(current.get("in_window_rule") or {}),
                              "dry_run": bool(current.get("dry_run"))})
 
+    def adopt_new_login() -> bool:
+        """Заметить вход, случившийся уже после старта агента.
+
+        Вход происходит в ДРУГОМ процессе — том, что запустил ярлык. Агент же
+        читает сессию один раз, при своём старте, а стартует он раньше: сторож
+        поднимает его при входе в Windows. Без этой проверки работающий агент
+        навсегда оставался «без сессии», ходил за настройками без Bearer и не
+        получал ни кабинета, ни объявлений — ровно это и увидели 18.09.2026.
+
+        Читаем только файл, без сети: сессию, которую сами же и обновили, узнаём
+        по совпадению access-токена и второй раз не подхватываем.
+        """
+        stored = load_session()
+        if not session_is_fresh(stored):
+            stored = {}
+        if (stored.get("access_token") or "") == (link.operator_session or {}).get("access_token", ""):
+            return False
+        link.set_operator_session(stored)
+        if stored:
+            logging.info("Замечен вход: %s", stored.get("user_name") or stored.get("login") or "оператор")
+        else:
+            logging.info("Сессия оператора кончилась — объявления не показываю")
+        return True
+
     try:
         while True:
             try:
+                if adopt_new_login():
+                    # Настройки перечитываем сразу: именно в них приезжает
+                    # учётка кабинета, и ждать общего таймера незачем.
+                    next_config_refresh = time.time()
                 if time.time() >= next_update_check:
                     next_update_check = time.time() + update_every_s
                     if check_for_update(cfg):
@@ -3284,7 +3941,7 @@ def run_agent(cfg: dict) -> int:
                 if (login_now and login_now != last_config_login) or time.time() >= next_config_refresh:
                     next_config_refresh = time.time() + config_every_s
                     was = rule_print(cfg)
-                    cfg = fetch_server_config(cfg, login_now)
+                    cfg = fetch_server_config(cfg, login_now, session=link.operator_session)
                     last_config_login = login_now
                     if rule_print(cfg) != was:
                         rule_now = cfg.get("in_window_rule") or {}
@@ -3410,17 +4067,21 @@ def run_agent(cfg: dict) -> int:
                 failures += 1
                 delay = backoff_delay(failures, poll_s, max_backoff)
                 if "401" in str(exc):
-                    # Молчать тут нельзя: агент жив, но сервер его не принимает,
-                    # и снаружи это выглядит как «программа не работает».
+                    # Сюда доходят только 401, которые не вылечило обновление
+                    # сессии (ServerLink._request пробует его сам). Значит дело
+                    # не в истёкшем access, а во вшитом токене машины: его
+                    # сменили на сервере, а сборку не разнесли. Молчать нельзя —
+                    # агент жив, но сервер его не принимает, и снаружи это
+                    # выглядит как «программа не работает».
                     logging.error(
-                        "Сервер не принимает наш пропуск (401). Скорее всего токен отозван — "
-                        "скачайте программу из раздела заново и запустите."
+                        "Сервер не принимает пропуск машины (401). Похоже, токен сборки "
+                        "сменили — нужна новая версия программы."
                     )
                     if not unauthorized_notified[0]:
                         unauthorized_notified[0] = True
                         show_message(
                             "Программа не может связаться с сервером: пропуск больше не действует. "
-                            "Скачайте её из iCORE заново и запустите — всё остальное произойдёт само.",
+                            "Сообщите в IT — нужна новая версия программы.",
                             error=True,
                         )
                 logging.warning("Цикл агента: ошибка (%s). Пауза %.0f c", exc, delay)
@@ -3500,12 +4161,22 @@ def run_watchdog(cfg: dict) -> int:
 
 
 def run_open(cfg: dict) -> int:
-    """Ярлык «Oktell» на рабочем столе ведёт сюда: открыть управляемое окно."""
+    """Ярлык «Oktell» на рабочем столе ведёт сюда: окно входа, потом клиент АТС."""
     setup_logging(cfg, "agent.log")
     if cfg.get("_config_error"):
         logging.error("Конфиг %s не читается (%s) — окно не открываю", cfg.get("_config_path"), cfg["_config_error"])
         return 2
-    cfg = fetch_server_config(cfg)
+    # Вход ДО открытия клиента, а не после: логин с паролем АТС подставляет
+    # агент, и взять их он может только у сервера, назвав, кто за машиной.
+    # Открыть окно раньше входа значило бы показать оператору пустую форму
+    # Oktell с паролем, которого он не знает.
+    session = ensure_session(cfg)
+    if not session:
+        # Отказ от входа — законный ответ, а не сбой: закрыл окно, значит
+        # Oktell не открываем (так же ведёт себя iCORE Phone).
+        logging.info("Вход не выполнен — окно Oktell не открываю")
+        return 3
+    cfg = fetch_server_config(cfg, session=session)
     if not is_configured(cfg):
         logging.error("Нет настроек (адрес Oktell не задан) — окно не открываю")
         return 2
@@ -3522,10 +4193,47 @@ def run_open(cfg: dict) -> int:
         chrome = browser.chrome_path()
         if chrome:
             subprocess.Popen(browser.launch_args(chrome), close_fds=True, env=child_env())
+    if ok:
+        fill_oktell_login(browser, cfg)
     # Автозапуск watchdog: оператор открыл Oktell — контроль обязан быть поднят.
     if cfg.get("ensure_watchdog_alive", True) and not is_running_by_mutex(WATCHDOG_MUTEX_NAME):
         spawn_self()
     return 0 if ok else 1
+
+
+def fill_oktell_login(browser: "ManagedBrowser", cfg: dict, wait_s: float = 20.0) -> bool:
+    """Вписать учётку кабинета в только что открытую форму Oktell.
+
+    Делает это САМ процесс ярлыка, а не долгоживущий агент. Сначала подстановка
+    жила только в цикле агента — и не срабатывала ни разу: агент читает сессию
+    при своём старте, то есть ДО входа, а вход происходит уже в процессе ярлыка.
+    Работающий агент о нём не знал, ходил за настройками без Bearer и кабинета
+    не получал (проверено живьём 18.09.2026 на учётке Зиноллаева). Даже когда
+    агент научился замечать вход, оставлять подстановку только ему нельзя:
+    круг у него минута, а человек всё это время смотрит на пустую форму.
+
+    Форма появляется не мгновенно — ждём её, а не пробуем один раз.
+    """
+    cabinet = cfg.get("cabinet") or {}
+    if not (cabinet.get("login") and cabinet.get("password")):
+        logging.info("Учётка кабинета не задана — форму Oktell оператор заполняет сам")
+        return False
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        state = browser.probe()
+        if state.get("session"):
+            # Уже внутри: Chrome помнит прошлую сессию Oktell, формы нет.
+            return True
+        if state.get("login_form"):
+            result = browser.autologin(cabinet.get("login"), cabinet.get("password"))
+            if result.get("ok"):
+                logging.info("Учётка кабинета подставлена в форму входа")
+                return True
+            logging.warning("Подстановка не выполнена: %s", result.get("reason"))
+            return False
+        time.sleep(1.0)
+    logging.info("Форма входа Oktell за %.0f c не появилась — подстановку пропускаю", wait_s)
+    return False
 
 
 def run_status(cfg: dict) -> int:
@@ -3537,6 +4245,7 @@ def run_status(cfg: dict) -> int:
     if unmanaged_cfg.get("detect", True) and not state.browser.get("window"):
         state.unmanaged = match_unmanaged_titles(list_window_titles(), unmanaged_cfg.get("window_title_patterns", []))
     payload = build_heartbeat_payload(state, cfg, now_iso())
+    saved_session = load_session()
     payload["_local"] = {
         "config": cfg.get("_config_path"),
         "config_error": cfg.get("_config_error"),
@@ -3544,6 +4253,12 @@ def run_status(cfg: dict) -> int:
         "cdp_port": browser.devtools_port(),
         "agent_running": is_running_by_mutex(AGENT_MUTEX_NAME),
         "watchdog_running": is_running_by_mutex(WATCHDOG_MUTEX_NAME),
+        # Кто вошёл. Сами токены сюда не кладём: --status печатают в переписке.
+        "session": {
+            "login": saved_session.get("login") or "",
+            "user_name": saved_session.get("user_name") or "",
+            "fresh": session_is_fresh(saved_session),
+        },
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     # В сборке --noconsole печатать некуда, поэтому дублируем в файл: на него
@@ -3575,11 +4290,28 @@ def run_logout_now(cfg: dict) -> int:
     return 0 if report.get("status") == "done" else 1
 
 
+def run_sign_out(cfg: dict) -> int:
+    """«Выход»: забыть оператора на этой машине.
+
+    Нужен на общей машине — вошёл не тот, и до порога в 12 часов программа
+    показывала бы ему чужие объявления и подставляла чужую учётку АТС.
+    """
+    setup_logging(cfg, "agent.log")
+    who = load_session().get("user_name") or load_session().get("login") or ""
+    clear_session()
+    logging.info("Выход из учётной записи%s", f": {who}" if who else "")
+    if getattr(sys, "stdout", None):
+        print(json.dumps({"ok": True, "signed_out": who}, ensure_ascii=False))
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="OktellRecallGuard", add_help=True)
     parser.add_argument("--agent", action="store_true", help="рабочий цикл агента")
     parser.add_argument("--watchdog", action="store_true", help="сторож (режим по умолчанию)")
     parser.add_argument("--open", action="store_true", help="открыть управляемое окно Oktell")
+    parser.add_argument("--sign-out", dest="sign_out", action="store_true",
+                        help="забыть учётку iCORE на этой машине")
     parser.add_argument("--logout-now", action="store_true", help="разлогинить прямо сейчас (проверка)")
     parser.add_argument("--status", action="store_true", help="состояние в JSON")
     parser.add_argument("--install", action="store_true", help="установить себя и запустить")
@@ -3605,6 +4337,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_uninstall(cfg)
     if args.logout_now:
         return run_logout_now(cfg)
+    if args.sign_out:
+        return run_sign_out(cfg)
     if args.status:
         return run_status(cfg)
     # Всё ниже поднимает контроль. Копия пользователя от снятой установки на

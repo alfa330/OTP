@@ -69,7 +69,7 @@ class OktellGuardSectionGateTest(unittest.TestCase):
         ('post', '/api/oktell_guard/release'),
     )
 
-    def client(self, requester):
+    def client(self, requester, gcs_client_factory=None):
         for name, replacement in (
             ('access_context', lambda _cursor, _uid: dict(requester)),
             ('get_settings', lambda _cursor: {'enabled': True, 'dry_run': False, 'threshold_s': 180}),
@@ -93,6 +93,7 @@ class OktellGuardSectionGateTest(unittest.TestCase):
             require_api_key=lambda f: f,
             build_cors_preflight_response=lambda: ('', 204),
             resolve_requester=lambda: (requester['id'], None, None),
+            gcs_client_factory=gcs_client_factory,
         ))
         app.config['TESTING'] = True
         return app.test_client()
@@ -152,17 +153,46 @@ class OktellGuardSectionGateTest(unittest.TestCase):
         установщик операторам раздаёт как раз СВ, а сам файл и так отдаёт
         публичная /version. Тест держит это решение видимым — если ручку решат
         закрыть, он упадёт и заставит объяснить, чем СВ теперь раздаёт агента."""
-        issued = []
         # Клиент строится ДО подмены: self.client сам подменяет current_release
         # на «версии нет», и начатый позже патч перебил бы наш.
         client = self.client(context('sv'))
         with patch.object(queries, 'current_release',
-                          lambda _cursor: {'version': '1.0.13', 'gcs_bucket': '', 'gcs_path': ''}), \
-             patch.object(queries, 'issue_token',
-                          lambda _cursor, user_id, digest, note=None: issued.append(user_id)):
+                          lambda _cursor: {'version': '1.0.17', 'gcs_bucket': '', 'gcs_path': ''}):
             response = client.get('/api/oktell_guard/download')
         self.assertNotEqual(response.status_code, 403)
-        self.assertEqual(issued, [42], 'личный токен должен выписываться на самого СВ')
+
+    def test_the_downloaded_file_is_the_same_for_everyone(self):
+        """Личного токена в имени больше нет.
+
+        Он держался на том, что каждый скачает файл себе, а файл ходил по рукам:
+        из 26 живых машин токен носили 7, остальным нельзя было ни показать
+        объявление, ни подставить учётку кабинета. Кто за машиной, программа
+        теперь спрашивает окном входа.
+        """
+        names = []
+
+        class _Blob:
+            def generate_signed_url(self, **kwargs):
+                names.append(kwargs.get('response_disposition') or '')
+                return 'https://storage/signed'
+
+        class _Bucket:
+            def blob(self, _path):
+                return _Blob()
+
+        class _Client:
+            def bucket(self, _name):
+                return _Bucket()
+
+        client = self.client(context('sv'), gcs_client_factory=_Client)
+        with patch.object(queries, 'current_release',
+                          lambda _cursor: {'version': '1.0.17', 'sha256': 'x',
+                                           'gcs_bucket': 'b', 'gcs_path': 'p'}):
+            response = client.get('/api/oktell_guard/download')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['filename'], 'Oktell-Perezvon-Setup.exe')
+        self.assertEqual(names, ['attachment; filename="Oktell-Perezvon-Setup.exe"'])
 
 
 if __name__ == '__main__':  # pragma: no cover

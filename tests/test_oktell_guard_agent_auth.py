@@ -43,14 +43,17 @@ def test_revoked_tokens_are_excluded_by_query():
     assert 'revoked_at IS NULL' in sql
 
 
-def test_issuing_token_does_not_revoke_previous_ones():
-    """Повторное скачивание НЕ должно гасить прежние токены.
+def test_nobody_issues_personal_tokens_any_more():
+    """С 1.0.17 человека называет вход по учётке iCORE, а не токен в имени
+    файла. Выдачу убрали целиком: оставленная «на всякий случай» ручка завела бы
+    второй способ опознания, который однажды разъедется с первым."""
+    assert not hasattr(queries, 'issue_token')
 
-    Сначала гасило — и каждое новое скачивание молча убивало уже установленную
-    копию: она начинала получать 401 и переставала работать. У человека может
-    быть несколько машин; отзыв остаётся отдельным действием.
-    """
-    cursor = TupleCursor(['id'], [])
-    queries.issue_token(cursor, 42, 'b' * 64, note='тест')
-    assert len(cursor.executed) == 1
-    assert 'INSERT INTO oktell_guard_tokens' in cursor.executed[0][0]
+
+def test_the_logged_in_operator_is_taken_by_id_with_the_sip():
+    """SIP нужен для сверки «про свой ли номер прислан факт», а в db.get_user
+    такой колонки нет — отсюда отдельный запрос."""
+    cursor = TupleCursor(['user_id', 'name', 'sip_number'], [(42, 'Кто-то', '6612')])
+    found = queries.user_brief(cursor, 42)
+    assert found == {'user_id': 42, 'name': 'Кто-то', 'sip_number': '6612'}
+    assert queries.user_brief(cursor, None) is None
