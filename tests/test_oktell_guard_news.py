@@ -1,0 +1,229 @@
+# -*- coding: utf-8 -*-
+"""Надстройка над ограничителем: вход по учётке iCORE и обязательные объявления.
+
+Почему это внутри «Ограничителя Перезвона», а не отдельной программой: у него
+уже есть всё нужное — хук в странице Oktell, живые сокеты клиента, плашка
+поверх окна, своя раздача с автообновлением и личный токен, по которому сервер
+знает, кто за машиной, ещё ДО входа в АТС. Отдельное приложение означало бы
+второй канал раздачи, вторую программу на машине и браузер внутри неё.
+
+Сторожим то, что ломается молча: порядок «сначала снять с линии, потом
+показать», возврат статуса только если мы его и забрали, и то, что правила
+подтверждения не продублированы, а взяты у раздела «Новости».
+"""
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+AGENT_PATH = ROOT / "oktell_recall_guard" / "agent.py"
+ROUTES = (ROOT / "oktell_guard" / "routes.py").read_text(encoding="utf-8")
+
+
+def _load_agent():
+    spec = importlib.util.spec_from_file_location("oktell_guard_news_agent", AGENT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+agent = pytest.importorskip("requests") and _load_agent()
+AGENT_SOURCE = AGENT_PATH.read_text(encoding="utf-8")
+
+
+class TestCabinetFromServer:
+    """Учётку кабинета отдаёт сервер, оператор её не вводит и не знает."""
+
+    def test_it_is_served_only_to_a_known_agent(self):
+        """Общий токен сборки не говорит, кто за машиной: отдавать по нему
+        чужой пароль от АТС нельзя."""
+        body = ROUTES.split("def oktell_guard_agent_config", 1)[1].split("@agent_route", 1)[0]
+        assert "agent_owner(cursor)" in body
+        assert "db.get_oktell_account(owner['user_id']) if owner else None" in body
+
+    def test_an_account_without_a_password_is_not_sent(self):
+        """Пустая пара выглядела бы как «логин без пароля», и агент пытался бы
+        войти ею — вместо этого ключа просто нет."""
+        body = ROUTES.split("def oktell_guard_agent_config", 1)[1].split("@agent_route", 1)[0]
+        assert "if cabinet and cabinet.get('cabinet_password'):" in body
+
+    def test_the_agent_forgets_it_when_the_server_stops_sending_it(self):
+        """Отозвали доступ — значит и в памяти агента учётки остаться не должно,
+        поэтому она перезаписывается, а не сливается с прежней."""
+        cfg = agent.apply_server_config(
+            {"cabinet": {"login": "6612", "password": "old"}, "server_url": "https://x"},
+            {"oktell_url": "https://oktell/"},
+        )
+        assert cfg["cabinet"] == {}
+
+    def test_it_reaches_the_agent_config(self):
+        cfg = agent.apply_server_config(
+            {"server_url": "https://x"},
+            {"oktell_url": "https://oktell/", "cabinet": {"login": "6612", "password": "s"}},
+        )
+        assert cfg["cabinet"]["login"] == "6612"
+
+
+class TestAutologin:
+    """Форму входа заполняет агент — тем же способом, что и разлогин."""
+
+    def test_native_setter_and_events(self):
+        """Простое присваивание value не будит слушателей Angular, и форма
+        отправила бы пустые поля, которые на экране выглядят заполненными."""
+        js = agent.build_autologin_js("6612", "secret")
+        assert "HTMLInputElement.prototype, 'value'" in js
+        assert "new Event('input'" in js and "new Event('change'" in js
+
+    def test_hidden_inputs_are_skipped(self):
+        """У формы входа бывает второй, невидимый набор полей: заполнение его
+        выглядит как «ничего не произошло»."""
+        assert "offsetParent !== null" in agent.build_autologin_js("a", "b")
+
+    def test_it_does_not_retry_in_a_tight_loop(self):
+        """Форма могла не успеть перерисоваться — второй заход подряд только
+        мешает и множит попытки входа."""
+        assert "__oktellGuardAutologinAt" in agent.build_autologin_js("a", "b")
+
+    def test_nothing_happens_without_credentials(self):
+        js = agent.build_autologin_js("", "")
+        assert "if (!creds.login || !creds.password)" in js
+
+
+class TestOperatorState:
+    """«Тренинг» уходит в тот же сокет, который слушает ограничитель."""
+
+    def test_the_frame_goes_through_the_page_socket(self):
+        """Своего соединения не поднимаем: сессию АТС знает только страница, а
+        второй логин занял бы место оператора."""
+        js = agent.build_set_state_js(["setuserstate", {"onlunch": True, "lunchreasonid": 3}])
+        assert "__oktellGuardSockets" in js
+        assert "readyState === 1" in js
+        assert "new WebSocket" not in js
+
+    def test_the_training_reason_is_three(self):
+        """Справочник подпричин Oktell: 1 Тех.причина, 2 Перезвон, 3 Тренинг,
+        4 Перерыв. У «Тренинга» на табло СЗоВ свой счётчик и свой цвет."""
+        loop = AGENT_SOURCE.split("def run_agent", 1)[1]
+        assert '"lunchreasonid": 3' in loop
+
+    def test_the_hook_knows_when_a_call_is_running(self):
+        """Объявление обязано дождаться конца разговора, а знать об этом
+        мгновенно может только страница."""
+        js = agent.build_hook_js({})
+        assert "inCall: false" in js
+        assert "rule.inCall = true;" in js
+        assert "rule.inCall = false;" in js
+        assert "inCall: !!rule.inCall" in agent.build_hook_health_js(["k"])
+
+
+class TestNewsWindow:
+    """Окно объявления рисуется в странице — как плашка предупреждения."""
+
+    def _item(self):
+        return {
+            "id": 7, "title": "Правила", "body": "<p>текст</p>", "remaining_seconds": 5,
+            "quiz": [{"id": 1, "prompt": "Куда звонить?", "options": ["Туда", "Сюда"]}],
+        }
+
+    def test_the_text_comes_first_and_the_quiz_after(self):
+        """Постановка: «после нажатия „Ознакомлен“ сотрудник переходит к
+        тестированию»."""
+        js = agent.build_news_js(self._item())
+        assert "state.step === 'read' && questions.length" in js
+        assert "state.step = 'quiz'" in js
+
+    def test_the_delay_is_taken_from_the_server(self):
+        """Часы на машине оператора свои: считать «сколько прошло» нечем."""
+        js = agent.build_news_js(self._item())
+        assert '"remaining_seconds": 5' in js or "'remaining_seconds': 5" in js
+
+    def test_there_is_no_way_to_close_it(self):
+        """Объявление обязательное: «свернуть, потом прочитаю» у него нет."""
+        js = agent.build_news_js(self._item())
+        assert "закрыть" not in js.lower()
+        assert "Esc" not in js
+
+    def test_the_verdict_comes_from_the_server_not_from_the_page(self):
+        """Верных ответов у страницы нет, и права ходить на наш адрес у неё
+        тоже: нажатие забирает агент и решает сервер."""
+        js = agent.build_news_js(self._item())
+        assert "state.result = { id: data.id, answers: state.answers }" in js
+        assert "fetch(" not in js
+        assert "state.result" in agent.build_news_result_js()
+
+    def test_a_wrong_answer_sends_the_operator_back_to_the_text(self):
+        js = agent.build_news_js(self._item())
+        assert "NEWS_QUIZ_WRONG" in js
+        assert "state.step = 'read'" in js
+
+
+class TestLoopOrder:
+    """Порядок действий в цикле — то, что ломается молча."""
+
+    def _loop(self):
+        return AGENT_SOURCE.split("def run_agent", 1)[1]
+
+    def test_the_line_is_released_before_the_window_is_shown(self):
+        """Иначе между окном и сменой статуса есть щель, в которую АТС успевает
+        направить звонок — а окно АТС уже закрыто объявлением."""
+        loop = self._loop()
+        assert loop.index("training_set = browser.set_operator_state(frame)") < \
+               loop.index("if browser.show_news(item):")
+
+    def test_nothing_is_shown_during_a_call(self):
+        loop = self._loop()
+        assert 'in_call = bool(rule_state.get("inCall"))' in loop
+        assert "if state.browser.get(\"session\") and not in_call:" in loop
+
+    def test_the_status_is_restored_only_if_we_took_it(self):
+        """У того, кто к моменту объявления уже был на перерыве, статус не наш:
+        «вернуть на линию» подняло бы его с обеда."""
+        loop = self._loop()
+        assert loop.count("if training_set:") >= 1
+        assert "training_set = False" in loop
+
+    def test_a_failed_show_gives_the_line_back(self):
+        """Сняли с линии, а окно не нарисовалось — оператор остался бы без
+        звонков и без объявления."""
+        loop = self._loop()
+        assert "elif training_set:" in loop
+
+    def test_the_queue_can_be_longer_than_one(self):
+        loop = self._loop()
+        assert "next_news_check = time.time()   # очередь может быть длиннее одного" in loop
+
+
+class TestServerRules:
+    """Правила показа и подтверждения берутся у раздела «Новости»."""
+
+    def test_only_mandatory_news_reaches_the_agent(self):
+        """Необязательное — «к сведению»: снимать ради него с линии и закрывать
+        клиент АТС значило бы терять звонки на ровном месте."""
+        body = ROUTES.split("def oktell_guard_agent_news", 1)[1].split("@agent_route", 1)[0]
+        assert "if item.get('is_mandatory')" in body
+
+    def test_only_the_shown_one_is_marked(self):
+        """Отметка «показали» — это точка отсчёта задержки кнопки и запись в
+        журнал: поставить её всей очереди значит написать «открыл» про то, чего
+        человек не видел."""
+        body = ROUTES.split("def oktell_guard_agent_news", 1)[1].split("@agent_route", 1)[0]
+        assert "mark_shown(cursor, news_ids=[item['id']]" in body
+
+    def test_the_confirmation_is_not_a_second_copy_of_the_rules(self):
+        """Выдержку, ответы и право подтверждать решает та же функция, что и на
+        сайте: две копии правила про документооборот разъезжаются."""
+        body = ROUTES.split("def oktell_guard_agent_news_read", 1)[1].split("@agent_route", 1)[0]
+        assert "news_queries.confirm_read(" in body
+        assert "NEWS_TOO_EARLY" in body and "NEWS_QUIZ_WRONG" in body
+
+    def test_an_unknown_agent_gets_nothing(self):
+        for name in ("oktell_guard_agent_news", "oktell_guard_agent_news_read"):
+            body = ROUTES.split(f"def {name}", 1)[1].split("@agent_route", 1)[0]
+            assert "agent_owner(cursor)" in body
+            assert "if not owner:" in body

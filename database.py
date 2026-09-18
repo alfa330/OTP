@@ -6687,7 +6687,6 @@ class Database:
             self._init_fleet_edm_schema_tx(cursor)
             self._init_driver_mailings_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
-            self._init_oktell_client_schema_tx(cursor)
             self._init_trainings_schema_tx(cursor)
             self._init_trainer_schema_tx(cursor)
             self._init_cdr_schema_tx(cursor)
@@ -8012,63 +8011,6 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT icore_phone_schema")
-
-    def _init_oktell_client_schema_tx(self, cursor):
-        """Реестр релизов клиента Oktell — по чему он решает, обновляться ли.
-
-        Третья копия той же схемы (первая — oktell_guard_releases, вторая —
-        icore_phone_releases), и копия сознательная: у каждой программы своя
-        линия версий, свой круг тех, кому её дают, и свой флаг обязательности.
-        Общая таблица связала бы их так, что публикация одной задевала бы другую.
-
-        Варианта здесь нет, в отличие от телефона: у клиента один инсталлятор.
-        Зато обязательность есть — она решает, можно ли отложить установку до
-        паузы или ставить при следующем входе (см. update.js в oktell_client).
-
-        SAVEPOINT и порядок CREATE TABLE → CREATE INDEX — как у соседей: весь
-        _init_db идёт одной транзакцией, и падение здесь не должно ронять
-        инициализацию базы.
-        """
-        import logging
-
-        cursor.execute("SAVEPOINT oktell_client_schema")
-        try:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS oktell_client_releases (
-                    id          SERIAL PRIMARY KEY,
-                    version     VARCHAR(32) NOT NULL,
-                    filename    VARCHAR(160) NOT NULL DEFAULT '',
-                    sha256      CHAR(64) NOT NULL,
-                    size_bytes  BIGINT NOT NULL,
-                    gcs_bucket  VARCHAR(255) NOT NULL DEFAULT '',
-                    gcs_path    VARCHAR(512) NOT NULL DEFAULT '',
-                    notes       TEXT NOT NULL DEFAULT '',
-                    mandatory   BOOLEAN NOT NULL DEFAULT FALSE,
-                    is_current  BOOLEAN NOT NULL DEFAULT TRUE,
-                    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    uploaded_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                );
-            """)
-            # Одна версия — одна строка: повторная публикация той же сборки
-            # обновляет её, а не плодит дубли с разными sha256.
-            cursor.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS oktell_client_releases_version_idx
-                ON oktell_client_releases (version);
-            """)
-            # Текущая ровно одна: «две текущие» означали бы, что часть машин
-            # уедет не туда, а клиент берёт релиз без ORDER BY.
-            cursor.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS oktell_client_releases_current_idx
-                ON oktell_client_releases ((is_current)) WHERE is_current;
-            """)
-        except Exception:
-            cursor.execute("ROLLBACK TO SAVEPOINT oktell_client_schema")
-            logging.exception(
-                "Схема релизов клиента Oktell не применилась — автообновление клиента "
-                "будет недоступно, остальное приложение работает штатно"
-            )
-        else:
-            cursor.execute("RELEASE SAVEPOINT oktell_client_schema")
 
     def _init_reg_contest_schema_tx(self, cursor):
         """Конкурс «Топ по регистрациям» (данные из CRM yataxi).
@@ -29627,97 +29569,6 @@ class Database:
             row = cur.fetchone()
         return {
             "release": self._icore_phone_release_row(row) if row else None,
-            "stale_blobs": stale,
-        }
-
-    _OKTELL_CLIENT_RELEASE_COLUMNS = (
-        "id, version, filename, sha256, size_bytes, gcs_bucket, gcs_path, "
-        "notes, mandatory, is_current, uploaded_by, uploaded_at"
-    )
-
-    @staticmethod
-    def _oktell_client_release_row(row) -> dict:
-        return {
-            "id": row[0],
-            "version": row[1] or "",
-            "filename": row[2] or "",
-            "sha256": (row[3] or "").strip().lower(),
-            "size": int(row[4] or 0),
-            "gcs_bucket": row[5] or "",
-            "gcs_path": row[6] or "",
-            "notes": row[7] or "",
-            "mandatory": bool(row[8]),
-            "is_current": bool(row[9]),
-            "uploaded_by": row[10],
-            "published_at": row[11].isoformat() if row[11] else None,
-        }
-
-    def get_oktell_client_release(self):
-        """Текущий релиз клиента или None, если ещё ничего не публиковали."""
-        with self._get_cursor() as cur:
-            cur.execute(
-                f"SELECT {self._OKTELL_CLIENT_RELEASE_COLUMNS} FROM oktell_client_releases "
-                "WHERE is_current LIMIT 1")
-            row = cur.fetchone()
-        return self._oktell_client_release_row(row) if row else None
-
-    def get_oktell_client_releases(self, limit: int = 50) -> list:
-        """История публикаций: свежие сверху."""
-        limit = max(1, min(int(limit or 50), 200))
-        with self._get_cursor() as cur:
-            cur.execute(
-                f"SELECT {self._OKTELL_CLIENT_RELEASE_COLUMNS} FROM oktell_client_releases "
-                "ORDER BY uploaded_at DESC, id DESC LIMIT %s",
-                (limit,))
-            rows = cur.fetchall()
-        return [self._oktell_client_release_row(r) for r in rows]
-
-    def add_oktell_client_release(self, *, version, filename, sha256, size_bytes,
-                                  gcs_bucket, gcs_path, notes='', mandatory=False,
-                                  uploaded_by=None) -> dict:
-        """Зарегистрировать релиз и сделать его текущим.
-
-        Возвращает {'release': ..., 'stale_blobs': [(bucket, path), ...]} — как у
-        телефона: в имени объекта есть версия, поэтому файлы прошлых сборок
-        никому больше не нужны, а ссылку на них мы тут же обнуляем. Подписать
-        URL на уже удалённый объект хуже, чем не подписать вовсе.
-        """
-        version = str(version or '').strip()
-        if not version:
-            raise ValueError("Не задан номер версии")
-        sha256 = str(sha256 or '').strip().lower()
-        with self._get_cursor() as cur:
-            cur.execute(
-                "SELECT gcs_bucket, gcs_path FROM oktell_client_releases "
-                "WHERE version <> %s AND gcs_path <> ''", (version,))
-            stale = [(r[0], r[1]) for r in cur.fetchall() if r[0] and r[1]]
-            cur.execute(
-                "UPDATE oktell_client_releases SET is_current = FALSE, gcs_path = '' "
-                "WHERE version <> %s", (version,))
-            cur.execute(f"""
-                INSERT INTO oktell_client_releases (
-                    version, filename, sha256, size_bytes, gcs_bucket, gcs_path,
-                    notes, mandatory, is_current, uploaded_by, uploaded_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s,
-                        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
-                ON CONFLICT (version) DO UPDATE SET
-                    filename = EXCLUDED.filename,
-                    sha256 = EXCLUDED.sha256,
-                    size_bytes = EXCLUDED.size_bytes,
-                    gcs_bucket = EXCLUDED.gcs_bucket,
-                    gcs_path = EXCLUDED.gcs_path,
-                    notes = EXCLUDED.notes,
-                    mandatory = EXCLUDED.mandatory,
-                    is_current = TRUE,
-                    uploaded_by = EXCLUDED.uploaded_by,
-                    uploaded_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                RETURNING {self._OKTELL_CLIENT_RELEASE_COLUMNS}
-            """, (version, str(filename or '').strip(), sha256, int(size_bytes or 0),
-                  str(gcs_bucket or '').strip(), str(gcs_path or '').strip(),
-                  str(notes or '').strip(), bool(mandatory), uploaded_by))
-            row = cur.fetchone()
-        return {
-            "release": self._oktell_client_release_row(row) if row else None,
             "stale_blobs": stale,
         }
 

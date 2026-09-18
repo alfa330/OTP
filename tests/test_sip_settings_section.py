@@ -2876,49 +2876,41 @@ class OktellAccountTests(unittest.TestCase):
         self.assertIsNone(self._call([])[0])
 
 
-class OktellAccountEndpointTests(unittest.TestCase):
-    """Ручка, которой клиент Oktell меняет учётку iCORE на учётку АТС."""
+class OktellCabinetDeliveryTests(unittest.TestCase):
+    """Кому и как достаётся учётка кабинета Oktell.
+
+    Раньше её отдавала отдельная ручка портала — под отдельный клиент на
+    Electron. Клиента больше нет: всё, что он делал, перенесено в «Ограничитель
+    Перезвона», который у операторов уже стоит. Поэтому и пара от АТС уезжает
+    туда же — агентским каналом, по личному токену сотрудника.
+    """
 
     def setUp(self):
         self.source = _read(BOT_PATH)
-        self.module = source_cache.parse(self.source)
+        self.guard = (ROOT / "oktell_guard" / "routes.py").read_text(encoding="utf-8")
 
-    def _function(self, name):
-        node = next(n for n in self.module.body
-                    if isinstance(n, ast.FunctionDef) and n.name == name)
-        return ast.get_source_segment(self.source, node)
+    def test_no_portal_route_hands_out_the_cabinet_password(self):
+        """Ручка, отдающая пароль от АТС сессии портала, больше не нужна — а
+        лишняя дверь к паролю это лишняя дверь."""
+        self.assertNotIn("/api/operator/oktell_account", self.source)
+        self.assertNotIn("operator_oktell_account_endpoint", self.source)
 
-    def test_the_route_exists(self):
-        self.assertIn(
-            "@app.route('/api/operator/oktell_account', methods=['GET', 'OPTIONS'])",
-            self.source)
+    def test_the_agent_gets_it_by_a_personal_token(self):
+        """Общий токен сборки не говорит, кто за машиной: по нему чужой пароль
+        отдавать нельзя."""
+        body = self.guard.split("def oktell_guard_agent_config", 1)[1].split("@agent_route", 1)[0]
+        self.assertIn("agent_owner(cursor)", body)
+        self.assertIn("db.get_oktell_account(owner['user_id'])", body)
 
-    def test_it_answers_only_about_the_caller(self):
-        """Учётку отдаём тому, кто пришёл с токеном, и никому другому.
+    def test_an_account_without_a_password_is_not_sent(self):
+        """Пустая пара выглядела бы как «логин без пароля», и агент пытался бы
+        войти ею."""
+        body = self.guard.split("def oktell_guard_agent_config", 1)[1].split("@agent_route", 1)[0]
+        self.assertIn("if cabinet and cabinet.get('cabinet_password'):", body)
 
-        Параметра «чья учётка» у ручки нет намеренно: появись он — любой
-        залогиненный оператор читал бы пароли АТС всего колл-центра.
-        """
-        body = self._function('operator_oktell_account_endpoint')
-        self.assertIn('_get_authenticated_requester', body)
-        self.assertIn('db.get_oktell_account(requester_id)', body)
-        self.assertNotIn('target_user_id', body)
-
-    def test_a_missing_account_is_a_409_with_a_human_answer(self):
-        """Текст читает оператор на экране входа, а заводит учётку не он."""
-        body = self._function('operator_oktell_account_endpoint')
-        self.assertIn('409', body)
-        self.assertIn('Обратитесь к руководителю', body)
-
-    def test_it_does_not_ride_on_the_phone_settings_endpoint(self):
-        """Отдельной ручкой, а не полем в /api/operator/sip_settings.
-
-        Та отвечает 409-м, пока у отдела не заполнены SIP-сервер и база пароля,
-        — а у СЗоВ, ради которого всё и делается, своей строки настроек нет
-        вовсе, и клиент Oktell упирался бы в чужую незаполненность.
-        """
-        settings = self._function('operator_sip_settings_endpoint')
-        self.assertNotIn('oktell', settings)
+    def test_the_accessor_survived_the_removal(self):
+        """Сама выборка учётки осталась общей: её зовёт агентский роут."""
+        self.assertIn("def get_oktell_account", _read(DATABASE_PATH))
 
 
 class SipDepartmentGateFrontendTests(unittest.TestCase):

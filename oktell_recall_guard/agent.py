@@ -420,7 +420,13 @@ def apply_server_config(cfg: dict, remote: dict) -> dict:
     правило, аргументы браузера, период опроса. Пути, логи и токен остаются
     локальными — иначе один кривой ответ сервера сломал бы всем машинам запуск.
     """
-    allowed = ("oktell_url", "session_keys", "in_window_rule", "poll_interval_s", "dry_run", "unmanaged")
+    # cabinet — учётка кабинета АТС этого сотрудника. Приходит только по личному
+    # токену и только с сервера: в локальном конфиге её нет и быть не должно,
+    # поэтому здесь она ПЕРЕЗАПИСЫВАЕТСЯ, а не сливается — отозвали доступ,
+    # значит и в памяти агента её остаться не должно.
+    allowed = ("oktell_url", "session_keys", "in_window_rule", "poll_interval_s", "dry_run",
+               "unmanaged", "training_frame", "restore_frame", "news_poll_s")
+    cfg["cabinet"] = remote.get("cabinet") or {}
     for key in allowed:
         if key in remote:
             if isinstance(remote[key], dict) and isinstance(cfg.get(key), dict):
@@ -1369,6 +1375,9 @@ HOOK_JS_TEMPLATE = r"""
     budget: 0,          // накопленные секунды «Перезвона» с последнего звонка
     callSeen: false,    // был ли звонок после последнего накопления
     warned: false, fired: false, login: null, userid: null, seconds: 0,
+    // Идёт ли разговор ПРЯМО СЕЙЧАС. Нужно не ограничителю, а тому, что стоит
+    // поверх него: обязательное объявление обязано дождаться конца звонка.
+    inCall: false,
     lastState: null, lastCallState: null, seenStates: []
   };
 
@@ -1434,6 +1443,7 @@ HOOK_JS_TEMPLATE = r"""
 
   function onCall(payload) {
     rule.callSeen = true;
+    rule.inCall = true;
     rule.lastCallState = { state: payload.userstate, str: payload.userstatestr, at: Date.now() };
     // Разговор идёт прямо сейчас — накопленное списываем сразу, чтобы плашка
     // не выскочила посреди звонка.
@@ -1483,6 +1493,8 @@ HOOK_JS_TEMPLATE = r"""
       if (rule.seenStates.length > 20) { rule.seenStates.shift(); }
     }
     if (looksLikeCall(payload)) { onCall(payload); return; }
+    // Любой НЕ разговорный кадр про нас означает, что разговор кончился.
+    rule.inCall = false;
     if (payload.onlunch === undefined && payload.lunchreasonid === undefined) { return; }
     var isRecall = payload.onlunch === true &&
                    Number(payload.lunchreasonid) === Number(cfg.recallReasonId);
@@ -1766,6 +1778,7 @@ def build_hook_health_js(session_keys: Iterable[str]) -> str:
     session: false,
     login: rule.login || null,
     seconds: Number(rule.seconds) || 0,
+    inCall: !!rule.inCall,
     counting: rule.since !== undefined && rule.since !== null
   }};
   try {{
@@ -1912,6 +1925,302 @@ def build_banner_js(message: str, seconds: int) -> str:
 
 class CdpError(RuntimeError):
     pass
+
+
+NEWS_JS_TEMPLATE = r"""
+(function () {
+  var data = __NEWS_PAYLOAD__;
+  var ID = '__oktell_guard_news';
+  var state = window.__oktellGuardNews = window.__oktellGuardNews || {};
+  if (state.id === data.id && document.getElementById(ID)) { return true; }
+  state.id = data.id; state.result = null; state.step = 'read'; state.answers = {};
+  var old = document.getElementById(ID);
+  if (old && old.parentNode) { old.parentNode.removeChild(old); }
+
+  var root = document.createElement('div');
+  root.id = ID;
+  root.setAttribute('style', [
+    'position:fixed', 'inset:0', 'z-index:2147483647',
+    'background:rgba(10,10,12,0.82)', 'backdrop-filter:blur(3px)',
+    'display:flex', 'align-items:center', 'justify-content:center',
+    'font:15px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif'
+  ].join(';'));
+  // Клавиатура и мышь дальше окна не идут: объявление обязательное, и
+  // «свернуть, потом прочитаю» у него нет.
+  root.addEventListener('keydown', function (e) { e.stopPropagation(); }, true);
+
+  var card = document.createElement('div');
+  card.setAttribute('style', [
+    'width:min(720px,92vw)', 'max-height:88vh', 'overflow:auto',
+    'background:#fff', 'color:#1c1c1e', 'border-radius:18px',
+    'padding:28px', 'box-shadow:0 20px 60px rgba(0,0,0,.45)'
+  ].join(';'));
+
+  var badge = document.createElement('div');
+  badge.textContent = 'ОБЯЗАТЕЛЬНО К ПРОЧТЕНИЮ';
+  badge.setAttribute('style', 'display:inline-block;font:600 11.5px/1 -apple-system,Segoe UI,Arial;'
+    + 'letter-spacing:.4px;color:#007aff;background:rgba(0,122,255,.1);padding:6px 10px;border-radius:999px');
+
+  var title = document.createElement('h2');
+  title.textContent = data.title || '';
+  title.setAttribute('style', 'font:600 22px/1.25 -apple-system,Segoe UI,Arial;margin:12px 0 14px');
+
+  var body = document.createElement('div');
+  body.innerHTML = data.body || '';
+  body.setAttribute('style', 'line-height:1.55');
+
+  var quiz = document.createElement('div');
+  quiz.style.display = 'none';
+
+  var note = document.createElement('div');
+  note.setAttribute('style', 'margin-top:12px;font-size:13px;color:#6e6e73;min-height:18px');
+
+  var button = document.createElement('button');
+  button.setAttribute('style', [
+    'margin-top:16px', 'width:100%', 'padding:12px 16px', 'border:none',
+    'border-radius:12px', 'background:#007aff', 'color:#fff',
+    'font:600 15px/1 -apple-system,Segoe UI,Arial', 'cursor:pointer',
+    'font-variant-numeric:tabular-nums'
+  ].join(';'));
+
+  var back = document.createElement('button');
+  back.textContent = 'Перечитать новость';
+  back.setAttribute('style', 'margin-top:8px;width:100%;padding:8px;border:none;background:none;'
+    + 'color:#007aff;font:500 13px/1 -apple-system,Segoe UI,Arial;cursor:pointer;display:none');
+
+  card.appendChild(badge); card.appendChild(title); card.appendChild(body);
+  card.appendChild(quiz); card.appendChild(button); card.appendChild(back); card.appendChild(note);
+  root.appendChild(card);
+  (document.body || document.documentElement).appendChild(root);
+
+  var left = Number(data.remaining_seconds || 0);
+  var questions = data.quiz || [];
+
+  function answered() {
+    for (var i = 0; i < questions.length; i++) {
+      if (typeof state.answers[questions[i].id] !== 'number') { return false; }
+    }
+    return true;
+  }
+
+  function paint() {
+    if (state.step === 'read') {
+      body.style.display = ''; quiz.style.display = 'none'; back.style.display = 'none';
+      button.disabled = left > 0;
+      button.textContent = left > 0 ? ('Ознакомлен · ' + left) : 'Ознакомлен';
+    } else {
+      body.style.display = 'none'; quiz.style.display = ''; back.style.display = '';
+      button.disabled = !answered();
+      button.textContent = 'Подтвердить';
+    }
+    button.style.opacity = button.disabled ? '.45' : '1';
+  }
+
+  function drawQuiz() {
+    quiz.innerHTML = '';
+    questions.forEach(function (item, index) {
+      var box = document.createElement('div');
+      box.setAttribute('style', 'background:#f2f2f7;border-radius:14px;padding:14px;margin-bottom:10px');
+      var prompt = document.createElement('div');
+      prompt.textContent = (index + 1) + '. ' + item.prompt;
+      prompt.setAttribute('style', 'font-weight:500;margin-bottom:8px');
+      box.appendChild(prompt);
+      (item.options || []).forEach(function (option, optionIndex) {
+        var label = document.createElement('label');
+        label.setAttribute('style', 'display:flex;gap:8px;align-items:center;padding:8px 10px;'
+          + 'background:#fff;border:1px solid #d1d1d6;border-radius:10px;margin-bottom:6px;cursor:pointer');
+        var radio = document.createElement('input');
+        radio.type = 'radio'; radio.name = 'q' + item.id;
+        radio.addEventListener('change', function () {
+          state.answers[item.id] = optionIndex;
+          paint();
+        });
+        var text = document.createElement('span');
+        text.textContent = option;
+        label.appendChild(radio); label.appendChild(text);
+        box.appendChild(label);
+      });
+      quiz.appendChild(box);
+    });
+  }
+
+  drawQuiz();
+  paint();
+
+  if (left > 0) {
+    var handle = setInterval(function () {
+      left = Math.max(0, left - 1);
+      paint();
+      if (left === 0) { clearInterval(handle); }
+    }, 1000);
+  }
+
+  back.addEventListener('click', function () { state.step = 'read'; paint(); });
+
+  button.addEventListener('click', function () {
+    if (button.disabled) { return; }
+    // Первый шаг ничего не подтверждает: он открывает тест. Отправлять
+    // подтверждение с пустыми ответами значило бы получить отказ сервера.
+    if (state.step === 'read' && questions.length) { state.step = 'quiz'; paint(); return; }
+    button.disabled = true;
+    button.textContent = 'Отправляем…';
+    state.result = { id: data.id, answers: state.answers };
+  });
+
+  // Сервер ответил отказом — показываем его словами, своего мнения не имеем.
+  state.feedback = function (payload) {
+    note.textContent = payload && payload.error ? payload.error : '';
+    note.style.color = '#d70015';
+    if (payload && payload.remaining_seconds) { left = Number(payload.remaining_seconds); }
+    if (payload && payload.code === 'NEWS_QUIZ_WRONG') {
+      state.answers = {}; drawQuiz(); state.step = 'read';
+    }
+    state.result = null;
+    paint();
+  };
+  return true;
+})();
+""".strip()
+
+
+def build_news_js(item: dict) -> str:
+    """Окно обязательного объявления поверх клиента АТС.
+
+    Рисуем в самой странице — там же, где живёт плашка предупреждения: системное
+    окно оператор в полноэкранном клиенте не увидит, а наш процесс своего окна
+    не имеет и заводить его ради этого незачем.
+    """
+    payload = json.dumps(
+        {
+            "id": item.get("id"),
+            "title": item.get("title") or "",
+            "body": item.get("body") or "",
+            "remaining_seconds": int(item.get("remaining_seconds") or 0),
+            "quiz": [
+                {"id": q.get("id"), "prompt": q.get("prompt") or "", "options": q.get("options") or []}
+                for q in (item.get("quiz") or [])
+            ],
+        },
+        ensure_ascii=False,
+    )
+    return NEWS_JS_TEMPLATE.replace("__NEWS_PAYLOAD__", payload)
+
+
+def build_news_result_js() -> str:
+    """Забрать нажатие «Ознакомлен» из страницы и очистить его.
+
+    Запрос на сервер делает агент, а не страница: у неё нет ни токена, ни права
+    ходить на наш адрес, и выдавать ей то и другое ради одной кнопки незачем.
+    """
+    return """
+(function () {
+  var state = window.__oktellGuardNews;
+  if (!state || !state.result) { return null; }
+  var out = state.result;
+  state.result = null;
+  return out;
+})();
+""".strip()
+
+
+def build_news_feedback_js(payload: dict) -> str:
+    data = json.dumps(payload or {}, ensure_ascii=False)
+    return f"""
+(function () {{
+  var state = window.__oktellGuardNews;
+  if (state && typeof state.feedback === 'function') {{ state.feedback({data}); return true; }}
+  return false;
+}})();
+""".strip()
+
+
+def build_news_close_js() -> str:
+    return """
+(function () {
+  var node = document.getElementById('__oktell_guard_news');
+  if (node && node.parentNode) { node.parentNode.removeChild(node); }
+  if (window.__oktellGuardNews) { window.__oktellGuardNews.id = null; }
+  return true;
+})();
+""".strip()
+
+
+def build_autologin_js(login: str, password: str) -> str:
+    """Подставить учётку кабинета в форму входа Oktell и нажать «Войти».
+
+    Оператор вводит только логин и пароль iCORE — при скачивании файла сервер
+    уже знает, кто он, поэтому пару от АТС агент получает вместе с настройками
+    и вписывает за него.
+
+    Нативный сеттер плюс события input/change: у формы на Angular простое
+    присваивание value не будит слушателей, и она отправляла бы пустые поля,
+    которые на экране выглядят заполненными.
+    """
+    payload = json.dumps({"login": str(login or ""), "password": str(password or "")},
+                         ensure_ascii=False)
+    return rf"""
+(function () {{
+  var creds = {payload};
+  if (!creds.login || !creds.password) {{ return {{ok: false, reason: 'нет учётки'}}; }}
+  if (window.__oktellGuardAutologinAt && (Date.now() - window.__oktellGuardAutologinAt) < 15000) {{
+    // Форма могла не успеть перерисоваться — второй заход подряд только мешает.
+    return {{ok: false, reason: 'только что пробовали'}};
+  }}
+  function visible(node) {{ return node && node.offsetParent !== null; }}
+  var pass = null, list = document.querySelectorAll('input[type="password"]');
+  for (var i = 0; i < list.length; i++) {{ if (visible(list[i])) {{ pass = list[i]; break; }} }}
+  if (!pass) {{ return {{ok: false, reason: 'формы входа нет'}}; }}
+  var form = pass.form || document;
+  var user = null, texts = form.querySelectorAll('input');
+  for (var j = 0; j < texts.length; j++) {{
+    var node = texts[j];
+    if (node === pass || !visible(node)) {{ continue; }}
+    var type = (node.getAttribute('type') || 'text').toLowerCase();
+    if (type === 'text' || type === 'email' || type === 'tel' || !type) {{ user = node; break; }}
+  }}
+  if (!user) {{ return {{ok: false, reason: 'поля логина нет'}}; }}
+  function put(node, value) {{
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(node, value);
+    node.dispatchEvent(new Event('input', {{bubbles: true}}));
+    node.dispatchEvent(new Event('change', {{bubbles: true}}));
+  }}
+  try {{
+    put(user, creds.login);
+    put(pass, creds.password);
+  }} catch (e) {{ return {{ok: false, reason: String(e)}}; }}
+  window.__oktellGuardAutologinAt = Date.now();
+  var submit = null;
+  var buttons = (form.querySelectorAll ? form : document).querySelectorAll('button, input[type="submit"]');
+  for (var k = 0; k < buttons.length; k++) {{ if (visible(buttons[k])) {{ submit = buttons[k]; break; }} }}
+  if (submit) {{ submit.click(); return {{ok: true, how: 'click'}}; }}
+  if (form && form.submit) {{ try {{ form.submit(); return {{ok: true, how: 'submit'}}; }} catch (e) {{}} }}
+  return {{ok: true, how: 'filled'}};
+}})();
+""".strip()
+
+
+def build_set_state_js(frame) -> str:
+    """Отправить кадр смены статуса в живой сокет клиента.
+
+    Сокеты уже сохранены хуком (`__oktellGuardSockets`) — тем же приёмом уходит
+    штатный `logout`. Своего соединения не поднимаем: сессию АТС знает только
+    страница, а второй логин занял бы место оператора.
+    """
+    payload = json.dumps(frame, ensure_ascii=False)
+    return rf"""
+(function () {{
+  var frame = {payload};
+  var socks = window.__oktellGuardSockets || [];
+  var text = (typeof frame === 'string') ? frame : JSON.stringify(frame);
+  for (var i = socks.length - 1; i >= 0; i--) {{
+    try {{
+      if (socks[i] && socks[i].readyState === 1) {{ socks[i].send(text); return {{ok: true}}; }}
+    }} catch (e) {{}}
+  }}
+  return {{ok: false, reason: 'живого сокета нет'}};
+}})();
+""".strip()
 
 
 def pick_oktell_target(targets: list[dict], origin: str) -> Optional[dict]:
@@ -2442,6 +2751,77 @@ class ManagedBrowser:
             self.close_page()
             return False
 
+    def autologin(self, login: str, password: str) -> dict:
+        """Вписать учётку кабинета в форму входа Oktell."""
+        page = self.page()
+        if not page:
+            return {"ok": False, "reason": "страницы нет"}
+        try:
+            result = page.evaluate(build_autologin_js(login, password))
+        except Exception as exc:  # noqa: BLE001
+            logging.debug("Подстановка учётки не удалась", exc_info=True)
+            self.close_page()
+            return {"ok": False, "reason": str(exc)}
+        return result if isinstance(result, dict) else {"ok": False, "reason": "нет ответа"}
+
+    def set_operator_state(self, frame) -> bool:
+        """Отправить кадр смены статуса в живой сокет клиента."""
+        page = self.page()
+        if not page or not frame:
+            return False
+        try:
+            result = page.evaluate(build_set_state_js(frame))
+        except Exception:  # noqa: BLE001
+            logging.debug("Кадр статуса не отправлен", exc_info=True)
+            return False
+        return bool(isinstance(result, dict) and result.get("ok"))
+
+    def show_news(self, item: dict) -> bool:
+        """Показать обязательное объявление поверх клиента."""
+        page = self.page()
+        if not page:
+            return False
+        try:
+            # Окно разворачиваем, но фокус не крадём: разговор уже кончился, а
+            # выдёргивать окно поверх чужой работы всё равно незачем.
+            self.ensure_window_visible(bring_to_front=False)
+            page.evaluate(build_news_js(item))
+            return True
+        except Exception:  # noqa: BLE001
+            logging.debug("Объявление не показано", exc_info=True)
+            self.close_page()
+            return False
+
+    def news_result(self) -> Optional[dict]:
+        """Нажатие «Ознакомлен», если оно было."""
+        page = self.page()
+        if not page:
+            return None
+        try:
+            data = page.evaluate(build_news_result_js())
+        except Exception:  # noqa: BLE001
+            logging.debug("Ответ объявления не прочитан", exc_info=True)
+            return None
+        return data if isinstance(data, dict) else None
+
+    def news_feedback(self, payload: dict) -> None:
+        page = self.page()
+        if not page:
+            return
+        try:
+            page.evaluate(build_news_feedback_js(payload))
+        except Exception:  # noqa: BLE001
+            logging.debug("Отказ сервера не показан", exc_info=True)
+
+    def close_news(self) -> None:
+        page = self.page()
+        if not page:
+            return
+        try:
+            page.evaluate(build_news_close_js())
+        except Exception:  # noqa: BLE001
+            logging.debug("Окно объявления не закрыто", exc_info=True)
+
     def logout(self) -> dict:
         """Настоящий разлогин: WS-logout → снос сессии → чистка origin → reload.
 
@@ -2658,6 +3038,35 @@ class ServerLink:
         response.raise_for_status()
         return True
 
+    def news(self) -> Optional[dict]:
+        """Что показать этому оператору. None — сервер недоступен."""
+        url = self._url("news_path", "/api/oktell_guard/news")
+        try:
+            response = self._session.get(url, timeout=self.timeout, verify=self.verify)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001
+            logging.debug("Объявления не получены", exc_info=True)
+            return None
+
+    def news_read(self, news_id: int, answers: dict) -> dict:
+        """Подтверждение. Решение принимает сервер, мы только передаём ответ."""
+        url = f"{self.base}/api/oktell_guard/news/{int(news_id)}/read"
+        try:
+            response = self._session.post(url, json={"answers": answers or {}},
+                                          timeout=self.timeout, verify=self.verify)
+            payload = {}
+            try:
+                payload = response.json() or {}
+            except Exception:  # noqa: BLE001
+                payload = {}
+            payload["ok"] = response.status_code == 200
+            return payload
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Подтверждение не доставлено: %s", exc)
+            return {"ok": False, "error": "Нет связи с iCORE — попробуйте ещё раз"}
+
     def ack(self, payload: dict) -> None:
         url = self._url("ack_path", "/api/oktell_guard/ack")
         try:
@@ -2740,6 +3149,12 @@ def run_agent(cfg: dict) -> int:
     # Сколько кругов подряд не удалось поднять сторожа и сколько ещё пропустить.
     watchdog_failures = 0
     watchdog_skip = 0
+    # Надстройка над ограничителем: вход по учётке iCORE и обязательные
+    # объявления. Живут в том же цикле — своего процесса им не нужно.
+    news_every_s = max(30.0, float(cfg.get("news_poll_s", 60)))
+    next_news_check = time.time()
+    active_news: Optional[dict] = None     # показанное объявление, ждём подтверждения
+    training_set = False                   # это мы сняли оператора с линии
 
     def rule_print(current: dict) -> str:
         """Отпечаток того, что реально уедет в окно: правило плюс обкатка."""
@@ -2837,6 +3252,64 @@ def run_agent(cfg: dict) -> int:
                                 for item in pending]
                         browser.drop_violations(keys)
                         logging.info("Отправлено нарушений: %d", len(pending))
+
+                # ── Вход по учётке iCORE ──────────────────────────────────
+                # Оператор ввёл логин и пароль iCORE ещё при скачивании файла —
+                # больше от него ничего не требуется: пару от кабинета АТС
+                # сервер отдал вместе с настройками, и вписывает её агент.
+                cabinet = cfg.get("cabinet") or {}
+                if state.browser.get("login_form") and cabinet.get("login"):
+                    filled = browser.autologin(cabinet.get("login"), cabinet.get("password"))
+                    if filled.get("ok"):
+                        logging.info("Учётка кабинета подставлена в форму входа")
+                    else:
+                        logging.debug("Подстановка не выполнена: %s", filled.get("reason"))
+
+                # ── Обязательные объявления ───────────────────────────────
+                rule_state = state.browser.get("rule") or {}
+                in_call = bool(rule_state.get("inCall"))
+                if active_news is None and time.time() >= next_news_check:
+                    next_news_check = time.time() + news_every_s
+                    if state.browser.get("session") and not in_call:
+                        answer = link.news() or {}
+                        item = answer.get("item")
+                        if item:
+                            # Порядок именно такой: сначала снять с линии, потом
+                            # показать. Иначе между окном и сменой статуса есть
+                            # щель, в которую АТС успевает направить звонок.
+                            frame = cfg.get("training_frame") or [
+                                "setuserstate", {"onlunch": True, "lunchreasonid": 3}]
+                            training_set = browser.set_operator_state(frame)
+                            if not training_set:
+                                logging.warning(
+                                    "Снять с линии не вышло — объявление покажем, "
+                                    "но звонок может прийти во время чтения")
+                            if browser.show_news(item):
+                                active_news = item
+                                logging.info("Показано объявление #%s", item.get("id"))
+                            elif training_set:
+                                browser.set_operator_state(
+                                    cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
+                                training_set = False
+
+                if active_news is not None:
+                    pressed = browser.news_result()
+                    if pressed:
+                        verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {})
+                        if verdict.get("ok"):
+                            browser.close_news()
+                            # Возвращаем статус только если сами его и забрали:
+                            # у того, кто к моменту объявления уже был на
+                            # перерыве, статус не наш.
+                            if training_set:
+                                browser.set_operator_state(
+                                    cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
+                                training_set = False
+                            logging.info("Объявление #%s подтверждено", pressed.get("id"))
+                            active_news = None
+                            next_news_check = time.time()   # очередь может быть длиннее одного
+                        else:
+                            browser.news_feedback(verdict)
 
                 if data:
                     server_interval = data.get("poll_interval_s")

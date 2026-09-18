@@ -232,7 +232,6 @@ const DepartmentsView = lazyWithRetry(() => import('./components/departments/Dep
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
 const SipSettingsView = lazyWithRetry(() => import('./components/sip/SipSettingsView'));
 const OktellGuardView = lazyWithRetry(() => import('./components/oktell_guard/OktellGuardView'));
-const OktellClientTestView = lazyWithRetry(() => import('./components/oktell_client/OktellClientTestView'));
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
@@ -442,8 +441,6 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // Телефония и программы
     sip_settings: ['op', 'tez'],
     oktell_guard: ['szov'],
-    // Пилот единой программы «Oktell + вход по iCORE». Пока СЗоВ: линия там.
-    icore_oktell_test: ['szov'],
     /* ПУСТОЙ список — не «забыли заполнить», а «раздел не про отдел».
        «Провайдер ЭДО» и «Рассылки» работают с водителями таксопарков через
        Fleet: к работе любого из наших отделов они не относятся, и при
@@ -44728,7 +44725,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     // путь, он ведёт на ?view=oktell_guard, и новая вкладка молча
                     // уезжала в раздел по умолчанию.
                     (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
-                    (requestedViewFromUrl !== 'icore_oktell_test' || canDownloadOktellAgent) &&
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
                     // «Оплата счетов»: диплинк из Telegram ведёт на ?view=payments&request=<id>.
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
@@ -50196,8 +50192,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
-                // Пилот «Тест iCORE/Oktell» — круг тот же, что у «Скачать Oktell».
-                if (view === 'icore_oktell_test' && canDownloadOktellAgent) return;
                 // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
                 if (view === 'fleet_edm' && canAccessFleetEdm) return;
                 // «Рассылки» — сообщения водителям, периметр именной, вне allowlist отдела.
@@ -51681,21 +51675,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </li>
                                                 </SidebarDeptScope>
                                             )}
-                                            {/* Пилот: Oktell и вход в него одной программой.
-                                                Пункт обязан стоять в ОБЕИХ ветках меню —
-                                                иначе раздел открывается только по адресу. */}
-                                            {canDownloadOktellAgent && (
-                                                <SidebarDeptScope section="icore_oktell_test" activeCode={activeDeptCode}>
-                                                    <li>
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'icore_oktell_test')}
-                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'icore_oktell_test' ? 'bg-blue-700' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-desktop"></FaIcon> <span className="sidebar-text">Тест iCORE/Oktell</span>
-                                                        </button>
-                                                    </li>
-                                                </SidebarDeptScope>
-                                            )}
                                             {canAccessOpWallboardSection && (
                                                 <SidebarDeptScope section="op_wallboard" activeCode={activeDeptCode}>
                                                     <li>
@@ -51954,16 +51933,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {canDownloadOktellAgent && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'icore_oktell_test')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'icore_oktell_test' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-desktop"></FaIcon> <span className="sidebar-text">Тест iCORE/Oktell</span>
                                                 </button>
                                             </li>
                                             )}
@@ -55038,16 +55007,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
-                                />
-                            </Suspense>
-                        ))}
-                        {/* Пилот единой программы: Oktell и вход в него — одно целое */}
-                        {( view === "icore_oktell_test" && canDownloadOktellAgent && (
-                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
-                                <OktellClientTestView
-                                    apiBaseUrl={API_BASE_URL}
-                                    withAccessTokenHeader={withAccessTokenHeader}
-                                    showToast={showToast}
                                 />
                             </Suspense>
                         ))}

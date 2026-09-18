@@ -150,6 +150,24 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             logging.exception("Ограничитель Перезвона: не удалось проверить личный токен")
             return False
 
+    def agent_owner(cursor):
+        """Сотрудник, которому выдан этот агент. None — пришли общим токеном.
+
+        Личный токен лежит в имени скачанного файла, поэтому сервер знает, кто
+        за машиной, ЕЩЁ ДО входа в Oktell. Именно на этом держится всё, что
+        добавлено поверх ограничителя: подставить учётку кабинета и показать
+        объявление можно только тому, кого мы опознали.
+        """
+        provided = (request.headers.get('X-Agent-Token') or '').strip()
+        if not provided:
+            return None
+        digest = hashlib.sha256(provided.encode('utf-8')).hexdigest()
+        try:
+            return queries.user_by_token(cursor, digest)
+        except Exception:
+            logging.exception("Ограничитель Перезвона: не удалось опознать агента")
+            return None
+
     def agent_route(rule, methods=('GET',), public=False):
         """public=True — ручка без токена.
 
@@ -270,14 +288,108 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
 
     @agent_route('/config')
     def oktell_guard_agent_config():
-        """Настройки для конкретного сотрудника: порог персональный, если задан."""
+        """Настройки для конкретного сотрудника: порог персональный, если задан.
+
+        Здесь же уезжает учётка кабинета Oktell — та, что заводят в «Настройках
+        SIP». Оператор её не вводит и не знает: он скачал файл и запустил, а
+        логин с паролем АТС подставляет агент. Отдаём ТОЛЬКО по личному токену:
+        общий токен сборки не говорит, кто за машиной, и отдавать по нему чужой
+        пароль нельзя.
+        """
         sip = (request.args.get('login') or request.args.get('sip') or '').strip()
         with db._get_cursor() as cursor:
             settings = queries.get_settings(cursor)
             personal = queries.personal_rule_by_sip(cursor, sip) if sip else None
+            owner = agent_owner(cursor)
+            cabinet = db.get_oktell_account(owner['user_id']) if owner else None
         payload = queries.agent_config_payload(settings, personal)
         payload['known_operator'] = bool(personal)
+        # Пароль кабинета — единственное секретное в этом ответе, поэтому ключа
+        # просто нет, когда учётку не завели: пустая пара выглядела бы как
+        # «логин без пароля» и агент пытался бы войти ею.
+        if cabinet and cabinet.get('cabinet_password'):
+            payload['cabinet'] = {
+                'login': cabinet.get('cabinet_login') or '',
+                'password': cabinet.get('cabinet_password') or '',
+            }
         return jsonify(payload)
+
+    @agent_route('/news')
+    def oktell_guard_agent_news():
+        """Обязательное объявление, которое надо показать этому оператору.
+
+        Берём его у раздела «Новости» тем же кодом, что и окно на сайте
+        (news.queries), — вторая копия правил адресата разъехалась бы с первой,
+        и агент показывал бы не тем.
+
+        ТОЛЬКО обязательные: необязательное объявление — «к сведению», его
+        человек прочитает в портале. Снимать ради него оператора с линии и
+        закрывать ему клиент АТС значило бы терять звонки на ровном месте.
+
+        Отметку «показали» ставим здесь же и ТОЛЬКО тому объявлению, которое
+        отдаём: она же точка отсчёта задержки кнопки, и поставить её всей
+        очереди значило бы написать «открыл» про то, чего человек не видел.
+        """
+        from news import queries as news_queries
+
+        with db._get_cursor() as cursor:
+            owner = agent_owner(cursor)
+            if not owner:
+                # Общий токен сборки не говорит, кто за машиной. Не ошибка:
+                # агент просто не показывает ничего.
+                return jsonify({"item": None, "known_operator": False})
+            viewer = news_queries.load_viewer_context(cursor, owner['user_id'])
+            if not viewer:
+                return jsonify({"item": None, "known_operator": False})
+            items = news_queries.pending_for_user(
+                cursor, user_id=viewer['user_id'], otp_role=viewer['otp_role'],
+                subjects=viewer['subjects'], with_photos=False,
+                with_quiz=True, with_pass=True)
+            mandatory = [item for item in items if item.get('is_mandatory')]
+            if not mandatory:
+                return jsonify({"item": None, "known_operator": True})
+            item = mandatory[0]
+            news_queries.mark_shown(cursor, news_ids=[item['id']], user_id=viewer['user_id'])
+        # Кадры объявления агент не показывает: окно рисуется внутри страницы
+        # АТС, а подписанные ссылки живут час и до показа успели бы протухнуть.
+        item.pop('photos', None)
+        return jsonify({"item": item, "known_operator": True})
+
+    @agent_route('/news/<int:news_id>/read', methods=('POST',))
+    def oktell_guard_agent_news_read(news_id):
+        """«Ознакомлен» из окна агента. Решает всё тот же сервер, что и на сайте.
+
+        Выдержку кнопки, верность ответов и право подтверждать именно это
+        объявление проверяет news.queries.confirm_read — та же функция, что и у
+        портала. Своей проверки здесь нет намеренно: две копии правила
+        разъезжаются, а это правило про документооборот.
+        """
+        from news import queries as news_queries
+
+        payload = request.get_json(silent=True) or {}
+        with db._get_cursor() as cursor:
+            owner = agent_owner(cursor)
+            if not owner:
+                return jsonify({"error": "Агент не опознан"}), 403
+            viewer = news_queries.load_viewer_context(cursor, owner['user_id'])
+            if not viewer:
+                return jsonify({"error": "Сотрудник не найден"}), 404
+            status, detail = news_queries.confirm_read(
+                cursor, news_id=news_id, user_id=viewer['user_id'],
+                otp_role=viewer['otp_role'], subjects=viewer['subjects'],
+                answers=payload.get('answers'), with_quiz=True, with_pass=True)
+        if status == 'not_found':
+            return jsonify({"error": "Новость не найдена"}), 404
+        if status == 'too_early':
+            return jsonify({"error": "Кнопка станет активной чуть позже",
+                            "code": "NEWS_TOO_EARLY", "remaining_seconds": detail}), 409
+        if status == 'quiz_wrong':
+            return jsonify({"error": "Есть неверные ответы — перечитайте новость",
+                            "code": "NEWS_QUIZ_WRONG"}), 409
+        if status == 'trainer_pending':
+            return jsonify({"error": "Сначала пройдите тренажёр",
+                            "code": "NEWS_TRAINER_PENDING"}), 409
+        return jsonify({"status": "ok"})
 
     @agent_route('/version', public=True)
     def oktell_guard_agent_version():
