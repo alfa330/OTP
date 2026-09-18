@@ -30,6 +30,7 @@ from . import access as news_access
 from . import photos as news_photos
 from . import queries
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
+                     channel_ready as schema_channel_ready,
                      pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
                      quiz_ready as schema_quiz_ready, schema_is_ready,
@@ -92,6 +93,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             _quiz_table['ready'] = schema_quiz_ready(cursor)
         return _quiz_table['ready']
 
+    # Канал доставки (решение владельца 18.09.2026) — тем же приёмом: без
+    # колонки объявление уходит в портал, как до задачи.
+    _channel_column = {'ready': False}
+
+    def _channel_ready(cursor):
+        if not _channel_column['ready']:
+            _channel_column['ready'] = schema_channel_ready(cursor)
+        return _channel_column['ready']
+
     # Колонки тренажёра и обязательности прохождения (задача #342) — тем же
     # приёмом: без них тест обязателен, как до задачи, а тренажёров нет.
     _pass_columns = {'ready': False}
@@ -145,10 +155,53 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return None
         return queries.space_departments(cursor, space_id) or None
 
+    def _channels_for_space(cursor, space_id):
+        """Какие каналы предлагать в этом пространстве. Всегда хотя бы портал.
+
+        Ответ считается по ОТДЕЛАМ пространства: программа «Ограничитель
+        Перезвона» стоит только у СЗоВ, и в «Тез» выбирать не из чего
+        (access.channels_for_departments). Список уходит форме и им же
+        проверяется сохранение: правило, живущее только во фронте, держится до
+        первого запроса мимо него.
+        """
+        if not _channel_ready(cursor):
+            return [news_access.DEFAULT_CHANNEL]
+        departments = _space_departments(cursor, space_id)
+        if departments is None:
+            # Пространство не назвали (старый бандл) или граница вики не
+            # развёрнута: про отделы сказать нечего — остаётся портал.
+            return [news_access.DEFAULT_CHANNEL]
+        return news_access.channels_for_departments(
+            queries.department_codes(cursor, departments))
+
+    def _channel_from_request(cursor, payload, space_id, post=None):
+        """(канал, отказ) из тела запроса.
+
+        Ключа нет — прежний канал карточки или умолчание: правка заголовка не
+        должна переносить объявление в другое место.
+        """
+        fallback = (post or {}).get('channel') or news_access.DEFAULT_CHANNEL
+        if 'channel' not in payload:
+            return fallback, None
+        channel = news_access.normalize_channel(payload.get('channel'), default=fallback)
+        if channel != news_access.DEFAULT_CHANNEL and not _channel_ready(cursor):
+            # Прислали Oktell, а колонки нет: молча положить в портал нельзя —
+            # автор отправил бы объявление не туда, куда собирался.
+            return None, (jsonify({
+                "error": "Выбор канала ещё разворачивается — сохраните без него "
+                         "или загляните позже",
+                "code": "NEWS_CHANNEL_NOT_READY"}), 503)
+        if channel not in _channels_for_space(cursor, space_id):
+            return None, (jsonify({
+                "error": "В этом пространстве объявление уходит только в портал",
+                "code": "NEWS_CHANNEL_UNAVAILABLE"}), 400)
+        return channel, None
+
     def _get_post(cursor, post_id):
-        """Карточка с колонками #342 и пространством, когда они развёрнуты."""
+        """Карточка с колонками #342, пространством и каналом, когда они есть."""
         return queries.get_post(cursor, post_id, with_pass=_pass_ready(cursor),
-                                with_space=_space_ready(cursor))
+                                with_space=_space_ready(cursor),
+                                with_channel=_channel_ready(cursor))
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -465,7 +518,11 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # показывают всё, что адресовано ЕМУ. Границу здесь держит не
             # вкладка, а сама новость — объявление чужой компании под правило
             # «все операторы» больше не попадает (access.SPACE_MATCH_TEMPLATE).
-            with_space=_space_ready(cursor))
+            with_space=_space_ready(cursor),
+            # ТОЛЬКО объявления портала: то, что автор отправил в Oktell,
+            # показывает программа поверх клиента АТС, и второе окно здесь
+            # означало бы два подтверждения одной новости.
+            channel=(news_access.DEFAULT_CHANNEL if _channel_ready(cursor) else None))
         if with_photos:
             # Подписи берутся из процессного кэша и базу не трогают: обращений к
             # ней у этого роута столько же, сколько было до фотографий.
@@ -595,9 +652,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # ими так же, как у выдачи доступа в вике: предлагать в «Тез» отдел
         # СЗоВ значит показывать чужую оргструктуру и обещать правило, которое
         # сервер отвергнет (access.audience_refusal).
-        space_departments = _space_departments(cursor, _request_space(cursor))
+        space_id = _request_space(cursor)
+        space_departments = _space_departments(cursor, space_id)
         return jsonify({
             "can_publish": True,
+            # Куда можно отправить объявление из ЭТОГО пространства. Один
+            # вариант — форма про выбор не спрашивает вовсе.
+            "channels": _channels_for_space(cursor, space_id),
             "ceiling": ctx['ceiling'],
             "bounded": ctx['departments'] is not None,
             "default_confirm_delay_seconds": DEFAULT_CONFIRM_DELAY_SECONDS,
@@ -623,6 +684,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             viewer_level=news_access.effective_role_level(ctx['otp_role']),
             departments=ctx['departments'], status=status,
             limit=limit, offset=offset, with_photos=_photos_ready(cursor),
+            with_channel=_channel_ready(cursor),
             with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
             with_space=_space_ready(cursor), space_id=_request_space(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
@@ -665,11 +727,17 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         passes, pass_refusal = _passes_from_request(cursor, payload)
         if pass_refusal:
             return pass_refusal
+        # Канал — тоже ДО первой записи: отказ после create_post оставил бы в
+        # базе черновик, который автор считает отменённым.
+        channel, channel_refusal = _channel_from_request(cursor, payload, space_id)
+        if channel_refusal:
+            return channel_refusal
 
         post_id = queries.create_post(
             cursor, title=title, body=body, author_id=ctx['user_id'],
             author_department_id=ctx['department_id'],
             space_id=space_id, with_space=_space_ready(cursor),
+            channel=channel, with_channel=_channel_ready(cursor),
             # С ОБЯЗАТЕЛЬНЫМ прохождением — всегда обязательна: у необязательной
             # крестик подтверждал бы прочтение без единого ответа. Необязательный
             # тест или тренажёр (#342) обязательность не навязывают.
@@ -766,6 +834,21 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                          "не меняются — опубликуйте новую новость",
                 "code": "NEWS_PASS_LOCKED",
             }), 409
+        # Канал ВЫПУЩЕННОЙ новости не меняется — по той же причине, что тест и
+        # обязательность: объявление уже показано людям там, куда его отправили,
+        # и половина отдела подтвердила его в другом окне. Нужен другой канал —
+        # публикуется новая новость.
+        channel, channel_refusal = _channel_from_request(
+            cursor, payload, post.get('space_id'), post)
+        if channel_refusal:
+            return channel_refusal
+        if post['published_at'] and channel != (post.get('channel')
+                                                or news_access.DEFAULT_CHANNEL):
+            return jsonify({
+                "error": "Канал опубликованной новости не меняется — "
+                         "опубликуйте новую новость",
+                "code": "NEWS_CHANNEL_LOCKED",
+            }), 409
         # Принесли тест или тренажёр с обязательным прохождением — новость
         # становится обязательной сама, как и при создании.
         if news_access.must_pass(
@@ -798,7 +881,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             confirm_delay_seconds=news_access.normalize_delay(
                 payload.get('confirm_delay_seconds', post['confirm_delay_seconds'])),
             expires_at=_timestamp_or_none(
-                payload.get('expires_at', post['expires_at'])))
+                payload.get('expires_at', post['expires_at'])),
+            channel=channel, with_channel=_channel_ready(cursor))
         if 'audience' in payload:
             queries.set_audience(cursor, post_id=post_id, rules=rules,
                                  audience_max_role_level=ctx['ceiling'])

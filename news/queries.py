@@ -229,13 +229,31 @@ def _space_filter(with_space):
         """
 
 
+def _channel_filter(channel):
+    """Условие «объявление этого канала» для выборок с `p` = news_posts.
+
+    Пустая строка, когда канал не назвали: колонки ещё нет (schema.channel_ready)
+    или спрашивают всё сразу. Требует параметра %(channel)s.
+    """
+    if not channel:
+        return ''
+    return 'AND p.channel = %(channel)s'
+
+
 def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
-                     with_quiz=False, with_pass=False, with_space=False):
+                     with_quiz=False, with_pass=False, with_space=False,
+                     channel=None):
     """Новости, которые этому человеку сейчас показывают. Свои — не показываем.
 
     Порядок: обязательные раньше необязательных, внутри — по публикации. Автор
     своей новости в выдачу не попадает: он её и написал, а окно, которое
     невозможно закрыть, у самого себя — это брак, а не контроль.
+
+    channel — куда спрашивают: 'icore' спрашивает окно портала, 'oktell' —
+    программа поверх клиента АТС (oktell_guard/routes.py). None — колонки канала
+    ещё нет (schema.channel_ready), и очередь собирается как до неё: одна на
+    оба места. Спрашивающий обязан назвать себя сам — выбери мы канал ЗДЕСЬ по
+    умолчанию, объявление для АТС молча уехало бы в портал.
 
     with_photos=False — таблица кадров ещё не развёрнута (см. schema.photos_ready).
     Флагом, а не проверкой внутри: этот запрос дёргает каждый вошедший в портал,
@@ -250,6 +268,7 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
     """
     params = news_access.audience_params(subjects, user_id, otp_role)
     params.update(_role_params())
+    params['channel'] = channel
     # Автора, его должность, отдел и время выпуска окно больше НЕ показывает
     # (решение владельца 01.09.2026), поэтому их здесь и не собираем: это два
     # LEFT JOIN на запросе, который дёргает каждый вошедший в портал и каждая
@@ -275,6 +294,7 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
                 OR p.published_at > @NOW@ - INTERVAL '@HORIZON@ days')
            AND p.author_id IS DISTINCT FROM %(user_id)s
            AND r.confirmed_at IS NULL
+           """ + _channel_filter(channel) + """
            AND
         """ + viewer_match(with_space) + """
          ORDER BY p.is_mandatory DESC, p.published_at, p.id
@@ -815,7 +835,7 @@ def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                limit=50, offset=0, with_photos=False, with_quiz=False, with_pass=False,
-               with_space=False, space_id=None):
+               with_space=False, space_id=None, with_channel=False):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
@@ -841,7 +861,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                p.author_id, u.role AS author_role,
                {photo_count} AS photo_count,
                {quiz_count} AS quiz_count,
-               {trainer_key} AS trainer_key
+               {trainer_key} AS trainer_key,
+               {channel} AS channel
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -869,6 +890,10 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
             quiz_count=("(SELECT COUNT(*) FROM news_quiz_questions z WHERE z.news_id = p.id)"
                         if with_quiz else "0"),
             trainer_key=("p.trainer_key" if with_pass else "NULL::varchar"),
+            # Канал — в строке списка: редактор должен видеть, куда ушло
+            # объявление, не открывая карточку.
+            channel=("p.channel" if with_channel
+                     else "'%s'::varchar" % news_access.DEFAULT_CHANNEL),
         ),
         params,
     )
@@ -915,6 +940,9 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         'quiz_count': int(row[14] or 0),
         # Тренажёр новости (#342): метка в строке и дверь к журналу прохождений.
         'trainer_key': row[15],
+        # Куда ушло объявление: 'icore' — окно портала, 'oktell' — окно поверх
+        # клиента АТС.
+        'channel': row[16] or news_access.DEFAULT_CHANNEL,
         # Заполняется ниже одним запросом на всю страницу: считать его
         # подзапросом по news_reads значило бы считать НЕ ТО, что показывает
         # журнал (там знаменатель — нынешние адресаты), и «Прочитали: 14» на
@@ -963,7 +991,7 @@ def audience_stats(cursor, post_ids, with_space=False):
     return {int(row[0]): (int(row[1]), int(row[2])) for row in cursor.fetchall()}
 
 
-def get_post(cursor, post_id, with_pass=False, with_space=False):
+def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=False):
     """Карточка новости с адресатами. None — нет такой.
 
     with_pass — развёрнуты ли колонки тренажёра и обязательности прохождения
@@ -981,14 +1009,16 @@ def get_post(cursor, post_id, with_pass=False, with_space=False):
                p.confirm_delay_seconds, p.published_at, p.expires_at,
                p.author_id, p.author_department_id, p.audience_max_role_level,
                u.name, d.name, p.created_at, p.updated_at, u.role,
-               {pass_required}, {trainer_key}, {space_id}
+               {pass_required}, {trainer_key}, {space_id}, {channel}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
          WHERE p.id = %s
         """.format(pass_required='p.pass_required' if with_pass else 'TRUE',
                    trainer_key='p.trainer_key' if with_pass else 'NULL::varchar',
-                   space_id='p.space_id' if with_space else 'NULL::int'),
+                   space_id='p.space_id' if with_space else 'NULL::int',
+                   channel=('p.channel' if with_channel
+                            else "'%s'::varchar" % news_access.DEFAULT_CHANNEL)),
         (post_id,),
     )
     row = cursor.fetchone()
@@ -1018,6 +1048,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False):
         # Пространство новости — «чьей компании это объявление». Наружу нужно
         # форме: по нему она сужает справочники адресата так же, как сервер.
         'space_id': row[18],
+        # Куда отправлено: портал или окно поверх клиента АТС.
+        'channel': row[19] or news_access.DEFAULT_CHANNEL,
         'audience': audience_rules(cursor, post_id),
     }
 
@@ -1090,12 +1122,16 @@ def roles_of_users(cursor, user_ids):
 
 def create_post(cursor, *, title, body, author_id, author_department_id,
                 is_mandatory, confirm_delay_seconds, expires_at, created_by,
-                space_id=None, with_space=False):
+                space_id=None, with_space=False,
+                channel=None, with_channel=False):
     """Черновик новости. space_id — вика, в которой её пишут.
 
     with_space=False — колонки пространства ещё нет (schema.space_ready):
     пишем без неё, и новость остаётся ничьей до бэкфилла. Перечислять колонку
     в INSERT «на всякий случай» нельзя: на базе без неё упал бы сам выпуск.
+
+    with_channel — то же самое про канал (schema.channel_ready): без колонки
+    новость уходит туда, куда уходила всегда, — в портал (умолчание колонки).
 
     Пространство у новости НЕ МЕНЯЕТСЯ правкой намеренно. Переезд объявления в
     соседнюю вику — это не опечатка в тексте, а другой круг адресатов: у
@@ -1105,32 +1141,43 @@ def create_post(cursor, *, title, body, author_id, author_department_id,
         """
         INSERT INTO news_posts (title, body, author_id, author_department_id,
                                 status, is_mandatory, confirm_delay_seconds,
-                                expires_at, created_by{space_column})
+                                expires_at, created_by{space_column}{channel_column})
         VALUES (%(title)s, %(body)s, %(author)s, %(dept)s, 'draft',
-                %(mandatory)s, %(delay)s, %(expires)s, %(created_by)s{space_value})
+                %(mandatory)s, %(delay)s, %(expires)s,
+                %(created_by)s{space_value}{channel_value})
         RETURNING id
         """.format(space_column=', space_id' if with_space else '',
-                   space_value=', %(space)s' if with_space else ''),
+                   space_value=', %(space)s' if with_space else '',
+                   channel_column=', channel' if with_channel else '',
+                   channel_value=', %(channel)s' if with_channel else ''),
         {'title': title, 'body': body, 'author': author_id,
          'dept': author_department_id, 'mandatory': is_mandatory,
          'delay': confirm_delay_seconds, 'expires': expires_at,
-         'created_by': created_by, 'space': space_id},
+         'created_by': created_by, 'space': space_id,
+         'channel': channel or news_access.DEFAULT_CHANNEL},
     )
     return int(cursor.fetchone()[0])
 
 
 def update_post(cursor, *, post_id, title, body, is_mandatory,
-                confirm_delay_seconds, expires_at):
+                confirm_delay_seconds, expires_at,
+                channel=None, with_channel=False):
+    """Правка черновика. channel меняется только у невыпущенной новости —
+    правило держит роут (NEWS_CHANNEL_LOCKED), здесь оно просто исполняется."""
     cursor.execute(
         """
         UPDATE news_posts
            SET title = %(title)s, body = %(body)s, is_mandatory = %(mandatory)s,
                confirm_delay_seconds = %(delay)s, expires_at = %(expires)s,
+               {channel_set}
                updated_at = {now}
          WHERE id = %(id)s
-        """.format(now=_NOW),
+        """.format(now=_NOW,
+                   channel_set=('channel = %(channel)s,'
+                                if with_channel and channel else '')),
         {'id': post_id, 'title': title, 'body': body, 'mandatory': is_mandatory,
-         'delay': confirm_delay_seconds, 'expires': expires_at},
+         'delay': confirm_delay_seconds, 'expires': expires_at,
+         'channel': channel},
     )
 
 
@@ -1374,6 +1421,19 @@ def space_departments(cursor, space_id):
     разойдётся с первым (ровно так уже расходились лестницы прав).
     """
     return wiki_structure.space_department_ids(cursor, space_id)
+
+
+def department_codes(cursor, department_ids):
+    """Коды отделов по их id. Нужны, чтобы понять, какие каналы предлагать.
+
+    Именно КОДЫ, а не имена: «СЗоВ» в базе переименуют однажды, а `szov` — это
+    то, чем отдел зовут и раздел «Ограничитель Перезвона», и оргструктура.
+    """
+    ids = [int(value) for value in (department_ids or []) if value is not None]
+    if not ids:
+        return []
+    cursor.execute("SELECT code FROM departments WHERE id = ANY(%s)", (ids,))
+    return [row[0] for row in cursor.fetchall() if row[0]]
 
 
 def space_of_department(cursor, department_id):

@@ -237,6 +237,17 @@ class TestServerRules:
         body = ROUTES.split("def oktell_guard_agent_news", 1)[1].split("@agent_route", 1)[0]
         assert "if item.get('is_mandatory')" in body
 
+    def test_only_what_was_sent_to_oktell_reaches_the_agent(self):
+        """Канал объявления (решение владельца 18.09.2026): автор выбирает в
+        форме, куда его отправить. Отправленное в портал агент показывать не
+        должен — человек подтвердил бы одну новость дважды, в двух окнах, а
+        журнал «Кто прочитал» у неё один."""
+        body = ROUTES.split("def oktell_guard_agent_news", 1)[1].split("@agent_route", 1)[0]
+        assert "channel=('oktell'" in body
+        # Нет колонки — агент работает как до задачи, а не падает.
+        assert "_news_channel_ready(cursor, news_channel_ready)" in body
+        assert "else None)" in body
+
     def test_only_the_shown_one_is_marked(self):
         """Отметка «показали» — это точка отсчёта задержки кнопки и запись в
         журнал: поставить её всей очереди значит написать «открыл» про то, чего

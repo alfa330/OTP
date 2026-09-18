@@ -264,6 +264,19 @@ _STATEMENTS = [
     # Список редактора всегда спрашивает «новости ЭТОГО пространства», и он же
     # ищет ничьи при бэкфилле.
     "CREATE INDEX IF NOT EXISTS idx_news_posts_space ON news_posts(space_id);",
+    # ── Куда отправлено объявление (решение владельца 18.09.2026) ────────────
+    # 'icore' — окно портала, 'oktell' — окно поверх клиента АТС, которое рисует
+    # «Ограничитель Перезвона» (news/access.py: CHANNELS). Умолчание — портал,
+    # и им же становятся все новости, выпущенные до этой колонки: они и
+    # показывались в портале.
+    #
+    # БЕЗ CHECK намеренно, в отличие от status: там ограничение объявлено внутри
+    # CREATE TABLE, а добавить его к существующей таблице идемпотентно нечем —
+    # ALTER TABLE ADD CONSTRAINT без IF NOT EXISTS упал бы на втором старте и
+    # утащил бы за собой весь SAVEPOINT схемы. Значение приводит
+    # access.normalize_channel: незнакомое становится порталом, а не отказом.
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS "
+    "channel VARCHAR(16) NOT NULL DEFAULT 'icore';",
 ]
 
 # Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.
@@ -382,6 +395,23 @@ def backfill_space_ids(cursor):
         """
     )
     return cursor.rowcount or 0
+
+
+def channel_ready(cursor):
+    """Развёрнута ли колонка канала. Отдельно — как кадры, тест и пространство.
+
+    Нет колонки — у новостей нет каналов: объявление уходит в портал, как до
+    этой задачи, а не встречает каждого вошедшего пятисоткой.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'news_posts'
+           AND column_name = 'channel'
+        """)
+    row = cursor.fetchone()
+    return bool(row and int(row[0]) == 1)
 
 
 def pass_ready(cursor):

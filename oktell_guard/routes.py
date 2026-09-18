@@ -179,6 +179,16 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             logging.exception("Ограничитель Перезвона: не удалось опознать вошедшего")
             return None
 
+    # Готовность колонки канала у «Новостей» — один раз на процесс. Спрашивать
+    # каталог на каждый заход агента (полсотни машин по таймеру) значило бы
+    # лишний запрос к базе ради ответа, который не меняется.
+    _news_channel = {'ready': False}
+
+    def _news_channel_ready(cursor, probe):
+        if not _news_channel['ready']:
+            _news_channel['ready'] = probe(cursor)
+        return _news_channel['ready']
+
     def agent_route(rule, methods=('GET',), public=False):
         """public=True — ручка без токена.
 
@@ -334,15 +344,19 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         (news.queries), — вторая копия правил адресата разъехалась бы с первой,
         и агент показывал бы не тем.
 
-        ТОЛЬКО обязательные: необязательное объявление — «к сведению», его
-        человек прочитает в портале. Снимать ради него оператора с линии и
-        закрывать ему клиент АТС значило бы терять звонки на ровном месте.
+        ТОЛЬКО обязательные и ТОЛЬКО отправленные в Oktell (канал объявления,
+        решение владельца 18.09.2026). Необязательное — «к сведению», его
+        человек прочитает в портале: снимать ради него оператора с линии и
+        закрывать ему клиент АТС значило бы терять звонки на ровном месте. А
+        объявление, отправленное в портал, здесь показывать нельзя тем более —
+        человек подтвердил бы одну новость дважды, в двух окнах.
 
         Отметку «показали» ставим здесь же и ТОЛЬКО тому объявлению, которое
         отдаём: она же точка отсчёта задержки кнопки, и поставить её всей
         очереди значило бы написать «открыл» про то, чего человек не видел.
         """
         from news import queries as news_queries
+        from news.schema import channel_ready as news_channel_ready
 
         with db._get_cursor() as cursor:
             owner = agent_owner(cursor)
@@ -356,7 +370,12 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             items = news_queries.pending_for_user(
                 cursor, user_id=viewer['user_id'], otp_role=viewer['otp_role'],
                 subjects=viewer['subjects'], with_photos=False,
-                with_quiz=True, with_pass=True)
+                with_quiz=True, with_pass=True,
+                # Готовность колонки спрашиваем ОДИН раз на процесс: агентов
+                # полсотни, и каждый ходит сюда по таймеру. Нет колонки —
+                # канала нет, и агент работает как до этой задачи.
+                channel=('oktell' if _news_channel_ready(cursor, news_channel_ready)
+                         else None))
             mandatory = [item for item in items if item.get('is_mandatory')]
             if not mandatory:
                 return jsonify({"item": None, "known_operator": True})

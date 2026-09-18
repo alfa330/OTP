@@ -28,6 +28,10 @@ import re
 
 from wiki import access as wiki_access
 from wiki.access import ROLE_LEVELS, normalize_role, role_level_of  # noqa: F401  (реэкспорт)
+# Периметр программы «Ограничитель Перезвона» — им же ограничен канал Oktell
+# (см. channels_for_departments в конце файла). Модуль чистый, как и этот:
+# ни flask, ни базы он не тянет.
+from oktell_guard.access import SECTION_DEPARTMENT_CODE as OKTELL_DEPARTMENT_CODE
 
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_CONFIRM_DELAY_SECONDS,
                      QUIZ_MAX_OPTION_LENGTH, QUIZ_MAX_OPTIONS, QUIZ_MAX_PROMPT_LENGTH,
@@ -541,3 +545,47 @@ def outstanding_passes(*, pass_required, has_quiz, has_trainer, quiz_passed, tra
     if has_quiz and not quiz_passed:
         left.append('quiz')
     return left
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# КУДА ОТПРАВИТЬ ОБЪЯВЛЕНИЕ (решение владельца 18.09.2026)
+#
+# 'icore'  — портал: окно «Новость дня» у каждого, кому новость адресована;
+# 'oktell' — клиент АТС: то же объявление рисует поверх окна Oktell программа
+#            «Ограничитель Перезвона» (oktell_recall_guard), она же снимает
+#            человека с линии на время чтения.
+#
+# Канал ОДИН, а не два флажка рядом. Показанное в обоих местах объявление
+# человек подтвердит дважды и дважды пройдёт тест, а журнал «Кто прочитал» у
+# новости один — вторая отметка легла бы поверх первой и соврала про время.
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHANNELS = ('icore', 'oktell')
+
+# Умолчание — портал: его видят все, а программа стоит у части операторов.
+DEFAULT_CHANNEL = 'icore'
+
+
+def normalize_channel(raw, default=DEFAULT_CHANNEL):
+    """Канал из формы. Незнакомое значение — умолчание, а не отказ.
+
+    Форма старого бандла канала не присылает вовсе, и новость обязана уйти
+    туда, куда уходила до этой задачи, — в портал.
+    """
+    value = str(raw or '').strip().lower()
+    return value if value in CHANNELS else default
+
+
+def channels_for_departments(department_codes):
+    """Какие каналы предлагать в этом пространстве. Всегда хотя бы портал.
+
+    Oktell — только там, где программа вообще стоит: её периметр — отдел СЗоВ
+    (oktell_guard/access.py: SECTION_DEPARTMENT_CODE), и код оттуда взят
+    константой, а не переписан сюда. В «Тез» такой программы нет, поэтому
+    вкладка там про выбор и не спрашивает: единственный вариант — не выбор, а
+    лишний вопрос на экране.
+    """
+    codes = {str(code or '').strip().lower() for code in (department_codes or ())}
+    if OKTELL_DEPARTMENT_CODE in codes:
+        return list(CHANNELS)
+    return [DEFAULT_CHANNEL]

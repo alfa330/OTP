@@ -50,6 +50,13 @@ import '../news/news-modal.css';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Куда отправляют объявление. Подписи короткие: это названия двух окон, а не
+   объяснение их устройства — объяснение живёт под «i» рядом с переключателем. */
+const NEWS_CHANNELS = [
+    { value: 'icore', label: 'iCORE' },
+    { value: 'oktell', label: 'Oktell' },
+];
+
 const BUCKETS = [
     { value: 'published', label: 'Опубликованные' },
     { value: 'draft', label: 'Черновики' },
@@ -308,9 +315,20 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     const [trainerKey, setTrainerKey] = useState(null);
     const [passRequired, setPassRequired] = useState(true);
     const [trainerPickerOpen, setTrainerPickerOpen] = useState(false);
+    /* Куда отправить объявление (решение владельца 18.09.2026): 'icore' — окно
+       портала, 'oktell' — окно поверх клиента АТС, которое рисует «Ограничитель
+       Перезвона». Какие каналы вообще есть в этом пространстве, говорит сервер
+       (news/routes.py: _channels_for_space) — в «Тез» программы нет, и выбора
+       там не показываем: единственный вариант это не выбор, а лишний вопрос. */
+    const [channel, setChannel] = useState(NEWS_CHANNELS[0].value);
+    const channels = access?.channels || [NEWS_CHANNELS[0].value];
+    const channelOptions = NEWS_CHANNELS.filter((item) => channels.includes(item.value));
     // По published_at, как на сервере: снятая с показа новость ответы уже собрала.
     // Тем же замком запираются тренажёр и обязательность (NEWS_PASS_LOCKED).
     const quizLocked = !!post?.published_at;
+    /* Канал — под тем же замком и по той же причине (NEWS_CHANNEL_LOCKED):
+       объявление уже показано людям там, куда его отправили. */
+    const channelLocked = quizLocked;
     const trainerCard = TRAINER_CARDS.find((item) => item.key === trainerKey) || null;
     /* Держит ли прохождение подтверждение — то же правило, что на сервере
        (news/access.py: must_pass). Держит — новость обязательна всегда. */
@@ -358,6 +376,7 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setQuizBusy(false);
         setTrainerKey(post?.trainer_key || null);
         setPassRequired(post ? post.pass_required !== false : true);
+        setChannel(post?.channel || NEWS_CHANNELS[0].value);
         setTrainerPickerOpen(false);
         // Уже прикреплённые кадры приезжают с карточкой готовыми адресами.
         setPhotos((post?.photos || []).map((photo) => ({
@@ -522,6 +541,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
             }),
             confirm_delay_seconds: Number(delay) || 0,
             expires_at: expires || null,
+            /* Канал опубликованной новости сервер не меняет (NEWS_CHANNEL_LOCKED),
+               но прислать его надо и тогда: он у неё тот же, и отказ будет
+               только у настоящей попытки перенести объявление. */
+            channel,
             audience: audience.map((rule) => ({
                 subject_type: rule.subject_type,
                 subject_id: rule.subject_id,
@@ -901,6 +924,37 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                 </div>
 
                 <div className={`${iosCard} mt-4 divide-y divide-slate-100`}>
+                    {/* Куда отправить — ПЕРВОЙ строкой: это решение про то, где
+                        человек вообще увидит объявление, и принимают его до
+                        настроек самого показа. Строки нет вовсе, когда канал
+                        один: в «Тез» программы Oktell нет, и переключатель с
+                        единственной кнопкой был бы вопросом без выбора. */}
+                    {channelOptions.length > 1 && (
+                        <div className="flex items-center justify-between gap-3 px-3.5 py-3">
+                            <div className="min-w-0">
+                                <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                    Куда отправить
+                                    <IosHint
+                                        label="Чем iCORE отличается от Oktell"
+                                        text="iCORE — окно «Новость дня» в портале: его видит каждый, кому новость адресована. Oktell — окно поверх клиента АТС, его рисует программа «Ограничитель Перезвона» и на время чтения снимает оператора с линии; увидят только те, у кого программа установлена. У опубликованной новости канал не меняется."
+                                    />
+                                </p>
+                            </div>
+                            {channelLocked ? (
+                                <span className="shrink-0 text-[13px] text-slate-500">
+                                    {(NEWS_CHANNELS.find((item) => item.value === channel)
+                                      || NEWS_CHANNELS[0]).label}
+                                </span>
+                            ) : (
+                                <IosSegmented
+                                    value={channel}
+                                    options={channelOptions}
+                                    onChange={setChannel}
+                                    ariaLabel="Куда отправить объявление"
+                                />
+                            )}
+                        </div>
+                    )}
                     <div className="flex items-center justify-between gap-3 px-3.5 py-3">
                         <div className="min-w-0">
                             {/* Оба состояния — в ОДНОМ пузырьке, а не подписью,
@@ -1376,6 +1430,10 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                             {post.status === 'draft' && <IosBadge tone="slate">черновик</IosBadge>}
                             {post.status === 'archived' && <IosBadge tone="slate">снята</IosBadge>}
                             {!post.is_mandatory && <IosBadge tone="slate">необязательная</IosBadge>}
+                            {/* Куда ушло объявление — только у Oktell: портал
+                                это умолчание, и метка «в iCORE» стояла бы
+                                почти у каждой строки, ничего не различая. */}
+                            {post.channel === 'oktell' && <IosBadge tone="slate">в Oktell</IosBadge>}
                             {/* Числом, а не фразой: строка списка отвечает на
                                 «что это за новость», а не рассказывает про её
                                 устройство. */}

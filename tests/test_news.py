@@ -1410,5 +1410,122 @@ class NewsSpaceTests(unittest.TestCase):
         self.assertNotIn('spaceId', modal)
 
 
+class NewsChannelTests(unittest.TestCase):
+    """Куда отправлено объявление (решение владельца 18.09.2026).
+
+    Дословно: «в редакторе новости добавить „отправить в iCORE или Oktell“, по
+    умолчанию в iCORE; в Тез пока будет только вариант с iCORE, и выбора там
+    делать не нужно».
+
+    Канал — не украшение списка: он решает, КТО и ГДЕ увидит объявление. Одно и
+    то же окно в двух местах означало бы два подтверждения одной новости и два
+    прохождения одного теста, а журнал «Кто прочитал» у неё один.
+    """
+
+    def test_the_default_is_the_portal(self):
+        """Портал видят все, программа стоит у части операторов. Незнакомое
+        значение — тоже портал: форма старого бандла канала не присылает."""
+        self.assertEqual(news_access.DEFAULT_CHANNEL, 'icore')
+        self.assertEqual(news_access.CHANNELS[0], 'icore')
+        self.assertEqual(news_access.normalize_channel(None), 'icore')
+        self.assertEqual(news_access.normalize_channel('телеграм'), 'icore')
+        self.assertEqual(news_access.normalize_channel('OKTELL'), 'oktell')
+        # Умолчание подменяется: у правки это прежний канал карточки, иначе
+        # сохранение заголовка переносило бы объявление в другое окно.
+        self.assertEqual(news_access.normalize_channel(None, default='oktell'), 'oktell')
+
+    def test_oktell_is_offered_only_where_the_program_stands(self):
+        """В «Тез» программы нет — и выбора там нет тоже: переключатель с
+        единственной кнопкой это не выбор, а лишний вопрос на экране."""
+        self.assertEqual(news_access.channels_for_departments(['szov', 'op']),
+                         ['icore', 'oktell'])
+        self.assertEqual(news_access.channels_for_departments(['tez']), ['icore'])
+        # Пространство без отделов ничего про своих людей не сказало.
+        self.assertEqual(news_access.channels_for_departments([]), ['icore'])
+        self.assertEqual(news_access.channels_for_departments(None), ['icore'])
+
+    def test_the_perimeter_is_taken_from_the_program_not_copied(self):
+        """Периметр «Ограничителя Перезвона» — один на портал. Вторая копия
+        кода отдела разъехалась бы молча, и форма предлагала бы Oktell там, где
+        программы нет, — объявление не увидел бы никто."""
+        from oktell_guard import access as guard_access
+        self.assertEqual(news_access.OKTELL_DEPARTMENT_CODE,
+                         guard_access.SECTION_DEPARTMENT_CODE)
+        source = _code_only(_read('news', 'access.py'))
+        self.assertIn('from oktell_guard.access import SECTION_DEPARTMENT_CODE',
+                      _read('news', 'access.py'))
+        self.assertNotIn("'szov'", source)
+
+    def test_each_window_asks_for_its_own_channel(self):
+        """Портал спрашивает своё, программа — своё. Спроси кто-нибудь «всё»,
+        человек подтвердил бы одну новость дважды, в двух окнах."""
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('channel=(news_access.DEFAULT_CHANNEL if _channel_ready(cursor)'
+                      ' else None)', routes)
+        guard = _code_only(_read('oktell_guard', 'routes.py'))
+        self.assertIn("channel=('oktell'", guard)
+
+    def test_the_queue_is_not_filtered_by_itself(self):
+        """Канал выбирает СПРАШИВАЮЩИЙ. Поставь мы умолчание в самой выдаче —
+        объявление для АТС молча уехало бы в портал у всякого, кто забыл
+        назвать канал."""
+        queries_src = _read('news', 'queries.py')
+        signature = queries_src[queries_src.index('def pending_for_user('):]
+        signature = signature[:signature.index(')')]
+        self.assertIn('channel=None', signature)
+        body = queries_src[queries_src.index('def _channel_filter('):]
+        body = body[:body.index('\ndef ', 10)]
+        self.assertIn('if not channel:', body)
+        self.assertIn('AND p.channel = %(channel)s', body)
+
+    def test_the_server_checks_the_channel_itself(self):
+        """Правило, живущее только во фронте, держится до первого запроса мимо
+        него: форма в «Тез» про Oktell не спрашивает, но запрос туда дойти
+        может."""
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('NEWS_CHANNEL_UNAVAILABLE', routes)
+        self.assertIn('channel not in _channels_for_space(cursor, space_id)', routes)
+        # И то же самое считается по отделам ПРОСТРАНСТВА, а не по своим.
+        self.assertIn('news_access.channels_for_departments(', routes)
+
+    def test_a_published_news_does_not_change_its_channel(self):
+        """Объявление уже показано людям там, куда его отправили, и часть
+        отдела подтвердила его в том окне. Нужен другой канал — публикуется
+        новая новость; тем же замком заперты тест и обязательность."""
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('NEWS_CHANNEL_LOCKED', routes)
+        self.assertIn("post['published_at'] and channel != (post.get('channel')", routes)
+
+    def test_the_column_can_be_missing(self):
+        """Деплой, на котором код приехал, а DDL ещё не отработал, обязан
+        работать как вчера — отправкой в портал, а не пятисоткой каждому
+        вошедшему."""
+        schema_src = _read('news', 'schema.py')
+        self.assertIn("channel VARCHAR(16) NOT NULL DEFAULT 'icore'", schema_src)
+        self.assertTrue(hasattr(news_schema, 'channel_ready'))
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('with_channel=_channel_ready(cursor)', routes)
+        self.assertIn('NEWS_CHANNEL_NOT_READY', routes)
+
+    def test_the_form_asks_only_where_there_is_a_choice(self):
+        """«В Тез выбора делать не нужно»: строки нет вовсе, а не серая
+        кнопка, на которую нельзя нажать."""
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn('channelOptions.length > 1 && (', form)
+        self.assertIn("access?.channels || [NEWS_CHANNELS[0].value]", form)
+        self.assertIn('channels.includes(item.value)', form)
+        # Значения переключателя — те же, что знает сервер.
+        values = re.findall(r"\{ value: '(\w+)', label: '[^']+' \}", form)
+        self.assertEqual([v for v in values if v in news_access.CHANNELS],
+                         list(news_access.CHANNELS))
+
+    def test_the_form_sends_the_channel_and_locks_it_after_publishing(self):
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn('            channel,', form)
+        self.assertIn("setChannel(post?.channel || NEWS_CHANNELS[0].value)", form)
+        self.assertIn('const channelLocked = quizLocked;', form)
+        self.assertIn('{channelLocked ? (', form)
+
+
 if __name__ == '__main__':
     unittest.main()
