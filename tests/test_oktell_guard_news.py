@@ -98,19 +98,37 @@ class TestAutologin:
 class TestOperatorState:
     """«Тренинг» уходит в тот же сокет, который слушает ограничитель."""
 
-    def test_the_frame_goes_through_the_page_socket(self):
-        """Своего соединения не поднимаем: сессию АТС знает только страница, а
-        второй логин занял бы место оператора."""
-        js = agent.build_set_state_js(["setuserstate", {"onlunch": True, "lunchreasonid": 3}])
-        assert "__oktellGuardSockets" in js
-        assert "readyState === 1" in js
+    def test_the_status_is_changed_by_the_clients_own_method(self):
+        """Кадр руками собирать НЕЛЬЗЯ. Свой (`{"onlunch":true,"lunchreasonid":3}`)
+        АТС молча игнорировала, и оператор оставался на линии всё чтение.
+        Настоящий кадр, снятый с провода, куда шире:
+
+            ["setuserstate",{"userlogin":"6554","userstateid":2,"oncallcenter":true,
+                             "onredirect":false,"lunchreasonid":3,"qid":"0.365…"}]
+
+        Формат — внутреннее дело вендора, а метод лежит в той же странице, что и
+        кнопка статуса, по которой жмёт оператор."""
+        js = agent.build_set_status_js("break", 3)
+        assert "app.oktell" in js
+        assert "setStatus" in js
         assert "new WebSocket" not in js
+        assert not hasattr(agent, "build_set_state_js"), "кадр руками больше не собираем"
+
+    def test_the_operator_goes_back_where_he_was(self):
+        """Возвращать в «Готов» нельзя: того, кто был без телефона или на обеде,
+        мы бы поставили на линию сами."""
+        js = agent.build_set_status_js("break", 3)
+        assert "getUserStatus" in js
+        assert "before" in js
+        loop = AGENT_SOURCE.split("def run_agent", 1)[1]
+        assert "browser.set_operator_status(status_before)" in loop
 
     def test_the_training_reason_is_three(self):
         """Справочник подпричин Oktell: 1 Тех.причина, 2 Перезвон, 3 Тренинг,
-        4 Перерыв. У «Тренинга» на табло СЗоВ свой счётчик и свой цвет."""
+        4 Перерыв. Проверено живьём: getLunchReasons() отдаёт ровно эту
+        четвёрку."""
         loop = AGENT_SOURCE.split("def run_agent", 1)[1]
-        assert '"lunchreasonid": 3' in loop
+        assert 'cfg.get("training_reason_id", 3)' in loop
 
     def test_the_hook_knows_when_a_call_is_running(self):
         """Объявление обязано дождаться конца разговора, а знать об этом
@@ -202,7 +220,7 @@ class TestLoopOrder:
         """Иначе между окном и сменой статуса есть щель, в которую АТС успевает
         направить звонок — а окно АТС уже закрыто объявлением."""
         loop = self._loop()
-        assert loop.index("training_set = browser.set_operator_state(frame)") < \
+        assert loop.index('status_before = browser.set_operator_status(') < \
                loop.index("if news_overlay.show(item):")
 
     def test_nothing_is_shown_during_a_call(self):

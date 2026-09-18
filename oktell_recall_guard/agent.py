@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.22"
+VERSION = "1.0.23"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -3456,25 +3456,48 @@ def build_autologin_js(login: str, password: str) -> str:
 """.strip()
 
 
-def build_set_state_js(frame) -> str:
-    """Отправить кадр смены статуса в живой сокет клиента.
+def build_set_status_js(status: str, reason_id: Optional[int] = None) -> str:
+    """Сменить статус ЕГО ЖЕ методом — `app.oktell.setStatus`.
 
-    Сокеты уже сохранены хуком (`__oktellGuardSockets`) — тем же приёмом уходит
-    штатный `logout`. Своего соединения не поднимаем: сессию АТС знает только
-    страница, а второй логин занял бы место оператора.
+    Раньше мы собирали кадр сами и слали в перехваченный сокет. Кадр оказался
+    неполным, и АТС его молча игнорировала: оператор на время чтения объявления
+    так и оставался на линии. Снятый с провода настоящий кадр клиента:
+
+        ["setuserstate",{"userlogin":"6554","userstateid":2,"oncallcenter":true,
+                         "onredirect":false,"lunchreasonid":3,"qid":"0.365…"}]
+
+    а наш был `{"onlunch":true,"lunchreasonid":3}` — без логина, без кода
+    состояния, без `oncallcenter`. Отсюда правило: формат кадра — внутреннее
+    дело вендора, и собирать его руками нельзя. Метод же лежит в той же
+    странице, что и кнопка статуса, по которой жмёт оператор.
+
+    Возвращаем и ПРЕЖНИЙ статус: вернуть человека надо туда, где он был, а не в
+    «Готов». У того, кто к моменту объявления был без телефона или на обеде,
+    «Готов» означал бы, что мы поставили его на линию сами.
     """
-    payload = json.dumps(frame, ensure_ascii=False)
+    payload = json.dumps({"status": status, "reason": reason_id}, ensure_ascii=False)
     return rf"""
 (function () {{
-  var frame = {payload};
-  var socks = window.__oktellGuardSockets || [];
-  var text = (typeof frame === 'string') ? frame : JSON.stringify(frame);
-  for (var i = socks.length - 1; i >= 0; i--) {{
-    try {{
-      if (socks[i] && socks[i].readyState === 1) {{ socks[i].send(text); return {{ok: true}}; }}
-    }} catch (e) {{}}
+  var want = {payload};
+  var root = window.app && window.app.oktell;
+  // Именно setUserStatus. Похожий setStatus подпричину ТЕРЯЕТ: снято с провода —
+  // setStatus('break', 3) шлёт кадр без lunchreasonid, и вместо «Тренинга»
+  // оператор уходит в перерыв по умолчанию. Разница видна только на проводе.
+  var method = (root && typeof root.setUserStatus === 'function') ? 'setUserStatus'
+             : (root && typeof root.setStatus === 'function') ? 'setStatus' : null;
+  if (!method) {{
+    return {{ok: false, reason: 'в странице нет app.oktell.setUserStatus'}};
   }}
-  return {{ok: false, reason: 'живого сокета нет'}};
+  var before = null;
+  try {{ before = root.getUserStatus ? root.getUserStatus() : null; }} catch (e) {{}}
+  try {{
+    var done = (want.reason === null || want.reason === undefined)
+      ? root[method](want.status)
+      : root[method](want.status, want.reason);
+    return {{ok: done !== false, before: before, status: want.status, used: method}};
+  }} catch (e) {{
+    return {{ok: false, reason: String(e), before: before}};
+  }}
 }})();
 """.strip()
 
@@ -4020,17 +4043,27 @@ class ManagedBrowser:
             return {"ok": False, "reason": str(exc)}
         return result if isinstance(result, dict) else {"ok": False, "reason": "нет ответа"}
 
-    def set_operator_state(self, frame) -> bool:
-        """Отправить кадр смены статуса в живой сокет клиента."""
+    def set_operator_status(self, status: str, reason_id: Optional[int] = None) -> Optional[str]:
+        """Сменить статус оператора. Возвращает ПРЕЖНИЙ статус либо None.
+
+        None — не вышло: сказать об этом надо честно, иначе объявление покажется
+        человеку, оставшемуся на линии, и звонок придёт посреди чтения.
+        """
         page = self.page()
-        if not page or not frame:
-            return False
+        if not page or not status:
+            return None
         try:
-            result = page.evaluate(build_set_state_js(frame))
+            result = page.evaluate(build_set_status_js(status, reason_id))
         except Exception:  # noqa: BLE001
-            logging.debug("Кадр статуса не отправлен", exc_info=True)
-            return False
-        return bool(isinstance(result, dict) and result.get("ok"))
+            logging.debug("Статус не сменился", exc_info=True)
+            return None
+        if not (isinstance(result, dict) and result.get("ok")):
+            logging.warning("Статус «%s» не поставлен: %s", status,
+                            (result or {}).get("reason") if isinstance(result, dict) else "нет ответа")
+            return None
+        # Прежний статус может быть пустым (клиент его ещё не знает) — тогда
+        # возвращать будем в «Готов», это единственное осмысленное умолчание.
+        return str((result or {}).get("before") or "ready")
 
     # Показ объявления раньше жил здесь — внутри страницы Oktell. Переехал в
     # собственное окно поверх всех окон (NewsOverlay): в странице он исчезал
@@ -4420,6 +4453,7 @@ def run_agent(cfg: dict) -> int:
     next_news_check = time.time()
     active_news: Optional[dict] = None     # показанное объявление, ждём подтверждения
     training_set = False                   # это мы сняли оператора с линии
+    status_before = ""                     # куда возвращать: туда, где он был
 
     def rule_print(current: dict) -> str:
         """Отпечаток того, что реально уедет в окно: правило плюс обкатка."""
@@ -4434,7 +4468,7 @@ def run_agent(cfg: dict) -> int:
         ответа, ни признака, что его вообще услышали. Теперь этой функции ждут
         каждые полсекунды, пока объявление на экране (см. wait_for_next_round).
         """
-        nonlocal active_news, training_set, next_news_check
+        nonlocal active_news, training_set, next_news_check, status_before
         if active_news is None:
             return False
         if not news_overlay.alive():
@@ -4454,8 +4488,7 @@ def run_agent(cfg: dict) -> int:
             # Возвращаем статус только если сами его и забрали: у того, кто к
             # моменту объявления уже был на перерыве, статус не наш.
             if training_set:
-                browser.set_operator_state(
-                    cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
+                browser.set_operator_status(status_before)
                 training_set = False
             logging.info("Объявление #%s подтверждено", pressed.get("id"))
             active_news = None
@@ -4631,9 +4664,9 @@ def run_agent(cfg: dict) -> int:
                             # Порядок именно такой: сначала снять с линии, потом
                             # показать. Иначе между окном и сменой статуса есть
                             # щель, в которую АТС успевает направить звонок.
-                            frame = cfg.get("training_frame") or [
-                                "setuserstate", {"onlunch": True, "lunchreasonid": 3}]
-                            training_set = browser.set_operator_state(frame)
+                            status_before = browser.set_operator_status(
+                                "break", int(cfg.get("training_reason_id", 3)))
+                            training_set = bool(status_before)
                             if not training_set:
                                 logging.warning(
                                     "Снять с линии не вышло — объявление покажем, "
@@ -4641,8 +4674,7 @@ def run_agent(cfg: dict) -> int:
                             if news_overlay.show(item):
                                 active_news = item
                             elif training_set:
-                                browser.set_operator_state(
-                                    cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])
+                                browser.set_operator_status(status_before)
                                 training_set = False
 
                 handle_news_press()
