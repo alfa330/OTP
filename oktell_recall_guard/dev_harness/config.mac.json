@@ -1,0 +1,27 @@
+{
+  "server_url": "http://127.0.0.1:8799",
+  "agent_token": "dev-token",
+  "verify_tls": false,
+  "poll_interval_s": 15,
+  "operator_login": "6612",
+  "oktell_url": "http://127.0.0.1:8799/fake-oktell/",
+  "auto_update": false,
+  "single_instance": false,
+  "ensure_watchdog_alive": false,
+  "browser": {
+    "chrome_path": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "cdp_port": 9333,
+    "app_mode": true,
+    "launch_on_start": true,
+    "keep_open": false
+  },
+  "unmanaged": { "detect": false, "action": "ignore" },
+  "in_window_rule": {
+    "enabled": true,
+    "threshold_s": 45,
+    "warn_before_s": 15
+  },
+  "warn_banner": true,
+  "dry_run": false,
+  "log_level": "DEBUG"
+}

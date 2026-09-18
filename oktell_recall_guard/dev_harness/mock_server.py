@@ -7,7 +7,7 @@
      открывается WebSocket (как настоящий клиент);
   2. WebSocket-сервер, который печатает всё, что прислал клиент — так видно,
      реально ли агент отправил штатный кадр ["logout",{}];
-  3. заглушку серверного API OTP: /api/oktell_guard/heartbeat и /ack.
+  3. заглушку серверного API OTP: /api/oktell_guard/heartbeat, /violations и /ack.
 
 Запуск:
     python mock_server.py            (HTTP 8799, WS 8800)
@@ -41,6 +41,7 @@ RUN_ID = str(int(time.time()))
 STATE: dict = {
     "heartbeats": [],
     "acks": [],
+    "violations": [],
     "ws_frames": [],
     "queue": [],
     "command_seq": 0,
@@ -165,6 +166,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 STATE["heartbeats"].clear()
                 STATE["acks"].clear()
+                STATE["violations"].clear()
                 STATE["ws_frames"].clear()
                 STATE["queue"].clear()
             self._json(200, {"ok": True})
@@ -186,6 +188,15 @@ class Handler(BaseHTTPRequestHandler):
                 commands = list(STATE["queue"])
                 STATE["queue"].clear()
             self._json(200, {"ok": True, "poll_interval_s": 3, "commands": commands})
+            return
+        if parsed.path.endswith("/violations"):
+            # Факты нарушений агент шлёт, пока сервер не ответит успехом:
+            # без этой ручки стенд отвечал 404, и агент повторял отправку
+            # каждые 6 секунд до конца прогона.
+            with LOCK:
+                STATE["violations"].append({"at": time.time(), "payload": payload})
+            print(f"[http] нарушение: {json.dumps(payload, ensure_ascii=False)}", flush=True)
+            self._json(200, {"ok": True})
             return
         if parsed.path.endswith("/ack"):
             with LOCK:
