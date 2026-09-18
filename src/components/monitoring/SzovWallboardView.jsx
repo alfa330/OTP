@@ -143,9 +143,11 @@ const modeLabel = (key) => (BROADCAST_MODES.find((mode) => mode.key === key) || 
 const BROADCAST_DEVIATION_HINT = {
     osnova: () => (
         <>
-            Отклонением считаем то же, что подсвечено на табло: AR вне коридора{' '}
-            {AR_MIN_PERCENT}–{AR_MAX_PERCENT}%, SL ниже {Math.round(SL_GOOD_RATIO * 100)}%
-            {' '}или Oktell не отвечает и цифры на табло замерли.
+            Отклонением считаем то же, что подсвечено на табло, но за прошедший час, а не
+            накопительно за день: AR вне коридора {AR_MIN_PERCENT}–{AR_MAX_PERCENT}%, SL ниже
+            {' '}{Math.round(SL_GOOD_RATIO * 100)}% или Oktell не отвечает и цифры на табло
+            замерли. Ночные часы с единичными звонками в тревогу не идут: процент от пяти
+            звонков — это случай, а не показатель.
         </>
     ),
     chat: (targetSeconds) => (

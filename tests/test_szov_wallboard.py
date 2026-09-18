@@ -1292,6 +1292,15 @@ class SzovBroadcastTests(unittest.TestCase):
         }, ns)
         return ns
 
+    # Час, о котором говорит отбивка, отсчитывается от момента отправки, а с задачи #341 по нему
+    # же считаются алерты. Поэтому момент в тестах задаём явно: 10:00 17.09 — значит тревога
+    # считается по часу 09:00–10:00.
+    NOW = datetime(2026, 9, 17, 10, 0)
+
+    def _collect(self, ns, **kwargs):
+        kwargs.setdefault('now', self.NOW)
+        return ns['_szov_broadcast_collect'](**kwargs)
+
     # --- почасовая таблица ---
 
     def test_hourly_rows_match_the_owner_report(self):
@@ -1448,16 +1457,18 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertEqual(ns['SZOV_AR_MAX_PERCENT'], 5)
 
     def test_notes_flag_ar_outside_the_corridor(self):
+        """Час 01:00–02:00 из отчёта владельца: 19 потерянных из 25 дошедших до очереди."""
         ns = self._namespace()
-        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
-        self.assertIn('AR выше установленного диапазона', notes)
-        self.assertIn('потеряно 20 звонков', notes)
+        notes = ' '.join(ns['_szov_broadcast_notes'](self._collect(ns, now=datetime(2026, 9, 17, 2, 30))))
+        self.assertIn('Обратите внимание (за час 01:00–02:00): AR выше установленного диапазона', notes)
+        self.assertIn('За час потеряно 19 звонков', notes)
 
     def test_notes_flag_ar_below_the_corridor(self):
         ns = self._namespace(hourly_raw=[
-            {'hh': 9, 'served': 980, 'arrived': 1000, 'lost': 20, 'greet_drop': 0, 'talk_seconds': 260000},
+            {'hh': 9, 'served': 980, 'arrived': 1000, 'lost': 20, 'greet_drop': 0, 'served_sl': 900,
+             'talk_seconds': 260000},
         ])
-        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
+        notes = ' '.join(ns['_szov_broadcast_notes'](self._collect(ns)))
         self.assertIn('AR ниже установленного диапазона', notes)
 
     def test_notes_mention_operators_on_recall_and_break(self):
@@ -1482,8 +1493,9 @@ class SzovBroadcastTests(unittest.TestCase):
     # --- отклонения от нормы: по ним решается, писать ли «тревожному» чату ---
 
     NORMAL_HOURLY = [
-        # AR = 4 % — внутри коридора 3…5 %.
-        {'hh': 9, 'served': 960, 'arrived': 1000, 'lost': 40, 'greet_drop': 0, 'talk_seconds': 260000},
+        # AR = 4 % — внутри коридора 3…5 %, SL = 90 % — выше порога.
+        {'hh': 9, 'served': 960, 'arrived': 1000, 'lost': 40, 'greet_drop': 0, 'served_sl': 900,
+         'talk_seconds': 260000},
     ]
 
     def _calm(self, **kwargs):
@@ -1495,38 +1507,53 @@ class SzovBroadcastTests(unittest.TestCase):
 
     def test_no_deviations_when_everything_is_within_norm(self):
         ns = self._calm()
-        self.assertEqual(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()), [])
+        self.assertEqual(ns['_szov_broadcast_deviations'](self._collect(ns)), [])
 
     def test_ar_outside_the_corridor_is_a_deviation(self):
         ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.9},
                                        'stale': False, 'age_seconds': 0})
-        deviations = ' '.join(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()))
+        deviations = ' '.join(ns['_szov_broadcast_deviations'](
+            self._collect(ns, now=datetime(2026, 9, 17, 2, 30))))
         self.assertIn('AR выше установленного диапазона', deviations)
 
     def test_sl_below_the_norm_is_a_deviation(self):
-        """Порог тот же, при котором плитка SL на табло перестаёт быть зелёной."""
-        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.72},
+        """Порог тот же, при котором плитка SL на табло перестаёт быть зелёной. SL берём у часа:
+        в снимке он за весь день, а тревога с задачи #341 — только про прошедший час."""
+        ns = self._calm(hourly_raw=[dict(self.NORMAL_HOURLY[0], served_sl=720)],
+                        snapshot={'now': {}, 'today': {'sl_ratio': 0.95},
                                   'stale': False, 'age_seconds': 0})
-        deviations = ' '.join(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()))
+        deviations = ' '.join(ns['_szov_broadcast_deviations'](self._collect(ns)))
         self.assertIn('SL ниже нормы', deviations)
         self.assertIn('72,0%', deviations)
 
     def test_sl_at_the_norm_is_not_a_deviation(self):
-        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.8},
+        ns = self._calm(hourly_raw=[dict(self.NORMAL_HOURLY[0], served_sl=800)],
+                        snapshot={'now': {}, 'today': {'sl_ratio': 0.8},
                                   'stale': False, 'age_seconds': 0})
-        self.assertEqual(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()), [])
+        self.assertEqual(ns['_szov_broadcast_deviations'](self._collect(ns)), [])
 
-    def test_sl_is_not_checked_for_a_past_hour_slice(self):
-        """SL в снимке — за весь день; на срез «на 14:00» его натягивать нельзя."""
-        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.4},
-                                  'stale': False, 'age_seconds': 0})
-        self.assertEqual(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect'](hour_to=14)), [])
+    def test_day_totals_never_raise_an_alert(self):
+        """Задача #341: AR, испорченный утром, не должен держать тревогу до вечера.
+
+        Итоги суток вне нормы (AR 11,8 %, SL 40 %), а прошедший час спокоен — значит писать
+        не о чем, и слова «за день» в сообщении быть не должно."""
+        ns = self._namespace(
+            hourly_raw=[
+                {'hh': 8, 'served': 10, 'arrived': 100, 'lost': 90, 'greet_drop': 0,
+                 'served_sl': 5, 'talk_seconds': 2000},
+                dict(self.NORMAL_HOURLY[0]),
+            ],
+            snapshot={'now': {}, 'today': {'sl_ratio': 0.4}, 'stale': False, 'age_seconds': 0})
+        data = self._collect(ns)
+        self.assertGreater(data['totals']['ar_ratio'], 0.05)
+        self.assertEqual(ns['_szov_broadcast_deviations'](data), [])
+        self.assertNotIn('за день', ' '.join(ns['_szov_broadcast_notes'](data)))
 
     def test_frozen_data_is_a_deviation_too(self):
         """Если Oktell молчит, «тревожный» чат должен узнать об этом, а не промолчать."""
         ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.9},
                                   'stale': True, 'age_seconds': 40 * 60})
-        deviations = ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']())
+        deviations = ns['_szov_broadcast_deviations'](self._collect(ns))
         self.assertEqual(len(deviations), 1)
         self.assertIn('не обновляются уже 40 минут', deviations[0])
 
@@ -1535,7 +1562,7 @@ class SzovBroadcastTests(unittest.TestCase):
         получал бы сообщение каждый раз, и режим терял бы смысл."""
         ns = self._calm(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 3},
                                   'today': {'sl_ratio': 0.9}, 'stale': False, 'age_seconds': 0})
-        data = ns['_szov_broadcast_collect']()
+        data = self._collect(ns)
         self.assertEqual(ns['_szov_broadcast_deviations'](data), [])
         notes = ' '.join(ns['_szov_broadcast_notes'](data))
         self.assertIn('на перерыве', notes)
@@ -1559,7 +1586,7 @@ class SzovBroadcastTests(unittest.TestCase):
             'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
             'kind': 'not_planned', 'planned_start_minutes': None,
         }])
-        data = ns['_szov_broadcast_collect']()
+        data = self._collect(ns)
         self.assertEqual(ns['_szov_broadcast_deviations'](data), [])
         notes = ' '.join(ns['_szov_broadcast_notes'](data))
         self.assertIn('перерывов в графике на этот день нет', notes)
@@ -1573,7 +1600,7 @@ class SzovBroadcastTests(unittest.TestCase):
                 'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
                 'kind': 'off_schedule', 'planned_start_minutes': 840,
             }])
-        notes = ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']())
+        notes = ns['_szov_broadcast_notes'](self._collect(ns))
         joined = '\n'.join(notes)
         self.assertLess(joined.index('не по графику'), joined.index('на перерыве'))
         self.assertLess(joined.index('не по графику'), joined.index('Среднее время разговора'))
@@ -1587,7 +1614,7 @@ class SzovBroadcastTests(unittest.TestCase):
     def test_notes_keep_the_frozen_data_line_last(self):
         ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.4},
                                        'stale': True, 'age_seconds': 12 * 60})
-        notes = ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']())
+        notes = ns['_szov_broadcast_notes'](self._collect(ns, now=datetime(2026, 9, 17, 2, 30)))
         self.assertIn('не обновляются уже 12 минут', notes[-1])
         self.assertEqual(len([note for note in notes if 'не обновляются' in note]), 1)
 
@@ -1669,11 +1696,14 @@ class SzovBroadcastTests(unittest.TestCase):
         data['hour'] = dict(hour, label='09:00–10:00', day='17.09')
         return data
 
-    def test_day_deviation_is_marked_as_the_day(self):
+    def test_every_alert_names_the_hour_it_is_about(self):
+        """У тревоги один период — прошедший час, и он назван в каждой строке."""
         ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.7}, 'stale': False, 'age_seconds': 0})
-        deviations = ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']())
-        self.assertTrue(deviations[0].startswith('Обратите внимание (за день): AR выше установленного диапазона'))
-        self.assertIn('Обратите внимание (за день): SL ниже нормы (80%) — 70,0%.', deviations)
+        deviations = ns['_szov_broadcast_deviations'](self._collect(ns, now=datetime(2026, 9, 17, 2, 30)))
+        self.assertTrue(deviations)
+        for note in deviations:
+            self.assertTrue(note.startswith('Обратите внимание (за час 01:00–02:00)'), note)
+        self.assertIn('AR выше установленного диапазона', ' '.join(deviations))
 
     def test_hour_deviations_are_marked_with_the_hour_and_shown(self):
         ns = self._calm()
@@ -1683,20 +1713,25 @@ class SzovBroadcastTests(unittest.TestCase):
                       'За час потеряно 5 звонков.', notes)
         self.assertIn('Обратите внимание (за час 09:00–10:00): SL ниже нормы (80%) — 60,0%.', notes)
 
-    def test_hour_deviations_do_not_wake_the_deviations_only_chat(self):
-        # AR одного часа редко ложится в коридор — «тревожный» чат получал бы письмо каждый час.
+    def test_hour_deviations_wake_the_deviations_only_chat(self):
+        """Задача #341: тревога — это событие прошедшего часа, ради него режим и заведён."""
         ns = self._calm()
-        self.assertEqual(ns['_szov_broadcast_deviations'](self._hour_data(ns, self.HOUR_ROWS[0])), [])
+        deviations = ns['_szov_broadcast_deviations'](self._hour_data(ns, self.HOUR_ROWS[0]))
+        self.assertIn('Обратите внимание (за час 09:00–10:00): AR выше установленного диапазона (3–5%) — 10,0%. '
+                      'За час потеряно 5 звонков.', deviations)
 
     def test_small_hour_is_not_judged(self):
+        """Ночью процент от единиц звонков — случай, а не показатель: ни строки, ни рассылки."""
         ns = self._calm()
         small = dict(self.HOUR_ROWS[0], arrived=19, lost=10, ar_ratio=10 / 19, sl_ratio=0.2)
-        self.assertEqual(ns['_szov_broadcast_hour_notes'](self._hour_data(ns, small)), [])
+        data = self._hour_data(ns, small)
+        self.assertEqual(ns['_szov_broadcast_hour_notes'](data), [])
+        self.assertEqual(ns['_szov_broadcast_deviations'](data), [])
 
-    def test_hour_notes_follow_the_day_ones(self):
+    def test_hour_notes_come_before_the_routine_lines(self):
         ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.9}, 'stale': False, 'age_seconds': 0})
         notes = '\n'.join(ns['_szov_broadcast_notes'](self._hour_data(ns, self.HOUR_ROWS[0])))
-        self.assertLess(notes.index('(за день)'), notes.index('(за час 09:00–10:00)'))
+        self.assertNotIn('(за день)', notes)
         self.assertLess(notes.index('(за час 09:00–10:00)'), notes.index('Среднее время разговора'))
 
     def test_hour_picture_goes_third_and_on_its_own(self):

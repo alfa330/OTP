@@ -29,7 +29,7 @@ DB_PATH = ROOT / "database.py"
 HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
            "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
            "_op_broadcast_attach_period", "_op_broadcast_caption", "_op_broadcast_period_notes",
-           "_op_broadcast_bridge_note", "_op_broadcast_notes", "_wallboard_format_asa",
+           "_op_broadcast_bridge_note", "_wallboard_format_asa",
            "_op_broadcast_key_tiles", "_op_render_wallboard_png", "_op_render_hour_png"}
 CONSTANTS = {"_OP_BROADCAST_TABLE_ROWS"}
 
@@ -84,54 +84,72 @@ def snapshot(arrived=100, missed=4, sl=0.9, live_age=30, online=5, talking=2, on
     }
 
 
+def with_hour(base=None, arrived=30, missed=1, sl=0.9):
+    """Снимок с уже приклеенным периодом. День и час задаются порознь: с 18.09.2026 тревога
+    считается только по последнему полному часу, и проверять это надо на расходящихся цифрах."""
+    data = dict(base if base is not None else snapshot())
+    data.update(day_label='За день', day_note_label='за день', day_column='День',
+                hour_label='09:00–10:00', hour_day='17.09', hour_column='09–10',
+                hour_totals={'arrived': arrived, 'answered': arrived - missed, 'missed': missed,
+                             'ar': (missed / arrived) if arrived else None, 'sl': sl,
+                             'avg_talk_seconds': 60, 'avg_wait_seconds': 4, 'outgoing': 0})
+    return data
+
+
 class DeviationTests(unittest.TestCase):
     def setUp(self):
         self.ns = _namespace()
         self.deviations = self.ns["_op_broadcast_deviations"]
 
     def test_all_in_norm_is_silent(self):
-        self.assertEqual(self.deviations(snapshot()), [])
+        self.assertEqual(self.deviations(with_hour()), [])
 
-    def test_day_deviation_is_marked_as_the_day(self):
-        """Владелец 17.09.2026: у отклонения видно, за какой оно период."""
-        notes = self.deviations(snapshot(arrived=100, missed=9, sl=0.7))
-        self.assertEqual(notes, ['Обратите внимание (за день): потеряно 9,0 % входящих при норме до 5 %.',
-                                 'Обратите внимание (за день): SL 70,0 % при норме от 80 %.'])
+    def test_every_alert_names_the_hour_it_is_about(self):
+        """Владелец 17.09.2026: у отклонения видно, за какой оно период. Период с 18.09 один."""
+        notes = self.deviations(with_hour(arrived=100, missed=9, sl=0.7))
+        self.assertEqual(notes, [
+            'Обратите внимание (за час 09:00–10:00): потеряно 9,0 % входящих при норме до 5 %.',
+            'Обратите внимание (за час 09:00–10:00): SL 70,0 % при норме от 80 %.'])
+
+    def test_day_totals_never_raise_an_alert(self):
+        """Задача #341 у СЗоВ, 18.09.2026 и здесь: провал в 8 утра не должен держать тревогу
+        до вечера. День вне нормы, час спокоен — писать не о чем."""
+        self.assertEqual(self.deviations(with_hour(snapshot(arrived=100, missed=40, sl=0.3))), [])
 
     def test_ar_above_corridor(self):
-        notes = self.deviations(snapshot(arrived=100, missed=9))
+        notes = self.deviations(with_hour(arrived=100, missed=9))
         self.assertEqual(len(notes), 1)
         self.assertIn('9,0 %', notes[0])
         self.assertIn('до 5 %', notes[0])
 
     def test_ar_below_corridor_is_also_a_deviation(self):
-        notes = self.deviations(snapshot(arrived=100, missed=1))
+        notes = self.deviations(with_hour(arrived=100, missed=1))
         self.assertEqual(len(notes), 1)
         self.assertIn('ниже коридора', notes[0])
 
     def test_sl_below_threshold(self):
-        notes = self.deviations(snapshot(sl=0.7))
+        notes = self.deviations(with_hour(sl=0.7))
         self.assertEqual(len(notes), 1)
         self.assertIn('SL 70,0 %', notes[0])
 
     def test_unknown_sl_is_not_a_deviation(self):
         # Станция не отдаёт момент ответа → снимок отдаёт SL как None; писать в чат
         # «SL 0 % при норме 80 %» на этом было бы ложной тревогой в каждой отбивке.
-        self.assertEqual(self.deviations(snapshot(sl=None)), [])
+        self.assertEqual(self.deviations(with_hour(sl=None)), [])
         text = self.ns["_op_broadcast_text"](snapshot(sl=None))
         self.assertEqual(table(text)[1]['SL'], ['—'])
 
     def test_small_sample_does_not_wake_anyone(self):
         # Утро: 7 входящих, 1 потерян — 14 % AR, но это не показатель.
-        self.assertEqual(self.deviations(snapshot(arrived=7, missed=1, sl=0.5)), [])
+        self.assertEqual(self.deviations(with_hour(arrived=7, missed=1, sl=0.5)), [])
 
     def test_silent_bridge_is_a_deviation(self):
-        notes = self.deviations(snapshot(live_age=1200))
+        notes = self.deviations(with_hour(snapshot(live_age=1200)))
         self.assertEqual(len(notes), 1)
         self.assertIn('молчит 20 мин', notes[0])
 
     def test_bridge_without_live_data_is_a_deviation(self):
-        notes = self.deviations(snapshot(live_age=None))
+        notes = self.deviations(with_hour(snapshot(live_age=None)))
         self.assertEqual(len(notes), 1)
         self.assertIn('не присылал живых данных', notes[0])
 
@@ -225,11 +243,12 @@ class PeriodTests(unittest.TestCase):
         self.assertLessEqual(max(len(line) for line in block), 32)
 
     def test_table_goes_first_then_deviations_then_people(self):
-        data = self.today()
-        data['totals'] = dict(data['totals'], sl=0.7)
-        text = self.ns["_op_broadcast_text"](self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts))
+        # Час 09:00–10:00 у self.today() — 30 входящих, 3 потеряно, SL 70 %.
+        text = self.ns["_op_broadcast_text"](
+            self.attach(self.today(), datetime(2026, 9, 17, 10, 0), self.day_parts))
         self.assertTrue(text.startswith('<b>Табло ОП</b> (15.09 18:00):\n\n<pre>'))
-        self.assertLess(text.index('</pre>'), text.index('Обратите внимание (за день): SL 70,0 %'))
+        self.assertLess(text.index('</pre>'),
+                        text.index('Обратите внимание (за час 09:00–10:00): SL 70,0 %'))
         self.assertLess(text.index('Обратите внимание'), text.index('Онлайн 5 · в разговоре 2'))
 
     def test_midnight_table_is_titled_by_the_day_that_ended(self):
@@ -248,14 +267,15 @@ class PeriodTests(unittest.TestCase):
             'Обратите внимание (за час 09:00–10:00): SL 30,0 % при норме от 80 %.',
         ])
 
-    def test_day_then_hour_then_bridge(self):
+    def test_hour_first_then_bridge(self):
         data = self.today()
-        data['totals'] = dict(data['totals'], sl=0.7)
+        data['totals'] = dict(data['totals'], sl=0.7)          # день вне нормы — и всё равно молчит
         data['hourly'] = hourly({9: (30, 12, 0.3)})
         data['bridge'] = {'live_age_seconds': 1200}
-        notes = self.ns["_op_broadcast_notes"](self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts))
-        self.assertTrue(notes[0].startswith('Обратите внимание (за день)'))
-        self.assertTrue(notes[1].startswith('Обратите внимание (за час 09:00–10:00)'))
+        notes = self.ns["_op_broadcast_deviations"](
+            self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts))
+        self.assertEqual(len([note for note in notes if '(за день' in note]), 0)
+        self.assertTrue(notes[0].startswith('Обратите внимание (за час 09:00–10:00)'))
         self.assertIn('молчит 20 мин', notes[-1])
 
     def test_small_hour_is_not_judged(self):
@@ -264,19 +284,20 @@ class PeriodTests(unittest.TestCase):
         out = self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts)
         self.assertEqual(self.ns["_op_broadcast_caption"](out), '')
 
-    def test_midnight_day_deviation_names_the_day(self):
+    def test_midnight_alert_names_the_hour_that_ended(self):
         out = self.attach(self.today('2026-09-17'), datetime(2026, 9, 17, 0, 0, 3), self.day_parts)
-        out['totals'] = dict(out['totals'], sl=0.5)
-        self.assertIn('Обратите внимание (за день 16.09): SL 50,0 % при норме от 80 %.',
+        out['hour_totals'] = dict(out['hour_totals'], arrived=40, missed=1, sl=0.5)
+        self.assertIn('Обратите внимание (за час 23:00–24:00): SL 50,0 % при норме от 80 %.',
                       self.ns["_op_broadcast_caption"](out))
 
-    def test_hour_is_not_a_deviation_on_its_own(self):
-        # Отклонения — по итогам дня, как и раньше: плохой час в хороший день режим
-        # «только при отклонениях» не будит.
+    def test_a_bad_hour_alone_wakes_the_deviations_only_chat(self):
+        # С 18.09.2026 тревога — это событие часа: плохой час в хорошем дне будит чат.
         data = self.today()
         data['hourly'] = hourly({9: (30, 12, 0.3)})
         out = self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts)
-        self.assertEqual(self.ns["_op_broadcast_deviations"](out), [])
+        self.assertEqual(self.ns["_op_broadcast_deviations"](out), [
+            'Обратите внимание (за час 09:00–10:00): потеряно 40,0 % входящих при норме до 5 %.',
+            'Обратите внимание (за час 09:00–10:00): SL 30,0 % при норме от 80 %.'])
 
     def test_snapshot_saved_before_hourly_metrics_gives_dashes_not_a_crash(self):
         data = self.today()
@@ -326,7 +347,7 @@ class CaptionTests(unittest.TestCase):
         self.assertEqual(self.caption(snapshot()), '')
 
     def test_caption_is_only_the_deviations(self):
-        data = snapshot(arrived=100, missed=9, sl=0.7)
+        data = with_hour(arrived=100, missed=9, sl=0.7)
         self.assertEqual(self.caption(data).split('\n'), self.ns["_op_broadcast_deviations"](data))
         for noise in ('Табло ОП', '<pre>', 'Онлайн', 'Входящих'):
             self.assertNotIn(noise, self.caption(data))
