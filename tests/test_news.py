@@ -373,7 +373,7 @@ class NewsPerimeterTests(unittest.TestCase):
         confirm = source[source.index('def confirm_read('):]
         confirm = confirm[:confirm.index('\n# ─')]
         self.assertIn("p.status = 'published'", confirm)
-        self.assertIn('AUDIENCE_MATCH_FOR_VIEWER', confirm)
+        self.assertIn('viewer_match(with_space)', confirm)
 
     def test_a_manager_above_the_author_can_take_the_window_down(self):
         """Обязательному окну нужен тормоз не только у автора.
@@ -556,7 +556,8 @@ class NewsFrontendTests(unittest.TestCase):
         tab = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
         # Читатель получает ленту, а не отказ «публикуют супервайзер и выше».
         self.assertIn('if (!canPublish) {', tab)
-        self.assertIn('return <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} />;', tab)
+        self.assertIn('return <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} '
+                      'spaceId={spaceId} />;', tab)
         self.assertNotIn('Новости публикуют супервайзер и выше', tab)
         # Список редактора читателю не запрашивается — иначе 403 на каждом заходе.
         self.assertIn("if (!canPublish || bucket === 'mine')", tab)
@@ -1104,7 +1105,9 @@ class NewsPassTests(unittest.TestCase):
             block = source[source.index(name):]
             block = block[:block.index(end)]
             self.assertIn("p.status = 'published'", block, name)
-            self.assertIn('AUDIENCE_MATCH_FOR_VIEWER', block, name)
+            # viewer_match(...) — тот же шаблон адресата, только с границей
+            # пространства или без неё (news/access.py).
+            self.assertIn('viewer_match(with_space)', block, name)
             # Свою новость автор не получает — ни окном, ни в ленте.
             self.assertIn('p.author_id IS DISTINCT FROM %(user_id)s', block, name)
             self.assertNotIn('correct_index', block, name)
@@ -1202,6 +1205,209 @@ class NewsPassFrontendTests(unittest.TestCase):
         self.assertIn('disabled={mustPass}', tab)
         # Список тренажёров — из реестра, а не своим перечнем.
         self.assertIn("import { TRAINER_CARDS } from './trainers/registry';", _read(self.TAB))
+
+
+class NewsSpaceTests(unittest.TestCase):
+    """Пространство новости (решение владельца 18.09.2026).
+
+    Дословно: «сделай чтобы по пространствам новости таксопарки и тез не
+    смешивались». Граница третья — рядом с потолком должности и границей
+    отдела, — и держится она в четырёх местах сразу: в шаблоне адресата, в
+    списке редактора, в справочниках формы и в проверке набора адресатов.
+    """
+
+    SUPER = dict(ceiling=wiki_access.ROLE_LEVELS['super_admin'], departments=None)
+
+    def test_the_boundary_stands_in_both_halves_of_one_template(self):
+        """Окно и журнал считают адресатов ОДНИМ правилом — вместе с границей.
+
+        Разъедься они, «подтвердили 12 из 30» считалось бы не по тем тридцати,
+        кому объявление показали, — и журнал перестал бы отвечать на вопрос,
+        ради которого существует.
+        """
+        source = _read('news', 'access.py')
+        self.assertEqual(source.count('SPACE_MATCH_TEMPLATE = """'), 1)
+        for form in (news_access.AUDIENCE_MATCH_FOR_VIEWER_IN_SPACE,
+                     news_access.AUDIENCE_MATCH_FOR_REPORT_IN_SPACE):
+            self.assertIn('wiki_space_departments', form)
+            self.assertIn('p.space_id', form)
+        # И ровно эти два выбирает селектор — второго способа собрать условие
+        # нет: разойдясь, они дали бы окно без границы, а журнал с ней.
+        self.assertIs(news_access.viewer_match(True),
+                      news_access.AUDIENCE_MATCH_FOR_VIEWER_IN_SPACE)
+        self.assertIs(news_access.report_match(True),
+                      news_access.AUDIENCE_MATCH_FOR_REPORT_IN_SPACE)
+        self.assertIs(news_access.viewer_match(False),
+                      news_access.AUDIENCE_MATCH_FOR_VIEWER)
+        self.assertIs(news_access.report_match(False),
+                      news_access.AUDIENCE_MATCH_FOR_REPORT)
+
+    def test_a_news_without_a_space_is_not_lost(self):
+        """Ничья новость видна отовсюду, а не ниоткуда.
+
+        Так лежат объявления, выпущенные до этой границы. Спрячь мы их — у
+        обязательного окна не осталось бы ни одного редактора, который вправе
+        его снять, и оно висело бы у людей навсегда.
+        """
+        self.assertIn('p.space_id IS NULL', news_access.SPACE_MATCH_TEMPLATE)
+        queries = _read('news', 'queries.py')
+        space_filter = queries[queries.index('def _space_filter('):]
+        space_filter = space_filter[:space_filter.index('\ndef ', 10)]
+        self.assertIn('p.space_id IS NULL', space_filter)
+        self.assertIn('%(space)s::int IS NULL', space_filter)
+
+    def test_a_space_without_departments_narrows_nothing(self):
+        """Пространство, не назвавшее отделов, ничего про своих людей не сказало.
+
+        То же соглашение, что у вики (wiki/queries.py: _SPACE_GATE_SQL): иначе
+        полунастроенное пространство отрезало бы своих же читателей от окна.
+
+        И справочник формы обязан читать пустоту ТАК ЖЕ: иначе в новом
+        пространстве он не предложил бы ни одного адресата, а новость оттуда
+        всё равно дошла бы до всех.
+        """
+        self.assertIn('NOT EXISTS', news_access.SPACE_MATCH_TEMPLATE)
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('queries.space_departments(cursor, space_id) or None', routes)
+
+    def test_a_subject_from_another_space_is_refused(self):
+        """Форма сужена справочником, но правило живёт и на сервере.
+
+        Правило, живущее только во фронте, держится до первого запроса мимо
+        него — а здесь мимо него уезжает объявление чужой компании.
+        """
+        refusal = news_access.audience_refusal(
+            [{'subject_type': 'department', 'subject_id': 560}],
+            subject_departments={('department', 560): 560},
+            space_departments=[1, 367], **self.SUPER)
+        self.assertIn('другого пространства', refusal or '')
+        # Свой отдел того же пространства проходит.
+        self.assertIsNone(news_access.audience_refusal(
+            [{'subject_type': 'department', 'subject_id': 367}],
+            subject_departments={('department', 367): 367},
+            space_departments=[1, 367], **self.SUPER))
+
+    def test_a_role_is_not_cut_by_the_space_but_by_the_window(self):
+        """Должность адресует людей по всей компании — её режет показ, а не форма.
+
+        Запрети мы её в пространстве, у директора пропало бы «всем операторам»
+        вовсе. Сужает такую новость сама граница показа: из «Тез» она дойдёт до
+        операторов Тез КЦ, из «Таксопарков» — до операторов Таксопарков.
+        """
+        self.assertIsNone(news_access.audience_refusal(
+            [{'subject_type': 'otp_role', 'subject_role': 'operator'}],
+            subject_departments={}, space_departments=[560], **self.SUPER))
+
+    def test_catalogs_add_the_two_boundaries_instead_of_choosing_one(self):
+        """«Чей это человек» и «чьей компании вика» — разные вопросы.
+
+        Складывает их вика, одной функцией (narrow_to_space). Вторая, своя,
+        однажды разошлась бы с первой молча.
+        """
+        queries = _read('news', 'queries.py')
+        catalog = queries[queries.index('def subject_catalog('):]
+        catalog = catalog[:catalog.index('\ndef ', 10)]
+        self.assertIn('wiki_structure.narrow_to_space(department_ids, space_department_ids)',
+                      catalog)
+        people = queries[queries.index('def targetable_people('):]
+        people = people[:people.index('\ndef ', 10)]
+        self.assertIn('space_department_ids=space_department_ids', people)
+
+    def test_the_foreign_table_never_reaches_a_query_unguarded(self):
+        """wiki_space_departments приносит ЧУЖОЙ пакет.
+
+        Сорвись миграция вики — упоминание несуществующей таблицы валит запрос
+        на разборе, то есть окно новости пропало бы у всех вошедших в портал.
+        Ради этого пакет news/ и вынесен из wiki/, поэтому каждая выборка
+        спрашивает защёлку, а не таблицу.
+        """
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('def _space_ready(cursor):', routes)
+        # Ни одна выборка не берёт границу мимо защёлки.
+        for call in ('with_space=_space_ready(cursor)',
+                     'space_id=_request_space(cursor)'):
+            self.assertIn(call, routes)
+        self.assertNotIn('with_space=True', routes)
+        schema = _read('news', 'schema.py')
+        ready = schema[schema.index('def space_ready('):]
+        ready = ready[:ready.index('\ndef ', 10)]
+        self.assertIn("to_regclass('public.wiki_space_departments')", ready)
+        self.assertIn("column_name = 'space_id'", ready)
+
+    def test_an_orphan_news_finds_its_space_by_the_author_department(self):
+        """Новости, выпущенные до колонки, разбираются отделом автора.
+
+        Другого следа, из какой вики выпущено старое объявление, в базе нет, и
+        он честный: список редактора и так стоял на отделе автора.
+        """
+        schema = _read('news', 'schema.py')
+        backfill = schema[schema.index('def backfill_space_ids('):]
+        backfill = backfill[:backfill.index('\ndef ', 10)]
+        self.assertIn('p.author_department_id', backfill)
+        self.assertIn('WHERE p.space_id IS NULL', backfill)
+        self.assertIn('if not space_ready(cursor):', backfill)
+        # Бэкфилл живёт под своим SAVEPOINT'ом: он читает таблицу вики, и её
+        # сбой не должен уносить развёрнутые таблицы раздела.
+        db = _read('database.py')
+        self.assertIn('SAVEPOINT news_spaces_backfill', db)
+
+    def test_a_question_becomes_the_news_of_its_own_space(self):
+        """Новость из «Вопросов операторов» (#321) — вики отдела адресата.
+
+        Вопрос задал оператор конкретной компании, и объявление с ответом
+        принадлежит её вике: иначе оно осталось бы ничьим и встало в список
+        обеих.
+        """
+        source = _code_only(_read('wiki', 'routes_questions.py'))
+        self.assertIn("space_of_department(cursor, item['department_id'])", source)
+
+    def test_the_space_of_a_news_never_changes_by_an_edit(self):
+        """Переезд объявления в соседнюю вику — это другой круг адресатов.
+
+        У опубликованной новости он уже показан людям и посчитан в журнале,
+        поэтому правка пространство не трогает, а проверяет адресатов по
+        ПРОСТРАНСТВУ САМОЙ НОВОСТИ, а не по вкладке, из которой пришёл запрос.
+        """
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertEqual(routes.count("_audience_refusal(cursor, ctx, rules, space_id=post.get('space_id'))"), 2)
+        self.assertIn('space_id=space_id, with_space=_space_ready(cursor),', routes)
+        update = routes[routes.index('def news_post_update('):]
+        update = update[:update.index('\n    @news_route')]
+        self.assertNotIn('space_id=%', update)
+
+    def test_the_tab_asks_for_the_space_it_is_open_in(self):
+        """Список, справочники и лента — все три спрашивают пространство.
+
+        Забудь любой из них — и вкладка в «Тез» показывала бы таксопарковые
+        объявления, предлагала бы чужие отделы или выдавала бы человеку ленту
+        соседней компании.
+        """
+        tab = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn('params: { status: bucket, space_id: spaceId }', tab)
+        self.assertIn('params: { space_id: spaceId }', tab)
+        self.assertIn('{ ...payload, space_id: spaceId }', tab)
+        # Пространство в зависимостях загрузчиков: переключили вику — список и
+        # справочники перечитываются, а не остаются от соседней.
+        self.assertIn('[apiBaseUrl, headers, bucket, canPublish, spaceId]', tab)
+        self.assertIn('[apiBaseUrl, headers, spaceId]', tab)
+        feed = _jsx_code_only(_read('src', 'components', 'news', 'NewsFeed.jsx'))
+        self.assertIn('space_id: spaceId', feed)
+        self.assertIn('[apiBaseUrl, headers, spaceId]', feed)
+        view = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiView.jsx'))
+        news_tab = view[view.index('<WikiNews'):]
+        news_tab = news_tab[:news_tab.index('/>')]
+        self.assertIn('spaceId={activeSpace?.id || null}', news_tab)
+
+    def test_the_window_outside_the_wiki_asks_for_no_space(self):
+        """Окно стоит вне вики, и пространства у него нет.
+
+        Человеку показывают всё, что адресовано ЕМУ; границу здесь держит сама
+        новость, а не вкладка. Появись у окна параметр пространства — он был бы
+        взят с потолка, потому что спрашивать его в корне портала не у кого.
+        """
+        modal = _jsx_code_only(_read('src', 'components', 'news', 'NewsOfDayModal.jsx'))
+        self.assertNotIn('space_id', modal)
+        self.assertNotIn('spaceId', modal)
 
 
 if __name__ == '__main__':

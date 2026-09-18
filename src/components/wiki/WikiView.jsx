@@ -1268,6 +1268,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             showToast={showToast}
                             compose={newsCompose}
                             onComposeFinished={finishNewsCompose}
+                            /* Пространство — граница раздела и здесь
+                               (решение владельца 18.09.2026): объявление
+                               Таксопарков не встаёт в список Тез, а
+                               справочник адресата не предлагает чужие
+                               отделы. Само окно «Новость дня» стоит вне
+                               вики, и его границу держит сервер. */
+                            spaceId={activeSpace?.id || null}
+                            /* Имя — только для подсказки «почему список
+                               сужен»: «отделы пространства „Тез“» человек
+                               читает как ответ, а «ваше пространство» — как
+                               отговорку. */
+                            spaceName={activeSpace?.name || ''}
                         />
                     </Suspense>
                 )}

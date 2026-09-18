@@ -93,7 +93,7 @@ const DELAY_PRESETS = [0, 10, 30, 60];
 // Выбор адресатов
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AudiencePicker({ open, onClose, access, value, onChange }) {
+function AudiencePicker({ open, onClose, access, value, onChange, spaceName = '' }) {
     const [tab, setTab] = useState('department');
     const [query, setQuery] = useState('');
 
@@ -184,11 +184,17 @@ function AudiencePicker({ open, onClose, access, value, onChange }) {
                     <IosHint
                         align="right"
                         label="Почему список сужен"
+                        /* Пространство названо ПЕРВЫМ и по имени: отдел
+                           соседней компании пропал из списка не потому, что
+                           прав не хватило, а потому что вика другая, и без
+                           этой строки человек ищет причину в своих правах. */
                         text={`В списке только те, кого вам можно адресовать: ${
+                            spaceName ? `отделы пространства «${spaceName}»` : 'отделы вашего пространства'
+                        }${
                             access?.bounded
-                                ? 'ваш отдел и должности ниже вашей'
-                                : 'должности ниже вашей'
-                        }. Выбрать должность целиком может лишь тот, у кого границы отдела нет: правило на должность адресует людей по всей компании.`}
+                                ? ', ваш отдел и должности ниже вашей'
+                                : ' и должности ниже вашей'
+                        }. Выбрать должность целиком может лишь тот, у кого границы отдела нет: правило на должность адресует людей по всей компании — в этом пространстве.`}
                     />
                 </span>
             </div>
@@ -273,7 +279,8 @@ function TrainerPicker({ open, value, onClose, onChange }) {
 // Форма новости
 // ─────────────────────────────────────────────────────────────────────────────
 
-function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, headers }) {
+function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, headers,
+                   spaceName = '' }) {
     const [title, setTitle] = useState('');
     const [mandatory, setMandatory] = useState(true);
     const [delay, setDelay] = useState(access?.default_confirm_delay_seconds ?? 10);
@@ -996,6 +1003,7 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                 access={access}
                 value={audience}
                 onChange={setAudience}
+                spaceName={spaceName}
             />
             <TrainerPicker
                 open={trainerPickerOpen}
@@ -1149,8 +1157,14 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
 // Витрина
 // ─────────────────────────────────────────────────────────────────────────────
 
+/* spaceId — пространство, в котором открыта вкладка (решение владельца
+   18.09.2026: «чтобы по пространствам новости Таксопарков и Тез не
+   смешивались»). Он и есть граница раздела здесь: список показывает
+   объявления ЭТОЙ вики, справочник адресата — её отделы, а новая новость
+   этой вике и принадлежит. Сервер держит ту же границу сам — параметр не
+   «уточнение выборки», но и единственной дверью он не остаётся. */
 export default function WikiNews({ apiBaseUrl, headers, showToast, compose = null,
-                                   onComposeFinished }) {
+                                   onComposeFinished, spaceId = null, spaceName = '' }) {
     const [bucket, setBucket] = useState('published');
     const [items, setItems] = useState([]);
     const [access, setAccess] = useState(null);
@@ -1203,21 +1217,25 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
     const load = useCallback(() => {
         if (!canPublish || bucket === 'mine') { setLoading(false); return Promise.resolve(); }
         setLoading(true);
-        return axios.get(`${apiBaseUrl}/api/news/posts`, { headers, params: { status: bucket } })
+        return axios.get(`${apiBaseUrl}/api/news/posts`,
+                         { headers, params: { status: bucket, space_id: spaceId } })
             .then((r) => { setItems(r.data?.items || []); setError(''); })
             .catch((e) => { setItems([]); setError(errText(e, 'Не удалось загрузить новости')); })
             .finally(() => setLoading(false));
-    }, [apiBaseUrl, headers, bucket, canPublish]);
+    }, [apiBaseUrl, headers, bucket, canPublish, spaceId]);
 
     useEffect(() => { load(); }, [load]);
 
     /* null — ещё не знаем, кто перед нами; false — ответ не пришёл. Различать
        нужно: до ответа вкладка не решает, ленту показывать или управление. */
     useEffect(() => {
-        axios.get(`${apiBaseUrl}/api/news/access`, { headers })
+        /* Пространство спрашивается ВМЕСТЕ с правами: справочник адресата
+           сужен его отделами, и переключение вики обязано его перечитать —
+           иначе форма предлагала бы отделы соседней компании. */
+        axios.get(`${apiBaseUrl}/api/news/access`, { headers, params: { space_id: spaceId } })
             .then((r) => setAccess(r.data))
             .catch(() => setAccess(false));
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, spaceId]);
 
     /* Карточку для правки берём с сервера целиком: в списке нет ни текста, ни
        адресатов, и открытая по нему форма показала бы пустую новость. */
@@ -1240,7 +1258,12 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                 .then((r) => (payload.publish && r.data?.status !== 'published'
                     ? axios.post(`${apiBaseUrl}/api/news/posts/${post.id}/publish`, {}, { headers })
                     : r))
-            : axios.post(`${apiBaseUrl}/api/news/posts`, payload, { headers });
+            /* Новая новость принадлежит той вике, из которой её пишут.
+               У правки пространство не меняется вовсе: переезд объявления в
+               соседнюю вику — это другой круг адресатов, а он у выпущенной
+               новости уже показан людям и посчитан в журнале. */
+            : axios.post(`${apiBaseUrl}/api/news/posts`, { ...payload, space_id: spaceId },
+                         { headers });
         request
             .then((response) => {
                 setFormPost(undefined);
@@ -1256,7 +1279,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
             })
             .catch((e) => toastRef.current?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
-    }, [apiBaseUrl, headers, formPost, bucket, load, closeCompose]);
+    }, [apiBaseUrl, headers, formPost, bucket, load, closeCompose, spaceId]);
 
     const act = useCallback((post, action) => {
         const url = `${apiBaseUrl}/api/news/posts/${post.id}${action === 'delete' ? '' : `/${action}`}`;
@@ -1296,7 +1319,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
        предназначены» (решение владельца 17.09.2026). Без сегментов и кнопок:
        управлять читателю нечем. */
     if (!canPublish) {
-        return <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} />;
+        return <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} spaceId={spaceId} />;
     }
 
     return (
@@ -1317,7 +1340,9 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                 </button>
             </div>
 
-            {bucket === 'mine' && <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} />}
+            {bucket === 'mine' && (
+                <NewsFeed apiBaseUrl={apiBaseUrl} headers={headers} spaceId={spaceId} />
+            )}
 
             {bucket !== 'mine' && error && <p className="text-[13px] text-rose-600">{error}</p>}
 
@@ -1426,6 +1451,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                 saving={saving}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
+                spaceName={spaceName}
                 onClose={() => {
                     setFormPost(undefined);
                     closeCompose(null);

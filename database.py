@@ -7558,6 +7558,21 @@ class Database:
         else:
             cursor.execute("RELEASE SAVEPOINT news_schema")
 
+        # Пространство ничьим новостям — ОТДЕЛЬНЫМ SAVEPOINT'ом, а не внутри
+        # схемы: он читает таблицу ВИКИ (wiki_space_departments), и сбой на
+        # чужой стороне не должен уносить с собой развёрнутые таблицы раздела.
+        cursor.execute("SAVEPOINT news_spaces_backfill")
+        try:
+            from news.schema import backfill_space_ids
+            filled = backfill_space_ids(cursor)
+        except Exception as exc:
+            cursor.execute("ROLLBACK TO SAVEPOINT news_spaces_backfill")
+            logging.error("Пространства новостям не проставлены: %s", exc, exc_info=True)
+        else:
+            cursor.execute("RELEASE SAVEPOINT news_spaces_backfill")
+            if filled:
+                logging.info("Новости: пространство проставлено %s объявлениям", filled)
+
     def _init_crm_schema_tx(self, cursor):
         """Схема раздела «Обращения» (таблицы crm_*).
 

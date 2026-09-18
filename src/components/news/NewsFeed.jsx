@@ -149,7 +149,10 @@ function FeedPost({ open, postId, apiBaseUrl, headers, onClose, onPassed }) {
     );
 }
 
-export default function NewsFeed({ apiBaseUrl, headers }) {
+/* spaceId — пространство, из которого открыта вкладка. Лента спрашивает
+   новости ЭТОЙ вики: «Новости» в «Тез» — это новости Тез, а не всё, что
+   человеку когда-либо адресовали (решение владельца 18.09.2026). */
+export default function NewsFeed({ apiBaseUrl, headers, spaceId = null }) {
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
@@ -160,7 +163,8 @@ export default function NewsFeed({ apiBaseUrl, headers }) {
 
     const load = useCallback((offset = 0) => {
         if (offset) setMore(true); else setLoading(true);
-        return axios.get(`${apiBaseUrl}/api/news/feed`, { headers, params: { limit: PAGE, offset } })
+        return axios.get(`${apiBaseUrl}/api/news/feed`,
+                         { headers, params: { limit: PAGE, offset, space_id: spaceId } })
             .then((r) => {
                 const page = r.data?.items || [];
                 setItems((prev) => (offset ? [...prev, ...page] : page));
@@ -170,7 +174,7 @@ export default function NewsFeed({ apiBaseUrl, headers }) {
             })
             .catch((e) => setError(errText(e, 'Не удалось загрузить новости')))
             .finally(() => { setLoading(false); setMore(false); });
-    }, [apiBaseUrl, headers]);
+    }, [apiBaseUrl, headers, spaceId]);
 
     useEffect(() => { load(0); }, [load]);
 

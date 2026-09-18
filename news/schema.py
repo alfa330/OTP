@@ -240,6 +240,30 @@ _STATEMENTS = [
     # подтверждения, и не проходят вовсе.
     "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS quiz_passed_at TIMESTAMP;",
     "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS trainer_passed_at TIMESTAMP;",
+    # ── Пространство новости (решение владельца 18.09.2026) ──────────────────
+    # «Чтобы по пространствам новости Таксопарков и Тез не смешивались».
+    # До этого новость не принадлежала никакой вике вовсе: объявление для
+    # Тез КЦ стояло в списке Таксопарков и наоборот, а «все операторы» от
+    # супер-админа доставали до обеих компаний разом.
+    #
+    # Пространство здесь — ВТОРАЯ граница адресата, рядом с потолком должности
+    # и границей отдела: колонка отвечает не «где показать в списке», а «чьей
+    # компании эта новость» (news/access.py: SPACE_MATCH_TEMPLATE).
+    #
+    # БЕЗ ВНЕШНЕГО КЛЮЧА на wiki_spaces, намеренно — по той же причине, по
+    # которой у вики нет ключа на news_posts (wiki/schema.py, kb_news_id):
+    # пакеты разворачиваются раздельно, и ссылка связала бы судьбу раздела с
+    # чужой миграцией. Сорвись схема вики — новости обязаны работать как
+    # вчера, только без границы пространства.
+    #
+    # NULL — законное значение: так лежат новости, выпущенные до этой колонки
+    # (их разбирает backfill_space_ids) и пришедшие мимо вкладки. Ничья
+    # новость видна из любого пространства: спрятать её значило бы оставить
+    # обязательное окно без единого человека, который вправе его снять.
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS space_id INTEGER;",
+    # Список редактора всегда спрашивает «новости ЭТОГО пространства», и он же
+    # ищет ничьи при бэкфилле.
+    "CREATE INDEX IF NOT EXISTS idx_news_posts_space ON news_posts(space_id);",
 ]
 
 # Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.
@@ -294,6 +318,70 @@ def quiz_ready(cursor):
     cursor.execute("SELECT to_regclass('public.news_quiz_questions') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])
+
+
+def space_ready(cursor):
+    """Можно ли считать границу пространства. Отдельно — как кадры и тест.
+
+    Спрашиваем ДВЕ вещи разом, потому что граница держится на них обеих:
+      * колонка news_posts.space_id — своя, приезжает этим деплоем;
+      * таблица wiki_space_departments — ЧУЖАЯ, из пакета вики. Ею
+        пространство и связано с отделами, а другого способа ответить, «чьи
+        это люди», нет.
+
+    Сказать «нет» здесь означает ровно «границы пространства пока нет»: раздел
+    работает как до задачи — новость видна всем своим адресатам, список
+    редактора показывает всё. Уронить окно у всего портала из-за чужой
+    несостоявшейся миграции нельзя — ради этого пакет news/ и вынесен из wiki/.
+    """
+    cursor.execute(
+        """
+        SELECT to_regclass('public.wiki_space_departments') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'news_posts'
+                          AND column_name = 'space_id')
+        """
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def backfill_space_ids(cursor):
+    """Проставляет пространство новостям, выпущенным до появления колонки.
+
+    Правило одно — то же, что у создания новости: пространство берётся по
+    ОТДЕЛУ АВТОРА на момент публикации (news_posts.author_department_id), а
+    отдел с пространством связывает wiki_space_departments. Другого следа, из
+    какой вики выпущено старое объявление, в базе нет, и он честный: список
+    редактора и так стоит на отделе автора.
+
+    Идемпотентен и повторяется на каждом старте намеренно: трогает только
+    ничьи строки, а появиться они могут и после деплоя — например от вкладки
+    со старым бандлом, которая ещё не знает про space_id. Так ничья новость
+    сама находит своё пространство к следующему рестарту.
+
+    Отделу, не выданному ни одному пространству, соответствия нет — такая
+    новость остаётся ничьей и видна из любого пространства (см. шапку колонки).
+    """
+    if not space_ready(cursor):
+        return 0
+    cursor.execute(
+        """
+        UPDATE news_posts p
+           SET space_id = (
+                   SELECT sd.space_id
+                     FROM wiki_space_departments sd
+                     JOIN wiki_spaces sp ON sp.id = sd.space_id AND sp.status = 'active'
+                    WHERE sd.department_id = p.author_department_id
+                    ORDER BY sp.position, sp.id
+                    LIMIT 1
+               )
+         WHERE p.space_id IS NULL
+           AND p.author_department_id IS NOT NULL
+        """
+    )
+    return cursor.rowcount or 0
 
 
 def pass_ready(cursor):

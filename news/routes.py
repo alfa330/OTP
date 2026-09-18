@@ -32,7 +32,8 @@ from . import queries
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
                      pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
-                     quiz_ready as schema_quiz_ready, schema_is_ready)
+                     quiz_ready as schema_quiz_ready, schema_is_ready,
+                     space_ready as schema_space_ready)
 
 # Отказ, который видит не-редактор. Одной строкой: текст показывают человеку,
 # и «недостаточно прав» без объяснения отправляет его писать в поддержку.
@@ -100,9 +101,54 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             _pass_columns['ready'] = schema_pass_ready(cursor)
         return _pass_columns['ready']
 
+    # Граница пространства (решение владельца 18.09.2026). Тем же приёмом и по
+    # той же причине, что кадры и тест, но с одной особенностью: половина
+    # ответа тут ЧУЖАЯ — таблицу wiki_space_departments приносит пакет вики.
+    # Сорвись её миграция, раздел обязан работать как вчера, без границы, а не
+    # отвечать пятисоткой каждому вошедшему в портал: ради этого пакет news/ и
+    # вынесен из wiki/.
+    _space_columns = {'ready': False}
+
+    def _space_ready(cursor):
+        if not _space_columns['ready']:
+            _space_columns['ready'] = schema_space_ready(cursor)
+        return _space_columns['ready']
+
+    def _request_space(cursor):
+        """Пространство, из которого пришёл запрос. None — не назвали.
+
+        Из строки запроса и из тела — как у вики (routes_structure.request_space).
+        Проверки «выдано ли человеку это пространство» здесь НЕТ намеренно: она
+        стоит на ролях вики, а раздел о них не спрашивает вовсе. Границу держит
+        не этот параметр, а справочник адресата (он сужен пересечением своего
+        отдела с отделами пространства) и периметр списка — назвав чужой id,
+        человек увидит не чужие новости, а пустой список.
+        """
+        if not _space_ready(cursor):
+            return None
+        raw = request.args.get('space_id')
+        if raw is None:
+            raw = (request.get_json(silent=True) or {}).get('space_id')
+        return _int_or_none(raw)
+
+    def _space_departments(cursor, space_id):
+        """Отделы пространства для проверки адресата. None — не сужаем.
+
+        Пустой список превращается в None НАМЕРЕННО: пространство, не назвавшее
+        ни одного отдела, ничего про своих людей не сказало — ровно так же его
+        читает и сторона показа (access.SPACE_MATCH_TEMPLATE). Оставь мы пустой
+        список, в новом пространстве форма не предложила бы ни одного адресата,
+        а выпущенная там новость всё равно дошла бы до всех: справочник говорил
+        бы одно, а окно делало другое.
+        """
+        if space_id is None or not _space_ready(cursor):
+            return None
+        return queries.space_departments(cursor, space_id) or None
+
     def _get_post(cursor, post_id):
-        """Карточка с колонками #342, когда они развёрнуты."""
-        return queries.get_post(cursor, post_id, with_pass=_pass_ready(cursor))
+        """Карточка с колонками #342 и пространством, когда они развёрнуты."""
+        return queries.get_post(cursor, post_id, with_pass=_pass_ready(cursor),
+                                with_space=_space_ready(cursor))
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -381,13 +427,19 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             })
         return rules
 
-    def _audience_refusal(cursor, ctx, rules):
+    def _audience_refusal(cursor, ctx, rules, space_id=None):
         """Отказ по адресатам либо None. Отделы адресатов достаются одним
-        запросом — по одному на строку формы было бы десять обращений к базе."""
+        запросом — по одному на строку формы было бы десять обращений к базе.
+
+        space_id — пространство, которому новость принадлежит: у создания это
+        вкладка, из которой пишут, у правки и публикации — сама новость. Форма
+        уже сужена тем же справочником, но правило, живущее только во фронте,
+        держится до первого запроса мимо него."""
         return news_access.audience_refusal(
             rules,
             ceiling=ctx['ceiling'],
             departments=ctx['departments'],
+            space_departments=_space_departments(cursor, space_id),
             subject_departments=queries.subject_departments(cursor, rules),
             target_roles=queries.roles_of_users(
                 cursor, [r.get('subject_id') for r in rules
@@ -408,7 +460,12 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         items = queries.pending_for_user(
             cursor, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], with_photos=with_photos,
-            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor))
+            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
+            # Окно стоит вне вики, и пространства у него нет: человеку
+            # показывают всё, что адресовано ЕМУ. Границу здесь держит не
+            # вкладка, а сама новость — объявление чужой компании под правило
+            # «все операторы» больше не попадает (access.SPACE_MATCH_TEMPLATE).
+            with_space=_space_ready(cursor))
         if with_photos:
             # Подписи берутся из процессного кэша и базу не трогают: обращений к
             # ней у этого роута столько же, сколько было до фотографий.
@@ -432,7 +489,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             cursor, news_id=post_id, user_id=ctx['user_id'],
             otp_role=ctx['otp_role'], subjects=ctx['subjects'],
             answers=payload.get('answers'), with_quiz=_quiz_ready(cursor),
-            with_pass=_pass_ready(cursor))
+            with_pass=_pass_ready(cursor), with_space=_space_ready(cursor))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
         if status == 'trainer_pending':
@@ -462,7 +519,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         payload = request.get_json(silent=True) or {}
         status, detail = queries.pass_quiz(
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            subjects=ctx['subjects'], answers=payload.get('answers'))
+            subjects=ctx['subjects'], answers=payload.get('answers'),
+            with_space=_space_ready(cursor))
         if status in ('not_found', 'no_quiz'):
             return jsonify({"error": "Теста у этой новости нет"}), 404
         if status == 'quiz_wrong':
@@ -483,7 +541,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             "code": "NEWS_PASS_NOT_READY"}), 503
         status, _detail = queries.mark_trainer_passed(
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            subjects=ctx['subjects'])
+            subjects=ctx['subjects'], with_space=_space_ready(cursor))
         if status in ('not_found', 'no_trainer'):
             return jsonify({"error": "Тренажёра у этой новости нет"}), 404
         return jsonify({"status": "ok"})
@@ -502,7 +560,10 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             cursor, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], limit=limit, offset=offset,
             with_photos=_photos_ready(cursor), with_quiz=_quiz_ready(cursor),
-            with_pass=_pass_ready(cursor))
+            with_pass=_pass_ready(cursor), with_space=_space_ready(cursor),
+            # Лента живёт во вкладке вики, и вкладка всегда открыта В
+            # пространстве: «Новости» в «Тез» — это новости Тез.
+            space_id=_request_space(cursor))
         return jsonify({"items": items, "total": total, "schema_ready": True})
 
     @news_route('/feed/<int:post_id>')
@@ -512,7 +573,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         post = queries.feed_post(
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], with_photos=with_photos,
-            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor))
+            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
+            with_space=_space_ready(cursor))
         if post is None:
             return jsonify({"error": "Новость не найдена"}), 404
         post['photos'] = news_photos.sign_urls(gcs, post['photos']) if with_photos else []
@@ -529,15 +591,22 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if ctx['ceiling'] is None:
             return jsonify({"can_publish": False, "ceiling": None,
                             "subjects": {}, "people": [], "roles": []})
+        # Отделы ПРОСТРАНСТВА, из которого открыта вкладка. Справочник сужается
+        # ими так же, как у выдачи доступа в вике: предлагать в «Тез» отдел
+        # СЗоВ значит показывать чужую оргструктуру и обещать правило, которое
+        # сервер отвергнет (access.audience_refusal).
+        space_departments = _space_departments(cursor, _request_space(cursor))
         return jsonify({
             "can_publish": True,
             "ceiling": ctx['ceiling'],
             "bounded": ctx['departments'] is not None,
             "default_confirm_delay_seconds": DEFAULT_CONFIRM_DELAY_SECONDS,
-            "subjects": queries.subject_catalog(cursor, ctx['departments']),
+            "subjects": queries.subject_catalog(cursor, ctx['departments'],
+                                                space_department_ids=space_departments),
             "people": queries.targetable_people(
                 cursor, max_role_level=ctx['ceiling'],
-                department_ids=ctx['departments']),
+                department_ids=ctx['departments'],
+                space_department_ids=space_departments),
             # Должность как адресат доступна только тому, у кого нет границы
             # отдела: правило на роль адресует людей по всей компании.
             "roles": (queries.targetable_roles(ctx['ceiling'])
@@ -554,7 +623,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             viewer_level=news_access.effective_role_level(ctx['otp_role']),
             departments=ctx['departments'], status=status,
             limit=limit, offset=offset, with_photos=_photos_ready(cursor),
-            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor))
+            with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
+            with_space=_space_ready(cursor), space_id=_request_space(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
                         "total": total})
 
@@ -565,7 +635,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_read_post(ctx, post):
             return jsonify({"error": "Эта новость не из вашего периметра"}), 403
-        post['audience_size'] = queries.audience_size(cursor, post_id)
+        post['audience_size'] = queries.audience_size(
+            cursor, post_id, with_space=_space_ready(cursor))
         return jsonify(_dress(cursor, ctx, post))
 
     @news_route('/posts', methods=('POST',), publisher=True)
@@ -576,7 +647,14 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Укажите заголовок"}), 400
         body = sanitize_html(payload.get('body') or '')
         rules = _rules_from_request(payload)
-        refusal = _audience_refusal(cursor, ctx, rules)
+        # Пространство новости. Вкладка называет его сама; вкладка со старым
+        # бандлом не называет — тогда берём вику отдела автора, как при
+        # разборе ничьих на старте (schema.backfill_space_ids). Оставить такую
+        # новость ничьей значило бы показать её обеим компаниям разом.
+        space_id = _request_space(cursor)
+        if space_id is None and _space_ready(cursor):
+            space_id = queries.space_of_department(cursor, ctx['department_id'])
+        refusal = _audience_refusal(cursor, ctx, rules, space_id=space_id)
         if refusal:
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
         # Тест проверяется ДО первой записи: отказ после create_post оставил бы
@@ -591,6 +669,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         post_id = queries.create_post(
             cursor, title=title, body=body, author_id=ctx['user_id'],
             author_department_id=ctx['department_id'],
+            space_id=space_id, with_space=_space_ready(cursor),
             # С ОБЯЗАТЕЛЬНЫМ прохождением — всегда обязательна: у необязательной
             # крестик подтверждал бы прочтение без единого ответа. Необязательный
             # тест или тренажёр (#342) обязательность не навязывают.
@@ -647,7 +726,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         'subject_role': r['subject_role'],
                         'min_role_level': r['min_role_level']}
                        for r in post['audience']])
-        refusal = _audience_refusal(cursor, ctx, rules)
+        refusal = _audience_refusal(cursor, ctx, rules, space_id=post.get('space_id'))
         if refusal:
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
 
@@ -743,7 +822,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         rules = [{'subject_type': r['subject_type'], 'subject_id': r['subject_id'],
                   'subject_role': r['subject_role'],
                   'min_role_level': r['min_role_level']} for r in post['audience']]
-        refusal = _audience_refusal(cursor, ctx, rules)
+        refusal = _audience_refusal(cursor, ctx, rules, space_id=post.get('space_id'))
         if refusal:
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
         queries.publish_post(cursor, post_id=post_id,
@@ -924,7 +1003,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_read_post(ctx, post):
             return jsonify({"error": "Эта новость не из вашего периметра"}), 403
-        rows = queries.read_report(cursor, post_id, with_pass=_pass_ready(cursor))
+        rows = queries.read_report(cursor, post_id, with_pass=_pass_ready(cursor),
+                                   with_space=_space_ready(cursor))
         # Знаменатель — только НЫНЕШНИЕ адресаты: «из скольких» отвечает на
         # вопрос «сколько человек это касается сейчас». Числитель — по тем же
         # людям, чтобы «12 из 30» нельзя было прочитать двумя способами.

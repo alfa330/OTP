@@ -120,14 +120,27 @@ def normalize_title(value):
 
 
 def audience_refusal(rules, *, ceiling, departments, subject_departments,
-                     target_roles=None):
+                     target_roles=None, space_departments=None):
     """Почему автор не вправе выписать такой набор адресатов. None — вправе.
 
     rules                — список словарей {'subject_type', 'subject_id',
                            'subject_role', 'min_role_level'};
     subject_departments  — {(subject_type, subject_id): department_id} для
                            числовых адресатов, собранный вызывающим из базы;
-    target_roles         — {user_id: role} для адресата-человека.
+    target_roles         — {user_id: role} для адресата-человека;
+    space_departments    — отделы ПРОСТРАНСТВА, в котором пишут новость
+                           (None — про пространство не спрашивали).
+
+    Границы отдела и пространства СКЛАДЫВАЮТСЯ, а не заменяют друг друга — как
+    в вике (wiki/structure.py: narrow_to_space): первая отвечает «чей это
+    человек», вторая — «чьей компании эта вика». Супервайзер СЗоВ не адресует
+    новость отделу продаж, а из «Тез» никто не адресует её Таксопаркам.
+
+    Должность (`otp_role`) этой границей НЕ режется намеренно: она адресует
+    людей по всей компании, и запретить её в пространстве значило бы отнять у
+    директора «всем операторам» вовсе. Такую новость сужает сама граница
+    пространства при показе (SPACE_MATCH_TEMPLATE): из «Тез» она дойдёт до
+    операторов Тез КЦ, из «Таксопарков» — до операторов Таксопарков.
 
     Возвращает готовую строку отказа — её показывают автору, поэтому она
     называет КОНКРЕТНОГО адресата, а не «недостаточно прав».
@@ -156,6 +169,11 @@ def audience_refusal(rules, *, ceiling, departments, subject_departments,
         if not may_target_subject(subject_type, publish_departments=departments,
                                   subject_department=subject_departments[key]):
             return 'Этот адресат относится к другому отделу'
+        # Граница пространства. Стоит ПОСЛЕ границы отдела, чтобы человек
+        # сначала услышал про свой периметр, а не про чужую вику.
+        if (space_departments is not None
+                and subject_departments[key] not in set(space_departments)):
+            return 'Этот адресат из другого пространства вики'
 
         if subject_type == 'user':
             role = (target_roles or {}).get(rule.get('subject_id'))
@@ -238,30 +256,109 @@ def role_level_sql(canon_expression):
     return "COALESCE((%%(role_levels)s::jsonb ->> %s)::int, 0)" % (canon_expression,)
 
 
+# ГРАНИЦА ПРОСТРАНСТВА — третья и последняя (решение владельца 18.09.2026:
+# «чтобы по пространствам новости Таксопарков и Тез не смешивались»).
+#
+# Потолок должности отвечает «кому по чину», правило адресата — «чьим людям», а
+# эта граница — «чьей КОМПАНИИ»: «Таксопарки» и «Тез» — две разные вики и два
+# разных заказчика, и объявление одной из них не должно доезжать до другой
+# просто потому, что супер-админ выбрал адресатом должность, а не отдел.
+#
+# Стоит ЗДЕСЬ, в общем шаблоне, а не поверх выборки окна: журнал редактора
+# обязан считать адресатов ровно теми же правилами, иначе «подтвердили 12 из
+# 30» считалось бы не по тем тридцати, кому окно показали.
+#
+# Три ветки «пусто = не сужаем» — не перестраховка, каждая отвечает за своё:
+#   * space_id IS NULL — новость выпущена до этой границы или мимо вкладки
+#     (см. news/schema.py). Спрятать её значило бы молча отнять у людей уже
+#     показанное объявление;
+#   * у пространства нет отделов — оно ничего про своих людей не сказало.
+#     То же соглашение, что и у вики (wiki/queries.py: _SPACE_GATE_SQL);
+#   * дальше — обычное «отдел человека выдан этому пространству».
+SPACE_MATCH_TEMPLATE = """
+    AND (
+        p.space_id IS NULL
+        OR NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+                        WHERE sd.space_id = p.space_id)
+        OR EXISTS (SELECT 1 FROM wiki_space_departments sd
+                    WHERE sd.space_id = p.space_id
+                      AND sd.department_id = ANY({departments}))
+    )
+"""
+
+
+def _audience_match(*, role_level, departments, directions, groups, roles, user_id,
+                    with_space):
+    """Шаблон адресата, собранный под одну из двух сторон. Один на обе."""
+    match = AUDIENCE_MATCH_TEMPLATE.format(
+        role_level=role_level, departments=departments, directions=directions,
+        groups=groups, roles=roles, rule_role=canon_role_sql('r.subject_role'),
+        user_id=user_id,
+    )
+    if with_space:
+        match += SPACE_MATCH_TEMPLATE.format(departments=departments)
+    return match
+
+
 # Выдача окна: субъекты зрителя посчитаны в питоне и приезжают параметрами.
-AUDIENCE_MATCH_FOR_VIEWER = AUDIENCE_MATCH_TEMPLATE.format(
+AUDIENCE_MATCH_FOR_VIEWER = _audience_match(
     role_level='%(role_level)s',
     departments='%(departments)s',
     directions='%(directions)s',
     groups='%(groups)s',
     roles='%(roles)s',
-    rule_role=canon_role_sql('r.subject_role'),
     user_id='%(user_id)s',
+    with_space=False,
 )
 
 # Журнал редактора: те же правила, но субъекты считает SQL по каждому
 # сотруднику (CTE `v` в news/queries.py). Шаблон один на оба вопроса намеренно —
 # разъедься они, журнал показывал бы не тех, кто видел окно, и перестал бы
 # отвечать на вопрос «был ли человек проинформирован».
-AUDIENCE_MATCH_FOR_REPORT = AUDIENCE_MATCH_TEMPLATE.format(
+AUDIENCE_MATCH_FOR_REPORT = _audience_match(
     role_level='v.role_level',
     departments='v.department_ids',
     directions='v.direction_ids',
     groups='v.group_ids',
     roles='v.roles',
-    rule_role=canon_role_sql('r.subject_role'),
     user_id='v.id',
+    with_space=False,
 )
+
+# Те же два, но с границей пространства. Отдельными значениями, а не флагом в
+# каждом запросе: таблицу wiki_space_departments приносит ЧУЖОЙ пакет, и пока
+# её нет (news/schema.py: space_ready), запросы обязаны уходить в базу вовсе без
+# этой ветки — упоминание несуществующей таблицы валит запрос на разборе, то
+# есть уронило бы окно у всех вошедших в портал.
+AUDIENCE_MATCH_FOR_VIEWER_IN_SPACE = _audience_match(
+    role_level='%(role_level)s',
+    departments='%(departments)s',
+    directions='%(directions)s',
+    groups='%(groups)s',
+    roles='%(roles)s',
+    user_id='%(user_id)s',
+    with_space=True,
+)
+
+AUDIENCE_MATCH_FOR_REPORT_IN_SPACE = _audience_match(
+    role_level='v.role_level',
+    departments='v.department_ids',
+    directions='v.direction_ids',
+    groups='v.group_ids',
+    roles='v.roles',
+    user_id='v.id',
+    with_space=True,
+)
+
+
+def viewer_match(with_space):
+    """Условие «эта новость адресована ЭТОМУ человеку» для выдачи окна."""
+    return AUDIENCE_MATCH_FOR_VIEWER_IN_SPACE if with_space else AUDIENCE_MATCH_FOR_VIEWER
+
+
+def report_match(with_space):
+    """То же условие для журнала: субъекты считает SQL по каждому сотруднику."""
+    return AUDIENCE_MATCH_FOR_REPORT_IN_SPACE if with_space else AUDIENCE_MATCH_FOR_REPORT
 
 
 def canon_role(otp_role):

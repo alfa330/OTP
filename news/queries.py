@@ -12,8 +12,9 @@ from wiki import access as wiki_access
 from wiki import structure as wiki_structure
 
 from . import access as news_access
-from .access import (AUDIENCE_MATCH_FOR_REPORT, AUDIENCE_MATCH_FOR_VIEWER,
-                     ROLE_CANON, SQL_ROLE_LEVELS)
+# Шаблон адресата берём СЕЛЕКТОРОМ, а не константой: у него две формы — с
+# границей пространства и без неё, пока её таблицу не принёс пакет вики.
+from .access import ROLE_CANON, SQL_ROLE_LEVELS, report_match, viewer_match
 # schema.py ничего не импортирует из пакета — цикла нет.
 from .schema import LOOSE_PHOTO_TTL_HOURS, MAX_PHOTOS_PER_POST
 
@@ -207,8 +208,29 @@ def _pass_columns_sql(with_pass):
             "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at")
 
 
+def _space_filter(with_space):
+    """Условие «новость этого пространства» для выборок с `p` = news_posts.
+
+    Требует параметра %(space)s (NULL — про пространство не спрашивали).
+    Пустая строка, пока колонки нет вовсе (schema.space_ready): раздел тогда
+    работает как до задачи, а не отвечает пятисоткой на несуществующую колонку.
+
+    НИЧЬЯ новость (space_id IS NULL) видна из ЛЮБОГО пространства намеренно.
+    Так лежат объявления, выпущенные до этой границы и пришедшие мимо вкладки,
+    и спрятать их значило бы оставить обязательное окно висеть у людей без
+    единого редактора, который вправе его снять.
+    """
+    if not with_space:
+        return ''
+    return """
+           AND (%(space)s::int IS NULL
+                OR p.space_id IS NULL
+                OR p.space_id = %(space)s::int)
+        """
+
+
 def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
-                     with_quiz=False, with_pass=False):
+                     with_quiz=False, with_pass=False, with_space=False):
     """Новости, которые этому человеку сейчас показывают. Свои — не показываем.
 
     Порядок: обязательные раньше необязательных, внутри — по публикации. Автор
@@ -254,7 +276,7 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
            AND p.author_id IS DISTINCT FROM %(user_id)s
            AND r.confirmed_at IS NULL
            AND
-        """ + AUDIENCE_MATCH_FOR_VIEWER + """
+        """ + viewer_match(with_space) + """
          ORDER BY p.is_mandatory DESC, p.published_at, p.id
          LIMIT 20
         """)
@@ -419,7 +441,7 @@ def set_quiz(cursor, *, post_id, quiz):
 
 
 def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
-                 with_quiz=False, with_pass=False):
+                 with_quiz=False, with_pass=False, with_space=False):
     """Принять «Прочитал». (status, подробность).
 
     Подробность — оставшиеся секунды у 'too_early' и id вопросов с неверным
@@ -448,7 +470,7 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
          WHERE p.id = %(news_id)s
            AND p.status = 'published'
            AND
-        """.format(now=_NOW, passes=_pass_columns_sql(with_pass)) + AUDIENCE_MATCH_FOR_VIEWER,
+        """.format(now=_NOW, passes=_pass_columns_sql(with_pass)) + viewer_match(with_space),
         params,
     )
     row = cursor.fetchone()
@@ -565,7 +587,8 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
 FEED_PREVIEW_LENGTH = 220
 
 
-def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass):
+def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass,
+                 with_space=False):
     """Опубликованная новость, адресованная человеку, со своими отметками. None — нет.
 
     Своя новость сюда НЕ попадает: автор её не получает (как и окно).
@@ -582,7 +605,7 @@ def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass):
            AND p.status = 'published'
            AND p.author_id IS DISTINCT FROM %(user_id)s
            AND
-        """.format(passes=_pass_columns_sql(with_pass)) + AUDIENCE_MATCH_FOR_VIEWER,
+        """.format(passes=_pass_columns_sql(with_pass)) + viewer_match(with_space),
         params,
     )
     row = cursor.fetchone()
@@ -611,7 +634,8 @@ def _mark_pass(cursor, *, news_id, user_id, column):
     )
 
 
-def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers):
+def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers,
+              with_space=False):
     """«Проверить» у теста новости. (status, подробность).
 
     'not_found' — новости нет или она не этому человеку; 'no_quiz' — теста у
@@ -620,7 +644,7 @@ def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers):
     вопрос, и отвечает на него кнопка «Прочитал».
     """
     post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
-                        subjects=subjects, with_pass=True)
+                        subjects=subjects, with_pass=True, with_space=with_space)
     if post is None:
         return 'not_found', 0
     answer_key = quiz_answer_key(cursor, news_id)
@@ -633,7 +657,8 @@ def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers):
     return 'ok', 0
 
 
-def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects):
+def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects,
+                        with_space=False):
     """Тренажёр новости дошёл до конца. (status, 0).
 
     Итог урока присылает браузер: сценарий живёт в коде фронта, и сервер
@@ -642,7 +667,7 @@ def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects):
     новость опубликована, адресована этому человеку и тренажёр у неё правда есть.
     """
     post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
-                        subjects=subjects, with_pass=True)
+                        subjects=subjects, with_pass=True, with_space=with_space)
     if post is None:
         return 'not_found', 0
     if not post['trainer_key']:
@@ -652,22 +677,28 @@ def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects):
 
 
 def feed_for_user(cursor, *, user_id, otp_role, subjects, limit=20, offset=0,
-                  with_photos=False, with_quiz=False, with_pass=False):
+                  with_photos=False, with_quiz=False, with_pass=False,
+                  with_space=False, space_id=None):
     """Лента «мои новости»: опубликованные и адресованные человеку. (всего, строки).
 
     Свежие сверху. Без тела и без кадров — строка списка отвечает на «что это
     за новость»; целиком карточку отдаёт feed_post, когда её открыли. Горизонт
     показа и срок новости ленту НЕ режут: они снимают окно, а не память о
     новости — открыть её и пройти тест человек вправе и через месяц.
+
+    space_id — лента ОТКРЫТА В ЭТОМ ПРОСТРАНСТВЕ. Граница адресата уже не
+    пустит сюда чужую компанию, но человека, работающего в обеих виках, лента
+    иначе показывала бы одинаково в каждой: вкладка «Новости» в «Тез» — это
+    новости Тез, а не всё, что человеку когда-либо адресовали.
     """
     params = news_access.audience_params(subjects, user_id, otp_role)
     params.update(_role_params())
-    params.update({'limit': int(limit), 'offset': int(offset)})
+    params.update({'limit': int(limit), 'offset': int(offset), 'space': space_id})
     where = """
          WHERE p.status = 'published'
            AND p.author_id IS DISTINCT FROM %(user_id)s
            AND
-        """ + AUDIENCE_MATCH_FOR_VIEWER
+        """ + viewer_match(with_space) + _space_filter(with_space)
     cursor.execute(
         """
         SELECT p.id, p.title, p.is_mandatory, p.published_at,
@@ -727,7 +758,7 @@ def _plain_preview(text):
 
 
 def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False,
-              with_quiz=False, with_pass=False):
+              with_quiz=False, with_pass=False, with_space=False):
     """Карточка новости из ленты — тем же периметром, что и лента. None — не его.
 
     Тест — БЕЗ верных ответов, как в окне: сверяет сервер (pass_quiz).
@@ -755,7 +786,7 @@ def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False
                         WHERE z.news_id = p.id
                    ), '[]'::json)""" if with_quiz else "'[]'::json"),
             passes=_pass_columns_sql(with_pass),
-        ) + AUDIENCE_MATCH_FOR_VIEWER,
+        ) + viewer_match(with_space),
         params,
     )
     row = cursor.fetchone()
@@ -783,16 +814,22 @@ def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False
 # ─────────────────────────────────────────────────────────────────────────────
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
-               limit=50, offset=0, with_photos=False, with_quiz=False, with_pass=False):
+               limit=50, offset=0, with_photos=False, with_quiz=False, with_pass=False,
+               with_space=False, space_id=None):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
     Иначе своё плюс чужое своего отдела, но только от авторов НЕ ВЫШЕ себя:
     черновик руководителя — не материал супервайзера, ровно по тому же правилу,
     по которому новость идёт вниз, а не вверх.
+
+    space_id — ПРОСТРАНСТВО, из которого открыт список. Граница отдела на этот
+    вопрос не отвечает: у супер-админа её нет вовсе, и без пространства он
+    видел бы объявления Тез КЦ вперемешку с таксопарковыми в одном списке.
     """
     params = {'viewer': viewer_id, 'viewer_level': viewer_level,
               'depts': list(departments) if departments is not None else None,
+              'space': space_id,
               'status': status, 'limit': limit, 'offset': offset}
     params.update(_role_params())
     author_level = news_access.role_level_sql(news_access.canon_role_sql('u.role'))
@@ -815,10 +852,12 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
              OR (p.author_department_id = ANY(%(depts)s::int[])
                  AND {author_level} <= %(viewer_level)s)
            )
+           {space}
          ORDER BY COALESCE(p.published_at, p.created_at) DESC, p.id DESC
          LIMIT %(limit)s OFFSET %(offset)s
         """.format(
             author_level=author_level,
+            space=_space_filter(with_space),
             # Скалярным подзапросом в тот же запрос, а не четвёртым обращением
             # по образцу audience_stats: там отдельный запрос оправдан тяжёлым
             # CTE сотрудников, а здесь это COUNT по индексу idx_news_photos_post.
@@ -850,7 +889,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
              OR (p.author_department_id = ANY(%(depts)s::int[])
                  AND {author_level} <= %(viewer_level)s)
            )
-        """.format(author_level=author_level),
+           {space}
+        """.format(author_level=author_level, space=_space_filter(with_space)),
         params,
     )
     total = int(cursor.fetchone()[0])
@@ -883,7 +923,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         'audience_count': 0,
     } for row in rows]
 
-    stats = audience_stats(cursor, [item['id'] for item in items])
+    stats = audience_stats(cursor, [item['id'] for item in items],
+                           with_space=with_space)
     for item in items:
         addressed, confirmed = stats.get(item['id'], (0, 0))
         item['audience_count'] = addressed
@@ -891,7 +932,7 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
     return total, items
 
 
-def audience_stats(cursor, post_ids):
+def audience_stats(cursor, post_ids, with_space=False):
     """{news_id: (адресатов сейчас, подтвердили из них)} для списка новостей.
 
     Одним запросом на всю страницу, а не подзапросом на строку: считается это
@@ -914,7 +955,7 @@ def audience_stats(cursor, post_ids):
          WHERE p.id = ANY(%(ids)s)
            AND v.id IS DISTINCT FROM p.author_id
            AND
-        """ + AUDIENCE_MATCH_FOR_REPORT + """
+        """ + report_match(with_space) + """
          GROUP BY p.id
         """,
         params,
@@ -922,12 +963,17 @@ def audience_stats(cursor, post_ids):
     return {int(row[0]): (int(row[1]), int(row[2])) for row in cursor.fetchall()}
 
 
-def get_post(cursor, post_id, with_pass=False):
+def get_post(cursor, post_id, with_pass=False, with_space=False):
     """Карточка новости с адресатами. None — нет такой.
 
     with_pass — развёрнуты ли колонки тренажёра и обязательности прохождения
     (schema.pass_ready). Без них карточка читается как до задачи #342: тест
     обязателен, тренажёра нет.
+
+    with_space — развёрнута ли колонка пространства (schema.space_ready). По
+    нему проверяются адресаты при правке: граница берётся у САМОЙ новости, а не
+    у вкладки, из которой пришёл запрос, — иначе объявление Тез правилось бы
+    справочником Таксопарков.
     """
     cursor.execute(
         """
@@ -935,13 +981,14 @@ def get_post(cursor, post_id, with_pass=False):
                p.confirm_delay_seconds, p.published_at, p.expires_at,
                p.author_id, p.author_department_id, p.audience_max_role_level,
                u.name, d.name, p.created_at, p.updated_at, u.role,
-               {pass_required}, {trainer_key}
+               {pass_required}, {trainer_key}, {space_id}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
          WHERE p.id = %s
         """.format(pass_required='p.pass_required' if with_pass else 'TRUE',
-                   trainer_key='p.trainer_key' if with_pass else 'NULL::varchar'),
+                   trainer_key='p.trainer_key' if with_pass else 'NULL::varchar',
+                   space_id='p.space_id' if with_space else 'NULL::int'),
         (post_id,),
     )
     row = cursor.fetchone()
@@ -968,6 +1015,9 @@ def get_post(cursor, post_id, with_pass=False):
         'author_role': row[15],
         'pass_required': bool(row[16]),
         'trainer_key': row[17],
+        # Пространство новости — «чьей компании это объявление». Наружу нужно
+        # форме: по нему она сужает справочники адресата так же, как сервер.
+        'space_id': row[18],
         'audience': audience_rules(cursor, post_id),
     }
 
@@ -1039,20 +1089,32 @@ def roles_of_users(cursor, user_ids):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def create_post(cursor, *, title, body, author_id, author_department_id,
-                is_mandatory, confirm_delay_seconds, expires_at, created_by):
+                is_mandatory, confirm_delay_seconds, expires_at, created_by,
+                space_id=None, with_space=False):
+    """Черновик новости. space_id — вика, в которой её пишут.
+
+    with_space=False — колонки пространства ещё нет (schema.space_ready):
+    пишем без неё, и новость остаётся ничьей до бэкфилла. Перечислять колонку
+    в INSERT «на всякий случай» нельзя: на базе без неё упал бы сам выпуск.
+
+    Пространство у новости НЕ МЕНЯЕТСЯ правкой намеренно. Переезд объявления в
+    соседнюю вику — это не опечатка в тексте, а другой круг адресатов: у
+    опубликованной новости он уже показан людям и посчитан в журнале.
+    """
     cursor.execute(
         """
         INSERT INTO news_posts (title, body, author_id, author_department_id,
                                 status, is_mandatory, confirm_delay_seconds,
-                                expires_at, created_by)
+                                expires_at, created_by{space_column})
         VALUES (%(title)s, %(body)s, %(author)s, %(dept)s, 'draft',
-                %(mandatory)s, %(delay)s, %(expires)s, %(created_by)s)
+                %(mandatory)s, %(delay)s, %(expires)s, %(created_by)s{space_value})
         RETURNING id
-        """,
+        """.format(space_column=', space_id' if with_space else '',
+                   space_value=', %(space)s' if with_space else ''),
         {'title': title, 'body': body, 'author': author_id,
          'dept': author_department_id, 'mandatory': is_mandatory,
          'delay': confirm_delay_seconds, 'expires': expires_at,
-         'created_by': created_by},
+         'created_by': created_by, 'space': space_id},
     )
     return int(cursor.fetchone()[0])
 
@@ -1156,7 +1218,7 @@ def delete_post(cursor, post_id):
 # ЖУРНАЛ: кто прочитал, кто нет
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_report(cursor, post_id, with_pass=False):
+def read_report(cursor, post_id, with_pass=False, with_space=False):
     """Адресаты новости с отметками показа и подтверждения.
 
     Круг адресатов считается ТЕМИ ЖЕ правилами, что и выдача окна
@@ -1182,7 +1244,7 @@ def read_report(cursor, post_id, with_pass=False):
              WHERE p.id = %(post_id)s
                AND v.id IS DISTINCT FROM p.author_id
                AND
-        """ + AUDIENCE_MATCH_FOR_REPORT + """
+        """ + report_match(with_space) + """
         ),
         -- Отметки ИМЕННО ЭТОЙ новости, отобранные ДО соединения. Условие
         -- `r.news_id = ...` в ON у FULL JOIN не работает: несовпавшая сторона
@@ -1229,7 +1291,7 @@ def read_report(cursor, post_id, with_pass=False):
     } for row in cursor.fetchall()]
 
 
-def audience_size(cursor, post_id):
+def audience_size(cursor, post_id, with_space=False):
     """Сколько человек под адресатами новости. Для подписи «12 из 30»."""
     params = {'post_id': post_id}
     params.update(_role_params())
@@ -1241,14 +1303,14 @@ def audience_size(cursor, post_id):
          WHERE p.id = %(post_id)s
            AND v.id IS DISTINCT FROM p.author_id
            AND
-        """ + AUDIENCE_MATCH_FOR_REPORT,
+        """ + report_match(with_space),
         params,
     )
     row = cursor.fetchone()
     return int(row[0]) if row else 0
 
 
-def subject_catalog(cursor, department_ids=None):
+def subject_catalog(cursor, department_ids=None, space_department_ids=None):
     """Справочники адресата: отделы, направления, группы.
 
     Свой запрос, а НЕ wiki_structure.subject_catalog, хотя тот отвечает почти
@@ -1260,7 +1322,14 @@ def subject_catalog(cursor, department_ids=None):
     department_ids=None — без границы отдела (директор, администратор вики).
     С границей справочник сужается до своего отдела: предлагать в форме то,
     что сервер потом отвергнет, — значит обещать невыполнимое.
+
+    space_department_ids — граница ПРОСТРАНСТВА (None — про него не
+    спрашивали). Вопрос другой: не «чей это человек», а «чьей компании эта
+    вика». Складываются обе (wiki/structure.py: narrow_to_space) — иначе в
+    «Тез» предлагался бы отдел СЗоВ, а сервер такую новость всё равно
+    отвергнет (access.audience_refusal).
     """
+    department_ids = wiki_structure.narrow_to_space(department_ids, space_department_ids)
     bounded = department_ids is not None
     cursor.execute(
         """
@@ -1284,10 +1353,56 @@ def subject_catalog(cursor, department_ids=None):
     return catalog
 
 
-def targetable_people(cursor, *, max_role_level, department_ids=None):
-    """Сотрудники, которым этот человек вправе адресовать новость поимённо."""
+def targetable_people(cursor, *, max_role_level, department_ids=None,
+                      space_department_ids=None):
+    """Сотрудники, которым этот человек вправе адресовать новость поимённо.
+
+    Обе границы — как у справочника субъектов: своя (чей это человек) и
+    пространства (чьей компании вика). Список людей чужой компании — не только
+    бесполезное правило, но и чужая оргструктура с именами и должностями.
+    """
     return wiki_structure.grantable_people(
-        cursor, max_role_level=max_role_level, department_ids=department_ids)
+        cursor, max_role_level=max_role_level, department_ids=department_ids,
+        space_department_ids=space_department_ids)
+
+
+def space_departments(cursor, space_id):
+    """Отделы пространства. Обёртка над справочником вики — ради одного места.
+
+    Пространство знает про свои отделы только вика, и спрашивать её надо тем же
+    запросом, которым спрашивает она сама: второй, написанный здесь, однажды
+    разойдётся с первым (ровно так уже расходились лестницы прав).
+    """
+    return wiki_structure.space_department_ids(cursor, space_id)
+
+
+def space_of_department(cursor, department_id):
+    """Пространство отдела: «чья это вика». None — отделу не выдано ни одного.
+
+    Нужно там, где пространство некому назвать: новость из вкладки «Вопросы
+    операторов» (#321) адресована отделу человека, задавшего вопрос, и та же
+    связь отвечает, в какой вике объявление живёт. Тем же правилом разбираются
+    ничьи новости на старте (schema.backfill_space_ids).
+
+    Отдел, выданный двум пространствам, — случай, которого в жизни нет, но в
+    базе он возможен: берём первое по порядку показа, чтобы ответ был
+    одинаковым при каждом вызове.
+    """
+    if not department_id:
+        return None
+    cursor.execute(
+        """
+        SELECT sd.space_id
+          FROM wiki_space_departments sd
+          JOIN wiki_spaces sp ON sp.id = sd.space_id AND sp.status = 'active'
+         WHERE sd.department_id = %s
+         ORDER BY sp.position, sp.id
+         LIMIT 1
+        """,
+        (department_id,),
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if row else None
 
 
 def targetable_roles(ceiling):

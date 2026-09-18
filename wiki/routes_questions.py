@@ -468,11 +468,18 @@ def register(bp, wiki_route, db, log_ip, edit_helpers):
             audit = ('article.create', {'title': title, 'slug': slug, 'status': 'published'})
 
         # ── Новость с тестом отделу оператора. ──
+        # Пространство берём по ОТДЕЛУ АДРЕСАТА, а не по вкладке: вопрос задал
+        # оператор конкретной компании, и объявление с ответом принадлежит её
+        # вике. Без него новость осталась бы ничьей и встала бы в список обеих.
+        news_space_ready = news_schema.space_ready(cursor)
         post_id = news_queries.create_post(
             cursor, title=news_title, body=news_body, author_id=ctx['user_id'],
             author_department_id=author['department_id'], is_mandatory=True,
             confirm_delay_seconds=news_schema.DEFAULT_CONFIRM_DELAY_SECONDS,
-            expires_at=None, created_by=ctx['user_id'])
+            expires_at=None, created_by=ctx['user_id'],
+            with_space=news_space_ready,
+            space_id=(news_queries.space_of_department(cursor, item['department_id'])
+                      if news_space_ready else None))
         news_queries.set_audience(cursor, post_id=post_id, rules=rules,
                                   audience_max_role_level=ceiling)
         # Тест — ДО выпуска и в той же транзакции: иначе окно успело бы всплыть у
