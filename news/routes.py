@@ -36,6 +36,11 @@ from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
                      quiz_ready as schema_quiz_ready, schema_is_ready,
                      space_ready as schema_space_ready)
 
+# Сколько имён «без SIP-номера» уезжает в форму. Остальные считаются числом:
+# панель предупреждения читают глазами, и список на двести строк в ней — это не
+# ответ, а новый вопрос.
+SIP_MISSING_LIMIT = 50
+
 # Отказ, который видит не-редактор. Одной строкой: текст показывают человеку,
 # и «недостаточно прав» без объяснения отправляет его писать в поддержку.
 _NOT_A_PUBLISHER = ('Новости публикуют супервайзер и выше', 403)
@@ -698,6 +703,38 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "roles": (queries.targetable_roles(ctx['ceiling'])
                       if ctx['departments'] is None else []),
         })
+
+    @news_route('/audience/oktell', methods=('POST',), publisher=True)
+    def news_audience_oktell(cursor, ctx):
+        """Кто из отмеченных адресатов не увидит объявление в Oktell.
+
+        Канал Oktell рисует окно поверх клиента АТС, а в АТС человек без
+        SIP-номера не работает вовсе — объявление до него просто не дойдёт.
+        Форма спрашивает это ДО публикации и называет людей поимённо: «кому-то
+        не дошло» выясняется иначе только через неделю и по жалобе.
+
+        Правила приезжают НЕСОХРАНЁННЫМИ — их набирают прямо сейчас. Считает их
+        тот же report_match, что и журнал (queries.audience_sip_check), а
+        периметр проверяется тем же _audience_refusal, что у сохранения: иначе
+        ручка стала бы способом перебрать чужих людей по id.
+        """
+        payload = request.get_json(silent=True) or {}
+        rules = _rules_from_request(payload)
+        if not rules:
+            return jsonify({"checked": 0, "missing": [], "missing_count": 0})
+        space_id = _request_space(cursor)
+        refusal = _audience_refusal(cursor, ctx, rules, space_id=space_id)
+        if refusal:
+            return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
+        checked, missing = queries.audience_sip_check(
+            cursor, rules=rules, author_id=ctx['user_id'],
+            audience_max_role_level=ctx['ceiling'],
+            space_id=space_id, with_space=_space_ready(cursor))
+        # Список режем, счётчик — нет: в панели читают первые имена, а решение
+        # принимают по числу. Полсотни строк в ответе хватает и на «весь отдел».
+        return jsonify({"checked": checked,
+                        "missing": missing[:SIP_MISSING_LIMIT],
+                        "missing_count": len(missing)})
 
     @news_route('/posts', publisher=True)
     def news_posts(cursor, ctx):

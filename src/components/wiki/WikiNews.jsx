@@ -6,8 +6,9 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
-    Bold, Check, Image as ImageIcon, Italic, Link2, List, ListChecks, ListOrdered, Loader2,
-    Megaphone, PlayCircle, Plus, Sparkles, Underline as UnderlineIcon, Users, X,
+    AlertTriangle, Bold, Check, ChevronDown, Image as ImageIcon, Italic, Link2, List,
+    ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus, Sparkles,
+    Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
@@ -287,7 +288,7 @@ function TrainerPicker({ open, value, onClose, onChange }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, headers,
-                   spaceName = '' }) {
+                   spaceId = null, spaceName = '' }) {
     const [title, setTitle] = useState('');
     const [mandatory, setMandatory] = useState(true);
     const [delay, setDelay] = useState(access?.default_confirm_delay_seconds ?? 10);
@@ -323,6 +324,15 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     const [channel, setChannel] = useState(NEWS_CHANNELS[0].value);
     const channels = access?.channels || [NEWS_CHANNELS[0].value];
     const channelOptions = NEWS_CHANNELS.filter((item) => channels.includes(item.value));
+    /* Кто из отмеченных не увидит объявление в Oktell: в АТС без SIP-номера не
+       работают, и окно поверх клиента такому человеку показать некому. Считает
+       сервер теми же правилами адресата, что и журнал, — вторая формула тут
+       предупреждала бы про одних, а объявление уходило бы другим. */
+    const [sipCheck, setSipCheck] = useState(null);
+    const [sipOpen, setSipOpen] = useState(false);
+    const sipMissing = Number(sipCheck?.missing_count) || 0;
+    // Единственный, у кого нет номера: его имя уходит в заголовок панели.
+    const sipOnly = sipMissing === 1 ? (sipCheck?.missing || [])[0] : null;
     // По published_at, как на сервере: снятая с показа новость ответы уже собрала.
     // Тем же замком запираются тренажёр и обязательность (NEWS_PASS_LOCKED).
     const quizLocked = !!post?.published_at;
@@ -377,6 +387,8 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setTrainerKey(post?.trainer_key || null);
         setPassRequired(post ? post.pass_required !== false : true);
         setChannel(post?.channel || NEWS_CHANNELS[0].value);
+        setSipCheck(null);
+        setSipOpen(false);
         setTrainerPickerOpen(false);
         // Уже прикреплённые кадры приезжают с карточкой готовыми адресами.
         setPhotos((post?.photos || []).map((photo) => ({
@@ -391,6 +403,45 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     useEffect(() => {
         if (mustPass) setMandatory(true);
     }, [mustPass]);
+
+    /* Проверка SIP-номеров — ТОЛЬКО когда выбран Oktell и есть кому адресовать.
+       В портале номер ни при чём, и запрос «на всякий случай» на каждый щелчок
+       по справочнику адресата был бы обращением к базе ради ответа, который
+       никто не спросит.
+
+       Пауза в 400 мс: адресатов набирают подряд, по одному, и без неё каждый
+       выбранный отдел стоил бы своего запроса. Отменяем прошлый ответ флагом —
+       иначе медленный первый придёт после быстрого второго и покажет список от
+       уже снятого адресата. */
+    const audienceKey = audience.map((rule) => `${rule.subject_type}:${rule.subject_id
+        || rule.subject_role || ''}`).join(',');
+    useEffect(() => {
+        if (!open || channel !== 'oktell' || !audienceKey) { setSipCheck(null); return undefined; }
+        let alive = true;
+        setSipCheck((prev) => ({ ...(prev || {}), loading: true }));
+        const timer = setTimeout(() => {
+            axios.post(`${apiBaseUrl}/api/news/audience/oktell`, {
+                space_id: spaceId,
+                audience: audience.map((rule) => ({
+                    subject_type: rule.subject_type,
+                    subject_id: rule.subject_id,
+                    subject_role: rule.subject_role,
+                })),
+            }, { headers })
+                .then((r) => { if (alive) setSipCheck({ ...r.data, loading: false }); })
+                /* Молча: проверка — подсказка, а не условие публикации, и
+                   красная строка про неудавшийся запрос отвлекала бы от
+                   собственно новости. */
+                .catch(() => { if (alive) setSipCheck(null); });
+        }, 400);
+        return () => { alive = false; clearTimeout(timer); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, channel, audienceKey, apiBaseUrl, headers, spaceId]);
+
+    // Предупреждение исчезло — исчезает и раскрытая панель под ним.
+    useEffect(() => {
+        if (!sipCheck?.missing_count) setSipOpen(false);
+    }, [sipCheck?.missing_count]);
 
     /* «Составить ИИ» — по тому, что уже написано в форме. Ответ модели ложится
        в тот же редактор: проверить и поправить его человек обязан сам, выпускает
@@ -930,29 +981,125 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                         один: в «Тез» программы Oktell нет, и переключатель с
                         единственной кнопкой был бы вопросом без выбора. */}
                     {channelOptions.length > 1 && (
-                        <div className="flex items-center justify-between gap-3 px-3.5 py-3">
-                            <div className="min-w-0">
-                                <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                        <div className="px-3.5 py-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <p className="flex min-w-0 items-center gap-2 text-[14px] text-slate-900">
                                     Куда отправить
                                     <IosHint
                                         label="Чем iCORE отличается от Oktell"
                                         text="iCORE — окно «Новость дня» в портале: его видит каждый, кому новость адресована. Oktell — окно поверх клиента АТС, его рисует программа «Ограничитель Перезвона» и на время чтения снимает оператора с линии; увидят только те, у кого программа установлена. У опубликованной новости канал не меняется."
                                     />
                                 </p>
+                                <div className="flex shrink-0 items-center gap-2">
+                                    {/* Предупреждение — РЯДОМ с переключателем, а не строкой
+                                        под ним: оно относится к одной кнопке «Oktell», и
+                                        отдельная красная строка внизу карточки читалась бы
+                                        как ошибка всей формы. Само число на кнопке — уже
+                                        ответ: «троим не дойдёт». */}
+                                    {sipMissing > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSipOpen((value) => !value)}
+                                            aria-expanded={sipOpen}
+                                            aria-label="Кто не увидит объявление в Oktell"
+                                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-amber-50 pl-2.5 pr-2 text-[12.5px] font-semibold text-amber-700 ring-1 ring-amber-200 transition hover:bg-amber-100 active:scale-[0.97]"
+                                        >
+                                            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                            <span className="tabular-nums">{sipMissing}</span>
+                                            <ChevronDown
+                                                className={`h-3.5 w-3.5 transition-transform duration-300 ${
+                                                    sipOpen ? 'rotate-180' : ''}`}
+                                                aria-hidden="true"
+                                            />
+                                        </button>
+                                    )}
+                                    {channelLocked ? (
+                                        <span className="text-[13px] text-slate-500">
+                                            {(NEWS_CHANNELS.find((item) => item.value === channel)
+                                              || NEWS_CHANNELS[0]).label}
+                                        </span>
+                                    ) : (
+                                        <IosSegmented
+                                            value={channel}
+                                            options={channelOptions}
+                                            onChange={setChannel}
+                                            ariaLabel="Куда отправить объявление"
+                                        />
+                                    )}
+                                </div>
                             </div>
-                            {channelLocked ? (
-                                <span className="shrink-0 text-[13px] text-slate-500">
-                                    {(NEWS_CHANNELS.find((item) => item.value === channel)
-                                      || NEWS_CHANNELS[0]).label}
-                                </span>
-                            ) : (
-                                <IosSegmented
-                                    value={channel}
-                                    options={channelOptions}
-                                    onChange={setChannel}
-                                    ariaLabel="Куда отправить объявление"
-                                />
-                            )}
+                            {/* Раскрытие СЕТКОЙ 0fr → 1fr, а не max-height с числом:
+                                высота считается по содержимому, поэтому список из трёх
+                                имён и из тридцати раскрываются одинаково плавно и без
+                                рывка в конце, каким заканчивается всякий подобранный
+                                на глаз максимум. */}
+                            <div
+                                className={`grid transition-all duration-300 ease-out ${
+                                    sipOpen ? 'mt-2.5 grid-rows-[1fr] opacity-100'
+                                            : 'grid-rows-[0fr] opacity-0'}`}
+                            >
+                                <div className="overflow-hidden">
+                                    <div className="rounded-2xl bg-amber-50/70 px-3.5 py-3 ring-1 ring-amber-200/70">
+                                        {/* У ОДНОГО человека имя стоит прямо в заголовке, а
+                                            списка нет вовсе: перечень из одной строки под
+                                            фразой «без номера — 1 из 24» повторял бы сам себя.
+                                            Дальше сразу инструкция — за ней сюда и пришли. */}
+                                        <p className="text-[13px] font-semibold text-amber-900">
+                                            {sipOnly
+                                                ? `Без SIP-номера — ${sipOnly.name}`
+                                                : `Без SIP-номера — ${sipMissing} из ${sipCheck?.checked || 0}`}
+                                            {sipOnly && (
+                                                <span className="font-normal text-amber-900/60">
+                                                    {' · '}
+                                                    {[roleTitle(sipOnly.role), sipOnly.department_name]
+                                                        .filter(Boolean).join(', ')}
+                                                </span>
+                                            )}
+                                        </p>
+                                        <p className="mt-0.5 text-[12px] leading-snug text-amber-900/70">
+                                            Объявление в Oktell показывает программа поверх клиента
+                                            АТС — тот, кто в АТС не заведён, его не увидит.
+                                        </p>
+                                        {/* Имена — списком с прокруткой: отдел из сорока
+                                            человек иначе вытолкнул бы кнопки формы за экран. */}
+                                        {sipMissing > 1 && (
+                                            <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1">
+                                                {(sipCheck?.missing || []).map((person) => (
+                                                    <li key={person.user_id}
+                                                        className="flex items-baseline justify-between gap-3 text-[12.5px]">
+                                                        <span className="min-w-0 truncate text-amber-900">
+                                                            {person.name}
+                                                        </span>
+                                                        <span className="shrink-0 text-amber-900/60">
+                                                            {[roleTitle(person.role), person.department_name]
+                                                                .filter(Boolean).join(' · ')}
+                                                        </span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                        {sipMissing > (sipCheck?.missing || []).length && (
+                                            <p className="mt-1 text-[12px] text-amber-900/60">
+                                                …и ещё {sipMissing - (sipCheck?.missing || []).length}
+                                            </p>
+                                        )}
+                                        {/* Инструкция — шагами в том порядке, в каком их делают,
+                                            и названиями, которые человек увидит на экране. */}
+                                        <div className="mt-2.5 border-t border-amber-200/70 pt-2 text-[12px] leading-relaxed text-amber-900/80">
+                                            <p className="font-medium text-amber-900">Как добавить номер</p>
+                                            <ol className="mt-1 list-decimal space-y-0.5 pl-4">
+                                                <li>Меню слева → «Настройки SIP».</li>
+                                                <li>Выберите отдел сотрудника и найдите его в списке.</li>
+                                                <li>Впишите номер в поле «SIP-номер» и нажмите «Сохранить».</li>
+                                            </ol>
+                                            <p className="mt-1.5">
+                                                Номер появится у человека сразу — новость можно
+                                                отправлять в Oktell после этого.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     )}
                     <div className="flex items-center justify-between gap-3 px-3.5 py-3">
@@ -1509,6 +1656,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                 saving={saving}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
+                spaceId={spaceId}
                 spaceName={spaceName}
                 onClose={() => {
                     setFormPost(undefined);

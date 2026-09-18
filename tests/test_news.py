@@ -255,7 +255,11 @@ class NewsDelayTests(unittest.TestCase):
         set_audience = set_audience[:set_audience.index('\n\ndef ')]
         self.assertIn('audience_max_role_level', set_audience)
         routes = _code_only(_read('news', 'routes.py'))
-        self.assertEqual(routes.count("audience_max_role_level=ctx['ceiling']"), 4)
+        # Пять мест: четыре записи (создание, правка адресатов, публикация) и
+        # проверка SIP-номеров, которая считает круг адресатов ТЕМ ЖЕ потолком.
+        # Возьми она другой — предупреждение было бы про других людей, чем сама
+        # публикация.
+        self.assertEqual(routes.count("audience_max_role_level=ctx['ceiling']"), 5)
 
     def test_server_decides_the_gate(self):
         """Задержку проверяет СЕРВЕР, а не таймер в браузере.
@@ -1581,6 +1585,104 @@ class NewsExpiryTests(unittest.TestCase):
         source = _read('news', 'routes.py')
         body = source.split('def _expiry_refusal(', 1)[1].split('\n    def ', 1)[0]
         self.assertIn('not publishing', body)
+
+
+class NewsOktellSipWarningTests(unittest.TestCase):
+    """Предупреждение «у кого нет SIP-номера» (решение владельца 18.09.2026).
+
+    Дословно: «если в разделе настройки SIP не имеется данных Oktell хотя бы у
+    одного человека из отмеченных для отправки новости — уведомление, рядом с
+    переключателем кнопка предупреждения, при нажатии плавный переход и видно,
+    у кого именно нет номера и как его ввести».
+
+    Смысл: объявление канала Oktell рисует программа поверх клиента АТС. Кто в
+    АТС не заведён, тот его не увидит — и узнать об этом надо ДО публикации, а
+    не через неделю по жалобе.
+    """
+
+    def test_the_audience_is_not_counted_a_second_way(self):
+        """Правила адресата не переписаны: предупреждение и показ обязаны
+        считать одних и тех же людей. Несохранённые правила формы подставлены
+        CTE поверх таблиц — имя CTE перекрывает таблицу внутри запроса."""
+        source = _read('news', 'queries.py')
+        body = source[source.index('def audience_sip_check('):]
+        body = body[:body.index('\ndef ', 10)]
+        self.assertIn('WITH news_posts AS (', body)
+        self.assertIn('news_audience_rules AS (', body)
+        self.assertIn('jsonb_to_recordset(%(rules)s::jsonb)', body)
+        self.assertIn('report_match(with_space)', body)
+        # Своего правила «кому уйдёт» здесь нет ни одного.
+        self.assertNotIn("subject_type = 'department'", body)
+
+    def test_the_check_is_about_the_sip_number(self):
+        """«Данные Oktell» у человека — это его SIP-номер в разделе
+        «Настройки SIP»: без номера он в АТС не работает."""
+        source = _read('news', 'queries.py')
+        body = source[source.index('def audience_sip_check('):]
+        body = body[:body.index('\ndef ', 10)]
+        self.assertIn("NULLIF(btrim(COALESCE(u.sip_number, '')), '') IS NOT NULL", body)
+
+    def test_the_route_keeps_the_same_perimeter(self):
+        """Иначе ручка стала бы способом перебрать чужих людей по id: правила
+        приходят из формы, а форма — это ещё не право их адресовать."""
+        routes = _code_only(_read('news', 'routes.py'))
+        body = routes[routes.index('def news_audience_oktell('):]
+        body = body[:body.index('@news_route', 10)]
+        self.assertIn('_audience_refusal(cursor, ctx, rules, space_id=space_id)', body)
+        self.assertIn('audience_max_role_level=ctx[\'ceiling\']', body)
+        # Пустой набор адресатов — не ошибка, а «спрашивать не о ком».
+        self.assertIn('if not rules:', body)
+
+    def test_the_list_is_capped_but_the_count_is_not(self):
+        """В панели читают первые имена, а решение принимают по числу: двести
+        строк в ней — это не ответ, а новый вопрос."""
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('missing[:SIP_MISSING_LIMIT]', routes)
+        self.assertIn('"missing_count": len(missing)', routes)
+
+    def test_the_form_asks_only_for_oktell(self):
+        """В портале SIP-номер ни при чём. Запрос «на всякий случай» на каждый
+        щелчок по справочнику адресата был бы обращением к базе ради ответа,
+        который никто не спросит."""
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn("if (!open || channel !== 'oktell' || !audienceKey)", form)
+        self.assertIn('/api/news/audience/oktell', form)
+        # Пауза и отмена прошлого ответа: адресатов набирают по одному.
+        self.assertIn('}, 400);', form)
+        self.assertIn('if (alive) setSipCheck', form)
+
+    def test_the_warning_button_stands_next_to_the_switch(self):
+        """Предупреждение относится к одной кнопке «Oktell»: отдельная красная
+        строка внизу карточки читалась бы как ошибка всей формы."""
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        row = form[form.index('Куда отправить'):]
+        row = row[:row.index('Обязательно к прочтению')]
+        self.assertIn('sipMissing > 0 && (', row)
+        self.assertIn('aria-label="Кто не увидит объявление в Oktell"', row)
+        self.assertIn('<IosSegmented', row)
+        self.assertIn('aria-expanded={sipOpen}', row)
+
+    def test_the_panel_opens_smoothly_and_without_a_second_modal(self):
+        """Вторая модалка поверх формы — это два окна об одной новости.
+        Плавность даёт сетка 0fr → 1fr: высота считается по содержимому, и три
+        имени раскрываются так же ровно, как тридцать."""
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        row = form[form.index('Куда отправить'):]
+        row = row[:row.index('Обязательно к прочтению')]
+        self.assertIn('grid transition-all duration-300 ease-out', row)
+        self.assertIn('grid-rows-[1fr]', row)
+        self.assertIn('grid-rows-[0fr]', row)
+        self.assertNotIn('IosModal', row)
+
+    def test_one_person_gets_the_instruction_not_a_list(self):
+        """«Если один сотрудник — просто инструкция, как добавить номер»:
+        перечень из одной строки под фразой «1 из 24» повторял бы сам себя."""
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn('const sipOnly = sipMissing === 1 ?', form)
+        self.assertIn('{sipMissing > 1 && (', form)
+        self.assertIn('Как добавить номер', form)
+        self.assertIn('«Настройки SIP»', form)
+        self.assertIn('«SIP-номер»', form)
 
 
 if __name__ == '__main__':

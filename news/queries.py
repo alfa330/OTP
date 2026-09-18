@@ -1357,6 +1357,70 @@ def audience_size(cursor, post_id, with_space=False):
     return int(row[0]) if row else 0
 
 
+def audience_sip_check(cursor, *, rules, author_id, audience_max_role_level,
+                       space_id=None, with_space=False):
+    """Кто из отмеченных адресатов остался без SIP-номера. (сколько всего, список).
+
+    Нужно каналу Oktell: объявление показывает программа поверх клиента АТС, а
+    в АТС человек без номера не работает — значит и окна он не увидит. Форма
+    предупреждает об этом ДО публикации, поимённо.
+
+    ПРАВИЛА АДРЕСАТА ЗДЕСЬ НЕ ПЕРЕПИСАНЫ. Считать «кому уйдёт» вторым способом
+    означало бы предупреждение про одних людей и показ другим; расходятся такие
+    копии молча. Поэтому берётся тот же report_match, что у журнала и у счётчика
+    «12 из 30», а НЕСОХРАНЁННЫЕ правила формы подставляются вместо таблиц: имя
+    CTE в Postgres перекрывает таблицу внутри запроса, и шаблон, написанный про
+    news_posts и news_audience_rules, читает временный набор, ничего не зная об
+    этом.
+    """
+    if not rules:
+        return 0, []
+    payload = json.dumps([{
+        'subject_type': rule.get('subject_type'),
+        'subject_id': rule.get('subject_id'),
+        'subject_role': rule.get('subject_role'),
+        'min_role_level': rule.get('min_role_level'),
+    } for rule in rules], ensure_ascii=False)
+    params = {'rules': payload, 'author': author_id,
+              'ceiling': audience_max_role_level, 'space': space_id}
+    params.update(_role_params())
+    cursor.execute(
+        """
+        WITH news_posts AS (
+            SELECT 0::int AS id, %(author)s::int AS author_id,
+                   %(ceiling)s::int AS audience_max_role_level,
+                   %(space)s::int AS space_id
+        ),
+        news_audience_rules AS (
+            SELECT 0::int AS news_id, r.subject_type, r.subject_id,
+                   r.subject_role, r.min_role_level
+              FROM jsonb_to_recordset(%(rules)s::jsonb)
+                AS r(subject_type text, subject_id int, subject_role text,
+                     min_role_level int)
+        ),
+        """ + _VIEWER_SUBJECTS_CTE + """
+        SELECT v.id, v.name, v.role, v.department_name,
+               NULLIF(btrim(COALESCE(u.sip_number, '')), '') IS NOT NULL AS has_sip
+          FROM news_posts p
+          JOIN viewers v ON TRUE
+          JOIN users u ON u.id = v.id
+         WHERE v.id IS DISTINCT FROM p.author_id
+           AND
+        """ + report_match(with_space) + """
+         ORDER BY v.name
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    missing = [{
+        'user_id': row[0],
+        'name': row[1],
+        'role': row[2],
+        'department_name': row[3],
+    } for row in rows if not row[4]]
+    return len(rows), missing
+
+
 def subject_catalog(cursor, department_ids=None, space_department_ids=None):
     """Справочники адресата: отделы, направления, группы.
 
