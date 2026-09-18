@@ -64,6 +64,17 @@ import {
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
 import {
+    WS_PHONE_BUTTON, WS_PHONE_TIME_INPUT, WorkSchedulesDayRow, WorkSchedulesEmpty, WorkSchedulesFlagRow,
+    WorkSchedulesOperatorRow, WorkSchedulesPeriodHeader, WorkSchedulesShiftRow, WorkSchedulesSummary,
+    WorkSchedulesValueRow, WsPhoneCheckRow, WsPhoneDayStrip, WsPhoneGroup, WsPhoneLinkRow,
+    WsPhonePill, WsPhoneRow, WsPhoneSearch, WsPhoneTabs
+} from './components/schedule/WorkSchedulesMobile';
+import {
+    formatPlannerPhoneHours, groupPlannerPhoneOperators, plannerPhoneCellCaption, plannerPhoneDayCell,
+    plannerPhoneFilterValue, plannerPhoneOnShiftCount, plannerPhoneOperatorSummary, plannerPhonePeriodLabel,
+    plannerPhonePeriodSummary, plannerPhoneStripCaption, sortPlannerPhoneOptions
+} from './components/schedule/workSchedulesPhone';
+import {
     MyHoursPhoneCalendar, MyHoursPhoneEmpty, MyHoursPhoneHeader, MyHoursPhoneNotice, MyHoursPhoneSkeleton, MyHoursPhoneSummary
 } from './components/hours/MyHoursMobile';
 import {
@@ -15504,6 +15515,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [phoneSwapListsExpanded, setPhoneSwapListsExpanded] = useState({});
             // Лист уезжает ещё четверть секунды после закрытия — с пустым вопросом он бы моргал.
             const phoneSwapConfirmShown = useLastPresent(phoneSwapConfirm);
+            /* Телефон, ветка руководителя: открытый человек (экран дней периода),
+               открытый экран отбора и поиск в нём. Компьютер этих состояний не
+               читает — у сетки свой return. */
+            const [plannerPhoneOperatorId, setPlannerPhoneOperatorId] = useState(null);
+            const [plannerPhoneFilterScreen, setPlannerPhoneFilterScreen] = useState('');
+            const [plannerPhoneFilterQuery, setPlannerPhoneFilterQuery] = useState('');
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [expandedMyUpcomingShifts, setExpandedMyUpcomingShifts] = useState({});
             const [swapIncomingPage, setSwapIncomingPage] = useState(0);
@@ -29025,6 +29042,2194 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
             }
 
+            /* Окна тренинга, тех. причины, офлайн-активности и штрафа общие для
+               компьютера и телефона: их открывают обработчики вкладки «Контроль»,
+               а она есть в обоих деревьях. Разметка одна — вынесена в переменную,
+               а не скопирована во второе дерево. */
+            const plannerSideModals = (
+                <>
+                {plannerTrainingModalState.open && (
+                    <SimpleModal
+                        open={plannerTrainingModalState.open}
+                        onClose={closePlannerTrainingModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-chalkboard-teacher text-blue-600"></FaIcon>
+                                    {plannerTrainingModalState.editingId
+                                        ? 'Редактировать тренинг'
+                                        : (String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                            || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
+                                            ? 'Подтвердить тренинг'
+                                            : 'Добавить тренинг'}
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerTrainingModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerTrainingModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                <input
+                                    type="date"
+                                    value={plannerTrainingModalState.date || ''}
+                                    onChange={(e) => updatePlannerTrainingDraftField('date', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                            </div>
+
+                            {String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all' ? (
+                                <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
+                                    <div className="text-xs font-semibold text-blue-800 mb-1">
+                                        Интервалы для подтверждения: {Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals.length : 0}
+                                    </div>
+                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
+                                        {(Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals : []).map((seg, idx) => (
+                                            <div key={`planner-training-modal-interval-${idx}`} className="text-[11px] text-blue-900 tabular-nums">
+                                                {plannerModalSegmentRangeText(seg)}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTrainingModalState.startTime || ''}
+                                            onChange={(e) => updatePlannerTrainingDraftField('startTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTrainingModalState.endTime || ''}
+                                            onChange={(e) => updatePlannerTrainingDraftField('endTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            {plannerTrainingDraftOverlapInfo?.hasOverlap && (
+                                <div className={`rounded-lg border px-3 py-2 text-xs ${
+                                    plannerTrainingDraftOverlapInfo.hasExactDuplicate
+                                        ? 'border-red-200 bg-red-50 text-red-700'
+                                        : 'border-amber-200 bg-amber-50 text-amber-800'
+                                }`}>
+                                    <div className="font-semibold">
+                                        {plannerTrainingDraftOverlapInfo.hasExactDuplicate
+                                            ? 'Такой тренинг уже есть.'
+                                            : 'Есть пересечение по времени.'}
+                                    </div>
+                                    {plannerTrainingDraftOverlapInfo.items.slice(0, 3).map((item, idx) => (
+                                        <div key={`planner-training-overlap-${item.training?.id || idx}`} className="mt-1">
+                                            {item.training?.start_time || '—'} - {item.training?.end_time || '—'}
+                                            {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
+                                        </div>
+                                    ))}
+                                    <div className="mt-1">
+                                        Сохранение заблокировано: выберите свободный интервал.
+                                    </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                <select
+                                    value={plannerTrainingModalState.reason || ''}
+                                    onChange={(e) => updatePlannerTrainingDraftField('reason', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">Выберите причину</option>
+                                    {plannerTrainingReasonOptions.map(reason => (
+                                        <option key={`planner-training-reason-${reason}`} value={reason}>{reason}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerTrainingModalState.comment || ''}
+                                    onChange={(e) => updatePlannerTrainingDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                    placeholder="Комментарий (необязательно)"
+                                />
+                            </div>
+
+                            {plannerTrainingModalError && (
+                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                    {plannerTrainingModalError}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerTrainingModal}
+                                disabled={plannerTrainingActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerTrainingModal}
+                                disabled={plannerTrainingActionLoading || !!plannerTrainingDraftOverlapInfo?.hasOverlap}
+                                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerTrainingActionLoading
+                                    ? 'Сохраняем...'
+                                    : (plannerTrainingModalState.editingId
+                                        ? 'Обновить тренинг'
+                                        : (String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
+                                            || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
+                                            ? 'Подтвердить'
+                                            : 'Сохранить тренинг')}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
+
+                {plannerTechStatusModalState.open && (
+                    <SimpleModal
+                        open={plannerTechStatusModalState.open}
+                        onClose={closePlannerTechStatusModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-tools text-violet-600"></FaIcon>
+                                    {(String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag'
+                                        || String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag_all')
+                                        ? 'Подтвердить тех.причину'
+                                        : 'Добавить тех.причину'}
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerTechStatusModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerTechStatusModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                <input
+                                    type="date"
+                                    value={plannerTechStatusModalState.date || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('date', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                />
+                            </div>
+
+                            {String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag_all' ? (
+                                <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-3 py-2">
+                                    <div className="text-xs font-semibold text-violet-800 mb-1">
+                                        Интервалы для подтверждения: {Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals.length : 0}
+                                    </div>
+                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
+                                        {(Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals : []).map((seg, idx) => (
+                                            <div key={`planner-tech-modal-interval-${idx}`} className="text-[11px] text-violet-900 tabular-nums">
+                                                {plannerModalSegmentRangeText(seg)}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTechStatusModalState.startTime || ''}
+                                            onChange={(e) => updatePlannerTechStatusDraftField('startTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                        <input
+                                            type="time"
+                                            value={plannerTechStatusModalState.endTime || ''}
+                                            onChange={(e) => updatePlannerTechStatusDraftField('endTime', e.target.value)}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                <select
+                                    value={plannerTechStatusModalState.reason || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('reason', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                >
+                                    <option value="">Выберите причину</option>
+                                    {(plannerTechReasonOptions.length > 0 ? plannerTechReasonOptions : plannerFallbackTechReasonOptions).map(reason => (
+                                        <option key={`planner-tech-reason-${reason}`} value={reason}>{reason}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Рабочее место (РМ)</label>
+                                <select
+                                    value={plannerTechStatusModalState.workplaceNumber || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('workplaceNumber', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                >
+                                    <option value="">Не указывать</option>
+                                    {Array.from({ length: 30 }, (_, idx) => {
+                                        const rm = idx + 1;
+                                        return (
+                                            <option key={`planner-tech-status-rm-${rm}`} value={rm}>
+                                                РМ {rm}
+                                            </option>
+                                        );
+                                    })}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">
+                                    Комментарий
+                                    {plannerTechStatusCommentRule && (
+                                        <span className="ml-1.5 font-semibold text-rose-600">обязательно</span>
+                                    )}
+                                </label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerTechStatusModalState.comment || ''}
+                                    onChange={(e) => updatePlannerTechStatusDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 resize-y"
+                                    placeholder={plannerTechStatusCommentRule?.example
+                                        ? `Например: ${plannerTechStatusCommentRule.example}`
+                                        : 'Комментарий (необязательно)'}
+                                />
+                                {plannerTechStatusCommentRule?.hint && (
+                                    <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
+                                        {plannerTechStatusCommentRule.hint}
+                                    </div>
+                                )}
+                            </div>
+
+                            {plannerTechStatusModalError && (
+                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                    {plannerTechStatusModalError}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerTechStatusModal}
+                                disabled={plannerTechStatusActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerTechStatusModal}
+                                disabled={plannerTechStatusActionLoading}
+                                className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerTechStatusActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerTechStatusActionLoading ? 'Сохраняем...' : 'Подтвердить'}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
+
+                {plannerOfflineActivityModalState.open && (() => {
+                    const activityType = String(plannerOfflineActivityModalState?.activityType || 'offline_activity');
+                    const isTraining = activityType === 'training';
+                    const isTechnical = activityType === 'technical_reason';
+                    const technicalReasonOptions = plannerTechReasonOptions.length > 0
+                        ? plannerTechReasonOptions
+                        : plannerFallbackTechReasonOptions;
+                    // Комментарий обязателен только у тех.причины и только у отдельных причин.
+                    const technicalCommentRule = isTechnical
+                        ? findCommentRule(plannerTechCommentRules, plannerOfflineActivityModalState?.technicalReason)
+                        : null;
+                    const technicalDirectionValues = plannerToUniquePositiveIntList(
+                        plannerOfflineActivityModalState?.technicalDirectionIds
+                    );
+                    const accentFocusClass = isTechnical
+                        ? 'focus:ring-violet-500'
+                        : (isTraining ? 'focus:ring-blue-500' : 'focus:ring-emerald-500');
+                    const saveButtonClass = isTechnical
+                        ? 'bg-violet-600 hover:bg-violet-700'
+                        : (isTraining ? 'bg-blue-600 hover:bg-blue-700' : 'bg-emerald-600 hover:bg-emerald-700');
+                    const titleText = isTechnical
+                        ? 'Отметить тех. причину'
+                        : (isTraining ? 'Отметить тренинг' : 'Отметить офлайн-активность');
+                    const titleIconClass = isTechnical
+                        ? 'fa-tools text-violet-600'
+                        : (isTraining ? 'fa-chalkboard-teacher text-blue-600' : 'fa-user-clock text-emerald-600');
+                    const saveLabel = isTechnical ? 'Сохранить тех. причину' : (isTraining ? 'Сохранить тренинг' : 'Сохранить офлайн');
+
+                    return (
+                        <SimpleModal
+                            open={plannerOfflineActivityModalState.open}
+                            onClose={closePlannerOfflineActivityModal}
+                            panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                        >
+                            <div className="mb-4 pb-3 border-b border-slate-200">
+                                <div className="flex items-center justify-between gap-3">
+                                    <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                        <FaIcon className={`fas ${titleIconClass}`}></FaIcon>
+                                        {titleText}
+                                    </h3>
+                                    <button
+                                        type="button"
+                                        onClick={closePlannerOfflineActivityModal}
+                                        className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                    >
+                                        <FaIcon className="fas fa-times"></FaIcon>
+                                    </button>
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                    Дата: {plannerOfflineActivityModalState.date || '—'}
+                                </div>
+                            </div>
+
+                            <div className="space-y-3">
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Тип активности</label>
+                                    <select
+                                        value={activityType}
+                                        onChange={(e) => {
+                                            const nextType = String(e.target.value || 'offline_activity');
+                                            setPlannerOfflineActivityModalState(prev => ({
+                                                ...(prev || {}),
+                                                activityType: nextType
+                                            }));
+                                        }}
+                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                    >
+                                        <option value="training">Тренинг</option>
+                                        <option value="offline_activity">Офлайн активность</option>
+                                        <option value="technical_reason">Тех причина</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
+                                    <input
+                                        type="date"
+                                        value={plannerOfflineActivityModalState.date || ''}
+                                        onChange={(e) => updatePlannerOfflineActivityDraftField('date', e.target.value)}
+                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                    />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
+                                        <input
+                                            type="time"
+                                            value={plannerOfflineActivityModalState.startTime || ''}
+                                            onChange={(e) => updatePlannerOfflineActivityDraftField('startTime', e.target.value)}
+                                            className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            step={300}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
+                                        <input
+                                            type="time"
+                                            value={plannerOfflineActivityModalState.endTime || ''}
+                                            onChange={(e) => updatePlannerOfflineActivityDraftField('endTime', e.target.value)}
+                                            className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            step={300}
+                                        />
+                                    </div>
+                                </div>
+
+                                {isTraining && plannerOfflineTrainingDraftOverlapInfo?.hasOverlap && (
+                                    <div className={`rounded-lg border px-3 py-2 text-xs ${
+                                        plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate
+                                            ? 'border-red-200 bg-red-50 text-red-700'
+                                            : 'border-amber-200 bg-amber-50 text-amber-800'
+                                    }`}>
+                                        <div className="font-semibold">
+                                            {plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate
+                                                ? 'Такой тренинг уже есть.'
+                                                : 'Есть пересечение по времени.'}
+                                        </div>
+                                        {plannerOfflineTrainingDraftOverlapInfo.items.slice(0, 3).map((item, idx) => (
+                                            <div key={`planner-offline-training-overlap-${item.training?.id || idx}`} className="mt-1">
+                                                {item.training?.start_time || '—'} - {item.training?.end_time || '—'}
+                                                {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
+                                            </div>
+                                        ))}
+                                        <div className="mt-1">
+                                            Сохранение заблокировано: выберите свободный интервал.
+                                        </div>
+                                    </div>
+                                )}
+
+                                {isTraining && (
+                                    <>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-600 mb-1">Причина тренинга</label>
+                                            <select
+                                                value={plannerOfflineActivityModalState.trainingReason || ''}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('trainingReason', e.target.value)}
+                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            >
+                                                <option value="">Выберите причину</option>
+                                                {plannerTrainingReasonOptions.map(reason => (
+                                                    <option key={`planner-unified-training-reason-${reason}`} value={reason}>{reason}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!plannerOfflineActivityModalState.trainingCountInHours}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('trainingCountInHours', !!e.target.checked)}
+                                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                            />
+                                            Засчитывать в учет часов
+                                        </label>
+                                    </>
+                                )}
+
+                                {isTechnical && (
+                                    <>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-600 mb-1">Причина тех.причины</label>
+                                            <select
+                                                value={plannerOfflineActivityModalState.technicalReason || ''}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalReason', e.target.value)}
+                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            >
+                                                <option value="">Выберите причину</option>
+                                                {technicalReasonOptions.map(reason => (
+                                                    <option key={`planner-unified-tech-reason-${reason}`} value={reason}>{reason}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-medium text-slate-600 mb-1">Рабочее место (РМ)</label>
+                                            <select
+                                                value={plannerOfflineActivityModalState.technicalWorkplaceNumber || ''}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalWorkplaceNumber', e.target.value)}
+                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                            >
+                                                <option value="">Не указывать</option>
+                                                {Array.from({ length: 30 }, (_, idx) => {
+                                                    const rm = idx + 1;
+                                                    return (
+                                                        <option key={`planner-unified-tech-rm-${rm}`} value={rm}>
+                                                            РМ {rm}
+                                                        </option>
+                                                    );
+                                                })}
+                                            </select>
+                                        </div>
+                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!plannerOfflineActivityModalState.technicalIsMass}
+                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalIsMass', !!e.target.checked)}
+                                                className="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
+                                            />
+                                            Массово по направлениям
+                                        </label>
+                                        {!!plannerOfflineActivityModalState.technicalIsMass && (
+                                            <div>
+                                                <label className="block text-xs font-medium text-slate-600 mb-1">Направления (мультивыбор)</label>
+                                                <select
+                                                    multiple
+                                                    value={technicalDirectionValues.map((id) => String(id))}
+                                                    onChange={(e) => {
+                                                        const selectedValues = Array.from(e?.target?.selectedOptions || []).map((option) => option.value);
+                                                        updatePlannerOfflineActivityDraftField(
+                                                            'technicalDirectionIds',
+                                                            plannerToUniquePositiveIntList(selectedValues)
+                                                        );
+                                                    }}
+                                                    className={`w-full min-h-[120px] px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
+                                                >
+                                                    {plannerTechMassDirectionOptions.map((direction) => (
+                                                        <option key={`planner-unified-tech-dir-${direction.id}`} value={direction.id}>
+                                                            {direction.name}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                {plannerTechMassDirectionOptions.length === 0 && (
+                                                    <div className="mt-1 text-[11px] text-amber-700">
+                                                        Справочник направлений не загружен. Для массовой тех.причины список направлений недоступен.
+                                                    </div>
+                                                )}
+                                                <div className="mt-1 text-[11px] text-slate-500">
+                                                    Запись будет выставлена только тем сотрудникам выбранных направлений, у кого есть смена в этом интервале.
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                                        Комментарий
+                                        {technicalCommentRule && (
+                                            <span className="ml-1.5 font-semibold text-rose-600">обязательно</span>
+                                        )}
+                                    </label>
+                                    <textarea
+                                        rows={3}
+                                        value={plannerOfflineActivityModalState.comment || ''}
+                                        onChange={(e) => updatePlannerOfflineActivityDraftField('comment', e.target.value)}
+                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass} resize-y`}
+                                        placeholder={technicalCommentRule?.example
+                                            ? `Например: ${technicalCommentRule.example}`
+                                            : 'Комментарий (необязательно)'}
+                                    />
+                                    {technicalCommentRule?.hint && (
+                                        <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
+                                            {technicalCommentRule.hint}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {plannerOfflineActivityModalError && (
+                                    <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                        {plannerOfflineActivityModalError}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                                <button
+                                    type="button"
+                                    onClick={closePlannerOfflineActivityModal}
+                                    disabled={plannerOfflineActivityActionLoading}
+                                    className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                                >
+                                    Отмена
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={submitPlannerOfflineActivityModal}
+                                    disabled={plannerOfflineActivityActionLoading || (isTraining && !!plannerOfflineTrainingDraftOverlapInfo?.hasOverlap)}
+                                    className={`px-4 py-2 rounded-lg text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 ${saveButtonClass}`}
+                                >
+                                    <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                    {plannerOfflineActivityActionLoading ? 'Сохраняем...' : saveLabel}
+                                </button>
+                            </div>
+                        </SimpleModal>
+                    );
+                })()}
+
+                {plannerFineModalState.open && (
+                    <SimpleModal
+                        open={plannerFineModalState.open}
+                        onClose={closePlannerFineModal}
+                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
+                    >
+                        <div className="mb-4 pb-3 border-b border-slate-200">
+                            <div className="flex items-center justify-between gap-3">
+                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                    <FaIcon className="fas fa-exclamation-triangle text-rose-600"></FaIcon>
+                                    Добавить штраф
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={closePlannerFineModal}
+                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
+                                >
+                                    <FaIcon className="fas fa-times"></FaIcon>
+                                </button>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                                Дата: {plannerFineModalState.date || '—'}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
+                                <select
+                                    value={plannerFineModalState.reason || ''}
+                                    onChange={(e) => updatePlannerFineDraftField('reason', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">Выберите причину</option>
+                                    <option value="Корп такси">Корп такси</option>
+                                    <option value="Опоздание">Опоздание</option>
+                                    <option value="Прокси карта">Прокси карта</option>
+                                    <option value="Не выход">Не выход</option>
+                                    <option value="Другое">Другое</option>
+                                </select>
+                            </div>
+
+                            {String(plannerFineModalState.reason || '') === 'Опоздание' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Минут опоздания</label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        value={plannerFineModalState.minutes}
+                                        onChange={(e) => updatePlannerFineDraftField('minutes', e.target.value)}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="0"
+                                    />
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                        Сумма считается автоматически: минуты × 50
+                                    </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Сумма</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    value={plannerFineModalState.amount}
+                                    onChange={(e) => updatePlannerFineDraftField('amount', e.target.value)}
+                                    disabled={String(plannerFineModalState.reason || '') === 'Опоздание' || String(plannerFineModalState.reason || '') === 'Не выход' || String(plannerFineModalState.reason || '') === 'Прокси карта'}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
+                                    placeholder="0"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <textarea
+                                    rows={3}
+                                    value={plannerFineModalState.comment || ''}
+                                    onChange={(e) => updatePlannerFineDraftField('comment', e.target.value)}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                    placeholder="Комментарий (необязательно)"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closePlannerFineModal}
+                                disabled={plannerFineActionLoading}
+                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                onClick={submitPlannerFineForCurrentDay}
+                                disabled={plannerFineActionLoading}
+                                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <FaIcon className={`fas ${plannerFineActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
+                                {plannerFineActionLoading ? 'Сохраняем...' : 'Сохранить штраф'}
+                            </button>
+                        </div>
+                    </SimpleModal>
+                )}
+                </>
+            );
+
+            /* Очередь «Запросы» и подписка на сводку изменений рисуются в обоих
+               деревьях: они собраны на IosModal, а он на телефоне и так экран, а
+               не окно. «Перерывы за день» остались настольными — у телефона свой
+               экран перерывов, списком вместо плашки с итогом. */
+            const plannerRequestModals = (
+                <>
+﻿                {/* ── Очередь «Запросы»: заявки операторов на изменение смены ─────
+                    Разбирается здесь, а не в отдельном разделе: решение меняет
+                    график, и человек уже стоит перед ним. */}
+                <IosModal
+                    open={showReviewModal}
+                    onClose={() => setShowReviewModal(false)}
+                    title="Запросы по сменам"
+                    subtitle="Заявки операторов на сокращение смены и дополнительную часть"
+                    maxWidth="max-w-2xl"
+                    footer={(
+                        <div className="flex w-full items-center justify-between gap-2">
+                            <span className="text-[12px] text-slate-500">
+                                {reviewPendingCount > 0
+                                    ? `Ожидают решения: ${reviewPendingCount}`
+                                    : 'Нерассмотренных заявок нет'}
+                            </span>
+                            <button
+                                type="button"
+                                className={`${iosBtnSecondary} shrink-0`}
+                                onClick={() => setShowReviewModal(false)}
+                            >
+                                Закрыть
+                            </button>
+                        </div>
+                    )}
+                >
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                            <IosSegmented
+                                value={reviewStatusFilter}
+                                onChange={setReviewStatusFilter}
+                                ariaLabel="Какие заявки показывать"
+                                options={[
+                                    { value: 'pending', label: 'Ожидают' },
+                                    { value: 'all', label: 'Все' },
+                                ]}
+                            />
+                            <div className="flex items-center gap-1.5">
+                                <IosHint
+                                    align="right"
+                                    text="Одобрение сразу правит график: смена сокращается или в день добавляется новая часть, перерывы пересчитываются по правилам направления, а изменение попадает в историю графика. Отклонение график не трогает. Оператор увидит решение в разделе «Мои смены»."
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => loadReviewRequests({ silent: false })}
+                                    disabled={reviewLoading}
+                                    className={`${iosBtnGhost} shrink-0`}
+                                >
+                                    <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-rotate'} text-[11px] text-slate-400`}></FaIcon>
+                                    Обновить
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Тумблер только у главы отдела: прямому СВ заявки его
+                            людей приходят всегда, и выключателя у них нет —
+                            иначе заявку можно было бы не заметить совсем. */}
+                        {reviewCanWatch && (
+                            <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
+                                <div className="min-w-0 text-[12.5px] leading-snug text-slate-600">
+                                    Уведомлять меня о заявках отдела
+                                    <span className="ml-1.5 inline-flex align-middle">
+                                        <IosHint
+                                            align="left"
+                                            text="Без подписки уведомления о заявке приходят только прямому супервайзеру оператора — это его человек и его решение. С подпиской они будут приходить и вам, по всему отделу. Заявки оператора, у которого супервайзера нет, приходят вам в любом случае: иначе о них не узнает никто. Сама очередь «Запросы» видна вам всегда, независимо от подписки."
+                                        />
+                                    </span>
+                                </div>
+                                <IosToggle
+                                    checked={reviewWatching}
+                                    onChange={toggleReviewWatch}
+                                    disabled={reviewWatchSaving}
+                                />
+                            </div>
+                        )}
+
+                        {reviewError && (
+                            <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
+                                {reviewError}
+                            </div>
+                        )}
+
+                        {reviewLoading && reviewRequests.length === 0 ? (
+                            <div className="px-4 py-10 text-center text-[13px] text-slate-500">
+                                <FaIcon className="fas fa-spinner fa-spin mr-2 text-slate-400"></FaIcon>
+                                Загружаем запросы…
+                            </div>
+                        ) : reviewVisibleRequests.length === 0 ? (
+                            <div className="px-4 py-10 text-center">
+                                <div className="mx-auto mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                                    <FaIcon className="fas fa-inbox"></FaIcon>
+                                </div>
+                                <div className="text-[14px] font-semibold text-slate-700">
+                                    {reviewStatusFilter === 'pending' ? 'Всё разобрано' : 'Заявок нет'}
+                                </div>
+                                <div className="mt-0.5 text-[12.5px] text-slate-500">
+                                    {reviewStatusFilter === 'pending'
+                                        ? 'Новые заявки появятся здесь и в колоколе.'
+                                        : 'Операторы вашего отдела ещё не подавали заявок.'}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {reviewRequestGroups.map(group => (
+                                    <section key={`review-group-${group.key}`}>
+                                        {reviewRequestGroups.length > 1 && (
+                                            <div className="mb-1.5 flex items-baseline justify-between gap-2 px-1">
+                                                <span className="truncate text-[12.5px] font-semibold text-slate-700">{group.label}</span>
+                                                <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{group.items.length}</span>
+                                            </div>
+                                        )}
+                                        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                            {group.items.map(item => {
+                                            const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
+                                            const deltaMin = Number(item?.minutesDelta) || 0;
+                                            const busy = reviewRespondingId === item.id;
+                                            return (
+                                                <div key={`review-${item.id}`} className="px-4 py-3">
+                                                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                                                        <div className="min-w-0">
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                <span className="text-[14px] font-semibold text-slate-900">
+                                                                    {item.operator?.name || 'Сотрудник'}
+                                                                </span>
+                                                                {item.status !== 'pending' && (
+                                                                    <IosBadge tone={statusMeta.tone}>{statusMeta.label}</IosBadge>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-0.5 text-[12.5px] text-slate-500">
+                                                                {SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
+                                                                {item.operator?.direction && (
+                                                                    <>
+                                                                        <span className="text-slate-300"> · </span>
+                                                                        {item.operator.direction}
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-1 text-[12.5px] tabular-nums text-slate-600">
+                                                                {formatDateRuDayMonth(parseDateStr(item.shiftDate))}
+                                                                <span className="text-slate-400"> · </span>
+                                                                {shiftChangeIntervalText(item)}
+                                                                {deltaMin !== 0 && (
+                                                                    <span className={deltaMin < 0 ? ' text-rose-600' : ' text-emerald-600'}>
+                                                                        {' '}({deltaMin > 0 ? '+' : '−'}{formatMinutesOnly(Math.abs(deltaMin))})
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            {item.requestComment && (
+                                                                <div className="mt-1 text-[12px] leading-snug text-slate-500">
+                                                                    {item.requestComment}
+                                                                </div>
+                                                            )}
+                                                            {item.status !== 'pending' && item.responseComment && (
+                                                                <div className="mt-1 text-[12px] leading-snug text-slate-600">
+                                                                    <span className="text-slate-400">Ответ: </span>
+                                                                    {item.responseComment}
+                                                                </div>
+                                                            )}
+                                                            {item.status !== 'pending' && item.reviewedBy?.name && (
+                                                                <div className="mt-0.5 text-[11.5px] text-slate-400">
+                                                                    {statusMeta.label}: {item.reviewedBy.name}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {item.status === 'pending' && reviewCanReview && (
+                                                        <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                            <input
+                                                                type="text"
+                                                                value={reviewComments?.[item.id] || ''}
+                                                                onChange={(e) => setReviewComments(prev => ({ ...prev, [item.id]: e.target.value }))}
+                                                                placeholder="Комментарий · необязательно"
+                                                                className={`${iosInput} flex-1 !py-2 !text-[13px]`}
+                                                            />
+                                                            <div className="flex shrink-0 gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => respondReviewRequest(item.id, 'reject')}
+                                                                    disabled={busy}
+                                                                    className="rounded-xl bg-slate-100 px-3.5 py-2 text-[13px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
+                                                                >
+                                                                    Отклонить
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => respondReviewRequest(item.id, 'approve')}
+                                                                    disabled={busy}
+                                                                    className="rounded-xl bg-blue-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50"
+                                                                >
+                                                                    {busy ? 'Применяем…' : 'Одобрить'}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                            })}
+                                        </div>
+                                    </section>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </IosModal>
+
+                {/* ── «Уведомления об изменениях»: суточная сводка правок ─────────
+                    Окно рендерится здесь, рядом с остальными модалками, а НЕ
+                    внутри контейнера меню «3 точки»: меню закрывается
+                    обработчиком mousedown с проверкой «щёлкнули вне контейнера»,
+                    и окно внутри него не давало бы меню закрыться. */}
+                <IosModal
+                    open={showChangeReportModal}
+                    onClose={() => setShowChangeReportModal(false)}
+                    title="Уведомления об изменениях"
+                    subtitle="Сводка правок графика за день — в Telegram"
+                    maxWidth="max-w-md"
+                    footer={(
+                        <div className="flex w-full items-center justify-between gap-2">
+                            <button
+                                type="button"
+                                className={`${iosBtnGhost} shrink-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent`}
+                                onClick={sendChangeReportNow}
+                                disabled={changeReportSending || !changeReport.telegramConnected}
+                                title="Прислать сводку за вчера прямо сейчас — проверить, как она выглядит"
+                            >
+                                <FaIcon className={`fas ${changeReportSending ? 'fa-spinner fa-spin' : 'fa-paper-plane'} text-[11px] text-slate-400`}></FaIcon>
+                                {changeReportSending ? 'Отправляем…' : 'Отправить сейчас'}
+                            </button>
+                            <button
+                                type="button"
+                                className={`${iosBtnSecondary} shrink-0`}
+                                onClick={() => setShowChangeReportModal(false)}
+                            >
+                                Закрыть
+                            </button>
+                        </div>
+                    )}
+                >
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
+                            <div className="min-w-0 text-[13px] font-medium leading-snug text-slate-700">
+                                Присылать сводку изменений
+                                <div className="mt-0.5 text-[12px] font-normal text-slate-500">
+                                    {changeReport.hint}
+                                </div>
+                            </div>
+                            <IosToggle
+                                checked={changeReport.enabled}
+                                onChange={toggleChangeReport}
+                                disabled={changeReportSaving}
+                            />
+                        </div>
+
+                        {/* Область написана прямо в окне: у главы отдела она уже
+                            своя, и расхождение с тем, что человек видит в сетке,
+                            не должно выглядеть ошибкой. */}
+                        <div className="rounded-xl bg-white px-3.5 py-2.5 text-[12.5px] text-slate-600 ring-1 ring-slate-200/70">
+                            <span className="text-slate-500">Область сводки: </span>
+                            <span className="font-medium text-slate-800">{changeReport.scopeLabel || '—'}</span>
+                        </div>
+
+                        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12px] leading-relaxed text-slate-500 ring-1 ring-slate-200/70">
+                            Таблица: сотрудник, группа, как было и как стало, кто
+                            изменил. Первичное внесение графика и перерывы не входят.
+                        </div>
+
+                        {!changeReport.telegramConnected && (
+                            <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-amber-200/70">
+                                К вашей учётной записи не привязан Telegram — сводку отправлять
+                                некуда. Привязка делается в боте портала.
+                            </div>
+                        )}
+
+                        {changeReportNotice && (
+                            <div className="rounded-xl bg-emerald-50 px-3.5 py-2.5 text-[12.5px] text-emerald-700 ring-1 ring-emerald-200/70">
+                                {changeReportNotice}
+                            </div>
+                        )}
+
+                        {changeReportError && (
+                            <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
+                                {changeReportError}
+                            </div>
+                        )}
+                    </div>
+                </IosModal>
+                </>
+            );
+
+            /* ── «Графики работы» на телефоне ─────────────────────────────────
+               Настольная сетка «люди × дни» на экране в 390 px показывает
+               полтора дня: один столбец имён занимает 256 px, а линейка часов
+               уезжает ещё на экран вбок. Здесь раздел — список настроек
+               телефона: период переключателем, дни полосой, люди списком по
+               направлениям, день человека — экраном с теми же четырьмя
+               вкладками, что и настольное окно правки.
+
+               Данные, права и запросы — те же помощники, что у сетки ниже
+               (filteredOperators, visibleRange, openEditModal, saveSegment);
+               она не тронута: у неё свой return. Что показать в ячейке и как
+               подписать период — workSchedulesPhone.js, разметка строк —
+               WorkSchedulesMobile.jsx. */
+            if (isNarrowShell) {
+                const wsToday = todayDateStr(new Date());
+                const wsCapitalize = (value) => {
+                    const text = String(value || '');
+                    return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+                };
+                const wsDayDate = visibleRange[0] || wsToday;
+                const wsDayTitle = (date) => `${wsCapitalize(formatWeekdayRu(date, 'long'))}, ${formatDateRuDayMonth(date)}`;
+                const wsPeriodSummary = plannerPhonePeriodSummary(filteredOperators, visibleRange);
+                const wsGroups = groupPlannerPhoneOperators(filteredOperators);
+                const wsIsDayMode = viewMode === 'day';
+                /* Собственный склонятор: тот, что в ветке оператора, объявлен
+                   внутри неё и сюда не виден. */
+                const wsPlural = (n, one, few, many) => {
+                    const abs = Math.abs(Number(n) || 0);
+                    const d10 = abs % 10;
+                    const d100 = abs % 100;
+                    if (d10 === 1 && d100 !== 11) return one;
+                    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+                    return many;
+                };
+                const wsShiftDuration = (seg) => {
+                    const start = timeToMinutes(seg?.start);
+                    let end = timeToMinutes(seg?.end);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+                    if (end <= start) end += 1440;
+                    return Math.max(0, end - start);
+                };
+                /* Полоса дней есть только в «Дне»: в «Неделе» и «Месяце» строка
+                   человека показывает весь период сразу, и выбранный день там
+                   ничего не значил бы. Стрелки в «Дне» листают неделю — день
+                   выбирают самой полосой. */
+                const wsStripDays = weekRange.map(date => {
+                    const onShift = plannerPhoneOnShiftCount(filteredOperators, date);
+                    return {
+                        date,
+                        weekday: wsCapitalize(formatWeekdayRu(date, 'short')),
+                        dayNumber: parseDateStr(date).getDate(),
+                        caption: plannerPhoneStripCaption(onShift),
+                        tone: onShift > 0 ? 'shift' : 'none',
+                        ariaLabel: `${wsDayTitle(date)}, на смене ${onShift}`
+                    };
+                });
+                const wsStepPeriod = (step) => {
+                    if (wsIsDayMode) {
+                        setCurrentDate(addDays(parseDateStr(wsDayDate), step * 7));
+                        return;
+                    }
+                    paginatePlannerDates(step);
+                };
+                const wsGoToday = () => setCurrentDate(new Date());
+                const wsPeriodIsToday = visibleRange.includes(wsToday);
+
+                const wsOperator = filteredOperators.find(op => Number(op?.id) === Number(plannerPhoneOperatorId)) || null;
+                const wsOpenDay = (opId, date) => {
+                    if (plannerReadOnly) return;
+                    setModalActiveTab('shifts');
+                    openEditModal(opId, date);
+                };
+                const wsCloseDay = () => {
+                    setModalState(m => ({ ...m, open: false }));
+                    clearSelectedDays();
+                };
+
+                /* Строка человека в списке: в «Дне» справа стоит его смена, в
+                   «Неделе» и «Месяце» — сводка периода. Нажатие в «Дне» ведёт
+                   прямо в день (правка — один ход), в остальных режимах — на
+                   экран человека со списком дней. Тренеру раздел открыт только
+                   на просмотр, поэтому у него нажатие ведёт на экран всегда. */
+                const wsRenderOperatorRow = (op) => {
+                    if (wsIsDayMode) {
+                        const cell = plannerPhoneDayCell(op, wsDayDate, {
+                            viewMode,
+                            status: getPlannerScheduleStatusForDate(op, wsDayDate)
+                        });
+                        const { caption, tone } = plannerPhoneCellCaption(cell);
+                        const flags = getPlannerAggregatedFlagsForDate(op, wsDayDate);
+                        const markers = [
+                            Number(flags?.lateActive ? flags?.lateMinutes : 0) > 0 ? 'опоздание' : '',
+                            Number(flags?.earlyLeaveActive ? flags?.earlyLeaveMinutes : 0) > 0 ? 'ранний уход' : ''
+                        ].filter(Boolean).join(' · ');
+                        return (
+                            <WorkSchedulesOperatorRow
+                                key={op.id}
+                                name={op.name || '—'}
+                                direction={op.direction}
+                                rate={op.rate}
+                                caption={caption}
+                                tone={tone}
+                                marker={markers || null}
+                                note={cell.workMin > 0 ? formatPlannerPhoneHours(cell.workMin) : null}
+                                onClick={() => (plannerReadOnly
+                                    ? setPlannerPhoneOperatorId(op.id)
+                                    : wsOpenDay(op.id, wsDayDate))}
+                            />
+                        );
+                    }
+                    const summary = plannerPhoneOperatorSummary(op, visibleRange);
+                    return (
+                        <WorkSchedulesOperatorRow
+                            key={op.id}
+                            name={op.name || '—'}
+                            direction={op.direction}
+                            rate={op.rate}
+                            caption={summary.shifts > 0 ? formatPlannerPhoneHours(summary.workMin) : '—'}
+                            tone={summary.shifts > 0 ? 'shift' : 'none'}
+                            note={summary.shifts > 0
+                                ? `${summary.shifts} ${wsPlural(summary.shifts, 'смена', 'смены', 'смен')}${summary.daysOff ? ` · ${summary.daysOff} вых.` : ''}`
+                                : (summary.daysOff ? `${summary.daysOff} вых.` : null)}
+                            onClick={() => setPlannerPhoneOperatorId(op.id)}
+                        />
+                    );
+                };
+
+                /* Экраны отбора. Списки длинные (людей бывает под триста), но
+                   поиск нужен не всем: у статусов пять строк, и поле поиска над
+                   ними — лишняя строка на пол-экрана. */
+                const WS_FILTER_SCREENS = {
+                    department: {
+                        title: 'Отдел',
+                        /* «Все отделы» в списке уже есть отдельной строкой
+                           сверху — второй раз её из вариантов убираем. */
+                        options: plannerDepartmentSelectOptions.filter(opt => String(opt.value) !== ''),
+                        values: plannerDepartmentId ? [String(plannerDepartmentId)] : [],
+                        multiple: false,
+                        searchable: plannerDepartmentSelectOptions.length > 7,
+                        empty: 'Все отделы',
+                        apply: (value) => changePlannerDepartment(value)
+                    },
+                    operators: {
+                        title: 'Сотрудники',
+                        options: plannerOperatorSearchOptions,
+                        values: selectedOperatorIds.map(String),
+                        multiple: true,
+                        searchable: true,
+                        empty: 'Все сотрудники',
+                        apply: (values) => setSelectedOperatorIds(values)
+                    },
+                    supervisors: {
+                        title: 'Супервайзеры',
+                        options: plannerSupervisorOptions,
+                        values: selectedSupervisors.map(String),
+                        multiple: true,
+                        searchable: true,
+                        empty: 'Все супервайзеры',
+                        apply: (values) => setSelectedSupervisors(values.map(Number).filter(Number.isFinite))
+                    },
+                    directions: {
+                        title: 'Направления',
+                        options: plannerDirectionOptions,
+                        values: selectedDirections.map(String),
+                        multiple: true,
+                        searchable: true,
+                        empty: 'Все направления',
+                        apply: (values) => setSelectedDirections(values)
+                    },
+                    statuses: {
+                        title: 'Статус',
+                        options: PLANNER_STATUS_FILTER_OPTIONS,
+                        values: selectedStatuses.map(String),
+                        multiple: true,
+                        searchable: false,
+                        empty: 'Все, кроме уволенных',
+                        apply: (values) => setSelectedStatuses(values)
+                    }
+                };
+                const wsFilterScreen = WS_FILTER_SCREENS[plannerPhoneFilterScreen] || null;
+                const wsFilterRow = (key) => {
+                    const config = WS_FILTER_SCREENS[key];
+                    if (!config) return null;
+                    return (
+                        <WorkSchedulesValueRow
+                            key={key}
+                            label={config.title}
+                            value={plannerPhoneFilterValue(config.values, config.options, config.empty)}
+                            chevron
+                            onClick={() => {
+                                setPlannerPhoneFilterQuery('');
+                                setPlannerPhoneFilterScreen(key);
+                            }}
+                        />
+                    );
+                };
+                const wsToggleFilterValue = (config, value) => {
+                    if (!config.multiple) {
+                        config.apply(String(value));
+                        setPlannerPhoneFilterScreen('');
+                        return;
+                    }
+                    const current = config.values.map(String);
+                    const next = current.includes(String(value))
+                        ? current.filter(item => item !== String(value))
+                        : [...current, String(value)];
+                    config.apply(next);
+                };
+
+                /* Экран дня: те же четыре вкладки, что в настольном окне, и те
+                   же обработчики. Массовой правки (Ctrl + клик по дням) на
+                   телефоне нет — нет и ветки isBulkSelectionModal. */
+                const wsModalOperator = operators.find(o => o.id === modalState.opId) || null;
+                const wsModalShifts = wsModalOperator?.shifts?.[modalState.date] ?? [];
+                const wsModalParts = (wsModalOperator && modalState.date)
+                    ? getShiftPartsForDate(wsModalOperator, modalState.date)
+                    : [];
+                const wsModalTimelineParts = wsModalParts.map((part, idx) => {
+                    const srcSeg = wsModalOperator?.shifts?.[part.sourceDate]?.[part.sourceIndex];
+                    return {
+                        key: `ws-part-${idx}`,
+                        left: computeLeftPercent(part.start),
+                        width: ((part.end - part.start) / minutesInDay) * 100,
+                        background: plannerShiftVisualMeta(srcSeg).barGradient,
+                        breaks: (getBreakPartsForPart(wsModalOperator, part, modalState.date) || []).map(b => ({
+                            left: ((b.start - part.start) / Math.max(1, part.end - part.start)) * 100,
+                            width: ((b.end - b.start) / Math.max(1, part.end - part.start)) * 100
+                        }))
+                    };
+                });
+                const wsModalNowPercent = modalState.date === wsToday
+                    ? computeLeftPercent(new Date().getHours() * 60 + new Date().getMinutes())
+                    : null;
+                const wsModalEditing = modalState.editIndex !== null || modalState.showAddPanel;
+                const wsModalDuration = (() => {
+                    const start = timeToMinutes(modalState.start);
+                    let end = timeToMinutes(modalState.end);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+                    if (end <= start) end += 1440;
+                    return Math.max(0, end - start);
+                })();
+                const wsBreaksForShift = (idx) => {
+                    const part = wsModalParts.find(p => p.sourceDate === modalState.date && p.sourceIndex === idx);
+                    if (!part) return [];
+                    return (getBreakPartsForPart(wsModalOperator, part, modalState.date) || [])
+                        .map(b => `${minutesToTime(b.start % 1440)}—${minutesToTime(b.end % 1440)}`);
+                };
+
+                const wsFlagRows = [
+                    { key: 'late', label: 'Опоздание', minutes: Number(modalAggregatedFlags?.lateMinutes || 0), status: modalAggregatedFlags?.lateStatus || null, penalty: true },
+                    { key: 'early_leave', label: 'Ранний уход', minutes: Number(modalAggregatedFlags?.earlyLeaveMinutes || 0), status: modalAggregatedFlags?.earlyLeaveStatus || null, penalty: true },
+                    { key: 'training', label: 'Тренинг по статусам', minutes: Number(modalAggregatedFlags?.trainingMinutes || 0), status: modalAggregatedFlags?.trainingStatus || null, penalty: false },
+                    { key: 'technical_reason', label: 'Тех. причина по статусам', minutes: Number(modalAggregatedFlags?.technicalReasonMinutes ?? modalTechReasonMinutesFromStatuses ?? 0), status: modalAggregatedFlags?.technicalReasonStatus || null, penalty: false }
+                ].map(item => {
+                    const minutes = Math.max(0, Math.round(item.minutes || 0));
+                    const status = String(item.status || '').trim().toLowerCase();
+                    const hasMinutes = minutes > 0;
+                    if (!hasMinutes && !status) return null;
+                    const statusLabel = status === 'confirmed'
+                        ? (item.penalty ? 'Штраф' : 'Подтверждено')
+                        : status === 'rejected'
+                            ? (item.penalty ? 'Согласовано' : 'Отклонено')
+                            : 'Ожидает решения';
+                    const statusTone = status === 'confirmed'
+                        ? (item.penalty ? 'penalty' : 'confirmed')
+                        : status === 'rejected'
+                            ? (item.penalty ? 'agreed' : 'rejected')
+                            : 'pending';
+                    return { ...item, minutes, status, hasMinutes, statusLabel, statusTone };
+                }).filter(Boolean);
+
+                /* Действия раздела. Работа с файлами (импорт графика, загрузка
+                   статусов), синхронизация телефонии, отчёты статусов и журнал
+                   замен на телефон не вынесены: это многоколоночные панели и
+                   выбор файла, за которыми садятся за компьютер. */
+                const wsActionRows = [
+                    {
+                        key: 'requests',
+                        icon: 'fa-inbox',
+                        tile: 'bg-amber-500',
+                        title: 'Запросы',
+                        subtitle: reviewPendingCount > 0
+                            ? `Ожидают решения: ${reviewPendingCount}`
+                            : 'Заявки на сокращение и доп. часть',
+                        onClick: () => {
+                            setReviewError('');
+                            setShowReviewModal(true);
+                            loadReviewRequests({ silent: true });
+                        }
+                    },
+                    wsIsDayMode ? {
+                        key: 'breaks',
+                        icon: 'fa-mug-hot',
+                        tile: 'bg-orange-500',
+                        title: 'Перерывы за день',
+                        subtitle: dayBreaksStats.breaksCount > 0
+                            ? `${dayBreaksStats.breaksCount} у ${dayBreaksStats.operatorsCount} чел.`
+                            : 'За этот день перерывов нет',
+                        onClick: () => setShowDayBreaksModal(true)
+                    } : null,
+                    (wsIsDayMode && !plannerReadOnly) ? {
+                        key: 'aggregate',
+                        icon: dayAggregateLoading ? 'fa-spinner fa-spin' : 'fa-calculator',
+                        tile: 'bg-slate-500',
+                        title: dayAggregateLoading ? 'Агрегируем…' : 'Агрегировать день',
+                        subtitle: 'Пересчитать метрики за выбранный день',
+                        disabled: dayAggregateLoading,
+                        onClick: () => aggregateCurrentDayForAllOperators()
+                    } : null,
+                    {
+                        key: 'export',
+                        icon: excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel',
+                        tile: 'bg-emerald-600',
+                        title: excelTransferState.exporting ? 'Готовим файл…' : 'Экспорт в Excel',
+                        subtitle: 'Видимый период с учётом отбора',
+                        disabled: excelTransferState.exporting || excelTransferState.importing,
+                        onClick: () => handlePlannerExcelExport()
+                    },
+                    changeReport.canSubscribe ? {
+                        key: 'change-report',
+                        icon: 'fa-bell',
+                        tile: changeReport.enabled ? 'bg-blue-500' : 'bg-slate-400',
+                        title: 'Уведомления об изменениях',
+                        subtitle: changeReport.enabled ? 'Сводка правок приходит в Telegram' : 'Сводка правок за день в Telegram',
+                        onClick: () => {
+                            setChangeReportError('');
+                            setChangeReportNotice('');
+                            loadChangeReportState();
+                            setShowChangeReportModal(true);
+                        }
+                    } : null
+                ].filter(Boolean);
+
+                return (
+                    <div className="sa-m-root ws-m-root min-h-screen bg-slate-100" style={{ fontFamily: IOS_FONT }}>
+                        <div className="flex flex-col gap-4 px-4 pb-6">
+                            <header className="pt-1">
+                                <h1 className="sa-m-title truncate text-slate-900">Графики работы</h1>
+                                <p className="text-[15px] text-slate-500">
+                                    {plannerDepartmentSelectOptions.find(opt => String(opt.value) === String(plannerDepartmentId))?.label || 'Все отделы'}
+                                    {plannerReadOnly ? ' · только просмотр' : ''}
+                                </p>
+                            </header>
+
+                            <IosSegmented
+                                value={viewMode}
+                                onChange={setViewMode}
+                                stretch
+                                size="lg"
+                                ariaLabel="Период"
+                                options={PLANNER_VIEW_MODE_OPTIONS}
+                            />
+
+                            {wsIsDayMode ? (
+                                <WsPhoneDayStrip
+                                    days={wsStripDays}
+                                    activeDate={wsDayDate}
+                                    onSelect={(date) => setCurrentDate(parseDateStr(date))}
+                                    header={(
+                                        <WorkSchedulesPeriodHeader
+                                            label={plannerPhonePeriodLabel('week', weekRange)}
+                                            onPrev={() => wsStepPeriod(-1)}
+                                            onNext={() => wsStepPeriod(1)}
+                                            onToday={wsGoToday}
+                                            showToday={wsDayDate !== wsToday}
+                                            prevLabel="Предыдущая неделя"
+                                            nextLabel="Следующая неделя"
+                                        />
+                                    )}
+                                />
+                            ) : (
+                                <WorkSchedulesPeriodHeader
+                                    label={plannerPhonePeriodLabel(viewMode, visibleRange)}
+                                    onPrev={() => wsStepPeriod(-1)}
+                                    onNext={() => wsStepPeriod(1)}
+                                    onToday={wsGoToday}
+                                    showToday={!wsPeriodIsToday}
+                                    prevLabel={viewMode === 'month' ? 'Предыдущий месяц' : 'Предыдущая неделя'}
+                                    nextLabel={viewMode === 'month' ? 'Следующий месяц' : 'Следующая неделя'}
+                                />
+                            )}
+
+                            <WorkSchedulesSummary
+                                items={[
+                                    { label: 'Людей', value: wsPeriodSummary.people },
+                                    { label: 'Смен', value: wsPeriodSummary.shifts },
+                                    { label: 'Часов', value: formatPlannerPhoneHours(wsPeriodSummary.workMin) }
+                                ]}
+                            />
+
+                            <WsPhoneGroup
+                                label="Отбор"
+                                right={plannerActiveFiltersCount > 0 ? (
+                                    <button
+                                        type="button"
+                                        onClick={resetPlannerFilters}
+                                        className="shrink-0 text-[15px] font-semibold text-blue-600 active:opacity-60"
+                                    >
+                                        Сбросить
+                                    </button>
+                                ) : null}
+                            >
+                                {plannerCanSwitchDepartment ? wsFilterRow('department') : null}
+                                {wsFilterRow('operators')}
+                                {wsFilterRow('supervisors')}
+                                {wsFilterRow('directions')}
+                                {wsFilterRow('statuses')}
+                                {wsIsDayMode ? (
+                                    <WorkSchedulesValueRow label="Сортировка">
+                                        <select
+                                            className="ws-m-select text-slate-500"
+                                            value={daySortMode}
+                                            onChange={(e) => setDaySortMode(e.target.value)}
+                                            aria-label="Сортировка людей в режиме «День»"
+                                        >
+                                            {PLANNER_DAY_SORT_OPTIONS.map(opt => (
+                                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                            ))}
+                                        </select>
+                                    </WorkSchedulesValueRow>
+                                ) : null}
+                            </WsPhoneGroup>
+
+                            <WsPhoneGroup label="Действия">
+                                {wsActionRows.map(action => (
+                                    <WsPhoneLinkRow
+                                        key={action.key}
+                                        icon={({ size }) => <FaIcon className={`fas ${action.icon}`} style={{ fontSize: size }} />}
+                                        tileClassName={action.tile}
+                                        title={action.title}
+                                        subtitle={action.subtitle}
+                                        disabled={action.disabled}
+                                        onClick={action.onClick}
+                                    />
+                                ))}
+                            </WsPhoneGroup>
+
+                            {isLoading && filteredOperators.length === 0 ? (
+                                <WsPhoneGroup label="Сотрудники">
+                                    <WorkSchedulesEmpty icon="fa-spinner fa-spin" title="Загружаем график…" />
+                                </WsPhoneGroup>
+                            ) : filteredOperators.length === 0 ? (
+                                <WsPhoneGroup label="Сотрудники">
+                                    <WorkSchedulesEmpty
+                                        title="Никого не нашлось"
+                                        hint="Проверьте отбор: по текущим фильтрам людей нет."
+                                    />
+                                </WsPhoneGroup>
+                            ) : (
+                                wsGroups.map(group => (
+                                    <WsPhoneGroup
+                                        key={group.key}
+                                        label={group.label}
+                                        right={<span className="shrink-0 text-[13px] tabular-nums text-slate-400">{group.items.length}</span>}
+                                    >
+                                        {group.items.map(op => wsRenderOperatorRow(op))}
+                                    </WsPhoneGroup>
+                                ))
+                            )}
+                        </div>
+
+                        {/* Экран человека: дни периода списком. В «Дне» он тоже
+                            доступен — тренеру, у которого правка закрыта. */}
+                        <IosModal
+                            open={!!wsOperator}
+                            onClose={() => setPlannerPhoneOperatorId(null)}
+                            title={wsOperator?.name || 'Сотрудник'}
+                            subtitle={`${wsOperator?.direction || 'Без направления'} · ${plannerPhonePeriodLabel(viewMode, visibleRange)}`}
+                        >
+                            {wsOperator ? (
+                                <div className="flex flex-col gap-4">
+                                    <WorkSchedulesSummary
+                                        items={(() => {
+                                            const summary = plannerPhoneOperatorSummary(wsOperator, visibleRange);
+                                            return [
+                                                { label: 'Смен', value: summary.shifts },
+                                                { label: 'Часов', value: formatPlannerPhoneHours(summary.workMin) },
+                                                { label: 'Выходных', value: summary.daysOff }
+                                            ];
+                                        })()}
+                                    />
+                                    <WsPhoneGroup label="Дни периода">
+                                        {visibleRange.map(date => {
+                                            const cell = plannerPhoneDayCell(wsOperator, date, {
+                                                viewMode,
+                                                status: getPlannerScheduleStatusForDate(wsOperator, date)
+                                            });
+                                            const { caption, tone } = plannerPhoneCellCaption(cell);
+                                            return (
+                                                <WorkSchedulesDayRow
+                                                    key={date}
+                                                    title={wsDayTitle(date)}
+                                                    subtitle={date === wsToday ? 'Сегодня' : null}
+                                                    caption={caption}
+                                                    tone={tone}
+                                                    hours={cell.workMin > 0 ? formatPlannerPhoneHours(cell.workMin) : null}
+                                                    onClick={plannerReadOnly ? null : () => wsOpenDay(wsOperator.id, date)}
+                                                />
+                                            );
+                                        })}
+                                    </WsPhoneGroup>
+                                    {plannerReadOnly ? (
+                                        <p className="px-1 text-[13px] leading-snug text-slate-500">
+                                            Раздел открыт только на просмотр — правка графика недоступна.
+                                        </p>
+                                    ) : null}
+                                </div>
+                            ) : null}
+                        </IosModal>
+
+                        {/* Экран дня — то же, что настольное окно правки: смены,
+                            статус на период, контроль и история. */}
+                        <IosModal
+                            open={!!modalState.open && !isBulkSelectionModal}
+                            onClose={wsCloseDay}
+                            title={wsModalOperator?.name || 'Смена'}
+                            subtitle={modalState.date ? wsDayTitle(modalState.date) : ''}
+                            footer={(() => {
+                                if (plannerReadOnly) return null;
+                                if (modalActiveTab === 'shifts') {
+                                    if (modalState.isDayOff) return null;
+                                    if (wsModalEditing) {
+                                        return (
+                                            <button
+                                                type="button"
+                                                className={WS_PHONE_BUTTON.blue}
+                                                onClick={() => saveSegment({
+                                                    opId: modalState.opId,
+                                                    date: modalState.date,
+                                                    start: modalState.start,
+                                                    end: modalState.end,
+                                                    shiftType: modalState.shiftType,
+                                                    editIndex: modalState.editIndex,
+                                                    breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null
+                                                })}
+                                            >
+                                                {modalState.editIndex !== null ? 'Обновить смену' : 'Сохранить смену'}
+                                            </button>
+                                        );
+                                    }
+                                    return (
+                                        <button
+                                            type="button"
+                                            className={WS_PHONE_BUTTON.blue}
+                                            onClick={() => setModalState(m => ({ ...m, showAddPanel: true, editIndex: null, breaks: [] }))}
+                                        >
+                                            Добавить смену
+                                        </button>
+                                    );
+                                }
+                                if (modalActiveTab === 'status') {
+                                    return (
+                                        <button
+                                            type="button"
+                                            className={WS_PHONE_BUTTON.blue}
+                                            onClick={saveScheduleStatusPeriod}
+                                            disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                        >
+                                            {modalState.statusSaving ? 'Сохраняем…' : 'Сохранить статус'}
+                                        </button>
+                                    );
+                                }
+                                return null;
+                            })()}
+                        >
+                            <div className="flex flex-col gap-4">
+                                <WsPhoneTabs
+                                    value={modalActiveTab}
+                                    onChange={setModalActiveTab}
+                                    ariaLabel="Что показать про день"
+                                    items={[
+                                        { value: 'shifts', label: 'Смены' },
+                                        { value: 'status', label: 'Статус' },
+                                        { value: 'control', label: 'Контроль' },
+                                        { value: 'history', label: 'История', count: modalHistoryCount }
+                                    ]}
+                                />
+
+                                {modalActiveTab === 'shifts' ? (
+                                    <>
+                                        <MyShiftsTimeline
+                                            parts={wsModalTimelineParts}
+                                            nowPercent={wsModalNowPercent}
+                                            emptyLabel={modalState.isDayOff ? 'Выходной' : 'Смен нет'}
+                                            caption="Янтарным внутри полосы — перерывы."
+                                        />
+                                        {!plannerReadOnly ? (
+                                            <WsPhoneGroup label="День">
+                                                <WsPhoneRow
+                                                    title="Выходной"
+                                                    subtitle={modalState.isDayOff ? 'Смены за день сняты' : 'Все смены дня будут удалены'}
+                                                    trailing={(
+                                                        <IosToggle
+                                                            checked={!!modalState.isDayOff}
+                                                            onChange={() => toggleDayOff(modalState.opId, modalState.date)}
+                                                        />
+                                                    )}
+                                                />
+                                            </WsPhoneGroup>
+                                        ) : null}
+
+                                        <WsPhoneGroup
+                                            label="Смены дня"
+                                            hint={wsModalShifts.length === 0 ? 'В этот день смен не запланировано.' : null}
+                                        >
+                                            {wsModalShifts.map((seg, idx) => (
+                                                <WorkSchedulesShiftRow
+                                                    key={`ws-shift-${idx}`}
+                                                    time={`${seg.start} — ${seg.end}`}
+                                                    hours={formatPlannerPhoneHours(wsShiftDuration(seg))}
+                                                    badges={[
+                                                        timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00'
+                                                            ? { label: '+1 день', tone: 'night' } : null,
+                                                        isPlannerOfficePracticeShift(seg)
+                                                            ? { label: PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL, tone: 'practice' } : null,
+                                                        isPlannerPhoneShift(seg)
+                                                            ? { label: PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL, tone: 'phone' } : null,
+                                                        modalState.editIndex === idx
+                                                            ? { label: 'Редактируется', tone: 'editing' } : null
+                                                    ].filter(Boolean)}
+                                                    breaks={wsBreaksForShift(idx)}
+                                                    onEdit={plannerReadOnly ? null : () => setModalState(m => ({
+                                                        ...m,
+                                                        start: seg.start,
+                                                        end: seg.end,
+                                                        shiftType: normalizePlannerShiftType(seg?.shift_type ?? seg?.shiftType),
+                                                        editIndex: idx,
+                                                        breaks: [],
+                                                        showAddPanel: true
+                                                    }))}
+                                                    onRemove={plannerReadOnly ? null : () => removeSegment({
+                                                        opId: modalState.opId,
+                                                        date: modalState.date,
+                                                        index: idx
+                                                    })}
+                                                />
+                                            ))}
+                                        </WsPhoneGroup>
+
+                                        {!plannerReadOnly && !modalState.isDayOff && wsModalEditing ? (
+                                            <WsPhoneGroup
+                                                label={modalState.editIndex !== null ? 'Редактирование смены' : 'Новая смена'}
+                                                right={(
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setModalState(m => ({ ...m, showAddPanel: false, editIndex: null, breaks: [] }))}
+                                                        className="shrink-0 text-[15px] font-semibold text-blue-600 active:opacity-60"
+                                                    >
+                                                        Скрыть
+                                                    </button>
+                                                )}
+                                            >
+                                                <WorkSchedulesValueRow label="Начало">
+                                                    <input
+                                                        type="time"
+                                                        className={WS_PHONE_TIME_INPUT}
+                                                        value={modalState.start}
+                                                        onChange={(e) => setModalState(m => ({ ...m, start: e.target.value }))}
+                                                    />
+                                                </WorkSchedulesValueRow>
+                                                <WorkSchedulesValueRow label="Конец">
+                                                    <input
+                                                        type="time"
+                                                        className={WS_PHONE_TIME_INPUT}
+                                                        value={modalState.end}
+                                                        onChange={(e) => setModalState(m => ({ ...m, end: e.target.value }))}
+                                                    />
+                                                </WorkSchedulesValueRow>
+                                                <WorkSchedulesValueRow label="Тип смены">
+                                                    <select
+                                                        className="ws-m-select text-slate-500"
+                                                        value={normalizePlannerShiftType(modalState.shiftType)}
+                                                        onChange={(e) => setModalState(m => ({ ...m, shiftType: normalizePlannerShiftType(e.target.value) }))}
+                                                    >
+                                                        <option value={PLANNER_SHIFT_TYPE_REGULAR}>Обычная</option>
+                                                        <option value={PLANNER_SHIFT_TYPE_OFFICE_PRACTICE}>{PLANNER_SHIFT_TYPE_OFFICE_PRACTICE_LABEL}</option>
+                                                        <option value={PLANNER_SHIFT_TYPE_PHONE_SHIFT}>{PLANNER_SHIFT_TYPE_PHONE_SHIFT_LABEL}</option>
+                                                    </select>
+                                                </WorkSchedulesValueRow>
+                                                <WorkSchedulesValueRow
+                                                    label="Длительность"
+                                                    value={formatPlannerPhoneHours(wsModalDuration)}
+                                                />
+                                            </WsPhoneGroup>
+                                        ) : null}
+
+                                        {!plannerReadOnly && !modalState.isDayOff && wsModalEditing && modalBreakEditorContext ? (
+                                            <WsPhoneGroup
+                                                label="Перерывы"
+                                                hint={modalBreakConflictState.hasConflict
+                                                    ? 'Есть пересечение с перерывами направления — время можно поправить вручную.'
+                                                    : 'Предпросмотр до сохранения: время можно поправить вручную.'}
+                                                right={modalBreaksForEditor.length === 0 ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setModalState(m => ({
+                                                            ...m,
+                                                            breaks: (modalBreakEditorContext.suggestedBreaks || modalBreakEditorContext.breaksLocal)
+                                                                .map(b => ({ start: b.start, end: b.end }))
+                                                        }))}
+                                                        className="shrink-0 text-[15px] font-semibold text-blue-600 active:opacity-60"
+                                                    >
+                                                        Сгенерировать
+                                                    </button>
+                                                ) : null}
+                                            >
+                                                {modalBreaksForEditor.map((b, i) => (
+                                                    modalFrozenBreakIndexes.has(i) ? (
+                                                        <WsPhoneRow
+                                                            key={`ws-break-${i}`}
+                                                            title={`${minutesToTime(b.start % 1440)} — ${minutesToTime(b.end % 1440)}`}
+                                                            subtitle="Перерыв уже прошёл"
+                                                            muted
+                                                        />
+                                                    ) : (
+                                                        <WorkSchedulesValueRow key={`ws-break-${i}`} label={`Перерыв ${i + 1}`}>
+                                                            <span className="flex shrink-0 items-center gap-1.5" style={{ flexWrap: 'nowrap' }}>
+                                                                <input
+                                                                    type="time"
+                                                                    step="300"
+                                                                    className={WS_PHONE_TIME_INPUT}
+                                                                    value={minutesToTime(b.start % 1440)}
+                                                                    onChange={(e) => {
+                                                                        const val = Math.round(timeToMinutes(e.target.value) / 5) * 5;
+                                                                        setModalState(m => {
+                                                                            const source = (m.breaks && m.breaks.length) ? m.breaks : modalBreaksForEditor;
+                                                                            const nb = source.map(x => ({ ...x }));
+                                                                            if (!nb[i]) return m;
+                                                                            const dayOffset = Math.floor(b.start / 1440) * 1440;
+                                                                            const nextStart = Math.max(val + dayOffset, modalBreakPlanningFromMin);
+                                                                            nb[i] = { start: nextStart, end: nextStart + (b.end - b.start) };
+                                                                            return { ...m, breaks: nb };
+                                                                        });
+                                                                    }}
+                                                                />
+                                                                <span className="shrink-0 text-[15px] text-slate-400">—</span>
+                                                                <input
+                                                                    type="time"
+                                                                    step="300"
+                                                                    className={WS_PHONE_TIME_INPUT}
+                                                                    value={minutesToTime(b.end % 1440)}
+                                                                    onChange={(e) => {
+                                                                        const val = timeToMinutes(e.target.value);
+                                                                        setModalState(m => {
+                                                                            const source = (m.breaks && m.breaks.length) ? m.breaks : modalBreaksForEditor;
+                                                                            const nb = source.map(x => ({ ...x }));
+                                                                            if (!nb[i]) return m;
+                                                                            nb[i] = { start: nb[i].start, end: val + Math.floor(b.end / 1440) * 1440 };
+                                                                            return { ...m, breaks: nb };
+                                                                        });
+                                                                    }}
+                                                                />
+                                                            </span>
+                                                        </WorkSchedulesValueRow>
+                                                    )
+                                                ))}
+                                            </WsPhoneGroup>
+                                        ) : null}
+                                    </>
+                                ) : null}
+
+                                {modalActiveTab === 'status' ? (
+                                    <>
+                                        {modalActiveScheduleStatus ? (
+                                            <WsPhoneGroup label="Активный статус">
+                                                <WsPhoneRow
+                                                    title={modalActiveScheduleStatus.label}
+                                                    subtitle={`${modalActiveScheduleStatus.startDate || '—'}${modalActiveScheduleStatus.endDate ? ` — ${modalActiveScheduleStatus.endDate}` : ''}`}
+                                                    note={modalActiveScheduleStatus.comment || null}
+                                                />
+                                                {modalActiveScheduleStatus.id && !plannerReadOnly ? (
+                                                    <WsPhoneRow
+                                                        title="Удалить статус"
+                                                        trailing={(
+                                                            <WsPhonePill
+                                                                label={modalState.statusDeleting ? '…' : 'Удалить'}
+                                                                tone="rose"
+                                                                onClick={() => deleteScheduleStatusPeriod(modalActiveScheduleStatus)}
+                                                                disabled={!!modalState.statusSaving || !!modalState.statusDeleting
+                                                                    || !!(modalActiveScheduleStatus.statusCode === 'dismissal' && modalActiveScheduleStatus.isBlacklist)}
+                                                            />
+                                                        )}
+                                                    />
+                                                ) : null}
+                                            </WsPhoneGroup>
+                                        ) : null}
+
+                                        {plannerReadOnly ? (
+                                            <p className="px-1 text-[13px] leading-snug text-slate-500">
+                                                Раздел открыт только на просмотр — статус менять нельзя.
+                                            </p>
+                                        ) : (
+                                            <WsPhoneGroup
+                                                label="Статус на период"
+                                                hint="Статус красит ячейки на весь период. Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте."
+                                            >
+                                                <WorkSchedulesValueRow label="Статус">
+                                                    <select
+                                                        className="ws-m-select text-slate-500"
+                                                        value={modalState.statusCode || ''}
+                                                        onChange={(e) => setModalState(m => ({
+                                                            ...m,
+                                                            statusCode: e.target.value,
+                                                            statusEndDate: e.target.value === 'dismissal'
+                                                                ? (m.statusEndDate || '')
+                                                                : (m.statusEndDate || m.statusStartDate || m.date || ''),
+                                                            dismissalReason: e.target.value === 'dismissal' ? m.dismissalReason : '',
+                                                            dismissalIsBlacklist: e.target.value === 'dismissal' ? !!m.dismissalIsBlacklist : false,
+                                                            statusComment: e.target.value === 'dismissal' ? m.statusComment : (m.statusComment || '')
+                                                        }))}
+                                                    >
+                                                        <option value="">Не выбран</option>
+                                                        {scheduleStatusOptions.map(opt => (
+                                                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                        ))}
+                                                    </select>
+                                                </WorkSchedulesValueRow>
+                                                <WorkSchedulesValueRow label="Начало">
+                                                    <input
+                                                        type="date"
+                                                        className="ws-m-select text-slate-500"
+                                                        value={modalState.statusStartDate || modalState.date || ''}
+                                                        onChange={(e) => setModalState(m => ({
+                                                            ...m,
+                                                            statusStartDate: e.target.value,
+                                                            statusEndDate: (m.statusCode && (!m.statusEndDate || m.statusEndDate < e.target.value))
+                                                                ? e.target.value
+                                                                : m.statusEndDate
+                                                        }))}
+                                                    />
+                                                </WorkSchedulesValueRow>
+                                                {!!modalState.statusCode && !(modalState.statusCode === 'dismissal' && modalState.dismissalIsBlacklist) ? (
+                                                    <WorkSchedulesValueRow label={modalState.statusCode === 'dismissal' ? 'Окончание (необ.)' : 'Окончание'}>
+                                                        <input
+                                                            type="date"
+                                                            className="ws-m-select text-slate-500"
+                                                            value={modalState.statusEndDate || (modalState.statusCode === 'dismissal' ? '' : (modalState.statusStartDate || modalState.date || ''))}
+                                                            min={modalState.statusStartDate || modalState.date || ''}
+                                                            onChange={(e) => setModalState(m => ({ ...m, statusEndDate: e.target.value }))}
+                                                        />
+                                                    </WorkSchedulesValueRow>
+                                                ) : null}
+                                                {modalState.statusCode === 'dismissal' ? (
+                                                    <WorkSchedulesValueRow label="Причина">
+                                                        <select
+                                                            className="ws-m-select text-slate-500"
+                                                            value={modalState.dismissalReason || ''}
+                                                            onChange={(e) => setModalState(m => ({
+                                                                ...m,
+                                                                dismissalReason: e.target.value,
+                                                                statusEndDate: (m.dismissalIsBlacklist || e.target.value !== dismissalReasonWithOptionalEndDate) ? '' : m.statusEndDate
+                                                            }))}
+                                                        >
+                                                            <option value="">Выберите причину</option>
+                                                            {dismissalReasonOptions.map(reason => (
+                                                                <option key={reason} value={reason}>{reason}</option>
+                                                            ))}
+                                                        </select>
+                                                    </WorkSchedulesValueRow>
+                                                ) : null}
+                                                {modalState.statusCode === 'dismissal' ? (
+                                                    <WsPhoneRow
+                                                        title="ЧС"
+                                                        subtitle="Полное увольнение без восстановления"
+                                                        trailing={(
+                                                            <IosToggle
+                                                                checked={!!modalState.dismissalIsBlacklist}
+                                                                onChange={(next) => setModalState(m => ({
+                                                                    ...m,
+                                                                    dismissalIsBlacklist: next,
+                                                                    statusEndDate: next ? '' : m.statusEndDate
+                                                                }))}
+                                                            />
+                                                        )}
+                                                    />
+                                                ) : null}
+                                                {modalState.statusCode === 'dismissal' ? (
+                                                    <div className="ws-m-inset">
+                                                        <textarea
+                                                            value={modalState.statusComment || ''}
+                                                            onChange={(e) => setModalState(m => ({ ...m, statusComment: e.target.value }))}
+                                                            rows={3}
+                                                            placeholder="Комментарий — обязательно"
+                                                            className={`${iosInput} w-full`}
+                                                        />
+                                                    </div>
+                                                ) : null}
+                                            </WsPhoneGroup>
+                                        )}
+                                    </>
+                                ) : null}
+
+                                {modalActiveTab === 'control' ? (
+                                    <>
+                                        <WsPhoneGroup
+                                            label="Отметки автоконтроля"
+                                            hint={wsFlagRows.length === 0 ? 'За этот день отметок нет.' : null}
+                                        >
+                                            {wsFlagRows.map(item => (
+                                                <WorkSchedulesFlagRow
+                                                    key={`ws-flag-${item.key}`}
+                                                    label={item.label}
+                                                    minutes={`${item.minutes} мин`}
+                                                    statusLabel={item.statusLabel}
+                                                    statusTone={item.statusTone}
+                                                    actions={plannerReadOnly ? [] : (item.penalty ? [
+                                                        {
+                                                            label: 'Согласовано',
+                                                            onClick: () => resolvePlannerAutoFlag(item.key, 'reject'),
+                                                            disabled: !item.hasMinutes || Boolean(plannerAutoFlagActionLoading),
+                                                            busy: plannerAutoFlagActionLoading === `${item.key}:reject`
+                                                        },
+                                                        {
+                                                            label: 'Штраф',
+                                                            tone: 'danger',
+                                                            onClick: () => resolvePlannerAutoFlag(item.key, 'confirm'),
+                                                            disabled: !item.hasMinutes || Boolean(plannerAutoFlagActionLoading),
+                                                            busy: plannerAutoFlagActionLoading === `${item.key}:confirm`
+                                                        }
+                                                    ] : [
+                                                        {
+                                                            label: 'Подтвердить',
+                                                            tone: 'primary',
+                                                            onClick: () => {
+                                                                if (item.key === 'training') {
+                                                                    const intervals = Array.isArray(modalTrainingPendingSegments) ? modalTrainingPendingSegments : [];
+                                                                    if (intervals.length > 0) {
+                                                                        openPlannerTrainingModalForCurrentDay('confirm_training_flag_all', {
+                                                                            intervals: intervals.map(seg => ({
+                                                                                startMin: seg.startMin, endMin: seg.endMin, startSec: seg.startSec, endSec: seg.endSec
+                                                                            }))
+                                                                        });
+                                                                    } else {
+                                                                        openPlannerTrainingModalForCurrentDay('confirm_training_flag');
+                                                                    }
+                                                                    return;
+                                                                }
+                                                                if (item.key === 'technical_reason') {
+                                                                    const intervals = Array.isArray(modalTechReasonStatusSegments) ? modalTechReasonStatusSegments : [];
+                                                                    if (intervals.length > 0) {
+                                                                        openPlannerTechStatusModalForCurrentDay('confirm_tech_flag_all', {
+                                                                            intervals: intervals.map(seg => ({
+                                                                                startMin: seg.startMin, endMin: seg.endMin, startSec: seg.startSec, endSec: seg.endSec
+                                                                            }))
+                                                                        });
+                                                                    } else {
+                                                                        openPlannerTechStatusModalForCurrentDay('confirm_tech_flag');
+                                                                    }
+                                                                    return;
+                                                                }
+                                                                resolvePlannerAutoFlag(item.key, 'confirm');
+                                                            },
+                                                            disabled: !item.hasMinutes || Boolean(plannerAutoFlagActionLoading)
+                                                                || (item.key === 'training' && modalTrainingPendingSegments.length === 0),
+                                                            busy: plannerAutoFlagActionLoading === `${item.key}:confirm`
+                                                        },
+                                                        {
+                                                            label: 'Отклонить',
+                                                            onClick: () => {
+                                                                if (item.key === 'training') {
+                                                                    rejectPlannerTrainingIntervals(modalTrainingPendingSegments);
+                                                                    return;
+                                                                }
+                                                                resolvePlannerAutoFlag(item.key, 'reject');
+                                                            },
+                                                            disabled: !item.hasMinutes || Boolean(plannerAutoFlagActionLoading)
+                                                                || (item.key === 'training' && modalTrainingPendingSegments.length === 0),
+                                                            busy: plannerAutoFlagActionLoading === `${item.key}:reject`
+                                                        }
+                                                    ])}
+                                                />
+                                            ))}
+                                        </WsPhoneGroup>
+
+                                        <WsPhoneGroup
+                                            label="Тренинги за день"
+                                            hint={modalSavedTrainings.length === 0 ? 'Тренингов за этот день нет.' : null}
+                                            right={plannerReadOnly ? null : (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openPlannerTrainingModalForCurrentDay('add')}
+                                                    disabled={plannerTrainingActionLoading}
+                                                    className="shrink-0 text-[15px] font-semibold text-blue-600 active:opacity-60 disabled:opacity-50"
+                                                >
+                                                    Добавить
+                                                </button>
+                                            )}
+                                        >
+                                            {modalSavedTrainings.map((t, idx) => (
+                                                <WsPhoneRow
+                                                    key={t?.id ?? `ws-training-${idx}`}
+                                                    title={`${t?.start_time || '—'} — ${t?.end_time || '—'}`}
+                                                    subtitle={t?.reason || 'Тренинг'}
+                                                    note={t?.comment || null}
+                                                    trailing={plannerReadOnly ? (
+                                                        <span className="shrink-0 text-[15px] tabular-nums text-slate-500">
+                                                            {computeTrainingDurationHours(t) || 0} ч
+                                                        </span>
+                                                    ) : (
+                                                        <span className="flex shrink-0 items-center gap-1.5" style={{ flexWrap: 'nowrap' }}>
+                                                            <button
+                                                                type="button"
+                                                                aria-label="Изменить тренинг"
+                                                                onClick={() => openPlannerTrainingModalForCurrentDay('edit', {
+                                                                    editingId: t?.id,
+                                                                    startTime: t?.start_time,
+                                                                    endTime: t?.end_time,
+                                                                    reason: t?.reason,
+                                                                    comment: t?.comment
+                                                                })}
+                                                                disabled={plannerTrainingActionLoading || !t?.id}
+                                                                className="grid h-8 w-8 place-items-center rounded-full bg-slate-100 text-slate-600 active:opacity-60 disabled:opacity-50"
+                                                            >
+                                                                <FaIcon className="fas fa-pen text-[12px]" />
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                aria-label="Удалить тренинг"
+                                                                onClick={() => deletePlannerTraining(t?.id, modalState.date)}
+                                                                disabled={plannerTrainingActionLoading || !t?.id}
+                                                                className="grid h-8 w-8 place-items-center rounded-full bg-rose-50 text-rose-600 active:opacity-60 disabled:opacity-50"
+                                                            >
+                                                                <FaIcon className="fas fa-trash-alt text-[12px]" />
+                                                            </button>
+                                                        </span>
+                                                    )}
+                                                />
+                                            ))}
+                                        </WsPhoneGroup>
+
+                                        {!plannerReadOnly ? (
+                                            <button
+                                                type="button"
+                                                className={WS_PHONE_BUTTON.gray}
+                                                onClick={openPlannerFineModalForCurrentDay}
+                                                disabled={plannerFineActionLoading}
+                                            >
+                                                <FaIcon className={`fas ${plannerFineActionLoading ? 'fa-spinner fa-spin' : 'fa-exclamation-triangle'}`} />
+                                                Добавить штраф
+                                            </button>
+                                        ) : null}
+                                    </>
+                                ) : null}
+
+                                {modalActiveTab === 'history' ? (
+                                    <WsPhoneGroup
+                                        label="История правок"
+                                        hint={modalHistoryState.status === 'ready' && modalHistoryState.items.length === 0
+                                            ? 'Записи копятся с 24 августа 2026 года — раньше система изменений графика не хранила.'
+                                            : null}
+                                    >
+                                        <div className="ws-m-inset">
+                                            <Suspense fallback={(
+                                                <div className="py-6 text-center text-[13px] text-slate-500">Загружаем историю…</div>
+                                            )}>
+                                                <ShiftHistoryList
+                                                    status={modalHistoryState.status}
+                                                    items={modalHistoryState.items}
+                                                    error={modalHistoryState.error}
+                                                    showCount={false}
+                                                />
+                                            </Suspense>
+                                        </div>
+                                    </WsPhoneGroup>
+                                ) : null}
+                            </div>
+                        </IosModal>
+
+                        {/* Экран отбора: список с галочками и поиском. */}
+                        <IosModal
+                            open={!!wsFilterScreen}
+                            onClose={() => setPlannerPhoneFilterScreen('')}
+                            title={wsFilterScreen?.title || 'Отбор'}
+                            subtitle={wsFilterScreen ? plannerPhoneFilterValue(wsFilterScreen.values, wsFilterScreen.options, wsFilterScreen.empty) : ''}
+                            footer={(wsFilterScreen && wsFilterScreen.multiple && wsFilterScreen.values.length > 0) ? (
+                                <button
+                                    type="button"
+                                    className={WS_PHONE_BUTTON.gray}
+                                    onClick={() => wsFilterScreen.apply([])}
+                                >
+                                    Сбросить отбор
+                                </button>
+                            ) : null}
+                        >
+                            {wsFilterScreen ? (
+                                <div className="flex flex-col gap-4">
+                                    {wsFilterScreen.searchable ? (
+                                        <WsPhoneSearch
+                                            value={plannerPhoneFilterQuery}
+                                            onChange={setPlannerPhoneFilterQuery}
+                                            placeholder="Поиск"
+                                        />
+                                    ) : null}
+                                    <WsPhoneGroup>
+                                        {!wsFilterScreen.multiple ? (
+                                            <WsPhoneCheckRow
+                                                title={wsFilterScreen.empty}
+                                                checked={wsFilterScreen.values.length === 0}
+                                                onClick={() => {
+                                                    wsFilterScreen.apply('');
+                                                    setPlannerPhoneFilterScreen('');
+                                                }}
+                                            />
+                                        ) : null}
+                                        {sortPlannerPhoneOptions(wsFilterScreen.options, wsFilterScreen.values, plannerPhoneFilterQuery).map(opt => (
+                                            <WsPhoneCheckRow
+                                                key={String(opt.value)}
+                                                title={opt.label}
+                                                checked={wsFilterScreen.values.map(String).includes(String(opt.value))}
+                                                onClick={() => wsToggleFilterValue(wsFilterScreen, opt.value)}
+                                            />
+                                        ))}
+                                    </WsPhoneGroup>
+                                </div>
+                            ) : null}
+                        </IosModal>
+
+                        {/* Перерывы за день: на компьютере это плашка с итогом и
+                            карточки; здесь — те же данные списком, по группе на
+                            человека. Данные общие с настольным окном. */}
+                        <IosModal
+                            open={showDayBreaksModal}
+                            onClose={() => setShowDayBreaksModal(false)}
+                            title="Перерывы за день"
+                            subtitle={wsDayTitle(dayViewBreaksDateStr)}
+                        >
+                            <div className="flex flex-col gap-4">
+                                <WorkSchedulesSummary
+                                    items={[
+                                        { label: 'Людей', value: dayBreaksStats.operatorsCount },
+                                        { label: 'Перерывов', value: dayBreaksStats.breaksCount },
+                                        { label: 'Всего', value: formatPlannerPhoneHours(dayBreaksStats.totalMinutes) }
+                                    ]}
+                                />
+                                {!wsIsDayMode ? (
+                                    <WorkSchedulesEmpty
+                                        icon="fa-mug-hot"
+                                        title="Нужен период «День»"
+                                        hint="Перерывы показываются по одной выбранной дате."
+                                    />
+                                ) : dayBreaksByOperator.length === 0 ? (
+                                    <WorkSchedulesEmpty
+                                        icon="fa-mug-hot"
+                                        title="Перерывов нет"
+                                        hint="За выбранный день у людей из отбора перерывов не запланировано."
+                                    />
+                                ) : (
+                                    dayBreaksByOperator.map(item => (
+                                        <WsPhoneGroup
+                                            key={`ws-breaks-${item.opId}`}
+                                            label={item.name}
+                                            right={<span className="shrink-0 text-[13px] tabular-nums text-slate-400">{item.breaks.length}</span>}
+                                        >
+                                            {item.breaks.map((b, idx) => (
+                                                <WorkSchedulesValueRow
+                                                    key={`ws-break-${item.opId}-${idx}`}
+                                                    label={`${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                    value={`${Math.round((b.durationMin || 0) / 5) * 5} мин${b.sourceDate !== dayViewBreaksDateStr ? ` · из ${b.sourceDate}` : ''}`}
+                                                />
+                                            ))}
+                                        </WsPhoneGroup>
+                                    ))
+                                )}
+                            </div>
+                        </IosModal>
+
+                        {plannerRequestModals}
+                        {plannerSideModals}
+                    </div>
+                );
+            }
+
             return (
                 <div className="px-4 py-2 min-h-screen bg-slate-50">
                 <ScheduleTimelineTooltip />
@@ -32132,717 +34337,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </>
                 </SimpleModal>
 
-                {plannerTrainingModalState.open && (
-                    <SimpleModal
-                        open={plannerTrainingModalState.open}
-                        onClose={closePlannerTrainingModal}
-                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
-                    >
-                        <div className="mb-4 pb-3 border-b border-slate-200">
-                            <div className="flex items-center justify-between gap-3">
-                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                    <FaIcon className="fas fa-chalkboard-teacher text-blue-600"></FaIcon>
-                                    {plannerTrainingModalState.editingId
-                                        ? 'Редактировать тренинг'
-                                        : (String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
-                                            || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
-                                            ? 'Подтвердить тренинг'
-                                            : 'Добавить тренинг'}
-                                </h3>
-                                <button
-                                    type="button"
-                                    onClick={closePlannerTrainingModal}
-                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
-                                >
-                                    <FaIcon className="fas fa-times"></FaIcon>
-                                </button>
-                            </div>
-                            <div className="mt-1 text-xs text-slate-500">
-                                Дата: {plannerTrainingModalState.date || '—'}
-                            </div>
-                        </div>
-
-                        <div className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
-                                <input
-                                    type="date"
-                                    value={plannerTrainingModalState.date || ''}
-                                    onChange={(e) => updatePlannerTrainingDraftField('date', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                />
-                            </div>
-
-                            {String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all' ? (
-                                <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
-                                    <div className="text-xs font-semibold text-blue-800 mb-1">
-                                        Интервалы для подтверждения: {Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals.length : 0}
-                                    </div>
-                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
-                                        {(Array.isArray(plannerTrainingModalState.intervals) ? plannerTrainingModalState.intervals : []).map((seg, idx) => (
-                                            <div key={`planner-training-modal-interval-${idx}`} className="text-[11px] text-blue-900 tabular-nums">
-                                                {plannerModalSegmentRangeText(seg)}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
-                                        <input
-                                            type="time"
-                                            value={plannerTrainingModalState.startTime || ''}
-                                            onChange={(e) => updatePlannerTrainingDraftField('startTime', e.target.value)}
-                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
-                                        <input
-                                            type="time"
-                                            value={plannerTrainingModalState.endTime || ''}
-                                            onChange={(e) => updatePlannerTrainingDraftField('endTime', e.target.value)}
-                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        />
-                                    </div>
-                                </div>
-                            )}
-
-                            {plannerTrainingDraftOverlapInfo?.hasOverlap && (
-                                <div className={`rounded-lg border px-3 py-2 text-xs ${
-                                    plannerTrainingDraftOverlapInfo.hasExactDuplicate
-                                        ? 'border-red-200 bg-red-50 text-red-700'
-                                        : 'border-amber-200 bg-amber-50 text-amber-800'
-                                }`}>
-                                    <div className="font-semibold">
-                                        {plannerTrainingDraftOverlapInfo.hasExactDuplicate
-                                            ? 'Такой тренинг уже есть.'
-                                            : 'Есть пересечение по времени.'}
-                                    </div>
-                                    {plannerTrainingDraftOverlapInfo.items.slice(0, 3).map((item, idx) => (
-                                        <div key={`planner-training-overlap-${item.training?.id || idx}`} className="mt-1">
-                                            {item.training?.start_time || '—'} - {item.training?.end_time || '—'}
-                                            {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
-                                        </div>
-                                    ))}
-                                    <div className="mt-1">
-                                        Сохранение заблокировано: выберите свободный интервал.
-                                    </div>
-                                </div>
-                            )}
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
-                                <select
-                                    value={plannerTrainingModalState.reason || ''}
-                                    onChange={(e) => updatePlannerTrainingDraftField('reason', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                >
-                                    <option value="">Выберите причину</option>
-                                    {plannerTrainingReasonOptions.map(reason => (
-                                        <option key={`planner-training-reason-${reason}`} value={reason}>{reason}</option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
-                                <textarea
-                                    rows={3}
-                                    value={plannerTrainingModalState.comment || ''}
-                                    onChange={(e) => updatePlannerTrainingDraftField('comment', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-                                    placeholder="Комментарий (необязательно)"
-                                />
-                            </div>
-
-                            {plannerTrainingModalError && (
-                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                                    {plannerTrainingModalError}
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={closePlannerTrainingModal}
-                                disabled={plannerTrainingActionLoading}
-                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                            >
-                                Отмена
-                            </button>
-                            <button
-                                type="button"
-                                onClick={submitPlannerTrainingModal}
-                                disabled={plannerTrainingActionLoading || !!plannerTrainingDraftOverlapInfo?.hasOverlap}
-                                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                            >
-                                <FaIcon className={`fas ${plannerTrainingActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
-                                {plannerTrainingActionLoading
-                                    ? 'Сохраняем...'
-                                    : (plannerTrainingModalState.editingId
-                                        ? 'Обновить тренинг'
-                                        : (String(plannerTrainingModalState.mode || '') === 'confirm_training_flag'
-                                            || String(plannerTrainingModalState.mode || '') === 'confirm_training_flag_all')
-                                            ? 'Подтвердить'
-                                            : 'Сохранить тренинг')}
-                            </button>
-                        </div>
-                    </SimpleModal>
-                )}
-
-                {plannerTechStatusModalState.open && (
-                    <SimpleModal
-                        open={plannerTechStatusModalState.open}
-                        onClose={closePlannerTechStatusModal}
-                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
-                    >
-                        <div className="mb-4 pb-3 border-b border-slate-200">
-                            <div className="flex items-center justify-between gap-3">
-                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                    <FaIcon className="fas fa-tools text-violet-600"></FaIcon>
-                                    {(String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag'
-                                        || String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag_all')
-                                        ? 'Подтвердить тех.причину'
-                                        : 'Добавить тех.причину'}
-                                </h3>
-                                <button
-                                    type="button"
-                                    onClick={closePlannerTechStatusModal}
-                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
-                                >
-                                    <FaIcon className="fas fa-times"></FaIcon>
-                                </button>
-                            </div>
-                            <div className="mt-1 text-xs text-slate-500">
-                                Дата: {plannerTechStatusModalState.date || '—'}
-                            </div>
-                        </div>
-
-                        <div className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
-                                <input
-                                    type="date"
-                                    value={plannerTechStatusModalState.date || ''}
-                                    onChange={(e) => updatePlannerTechStatusDraftField('date', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                />
-                            </div>
-
-                            {String(plannerTechStatusModalState.mode || '') === 'confirm_tech_flag_all' ? (
-                                <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-3 py-2">
-                                    <div className="text-xs font-semibold text-violet-800 mb-1">
-                                        Интервалы для подтверждения: {Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals.length : 0}
-                                    </div>
-                                    <div className="max-h-44 overflow-auto space-y-1 pr-1">
-                                        {(Array.isArray(plannerTechStatusModalState.intervals) ? plannerTechStatusModalState.intervals : []).map((seg, idx) => (
-                                            <div key={`planner-tech-modal-interval-${idx}`} className="text-[11px] text-violet-900 tabular-nums">
-                                                {plannerModalSegmentRangeText(seg)}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
-                                        <input
-                                            type="time"
-                                            value={plannerTechStatusModalState.startTime || ''}
-                                            onChange={(e) => updatePlannerTechStatusDraftField('startTime', e.target.value)}
-                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
-                                        <input
-                                            type="time"
-                                            value={plannerTechStatusModalState.endTime || ''}
-                                            onChange={(e) => updatePlannerTechStatusDraftField('endTime', e.target.value)}
-                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                        />
-                                    </div>
-                                </div>
-                            )}
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
-                                <select
-                                    value={plannerTechStatusModalState.reason || ''}
-                                    onChange={(e) => updatePlannerTechStatusDraftField('reason', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                >
-                                    <option value="">Выберите причину</option>
-                                    {(plannerTechReasonOptions.length > 0 ? plannerTechReasonOptions : plannerFallbackTechReasonOptions).map(reason => (
-                                        <option key={`planner-tech-reason-${reason}`} value={reason}>{reason}</option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Рабочее место (РМ)</label>
-                                <select
-                                    value={plannerTechStatusModalState.workplaceNumber || ''}
-                                    onChange={(e) => updatePlannerTechStatusDraftField('workplaceNumber', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                >
-                                    <option value="">Не указывать</option>
-                                    {Array.from({ length: 30 }, (_, idx) => {
-                                        const rm = idx + 1;
-                                        return (
-                                            <option key={`planner-tech-status-rm-${rm}`} value={rm}>
-                                                РМ {rm}
-                                            </option>
-                                        );
-                                    })}
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">
-                                    Комментарий
-                                    {plannerTechStatusCommentRule && (
-                                        <span className="ml-1.5 font-semibold text-rose-600">обязательно</span>
-                                    )}
-                                </label>
-                                <textarea
-                                    rows={3}
-                                    value={plannerTechStatusModalState.comment || ''}
-                                    onChange={(e) => updatePlannerTechStatusDraftField('comment', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 resize-y"
-                                    placeholder={plannerTechStatusCommentRule?.example
-                                        ? `Например: ${plannerTechStatusCommentRule.example}`
-                                        : 'Комментарий (необязательно)'}
-                                />
-                                {plannerTechStatusCommentRule?.hint && (
-                                    <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
-                                        {plannerTechStatusCommentRule.hint}
-                                    </div>
-                                )}
-                            </div>
-
-                            {plannerTechStatusModalError && (
-                                <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                                    {plannerTechStatusModalError}
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={closePlannerTechStatusModal}
-                                disabled={plannerTechStatusActionLoading}
-                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                            >
-                                Отмена
-                            </button>
-                            <button
-                                type="button"
-                                onClick={submitPlannerTechStatusModal}
-                                disabled={plannerTechStatusActionLoading}
-                                className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                            >
-                                <FaIcon className={`fas ${plannerTechStatusActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
-                                {plannerTechStatusActionLoading ? 'Сохраняем...' : 'Подтвердить'}
-                            </button>
-                        </div>
-                    </SimpleModal>
-                )}
-
-                {plannerOfflineActivityModalState.open && (() => {
-                    const activityType = String(plannerOfflineActivityModalState?.activityType || 'offline_activity');
-                    const isTraining = activityType === 'training';
-                    const isTechnical = activityType === 'technical_reason';
-                    const technicalReasonOptions = plannerTechReasonOptions.length > 0
-                        ? plannerTechReasonOptions
-                        : plannerFallbackTechReasonOptions;
-                    // Комментарий обязателен только у тех.причины и только у отдельных причин.
-                    const technicalCommentRule = isTechnical
-                        ? findCommentRule(plannerTechCommentRules, plannerOfflineActivityModalState?.technicalReason)
-                        : null;
-                    const technicalDirectionValues = plannerToUniquePositiveIntList(
-                        plannerOfflineActivityModalState?.technicalDirectionIds
-                    );
-                    const accentFocusClass = isTechnical
-                        ? 'focus:ring-violet-500'
-                        : (isTraining ? 'focus:ring-blue-500' : 'focus:ring-emerald-500');
-                    const saveButtonClass = isTechnical
-                        ? 'bg-violet-600 hover:bg-violet-700'
-                        : (isTraining ? 'bg-blue-600 hover:bg-blue-700' : 'bg-emerald-600 hover:bg-emerald-700');
-                    const titleText = isTechnical
-                        ? 'Отметить тех. причину'
-                        : (isTraining ? 'Отметить тренинг' : 'Отметить офлайн-активность');
-                    const titleIconClass = isTechnical
-                        ? 'fa-tools text-violet-600'
-                        : (isTraining ? 'fa-chalkboard-teacher text-blue-600' : 'fa-user-clock text-emerald-600');
-                    const saveLabel = isTechnical ? 'Сохранить тех. причину' : (isTraining ? 'Сохранить тренинг' : 'Сохранить офлайн');
-
-                    return (
-                        <SimpleModal
-                            open={plannerOfflineActivityModalState.open}
-                            onClose={closePlannerOfflineActivityModal}
-                            panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
-                        >
-                            <div className="mb-4 pb-3 border-b border-slate-200">
-                                <div className="flex items-center justify-between gap-3">
-                                    <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                        <FaIcon className={`fas ${titleIconClass}`}></FaIcon>
-                                        {titleText}
-                                    </h3>
-                                    <button
-                                        type="button"
-                                        onClick={closePlannerOfflineActivityModal}
-                                        className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
-                                    >
-                                        <FaIcon className="fas fa-times"></FaIcon>
-                                    </button>
-                                </div>
-                                <div className="mt-1 text-xs text-slate-500">
-                                    Дата: {plannerOfflineActivityModalState.date || '—'}
-                                </div>
-                            </div>
-
-                            <div className="space-y-3">
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Тип активности</label>
-                                    <select
-                                        value={activityType}
-                                        onChange={(e) => {
-                                            const nextType = String(e.target.value || 'offline_activity');
-                                            setPlannerOfflineActivityModalState(prev => ({
-                                                ...(prev || {}),
-                                                activityType: nextType
-                                            }));
-                                        }}
-                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                    >
-                                        <option value="training">Тренинг</option>
-                                        <option value="offline_activity">Офлайн активность</option>
-                                        <option value="technical_reason">Тех причина</option>
-                                    </select>
-                                </div>
-
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Дата</label>
-                                    <input
-                                        type="date"
-                                        value={plannerOfflineActivityModalState.date || ''}
-                                        onChange={(e) => updatePlannerOfflineActivityDraftField('date', e.target.value)}
-                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                    />
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">Начало</label>
-                                        <input
-                                            type="time"
-                                            value={plannerOfflineActivityModalState.startTime || ''}
-                                            onChange={(e) => updatePlannerOfflineActivityDraftField('startTime', e.target.value)}
-                                            className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                            step={300}
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-medium text-slate-600 mb-1">Конец</label>
-                                        <input
-                                            type="time"
-                                            value={plannerOfflineActivityModalState.endTime || ''}
-                                            onChange={(e) => updatePlannerOfflineActivityDraftField('endTime', e.target.value)}
-                                            className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                            step={300}
-                                        />
-                                    </div>
-                                </div>
-
-                                {isTraining && plannerOfflineTrainingDraftOverlapInfo?.hasOverlap && (
-                                    <div className={`rounded-lg border px-3 py-2 text-xs ${
-                                        plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate
-                                            ? 'border-red-200 bg-red-50 text-red-700'
-                                            : 'border-amber-200 bg-amber-50 text-amber-800'
-                                    }`}>
-                                        <div className="font-semibold">
-                                            {plannerOfflineTrainingDraftOverlapInfo.hasExactDuplicate
-                                                ? 'Такой тренинг уже есть.'
-                                                : 'Есть пересечение по времени.'}
-                                        </div>
-                                        {plannerOfflineTrainingDraftOverlapInfo.items.slice(0, 3).map((item, idx) => (
-                                            <div key={`planner-offline-training-overlap-${item.training?.id || idx}`} className="mt-1">
-                                                {item.training?.start_time || '—'} - {item.training?.end_time || '—'}
-                                                {' '}({minutesToDisplayTime(item.overlapStart)} - {minutesToDisplayTime(item.overlapEnd)})
-                                            </div>
-                                        ))}
-                                        <div className="mt-1">
-                                            Сохранение заблокировано: выберите свободный интервал.
-                                        </div>
-                                    </div>
-                                )}
-
-                                {isTraining && (
-                                    <>
-                                        <div>
-                                            <label className="block text-xs font-medium text-slate-600 mb-1">Причина тренинга</label>
-                                            <select
-                                                value={plannerOfflineActivityModalState.trainingReason || ''}
-                                                onChange={(e) => updatePlannerOfflineActivityDraftField('trainingReason', e.target.value)}
-                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                            >
-                                                <option value="">Выберите причину</option>
-                                                {plannerTrainingReasonOptions.map(reason => (
-                                                    <option key={`planner-unified-training-reason-${reason}`} value={reason}>{reason}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                                            <input
-                                                type="checkbox"
-                                                checked={!!plannerOfflineActivityModalState.trainingCountInHours}
-                                                onChange={(e) => updatePlannerOfflineActivityDraftField('trainingCountInHours', !!e.target.checked)}
-                                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                            />
-                                            Засчитывать в учет часов
-                                        </label>
-                                    </>
-                                )}
-
-                                {isTechnical && (
-                                    <>
-                                        <div>
-                                            <label className="block text-xs font-medium text-slate-600 mb-1">Причина тех.причины</label>
-                                            <select
-                                                value={plannerOfflineActivityModalState.technicalReason || ''}
-                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalReason', e.target.value)}
-                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                            >
-                                                <option value="">Выберите причину</option>
-                                                {technicalReasonOptions.map(reason => (
-                                                    <option key={`planner-unified-tech-reason-${reason}`} value={reason}>{reason}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs font-medium text-slate-600 mb-1">Рабочее место (РМ)</label>
-                                            <select
-                                                value={plannerOfflineActivityModalState.technicalWorkplaceNumber || ''}
-                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalWorkplaceNumber', e.target.value)}
-                                                className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                            >
-                                                <option value="">Не указывать</option>
-                                                {Array.from({ length: 30 }, (_, idx) => {
-                                                    const rm = idx + 1;
-                                                    return (
-                                                        <option key={`planner-unified-tech-rm-${rm}`} value={rm}>
-                                                            РМ {rm}
-                                                        </option>
-                                                    );
-                                                })}
-                                            </select>
-                                        </div>
-                                        <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                                            <input
-                                                type="checkbox"
-                                                checked={!!plannerOfflineActivityModalState.technicalIsMass}
-                                                onChange={(e) => updatePlannerOfflineActivityDraftField('technicalIsMass', !!e.target.checked)}
-                                                className="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500"
-                                            />
-                                            Массово по направлениям
-                                        </label>
-                                        {!!plannerOfflineActivityModalState.technicalIsMass && (
-                                            <div>
-                                                <label className="block text-xs font-medium text-slate-600 mb-1">Направления (мультивыбор)</label>
-                                                <select
-                                                    multiple
-                                                    value={technicalDirectionValues.map((id) => String(id))}
-                                                    onChange={(e) => {
-                                                        const selectedValues = Array.from(e?.target?.selectedOptions || []).map((option) => option.value);
-                                                        updatePlannerOfflineActivityDraftField(
-                                                            'technicalDirectionIds',
-                                                            plannerToUniquePositiveIntList(selectedValues)
-                                                        );
-                                                    }}
-                                                    className={`w-full min-h-[120px] px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
-                                                >
-                                                    {plannerTechMassDirectionOptions.map((direction) => (
-                                                        <option key={`planner-unified-tech-dir-${direction.id}`} value={direction.id}>
-                                                            {direction.name}
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                                {plannerTechMassDirectionOptions.length === 0 && (
-                                                    <div className="mt-1 text-[11px] text-amber-700">
-                                                        Справочник направлений не загружен. Для массовой тех.причины список направлений недоступен.
-                                                    </div>
-                                                )}
-                                                <div className="mt-1 text-[11px] text-slate-500">
-                                                    Запись будет выставлена только тем сотрудникам выбранных направлений, у кого есть смена в этом интервале.
-                                                </div>
-                                            </div>
-                                        )}
-                                    </>
-                                )}
-
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                                        Комментарий
-                                        {technicalCommentRule && (
-                                            <span className="ml-1.5 font-semibold text-rose-600">обязательно</span>
-                                        )}
-                                    </label>
-                                    <textarea
-                                        rows={3}
-                                        value={plannerOfflineActivityModalState.comment || ''}
-                                        onChange={(e) => updatePlannerOfflineActivityDraftField('comment', e.target.value)}
-                                        className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass} resize-y`}
-                                        placeholder={technicalCommentRule?.example
-                                            ? `Например: ${technicalCommentRule.example}`
-                                            : 'Комментарий (необязательно)'}
-                                    />
-                                    {technicalCommentRule?.hint && (
-                                        <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
-                                            {technicalCommentRule.hint}
-                                        </div>
-                                    )}
-                                </div>
-
-                                {plannerOfflineActivityModalError && (
-                                    <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                                        {plannerOfflineActivityModalError}
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                                <button
-                                    type="button"
-                                    onClick={closePlannerOfflineActivityModal}
-                                    disabled={plannerOfflineActivityActionLoading}
-                                    className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                                >
-                                    Отмена
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={submitPlannerOfflineActivityModal}
-                                    disabled={plannerOfflineActivityActionLoading || (isTraining && !!plannerOfflineTrainingDraftOverlapInfo?.hasOverlap)}
-                                    className={`px-4 py-2 rounded-lg text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 ${saveButtonClass}`}
-                                >
-                                    <FaIcon className={`fas ${plannerOfflineActivityActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
-                                    {plannerOfflineActivityActionLoading ? 'Сохраняем...' : saveLabel}
-                                </button>
-                            </div>
-                        </SimpleModal>
-                    );
-                })()}
-
-                {plannerFineModalState.open && (
-                    <SimpleModal
-                        open={plannerFineModalState.open}
-                        onClose={closePlannerFineModal}
-                        panelClassName="w-[560px] max-w-[calc(100vw-1rem)]"
-                    >
-                        <div className="mb-4 pb-3 border-b border-slate-200">
-                            <div className="flex items-center justify-between gap-3">
-                                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                    <FaIcon className="fas fa-exclamation-triangle text-rose-600"></FaIcon>
-                                    Добавить штраф
-                                </h3>
-                                <button
-                                    type="button"
-                                    onClick={closePlannerFineModal}
-                                    className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center"
-                                >
-                                    <FaIcon className="fas fa-times"></FaIcon>
-                                </button>
-                            </div>
-                            <div className="mt-1 text-xs text-slate-500">
-                                Дата: {plannerFineModalState.date || '—'}
-                            </div>
-                        </div>
-
-                        <div className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Причина</label>
-                                <select
-                                    value={plannerFineModalState.reason || ''}
-                                    onChange={(e) => updatePlannerFineDraftField('reason', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                >
-                                    <option value="">Выберите причину</option>
-                                    <option value="Корп такси">Корп такси</option>
-                                    <option value="Опоздание">Опоздание</option>
-                                    <option value="Прокси карта">Прокси карта</option>
-                                    <option value="Не выход">Не выход</option>
-                                    <option value="Другое">Другое</option>
-                                </select>
-                            </div>
-
-                            {String(plannerFineModalState.reason || '') === 'Опоздание' && (
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Минут опоздания</label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        value={plannerFineModalState.minutes}
-                                        onChange={(e) => updatePlannerFineDraftField('minutes', e.target.value)}
-                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        placeholder="0"
-                                    />
-                                    <div className="mt-1 text-[11px] text-slate-500">
-                                        Сумма считается автоматически: минуты × 50
-                                    </div>
-                                </div>
-                            )}
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Сумма</label>
-                                <input
-                                    type="number"
-                                    min="0"
-                                    value={plannerFineModalState.amount}
-                                    onChange={(e) => updatePlannerFineDraftField('amount', e.target.value)}
-                                    disabled={String(plannerFineModalState.reason || '') === 'Опоздание' || String(plannerFineModalState.reason || '') === 'Не выход' || String(plannerFineModalState.reason || '') === 'Прокси карта'}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
-                                    placeholder="0"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
-                                <textarea
-                                    rows={3}
-                                    value={plannerFineModalState.comment || ''}
-                                    onChange={(e) => updatePlannerFineDraftField('comment', e.target.value)}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-                                    placeholder="Комментарий (необязательно)"
-                                />
-                            </div>
-                        </div>
-
-                        <div className="mt-5 pt-4 border-t border-slate-200 flex items-center justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={closePlannerFineModal}
-                                disabled={plannerFineActionLoading}
-                                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                            >
-                                Отмена
-                            </button>
-                            <button
-                                type="button"
-                                onClick={submitPlannerFineForCurrentDay}
-                                disabled={plannerFineActionLoading}
-                                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                            >
-                                <FaIcon className={`fas ${plannerFineActionLoading ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
-                                {plannerFineActionLoading ? 'Сохраняем...' : 'Сохранить штраф'}
-                            </button>
-                        </div>
-                    </SimpleModal>
-                )}
+                {plannerSideModals}
 
                 <SimpleModal
                     open={!!showPlannerStatusMatchExportModal && user?.role !== 'operator'}
@@ -35991,293 +37486,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </SimpleModal>
 
-﻿                {/* ── Очередь «Запросы»: заявки операторов на изменение смены ─────
-                    Разбирается здесь, а не в отдельном разделе: решение меняет
-                    график, и человек уже стоит перед ним. */}
-                <IosModal
-                    open={showReviewModal}
-                    onClose={() => setShowReviewModal(false)}
-                    title="Запросы по сменам"
-                    subtitle="Заявки операторов на сокращение смены и дополнительную часть"
-                    maxWidth="max-w-2xl"
-                    footer={(
-                        <div className="flex w-full items-center justify-between gap-2">
-                            <span className="text-[12px] text-slate-500">
-                                {reviewPendingCount > 0
-                                    ? `Ожидают решения: ${reviewPendingCount}`
-                                    : 'Нерассмотренных заявок нет'}
-                            </span>
-                            <button
-                                type="button"
-                                className={`${iosBtnSecondary} shrink-0`}
-                                onClick={() => setShowReviewModal(false)}
-                            >
-                                Закрыть
-                            </button>
-                        </div>
-                    )}
-                >
-                    <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-2">
-                            <IosSegmented
-                                value={reviewStatusFilter}
-                                onChange={setReviewStatusFilter}
-                                ariaLabel="Какие заявки показывать"
-                                options={[
-                                    { value: 'pending', label: 'Ожидают' },
-                                    { value: 'all', label: 'Все' },
-                                ]}
-                            />
-                            <div className="flex items-center gap-1.5">
-                                <IosHint
-                                    align="right"
-                                    text="Одобрение сразу правит график: смена сокращается или в день добавляется новая часть, перерывы пересчитываются по правилам направления, а изменение попадает в историю графика. Отклонение график не трогает. Оператор увидит решение в разделе «Мои смены»."
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => loadReviewRequests({ silent: false })}
-                                    disabled={reviewLoading}
-                                    className={`${iosBtnGhost} shrink-0`}
-                                >
-                                    <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-rotate'} text-[11px] text-slate-400`}></FaIcon>
-                                    Обновить
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Тумблер только у главы отдела: прямому СВ заявки его
-                            людей приходят всегда, и выключателя у них нет —
-                            иначе заявку можно было бы не заметить совсем. */}
-                        {reviewCanWatch && (
-                            <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
-                                <div className="min-w-0 text-[12.5px] leading-snug text-slate-600">
-                                    Уведомлять меня о заявках отдела
-                                    <span className="ml-1.5 inline-flex align-middle">
-                                        <IosHint
-                                            align="left"
-                                            text="Без подписки уведомления о заявке приходят только прямому супервайзеру оператора — это его человек и его решение. С подпиской они будут приходить и вам, по всему отделу. Заявки оператора, у которого супервайзера нет, приходят вам в любом случае: иначе о них не узнает никто. Сама очередь «Запросы» видна вам всегда, независимо от подписки."
-                                        />
-                                    </span>
-                                </div>
-                                <IosToggle
-                                    checked={reviewWatching}
-                                    onChange={toggleReviewWatch}
-                                    disabled={reviewWatchSaving}
-                                />
-                            </div>
-                        )}
-
-                        {reviewError && (
-                            <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
-                                {reviewError}
-                            </div>
-                        )}
-
-                        {reviewLoading && reviewRequests.length === 0 ? (
-                            <div className="px-4 py-10 text-center text-[13px] text-slate-500">
-                                <FaIcon className="fas fa-spinner fa-spin mr-2 text-slate-400"></FaIcon>
-                                Загружаем запросы…
-                            </div>
-                        ) : reviewVisibleRequests.length === 0 ? (
-                            <div className="px-4 py-10 text-center">
-                                <div className="mx-auto mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-400">
-                                    <FaIcon className="fas fa-inbox"></FaIcon>
-                                </div>
-                                <div className="text-[14px] font-semibold text-slate-700">
-                                    {reviewStatusFilter === 'pending' ? 'Всё разобрано' : 'Заявок нет'}
-                                </div>
-                                <div className="mt-0.5 text-[12.5px] text-slate-500">
-                                    {reviewStatusFilter === 'pending'
-                                        ? 'Новые заявки появятся здесь и в колоколе.'
-                                        : 'Операторы вашего отдела ещё не подавали заявок.'}
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="space-y-3">
-                                {reviewRequestGroups.map(group => (
-                                    <section key={`review-group-${group.key}`}>
-                                        {reviewRequestGroups.length > 1 && (
-                                            <div className="mb-1.5 flex items-baseline justify-between gap-2 px-1">
-                                                <span className="truncate text-[12.5px] font-semibold text-slate-700">{group.label}</span>
-                                                <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{group.items.length}</span>
-                                            </div>
-                                        )}
-                                        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                                            {group.items.map(item => {
-                                            const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
-                                            const deltaMin = Number(item?.minutesDelta) || 0;
-                                            const busy = reviewRespondingId === item.id;
-                                            return (
-                                                <div key={`review-${item.id}`} className="px-4 py-3">
-                                                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-                                                        <div className="min-w-0">
-                                                            <div className="flex flex-wrap items-center gap-2">
-                                                                <span className="text-[14px] font-semibold text-slate-900">
-                                                                    {item.operator?.name || 'Сотрудник'}
-                                                                </span>
-                                                                {item.status !== 'pending' && (
-                                                                    <IosBadge tone={statusMeta.tone}>{statusMeta.label}</IosBadge>
-                                                                )}
-                                                            </div>
-                                                            <div className="mt-0.5 text-[12.5px] text-slate-500">
-                                                                {SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
-                                                                {item.operator?.direction && (
-                                                                    <>
-                                                                        <span className="text-slate-300"> · </span>
-                                                                        {item.operator.direction}
-                                                                    </>
-                                                                )}
-                                                            </div>
-                                                            <div className="mt-1 text-[12.5px] tabular-nums text-slate-600">
-                                                                {formatDateRuDayMonth(parseDateStr(item.shiftDate))}
-                                                                <span className="text-slate-400"> · </span>
-                                                                {shiftChangeIntervalText(item)}
-                                                                {deltaMin !== 0 && (
-                                                                    <span className={deltaMin < 0 ? ' text-rose-600' : ' text-emerald-600'}>
-                                                                        {' '}({deltaMin > 0 ? '+' : '−'}{formatMinutesOnly(Math.abs(deltaMin))})
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            {item.requestComment && (
-                                                                <div className="mt-1 text-[12px] leading-snug text-slate-500">
-                                                                    {item.requestComment}
-                                                                </div>
-                                                            )}
-                                                            {item.status !== 'pending' && item.responseComment && (
-                                                                <div className="mt-1 text-[12px] leading-snug text-slate-600">
-                                                                    <span className="text-slate-400">Ответ: </span>
-                                                                    {item.responseComment}
-                                                                </div>
-                                                            )}
-                                                            {item.status !== 'pending' && item.reviewedBy?.name && (
-                                                                <div className="mt-0.5 text-[11.5px] text-slate-400">
-                                                                    {statusMeta.label}: {item.reviewedBy.name}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </div>
-
-                                                    {item.status === 'pending' && reviewCanReview && (
-                                                        <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                            <input
-                                                                type="text"
-                                                                value={reviewComments?.[item.id] || ''}
-                                                                onChange={(e) => setReviewComments(prev => ({ ...prev, [item.id]: e.target.value }))}
-                                                                placeholder="Комментарий · необязательно"
-                                                                className={`${iosInput} flex-1 !py-2 !text-[13px]`}
-                                                            />
-                                                            <div className="flex shrink-0 gap-2">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => respondReviewRequest(item.id, 'reject')}
-                                                                    disabled={busy}
-                                                                    className="rounded-xl bg-slate-100 px-3.5 py-2 text-[13px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
-                                                                >
-                                                                    Отклонить
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => respondReviewRequest(item.id, 'approve')}
-                                                                    disabled={busy}
-                                                                    className="rounded-xl bg-blue-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50"
-                                                                >
-                                                                    {busy ? 'Применяем…' : 'Одобрить'}
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                            })}
-                                        </div>
-                                    </section>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </IosModal>
-
-                {/* ── «Уведомления об изменениях»: суточная сводка правок ─────────
-                    Окно рендерится здесь, рядом с остальными модалками, а НЕ
-                    внутри контейнера меню «3 точки»: меню закрывается
-                    обработчиком mousedown с проверкой «щёлкнули вне контейнера»,
-                    и окно внутри него не давало бы меню закрыться. */}
-                <IosModal
-                    open={showChangeReportModal}
-                    onClose={() => setShowChangeReportModal(false)}
-                    title="Уведомления об изменениях"
-                    subtitle="Сводка правок графика за день — в Telegram"
-                    maxWidth="max-w-md"
-                    footer={(
-                        <div className="flex w-full items-center justify-between gap-2">
-                            <button
-                                type="button"
-                                className={`${iosBtnGhost} shrink-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent`}
-                                onClick={sendChangeReportNow}
-                                disabled={changeReportSending || !changeReport.telegramConnected}
-                                title="Прислать сводку за вчера прямо сейчас — проверить, как она выглядит"
-                            >
-                                <FaIcon className={`fas ${changeReportSending ? 'fa-spinner fa-spin' : 'fa-paper-plane'} text-[11px] text-slate-400`}></FaIcon>
-                                {changeReportSending ? 'Отправляем…' : 'Отправить сейчас'}
-                            </button>
-                            <button
-                                type="button"
-                                className={`${iosBtnSecondary} shrink-0`}
-                                onClick={() => setShowChangeReportModal(false)}
-                            >
-                                Закрыть
-                            </button>
-                        </div>
-                    )}
-                >
-                    <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
-                            <div className="min-w-0 text-[13px] font-medium leading-snug text-slate-700">
-                                Присылать сводку изменений
-                                <div className="mt-0.5 text-[12px] font-normal text-slate-500">
-                                    {changeReport.hint}
-                                </div>
-                            </div>
-                            <IosToggle
-                                checked={changeReport.enabled}
-                                onChange={toggleChangeReport}
-                                disabled={changeReportSaving}
-                            />
-                        </div>
-
-                        {/* Область написана прямо в окне: у главы отдела она уже
-                            своя, и расхождение с тем, что человек видит в сетке,
-                            не должно выглядеть ошибкой. */}
-                        <div className="rounded-xl bg-white px-3.5 py-2.5 text-[12.5px] text-slate-600 ring-1 ring-slate-200/70">
-                            <span className="text-slate-500">Область сводки: </span>
-                            <span className="font-medium text-slate-800">{changeReport.scopeLabel || '—'}</span>
-                        </div>
-
-                        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12px] leading-relaxed text-slate-500 ring-1 ring-slate-200/70">
-                            Таблица: сотрудник, группа, как было и как стало, кто
-                            изменил. Первичное внесение графика и перерывы не входят.
-                        </div>
-
-                        {!changeReport.telegramConnected && (
-                            <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-amber-200/70">
-                                К вашей учётной записи не привязан Telegram — сводку отправлять
-                                некуда. Привязка делается в боте портала.
-                            </div>
-                        )}
-
-                        {changeReportNotice && (
-                            <div className="rounded-xl bg-emerald-50 px-3.5 py-2.5 text-[12.5px] text-emerald-700 ring-1 ring-emerald-200/70">
-                                {changeReportNotice}
-                            </div>
-                        )}
-
-                        {changeReportError && (
-                            <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
-                                {changeReportError}
-                            </div>
-                        )}
-                    </div>
-                </IosModal>
+                {plannerRequestModals}
 
                 <SimpleModal open={showDayBreaksModal} onClose={() => setShowDayBreaksModal(false)}>
                     <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
@@ -51495,6 +52704,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </li>
                                     </SidebarDeptScope>
                                     )}
+
                                 </ul>
                                 {/* Пусто по запросу поиска. Живёт ВНЕ списка: внутри
                                     он попал бы в карточку последнего блока и в проход

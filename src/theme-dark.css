@@ -1034,6 +1034,7 @@ html[data-otp-theme="dark"] .hover\:text-violet-800:hover { color: #c4b5fd !impo
 html[data-otp-theme="dark"] .odd\:bg-white:nth-child(odd) { background-color: #1e2127 !important; }
 html[data-otp-theme="dark"] .placeholder\:text-gray-400::placeholder { color: #7d8695 !important; }
 html[data-otp-theme="dark"] .placeholder\:text-slate-400::placeholder { color: #7d8695 !important; }
+html[data-otp-theme="dark"] .placeholder\:text-slate-500::placeholder { color: #939cab !important; }
 html[data-otp-theme="dark"] .ring-amber-200\/70 { --tw-ring-color: rgba(130, 96, 39, 0.7) !important; }
 html[data-otp-theme="dark"] .ring-amber-200\/80 { --tw-ring-color: rgba(130, 96, 39, 0.8) !important; }
 html[data-otp-theme="dark"] .ring-blue-200\/60 { --tw-ring-color: rgba(51, 84, 138, 0.6) !important; }

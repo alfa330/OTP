@@ -1,0 +1,55 @@
+/* ── «Графики работы» на телефоне ────────────────────────────────────────────
+
+   Разметка — WorkSchedulesMobile.jsx и ветка isNarrowShell в App.jsx
+   (ShiftPlannerViewWithCalendar, ниже ветки оператора). Полоса дней, строки,
+   капсулы и поля — общие с «Аукционом смен» (sa-m-*, shift-auction-mobile.css,
+   подключается из WorkSchedulesMobile.jsx). Здесь только то, чего там нет.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_work_schedules_mobile.py). Своих цветов нет:
+   тёмный слой портала перекрашивает утилиты Tailwind, а hex отсюда он не
+   видит.
+
+   ВЕС. Правила с системным `<select>` записаны в четыре класса: общий слой
+   движения (mobile-motion.css) красит `.main-content select` весом (0,2,2), и
+   правило в два класса ему проигрывает — поле получило бы рамку и высоту
+   40 px прямо посреди строки списка. */
+
+/* Строка «‹ › 15 — 21 сентября · Сегодня» липнет вместе с днями (она отдана
+   полосе пропом header), и нужен ей только отступ. */
+body.mobile-shell .ws-m-period {
+    padding: 6px 12px 0;
+}
+
+/* Итог периода тремя плитками: числа и подписи в одну строку каждая, ширина
+   делится поровну. Перенос запрещён инлайном — общий слой разделов переносит
+   ряды с gap, и «Часов» уезжало бы под «Смен». */
+body.mobile-shell .main-content .sa-m-root .ws-m-summary__cell {
+    min-width: 0;
+}
+
+/* Значение в строке — системный список (на iOS колесо), а видно только
+   выбранное у правого края, как в настройках телефона. Цвет НЕ задаём: он
+   приходит утилитой из разметки, иначе тёмный слой портала его не перекрасит.
+   16 px — порог, ниже которого iOS приближает страницу при фокусе. */
+body.mobile-shell .main-content .sa-m-root select.ws-m-select {
+    -webkit-appearance: none;
+    appearance: none;
+    min-height: 0;
+    max-width: 62%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    background-image: none;
+    text-align: right;
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+    outline: none;
+}
+
+/* Поля времени и типа смены лежат прямо в карточке группы, без строки-обёртки:
+   строка добавила бы им разделитель и высоту 52 px. */
+body.mobile-shell .ws-m-inset {
+    padding: 10px 16px;
+}

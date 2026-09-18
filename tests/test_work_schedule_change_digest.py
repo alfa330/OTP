@@ -976,14 +976,22 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("setShowPlannerTopActionsMenu(false)", block)
 
     def test_modal_is_not_rendered_inside_the_menu_container(self):
+        """Панель меню живёт на z-[80] и окно внутри своего контейнера
+        перекрыла бы.
+
+        С 18.09.2026 окно лежит в переменной plannerRequestModals: её рисуют оба
+        дерева раздела — настольная сетка и телефонный список, — и объявлена она
+        ДО разметки. Сравнивать смещения в файле поэтому больше нельзя; проверяем
+        то же по сути: в переменной нет контейнера меню, а в контейнере — окна.
+        """
         source = self._app_source()
+        block_start = source.index('const plannerRequestModals = (')
+        block = source[block_start:source.index('\n            );', block_start)]
+        self.assertIn("open={showChangeReportModal}", block)
+        self.assertNotIn('plannerTopActionsMenuRef', block)
         menu_start = source.index('ref={plannerTopActionsMenuRef}')
-        modal_start = source.index("open={showChangeReportModal}")
-        # Окно стоит в хвосте разметки, рядом с остальными модалками, далеко
-        # за пределами контейнера меню.
-        self.assertGreater(modal_start, menu_start)
-        self.assertNotIn('plannerTopActionsMenuRef',
-                         source[source.index("{/* ── «Уведомления об изменениях»"):modal_start])
+        menu_block = source[menu_start:source.index('{plannerRequestModals}', menu_start)]
+        self.assertNotIn("open={showChangeReportModal}", menu_block)
 
     def test_subscription_is_not_confused_with_the_requests_watch(self):
         """В разделе уже есть подписка «Уведомлять меня о заявках отдела».
