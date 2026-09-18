@@ -1038,16 +1038,61 @@ def show_message(text: str, title: str = APP_NAME, error: bool = False) -> None:
 # забытая форма держала бы его до перезагрузки.
 LOGIN_WINDOW_TIMEOUT_S = 600
 
+# Значок окна входа: 32×32 PNG, снятый с icore.ico — того же файла, который
+# PyInstaller вшивает в exe (см. build_exe.bat, --icon). Держим байтами, а не
+# ссылкой на файл: страница открывается как file:// и не должна зависеть от
+# того, что рядом с ней что-то лежит. Менять значок — менять icore.ico и
+# пересобирать эту строку тем же способом.
+LOGIN_ICON_B64 = (
+    "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"
+    "X/XLJVoAAAAASUVORK5CYII="
+)
+
 LOGIN_PAGE_HTML = """<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
-<!-- Значок в заголовке окна. Без него Chrome рисует глобус, и окно входа
-     выглядит как случайная страница из интернета, а не как наша программа.
-     Тот же контур, что и на карточке, — рисуем разметкой, файл не заводим. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 389 389'%3E%3Ccircle cx='194.5' cy='194.5' r='194.5' fill='%234338CA'/%3E%3Cpath fill='white' d='M49 193 C49 138 77 89 121 65 C165 41 220 41 264 62 C277 68 280 88 276 102 C272 116 259 121 240 121 C221 121 204 114 196 114 C155 117 121 152 121 194 C121 236 155 271 196 271 C237 271 269 239 269 204 C269 190 264 170 265 161 C267 149 277 140 292 140 C307 140 318 155 326 172 C334 189 333 200 333 215 C333 285 275 342 205 342 C127 342 49 271 49 193Z'/%3E%3Cellipse cx='199' cy='195' rx='39' ry='40' fill='white'/%3E%3C/svg%3E">
+<!-- Значок в заголовке окна: тот же, что у iCORE Phone и у самого exe
+     (icore.ico). Без него Chrome рисует глобус, и окно входа выглядит как
+     случайная страница из интернета, а не как наша программа. Вшит прямо в
+     страницу: она открывается как file:// и ходить за файлами не должна. -->
+<link rel="icon" href="data:image/png;base64,__ICON__">
 <style>
   :root {
     --indigo-700: #4338CA; --indigo-600: #4F46E5; --indigo-500: #6366F1;
@@ -1244,6 +1289,7 @@ def build_login_html(prefill: str = "") -> str:
             .replace("&", "&amp;").replace('"', "&quot;")
             .replace("<", "&lt;").replace(">", "&gt;"))
     return (LOGIN_PAGE_HTML
+            .replace("__ICON__", LOGIN_ICON_B64)
             .replace("__TITLE__", APP_NAME_SHORT)
             .replace("__SUBTITLE__", f"Вход в {APP_NAME_SHORT}")
             .replace("__PREFILL__", safe)
@@ -4291,17 +4337,48 @@ def run_logout_now(cfg: dict) -> int:
 
 
 def run_sign_out(cfg: dict) -> int:
-    """«Выход»: забыть оператора на этой машине.
+    """«Выход»: закончить работу на этой машине целиком.
 
-    Нужен на общей машине — вошёл не тот, и до порога в 12 часов программа
-    показывала бы ему чужие объявления и подставляла чужую учётку АТС.
+    Выход — это ЧЕЛОВЕК ушёл, а не «переключить учётку». Поэтому уходит всё
+    сразу: сессия Oktell, окно клиента, сессия iCORE и сама программа. Оставь
+    мы хоть что-то — получилась бы дыра, и каждая по-своему:
+
+    * не разлогинить Oktell — следующий за этой машиной попадает в чужую
+      сессию АТС: cookie живёт в профиле Chrome, а не в нашей сессии;
+    * не закрыть окно — остаётся окно Oktell, за которым уже никто не следит:
+      ограничитель живёт в процессе, а его мы гасим;
+    * не погасить процессы — сторож поднимет агента обратно, и он продолжит
+      отмечаться за ушедшего.
+
+    ВЫБРОС ПО ПРАВИЛУ — НЕ ЭТО. Там оператор остаётся за машиной, и программу
+    трогать нельзя: она обязана продолжать считать. Выброс делает только
+    WS-logout в окне (ManagedBrowser.logout), процессы не задеваются вовсе.
     """
     setup_logging(cfg, "agent.log")
-    who = load_session().get("user_name") or load_session().get("login") or ""
+    session = load_session()
+    who = session.get("user_name") or session.get("login") or ""
+
+    # Сначала АТС, пока окно и агент ещё живы: после остановки процессов
+    # разлогинить будет нечем.
+    try:
+        browser = ManagedBrowser(cfg, heal=False)
+        if browser.is_debug_port_alive():
+            target = browser.oktell_target()
+            if target:
+                report = browser.logout()
+                logging.info("Выход: разлогин в Oktell — %s", report.get("status"))
+                browser.close_page()
+                _close_target(browser, str(target.get("id") or ""))
+    except Exception:  # noqa: BLE001 — не закрывшееся окно не повод оставить сессию
+        logging.debug("Выход: окно Oktell закрыть не удалось", exc_info=True)
+
     clear_session()
-    logging.info("Выход из учётной записи%s", f": {who}" if who else "")
+    logging.info("Выход из учётной записи%s — останавливаю программу", f": {who}" if who else "")
     if getattr(sys, "stdout", None):
         print(json.dumps({"ok": True, "signed_out": who}, ensure_ascii=False))
+    # Гасим последними: этот процесс себя и своего родителя не трогает, поэтому
+    # строку выше напечатать успеваем.
+    _stop_installed_copies(installed_path())
     return 0
 
 

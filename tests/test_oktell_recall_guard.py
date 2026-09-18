@@ -939,14 +939,65 @@ def test_the_running_agent_notices_a_login_that_happened_later():
     assert "next_config_refresh = time.time()" in body
 
 
-def test_sign_out_forgets_the_operator(tmp_path, monkeypatch):
-    """«Выход» нужен на общей машине: вошёл не тот — и до порога в 12 часов ему
-    показывались бы чужие объявления и подставлялась чужая учётка АТС."""
+def test_sign_out_takes_everything_down(tmp_path, monkeypatch):
+    """«Выход» — это человек ушёл, а не «переключить учётку».
+
+    Оставь мы хоть что-то, и каждое оставшееся — своя дыра: не разлогинить
+    Oktell — следующий за машиной попадёт в чужую сессию АТС (cookie живёт в
+    профиле Chrome); не закрыть окно — останется окно, за которым уже никто не
+    следит; не погасить процессы — сторож поднимет агента обратно.
+    """
     monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
     monkeypatch.setattr(agent, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(agent, "installed_path", lambda: tmp_path / "OktellRecallGuard.exe")
+    steps = []
+
+    class _Browser:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_debug_port_alive(self):
+            return True
+
+        def oktell_target(self):
+            return {"id": "T1"}
+
+        def logout(self):
+            steps.append("разлогин в Oktell")
+            return {"status": "done"}
+
+        def close_page(self):
+            pass
+
+    monkeypatch.setattr(agent, "ManagedBrowser", _Browser)
+    monkeypatch.setattr(agent, "_close_target", lambda _b, tid: steps.append(f"закрыто окно {tid}"))
+    monkeypatch.setattr(agent, "_stop_installed_copies", lambda _t: steps.append("программа остановлена"))
+
     agent.save_session({"refresh_token": "r", "login": "6612"})
     assert agent.run_sign_out({}) == 0
     assert agent.load_session() == {}
+    assert steps == ["разлогин в Oktell", "закрыто окно T1", "программа остановлена"], steps
+
+
+def test_being_kicked_out_does_not_kill_the_program():
+    """Выброс по правилу — не выход. Оператор остаётся за машиной, и программа
+    обязана продолжать считать: иначе один выброс снимал бы ограничитель до
+    конца смены, то есть работал бы ровно наоборот задуманному."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    logout = source[source.index("    def logout(self)"):source.index("    def probe(self)")]
+    assert "_stop_installed_copies" not in logout
+    assert "clear_session" not in logout
+
+
+def test_the_program_wears_the_icore_phone_icon():
+    """Ярлык берёт значок из самого exe, поэтому он один на всё: рабочий стол,
+    панель задач, «Программы и компоненты». Разные значки у двух наших программ
+    человек читает как «это что-то чужое»."""
+    here = Path(agent.__file__).parent
+    assert (here / "icore.ico").exists()
+    assert "--icon icore.ico" in (here / "build_exe.bat").read_text(encoding="utf-8")
+    # Тот же значок — в шапке окна входа, иначе Chrome рисует глобус.
+    assert "data:image/png;base64," + agent.LOGIN_ICON_B64 in agent.build_login_html()
 
 
 def test_install_hands_over_to_the_installed_copy():

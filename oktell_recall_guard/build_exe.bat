@@ -36,7 +36,13 @@ REM когда onefile-процесс попадает на ЧУЖУЮ недо�
 REM остаются после убитых копий, имя считается от PID и повторяется), файла на
 REM месте нет — процесс умирает с модальным окном «Unhandled exception in
 REM script». Без этих модулей у падения нет и повода.
+REM Значок — тот же, что у iCORE Phone (microsip-src\res\icore.ico): человек
+REM видит его на ярлыке, в панели задач и в «Программах и компонентах», и две
+REM наши программы должны выглядеть одной семьёй. Без --icon PyInstaller ставит
+REM свой, и ярлык «Oktell» на рабочем столе читается как чужая программа —
+REM ярлык берёт значок из самого exe (IconLocation=<exe>,0).
 python -m PyInstaller --onefile --noconsole --name OktellRecallGuard ^
+  --icon icore.ico ^
   --hidden-import websocket ^
   --hidden-import win32gui ^
   --hidden-import _build_token ^
