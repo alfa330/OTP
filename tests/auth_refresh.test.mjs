@@ -283,9 +283,26 @@ test('две вкладки обновляются под одним замко�
 });
 
 test('без Web Locks обновление работает как раньше', async () => {
-  assert.equal(typeof globalThis.navigator?.locks, 'undefined');
-  const refresh = createSharedAuthRefresh(async () => ({ status: 200 }), { lockName: 'otp-auth-refresh' });
-  assert.deepEqual(await refresh(), { outcome: AUTH_REFRESH_OUTCOME.REFRESHED, status: 200 });
+  // Отсутствие замков надо выставлять руками: в Node 22 (как на CI) `navigator.locks`
+  // нет, а в Node 24 он уже есть, и проверка «в среде замков нет» ловила бы версию
+  // Node, а не запасной путь. Три случая — как у старых браузеров и у server-side
+  // рендера: navigator нет вовсе, navigator есть без Web Locks, объект есть без request.
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const refreshesWithout = async (navigatorValue) => {
+    if (navigatorValue === undefined) delete globalThis.navigator;
+    else Object.defineProperty(globalThis, 'navigator', { value: navigatorValue, configurable: true });
+    assert.notEqual(typeof globalThis.navigator?.locks?.request, 'function');
+    const refresh = createSharedAuthRefresh(async () => ({ status: 200 }), { lockName: 'otp-auth-refresh' });
+    assert.deepEqual(await refresh(), { outcome: AUTH_REFRESH_OUTCOME.REFRESHED, status: 200 });
+  };
+  try {
+    await refreshesWithout(undefined);
+    await refreshesWithout({});
+    await refreshesWithout({ locks: {} });
+  } finally {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
 });
 
 test('токены из другой вкладки подхватываются событием storage, выход там — тоже', async () => {
