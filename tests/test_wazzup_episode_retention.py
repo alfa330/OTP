@@ -56,7 +56,15 @@ class _FakeCursor:
     def execute(self, query, params=None):
         normalized = " ".join(str(query).split())
         self.executions.append((normalized, params))
-        self.rowcount = next(self._rowcounts)
+        # Кончились заготовленные rowcount — значит в чистку добавили запрос, а
+        # тест о нём не знает. Голый StopIteration такое не объясняет.
+        try:
+            self.rowcount = next(self._rowcounts)
+        except StopIteration:
+            raise AssertionError(
+                "запрос №%d в чистке не покрыт тестом: %s"
+                % (len(self.executions), normalized[:200])
+            ) from None
 
 
 def _database_with_cursor(cursor):
@@ -142,10 +150,11 @@ class WazzupEpisodeRetentionTests(unittest.TestCase):
         self.assertIn("s.episode_start = e.started_at", episode_sql)
 
     def test_snapshot_cleanup_marks_final_evaluation_before_deleting_link(self):
-        cursor = _FakeCursor([4, 6, 8])
+        cursor = _FakeCursor([4, 6, 8, 5])
         result = _database_with_cursor(cursor).cleanup_c2d_eval_data(
             requests_days=40,
             snapshots_days=120,
+            webhook_days=3,
         )
 
         self.assertEqual(
@@ -153,6 +162,7 @@ class WazzupEpisodeRetentionTests(unittest.TestCase):
             {
                 "requests": 6,
                 "snapshots": 8,
+                "webhook_events": 5,
                 "wazzup_journal_marked": 4,
             },
         )
@@ -165,6 +175,19 @@ class WazzupEpisodeRetentionTests(unittest.TestCase):
         )
         self.assertEqual(cursor.executions[1][1], (40,))
         self.assertEqual(cursor.executions[2][1], (120,))
+
+    def test_webhook_events_are_cleaned_last_and_by_their_own_horizon(self):
+        """Сырьё вебхуков живёт своей неделей и удаляется по дню события."""
+        cursor = _FakeCursor([0, 0, 0, 9])
+        result = _database_with_cursor(cursor).cleanup_c2d_eval_data()
+
+        self.assertEqual(result["webhook_events"], 9)
+        webhook_sql, webhook_params = cursor.executions[-1]
+        self.assertIn(
+            "DELETE FROM c2d_webhook_events WHERE day < CURRENT_DATE - %s",
+            webhook_sql,
+        )
+        self.assertEqual(webhook_params, (7,))
 
     def test_schema_has_durable_marker_and_snapshot_lookup_index(self):
         source = DATABASE_PATH.read_text(encoding="utf-8-sig")
