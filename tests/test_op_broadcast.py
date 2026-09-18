@@ -165,6 +165,24 @@ class DeviationTests(unittest.TestCase):
         self.assertNotIn('def _op_broadcast_lines', BOT_PATH.read_text(encoding="utf-8-sig"))
 
 
+class HourSampleGateTests(unittest.TestCase):
+    """Порог выборки часа. Переезд тревоги с суток на час (18.09.2026) оставил ОП вообще без
+    предупреждений: порог 20 заводился под сутки, а в часе у отдела медиана 13 входящих
+    (замер по cdr_touches за 04–17.09.2026; порог 20 судил 42 % рабочих часов, порог 10 — 84 %)."""
+
+    def test_default_gate_is_measured_not_borrowed_from_the_day(self):
+        line = next(l for l in BOT_PATH.read_text(encoding="utf-8-sig").splitlines()
+                    if l.startswith('OP_BROADCAST_MIN_CALLS ='))
+        self.assertIn("'OP_BROADCAST_MIN_CALLS', 10", line)
+
+    def test_a_typical_hour_is_judged(self):
+        """13 входящих — медианный час ОП. Два потерянных это AR 15 %, и об этом надо написать."""
+        notes = _namespace(min_calls=10)["_op_broadcast_deviations"](
+            with_hour(arrived=13, missed=2, sl=0.85))
+        self.assertEqual(len(notes), 1)
+        self.assertIn('15,4 %', notes[0])
+
+
 def hourly(day_hours):
     """Разрез по часам снимка: {час: (входящих, потеряно, SL)}, остальные часы пустые."""
     rows = []
