@@ -157,10 +157,39 @@ class TestNewsWindow:
         assert "fetch(" not in js
         assert "state.result" in agent.build_news_result_js()
 
-    def test_a_wrong_answer_sends_the_operator_back_to_the_text(self):
+    def test_a_wrong_answer_keeps_the_answers_and_marks_the_question(self):
+        """Дефект 1.0.16: из-за одного неверного ответа окно стирало ВСЕ отметки
+        и возвращало к тексту — человек отвечал заново на весь тест и даже не
+        знал, где ошибся. Ответы остаются, помечается только неверный вопрос."""
         js = agent.build_news_js(self._item())
         assert "NEWS_QUIZ_WRONG" in js
-        assert "state.step = 'read'" in js
+        # Сброс ответов и возврат к тексту — ровно то, чего быть не должно.
+        assert "state.answers = {}; drawQuiz(); state.step = 'read';" not in js
+        assert "state.wrong = (payload.wrong || []).slice();" in js
+        assert "Неверно — перечитайте новость и выберите другой вариант" in js
+
+    def test_the_marked_question_is_the_one_the_server_named(self):
+        """Своего мнения о верности у окна нет: красит те вопросы, которые
+        назвал сервер, и только выбранный в них вариант — подкрасить остальные
+        значило бы подсказать."""
+        js = agent.build_news_js(self._item())
+        assert "function missed(id)" in js
+        assert "var chosen = state.answers[item.id] === optionIndex;" in js
+        assert "bad && chosen" in js
+
+    def test_the_choice_survives_a_repaint(self):
+        """Пометка приходит после ответа сервера, и перерисовка не должна
+        снимать уже сделанный выбор."""
+        js = agent.build_news_js(self._item())
+        assert "radio.checked = state.answers[item.id] === optionIndex;" in js
+
+    def test_fixing_the_answer_clears_the_mark(self):
+        """Красный на варианте, который человек только что сменил, говорил бы
+        неправду — как и отказ сервера про прошлый ответ."""
+        js = agent.build_news_js(self._item())
+        body = js.split("radio.addEventListener('change'", 1)[1].split("var text =", 1)[0]
+        assert "state.wrong = state.wrong.filter(" in body
+        assert "note.textContent = '';" in body
 
 
 class TestLoopOrder:
@@ -221,6 +250,13 @@ class TestServerRules:
         body = ROUTES.split("def oktell_guard_agent_news_read", 1)[1].split("@agent_route", 1)[0]
         assert "news_queries.confirm_read(" in body
         assert "NEWS_TOO_EARLY" in body and "NEWS_QUIZ_WRONG" in body
+
+    def test_the_wrong_questions_are_named(self):
+        """Без id вопросов окно агента умеет сказать только «где-то неверно»,
+        и человек переотвечает весь тест из-за одного вопроса. Портал их
+        отдаёт (news/routes.py) — агенту нужны те же."""
+        body = ROUTES.split("def oktell_guard_agent_news_read", 1)[1].split("@agent_route", 1)[0]
+        assert '"wrong": detail' in body
 
     def test_an_unknown_agent_gets_nothing(self):
         for name in ("oktell_guard_agent_news", "oktell_guard_agent_news_read"):

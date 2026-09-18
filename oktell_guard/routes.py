@@ -384,8 +384,11 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             return jsonify({"error": "Кнопка станет активной чуть позже",
                             "code": "NEWS_TOO_EARLY", "remaining_seconds": detail}), 409
         if status == 'quiz_wrong':
+            # wrong — id вопросов с ошибкой, как и у портала: без них окно агента
+            # умеет сказать только «где-то неверно», и человек переотвечает весь
+            # тест из-за одного вопроса.
             return jsonify({"error": "Есть неверные ответы — перечитайте новость",
-                            "code": "NEWS_QUIZ_WRONG"}), 409
+                            "code": "NEWS_QUIZ_WRONG", "wrong": detail}), 409
         if status == 'trainer_pending':
             return jsonify({"error": "Сначала пройдите тренажёр",
                             "code": "NEWS_TRAINER_PENDING"}), 409

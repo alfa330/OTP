@@ -58,7 +58,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.16"
+VERSION = "1.0.17"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -1933,7 +1933,8 @@ NEWS_JS_TEMPLATE = r"""
   var ID = '__oktell_guard_news';
   var state = window.__oktellGuardNews = window.__oktellGuardNews || {};
   if (state.id === data.id && document.getElementById(ID)) { return true; }
-  state.id = data.id; state.result = null; state.step = 'read'; state.answers = {};
+  state.id = data.id; state.result = null; state.step = 'read';
+  state.answers = {}; state.wrong = [];
   var old = document.getElementById(ID);
   if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
@@ -2016,8 +2017,22 @@ NEWS_JS_TEMPLATE = r"""
     button.style.opacity = button.disabled ? '.45' : '1';
   }
 
+  function missed(id) {
+    for (var i = 0; i < state.wrong.length; i++) {
+      if (String(state.wrong[i]) === String(id)) { return true; }
+    }
+    return false;
+  }
+
+  // Перерисовщики вопросов. Отметка «неверно» приходит после ответа сервера, а
+  // перекладывать ради неё разметку заново нельзя: обработчик клика снёс бы
+  // сам переключатель, по которому только что щёлкнули. Поэтому каждый вопрос
+  // отдаёт функцию, которая красит УЖЕ нарисованное.
+  var refreshers = [];
+
   function drawQuiz() {
     quiz.innerHTML = '';
+    refreshers = [];
     questions.forEach(function (item, index) {
       var box = document.createElement('div');
       box.setAttribute('style', 'background:#f2f2f7;border-radius:14px;padding:14px;margin-bottom:10px');
@@ -2025,23 +2040,64 @@ NEWS_JS_TEMPLATE = r"""
       prompt.textContent = (index + 1) + '. ' + item.prompt;
       prompt.setAttribute('style', 'font-weight:500;margin-bottom:8px');
       box.appendChild(prompt);
+      var labels = [], radios = [];
       (item.options || []).forEach(function (option, optionIndex) {
         var label = document.createElement('label');
         label.setAttribute('style', 'display:flex;gap:8px;align-items:center;padding:8px 10px;'
           + 'background:#fff;border:1px solid #d1d1d6;border-radius:10px;margin-bottom:6px;cursor:pointer');
         var radio = document.createElement('input');
         radio.type = 'radio'; radio.name = 'q' + item.id;
+        radio.checked = state.answers[item.id] === optionIndex;
         radio.addEventListener('change', function () {
           state.answers[item.id] = optionIndex;
+          // Пометку снимаем сразу: человек уже отвечает заново, и красный на
+          // только что выбранном варианте говорил бы неправду.
+          state.wrong = state.wrong.filter(function (id) { return String(id) !== String(item.id); });
+          // И отказ сервера убираем: он был про прошлый ответ.
+          note.textContent = '';
+          refresh();
           paint();
         });
         var text = document.createElement('span');
         text.textContent = option;
         label.appendChild(radio); label.appendChild(text);
         box.appendChild(label);
+        labels.push(label); radios.push(radio);
       });
+      var hint = document.createElement('div');
+      hint.textContent = 'Неверно — перечитайте новость и выберите другой вариант';
+      hint.setAttribute('style', 'color:#d70015;font-size:13px;margin-top:2px;display:none');
+      box.appendChild(hint);
+
+      function refresh() {
+        var bad = missed(item.id);
+        box.style.boxShadow = bad ? 'inset 0 0 0 1.5px #ff3b30' : 'none';
+        hint.style.display = bad ? '' : 'none';
+        labels.forEach(function (label, optionIndex) {
+          // Красным — только ВЫБРАННЫЙ вариант: подкрасить остальные значило бы
+          // подсказать верный.
+          var chosen = state.answers[item.id] === optionIndex;
+          label.style.background = bad && chosen ? '#fff1f0' : '#fff';
+          label.style.borderColor = bad && chosen ? '#ff3b30' : '#d1d1d6';
+          radios[optionIndex].checked = chosen;
+        });
+      }
+
+      refreshers.push({ id: item.id, box: box, refresh: refresh });
+      refresh();
       quiz.appendChild(box);
     });
+  }
+
+  function refreshQuiz() { refreshers.forEach(function (one) { one.refresh(); }); }
+
+  // Первый помеченный вопрос — к нему и подводим: тест длиннее экрана, и
+  // «где-то выше» человек искать не обязан.
+  function firstWrongBox() {
+    for (var i = 0; i < refreshers.length; i++) {
+      if (missed(refreshers[i].id)) { return refreshers[i].box; }
+    }
+    return null;
   }
 
   drawQuiz();
@@ -2073,7 +2129,15 @@ NEWS_JS_TEMPLATE = r"""
     note.style.color = '#d70015';
     if (payload && payload.remaining_seconds) { left = Number(payload.remaining_seconds); }
     if (payload && payload.code === 'NEWS_QUIZ_WRONG') {
-      state.answers = {}; drawQuiz(); state.step = 'read';
+      // ОТВЕТЫ ОСТАЮТСЯ НА МЕСТЕ, и человек остаётся на тесте. Сброс всех
+      // отметок с возвратом к тексту (так было в 1.0.16) заставлял отвечать
+      // заново на ВСЕ вопросы из-за одного неверного, а какой именно неверный —
+      // не говорил вовсе. Сервер называет вопросы с ошибкой (поле wrong) — их и
+      // помечаем, остальное человек уже ответил верно.
+      state.wrong = (payload.wrong || []).slice();
+      refreshQuiz();
+      var bad = firstWrongBox();
+      if (bad && bad.scrollIntoView) { bad.scrollIntoView({block: 'center'}); }
     }
     state.result = null;
     paint();
