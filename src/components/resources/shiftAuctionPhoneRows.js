@@ -19,12 +19,32 @@ export const AUCTION_PHONE_ROW_KIND = Object.freeze({
   TOPUP: 'topup',     // свободна после аукциона — берётся добором
   BLOCKED: 'blocked', // свободна, но правило не пускает — причина рядом
   CLOSED: 'closed',   // свободна, но выбор сейчас не идёт: до старта, пауза, итоги
-  MINE: 'mine',       // взята мной
+  MINE: 'mine',       // взята мной целиком
+  MINE_PART: 'mine_part', // в смене мой кусок, взятый в ходе аукциона
   TAKEN: 'taken',     // взята коллегой
   FREE: 'free',       // свободна — так её видит руководитель, брать ему нечего
 });
 
 const KIND = AUCTION_PHONE_ROW_KIND;
+
+/*
+ * Взятая В ХОДЕ АУКЦИОНА часть смены (так разбирает смены чат) НЕ закрывает лот:
+ * он остаётся `available` с пустым `claimed_by`, иначе оставшийся кусок пропал бы
+ * у остальных. Значит по статусу такую смену своей не признать — только по своей
+ * строке в `lot.claim_segments`. Без этой проверки сетка звала оператора «взять»
+ * смену, которую он уже держит, а вернуть свой кусок из недели было нечем.
+ *
+ * Стадия обязательна: `post_auction` — это добор, он уже в графике и возвращается
+ * не здесь, а в «Моих доп. сменах» (см. shiftAuctionDayClaims).
+ */
+const holdsAuctionClaimPart = (lot, userId) => {
+  const myId = Number(userId);
+  if (!Number.isFinite(myId) || !myId) return false;
+  return (Array.isArray(lot?.claim_segments) ? lot.claim_segments : []).some((segment) => (
+    Number(segment?.claimed_by) === myId
+    && String(segment?.stage || 'post_auction') === 'auction'
+  ));
+};
 
 // Та же формулировка, что у раздела для этого случая: подпись не должна
 // меняться от того, какой из двух путей её посчитал.
@@ -54,10 +74,18 @@ export const classifyAuctionLotForPhone = ({
   if (lot.status === 'claimed') {
     const myId = Number(userId);
     const mine = Number.isFinite(myId) && lot.claimed_by != null && Number(lot.claimed_by) === myId;
-    return { kind: mine ? KIND.MINE : KIND.TAKEN, reason: '' };
+    if (mine) return { kind: KIND.MINE, reason: '' };
+    // Смену закрыли несколько человек: `claimed_by` достался последнему, а мой
+    // кусок в ней всё равно мой — иначе она выглядела бы чужой.
+    if (holdsAuctionClaimPart(lot, userId)) return { kind: KIND.MINE_PART, reason: '' };
+    return { kind: KIND.TAKEN, reason: '' };
   }
 
   if (canManage) return { kind: KIND.FREE, reason: '' };
+
+  // Свой кусок старше причины отказа: она про то, чтобы взять ЕЩЁ, а вернуть уже
+  // взятое человек вправе в любом случае.
+  if (holdsAuctionClaimPart(lot, userId)) return { kind: KIND.MINE_PART, reason: '' };
 
   if (lot.status === 'available') {
     if (reason) return { kind: KIND.BLOCKED, reason };
@@ -158,6 +186,7 @@ export const AUCTION_PHONE_CELL_ACTION = Object.freeze({
   PARTIAL: 'partial', // чат: сразу экран выбора части с таймлайном
   TOPUP: 'topup',     // добор: сразу экран выбора интервала
   RELEASE: 'release', // своя смена: лист «Вернуть смену»
+  PART: 'part',       // свой кусок смены: лист «Вернуть часть» и «Взять ещё»
   DAY: 'day',         // своя смена, которую не вернуть: экран дня
   INFO: 'info',       // взять нельзя: лист с причиной
 });
@@ -175,5 +204,8 @@ export const pickAuctionPhoneCellAction = ({ kind, canManage = false, supportsPa
   if (kind === KIND.TAKE) return supportsPartialClaim ? ACTION.PARTIAL : ACTION.CONFIRM;
   if (kind === KIND.TOPUP) return ACTION.TOPUP;
   if (kind === KIND.MINE) return releasable ? ACTION.RELEASE : ACTION.DAY;
+  // У куска действий два — вернуть свой и добрать оставшееся, — поэтому лист, а
+  // не сразу возврат: одним нажатием отдавать смену, придя за добором, нельзя.
+  if (kind === KIND.MINE_PART) return releasable ? ACTION.PART : ACTION.DAY;
   return ACTION.INFO;
 };

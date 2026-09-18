@@ -198,3 +198,76 @@ test('серая и закрытая ячейка объясняют, руков
     assert.equal(pickAuctionPhoneCellAction({ kind, canManage: true, supportsPartialClaim: true, releasable: true }), ACTION.DETAILS, kind);
   }
 });
+
+/*
+ * Взятая в ходе аукциона ЧАСТЬ смены (так разбирает смены чат).
+ *
+ * Лот при этом НАМЕРЕННО остаётся `available` с пустым `claimed_by` — иначе
+ * оставшийся кусок пропал бы у остальных, — поэтому по статусу такую смену
+ * своей не признать. Без этой ветки сетка на телефоне звала «взять» смену,
+ * которую человек уже держит, а вернуть свой кусок из недели было нечем:
+ * «Вернуть» оставалось только на экране дня, куда без подсказки не заходят.
+ */
+
+const part = (over) => ({ claimed_by: ME, start_time: '09:00', end_time: '12:00', stage: 'auction', ...over });
+
+test('мой кусок делает смену моей, хотя лот остался свободным', () => {
+  const row = classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part()] }), userId: ME, canClaim: true,
+  });
+  assert.deepEqual(row, { kind: KIND.MINE_PART, reason: '' });
+});
+
+test('смену закрыл коллега, но мой кусок в ней остаётся моим', () => {
+  const row = classifyAuctionLotForPhone({
+    lot: lot({ status: 'claimed', claimed_by: OTHER, claim_segments: [part(), part({ claimed_by: OTHER, start_time: '12:00', end_time: '18:00' })] }),
+    userId: ME,
+    canClaim: true,
+  });
+  assert.equal(row.kind, KIND.MINE_PART);
+  // Взятая мной ЦЕЛИКОМ смена остаётся обычной «моей»: там есть claimed_by.
+  assert.equal(classifyAuctionLotForPhone({
+    lot: lot({ status: 'claimed', claimed_by: ME, claim_segments: [part()] }), userId: ME,
+  }).kind, KIND.MINE);
+});
+
+test('чужой кусок своей смену не делает, мой добор — тоже', () => {
+  assert.equal(classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part({ claimed_by: OTHER })] }), userId: ME, canClaim: true,
+  }).kind, KIND.TAKE);
+  // Добор уже в графике: его возвращают в «Моих доп. сменах», а не тут.
+  assert.equal(classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part({ stage: 'post_auction' })] }), userId: ME, canClaim: true,
+  }).kind, KIND.TAKE);
+  // Стадии нет вовсе — это старая строка добора, стадия у них по умолчанию.
+  assert.equal(classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part({ stage: undefined })] }), userId: ME, canClaim: true,
+  }).kind, KIND.TAKE);
+});
+
+test('свой кусок старше причины отказа: она про «взять ещё», а не про возврат', () => {
+  const row = classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part()] }), userId: ME, canClaim: true,
+    blockReason: 'Больше нормы взять нельзя',
+  });
+  assert.equal(row.kind, KIND.MINE_PART);
+});
+
+test('в доборе смена с моим куском по-прежнему предлагается добрать', () => {
+  const row = classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part()] }), userId: ME, postAuctionActive: true,
+  });
+  // Возврат в добор закрыт (аукцион уже не open) — ветка обязана остаться прежней.
+  assert.equal(row.kind, KIND.TOPUP);
+});
+
+test('руководителю смена с чужими кусками остаётся свободной', () => {
+  assert.equal(classifyAuctionLotForPhone({
+    lot: lot({ claim_segments: [part()] }), userId: ME, canManage: true, canClaim: true,
+  }).kind, KIND.FREE);
+});
+
+test('нажатие на свой кусок: лист с возвратом и добором, а без права возврата — день', () => {
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.MINE_PART, releasable: true }), ACTION.PART);
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.MINE_PART }), ACTION.DAY);
+});

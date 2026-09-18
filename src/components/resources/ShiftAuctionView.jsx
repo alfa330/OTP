@@ -810,7 +810,19 @@ const getAuctionLotEffectiveMinuteRange = (lot) => {
 
 const formatAuctionBreaksLabel = (lot) => {
   const breaks = Array.isArray(lot?.breaks) ? lot.breaks : [];
+  // Перерывы вне взятого окна перечислять нельзя: у части смены 08:00–11:00
+  // перерыв 11:15 — уже не её, а часы рядом считаются как раз по окну
+  // (getAuctionLotBreakMinutes), и подпись расходилась бы с числом.
+  const activeRange = getAuctionLotEffectiveMinuteRange(lot);
   const labels = breaks
+    .filter((item) => {
+      if (!activeRange) return true;
+      const start = Number(item?.start || 0);
+      let end = Number(item?.end || 0);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+      if (end <= start) end += 1440;
+      return start < activeRange[1] && activeRange[0] < end;
+    })
     .map((item) => {
       const start = formatAuctionBreakMinute(item?.start);
       const end = formatAuctionBreakMinute(item?.end);
@@ -8064,8 +8076,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   // Время в ячейке — то, что человек получит: у взятой смены фактическое окно
   // (часть уже лота), у добора предложенный кусок, у частично разобранной —
   // первый свободный кусок.
-  const getPhoneLotTimes = (lot, row) => {
+  const getPhoneLotTimes = (lot, row, myClaim = null) => {
     const clock = (value) => String(normalizeClockValue(value) || '').slice(0, 5);
+    // Свой кусок называем своим окном: ни статус лота, ни его post_claim_* про
+    // него не знают — смену мог закрыть коллега, и там стоит ЕГО время.
+    if (row?.kind === AUCTION_PHONE_ROW_KIND.MINE_PART && myClaim?.claimLot) {
+      return [
+        clock(getAuctionLotEffectiveStartTime(myClaim.claimLot)),
+        clock(getAuctionLotEffectiveEndTime(myClaim.claimLot))
+      ];
+    }
     if (lot.status === 'claimed') {
       return [clock(getAuctionLotEffectiveStartTime(lot)), clock(getAuctionLotEffectiveEndTime(lot))];
     }
@@ -8084,7 +8104,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const getPhoneCellLook = (lot, row, hasStarted) => {
     const K = AUCTION_PHONE_ROW_KIND;
     const isPhoneLot = isPhoneAuctionLot(lot);
-    if (row.kind === K.MINE) return { className: 'border-emerald-600 bg-emerald-600 text-white' };
+    // Смена с моим куском — такая же моя, как взятая целиком: цвет один, а о том,
+    // что смена поделена, говорит точка в углу (marker 'parts').
+    if (row.kind === K.MINE || row.kind === K.MINE_PART) {
+      return { className: 'border-emerald-600 bg-emerald-600 text-white' };
+    }
     if (row.kind === K.TAKEN) {
       return { className: isPhoneLot ? 'border-emerald-200 bg-emerald-50 text-emerald-600' : 'border-slate-200 bg-slate-100 text-slate-400' };
     }
@@ -8105,6 +8129,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [AUCTION_PHONE_ROW_KIND.BLOCKED]: 'взять нельзя',
     [AUCTION_PHONE_ROW_KIND.CLOSED]: 'выбор не идёт',
     [AUCTION_PHONE_ROW_KIND.MINE]: 'ваша смена',
+    [AUCTION_PHONE_ROW_KIND.MINE_PART]: 'ваша часть смены',
     [AUCTION_PHONE_ROW_KIND.TAKEN]: 'занята',
     [AUCTION_PHONE_ROW_KIND.FREE]: 'свободна'
   };
@@ -8119,10 +8144,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const buildPhoneCell = (lot) => {
     const { lotKey, row, hasStarted } = getPhoneLotRow(lot);
     if (!row) return null;
-    const [start, end] = getPhoneLotTimes(lot, row);
-    const mine = row.kind === AUCTION_PHONE_ROW_KIND.MINE
-      ? collectMyAuctionDayClaims({ lots: [lot], date: lot.shift_date, userId: user?.id })[0] || null
-      : null;
+    // Своих кусков в одной смене бывает несколько (между ними успел вклиниться
+    // коллега), поэтому берём список, а не первый попавшийся.
+    const mineRows = row.kind === AUCTION_PHONE_ROW_KIND.MINE || row.kind === AUCTION_PHONE_ROW_KIND.MINE_PART
+      ? collectMyAuctionDayClaims({ lots: [lot], date: lot.shift_date, userId: user?.id })
+      : [];
+    const mine = mineRows[0] || null;
+    const [start, end] = getPhoneLotTimes(lot, row, mine);
     // Условие то же, что у кнопки «Вернуть» в карточке дня на компьютере.
     const releasable = Boolean(
       canReleaseFromDayPanel
@@ -8151,6 +8179,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         else if (action === AUCTION_PHONE_CELL_ACTION.PARTIAL) handleClaimLot(lot.id);
         else if (action === AUCTION_PHONE_CELL_ACTION.TOPUP) handleRequestPostAuctionClaim(lot);
         else if (action === AUCTION_PHONE_CELL_ACTION.RELEASE) openReleaseConfirm([mine.claimLot || mine.lot]);
+        else if (action === AUCTION_PHONE_CELL_ACTION.PART) setPhoneCellKey(lotKey);
         else if (action === AUCTION_PHONE_CELL_ACTION.DAY) openPhoneDay(lot.shift_date);
         else setPhoneCellKey(lotKey);
       }
@@ -8236,24 +8265,42 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // Лист смены: что в ней, почему её нельзя взять и «Взять» — если можно.
     const cellLot = phoneCellLot;
     const cellRow = cellLot ? getPhoneLotRow(cellLot).row : null;
-    const [cellStart, cellEnd] = cellLot && cellRow ? getPhoneLotTimes(cellLot, cellRow) : ['', ''];
+    const cellIsMyPart = cellRow?.kind === AUCTION_PHONE_ROW_KIND.MINE_PART;
+    // Свои куски этой смены и свободный остаток: из листа можно и вернуть своё,
+    // и добрать оставшееся — смену не обязательно отдавать целиком.
+    const cellMineRows = cellLot && cellIsMyPart
+      ? collectMyAuctionDayClaims({ lots: [cellLot], date: cellLot.shift_date, userId: user?.id })
+      : [];
+    const cellFreeSegment = cellLot && cellIsMyPart && canClaim
+      && !claimBlockReasonByLotId.get(getAuctionLotActionKey(cellLot))
+      ? auctionPartialClaimOptionsByLotId.get(getAuctionLotActionKey(cellLot))?.recommendedSegment || null
+      : null;
+    const [cellStart, cellEnd] = cellLot && cellRow ? getPhoneLotTimes(cellLot, cellRow, cellMineRows[0]) : ['', ''];
     const cellDayRaw = cellLot ? AUCTION_PHONE_DAY_FORMATTER.format(new Date(`${cellLot.shift_date}T00:00:00`)) : '';
     let cellState = '';
     if (cellRow?.kind === AUCTION_PHONE_ROW_KIND.BLOCKED) {
       cellState = cellRow.reason;
     } else if (cellRow?.kind === AUCTION_PHONE_ROW_KIND.TAKEN) {
       cellState = cellLot.claimed_by_name ? `Занята: ${cellLot.claimed_by_name}` : 'Смена занята';
+    } else if (cellIsMyPart) {
+      // Возврат из листа уходит сразу — значит лист и есть подтверждение, и он
+      // обязан сказать, что именно освободится.
+      cellState = 'Вернёте — свободным станет только ваш кусок, части коллег останутся у них';
     } else if (cellRow?.kind === AUCTION_PHONE_ROW_KIND.CLOSED) {
       if (!isViewingActivePeriod && !selectedViewPostAuctionActive) cellState = 'Просмотр периода: брать смены можно только в активном';
       else if (runtimeStatus === 'scheduled') cellState = 'Аукцион ещё не открылся';
       else if (runtimeStatus === 'paused') cellState = 'Аукцион на паузе';
       else cellState = 'Выбор смен сейчас не идёт';
     }
-    const cellBreakMinutes = cellLot ? getAuctionLotBreakMinutes(cellLot) : 0;
-    const cellBreaksLabel = cellLot ? formatAuctionBreaksLabel(cellLot).replaceAll('-', '–') : '';
+    // Часы, перерывы и подпись своего куска считаются ПО НЕМУ, а не по всей
+    // смене: 09:00–15:00 из 09:00–21:00 — это шесть часов, а не двенадцать.
+    const cellFactsLot = cellIsMyPart && cellMineRows[0] ? cellMineRows[0].claimLot : cellLot;
+    const cellBreakMinutes = cellFactsLot ? getAuctionLotBreakMinutes(cellFactsLot) : 0;
+    const cellBreaksLabel = cellFactsLot ? formatAuctionBreaksLabel(cellFactsLot).replaceAll('-', '–') : '';
     const cellFreeRanges = cellLot ? getAuctionLotFreeRangesLabel(cellLot) : '';
     const cellFacts = cellLot ? [
-      `${formatAuctionHours(getAuctionLotNetMinutes(cellLot))} ч в норму`,
+      `${formatAuctionHours(getAuctionLotNetMinutes(cellFactsLot))} ч в норму`,
+      cellIsMyPart ? `ваша часть смены ${formatAuctionShiftLabel(cellLot).replaceAll('-', '–')}` : '',
       cellBreakMinutes ? `перерыв ${cellBreaksLabel || `${formatAuctionHours(cellBreakMinutes)} ч`}` : '',
       isPhoneAuctionLot(cellLot) ? 'телефонная' : '',
       cellFreeRanges ? `свободно ${cellFreeRanges}` : '',
@@ -8276,12 +8323,33 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           setPhoneCellKey('');
           handleClaimLot(cellLot.id);
         }
-      } : {
+      } : null,
+      // Взятый в ходе аукциона кусок возвращается отсюда же, где человек его и
+      // видит. Своих кусков в смене бывает несколько — у каждого своя строка.
+      ...(cellIsMyPart ? cellMineRows.map((mine) => ({
+        key: `release-${mine.key}`,
+        danger: true,
+        disabled: releasingLotId !== null,
+        label: `Вернуть часть ${formatAuctionLotEffectiveTimeRangeLabel(mine.claimLot)}`,
+        onClick: () => {
+          setPhoneCellKey('');
+          handleReleaseLot(mine.claimLot);
+        }
+      })) : []),
+      cellFreeSegment ? {
+        key: 'take-more',
+        label: `Взять ещё ${cellFreeSegment.start_time}–${cellFreeSegment.end_time}`,
+        onClick: () => {
+          setPhoneCellKey('');
+          handleClaimLot(cellLot.id);
+        }
+      } : null,
+      cellRow.kind === AUCTION_PHONE_ROW_KIND.TAKE ? null : {
         key: 'day',
         label: 'Открыть день',
         onClick: () => openPhoneDay(cellLot.shift_date)
       }
-    ] : [];
+    ].filter(Boolean) : [];
 
     // Экран дня — то, что на сайте даёт карточка дня и «Мои выходные»: переключатель
     // выходного, свои смены с лентой суток и «Вернуть», руководителю — кто что взял.

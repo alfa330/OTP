@@ -107,8 +107,11 @@ class PhoneBranchTests(unittest.TestCase):
 
     def test_own_shift_is_green_like_on_the_site(self):
         """Своя смена в сетке — зелёная ячейка, как на сайте; нажатие на неё
-        открывает лист «Вернуть смену», а в экране дня она в «Моих сменах»."""
-        self.assertIn("if (row.kind === K.MINE) return { className: 'border-emerald-600 bg-emerald-600 text-white' };", VIEW)
+        открывает лист «Вернуть смену», а в экране дня она в «Моих сменах».
+        Смена, в которой мой только КУСОК, красится тем же зелёным — см.
+        PhonePartClaimReleaseTests."""
+        self.assertIn('if (row.kind === K.MINE || row.kind === K.MINE_PART) {', VIEW)
+        self.assertIn("return { className: 'border-emerald-600 bg-emerald-600 text-white' };", VIEW)
         self.assertIn('openReleaseConfirm([mine.claimLot || mine.lot])', VIEW)
 
     def test_return_is_confirmed_by_a_sheet_naming_the_shift(self):
@@ -275,6 +278,63 @@ class PhoneManagerTabsTests(unittest.TestCase):
         self.assertIn('title="Участники"', settings)
         self.assertIn('className={`${iosCard} sa-m-window p-3`}', settings)
         self.assertIn('.sa-m-window > div', CSS)
+
+
+class PhonePartClaimReleaseTests(unittest.TestCase):
+    """Владелец 18.09.2026: «нужно исправить возврат смены во время аукциона
+    смен — чат… данная логика перестала работать, кроме добора».
+
+    Взятая В ХОДЕ аукциона часть смены не закрывает лот: он остаётся
+    `available` с пустым `claimed_by`, иначе остаток пропал бы у остальных. В
+    сетке недели такая смена поэтому выглядела свободной — нажатие звало взять
+    её ещё раз, а «Вернуть» жило только на экране дня, куда без подсказки не
+    заходят. Правило веток — в tests/shift_auction_phone_rows.test.mjs, здесь —
+    что разметка его слушает и что лист делает.
+    """
+
+    @staticmethod
+    def screens_block():
+        return VIEW[VIEW.index('const renderPhoneScreens = () => {'):VIEW.index('const dayDate = activeDayDate;')]
+
+    def test_cell_of_my_part_is_mine_not_free(self):
+        grid = PhoneGridTests.grid_block()
+        # Цвет — тот же, что у взятой целиком: смена с моим куском такая же моя.
+        self.assertIn('if (row.kind === K.MINE || row.kind === K.MINE_PART) {', grid)
+        self.assertIn("[AUCTION_PHONE_ROW_KIND.MINE_PART]: 'ваша часть смены'", VIEW)
+        # Время в ячейке — МОЁ окно: у смены, закрытой коллегой, post_claim_*
+        # хранит его время, а не моё.
+        self.assertIn('if (row?.kind === AUCTION_PHONE_ROW_KIND.MINE_PART && myClaim?.claimLot) {', grid)
+
+    def test_my_parts_are_collected_for_the_cell(self):
+        grid = PhoneGridTests.grid_block()
+        self.assertIn(
+            'row.kind === AUCTION_PHONE_ROW_KIND.MINE || row.kind === AUCTION_PHONE_ROW_KIND.MINE_PART',
+            grid,
+        )
+        # Своих кусков в одной смене бывает несколько — берём список целиком.
+        self.assertIn('const mine = mineRows[0] || null;', grid)
+        self.assertIn('else if (action === AUCTION_PHONE_CELL_ACTION.PART) setPhoneCellKey(lotKey);', grid)
+
+    def test_sheet_returns_the_part_and_lets_take_the_rest(self):
+        screens = self.screens_block()
+        self.assertIn('label: `Вернуть часть ${formatAuctionLotEffectiveTimeRangeLabel(mine.claimLot)}`', screens)
+        self.assertIn('handleReleaseLot(mine.claimLot)', screens)
+        # Возврат уходит по нажатию, поэтому лист обязан сказать последствие.
+        self.assertIn('Вернёте — свободным станет только ваш кусок', screens)
+        # Смену не обязательно отдавать целиком: остаток можно добрать отсюда же.
+        self.assertIn('label: `Взять ещё ${cellFreeSegment.start_time}–${cellFreeSegment.end_time}`', screens)
+        self.assertIn("disabled: releasingLotId !== null", screens)
+
+    def test_hours_and_breaks_of_a_part_are_counted_by_the_part(self):
+        screens = self.screens_block()
+        self.assertIn('const cellFactsLot = cellIsMyPart && cellMineRows[0] ? cellMineRows[0].claimLot : cellLot;', screens)
+        self.assertIn('getAuctionLotNetMinutes(cellFactsLot)', screens)
+        self.assertIn('getAuctionLotBreakMinutes(cellFactsLot)', screens)
+        # Перерыв вне взятого окна — не мой: подпись обязана совпасть с часами.
+        label = VIEW[VIEW.index('const formatAuctionBreaksLabel = (lot) => {'):]
+        label = label[:label.index('const getAuctionLotDurationMinutes')]
+        self.assertIn('const activeRange = getAuctionLotEffectiveMinuteRange(lot);', label)
+        self.assertIn('return start < activeRange[1] && activeRange[0] < end;', label)
 
 
 if __name__ == '__main__':
