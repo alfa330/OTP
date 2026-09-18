@@ -62,7 +62,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.17"
+VERSION = "1.0.18"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -972,15 +972,49 @@ def shortcut_path() -> Path:
     return desktop_dir() / "Oktell.lnk"
 
 
+def icon_path() -> Path:
+    return app_dir() / "icore.ico"
+
+
+def ensure_icon_file() -> Optional[Path]:
+    """Разложить значок рядом с программой и вернуть путь к нему.
+
+    Значок есть и внутри exe, но ярлык на него ссылаться НЕ должен. Проводник
+    кэширует картинку по строке `<путь>,<индекс>`, а она у ярлыка не менялась с
+    самой первой установки — значит на всех уже работающих машинах он так и
+    показывал бы старую, сколько exe ни обновляй. Отдельный файл даёт новую
+    строку, и картинка обновляется у всех разом. Заодно уходит гонка: при
+    обновлении exe на секунды исчезает, и Проводник, спросив значок ровно в этот
+    момент, запоминает замок «файл недоступен» — именно это и было видно.
+    """
+    if not IS_WINDOWS:
+        return None
+    target = icon_path()
+    source = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "icore.ico"
+    try:
+        if not source.exists():
+            return target if target.exists() else None
+        if not target.exists() or target.stat().st_size != source.stat().st_size:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            logging.info("Значок разложен: %s", target)
+        return target
+    except Exception:  # noqa: BLE001 — без значка программа работает, ярлык просто серый
+        logging.debug("Значок разложить не удалось", exc_info=True)
+        return target if target.exists() else None
+
+
 def _create_shortcut(target: Path) -> bool:
     """Ярлык «Oktell» на рабочем столе: сотрудник открывает Oktell через него,
     и окно сразу управляемое."""
     if not IS_WINDOWS:
         return False
+    icon = ensure_icon_file()
+    icon_location = f"{icon},0" if icon else f"{target},0"
     script = (
         f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({_ps_quote(shortcut_path())});"
         f"$s.TargetPath={_ps_quote(target)};$s.Arguments='--open';"
-        f"$s.IconLocation={_ps_quote(f'{target},0')};$s.Description='Oktell';$s.Save()"
+        f"$s.IconLocation={_ps_quote(icon_location)};$s.Description='Oktell';$s.Save()"
     )
     return _run_hidden(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
 
@@ -3838,6 +3872,13 @@ def run_agent(cfg: dict) -> int:
         return 0
     setup_logging(cfg, "agent.log")
     cleanup_old_binary()
+    # Обновление меняет только exe, ярлык остаётся прежним — значит после
+    # перехода на новую версию его надо один раз переписать, иначе значок у уже
+    # работающих машин так и останется старым из кэша Проводника. Признак «ещё
+    # не переписывали» — отсутствие файла значка рядом с программой.
+    if IS_WINDOWS and is_installed_copy() and not icon_path().exists():
+        if ensure_icon_file() and shortcut_path().exists():
+            logging.info("Значок ярлыка обновлён: %s", _create_shortcut(installed_path()))
     cfg = wait_for_valid_config(cfg)
     if cfg.get("_token_error"):
         logging.error("Токен агента не применён: %s. Задай токен латиницей и пересобери.",

@@ -41,8 +41,13 @@ REM видит его на ярлыке, в панели задач и в «Пр
 REM наши программы должны выглядеть одной семьёй. Без --icon PyInstaller ставит
 REM свой, и ярлык «Oktell» на рабочем столе читается как чужая программа —
 REM ярлык берёт значок из самого exe (IconLocation=<exe>,0).
+REM --add-data кладёт тот же .ico ВНУТРЬ сборки: программа раскладывает его
+REM рядом с собой, и ярлык ссылается на файл, а не на exe. Проводник кэширует
+REM картинку по строке пути, и у ярлыка она не менялась с первой установки —
+REM значит значок в exe сам по себе до уже работающих машин не доехал бы.
 python -m PyInstaller --onefile --noconsole --name OktellRecallGuard ^
   --icon icore.ico ^
+  --add-data "icore.ico;." ^
   --hidden-import websocket ^
   --hidden-import win32gui ^
   --hidden-import _build_token ^
