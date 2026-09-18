@@ -223,6 +223,9 @@ OPERATOR_STATE = {
     "binotel_cabinet_login": "", "binotel_employee_id": "", "binotel_cabinet_url": "",
     "direction_id": None, "direction_name": "",
     "has_binotel_cabinet_password": False,
+    # Учётка кабинета Oktell — у отделов локальной АТС. Пароль наружу не
+    # отдаётся никогда, поэтому в строке сотрудника только логин и признак.
+    "oktell_cabinet_login": "", "has_oktell_cabinet_password": False,
 }
 
 
@@ -584,8 +587,14 @@ class SaveUserSipSettingsTests(unittest.TestCase):
             columns[30].endswith("AS department_auto_answer_delay"), columns[30])
         self.assertTrue(columns[32].endswith("AS direction_id"), columns[32])
         self.assertTrue(columns[33].endswith("AS direction_name"), columns[33])
+        # Признак пароля Binotel когда-то был последним; учётка Oktell дописана
+        # ПОСЛЕ него, а не на его место — именно так и положено расти этому
+        # SELECT'у. Проверяем обоих: уедет любой — маппер начнёт читать соседа.
         self.assertTrue(
-            columns[-1].endswith("AS has_binotel_cabinet_password"), columns[-1])
+            columns[34].endswith("AS has_binotel_cabinet_password"), columns[34])
+        self.assertTrue(columns[35].endswith("AS oktell_cabinet_login"), columns[35])
+        self.assertTrue(
+            columns[-1].endswith("AS has_oktell_cabinet_password"), columns[-1])
 
     def test_the_auto_answer_columns_are_read_raw_and_not_collapsed(self):
         """COALESCE(s.auto_answer, FALSE) схлопнул бы «как у отдела» с «выключено».
@@ -619,13 +628,21 @@ class SaveUserSipSettingsTests(unittest.TestCase):
 
         Список операторов видит каждый глава отдела и СВ ОП; сам пароль от
         кабинета Binotel — это доступ к настройкам телефонии всей компании,
-        и в выборку раздела он попадать не должен ни в каком виде.
+        и в выборку раздела он попадать не должен ни в каком виде. Пароль
+        кабинета Oktell — ровно та же история: им клиент входит в АТС за
+        оператора, и в списке из полутора сотен строк ему делать нечего.
+
+        Место признака в SELECT здесь не проверяем — за порядок колонок
+        отвечает test_new_columns_are_appended_and_never_wedged_into_the_middle;
+        два теста с одним утверждением разъезжаются при первой же правке.
         """
         select = self.ns["_SIP_OPERATOR_SELECT"]
         columns = _select_columns(select)
-        self.assertTrue(all("b.cabinet_password" not in c
-                            for c in columns if "IS NOT NULL" not in c), columns)
-        self.assertIn("(NULLIF(b.cabinet_password, '') IS NOT NULL)", columns[-1])
+        for secret in ("b.cabinet_password", "ok.cabinet_password"):
+            self.assertTrue(all(secret not in c
+                                for c in columns if "IS NOT NULL" not in c), columns)
+            self.assertTrue(any("(NULLIF(%s, '') IS NOT NULL)" % secret in c
+                                for c in columns), columns)
 
     def test_sip_login_is_forced_empty_on_a_local_pbx(self):
         """У локальной АТС логин и есть номер — отдельное поле там только мусор.
@@ -2754,3 +2771,208 @@ class BinotelCommonTabFrontendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OktellCabinetStorageTests(unittest.TestCase):
+    """Учётка кабинета Oktell в карточке «Таксопарков».
+
+    Зачем она в базе: клиент Oktell раздаётся с нашего сайта и входит в АТС ЗА
+    оператора — тот вводит только свою учётку iCORE. Значит пара «логин +
+    пароль» живёт на сервере, оператор её не знает, и потерять её молча нельзя.
+    """
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "save_user_sip_settings", "_mask_sip_secret", "_sip_operator_row",
+            "normalize_sip_domain",
+        })
+        self.db = _StubDb(self.ns)
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.current = dict(OPERATOR_STATE)
+        self.db.get_sip_operator = lambda user_id: dict(self.current)
+        self.db.get_sip_config = _no_common_tier
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+        self.db.find_sip_login_owner = lambda sip_login, exclude_user_ids=None: None
+
+    def _save(self, payload):
+        return self.ns["save_user_sip_settings"](self.db, 41, payload, changed_by=7)
+
+    def _call(self, marker):
+        return next((c for c in self.db.cursor.calls if marker in c[0]), None)
+
+    def test_the_cabinet_is_written_with_both_halves(self):
+        self._save({"oktell_cabinet_login": "6612", "oktell_cabinet_password": "secret"})
+        call = self._call("INSERT INTO oktell_user_accounts")
+        self.assertIsNotNone(call)
+        self.assertEqual((41, "6612", "secret", 7), call[1])
+
+    def test_an_empty_password_does_not_erase_the_stored_one(self):
+        """Пустое поле значит «оставить прежний», а не «стереть».
+
+        Иначе сохранение карточки ради SIP-номера выбивало бы оператора из АТС,
+        и узнал бы он об этом на смене — пароля-то он не знает.
+        """
+        self.current["oktell_cabinet_login"] = "6612"
+        self._save({"oktell_cabinet_login": "6613", "oktell_cabinet_password": ""})
+        sql, params = self._call("INSERT INTO oktell_user_accounts")
+        self.assertIn("COALESCE(", sql)
+        self.assertIn("NULLIF(EXCLUDED.cabinet_password, '')", sql)
+        self.assertIn("oktell_user_accounts.cabinet_password", sql)
+        self.assertEqual("", params[2])
+
+    def test_an_unchanged_cabinet_writes_nothing(self):
+        """Тот же логин и пустой пароль — это не правка, и истории здесь взяться неоткуда."""
+        self.current["oktell_cabinet_login"] = "6612"
+        self._save({"oktell_cabinet_login": "6612", "oktell_cabinet_password": ""})
+        self.assertIsNone(self._call("INSERT INTO oktell_user_accounts"))
+        self.assertIsNone(self._call("INSERT INTO sip_config_history"))
+
+    def test_a_new_password_alone_is_a_change(self):
+        """Замена пароля при том же логине обязана дойти до базы."""
+        self.current["oktell_cabinet_login"] = "6612"
+        self._save({"oktell_cabinet_login": "6612", "oktell_cabinet_password": "new"})
+        self.assertIsNotNone(self._call("INSERT INTO oktell_user_accounts"))
+
+    def test_the_password_never_reaches_the_history(self):
+        """В историю идёт факт замены, а не сам пароль: её читает весь раздел."""
+        self._save({"oktell_cabinet_login": "6612", "oktell_cabinet_password": "secret"})
+        _, params = self._call("INSERT INTO sip_config_history")
+        snapshot = json.loads(params[2])
+        self.assertEqual("6612", snapshot["oktell_cabinet_login"])
+        self.assertTrue(snapshot["oktell_cabinet_password_set"])
+        self.assertNotIn("secret", params[2])
+
+    def test_the_cabinet_is_ignored_but_not_wiped_on_binotel(self):
+        """У Теза кабинета Oktell нет — но и стирать его нельзя.
+
+        Отдел могли перевести с одной АТС на другую и обратно; по возвращении
+        учётка обязана остаться прежней, иначе её пришлось бы заводить заново
+        всему отделу.
+        """
+        self.current.update({"department_provider": "binotel",
+                             "oktell_cabinet_login": "6612"})
+        self._save({"oktell_cabinet_login": "", "oktell_cabinet_password": "other"})
+        self.assertIsNone(self._call("INSERT INTO oktell_user_accounts"))
+
+
+class OktellAccountTests(unittest.TestCase):
+    """get_oktell_account — то, что уезжает в клиент Oktell вместе с паролем."""
+
+    def setUp(self):
+        self.ns = _database_namespace({"get_oktell_account"})
+
+    def _call(self, rows):
+        db = _StubDb(self.ns, _FakeCursor(rows))
+        return self.ns["get_oktell_account"](db, 41), db.cursor.calls
+
+    def test_the_pair_is_returned_for_the_client(self):
+        account, calls = self._call([("6612", "secret")])
+        self.assertEqual({"cabinet_login": "6612", "cabinet_password": "secret"}, account)
+        self.assertEqual((41,), calls[0][1])
+
+    def test_no_login_means_no_account(self):
+        """Строка-заготовка от апсерта — это ещё не выданная учётка."""
+        self.assertIsNone(self._call([("", "secret")])[0])
+        self.assertIsNone(self._call([])[0])
+
+
+class OktellAccountEndpointTests(unittest.TestCase):
+    """Ручка, которой клиент Oktell меняет учётку iCORE на учётку АТС."""
+
+    def setUp(self):
+        self.source = _read(BOT_PATH)
+        self.module = source_cache.parse(self.source)
+
+    def _function(self, name):
+        node = next(n for n in self.module.body
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+        return ast.get_source_segment(self.source, node)
+
+    def test_the_route_exists(self):
+        self.assertIn(
+            "@app.route('/api/operator/oktell_account', methods=['GET', 'OPTIONS'])",
+            self.source)
+
+    def test_it_answers_only_about_the_caller(self):
+        """Учётку отдаём тому, кто пришёл с токеном, и никому другому.
+
+        Параметра «чья учётка» у ручки нет намеренно: появись он — любой
+        залогиненный оператор читал бы пароли АТС всего колл-центра.
+        """
+        body = self._function('operator_oktell_account_endpoint')
+        self.assertIn('_get_authenticated_requester', body)
+        self.assertIn('db.get_oktell_account(requester_id)', body)
+        self.assertNotIn('target_user_id', body)
+
+    def test_a_missing_account_is_a_409_with_a_human_answer(self):
+        """Текст читает оператор на экране входа, а заводит учётку не он."""
+        body = self._function('operator_oktell_account_endpoint')
+        self.assertIn('409', body)
+        self.assertIn('Обратитесь к руководителю', body)
+
+    def test_it_does_not_ride_on_the_phone_settings_endpoint(self):
+        """Отдельной ручкой, а не полем в /api/operator/sip_settings.
+
+        Та отвечает 409-м, пока у отдела не заполнены SIP-сервер и база пароля,
+        — а у СЗоВ, ради которого всё и делается, своей строки настроек нет
+        вовсе, и клиент Oktell упирался бы в чужую незаполненность.
+        """
+        settings = self._function('operator_sip_settings_endpoint')
+        self.assertNotIn('oktell', settings)
+
+
+class SipDepartmentGateFrontendTests(unittest.TestCase):
+    """«Таксопарки» не показывают людей, пока не выбран отдел."""
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+
+    def test_the_gate_lives_only_in_the_local_pbx_section(self):
+        """В «Тезе» отдел ровно один — там гейт был бы щелчком на пустом месте."""
+        self.assertIn("const requiresDepartment = !isBinotel;", self.view)
+
+    def test_there_is_no_all_departments_option_behind_the_gate(self):
+        """«Все отделы» — это и есть та лента на полторы сотни человек."""
+        self.assertIn("label: 'Выберите отдел'", self.view)
+        self.assertIn("requiresDepartment\n                                    ? [{ value: '', label: 'Выберите отдел' }",
+                      self.view)
+
+    def test_the_empty_state_tells_what_to_do(self):
+        """Пустой экран без объяснения читается как сломанная загрузка."""
+        self.assertIn("requiresDepartment && !departmentFilter ?", self.view)
+        self.assertIn("Выберите отдел", self.view)
+
+    def test_a_single_department_is_chosen_for_the_viewer(self):
+        """У главы отдела и СВ область видимости одна — выбор без выбора не нужен."""
+        self.assertIn("if (departmentOptions.length === 1) setDepartmentFilter(", self.view)
+
+
+class OktellCabinetFrontendTests(unittest.TestCase):
+    """Блок «Кабинет Oktell» в карточке сотрудника «Таксопарков»."""
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+
+    def test_the_block_is_hidden_behind_a_button(self):
+        """Кабинет заведён не всем отделам локальной АТС: пустая пара на каждой
+        карточке — шум, а шум владелец считает браком."""
+        self.assertIn("setOktellOpen((v) => !v)", self.view)
+        self.assertIn("Кабинет Oktell", self.view)
+
+    def test_a_filled_cabinet_opens_itself(self):
+        """Иначе заполненная учётка пряталась бы за кнопкой и читалась как пустая."""
+        self.assertIn("setOktellOpen(Boolean(op?.oktell_cabinet_login || op?.has_oktell_cabinet_password))",
+                      self.view)
+
+    def test_the_password_is_write_only(self):
+        """Пароль наружу не отдаётся — в карточке только признак и «Заменить»."""
+        self.assertIn("editing?.has_oktell_cabinet_password && !replacingOktellPassword", self.view)
+        self.assertIn("setReplacingOktellPassword(true)", self.view)
+        self.assertIn("oktell_cabinet_password: '',", self.view)
+
+    def test_the_pair_is_sent_only_by_the_local_pbx_form(self):
+        """У Теза этих полей нет вовсе — отправлять их оттуда значит врать бэкенду."""
+        payload = self.view.split("const operatorPayload = () => (isBinotel", 1)[1]
+        binotel, local = payload.split("        : {", 1)
+        self.assertNotIn("oktell_cabinet_login", binotel)
+        self.assertIn("oktell_cabinet_login: form.oktell_cabinet_login", local)

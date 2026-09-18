@@ -118,6 +118,8 @@ const EMPTY_FORM = {
     // Поля Binotel: логин у провайдера и учётка кабинета my.binotel.kz.
     sip_login: '', binotel_cabinet_login: '', binotel_cabinet_password: '',
     binotel_employee_id: '', binotel_cabinet_url: '',
+    // Учётка кабинета Oktell — у отделов локальной АТС («Таксопарки»).
+    oktell_cabinet_login: '', oktell_cabinet_password: '',
 };
 
 // Массово меняются пароль, домен и вход в FOP2: номера у каждого свои.
@@ -191,6 +193,11 @@ const formFromOperator = (op) => ({
     binotel_cabinet_password: '',
     binotel_employee_id: op?.binotel_employee_id ? String(op.binotel_employee_id) : '',
     binotel_cabinet_url: op?.binotel_cabinet_url || '',
+    oktell_cabinet_login: op?.oktell_cabinet_login || '',
+    // Пароль кабинета Oktell — по тому же правилу, что и у Binotel: наружу его
+    // не отдают никогда, поэтому поле всегда стартует пустым, а пустое значит
+    // «оставить прежний».
+    oktell_cabinet_password: '',
 });
 
 const hasPersonalPassword = (op) => Boolean(op?.sip_password || op?.autodial_password);
@@ -334,6 +341,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     // Пароль кабинета Binotel — только на запись: пока его не собираются менять,
     // поля вообще нет, иначе пустое поле читалось бы как «пароля нет».
     const [replacingCabinetPassword, setReplacingCabinetPassword] = useState(false);
+    // Кабинет Oktell: тот же приём «пароль только на запись», и отдельная
+    // раскрывашка — у отделов локальной АТС кабинет есть не у всех, а поле,
+    // которое никто не заполняет, на карточке лишнее.
+    const [replacingOktellPassword, setReplacingOktellPassword] = useState(false);
+    const [oktellOpen, setOktellOpen] = useState(false);
     const [resolvingEmployee, setResolvingEmployee] = useState(false);
 
     // Множественный выбор: Ctrl/⌘ + клик — по одному, Shift + клик — диапазон.
@@ -504,6 +516,21 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         });
         return [...seen.entries()].map(([value, label]) => ({ value, label }));
     }, [operators]);
+
+    /* Пока отдел не выбран, список сотрудников в «Таксопарках» не показываем.
+       Причина простая: на локальной АТС сидят почти все отделы разом — СЗоВ,
+       продажи, фронт-офисы, маркетинг, кадры, бухгалтерия, — и открытый
+       раздел встречал руководителя лентой на полторы сотни человек, в которой
+       своих надо было выискивать. В «Тезе» отдел ровно один, и там такой
+       гейт был бы лишним щелчком на пустом месте. */
+    const requiresDepartment = !isBinotel;
+
+    // Единственный доступный отдел выбираем сами: у главы отдела и супервайзера
+    // область видимости и так одна, и требовать от них выбор без выбора незачем.
+    useEffect(() => {
+        if (!requiresDepartment || departmentFilter) return;
+        if (departmentOptions.length === 1) setDepartmentFilter(departmentOptions[0].value);
+    }, [requiresDepartment, departmentFilter, departmentOptions]);
 
     // Направления собираем из самих строк, а не из справочника: так список
     // бесплатно уважает область видимости запросившего (глава отдела, СВ) и не
@@ -727,6 +754,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         setForm(formFromOperator(op));
         setShowAdvanced(hasPersonalParams(op));
         setReplacingCabinetPassword(false);
+        setReplacingOktellPassword(false);
+        // Раскрыто у того, у кого учётка уже есть: иначе заполненный кабинет
+        // прятался бы за кнопкой и выглядел как незаполненный.
+        setOktellOpen(Boolean(op?.oktell_cabinet_login || op?.has_oktell_cabinet_password));
     };
 
     const closeEditor = () => {
@@ -734,6 +765,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         setForm({ ...EMPTY_FORM });
         setShowAdvanced(false);
         setReplacingCabinetPassword(false);
+        setReplacingOktellPassword(false);
+        setOktellOpen(false);
     };
 
     // Отправляем только те поля, которые у провайдера вообще есть. Лишние бэкенд
@@ -859,6 +892,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             autodial_domain: form.autodial_domain,
             fop2_enabled: form.fop2_enabled,
             ...autoAnswerPayload(),
+            oktell_cabinet_login: form.oktell_cabinet_login,
+            // Пусто = «не менять», как и у кабинета Binotel: пересохранение
+            // карточки ради номера не должно стирать человеку доступ в АТС.
+            oktell_cabinet_password: form.oktell_cabinet_password,
         });
 
     const saveOperator = async () => {
@@ -1156,14 +1193,19 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 className={`${iosInput} w-56 pl-9`}
                             />
                         </div>
-                        {departmentOptions.length > 1 && (
+                        {(requiresDepartment || departmentOptions.length > 1) && (
                             <CustomSelect
                                 className="w-48"
                                 variant="ios"
                                 value={departmentFilter}
                                 onChange={setDepartmentFilter}
                                 ariaLabel="Отдел"
-                                options={[{ value: '', label: 'Все отделы' }, ...departmentOptions]}
+                                /* В «Таксопарках» пункта «Все отделы» нет намеренно: он
+                                   и есть та самая лента на полторы сотни человек, ради
+                                   которой ставили гейт. */
+                                options={requiresDepartment
+                                    ? [{ value: '', label: 'Выберите отдел' }, ...departmentOptions]
+                                    : [{ value: '', label: 'Все отделы' }, ...departmentOptions]}
                             />
                         )}
                         {/* Направление — рабочая ось там, где отдел один: в Тезе
@@ -1218,6 +1260,19 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 loading ? (
                     <div className="flex items-center justify-center py-16 text-slate-400">
                         <FaIcon className="fas fa-spinner fa-spin mr-2" /> Загрузка…
+                    </div>
+                ) : requiresDepartment && !departmentFilter ? (
+                    /* Не «ничего не найдено»: искать ещё нечего. Говорим, что
+                       сделать, и сколько отделов на выбор — иначе пустой экран
+                       читается как сломанная загрузка. */
+                    <div className={`${iosCard} flex flex-col items-center justify-center py-16 text-slate-400`}>
+                        <FaIcon className="fas fa-building mb-2" style={{ width: 28, height: 28 }} />
+                        <p className="text-[13px] text-slate-500">Выберите отдел</p>
+                        <p className="mt-1 text-[11.5px]">
+                            {departmentOptions.length
+                                ? `Сотрудники появятся после выбора — отделов на локальной АТС ${departmentOptions.length}`
+                                : 'Отделов на локальной АТС пока нет'}
+                        </p>
                     </div>
                 ) : filtered.length === 0 ? (
                     <div className={`${iosCard} flex flex-col items-center justify-center py-16 text-slate-400`}>
@@ -2347,6 +2402,80 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         </section>
 
                         {autoAnswerSection}
+
+                        {/* Учётка АТС, которой клиент Oktell входит ЗА оператора: тот
+                            вводит свою учётку iCORE, а логин и пароль кабинета
+                            подставляет сервер. Под кнопкой, как персональные пароль и
+                            домен: на локальной АТС кабинет заведён не всем отделам, и
+                            пустая пара на каждой карточке была бы шумом. */}
+                        <section className="space-y-1.5">
+                            <button
+                                type="button"
+                                onClick={() => setOktellOpen((v) => !v)}
+                                className="flex w-full items-center justify-between rounded-xl px-1 py-1 text-left"
+                            >
+                                <span className={iosGroupLabel}>Кабинет Oktell</span>
+                                <span className="flex items-center gap-2">
+                                    {editing?.has_oktell_cabinet_password && !oktellOpen && (
+                                        <IosBadge tone="green">Выдан</IosBadge>
+                                    )}
+                                    <FaIcon className={`fas ${oktellOpen ? 'fa-chevron-up' : 'fa-chevron-down'} text-slate-400`} style={{ width: 12, height: 12 }} />
+                                </span>
+                            </button>
+                            {oktellOpen && (
+                                <div className={`${iosCard} space-y-3 p-4`}>
+                                    <p className="text-[11.5px] leading-relaxed text-slate-500">
+                                        Этой парой клиент Oktell входит за оператора: сам он вводит
+                                        только свою учётку iCORE. Заменить пароль можно здесь —
+                                        переустанавливать клиент не нужно.
+                                    </p>
+                                    <div>
+                                        <label className="text-[12.5px] font-medium text-slate-600">Логин кабинета</label>
+                                        <input
+                                            type="text"
+                                            value={form.oktell_cabinet_login}
+                                            onChange={(e) => setForm((f) => ({ ...f, oktell_cabinet_login: e.target.value }))}
+                                            placeholder="логин оператора в Oktell"
+                                            autoComplete="off"
+                                            disabled={!canEdit}
+                                            className={`${iosInput} mt-1 font-mono`}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-[12.5px] font-medium text-slate-600">Пароль кабинета</label>
+                                        {editing?.has_oktell_cabinet_password && !replacingOktellPassword ? (
+                                            // Пароль наружу не отдаётся никогда — показываем только
+                                            // признак. Пустое поле рядом с «задан» читалось бы как
+                                            // «пароля нет», и его бы завели заново поверх рабочего.
+                                            <div className="mt-1 flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
+                                                <IosBadge tone="green">Задан</IosBadge>
+                                                {canEdit && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setReplacingOktellPassword(true)}
+                                                        className={iosBtnSecondary}
+                                                    >
+                                                        <FaIcon className="fas fa-pen" />
+                                                        Заменить
+                                                    </button>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="mt-1">
+                                                <SecretInput
+                                                    value={form.oktell_cabinet_password}
+                                                    onChange={(v) => setForm((f) => ({ ...f, oktell_cabinet_password: v }))}
+                                                    placeholder={editing?.has_oktell_cabinet_password
+                                                        ? 'пусто — оставить прежний'
+                                                        : 'пароль от кабинета Oktell'}
+                                                    disabled={!canEdit}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </section>
 
                         {/* Персональные пароль/домен нужны редко — держим под кнопкой */}
                         <section className="space-y-1.5">

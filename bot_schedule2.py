@@ -28099,6 +28099,41 @@ def operator_sip_settings_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/operator/oktell_account', methods=['GET', 'OPTIONS'])
+@require_api_key
+def operator_oktell_account_endpoint():
+    """Логин и пароль кабинета Oktell для клиента АТС, раздаваемого с нашего сайта.
+
+    Оператор вводит в клиенте учётку iCORE, клиент приходит сюда с её токеном и
+    получает учётку АТС. Смысл ровно в этом: пароль Oktell оператор не знает и
+    знать не должен — его заводит руководитель в «Настройках SIP», а меняется он
+    без переустановки клиента.
+
+    Отдельной ручкой, а не полем в /api/operator/sip_settings: та отвечает
+    409-м, пока у отдела не заполнены SIP-сервер и база пароля, — а у СЗоВ,
+    ради которого всё и делается, своей строки настроек нет вовсе, и клиент
+    Oktell упирался бы в чужую незаполненность.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        account = db.get_oktell_account(requester_id)
+        if not account or not account.get('cabinet_password'):
+            # Текст читает оператор на экране входа, поэтому он про действие, а
+            # не про поля: заводит учётку не он.
+            return jsonify({
+                "error": "Учётная запись Oktell вам ещё не выдана. Обратитесь к руководителю."
+            }), 409
+        return jsonify({"status": "success", "account": account}), 200
+    except Exception as e:
+        logging.error(f"Error in operator oktell_account: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 # ───────────────────── iCORE Phone: раздача и автообновление ──────────────────
 # Дистрибутив телефона лежит в GCS, метаданные — в icore_phone_releases. Схема
 # намеренно повторяет раздел «Ограничитель Перезвона»: задача та же — отдать
