@@ -310,6 +310,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         Разбираем ЗДЕСЬ, а не отдаём строку постгресу: невнятная дата уронила
         бы запрос пятисоткой, и автор увидел бы «внутренняя ошибка» вместо
         поля, которое надо поправить.
+
+        ПОЛНОЧЬ СЧИТАЕМ КОНЦОМ ДНЯ. «Действует до 18.09» человек читает как «весь
+        18-е», а поле `datetime-local`, в котором тронули только дату, отдаёт
+        `18.09 00:00` — то есть НАЧАЛО дня. 18.09.2026 на этом и сгорели четыре
+        объявления подряд (#7–#10): выпущенные вечером, они истекли за 22 часа до
+        собственной публикации и не показались никому и нигде, молча. Кому нужна
+        ровно полночь, ставит 00:01 — цена этого выбора несравнима с тишиной.
         """
         if not value:
             return None
@@ -318,10 +325,28 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return None
         for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
             try:
-                return datetime.strptime(text[:len(fmt) + 4], fmt)
+                parsed = datetime.strptime(text[:len(fmt) + 4], fmt)
             except ValueError:
                 continue
+            if (parsed.hour, parsed.minute, parsed.second) == (0, 0, 0):
+                return parsed.replace(hour=23, minute=59, second=59)
+            return parsed
         return None
+
+    def _expiry_refusal(expires_at, publishing):
+        """Отказ, если объявление выпускают уже просроченным.
+
+        Такое объявление не показывается НИКОМУ и НИГДЕ — ни в портале, ни в
+        окне агента, — и автор об этом не узнаёт: в списке оно «опубликовано».
+        Молчать здесь нельзя: тишина неотличима от поломки, и 18.09.2026 её
+        именно так и искали — в агенте, в канале и в правах.
+        """
+        if not publishing or expires_at is None:
+            return None
+        if expires_at > datetime.now():
+            return None
+        return ("Срок показа уже истёк — объявление не увидит никто. "
+                "Поправьте «действует до» или очистите поле.")
 
     def _may_read_post(ctx, post):
         """Вправе ли человек ОТКРЫТЬ карточку новости и её журнал.
@@ -765,6 +790,9 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if _pass_ready(cursor):
             queries.set_passes(cursor, post_id=post_id, **passes)
         if payload.get('publish'):
+            refusal = _expiry_refusal(_get_post(cursor, post_id)['expires_at'], True)
+            if refusal:
+                return jsonify({"error": refusal, "code": "NEWS_EXPIRED"}), 400
             queries.publish_post(cursor, post_id=post_id,
                                  audience_max_role_level=ctx['ceiling'])
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id))), 201
@@ -909,6 +937,9 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         refusal = _audience_refusal(cursor, ctx, rules, space_id=post.get('space_id'))
         if refusal:
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
+        refusal = _expiry_refusal(post['expires_at'], True)
+        if refusal:
+            return jsonify({"error": refusal, "code": "NEWS_EXPIRED"}), 400
         queries.publish_post(cursor, post_id=post_id,
                              audience_max_role_level=ctx['ceiling'])
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))

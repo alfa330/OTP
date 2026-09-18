@@ -1527,5 +1527,61 @@ class NewsChannelTests(unittest.TestCase):
         self.assertIn('{channelLocked ? (', form)
 
 
+class NewsExpiryTests(unittest.TestCase):
+    """«Действует до» — поле, на котором 18.09.2026 молча сгорели четыре
+    объявления подряд (#7–#10): выпущенные вечером, они истекли за 22 часа до
+    собственной публикации и не показались никому и нигде. Искали причину в
+    агенте, в канале доставки и в правах — а она была в дате."""
+
+    @staticmethod
+    def _timestamp_parser():
+        """Достаём _timestamp_or_none из замыкания фабрики и выполняем как есть.
+
+        Ходить ради него в базу и поднимать Flask незачем: функция чистая, а
+        читать её глазами — ровно то, из-за чего дефект и дожил до прода.
+        """
+        from datetime import datetime as real_datetime
+
+        tree = ast.parse(_read('news', 'routes.py'))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == '_timestamp_or_none':
+                namespace = {'datetime': real_datetime}
+                exec(compile(ast.Module([node], []), '<timestamp>', 'exec'), namespace)
+                return namespace['_timestamp_or_none']
+        raise AssertionError('_timestamp_or_none не найден в news/routes.py')
+
+    def test_a_bare_date_means_the_whole_day_not_its_first_second(self):
+        """Поле `datetime-local`, в котором тронули только дату, отдаёт 00:00 —
+        то есть НАЧАЛО дня. «Действует до 18.09» человек читает как «весь 18-е»."""
+        parse = self._timestamp_parser()
+        self.assertEqual(str(parse('2026-09-18T00:00')), '2026-09-18 23:59:59')
+        self.assertEqual(str(parse('2026-09-18')), '2026-09-18 23:59:59')
+
+    def test_a_time_typed_on_purpose_is_left_alone(self):
+        parse = self._timestamp_parser()
+        self.assertEqual(str(parse('2026-09-18T15:30')), '2026-09-18 15:30:00')
+        self.assertEqual(str(parse('2026-09-18T00:01')), '2026-09-18 00:01:00')
+        self.assertIsNone(parse(''))
+        self.assertIsNone(parse('не дата'))
+
+    def test_publishing_something_already_expired_is_refused(self):
+        """Просроченное объявление не видит НИКТО и НИГДЕ, а в списке оно стоит
+        «опубликовано». Тишина неотличима от поломки — отказываем словами."""
+        source = _read('news', 'routes.py')
+        self.assertIn('def _expiry_refusal(', source)
+        self.assertIn('NEWS_EXPIRED', source)
+        # Обе двери публикации: и создание с publish=true, и отдельная кнопка.
+        self.assertEqual(source.count('"code": "NEWS_EXPIRED"'), 2)
+        body = source.split('def _expiry_refusal(', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('if not publishing or expires_at is None:', body)
+
+    def test_a_draft_may_keep_any_date(self):
+        """Отказ только на публикации: черновику дата в прошлом не мешает —
+        автор как раз и сохраняет его, чтобы её поправить."""
+        source = _read('news', 'routes.py')
+        body = source.split('def _expiry_refusal(', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn('not publishing', body)
+
+
 if __name__ == '__main__':
     unittest.main()
