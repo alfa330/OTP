@@ -1,4 +1,4 @@
-"""
+﻿"""
 Oktell Recall Guard — агент на машине оператора.
 
 Задача: по команде сервера выкинуть оператора из веб-клиента Oktell
@@ -48,6 +48,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -62,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.20"
+VERSION = "1.0.21"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -1352,6 +1353,23 @@ def _close_target(browser: "ManagedBrowser", target_id: str) -> None:
         logging.debug("Окно входа не закрылось само", exc_info=True)
 
 
+def _set_window_bounds(page: "CdpPage", bounds: dict) -> None:
+    """Задать окну размер/состояние через CDP.
+
+    Флаги вроде --window-size и --kiosk действуют, только когда Chrome стартует
+    ХОЛОДНЫМ. У оператора он уже запущен, новый вызов просто передаёт окно
+    живому процессу и выбрасывает флаги — молча.
+    """
+    try:
+        window = page.call("Browser.getWindowForTarget")
+        window_id = (window or {}).get("windowId")
+        if window_id is None:
+            return
+        page.call("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
+    except Exception:  # noqa: BLE001
+        logging.debug("Размер окна не задан", exc_info=True)
+
+
 def run_login_window(cfg: dict, prefill: str = "") -> dict:
     """Спросить учётку iCORE. Возвращает сессию либо {} — человек закрыл окно.
 
@@ -1417,6 +1435,10 @@ def run_login_window(cfg: dict, prefill: str = "") -> dict:
                 except Exception:  # noqa: BLE001
                     time.sleep(0.4)
                     continue
+                # Размер задаём по отладочному соединению, а не флагом: живому
+                # Chrome (а он у оператора запущен — там открыт клиент Oktell)
+                # командная строка не доезжает, и окно выходило во весь экран.
+                _set_window_bounds(page, {"width": 420, "height": 620})
 
             try:
                 pending = page.evaluate(
@@ -2612,7 +2634,7 @@ NEWS_JS_TEMPLATE = r"""
   root.id = ID;
   root.setAttribute('style', [
     'position:fixed', 'inset:0', 'z-index:2147483647',
-    'background:rgba(10,10,12,0.82)', 'backdrop-filter:blur(3px)',
+    'background:rgba(10,10,12,0.58)', 'backdrop-filter:blur(6px)',
     'display:flex', 'align-items:center', 'justify-content:center',
     'font:15px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif'
   ].join(';'));
@@ -2917,7 +2939,16 @@ NEWS_PAGE_HTML = """<!doctype html>
 <title>__TITLE__</title>
 <link rel="icon" href="data:image/png;base64,__ICON__">
 <style>
-  html, body { margin: 0; height: 100%; background: rgba(10,10,12,.88); overflow: hidden; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0a0c; }
+  /* Под затемнением — снимок того, что было на экране. Настоящей прозрачности
+     у окна Chrome нет, а полупрозрачность всему окну выцветила бы и карточку,
+     которую как раз надо читать. */
+  body {
+    background-image: url("backdrop.bmp");
+    background-size: cover;
+    background-position: center;
+  }
+
 </style>
 </head>
 <body>
@@ -2937,6 +2968,89 @@ def build_news_page(item: dict) -> str:
             .replace("__TITLE__", NEWS_WINDOW_TITLE)
             .replace("__ICON__", LOGIN_ICON_B64)
             .replace("__NEWS_JS__", build_news_js(item)))
+
+
+def capture_backdrop(rect, path: Path, shrink: int = 2) -> bool:
+    """Снять монитор в BMP — он станет фоном окна объявления.
+
+    Зачем это вместо настоящей прозрачности. Прозрачный фон при непрозрачной
+    карточке умеет только своя оболочка на Chromium (Electron/WebView2); Electron
+    по собственному README тянет около 100 МБ на оператора, а окно Chrome
+    попиксельной прозрачности не имеет вовсе. Полупрозрачность всему окну
+    (LWA_ALPHA) гасит заодно и карточку — текст объявления выцветает вместе с
+    фоном, а его как раз надо читать.
+
+    Снимок решает то же самое честнее: под затемнением стоит ровно то, что было
+    на экране, карточка поверх — полностью чёткая. Фон застывший, но окно
+    модальное и живёт минуту: за спиной у него всё равно ничего не меняется.
+
+    Пишем BMP руками, а не через библиотеку: PIL в сборку не входит, и тащить
+    её ради одного кадра — те же лишние мегабайты, от которых уходим. 24 бита,
+    а не 32: BitBlt оставляет четвёртый байт нулевым, и декодер, принявший его
+    за прозрачность, показал бы пустоту вместо экрана.
+    """
+    if not IS_WINDOWS or not rect:
+        return False
+    left, top, width, height = (int(v) for v in rect)
+    if width <= 0 or height <= 0:
+        return False
+    out_w, out_h = max(1, width // shrink), max(1, height // shrink)
+
+    class BitmapInfoHeader(ctypes.Structure):
+        _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                    ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                    ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                    ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                    ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+                    ("biClrImportant", ctypes.c_uint32)]
+
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    screen_dc = mem_dc = bitmap = None
+    try:
+        screen_dc = user32.GetDC(None)
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, out_w, out_h)
+        gdi32.SelectObject(mem_dc, bitmap)
+        gdi32.SetStretchBltMode(mem_dc, 4)   # HALFTONE — уменьшение без ступенек
+        SRCCOPY = 0x00CC0020
+        if not gdi32.StretchBlt(mem_dc, 0, 0, out_w, out_h,
+                                screen_dc, left, top, width, height, SRCCOPY):
+            return False
+
+        stride = (out_w * 3 + 3) & ~3
+        buffer = ctypes.create_string_buffer(stride * out_h)
+        header = BitmapInfoHeader()
+        header.biSize = ctypes.sizeof(BitmapInfoHeader)
+        header.biWidth, header.biHeight = out_w, out_h   # + — строки снизу вверх, как ждёт BMP
+        header.biPlanes, header.biBitCount, header.biCompression = 1, 24, 0
+        if not gdi32.GetDIBits(mem_dc, bitmap, 0, out_h, buffer,
+                               ctypes.byref(header), 0):
+            return False
+
+        size = 14 + header.biSize + len(buffer)
+        with path.open("wb") as handle:
+            handle.write(b"BM")
+            handle.write(struct.pack("<IHHI", size, 0, 0, 14 + header.biSize))
+            handle.write(bytes(header))
+            handle.write(buffer.raw)
+        return True
+    except Exception:  # noqa: BLE001 — без фона объявление показывается на тёмном
+        logging.debug("Снимок экрана для фона не сделан", exc_info=True)
+        return False
+    finally:
+        try:
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            if screen_dc:
+                user32.ReleaseDC(None, screen_dc)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def backdrop_path() -> Path:
+    return app_dir() / "backdrop.bmp"
 
 
 def _window_by_title(title: str):
@@ -3023,7 +3137,7 @@ def _set_window_pos(hwnd: int, left: int, top: int, width: int, height: int, fla
                                     left, top, width, height, flags))
 
 
-def _make_overlay(hwnd: int, rect, cfg_alpha: float = 0.93) -> bool:
+def _make_overlay(hwnd: int, rect) -> bool:
     """Снять рамку, накрыть монитор, поднять поверх всех окон.
 
     Поверх ВСЕХ — это и есть постановка: объявление обязательное, и «сверну,
@@ -3035,22 +3149,14 @@ def _make_overlay(hwnd: int, rect, cfg_alpha: float = 0.93) -> bool:
     GWL_STYLE = -16
     WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
     SWP_SHOWWINDOW, SWP_FRAMECHANGED = 0x0040, 0x0020
-    GWL_EXSTYLE = -20
-    WS_EX_LAYERED = 0x00080000
-    LWA_ALPHA = 0x00000002
     try:
         user32 = ctypes.windll.user32
         style = user32.GetWindowLongW(hwnd, GWL_STYLE)
         user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME))
-        # Полупрозрачность — всему окну целиком (LWA_ALPHA). Попиксельной у окна
-        # Chrome не бывает: прозрачный фон при непрозрачной карточке умеет только
-        # своя оболочка вроде Electron, а это +100 МБ на оператора. Значение
-        # подобрано так, чтобы за тёмным полем угадывался рабочий стол, а текст
-        # карточки оставался читаемым.
-        alpha = int(max(0.5, min(1.0, float(cfg_alpha or 0.93))) * 255)
-        user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
-                              user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED)
-        user32.SetLayeredWindowAttributes(ctypes.c_void_p(hwnd), 0, alpha, LWA_ALPHA)
+        # Полупрозрачным окно целиком НЕ делаем. LWA_ALPHA гасит вместе с фоном
+        # и карточку — текст объявления выцветает, а его как раз надо читать.
+        # Прозрачность даёт фон-снимок экрана под затемнением (capture_backdrop):
+        # под ним стоит ровно то, что было на экране, карточка поверх чёткая.
         left, top, width, height = rect or (0, 0, 0, 0)
         _set_window_pos(hwnd, int(left), int(top), int(width), int(height),
                         SWP_SHOWWINDOW | SWP_FRAMECHANGED)
@@ -3108,6 +3214,8 @@ class NewsOverlay:
             return False
 
         rect = _monitor_rect(_window_by_title_like_oktell(self.browser))
+        # Снимок ДО запуска окна: иначе оно снимет само себя.
+        capture_backdrop(rect, page_file.parent / "backdrop.bmp")
         args = [
             str(chrome),
             f"--user-data-dir={self.browser.profile_dir}",
@@ -3143,13 +3251,38 @@ class NewsOverlay:
                 except Exception:  # noqa: BLE001
                     time.sleep(0.4)
                     continue
+                self._go_fullscreen()
                 self.hwnd = _window_by_title(NEWS_WINDOW_TITLE)
-                _make_overlay(self.hwnd, rect, self.cfg.get("news_overlay_alpha", 0.93))
+                _make_overlay(self.hwnd, rect)
                 logging.info("Объявление #%s показано поверх всех окон", item.get("id"))
                 return True
             time.sleep(0.4)
         logging.warning("Окно объявления не открылось за 20 с")
         return False
+
+    def _go_fullscreen(self) -> None:
+        """Убрать рамку через CDP, а не флагом командной строки.
+
+        `--kiosk` работает, только когда Chrome стартует ХОЛОДНЫМ. У оператора он
+        уже запущен — в том же профиле открыт клиент Oktell, — и новый вызов
+        просто передаёт окно живому процессу, молча выбрасывая все флаги. Окно
+        объявления выходило с обычной рамкой Chrome, и заметить это на чистом
+        профиле было нельзя: там Chrome стартовал заново и флаг срабатывал.
+
+        `Browser.setWindowBounds` идёт по отладочному соединению к УЖЕ открытому
+        окну, поэтому ему всё равно, кто его запустил.
+        """
+        if self.page is None:
+            return
+        try:
+            window = self.page.call("Browser.getWindowForTarget")
+            window_id = (window or {}).get("windowId")
+            if window_id is None:
+                return
+            self.page.call("Browser.setWindowBounds",
+                           {"windowId": window_id, "bounds": {"windowState": "fullscreen"}})
+        except Exception:  # noqa: BLE001 — рамка хуже, чем отсутствие объявления
+            logging.debug("Полноэкранный режим не включился", exc_info=True)
 
     # ---------- общение ----------
 
@@ -3190,12 +3323,13 @@ class NewsOverlay:
             _close_target(self.browser, self.target_id)
             self.target_id = ""
         self.hwnd = 0
-        try:
-            news_page_path().unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:  # noqa: BLE001
-            logging.debug("Страница объявления не удалилась", exc_info=True)
+        for leftover in (news_page_path(), backdrop_path()):
+            try:
+                leftover.unlink()
+            except FileNotFoundError:
+                continue
+            except Exception:  # noqa: BLE001
+                logging.debug("Файл окна объявления не удалился", exc_info=True)
 
 
 def _window_by_title_like_oktell(browser: "ManagedBrowser") -> int:

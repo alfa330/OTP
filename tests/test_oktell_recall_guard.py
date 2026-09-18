@@ -1019,10 +1019,17 @@ def test_the_window_has_no_frame_and_lets_the_desktop_through():
     вроде Electron, а это +100 МБ на оператора."""
     source = Path(agent.__file__).read_text(encoding="utf-8")
     show = source[source.index("    def show(self, item: dict) -> bool:"):source.index("    # ---------- общение ----------")]
-    assert '"--kiosk"' in show
-    overlay = source[source.index("def _make_overlay("):source.index("def _keep_on_top(")]
-    assert "WS_EX_LAYERED" in overlay
-    assert "SetLayeredWindowAttributes" in overlay
+    # Флага --kiosk НЕДОСТАТОЧНО, и это стоило живого прогона: он действует,
+    # только когда Chrome стартует ХОЛОДНЫМ. У оператора он уже запущен — в том
+    # же профиле открыт клиент Oktell, — и новый вызов просто передаёт окно
+    # живому процессу, молча выбрасывая все флаги. Полноэкранный режим обязан
+    # ставиться по отладочному соединению, ему всё равно, кто запустил окно.
+    assert "_go_fullscreen" in show
+    assert '"windowState": "fullscreen"' in source
+    # Прозрачность — снимком экрана под затемнением, а не LWA_ALPHA: тот гасит
+    # вместе с фоном и карточку, а её как раз надо читать.
+    assert "def capture_backdrop(" in source
+    assert "SetLayeredWindowAttributes" not in source
 
 
 def test_the_window_is_pushed_back_on_top_while_it_is_shown():
