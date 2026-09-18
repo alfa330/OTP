@@ -1568,6 +1568,48 @@ class NewsExpiryTests(unittest.TestCase):
         self.assertIsNone(parse(''))
         self.assertIsNone(parse('не дата'))
 
+    @staticmethod
+    def _expiry_parser():
+        """_expiry_refusal из замыкания фабрики — тем же приёмом, что выше."""
+        from datetime import datetime as real_datetime
+
+        tree = ast.parse(_read('news', 'routes.py'))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == '_expiry_refusal':
+                namespace = {'datetime': real_datetime}
+                exec(compile(ast.Module([node], []), '<expiry>', 'exec'), namespace)
+                return namespace['_expiry_refusal']
+        raise AssertionError('_expiry_refusal не найден в news/routes.py')
+
+    def test_the_check_survives_what_the_card_actually_gives_it(self):
+        """Срок приходит СТРОКОЙ, и проверка обязана это пережить.
+
+        Оба места, откуда её зовут, берут значение у queries.get_post, а тот
+        отдаёт карточку — готовый JSON, где время сериализовано. Сравнение
+        строки с datetime роняло публикацию КАЖДОГО объявления с заполненным
+        «действует до»: 500 и «внутренняя ошибка» вместо выпуска. Поймано на
+        проде 18.09.2026, через полчаса после выкладки.
+        """
+        from datetime import datetime, timedelta
+
+        self.assertIn("'expires_at': row[7].isoformat() if row[7] else None",
+                      _read('news', 'queries.py'))
+        refusal = self._expiry_parser()
+        future = (datetime.now() + timedelta(days=3)).replace(microsecond=0)
+        past = (datetime.now() - timedelta(days=1)).replace(microsecond=0)
+        # Так значение и приезжает — строкой из карточки.
+        self.assertIsNone(refusal(future.isoformat(), True))
+        self.assertIn('истёк', refusal(past.isoformat(), True))
+        # И объектом, если однажды позовут до сериализации.
+        self.assertIsNone(refusal(future, True))
+        self.assertIn('истёк', refusal(past, True))
+        # Пустое поле и черновик — не отказ.
+        self.assertIsNone(refusal(None, True))
+        self.assertIsNone(refusal('', True))
+        self.assertIsNone(refusal(past.isoformat(), False))
+        # Непонятная дата не должна запирать выпуск: срок проверяет и выдача.
+        self.assertIsNone(refusal('не дата', True))
+
     def test_publishing_something_already_expired_is_refused(self):
         """Просроченное объявление не видит НИКТО и НИГДЕ, а в списке оно стоит
         «опубликовано». Тишина неотличима от поломки — отказываем словами."""
@@ -1577,7 +1619,9 @@ class NewsExpiryTests(unittest.TestCase):
         # Обе двери публикации: и создание с publish=true, и отдельная кнопка.
         self.assertEqual(source.count('"code": "NEWS_EXPIRED"'), 2)
         body = source.split('def _expiry_refusal(', 1)[1].split('\n    def ', 1)[0]
-        self.assertIn('if not publishing or expires_at is None:', body)
+        # Пустое поле — «показывать без срока», а не отказ. Пустая СТРОКА тоже:
+        # карточка отдаёт срок сериализованным, и её пустота выглядит так.
+        self.assertIn("if not publishing or expires_at in (None, ''):", body)
 
     def test_a_draft_may_keep_any_date(self):
         """Отказ только на публикации: черновику дата в прошлом не мешает —

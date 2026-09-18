@@ -345,10 +345,25 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         окне агента, — и автор об этом не узнаёт: в списке оно «опубликовано».
         Молчать здесь нельзя: тишина неотличима от поломки, и 18.09.2026 её
         именно так и искали — в агенте, в канале и в правах.
+
+        СРОК ПРИХОДИТ СТРОКОЙ. Оба места, откуда сюда попадают, берут его у
+        queries.get_post, а тот отдаёт КАРТОЧКУ — то есть уже готовый JSON, где
+        время сериализовано (`expires_at.isoformat()`). Сравнение строки с
+        datetime роняло публикацию любого объявления, у которого заполнено
+        «действует до»: 500 и «внутренняя ошибка» вместо выпуска. Поэтому
+        значение приводится здесь, а не предполагается.
         """
-        if not publishing or expires_at is None:
+        if not publishing or expires_at in (None, ''):
             return None
-        if expires_at > datetime.now():
+        moment = expires_at
+        if not isinstance(moment, datetime):
+            try:
+                moment = datetime.fromisoformat(str(moment))
+            except ValueError:
+                # Дата, которую мы не понимаем, — не повод не выпускать
+                # новость: срок показа проверяет ещё и сама выдача.
+                return None
+        if moment > datetime.now():
             return None
         return ("Срок показа уже истёк — объявление не увидит никто. "
                 "Поправьте «действует до» или очистите поле.")
