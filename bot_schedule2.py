@@ -9267,6 +9267,14 @@ def _oktell_billing_response_meta(params):
     }
 
 
+def _oktell_billing_parse_direction():
+    """('incoming'|'outgoing', None) или (None, ответ с ошибкой). По умолчанию вход."""
+    direction = str(request.args.get('direction') or 'incoming').strip().lower()
+    if direction not in _OKTELL_BILLING_DIRECTIONS:
+        return None, (jsonify({"error": "direction должен быть incoming или outgoing"}), 400)
+    return direction, None
+
+
 def _oktell_billing_parse_sl_seconds():
     """(порог SL в секундах, None) или (None, ответ с ошибкой)."""
     try:
@@ -9318,6 +9326,13 @@ def api_resource_fte_oktell_billing():
 @app.route('/api/resource_fte/oktell_billing_operators', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_oktell_billing_operators():
+    """Разрез «Операторы»: ОБА направления одним ответом.
+
+    Переключатель «Вход / Исход» на экране режет уже загруженный отчёт
+    (billingOperatorDirection.js) и второй раз в Oktell не ходит: прокси станции
+    плохо переносит частые запросы, а обе половины считаются одним и тем же
+    проходом по Call_Systems_hst и кубу состояний.
+    """
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, guard_response, guard_status = _resource_fte_route_guard()
@@ -9539,6 +9554,10 @@ def api_resource_fte_oktell_billing_export():
     if mode not in ('park', 'line', 'operator', 'detail', 'grouping'):
         return jsonify({"error": "mode должен быть park, line, operator, detail или grouping"}), 400
 
+    direction, direction_error = _oktell_billing_parse_direction()
+    if direction_error is not None:
+        return direction_error
+
     sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
     if sl_error is not None:
         return sl_error
@@ -9548,7 +9567,8 @@ def api_resource_fte_oktell_billing_export():
             calls_rows, states_rows = _oktell_fetch_billing_operator_rows(
                 params['start_day'], params['end_day'],
                 params['minute_from'], params['minute_to'])
-            report = _oktell_billing_build_operator_report(calls_rows, states_rows)
+            report = _oktell_billing_operator_direction_report(
+                _oktell_billing_build_operator_report(calls_rows, states_rows), direction)
         elif mode == 'detail':
             detail_rows = _oktell_fetch_billing_detail_export_rows(
                 params['start_day'], params['end_day'],
@@ -9569,9 +9589,10 @@ def api_resource_fte_oktell_billing_export():
         return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
 
     output = (_oktell_billing_grouping_workbook(report) if mode == 'grouping'
-              else _oktell_billing_export_workbook(mode, params, report, sl_seconds))
+              else _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction))
+    mode_part = f"{mode}_{direction}" if mode == 'operator' else mode
     filename = (
-        f"oktell_billing_{mode}_"
+        f"oktell_billing_{mode_part}_"
         f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
     )
     return send_file(
@@ -36288,6 +36309,29 @@ def _oktell_billing_minute_filter(minute_from, minute_to, column='t.dt_insert'):
     return ''
 
 
+# --- Чистое время разговора входящего звонка ----------------------------------------------------
+# ⚠️ `Call_Systems_hst.total_length` — это НЕ разговор, а длина всей цепочки: IVR плюс очередь
+# плюс разговор. Проверено 18.09.2026 на 2846 отвеченных звонках за 15–17.09: у 2846 из 2846
+# total_length = плечо «снаружи в IVR» (ct=4) + плечо оператора (ct=5), расхождение ≤ 3 с.
+# За неделю 11–17.09 это давало средний «разговор» 334 с вместо фактических 244 с (+37 %).
+# Разговор оператора с клиентом — это плечо ct=5 от ответа оператора (TimeAnswer) до конца
+# коммутации; переводов может быть несколько, поэтому суммируем все плечи цепочки.
+# Окно по TimeStart расширено на сутки назад: звонок мог начаться до полуночи.
+def _oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, chain_expr='t.chainid', alias='k'):
+    conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
+    return (
+        "LEFT JOIN (SELECT IdChain, SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 "
+        f"WHERE ConnectionType = 5 AND TimeStart >= '{conn_from}' AND TimeStart < '{date_to_excl_compact}' "
+        f"GROUP BY IdChain) {alias} ON {alias}.IdChain = TRY_CAST({chain_expr} AS uniqueidentifier) "
+    )
+
+
+# Цепочка не нашлась — считаем разговор нулевым, а не берём total_length: смешивать в одной
+# колонке две разные величины нельзя. На практике непокрытых звонков нет (0 из 7290 за неделю).
+_OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"
+
+
 def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to, sl_seconds, group_by='park'):
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
@@ -36343,13 +36387,15 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         # числитель SL: отвечены оператором И ждали в очереди не дольше порога (LenQueue — секунды в очереди)
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END) AS served_sl, "
         f"SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END) AS greet_drop, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds, "
+        # Разговор — плечо оператора, без IVR и очереди (см. _oktell_billing_talk_join_sql).
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN {_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS wait_ok_seconds, "
         f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds, "
         f"{rating_select}"
         "FROM oktell.dbo.Call_Systems_hst t "
         f"{line_join}"
+        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact)}"
         f"{rating_join}"
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
@@ -36611,7 +36657,7 @@ def _oktell_billing_detail_page_sql(date_from_compact, date_to_excl_compact,
         "COALESCE(NULLIF(q.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
         f"CASE WHEN q.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
         f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
-        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result = 5 THEN q.total_length ELSE 0 END AS talk_seconds, "
+        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result = 5 THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds, "
         "q.total_count, q.snapshot_id "
         "FROM (SELECT ranked.* FROM (SELECT "
         f"{select_sql}, "
@@ -36621,6 +36667,7 @@ def _oktell_billing_detail_page_sql(date_from_compact, date_to_excl_compact,
         ") ranked "
         f"WHERE ranked.row_num BETWEEN {row_from} AND {row_to}) q "
         f"{_oktell_billing_detail_line_apply_sql('q', date_from_compact, date_to_excl_compact)}"
+        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, 'q.chain_id')}"
         "ORDER BY q.row_num"
     )
 
@@ -36638,11 +36685,12 @@ def _oktell_billing_detail_export_page_sql(date_from_compact, date_to_excl_compa
         "COALESCE(NULLIF(p.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
         f"CASE WHEN p.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
         f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
-        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result = 5 THEN p.total_length ELSE 0 END AS talk_seconds "
+        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result = 5 THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds "
         f"FROM (SELECT TOP {size} {_oktell_billing_detail_select_sql()} "
         f"{source_sql}"
         "ORDER BY t.Id DESC) p "
         f"{_oktell_billing_detail_line_apply_sql('p', date_from_compact, date_to_excl_compact)}"
+        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, 'p.chain_id')}"
         "ORDER BY p.call_id DESC"
     )
 
@@ -36721,35 +36769,69 @@ def _oktell_fetch_billing_detail_export_rows(range_from, range_to, minute_from, 
 
 
 # --- «Биллинг Oktell»: разрез по операторам ------------------------------------------------------
-# Обслужено/время разговора — из Call_Systems_hst (как в парковых таблицах, оператор = id_operator);
+# Звонки/время разговора — из Call_Systems_hst (как в парковых таблицах, оператор = id_operator);
 # постобработка/удержание/готовность/перерыв — из oktell_cc_temp.dbo.A_Cube_CC_OperatorStates.
 # Коды состояний берём из справочника oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorStateTypes
-# (сверено с живой базой 2026-08-06): 3 обратный вызов, 6 разговор по задаче, 7 поствызывная
-# обработка, 9 ПЕРЕРЫВ, 10 ГОТОВ, 33 удержание. Кода 12 в справочнике нет — по объёму и по
-# сопутствующему ICode 10201 это техническое распределение, считаем его вместе с 3.
+# (сверено с живой базой 2026-08-06): 2 ожидание ответа абонента, 3 обратный вызов, 6 разговор
+# по задаче, 7 поствызывная обработка, 9 ПЕРЕРЫВ, 10 ГОТОВ, 33 удержание. Кода 12 в справочнике
+# нет — по объёму и по сопутствующему ICode 10201 это техническое распределение, считаем его
+# вместе с 3.
 # ⚠️ 9 и 10 легко перепутать местами (до 2026-08-06 так и было: колонки «Ожидание»/«Пауза»
 # показывались наоборот, а UTZ засчитывал перерыв как полезную занятость). Признак, по которому
 # это проверяется на данных: подпричины перерыва (ICode 1-4 из A_TaskManager_CardLunchStates)
 # стоят именно у State=9, а у State=10 — коды входа в систему (10201/10203).
+#
+# Направление: у состояний 2, 3, 6, 7 и 33 есть флаг IsOutput (0 — входящий, 1 — исходящий),
+# поэтому вкладка «Операторы» делится на «Вход» и «Исход». Состояния 9 «Перерыв», 10 «Готов»
+# и 12 флага не имеют — это время оператора за день целиком, оно одинаково в обоих разрезах
+# и не делится между направлениями. Обе половины приходят ОДНИМ ответом: переключатель на
+# фронте только выбирает половину, второго похода в Oktell не делает.
 _OKTELL_BILLING_OPERATOR_METRICS = (
-    'served', 'talk_seconds', 'talk_in_seconds', 'talk_out_seconds', 'postproc_seconds',
-    'hold_seconds', 'wait_seconds', 'pause_seconds', 'dial_seconds',
+    'served_in', 'served_out', 'call_in_seconds', 'call_out_seconds',
+    'handle_in_seconds', 'handle_out_seconds',
+    'talk_in_seconds', 'talk_out_seconds',
+    'postproc_in_seconds', 'postproc_out_seconds',
+    'hold_in_seconds', 'hold_out_seconds',
+    'dial_in_seconds', 'dial_out_seconds', 'dial_other_seconds',
+    'dial_wait_out_seconds',
+    'wait_seconds', 'pause_seconds',
 )
+
+_OKTELL_BILLING_DIRECTIONS = ('incoming', 'outgoing')
 
 
 def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to):
+    """Звонки оператора за день, обе стороны сразу: входящие и исходящие.
+
+    Фильтр `taxi_park <> ''` стоит только на входящих: у исходящих парк не заполнен
+    у 58 % строк (проверено 10–17.09.2026), и это не мусор, а обычный звонок водителю
+    — тот же фильтр выбросил бы больше половины исходящих.
+
+    Две длительности на направление, и путать их нельзя:
+      call_* — РАЗГОВОР (ATT). У входящих это плечо оператора без IVR и очереди;
+      handle_* — ВСЁ время обработки звонка (AHT), то есть длина цепочки целиком.
+    У исходящих момент ответа водителя станция не пишет, поэтому там обе величины —
+    одна и та же длина коммутации (гудки внутри).
+    """
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
+    incoming = "t.route = 'incoming' AND t.taxi_park <> ''"
+    outgoing = "t.route = 'outgoing'"
     return (
         "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
         "oi.Name AS operator_name, "
-        "COUNT(*) AS served, "
-        "SUM(t.total_length) AS talk_seconds "
+        f"SUM(CASE WHEN {incoming} THEN 1 ELSE 0 END) AS served_in, "
+        f"SUM(CASE WHEN {incoming} THEN {_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS call_in_seconds, "
+        f"SUM(CASE WHEN {incoming} THEN t.total_length ELSE 0 END) AS handle_in_seconds, "
+        f"SUM(CASE WHEN {outgoing} THEN 1 ELSE 0 END) AS served_out, "
+        f"SUM(CASE WHEN {outgoing} THEN t.total_length ELSE 0 END) AS call_out_seconds, "
+        f"SUM(CASE WHEN {outgoing} THEN t.total_length ELSE 0 END) AS handle_out_seconds "
         "FROM oktell.dbo.Call_Systems_hst t "
         "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = TRY_CAST(t.id_operator AS uniqueidentifier) "
+        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact)}"
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        "AND t.taxi_park <> '' AND t.route = 'incoming' "
+        "AND t.route IN ('incoming', 'outgoing') "
         f"AND t.result_call NOT IN (N'{grt}', N'{fail}') AND t.call_result IN (5) "
         f"{minute_filter}"
         "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), oi.Name"
@@ -36763,13 +36845,24 @@ def _oktell_billing_operator_states_sql(date_from_compact, date_to_excl_compact,
         "oi.Name AS operator_name, "
         "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS talk_in_seconds, "
         "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS talk_out_seconds, "
-        "SUM(CASE WHEN s.State = 7 THEN s.LenTime ELSE 0 END) AS postproc_seconds, "
-        "SUM(CASE WHEN s.State = 33 THEN s.LenTime ELSE 0 END) AS hold_seconds, "
+        "SUM(CASE WHEN s.State = 7 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS postproc_in_seconds, "
+        "SUM(CASE WHEN s.State = 7 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS postproc_out_seconds, "
+        "SUM(CASE WHEN s.State = 33 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS hold_in_seconds, "
+        "SUM(CASE WHEN s.State = 33 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS hold_out_seconds, "
         # «Ожидание» — это State=10 «Готов»: оператор на линии и ждёт звонка.
         "SUM(CASE WHEN s.State = 10 THEN s.LenTime ELSE 0 END) AS wait_seconds, "
         # «Пауза» — State=9 «Перерыв» (в нём же лежат подпричины перерыва в ICode).
         "SUM(CASE WHEN s.State = 9 THEN s.LenTime ELSE 0 END) AS pause_seconds, "
-        "SUM(CASE WHEN s.State IN (3,12) THEN s.LenTime ELSE 0 END) AS dial_seconds "
+        "SUM(CASE WHEN s.State = 3 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS dial_in_seconds, "
+        "SUM(CASE WHEN s.State = 3 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS dial_out_seconds, "
+        "SUM(CASE WHEN s.State = 12 THEN s.LenTime ELSE 0 END) AS dial_other_seconds, "
+        # «Дозвон» исходящего — State=2 «Ожидание ответа абонента»: время от набора до
+        # ответа водителя. Станция пишет его только в предиктивном режиме обзвона, когда
+        # сначала дозванивается сама и лишь потом подключает оператора. У боевой задачи
+        # «Таксопарк исходящая» режим другой (оператор занят с момента набора), поэтому
+        # сейчас здесь ноль, а гудки лежат внутри «Разговора». Колонка появляется на
+        # экране и в выгрузке только когда в периоде есть ненулевое значение.
+        "SUM(CASE WHEN s.State = 2 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS dial_wait_out_seconds "
         "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates s "
         "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.IdOperator "
         f"WHERE s.DateTimeStart >= '{date_from_compact}' AND s.DateTimeStart < '{date_to_excl_compact}' "
@@ -36822,17 +36915,18 @@ def _oktell_billing_build_operator_report(calls_rows, states_rows):
     def _entry(report_date, operator):
         return days_map.setdefault(report_date, {}).setdefault(operator, _blank())
 
+    call_keys = ('served_in', 'served_out', 'call_in_seconds', 'call_out_seconds',
+                 'handle_in_seconds', 'handle_out_seconds')
     for raw in calls_rows:
         report_date = str(raw.get('report_date') or '').strip()
         operator = str(raw.get('operator_name') or '').strip()
         if not report_date or not operator:
             continue
         entry = _entry(report_date, operator)
-        entry['served'] += max(0, _oktell_billing_int(raw.get('served')))
-        entry['talk_seconds'] += _oktell_billing_sec(raw.get('talk_seconds'))
+        for key in call_keys:
+            entry[key] += max(0, _oktell_billing_sec(raw.get(key)))
 
-    state_keys = ('talk_in_seconds', 'talk_out_seconds', 'postproc_seconds', 'hold_seconds',
-                  'wait_seconds', 'pause_seconds', 'dial_seconds')
+    state_keys = tuple(key for key in _OKTELL_BILLING_OPERATOR_METRICS if key not in call_keys)
     for raw in states_rows:
         report_date = str(raw.get('report_date') or '').strip()
         operator = str(raw.get('operator_name') or '').strip()
@@ -36843,7 +36937,13 @@ def _oktell_billing_build_operator_report(calls_rows, states_rows):
             entry[key] += _oktell_billing_sec(raw.get(key))
 
     def _is_real_operator(metrics):
-        return metrics['served'] > 0 or metrics['talk_in_seconds'] > 0 or metrics['talk_out_seconds'] > 0
+        return (metrics['served_in'] > 0 or metrics['served_out'] > 0
+                or metrics['talk_in_seconds'] > 0 or metrics['talk_out_seconds'] > 0)
+
+    def _order(item):
+        return (-(item['served_in'] + item['served_out']),
+                -(item['talk_in_seconds'] + item['talk_out_seconds']),
+                item['operator'])
 
     operators_map = {}
     totals = _blank()
@@ -36856,7 +36956,7 @@ def _oktell_billing_build_operator_report(calls_rows, states_rows):
         ]
         if not rows:
             continue
-        rows.sort(key=lambda item: (-item['served'], -item['talk_in_seconds'], item['operator']))
+        rows.sort(key=_order)
         day_totals = _blank()
         for item in rows:
             for key in _OKTELL_BILLING_OPERATOR_METRICS:
@@ -36866,8 +36966,73 @@ def _oktell_billing_build_operator_report(calls_rows, states_rows):
         days.append({'date': report_date, 'operators': rows, 'totals': day_totals})
 
     operators = [{'operator': operator, **metrics} for operator, metrics in operators_map.items()]
-    operators.sort(key=lambda item: (-item['served'], -item['talk_in_seconds'], item['operator']))
+    operators.sort(key=_order)
     return {'days': days, 'operators': operators, 'totals': totals}
+
+
+# Срез отчёта по операторам на одно направление. Ровно то же делает фронт
+# (billingOperatorDirection.js) — там переключатель «Вход / Исход» листает уже
+# загруженный ответ, здесь тем же правилом режется выгрузка в Excel. Совпадение
+# ключей сторожит tests/test_oktell_billing_operator_direction.py.
+#
+# Занятость (OCC/UTZ) остаётся ОБЩЕЙ: «Готов» и «Перерыв» направления не знают,
+# поэтому активное время в срезе — это работа оператора за день целиком, а не
+# только по выбранному направлению. Иначе OCC на «Исходе» показывал бы занятость
+# в разы ниже фактической.
+def _oktell_billing_operator_direction_row(item, direction):
+    out = direction == 'outgoing'
+    active = sum(float(item.get(key) or 0) for key in (
+        'talk_in_seconds', 'talk_out_seconds', 'postproc_in_seconds', 'postproc_out_seconds',
+        'hold_in_seconds', 'hold_out_seconds', 'dial_in_seconds', 'dial_out_seconds',
+        'dial_other_seconds', 'dial_wait_out_seconds'))
+    row = {
+        'served': _oktell_billing_int(item.get('served_out' if out else 'served_in')),
+        # talk_seconds — разговор (ATT), handle_seconds — всё время обработки (AHT).
+        'talk_seconds': _oktell_billing_sec(item.get('call_out_seconds' if out else 'call_in_seconds')),
+        'handle_seconds': _oktell_billing_sec(
+            item.get('handle_out_seconds' if out else 'handle_in_seconds')),
+        'talk_state_seconds': _oktell_billing_sec(item.get('talk_out_seconds' if out else 'talk_in_seconds')),
+        'postproc_seconds': _oktell_billing_sec(
+            item.get('postproc_out_seconds' if out else 'postproc_in_seconds')),
+        'hold_seconds': _oktell_billing_sec(item.get('hold_out_seconds' if out else 'hold_in_seconds')),
+        'dial_wait_seconds': _oktell_billing_sec(item.get('dial_wait_out_seconds')) if out else 0,
+        'active_seconds': int(round(active)),
+        'wait_seconds': _oktell_billing_sec(item.get('wait_seconds')),
+        'pause_seconds': _oktell_billing_sec(item.get('pause_seconds')),
+    }
+    if item.get('operator') is not None:
+        row['operator'] = item.get('operator')
+    return row
+
+
+def _oktell_billing_operator_direction_report(report, direction):
+    """Отчёт по операторам -> тот же отчёт по одному направлению.
+
+    Оператор без звонков и без разговоров в выбранном направлении из таблицы
+    выпадает, итоги дня и периода пересчитываются по оставшимся.
+    """
+    if direction not in _OKTELL_BILLING_DIRECTIONS:
+        direction = 'incoming'
+    sum_keys = ('served', 'talk_seconds', 'handle_seconds', 'talk_state_seconds', 'postproc_seconds',
+                'hold_seconds', 'dial_wait_seconds', 'active_seconds', 'wait_seconds', 'pause_seconds')
+
+    def _rows(items):
+        rows = [_oktell_billing_operator_direction_row(item, direction) for item in items or []]
+        rows = [row for row in rows if row['served'] > 0 or row['talk_state_seconds'] > 0]
+        rows.sort(key=lambda row: (-row['served'], -row['talk_state_seconds'], row.get('operator') or ''))
+        return rows
+
+    def _totals(rows):
+        return {key: sum(row[key] for row in rows) for key in sum_keys}
+
+    days = []
+    for day in report.get('days') or []:
+        rows = _rows(day.get('operators'))
+        if not rows:
+            continue
+        days.append({'date': day.get('date'), 'operators': rows, 'totals': _totals(rows)})
+    operators = _rows(report.get('operators'))
+    return {'days': days, 'operators': operators, 'totals': _totals(operators)}
 
 
 # --- «Биллинг Oktell»: выгрузка в Excel ----------------------------------------------------------
@@ -36949,7 +37114,7 @@ def _oktell_billing_ratio(numerator, denominator):
         return None
 
 
-def _oktell_billing_export_columns(mode):
+def _oktell_billing_export_columns(mode, direction='incoming', with_dial_wait=False):
     """(заголовки, ширины, {индекс с 1: формат}) для листов экспорта; без колонки даты."""
     dur = _OKTELL_BILLING_EXPORT_DUR_FMT
     pct = _OKTELL_BILLING_EXPORT_PCT_FMT
@@ -36968,10 +37133,20 @@ def _oktell_billing_export_columns(mode):
     elif mode == 'operator':
         # Рядом с каждой средней длительностью разговора — она же целыми секундами:
         # отчётность СЗоВ ведётся в секундах (задача #298).
-        headers = ['Оператор', 'Обслужено', 'АТТ', 'АТТ, сек', 'АНТ', 'Разговоры вх.', 'Разговоры исх.',
-                   'Постобработка', 'Удержание', 'Ожидание', 'Пауза', 'OCC', 'UTZ']
-        widths = [32, 11, 10, 10, 10, 13, 13, 14, 11, 11, 10, 8, 8]
-        formats = {3: dur, 5: dur, 6: dur, 7: dur, 8: dur, 9: dur, 10: dur, 11: dur, 12: pct, 13: pct}
+        # Лист один на выбранное направление: «Вход» или «Исход». Колонка «Дозвон»
+        # выводится только когда станция её действительно пишет (предиктивный обзвон).
+        headers = ['Оператор', 'Звонков' if direction == 'outgoing' else 'Обслужено',
+                   'АТТ', 'АТТ, сек', 'АНТ']
+        widths = [32, 11, 10, 10, 10]
+        if with_dial_wait:
+            headers.append('Дозвон')
+            widths.append(11)
+        headers += ['Разговоры', 'Постобработка', 'Удержание', 'Ожидание', 'Пауза', 'OCC', 'UTZ']
+        widths += [13, 14, 11, 11, 10, 8, 8]
+        last = len(headers)
+        formats = {3: dur, 5: dur, last - 1: pct, last: pct}
+        for index in range(6, last - 1):
+            formats[index] = dur
     elif mode == 'line':
         headers = ['Номер', 'Название', 'Таксопарк', 'Поступило', 'Обслужено', 'Потеряно', 'AR', 'SL',
                    'Ср. разговор', 'Ср. разговор, сек', 'Ср. ожидание', 'Время разговора', 'Общее время',
@@ -36987,7 +37162,7 @@ def _oktell_billing_export_columns(mode):
     return headers, widths, formats
 
 
-def _oktell_billing_export_values(mode, item, label=None):
+def _oktell_billing_export_values(mode, item, label=None, with_dial_wait=False):
     """Значения строки листа (та же математика, что в таблицах UI). Длительности — доля
     суток (Excel-время, формат [h]:mm:ss), проценты — доля единицы (формат 0.0%)."""
     def _dur(seconds):
@@ -37016,23 +37191,28 @@ def _oktell_billing_export_values(mode, item, label=None):
     if mode == 'operator':
         served = item.get('served') or 0
         att = _oktell_billing_ratio(item.get('talk_seconds'), served)
+        # AHT — всё время обработки звонка, поэтому в его основе длина цепочки целиком
+        # (handle_seconds), а не разговор: в АНТ по определению входят и IVR, и очередь.
         aht = _oktell_billing_ratio(
-            float(item.get('talk_seconds') or 0) + float(item.get('hold_seconds') or 0) + float(item.get('postproc_seconds') or 0),
+            float(item.get('handle_seconds') or 0) + float(item.get('hold_seconds') or 0) + float(item.get('postproc_seconds') or 0),
             served,
         )
-        # как billingOperatorActivity на фронте: актив = разговоры + обработка + удержание + распределение
-        active = sum(float(item.get(key) or 0) for key in (
-            'talk_in_seconds', 'talk_out_seconds', 'postproc_seconds', 'hold_seconds', 'dial_seconds'))
+        # как billingOperatorActivity на фронте: занятость считается по всему дню
+        # оператора (оба направления) — «Готов» и «Перерыв» направления не знают.
+        active = float(item.get('active_seconds') or 0)
         wait = float(item.get('wait_seconds') or 0)
         pause = float(item.get('pause_seconds') or 0)
-        return [
+        row = [
             label if label is not None else item.get('operator') or '',
             served,
             _opt(None if att is None else _dur(att)),
             _opt(None if att is None else int(round(att))),
             _opt(None if aht is None else _dur(aht)),
-            _dur(item.get('talk_in_seconds')),
-            _dur(item.get('talk_out_seconds')),
+        ]
+        if with_dial_wait:
+            row.append(_dur(item.get('dial_wait_seconds')))
+        row += [
+            _dur(item.get('talk_state_seconds')),
             _dur(item.get('postproc_seconds')),
             _dur(item.get('hold_seconds')),
             _dur(item.get('wait_seconds')),
@@ -37040,6 +37220,7 @@ def _oktell_billing_export_values(mode, item, label=None):
             _opt(_oktell_billing_ratio(active, active + wait + pause)),
             _opt(_oktell_billing_ratio(active + wait, active + wait + pause)),
         ]
+        return row
 
     arrived = item.get('arrived') or 0
     served = item.get('served') or 0
@@ -37069,19 +37250,28 @@ def _oktell_billing_export_values(mode, item, label=None):
     return [label if label is not None else _oktell_billing_park_label(item.get('park') or ''), *metrics]
 
 
-def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
-    headers, widths, formats = _oktell_billing_export_columns(mode)
-    mode_titles = {'park': 'Таксопарки', 'line': 'Номера', 'operator': 'Операторы'}
+def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction='incoming'):
+    with_dial_wait = bool(mode == 'operator' and direction == 'outgoing'
+                          and (report.get('totals') or {}).get('dial_wait_seconds'))
+    headers, widths, formats = _oktell_billing_export_columns(mode, direction, with_dial_wait)
+    operator_title = 'Операторы · исход' if direction == 'outgoing' else 'Операторы · вход'
+    mode_titles = {'park': 'Таксопарки', 'line': 'Номера', 'operator': operator_title}
     period_text = (
         f"{params['start_day'].strftime('%d.%m.%Y')} — {params['end_day'].strftime('%d.%m.%Y')}, "
         f"время {params['minute_from'] // 60:02d}:{params['minute_from'] % 60:02d}–"
         f"{params['minute_to'] // 60:02d}:{params['minute_to'] % 60:02d}"
     )
-    note = (
-        'OCC = разговоры и обработка ко всему времени в системе; UTZ = время без пауз'
-        if mode == 'operator'
-        else f'SL — отвечено за ≤ {sl_seconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь'
-    )
+    if mode == 'operator':
+        note = 'OCC = разговоры и обработка ко всему времени в системе; UTZ = время без пауз'
+        if direction == 'outgoing' and not with_dial_wait:
+            # Не прятать известное ограничение: на исходящих станция «отвечает» в момент
+            # набора, поэтому гудки до ответа водителя лежат внутри разговора.
+            note += ('. На исходящих в «Разговоры» входят гудки до ответа водителя: '
+                     'момент ответа Oktell пишет только в предиктивном режиме обзвона')
+    else:
+        note = (f'SL — отвечено за ≤ {sl_seconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь. '
+                'Время разговора — только разговор с оператором, без IVR и ожидания; '
+                'звонок целиком — в колонке «Общее время»')
     header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
     header_font = Font(color='FFFFFF', bold=True)
     bold_font = Font(bold=True)
@@ -37131,15 +37321,18 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
     ws.cell(row=1, column=1).font = bold_font
     ws.append([f'Период: {period_text}'])
     ws.append([note])
-    ws.append(['Источник: Oktell (входящие звонки), сформировано '
+    source_calls = ('исходящие звонки' if mode == 'operator' and direction == 'outgoing'
+                    else 'входящие звонки')
+    ws.append([f'Источник: Oktell ({source_calls}), сформировано '
                + datetime.now().strftime('%d.%m.%Y %H:%M')])
     ws.append([])
     _write_header(ws, headers)
     table_start = ws.max_row
     for item in report.get(rows_key) or []:
-        _write_row(ws, _oktell_billing_export_values(mode, item))
+        _write_row(ws, _oktell_billing_export_values(mode, item, with_dial_wait=with_dial_wait))
     if report.get('totals') and (report.get(rows_key) or []):
-        _write_row(ws, _oktell_billing_export_values(mode, report['totals'], label=total_label), bold=True)
+        _write_row(ws, _oktell_billing_export_values(
+            mode, report['totals'], label=total_label, with_dial_wait=with_dial_wait), bold=True)
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = f'A{table_start + 1}'
@@ -37152,10 +37345,12 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
         except ValueError:
             day_label = day.get('date') or ''
         for item in day.get(rows_key) or []:
-            _write_row(ws_days, [day_label] + _oktell_billing_export_values(mode, item), date_offset=1)
+            _write_row(ws_days, [day_label] + _oktell_billing_export_values(
+                mode, item, with_dial_wait=with_dial_wait), date_offset=1)
         if day.get('totals'):
-            _write_row(ws_days, [day_label] + _oktell_billing_export_values(mode, day['totals'], label='Итого за день'),
-                       bold=True, date_offset=1)
+            _write_row(ws_days, [day_label] + _oktell_billing_export_values(
+                mode, day['totals'], label='Итого за день', with_dial_wait=with_dial_wait),
+                bold=True, date_offset=1)
     for i, width in enumerate([12] + widths, start=1):
         ws_days.column_dimensions[get_column_letter(i)].width = width
     ws_days.freeze_panes = 'A2'

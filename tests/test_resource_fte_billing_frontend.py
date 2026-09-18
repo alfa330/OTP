@@ -174,5 +174,110 @@ class BillingGroupingFrontendTests(unittest.TestCase):
         self.assertIn("previous_hour_from: editor.hourFrom", block)
 
 
+class BillingOperatorDirectionTests(unittest.TestCase):
+    """Вкладка «Операторы» делится на «Вход» и «Исход» (задача #340, Омарова Ару)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
+        cls.backend = BOT_PATH.read_text(encoding="utf-8-sig")
+        cls.helper = (ROOT / "src" / "components" / "resources"
+                      / "billingOperatorDirection.js").read_text(encoding="utf-8-sig")
+
+    def test_switch_has_only_two_sides(self):
+        self.assertIn("{ key: 'incoming', label: 'Вход' }", self.helper)
+        self.assertIn("{ key: 'outgoing', label: 'Исход' }", self.helper)
+        # Третьего варианта («Все») в переключателе нет — так решил владелец.
+        self.assertNotIn("label: 'Все'", self.helper)
+
+    def test_switch_is_rendered_on_desktop_and_phone(self):
+        self.assertIn("cfg.hasBillingTalkTime && billingMode === 'operator' ? (", self.source)
+        self.assertIn("setBillingOperatorDirection(item.key)", self.source)
+        self.assertIn('ariaLabel="Направление звонков"', self.source)
+
+    def test_switch_does_not_refetch_oktell(self):
+        # Ручка отдаёт обе половины сразу: прокси станции плохо переносит частые
+        # запросы, поэтому переключение режет уже загруженный ответ.
+        self.assertIn("billingOperatorDirectionReport(billingReportRaw, billingOperatorDirection)",
+                      self.source)
+        start = self.source.index("const billingReport = useMemo(")
+        end = self.source.index("const billingError = billingErrors[billingMode]")
+        self.assertNotIn("fetchBillingReport", self.source[start:end])
+        self.assertIn("t.route IN ('incoming', 'outgoing')", self.backend)
+
+    def test_outgoing_columns_are_renamed_and_talk_time_is_honest(self):
+        self.assertIn("{isOutgoing ? 'Звонков' : 'Обслужено'}", self.source)
+        self.assertIn("formatDurationHms(item.talk_state_seconds)", self.source)
+        # Про гудки внутри разговора на исходящих говорим прямо, а не умалчиваем:
+        # подпись стоит у самого показателя — и на экране, и в листе Excel.
+        self.assertIn("'С гудками до ответа водителя'", self.source)
+        self.assertIn("входят гудки до ответа водителя", self.backend)
+
+    def test_dial_wait_column_appears_only_with_data(self):
+        self.assertIn("const billingShowDialWait = billingIsOutgoing && billingOperatorHasDialWait(billingReport);",
+                      self.source)
+        self.assertIn("{showDialWait ? (", self.source)
+        self.assertIn("AS dial_wait_out_seconds", self.backend)
+
+    def test_export_carries_direction(self):
+        self.assertIn("? { direction: billingOperatorDirection }", self.source)
+        self.assertIn("_oktell_billing_parse_direction()", self.backend)
+        self.assertIn("_oktell_billing_operator_direction_report(", self.backend)
+        self.assertIn('mode_part = f"{mode}_{direction}" if mode == \'operator\' else mode', self.backend)
+
+
+class BillingTalkTimeTests(unittest.TestCase):
+    """«Время разговора» — только разговор с оператором, без IVR и очереди.
+
+    `Call_Systems_hst.total_length` — это длина ВСЕЙ цепочки. Проверено на живых
+    данных 18.09.2026: у 2846 из 2846 отвеченных звонков за 15–17.09 она равна
+    плечо IVR и очереди (ct=4) + плечо оператора (ct=5). За неделю 11–17.09 отчёт
+    показывал средний «разговор» 334 с вместо фактических 244 с. AHT при этом
+    остаётся временем обработки звонка целиком — так решил владелец.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
+        cls.backend = BOT_PATH.read_text(encoding="utf-8-sig")
+
+    def _has(self, needle, haystack, where):
+        self.assertTrue(needle in haystack, f"в {where} нет фрагмента: {needle}")
+
+    def _has_not(self, needle, haystack, where):
+        self.assertTrue(needle not in haystack, f"в {where} остался фрагмент: {needle}")
+
+    def test_talk_comes_from_operator_leg(self):
+        for needle in (
+            '_OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"',
+            "SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec",
+            "WHERE ConnectionType = 5 AND TimeStart >=",
+            "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds",
+            "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS call_in_seconds",
+            # детализация — та же величина построчно, обе страницы
+            "THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds",
+        ):
+            self._has(needle, self.backend, "bot_schedule2.py")
+        # старая подмена разговора длиной всей цепочки не должна вернуться
+        self._has_not("THEN t.total_length ELSE 0 END) AS talk_seconds", self.backend,
+                      "bot_schedule2.py")
+
+    def test_whole_call_stays_for_total_and_aht(self):
+        for needle in (
+            "THEN t.total_length ELSE 0 END) AS total_seconds",
+            "t.total_length ELSE 0 END) AS handle_in_seconds",
+            "float(item.get('handle_seconds') or 0)",
+        ):
+            self._has(needle, self.backend, "bot_schedule2.py")
+        self._has("Number(item.handle_seconds || 0)", self.source, "ResourceFteView.jsx")
+
+    def test_labels_say_what_is_counted(self):
+        self._has("без IVR и ожидания", self.source, "ResourceFteView.jsx")
+        self._has("Звонки целиком: IVR, ожидание в очереди и разговор", self.source,
+                  "ResourceFteView.jsx")
+        self._has("Время разговора — только разговор с оператором, без IVR и ожидания",
+                  self.backend, "bot_schedule2.py")
+
+
 if __name__ == "__main__":
     unittest.main()

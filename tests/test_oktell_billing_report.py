@@ -33,6 +33,7 @@ FUNCTION_NAMES = [
     "_oktell_billing_parse_time",
     "_oktell_billing_line_key",
     "_oktell_billing_minute_filter",
+    "_oktell_billing_talk_join_sql",
     "_oktell_billing_sql",
     "_oktell_fetch_billing_rows",
     "_oktell_billing_int",
@@ -55,6 +56,8 @@ FUNCTION_NAMES = [
     "_oktell_billing_operator_states_sql",
     "_oktell_fetch_billing_operator_rows",
     "_oktell_billing_build_operator_report",
+    "_oktell_billing_operator_direction_row",
+    "_oktell_billing_operator_direction_report",
     "_oktell_billing_park_label",
     "_oktell_billing_line_digits",
     "_oktell_billing_phone_display",
@@ -73,6 +76,7 @@ CONST_NAMES = (
     "_OKTELL_BILLING_PARK_LABELS",
     "_OKTELL_BILLING_LINE_LABELS",
     "_OKTELL_BILLING_LINE_TAIL_MIN",
+    "_OKTELL_BILLING_TALK_EXPR",
     "_OKTELL_BILLING_EXPORT_DUR_FMT",
     "_OKTELL_BILLING_EXPORT_PCT_FMT",
     "OKTELL_BILLING_GROUPING_AR_ALERT",
@@ -116,9 +120,16 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
             "rating_sum", "rating_count",
         ),
         "_OKTELL_BILLING_OPERATOR_METRICS": (
-            "served", "talk_seconds", "talk_in_seconds", "talk_out_seconds", "postproc_seconds",
-            "hold_seconds", "wait_seconds", "pause_seconds", "dial_seconds",
+            "served_in", "served_out", "call_in_seconds", "call_out_seconds",
+            "handle_in_seconds", "handle_out_seconds",
+            "talk_in_seconds", "talk_out_seconds",
+            "postproc_in_seconds", "postproc_out_seconds",
+            "hold_in_seconds", "hold_out_seconds",
+            "dial_in_seconds", "dial_out_seconds", "dial_other_seconds",
+            "dial_wait_out_seconds",
+            "wait_seconds", "pause_seconds",
         ),
+        "_OKTELL_BILLING_DIRECTIONS": ("incoming", "outgoing"),
         "OKTELL_API_PAGE_SIZE": page_size,
         "OKTELL_RESOURCE_CHUNK_DAYS": chunk_days,
         "_oktell_query": oktell_query or (lambda sql: []),
@@ -198,6 +209,16 @@ class SqlBuilderTests(unittest.TestCase):
 
     def test_base_filters_and_sl(self):
         sql = self.ns["_oktell_billing_sql"]("20260701", "20260702", 0, 1439, 25)
+        # «Время разговора» — плечо оператора (ct=5), а НЕ total_length: тот равен
+        # длине всей цепочки вместе с IVR и очередью (проверено на живых данных
+        # 18.09.2026: 2846 из 2846 звонков, разговор 268 с против 404 с).
+        self.assertIn("COALESCE(k.talk_sec, 0) ELSE 0 END) AS talk_seconds", sql)
+        self.assertIn("ConnectionType = 5", sql)
+        self.assertIn("SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec", sql)
+        # окно джойна расширено на сутки назад — звонок мог начаться до полуночи
+        self.assertIn("TimeStart >= '20260630'", sql)
+        # «Общее время» остаётся длиной звонка целиком
+        self.assertIn("THEN t.total_length ELSE 0 END) AS total_seconds", sql)
         self.assertIn("t.route = 'incoming'", sql)
         self.assertIn("t.taxi_park <> ''", sql)
         self.assertIn("N'Неудачный звонок'", sql)
@@ -210,7 +231,9 @@ class SqlBuilderTests(unittest.TestCase):
 
     def test_park_mode_has_no_line_join(self):
         sql = self.ns["_oktell_billing_sql"]("20260701", "20260702", 0, 1439, 20, "park")
-        self.assertNotIn("A_Stat_Connections_1x1", sql)
+        # Плечо ct=4 (набранная линия) в этом разрезе не нужно; плечо ct=5 нужно —
+        # из него берётся время разговора.
+        self.assertNotIn("ConnectionType = 4", sql)
         self.assertNotIn("line_number", sql)
 
     def test_line_mode_joins_dialed_number(self):
@@ -230,12 +253,37 @@ class SqlBuilderTests(unittest.TestCase):
         self.assertIn("TRY_CAST(t.id_operator AS uniqueidentifier)", calls_sql)
         self.assertIn("t.call_result IN (5)", calls_sql)
         self.assertIn("BETWEEN 480 AND 1200", calls_sql)
+        # Обе стороны одним запросом: «Вход» и «Исход» режутся уже из ответа,
+        # переключатель второй раз в Oktell не ходит.
+        self.assertIn("t.route IN (\'incoming\', \'outgoing\')", calls_sql)
+        for call_alias in ("served_in", "served_out", "call_in_seconds", "call_out_seconds",
+                           "handle_in_seconds", "handle_out_seconds"):
+            self.assertIn(call_alias, calls_sql)
+        # ATT у входящих — разговор с оператором, AHT — звонок целиком.
+        self.assertIn("COALESCE(k.talk_sec, 0) ELSE 0 END) AS call_in_seconds", calls_sql)
+        self.assertIn("t.total_length ELSE 0 END) AS handle_in_seconds", calls_sql)
+        # У исходящих момент ответа станция не пишет, поэтому обе величины равны.
+        self.assertIn("t.total_length ELSE 0 END) AS call_out_seconds", calls_sql)
+        # Парк проверяется только у входящих: у исходящих он пуст больше чем у
+        # половины строк, и общий фильтр выбросил бы эти звонки водителям.
+        self.assertIn("t.route = \'incoming\' AND t.taxi_park <> \'\'", calls_sql)
         self.assertNotIn(";", calls_sql)
         states_sql = self.ns["_oktell_billing_operator_states_sql"]("20260701", "20260702", 480, 1200)
         self.assertIn("A_Cube_CC_OperatorStates", states_sql)
-        for state_alias in ("talk_in_seconds", "talk_out_seconds", "postproc_seconds",
-                            "hold_seconds", "wait_seconds", "pause_seconds", "dial_seconds"):
+        for state_alias in ("talk_in_seconds", "talk_out_seconds",
+                            "postproc_in_seconds", "postproc_out_seconds",
+                            "hold_in_seconds", "hold_out_seconds",
+                            "dial_in_seconds", "dial_out_seconds", "dial_other_seconds",
+                            "dial_wait_out_seconds", "wait_seconds", "pause_seconds"):
             self.assertIn(state_alias, states_sql)
+        # Состояния с направлением режутся по IsOutput, без направления — общие.
+        self.assertIn("s.State = 6 AND s.IsOutput = 0", states_sql)
+        self.assertIn("s.State = 7 AND s.IsOutput = 1", states_sql)
+        self.assertIn("s.State = 33 AND s.IsOutput = 0", states_sql)
+        # «Дозвон» исходящего — State=2 «Ожидание ответа абонента».
+        self.assertIn(
+            "SUM(CASE WHEN s.State = 2 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS dial_wait_out_seconds",
+            states_sql)
         self.assertIn("DATEPART(HOUR, s.DateTimeStart)", states_sql)
         self.assertNotIn(";", states_sql)
         # Справочник A_Cube_CC_Cat_OperatorStateTypes: 9 = «Перерыв», 10 = «Готов».
@@ -496,39 +544,90 @@ class BuildOperatorReportTests(unittest.TestCase):
     def setUp(self):
         self.ns = _extract_namespace()
 
+    CALLS = [
+        {"report_date": "2026-07-01", "operator_name": "Иванова А.",
+         "served_in": 30, "call_in_seconds": 6000.4, "handle_in_seconds": 9000,
+         "served_out": 4, "call_out_seconds": 200, "handle_out_seconds": 200},
+        {"report_date": "2026-07-02", "operator_name": "Иванова А.",
+         "served_in": 20, "call_in_seconds": 4000, "handle_in_seconds": 6000,
+         "served_out": 0, "call_out_seconds": 0, "handle_out_seconds": 0},
+    ]
+    STATES = [
+        {"report_date": "2026-07-01", "operator_name": "Иванова А.", "talk_in_seconds": 5900,
+         "talk_out_seconds": 180, "postproc_in_seconds": 100, "postproc_out_seconds": 30,
+         "hold_in_seconds": 50, "hold_out_seconds": 0, "dial_in_seconds": 20,
+         "dial_out_seconds": 5, "dial_other_seconds": 10, "dial_wait_out_seconds": 0,
+         "wait_seconds": 3000, "pause_seconds": 1000},
+        {"report_date": "2026-07-01", "operator_name": "Петров Б.", "talk_in_seconds": 0,
+         "talk_out_seconds": 2000, "postproc_in_seconds": 0, "postproc_out_seconds": 40,
+         "hold_in_seconds": 0, "hold_out_seconds": 0, "dial_in_seconds": 0,
+         "dial_out_seconds": 100, "dial_other_seconds": 0, "dial_wait_out_seconds": 60,
+         "wait_seconds": 500, "pause_seconds": 0},
+    ]
+
     def test_merge_calls_and_states(self):
         build = self.ns["_oktell_billing_build_operator_report"]
-        calls = [
-            {"report_date": "2026-07-01", "operator_name": "Иванова А.", "served": 30, "talk_seconds": 6000.4},
-            {"report_date": "2026-07-02", "operator_name": "Иванова А.", "served": 20, "talk_seconds": 4000},
-        ]
-        states = [
-            {"report_date": "2026-07-01", "operator_name": "Иванова А.", "talk_in_seconds": 5900,
-             "talk_out_seconds": 0, "postproc_seconds": 100, "hold_seconds": 50,
-             "wait_seconds": 3000, "pause_seconds": 1000, "dial_seconds": 20},
-            {"report_date": "2026-07-01", "operator_name": "Петров Б.", "talk_in_seconds": 0,
-             "talk_out_seconds": 2000, "postproc_seconds": 40, "hold_seconds": 0,
-             "wait_seconds": 500, "pause_seconds": 0, "dial_seconds": 100},
-        ]
-        report = build(calls, states)
+        report = build(self.CALLS, self.STATES)
         self.assertEqual([d["date"] for d in report["days"]], ["2026-07-01", "2026-07-02"])
         day1 = {r["operator"]: r for r in report["days"][0]["operators"]}
-        self.assertEqual(day1["Иванова А."]["served"], 30)
-        self.assertEqual(day1["Иванова А."]["talk_seconds"], 6000)
-        self.assertEqual(day1["Иванова А."]["hold_seconds"], 50)
+        self.assertEqual(day1["Иванова А."]["served_in"], 30)
+        self.assertEqual(day1["Иванова А."]["call_in_seconds"], 6000)
+        self.assertEqual(day1["Иванова А."]["handle_in_seconds"], 9000)
+        self.assertEqual(day1["Иванова А."]["hold_in_seconds"], 50)
         # Петров без входящих звонков, но с исходящими разговорами — остаётся
-        self.assertEqual(day1["Петров Б."]["served"], 0)
+        self.assertEqual(day1["Петров Б."]["served_in"], 0)
         self.assertEqual(day1["Петров Б."]["talk_out_seconds"], 2000)
         period = {r["operator"]: r for r in report["operators"]}
-        self.assertEqual(period["Иванова А."]["served"], 50)
-        self.assertEqual(report["totals"]["served"], 50)
+        self.assertEqual(period["Иванова А."]["served_in"], 50)
+        self.assertEqual(report["totals"]["served_in"], 50)
+        self.assertEqual(report["totals"]["served_out"], 4)
+
+    def test_direction_report_splits_rows_and_totals(self):
+        build = self.ns["_oktell_billing_build_operator_report"]
+        split = self.ns["_oktell_billing_operator_direction_report"]
+        report = build(self.CALLS, self.STATES)
+
+        incoming = split(report, "incoming")
+        # У Петрова входящих нет ни звонком, ни разговором — во «Входе» его нет.
+        self.assertEqual([row["operator"] for row in incoming["operators"]], ["Иванова А."])
+        self.assertEqual(incoming["totals"]["served"], 50)
+        self.assertEqual(incoming["totals"]["talk_state_seconds"], 5900)
+        # Разговор и время обработки — разные величины и не смешиваются.
+        self.assertEqual(incoming["totals"]["talk_seconds"], 10000)
+        self.assertEqual(incoming["totals"]["handle_seconds"], 15000)
+        self.assertEqual(incoming["totals"]["postproc_seconds"], 100)
+        self.assertEqual(incoming["operators"][0]["dial_wait_seconds"], 0)
+
+        outgoing = split(report, "outgoing")
+        self.assertEqual(sorted(row["operator"] for row in outgoing["operators"]),
+                         ["Иванова А.", "Петров Б."])
+        self.assertEqual(outgoing["totals"]["served"], 4)
+        self.assertEqual(outgoing["totals"]["talk_state_seconds"], 2180)
+        self.assertEqual(outgoing["totals"]["postproc_seconds"], 70)
+        self.assertEqual(outgoing["totals"]["dial_wait_seconds"], 60)
+
+        # Занятость по направлениям не делится: «Готов» и «Перерыв» направления не
+        # знают, поэтому активное время в обоих срезах — за день целиком.
+        ivanova_in = incoming["operators"][0]["active_seconds"]
+        ivanova_out = next(r for r in outgoing["operators"] if r["operator"] == "Иванова А.")
+        self.assertEqual(ivanova_in, ivanova_out["active_seconds"])
+        self.assertEqual(ivanova_in, 5900 + 180 + 100 + 30 + 50 + 20 + 5 + 10)
+
+    def test_direction_report_drops_empty_days(self):
+        build = self.ns["_oktell_billing_build_operator_report"]
+        split = self.ns["_oktell_billing_operator_direction_report"]
+        # Второй день только входящий: в «Исходе» его среди дней быть не должно.
+        outgoing = split(build(self.CALLS, self.STATES), "outgoing")
+        self.assertEqual([d["date"] for d in outgoing["days"]], ["2026-07-01"])
 
     def test_technical_accounts_dropped(self):
         build = self.ns["_oktell_billing_build_operator_report"]
         states = [
             {"report_date": "2026-07-01", "operator_name": "admin", "talk_in_seconds": 0,
-             "talk_out_seconds": 0, "postproc_seconds": 0, "hold_seconds": 0,
-             "wait_seconds": 65000, "pause_seconds": 5000, "dial_seconds": 0},
+             "talk_out_seconds": 0, "postproc_in_seconds": 0, "postproc_out_seconds": 0,
+             "hold_in_seconds": 0, "hold_out_seconds": 0, "dial_in_seconds": 0,
+             "dial_out_seconds": 0, "dial_other_seconds": 0, "dial_wait_out_seconds": 0,
+             "wait_seconds": 65000, "pause_seconds": 5000},
         ]
         report = build([], states)
         self.assertEqual(report["days"], [])

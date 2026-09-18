@@ -59,6 +59,11 @@ import {
   billingGroupingRow,
 } from './billingGrouping';
 import {
+  BILLING_OPERATOR_DIRECTIONS,
+  billingOperatorDirectionReport,
+  billingOperatorHasDialWait,
+} from './billingOperatorDirection';
+import {
   AlertTriangle,
   BarChart3,
   CalendarDays,
@@ -2142,22 +2147,31 @@ const LINE_DIRECTION = {
     arClass: billingArClass,
     title: 'Биллинг Oktell',
     text: 'Входящие звонки напрямую из базы Oktell: детализация по дням за выбранный период и окно времени.',
+    // Подзаголовок для «Операторы · исход»: там показаны не входящие, и старая
+    // фраза про «входящие звонки» над таблицей исходящих просто врала.
+    outgoingText: 'Исходящие звонки операторов напрямую из базы Oktell: детализация по дням за выбранный период и окно времени.',
     loadingText: 'Получаем данные из Oktell...',
     errorText: 'Не удалось получить данные из Oktell',
     detailTitle: 'Детализация звонков',
-    detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только отвеченные звонки.',
-    emptyText: 'Oktell не вернул входящих звонков за указанный период и окно времени.',
+    detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только сам разговор с оператором, без IVR и ожидания.',
+    // Без слова «входящих»: этот же текст показывается во вкладке «Операторы · исход».
+    emptyText: 'Oktell не вернул звонков за указанный период и окно времени.',
     idleText: 'Отчёт соберётся сам. Чтобы сменить период или окно времени, задайте их сверху и нажмите «Сформировать».',
-    summaryTitle: (mode) => (mode === 'operator'
-      ? 'Итоги за период по операторам'
+    summaryTitle: (mode, direction) => (mode === 'operator'
+      ? `Итоги за период по операторам · ${direction === 'outgoing' ? 'исход' : 'вход'}`
       : mode === 'line' ? 'Итоги за период по номерам' : 'Итоги за период по таксопаркам'),
-    daySummary: (mode, day) => (mode === 'operator'
-      ? `Операторов ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.served)} · Разговоры ${formatDurationHms(day.totals?.talk_in_seconds)}`
+    daySummary: (mode, day, direction) => (mode === 'operator'
+      ? `Операторов ${formatInt((day.operators || []).length)} · ${direction === 'outgoing' ? 'Звонков' : 'Обслужено'} ${formatInt(day.totals?.served)} · Разговоры ${formatDurationHms(day.totals?.talk_state_seconds)}`
       : `Поступило ${formatInt(day.totals?.arrived)} · Обслужено ${formatInt(day.totals?.served)} · Потеряно ${formatInt(day.totals?.lost)}`),
     // Подсказки режимов у линии остаются в разметке: в подсказке про SL стоит
     // число из ответа, и вынос её в строку конфигурации сменил бы разметку.
     modeHint: null,
-    exportFileName: (mode, applied) => `oktell_billing_${mode}_${applied.from}_${applied.to}.xlsx`,
+    // У «Операторов» направление тоже в имени: вход и исход за один период — это
+    // два разных отчёта, и в папке они не должны ложиться друг на друга.
+    exportFileName: (mode, applied, park, direction) => {
+      const part = mode === 'operator' ? `${mode}_${direction === 'outgoing' ? 'outgoing' : 'incoming'}` : mode;
+      return `oktell_billing_${part}_${applied.from}_${applied.to}.xlsx`;
+    },
   },
   hasAht: true,
   hasOccUr: true,
@@ -2672,13 +2686,13 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
             <th className="px-3 py-2.5 text-right font-semibold">Потеряно</th>
             <th className="px-3 py-2.5 text-right font-semibold">AR</th>
             <th className="px-3 py-2.5 text-right font-semibold">SL</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Ср. разговор</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Средний разговор с оператором, без IVR и очереди">Ср. разговор</th>
             {/* Отчётность СЗоВ ведётся в секундах (задача #298), поэтому рядом с
                 ч:мм:сс — то же среднее целым числом секунд. */}
             <th className="px-3 py-2.5 text-right font-semibold" title="Среднее время разговора (ATT) в секундах">Ср. разговор, сек</th>
             <th className="px-3 py-2.5 text-right font-semibold">Ср. ожидание</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Время разговора</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Общее время</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Разговоры с операторами, без IVR и очереди">Время разговора</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Звонки целиком: IVR, ожидание в очереди и разговор">Общее время</th>
             <th className="px-3 py-2.5 text-right font-semibold">Сброс на приветствии</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Средний балл 1–5, который водитель ставит в IVR после разговора с оператором. Разговоры без оценки в среднее не входят.">Ср. оценка</th>
           </tr>
@@ -3040,7 +3054,7 @@ const BillingDetailTable = ({ rows }) => (
           <th className="px-3 py-2.5 text-left font-semibold">Номер водителя</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Звонки, которые не дошли до очереди после IVR">Сброс на IVR</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Оператор не принял звонок, водитель сбросил">Сброс в очереди/пропущенные</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="Время разговора, если звонок дошёл до оператора">Время разговора</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Разговор с оператором, без IVR и ожидания в очереди">Время разговора</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100">
@@ -3062,10 +3076,11 @@ const BillingDetailTable = ({ rows }) => (
   </div>
 );
 
-// Занятость оператора: активное = разговоры (вх+исх) + постобработка + удержание + распределение
+// Занятость оператора: активное время за день целиком (оба направления) ко всему
+// времени в системе. Срез по направлению его не делит — «Готов» и «Перерыв» в Oktell
+// направления не имеют, см. billingOperatorDirection.js.
 const billingOperatorActivity = (item) => {
-  const active = Number(item.talk_in_seconds || 0) + Number(item.talk_out_seconds || 0)
-    + Number(item.postproc_seconds || 0) + Number(item.hold_seconds || 0) + Number(item.dial_seconds || 0);
+  const active = Number(item.active_seconds || 0);
   const wait = Number(item.wait_seconds || 0);
   const pause = Number(item.pause_seconds || 0);
   const total = active + wait + pause;
@@ -3075,11 +3090,16 @@ const billingOperatorActivity = (item) => {
   };
 };
 
-const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
+const BillingOperatorTable = ({
+  rows, totals, totalsLabel = 'Итого', direction = 'incoming', showDialWait = false,
+}) => {
+  const isOutgoing = direction === 'outgoing';
   const renderMetricsCells = (item) => {
     const attSeconds = safeRatio(item.talk_seconds, item.served);
+    // AHT — всё время обработки звонка, поэтому от длины цепочки целиком
+    // (handle_seconds): IVR и очередь в него по определению входят, в отличие от ATT.
     const ahtSeconds = safeRatio(
-      Number(item.talk_seconds || 0) + Number(item.hold_seconds || 0) + Number(item.postproc_seconds || 0),
+      Number(item.handle_seconds || 0) + Number(item.hold_seconds || 0) + Number(item.postproc_seconds || 0),
       item.served,
     );
     const { occ, utz } = billingOperatorActivity(item);
@@ -3089,8 +3109,10 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
         <td className="px-3 py-2.5 text-right text-slate-700">{attSeconds === null ? '—' : formatDurationHms(attSeconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{attSeconds === null ? '—' : formatInt(attSeconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-700">{ahtSeconds === null ? '—' : formatDurationHms(ahtSeconds)}</td>
-        <td className="px-3 py-2.5 text-right text-slate-900">{formatDurationHms(item.talk_in_seconds)}</td>
-        <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.talk_out_seconds)}</td>
+        {showDialWait ? (
+          <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.dial_wait_seconds)}</td>
+        ) : null}
+        <td className="px-3 py-2.5 text-right text-slate-900">{formatDurationHms(item.talk_state_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.postproc_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.wait_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.pause_seconds)}</td>
@@ -3110,7 +3132,9 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
         <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2.5 text-left font-semibold">Оператор</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Обслужено</th>
+            {/* «Обслужено» — про принятые звонки; на исходящих обслуживать нечего,
+                там это просто число сделанных звонков. */}
+            <th className="px-3 py-2.5 text-right font-semibold">{isOutgoing ? 'Звонков' : 'Обслужено'}</th>
             {/* Было «АТТ» и «АНТ» кириллицей — вторая ещё и искажала AHT: русская «Н»
                 выглядит как латинская «H», и сокращение читалось как несуществующее
                 слово. Рядом стоят латинские OCC и UTZ, так что кириллица тут просто
@@ -3118,9 +3142,11 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
                 подряд не читает никто, кроме их автора. */}
             <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time — среднее время разговора">ATT</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time в секундах">ATT, сек</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Average Handling Time — разговор + удержание + постобработка">AHT</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Разговоры вх.</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Разговоры исх.</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Average Handling Time — звонок целиком (с IVR и очередью) плюс удержание и постобработка">AHT</th>
+            {showDialWait ? (
+              <th className="px-3 py-2.5 text-right font-semibold" title="Ожидание ответа абонента — от набора до ответа водителя">Дозвон</th>
+            ) : null}
+            <th className="px-3 py-2.5 text-right font-semibold">Разговоры</th>
             <th className="px-3 py-2.5 text-right font-semibold">Постобработка</th>
             <th className="px-3 py-2.5 text-right font-semibold">Ожидание</th>
             <th className="px-3 py-2.5 text-right font-semibold">Пауза</th>
@@ -3481,6 +3507,9 @@ const ResourceFteView = ({
   const [billingTimeFrom, setBillingTimeFrom] = useState('00:00');
   const [billingTimeTo, setBillingTimeTo] = useState('23:59');
   const [billingMode, setBillingMode] = useState('park');
+  // Направление разреза «Операторы»: ответ ручки содержит обе половины, поэтому
+  // переключение не ходит в Oktell заново — отчёт режется на месте.
+  const [billingOperatorDirection, setBillingOperatorDirection] = useState('incoming');
   // Применённые параметры: фетч идёт только по ним (по кнопке «Сформировать»),
   // изменение пикеров само по себе не дергает Oktell.
   const [billingApplied, setBillingApplied] = useState(() => ({
@@ -3758,6 +3787,9 @@ const ResourceFteView = ({
           time_to: billingApplied.timeTo,
           mode: billingMode,
           report_type: billingExportType,
+          ...(billingMode === 'operator' && cfg.hasBillingTalkTime
+            ? { direction: billingOperatorDirection }
+            : {}),
           ...(billingMode === 'grouping' && cfg.billing.groupingByPark && billingGroupingPark
             ? { park: billingGroupingPark }
             : {}),
@@ -3770,7 +3802,7 @@ const ResourceFteView = ({
       link.href = url;
       link.download = billingExportType === 'efficiency'
         ? `operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx`
-        : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark);
+        : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark, billingOperatorDirection);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -3787,7 +3819,8 @@ const ResourceFteView = ({
     } finally {
       setIsBillingExporting(false);
     }
-  }, [apiRoot, billingApplied, billingExportType, billingGroupingPark, billingMode, buildHeaders, cfg, notify]);
+  }, [apiRoot, billingApplied, billingExportType, billingGroupingPark, billingMode,
+    billingOperatorDirection, buildHeaders, cfg, notify]);
 
   const saveBillingGroupingComment = useCallback(async ({ hourFrom, hourTo, comment }) => {
     const editor = billingCommentEditor;
@@ -3865,7 +3898,25 @@ const ResourceFteView = ({
     : billingPeriodDays > 31
       ? 'Период отчета не может быть больше 31 дня'
       : '';
-  const billingReport = billingReports[billingMode];
+  const billingReportRaw = billingReports[billingMode];
+  // Разрез «Операторы» приходит по обоим направлениям сразу; на экран идёт половина.
+  const billingReport = useMemo(() => (
+    billingMode === 'operator' && cfg.hasBillingTalkTime && billingReportRaw
+      ? billingOperatorDirectionReport(billingReportRaw, billingOperatorDirection)
+      : billingReportRaw
+  ), [billingMode, billingOperatorDirection, billingReportRaw, cfg.hasBillingTalkTime]);
+  const billingIsOutgoing = billingMode === 'operator' && cfg.hasBillingTalkTime
+    && billingOperatorDirection === 'outgoing';
+  // Колонка «Дозвон» появляется только когда станция её пишет (предиктивный обзвон):
+  // в нынешнем режиме «Таксопарк исходящая» она была бы вечным нулём.
+  const billingShowDialWait = billingIsOutgoing && billingOperatorHasDialWait(billingReport);
+  const billingOperatorHint = 'OCC и UTZ — по оператору за день целиком: «Готов» и «Перерыв» на направления не делятся';
+  // Про гудки внутри разговора молчать нельзя — иначе цифра читается как чистый
+  // разговор. Но это свойство одного показателя, а не всего разреза, поэтому
+  // оговорка стоит подписью у него же, а не третьей строкой подсказок.
+  const billingTalkHint = billingShowDialWait
+    ? `Дозвон ${formatDurationHms(billingTotals?.dial_wait_seconds)}`
+    : billingIsOutgoing ? 'С гудками до ответа водителя' : 'Состояние «Разговор» у операторов';
   const billingError = billingErrors[billingMode] || '';
   const billingDays = billingReport?.days || [];
   const billingTotals = billingReport?.totals || null;
@@ -3889,7 +3940,8 @@ const ResourceFteView = ({
   const billingAttSeconds = billingTotals ? safeRatio(billingTotals.talk_seconds, billingTotals.served) : null;
   const billingAhtSeconds = billingTotals
     ? safeRatio(
-      Number(billingTotals.talk_seconds || 0) + Number(billingTotals.hold_seconds || 0) + Number(billingTotals.postproc_seconds || 0),
+      Number(billingTotals.handle_seconds ?? billingTotals.talk_seconds ?? 0)
+      + Number(billingTotals.hold_seconds || 0) + Number(billingTotals.postproc_seconds || 0),
       billingTotals.served,
     )
     : null;
@@ -5982,7 +6034,7 @@ const ResourceFteView = ({
   };
 
   const renderPhoneBillingTable = (day) => {
-    if (billingMode === 'operator') return <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />;
+    if (billingMode === 'operator') return <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" direction={billingOperatorDirection} showDialWait={billingShowDialWait} />;
     if (billingMode === 'grouping' && !cfg.hasBillingTalkTime) {
       return <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode={billingReport?.park ? 'groupingPark' : 'grouping'} />;
     }
@@ -5997,7 +6049,7 @@ const ResourceFteView = ({
     );
     let modeHint = '';
     if (cfg.billing.modeHint) modeHint = cfg.billing.modeHint(billingMode, billingSlSeconds);
-    else if (billingMode === 'operator') modeHint = 'OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз';
+    else if (billingMode === 'operator') modeHint = billingOperatorHint;
     else if (billingMode === 'detail') modeHint = 'Одна строка — один звонок; на странице 25 звонков';
     else if (billingMode === 'grouping') modeHint = 'Разница — факт смен минус прогноз; комментарий к часу — нажатие на его ячейку';
     else modeHint = `SL — отвечено за ≤ ${billingSlSeconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь`;
@@ -6021,8 +6073,13 @@ const ResourceFteView = ({
         ];
       } else if (billingMode === 'operator') {
         tiles = [
-          { key: 'served', label: 'Обслужено', value: formatInt(billingTotals.served) },
-          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_in_seconds), hint: `исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}` },
+          { key: 'served', label: billingIsOutgoing ? 'Звонков' : 'Обслужено', value: formatInt(billingTotals.served) },
+          {
+            key: 'talk',
+            label: 'Время разговора',
+            value: formatDurationHms(billingTotals.talk_state_seconds),
+            hint: billingTalkHint.toLowerCase(),
+          },
           { key: 'att', label: 'ATT', value: billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds), hint: billingAttSeconds === null ? null : `${formatInt(billingAttSeconds)} сек` },
           { key: 'aht', label: 'AHT', value: billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds) },
           { key: 'occ', label: 'OCC', value: billingOperatorTotals?.occ == null ? '—' : formatPercent(billingOperatorTotals.occ, 1) },
@@ -6035,7 +6092,7 @@ const ResourceFteView = ({
           { key: 'lost', label: 'Потеряно', value: formatInt(billingTotals.lost), tone: Number(billingTotals.lost || 0) > 0 ? 'rose' : 'slate' },
           { key: 'ar', label: 'AR', value: billingArRatio === null ? '—' : formatPercent(billingArRatio, 1), tone: phoneArTone(billingArRatio) },
           { key: 'sl', label: 'SL', value: billingSlRatio === null ? '—' : formatPercent(billingSlRatio, 1), hint: `ответ ≤ ${billingSlSeconds} сек`, tone: phoneSlTone(billingSlRatio) },
-          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: `общее ${formatDurationHms(billingTotals.total_seconds)}` },
+          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: `без IVR и очереди · всего ${formatDurationHms(billingTotals.total_seconds)}` },
         ];
       }
     }
@@ -6100,6 +6157,15 @@ const ResourceFteView = ({
           ariaLabel="Разрез биллинга"
         />
 
+        {cfg.hasBillingTalkTime && billingMode === 'operator' ? (
+          <RfPhonePills
+            items={BILLING_OPERATOR_DIRECTIONS.map((item) => ({ value: item.key, label: item.label }))}
+            value={billingOperatorDirection}
+            onChange={setBillingOperatorDirection}
+            ariaLabel="Направление звонков"
+          />
+        ) : null}
+
         {billingError ? <RfPhoneNote tone="rose">{billingError}</RfPhoneNote> : null}
 
         {isBillingLoading ? (
@@ -6134,12 +6200,12 @@ const ResourceFteView = ({
               <>
                 {billingMode !== 'grouping' ? (
                   <RfPhoneSection
-                    label={cfg.billing.summaryTitle(billingMode)}
+                    label={cfg.billing.summaryTitle(billingMode, billingOperatorDirection)}
                     hint={`${formatPhoneRange(billingReport.date_from, billingReport.date_to)} · ${billingReport.time_from}–${billingReport.time_to}`}
                   >
                     <RfPhoneTable>
                       {billingMode === 'operator' ? (
-                        <BillingPeopleTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
+                        <BillingPeopleTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" direction={billingOperatorDirection} showDialWait={billingShowDialWait} />
                       ) : (
                         <BillingSummaryTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
                       )}
@@ -6170,7 +6236,7 @@ const ResourceFteView = ({
                       <RfPhoneRow
                         key={day.date}
                         title={formatPhoneDayTitle(day.date)}
-                        subtitle={cfg.billing.daySummary(billingMode, day)}
+                        subtitle={cfg.billing.daySummary(billingMode, day, billingOperatorDirection)}
                         value={badge}
                         valueClassName={`text-[14px] font-semibold ${badgeClass}`}
                         onClick={() => setPhoneBillingDay(day.date)}
@@ -6790,7 +6856,7 @@ const ResourceFteView = ({
             open={Boolean(phoneBillingDay) && Boolean(billingDays.find((day) => day.date === phoneBillingDay))}
             onClose={() => setPhoneBillingDay('')}
             title={billingDay ? formatPhoneDayTitle(billingDay.date) : ''}
-            subtitle={billingDay ? cfg.billing.daySummary(billingMode, billingDay) : ''}
+            subtitle={billingDay ? cfg.billing.daySummary(billingMode, billingDay, billingOperatorDirection) : ''}
           >
             {billingDay ? (
               <div className="space-y-2">
@@ -8057,7 +8123,7 @@ const ResourceFteView = ({
                   </span>
                   <div>
                     <h2 className="text-lg font-semibold text-slate-950">{cfg.billing.title}</h2>
-                    <p className="text-sm text-slate-500">{cfg.billing.text}</p>
+                    <p className="text-sm text-slate-500">{billingIsOutgoing ? cfg.billing.outgoingText : cfg.billing.text}</p>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
@@ -8145,6 +8211,27 @@ const ResourceFteView = ({
                       </button>
                     ))}
                   </div>
+                  {/* Направление разреза «Операторы». Стоит рядом с разрезами, потому
+                      что это вторая половина одного выбора: «что показываем» и «по
+                      какому направлению». Данные уже загружены, походов в Oktell нет. */}
+                  {cfg.hasBillingTalkTime && billingMode === 'operator' ? (
+                    <div className="inline-flex w-fit shrink-0 rounded-xl bg-slate-100 p-1">
+                      {BILLING_OPERATOR_DIRECTIONS.map((item) => (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={() => setBillingOperatorDirection(item.key)}
+                          className={`h-9 rounded-lg px-4 text-sm font-semibold transition ${
+                            billingOperatorDirection === item.key
+                              ? 'bg-white text-slate-950 shadow-sm'
+                              : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   {cfg.billing.groupingByPark && billingMode === 'grouping' ? (
                     <CustomSelect
                       variant="ios"
@@ -8166,7 +8253,7 @@ const ResourceFteView = ({
                   {cfg.billing.modeHint ? (
                     <span>{cfg.billing.modeHint(billingMode, billingSlSeconds)}</span>
                   ) : billingMode === 'operator' ? (
-                    <span>OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз</span>
+                    <span>{billingOperatorHint}</span>
                   ) : billingMode === 'detail' ? (
                     <span>Одна строка — один звонок; на странице 25 звонков</span>
                   ) : billingMode === 'grouping' ? (
@@ -8249,10 +8336,22 @@ const ResourceFteView = ({
                   </div>
                 ) : billingMode === 'operator' ? (
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-                    <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.served)} hint="Входящие, отвеченные оператором" tone="emerald" />
-                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_in_seconds)} hint={`Исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}`} tone="blue" />
+                    <StatCard
+                      icon={CheckCircle2}
+                      label={billingIsOutgoing ? 'Звонков' : 'Обслужено'}
+                      value={formatInt(billingTotals.served)}
+                      hint={billingIsOutgoing ? 'Исходящие звонки операторов' : 'Входящие, отвеченные оператором'}
+                      tone="emerald"
+                    />
+                    <StatCard
+                      icon={Clock3}
+                      label="Время разговора"
+                      value={formatDurationHms(billingTotals.talk_state_seconds)}
+                      hint={billingTalkHint}
+                      tone="blue"
+                    />
                     <StatCard icon={PhoneCall} label="ATT" value={billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds)} hint={billingAttSeconds === null ? 'Ср. время разговора' : `Ср. время разговора · ${formatInt(billingAttSeconds)} сек`} tone="slate" />
-                    <StatCard icon={ListChecks} label="AHT" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint="Разговор + удержание + постобработка" tone="slate" />
+                    <StatCard icon={ListChecks} label="AHT" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint="Звонок целиком + удержание и постобработка" tone="slate" />
                     <StatCard
                       icon={TrendingUp}
                       label="OCC"
@@ -8287,7 +8386,7 @@ const ResourceFteView = ({
                       hint={`Ответ за ≤ ${billingSlSeconds} сек от поступивших`}
                       tone={billingSlRatio !== null && billingSlRatio >= 0.8 ? 'emerald' : billingSlRatio !== null && billingSlRatio >= 0.6 ? 'amber' : 'rose'}
                     />
-                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={`Общее время ${formatDurationHms(billingTotals.total_seconds)}`} tone="slate" />
+                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={`Без IVR и очереди · всего ${formatDurationHms(billingTotals.total_seconds)}`} tone="slate" />
                   </div>
                 ))}
 
@@ -8344,12 +8443,12 @@ const ResourceFteView = ({
                     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                       <div className="border-b border-slate-100 px-4 py-3">
                         <h3 className="text-base font-semibold text-slate-950">
-                          {cfg.billing.summaryTitle(billingMode)}
+                          {cfg.billing.summaryTitle(billingMode, billingOperatorDirection)}
                         </h3>
                         <p className="text-xs tabular-nums text-slate-500">{formatDate(billingReport.date_from)} — {formatDate(billingReport.date_to)} · {billingReport.time_from}–{billingReport.time_to}</p>
                       </div>
                       {billingMode === 'operator' ? (
-                        <BillingPeopleTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
+                        <BillingPeopleTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" direction={billingOperatorDirection} showDialWait={billingShowDialWait} />
                       ) : (
                         <BillingSummaryTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
                       )}
@@ -8399,7 +8498,7 @@ const ResourceFteView = ({
                                 <div className="min-w-0">
                                   <div className="truncate text-sm font-semibold capitalize text-slate-950">{billingDayLabel(day.date)}</div>
                                   <div className="truncate text-xs tabular-nums text-slate-500">
-                                    {cfg.billing.daySummary(billingMode, day)}
+                                    {cfg.billing.daySummary(billingMode, day, billingOperatorDirection)}
                                   </div>
                                 </div>
                               </div>
@@ -8425,7 +8524,7 @@ const ResourceFteView = ({
                             {expanded ? (
                               <div className="border-t border-slate-100">
                                 {billingMode === 'operator' ? (
-                                  <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
+                                  <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" direction={billingOperatorDirection} showDialWait={billingShowDialWait} />
                                 ) : billingMode === 'grouping' && !cfg.hasBillingTalkTime ? (
                                   <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode={billingReport.park ? 'groupingPark' : 'grouping'} />
                                 ) : billingMode === 'grouping' ? (
