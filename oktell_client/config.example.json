@@ -1,0 +1,18 @@
+{
+  "api_base_url": "https://icore.example.com",
+  "oktell": {
+    "url": "https://oktell.example.com/",
+    "autologin": true,
+    "selectors": {
+      "login": "input[name='login'], input#login, input[type='text']",
+      "password": "input[name='password'], input#password, input[type='password']",
+      "submit": "button[type='submit'], input[type='submit'], .login-button"
+    },
+    "busy_state_strings": ["talk", "dial", "call", "ring"],
+    "session_keys": ["___oktellsessionid"]
+  },
+  "news": {
+    "poll_seconds": 60,
+    "unknown_state_grace_seconds": 60
+  }
+}

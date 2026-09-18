@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <!-- Страница локальная и грузит только свои файлы: политика запрещает всё
+         остальное, кроме картинок новостей (они приезжают подписанными
+         ссылками из хранилища). -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'">
+    <title>iCORE Oktell</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<section id="login" class="screen is-active">
+    <form class="card" id="login-form">
+        <div class="brand">
+            <h1>iCORE Oktell</h1>
+            <p>Вход по учётной записи iCORE</p>
+        </div>
+
+        <div class="field">
+            <label for="login-input">Логин</label>
+            <input id="login-input" type="text" autocomplete="username" autofocus>
+        </div>
+
+        <div class="field">
+            <label for="password-input">Пароль</label>
+            <input id="password-input" type="password" autocomplete="current-password">
+        </div>
+
+        <!-- Адрес портала спрашиваем только тогда, когда его нет в конфиге:
+             на настроенной машине это поле оператор не увидит никогда. -->
+        <div class="field" id="api-field" hidden>
+            <label for="api-input">Адрес iCORE</label>
+            <input id="api-input" type="text" placeholder="https://…">
+        </div>
+
+        <button class="btn" id="login-button" type="submit">Войти</button>
+        <p class="note" id="login-note"></p>
+    </form>
+</section>
+
+<section id="idle" class="screen">
+    <div class="card">
+        <h2><span class="dot"></span><span id="idle-title">Клиент Oktell открыт</span></h2>
+        <p class="note" id="idle-note"></p>
+    </div>
+</section>
+
+<section id="news" class="screen">
+    <div class="sheet">
+        <span class="badge" id="news-badge">Обязательно к прочтению</span>
+        <h2 id="news-title"></h2>
+        <div class="prose" id="news-body"></div>
+        <div class="photos" id="news-photos"></div>
+        <div class="quiz" id="news-quiz"></div>
+        <div class="footer">
+            <button class="btn" id="news-confirm" disabled>Ознакомлен</button>
+            <p class="note" id="news-note"></p>
+        </div>
+    </div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

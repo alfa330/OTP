@@ -1,0 +1,15 @@
+{
+  "name": "icore-oktell-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Клиент Oktell с входом по учётке iCORE и обязательными новостями",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "stub": "python3 dev_harness/stub_server.py",
+    "selftest": "ICORE_OKTELL_SELFTEST=1 electron ."
+  },
+  "dependencies": {
+    "electron": "^33.4.11"
+  }
+}
