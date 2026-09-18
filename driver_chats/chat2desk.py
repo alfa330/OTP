@@ -566,6 +566,52 @@ def normalize_message(msg, names=None):
     return item
 
 
+def message_from_event(payload):
+    """Тело вебхука -> строка в форме ответа `/v1/messages`.
+
+    Дальше её разбирает тот же `normalize_message`, что и ответ вендора: разбор формы
+    остаётся в одном месте, и лента не может разъехаться между двумя источниками.
+    Отличий у события ровно три: id сообщения зовётся `message_id`, время — `event_time`
+    (в UTC, как и `created`, поэтому отдаём строку как есть — её разберёт `_parse_created`),
+    а статуса доставки в событии нет вовсе: он приезжает отдельным `outbox_status`, и до
+    него в ленте не было ничего, кроме пустоты.
+    """
+    if not isinstance(payload, dict):
+        return None
+    return {
+        'id': payload.get('message_id'),
+        'type': payload.get('type'),
+        'text': payload.get('text'),
+        'created': payload.get('event_time'),
+        'photo': payload.get('photo'),
+        'video': payload.get('video'),
+        'audio': payload.get('audio'),
+        'pdf': payload.get('pdf'),
+        'attachments': payload.get('attachments') or [],
+        'status': payload.get('status'),
+        'request_id': payload.get('request_id'),
+        'dialog_id': payload.get('dialog_id'),
+        'channel_id': payload.get('channel_id'),
+        'operator_id': payload.get('operator_id'),
+    }
+
+
+def messages_from_events(payloads, names=None):
+    """События окна -> сообщения ленты. Порядок и дедуп — как у ответа вендора."""
+    seen, messages = set(), []
+    for payload in payloads or []:
+        row = message_from_event(payload)
+        if not row or row.get('id') is None:
+            continue
+        # Повтор доставки вендор гасит ключом в базе, но одно и то же сообщение
+        # может прийти двумя событиями (например outbox и imported_message).
+        if row['id'] in seen:
+            continue
+        seen.add(row['id'])
+        messages.append(normalize_message(row, names))
+    return messages
+
+
 def pending_comment_message(*, message_id, text, created, channel_id=None,
                             dialog_id=None, request_id=None):
     """Наша только что отправленная заметка в форме сообщения ленты.

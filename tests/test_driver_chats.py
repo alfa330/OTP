@@ -1095,8 +1095,10 @@ class RefreshTests(unittest.TestCase):
         reads = [i for i, line in enumerate(lines) if 'cached_messages' in line]
         self.assertEqual(len(reads), 1,
                          'чтение кеша в поиске одно — иначе флаг обойдут мимо')
+        # Ветка кеша может быть и `elif` (перед ней стоит путь потока вебхуков) —
+        # для сторожа важна не форма, а то, что чтение стоит под флагом.
         guard = next(line for line in reversed(lines[:reads[0]])
-                     if line.strip().startswith('if '))
+                     if line.strip().startswith(('if ', 'elif ')))
         self.assertIn('not force_fresh', guard,
                       'кеш читается ТОЛЬКО когда это не «Обновить»')
 
@@ -2251,6 +2253,153 @@ class JournalScreenTests(unittest.TestCase):
         есть ещё и «1–50 из 179», которого не хватало."""
         self.assertIn('<IosPager', self.journal)
         self.assertNotIn('Вперёд', self.journal)
+
+
+class WebhookStreamTests(unittest.TestCase):
+    """Лента из потока вебхуков: те же правила, что у вендорского пути, но без вызовов.
+
+    Раздел раньше платил вендору дважды: за поиск клиента, которого ещё нет в ночном
+    срезе, и за саму переписку (кеш на пять минут, то есть до пяти минут задержки).
+    События приходят сами и лежат неделю — это и дешевле, и живее.
+    """
+
+    class _Cursor:
+        """Курсор ровно настолько, насколько его используют запросы потока."""
+
+        def __init__(self, one=None, rows=None):
+            self.one, self.rows = one, rows or []
+            self.params = None
+            self.sql = None
+
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, params
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return self.rows
+
+    def _event(self, **extra):
+        payload = {
+            'message_id': 115816153, 'type': 'from_client', 'text': 'Привет',
+            'transport': 'whatsapp', 'client_id': 30247382, 'operator_id': None,
+            'dialog_id': 4236638, 'channel_id': 18337, 'photo': None, 'audio': None,
+            'pdf': None, 'attachments': [], 'request_id': 8891565,
+            'hook_type': 'inbox', 'event_time': '2026-09-18T09:32:10.137860Z',
+        }
+        payload.update(extra)
+        return payload
+
+    # ── Событие -> сообщение ленты ───────────────────────────────────────────
+
+    def test_event_becomes_the_same_message_as_the_vendor_row(self):
+        """Форма ленты одна на оба источника — её строит тот же normalize_message."""
+        message = chat2desk.messages_from_events([self._event()])[0]
+        self.assertEqual(message['id'], 115816153)
+        self.assertEqual(message['type'], 'from_client')
+        self.assertEqual(message['text'], 'Привет')
+        self.assertEqual(message['requestId'], 8891565)
+        self.assertEqual(message['channelId'], 18337)
+        # Время вендор шлёт в UTC — на ленте оно обязано стоять по Алматы.
+        self.assertEqual(message['created'], '2026-09-18T14:32:10.137860')
+
+    def test_operator_reply_is_signed_by_its_author(self):
+        """За двое суток водителю отвечают несколько человек; подпись у каждого своя."""
+        message = chat2desk.messages_from_events(
+            [self._event(type='to_client', operator_id=40818, message_id=2)],
+            {40818: 'Айман Абдрахманова'})[0]
+        self.assertEqual(message['author'], 'Айман Абдрахманова')
+
+    def test_internal_note_arrives_as_its_own_event(self):
+        """Заметку «нет ответа/обед» вендор шлёт событием comment — в ленте она своя."""
+        message = chat2desk.messages_from_events(
+            [self._event(hook_type='comment', type='comment', message_id=3,
+                         text='Передан', operator_id=40818)],
+            {40818: 'Айман Абдрахманова'})[0]
+        self.assertEqual(message['type'], 'comment')
+        self.assertEqual(message['author'], 'Айман Абдрахманова')
+
+    def test_one_message_delivered_twice_stays_one(self):
+        """Одно сообщение может прийти двумя событиями — в ленте оно одно."""
+        messages = chat2desk.messages_from_events([
+            self._event(message_id=7),
+            self._event(message_id=7, hook_type='imported_message'),
+        ])
+        self.assertEqual(len(messages), 1)
+
+    def test_event_without_id_is_skipped(self):
+        self.assertEqual(chat2desk.messages_from_events(
+            [self._event(message_id=None), 'мусор', None]), [])
+
+    # ── Покрывает ли поток окно ──────────────────────────────────────────────
+
+    def _covers(self, first_at, last_at, now=None, window_from=date(2026, 9, 17)):
+        now = now or datetime(2026, 9, 18, 12, 0)
+        cursor = self._Cursor(one=(first_at, last_at, now))
+        return queries.webhook_stream_covers(cursor, window_from)
+
+    def test_live_stream_that_started_before_the_window_covers_it(self):
+        self.assertTrue(self._covers(datetime(2026, 9, 15, 8, 0),
+                                     datetime(2026, 9, 18, 11, 55)))
+
+    def test_stream_that_went_quiet_does_not_cover(self):
+        """Молчание потока неотличимо от «никто не писал» — верить ему нельзя."""
+        self.assertFalse(self._covers(datetime(2026, 9, 15, 8, 0),
+                                      datetime(2026, 9, 18, 10, 0)))
+
+    def test_stream_started_inside_the_window_does_not_cover(self):
+        """Вебхук включили вчера — позавчерашний день ленты он не закрывает."""
+        self.assertFalse(self._covers(datetime(2026, 9, 18, 8, 0),
+                                      datetime(2026, 9, 18, 11, 55)))
+
+    def test_empty_or_broken_stream_does_not_cover(self):
+        self.assertFalse(self._covers(None, None))
+        self.assertFalse(queries.webhook_stream_covers(self._Cursor(one=(0,)),
+                                                       date(2026, 9, 17)))
+
+    # ── Поиск клиента в потоке ───────────────────────────────────────────────
+
+    def test_tail_search_finds_one_driver(self):
+        cursor = self._Cursor(rows=[(124223666, '905317298361',
+                                     datetime(2026, 9, 18, 9, 0))])
+        self.assertEqual(queries.webhook_client_by_tail(cursor, '317298361'),
+                         (124223666, '905317298361'))
+        self.assertEqual(cursor.params, {'tail': '317298361'})
+
+    def test_two_drivers_behind_one_tail_stop_the_search_here_too(self):
+        """Правило то же, что у ночного среза: показать переписку соседа нельзя."""
+        cursor = self._Cursor(rows=[(1, '905317298361', datetime(2026, 9, 18, 9, 0)),
+                                    (2, '77071234567', datetime(2026, 9, 18, 8, 0))])
+        self.assertEqual(queries.webhook_client_by_tail(cursor, '317298361'),
+                         ('ambiguous', None))
+
+    def test_tail_expression_matches_the_index(self):
+        """Разойдись выражение с индексом хоть пробелом — планировщик уйдёт в скан."""
+        database_source = (ROOT / 'database.py').read_text(encoding='utf-8')
+        self.assertIn("right(regexp_replace(client_phone, '\\D', '', 'g'), 9)",
+                      queries._WEBHOOK_CLIENT_BY_TAIL_SQL)
+        self.assertIn("right(regexp_replace(client_phone, '\\D', '', 'g'), 9)",
+                      database_source)
+
+    # ── Раздел ───────────────────────────────────────────────────────────────
+
+    def test_search_prefers_the_stream_and_keeps_the_vendor_as_fallback(self):
+        source = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        search = source.split('def driver_chats_search')[1].split('def driver_chats_open')[0]
+        self.assertIn('queries.webhook_stream_covers(cursor, window_from)', search)
+        self.assertIn('queries.webhook_messages(', search)
+        self.assertIn('chat2desk.messages_from_events(', search)
+        # Вендорский путь остался: на первых сутках после включения и при молчании
+        # потока раздел обязан работать по-старому.
+        self.assertIn('chat2desk.fetch_window_messages(', search)
+        self.assertIn('chat2desk.find_client(', search)
+
+    def test_stream_path_does_not_write_a_second_copy_of_the_thread(self):
+        """Лента из событий уже лежит в базе — снимок был бы копией, которая устареет."""
+        source = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        search = source.split('def driver_chats_search')[1].split('def driver_chats_open')[0]
+        self.assertIn('if not from_cache and webhook_payloads is None:', search)
 
 
 if __name__ == '__main__':

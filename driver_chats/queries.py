@@ -12,6 +12,7 @@ messages вендор не даёт), поэтому запись в журна�
 """
 
 import json
+import logging
 import re
 from datetime import datetime, timedelta
 
@@ -192,6 +193,151 @@ def local_client_by_tail(cursor, tail):
     if len(numbers) > 1:
         return ('ambiguous', None)
     return (int(rows[0][0]), rows[0][1])
+
+
+# ── То же самое, но из потока вебхуков ────────────────────────────────────────
+#
+# Зачем второй источник. `c2d_requests` наполняется ночным синком, поэтому тот,
+# кто написал впервые СЕГОДНЯ, в нём появится только завтра — за него раздел
+# платил вызовом `/v1/clients` (до трёх запросов), а переписку брал у вендора
+# (ещё один, и не чаще раза в пять минут: столько живёт кеш). События приходят
+# сами и лежат в `c2d_webhook_events` неделю, то есть покрывают и сегодняшний
+# день, и всё окно раздела — двое суток.
+#
+# Правила поиска ТЕ ЖЕ, что выше: точные варианты номера, потом хвост из девяти
+# цифр, и «несколько водителей за одним хвостом» — это отказ, а не показ
+# переписки соседа. Отдельные функции, а не общий SQL с UNION: у таблиц разный
+# ретеншн (45 суток против недели) и разные индексы, а слитый запрос заставил бы
+# планировщик выбирать между ними на каждый поиск.
+
+# Сколько поток считается живым. То же число, что у табло: вендор отключает
+# вебхук после пяти часов неуспешных доставок, а молчание потока внешне
+# неотличимо от «сегодня никто не писал».
+STREAM_STALE_SECONDS = 1800
+
+# Сообщения ленты. `system_message` тоже здесь: лента показывает служебные
+# строки диалога, а `imported_message` — это сообщения, пришедшие напрямую из
+# мессенджера, они НЕ поднимают inbox/outbox (см. документацию вендора).
+_WEBHOOK_MESSAGE_HOOKS = ('inbox', 'outbox', 'imported_message', 'comment',
+                          'system_message')
+
+
+def webhook_stream_covers(cursor, window_from):
+    """Покрывает ли поток событий окно раздела: жив сейчас и начался до его начала.
+
+    Второе условие обязательно: включили вебхук вчера — сегодняшний день он
+    закрывает, а позавчерашний нет, и лента вышла бы обрезанной молча.
+    Любая неожиданность здесь — это «нет», а не исключение: раздел обязан
+    ответить человеку, а вендорский путь работает и без потока."""
+    try:
+        cursor.execute(
+            """
+            SELECT MIN(event_at), MAX(event_at),
+                   (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') AS now_almaty
+              FROM c2d_webhook_events
+             WHERE hook_type = ANY(%(hooks)s)
+            """,
+            {'hooks': list(_WEBHOOK_MESSAGE_HOOKS)})
+        row = cursor.fetchone()
+        if not row or len(row) < 3 or row[0] is None or row[1] is None:
+            return False
+        first_at, last_at, now_almaty = row[0], row[1], row[2]
+        if (now_almaty - last_at).total_seconds() > STREAM_STALE_SECONDS:
+            return False
+        return first_at.date() <= window_from
+    except Exception:
+        logging.warning("Чаты водителей: поток вебхуков недоступен, идём к вендору",
+                        exc_info=True)
+        return False
+
+
+_WEBHOOK_CLIENT_SQL = """
+    SELECT client_id
+      FROM c2d_webhook_events
+     WHERE client_phone = ANY(%(variants)s)
+       AND client_id IS NOT NULL
+     ORDER BY event_at DESC
+     LIMIT 1
+"""
+
+
+def webhook_client_id(cursor, variants):
+    """client_id по точному номеру из потока событий. Ноль вызовов API."""
+    if not variants:
+        return None
+    cursor.execute(_WEBHOOK_CLIENT_SQL, {'variants': list(variants)})
+    row = cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+# Выражение хвоста — ДОСЛОВНО то же, что в индексе idx_c2d_webhook_events_phone_tail
+# (database.py): разойдись они хоть пробелом, индекс не возьмётся.
+_WEBHOOK_CLIENT_BY_TAIL_SQL = r"""
+    SELECT client_id, client_phone, max(event_at)
+      FROM c2d_webhook_events
+     WHERE right(regexp_replace(client_phone, '\D', '', 'g'), 9) = %(tail)s
+       AND client_id IS NOT NULL
+       -- Только то, что и правда номер: в этой же колонке оказывается
+       -- идентификатор WhatsApp, а девять последних цифр есть и у него.
+       AND client_phone ~ '^[+]?[0-9]{10,15}$'
+     GROUP BY client_id, client_phone
+     ORDER BY max(event_at) DESC
+     LIMIT 5
+"""
+
+
+def webhook_client_by_tail(cursor, tail):
+    """(client_id, номер как в потоке) по хвосту. Форма ответа — как у local_client_by_tail."""
+    if not tail:
+        return None
+    cursor.execute(_WEBHOOK_CLIENT_BY_TAIL_SQL, {'tail': str(tail)})
+    rows = [r for r in cursor.fetchall() if r and r[0] is not None]
+    if not rows:
+        return None
+    numbers = {re.sub(r'\D', '', str(row[1] or '')) for row in rows}
+    if len(numbers) > 1:
+        return ('ambiguous', None)
+    return (int(rows[0][0]), rows[0][1])
+
+
+def webhook_messages(cursor, client_id, window_from, window_to):
+    """Сырые события-сообщения клиента за окно, от старых к новым.
+
+    Отдаём тела событий как есть: приводит их к виду ленты `chat2desk.message_from_event`,
+    и разбор формы вендора остаётся в одном месте — рядом с разбором ответа `/v1/messages`."""
+    if not client_id:
+        return []
+    cursor.execute(
+        """
+        SELECT payload
+          FROM c2d_webhook_events
+         WHERE client_id = %(client_id)s
+           AND hook_type = ANY(%(hooks)s)
+           AND day BETWEEN %(window_from)s AND %(window_to)s
+         ORDER BY event_at, id
+        """,
+        {'client_id': int(client_id), 'hooks': list(_WEBHOOK_MESSAGE_HOOKS),
+         'window_from': window_from, 'window_to': window_to})
+    return [row[0] for row in cursor.fetchall() if isinstance(row[0], dict)]
+
+
+def chat_author_names(cursor, days=30):
+    """{id оператора Chat2Desk: имя} из своей базы — подпись автора без вызова API.
+
+    У вендора это `/v1/operators` (кеш процесса на шесть часов), но в потоке событий
+    имени нет вовсе, только id, а спрашивать вендора ради подписи — снова платить
+    квотой за то, что уже лежит в `c2d_requests` с ночного синка."""
+    cursor.execute(
+        """
+        SELECT DISTINCT ON (c2d_operator_id) c2d_operator_id, c2d_operator_name
+          FROM c2d_requests
+         WHERE c2d_operator_id IS NOT NULL
+           AND NULLIF(c2d_operator_name, '') IS NOT NULL
+           AND day >= CURRENT_DATE - %(days)s
+         ORDER BY c2d_operator_id, day DESC
+        """,
+        {'days': int(days)})
+    return {int(row[0]): str(row[1]) for row in cursor.fetchall()}
 
 
 # Справочник таксопарков. Канал в Chat2Desk = парк, на чей номер написал

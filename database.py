@@ -3180,6 +3180,84 @@ class Database:
                 ON c2d_chat_snapshots (wz_channel_id, wz_chat_id, episode_start)
                 WHERE source = 'chatapp';
             """)
+            # Сырые вебхуки Chat2Desk (задача табло, 18.09.2026). Вендор не отдаёт
+            # событий статусов операторов, но сообщения и закрытие обращений шлёт
+            # сам — это снимает основной расход квоты: табло больше не выкачивает
+            # день обращений опросом каждые 10 минут.
+            # Храним СЫРЬЁ, а не готовые метрики: событие приходит по одному, при
+            # неуспехе вендор повторяет доставку трижды, а пересчитать показатели
+            # из сырья можно задним числом — восстановить выброшенное нельзя.
+            # Ретеншн 7 суток (решение владельца 18.09.2026): табло смотрит на
+            # сегодня, недели с запасом хватает и на сверку с ночным синком.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS c2d_webhook_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_key TEXT NOT NULL UNIQUE,
+                    hook_type TEXT NOT NULL,
+                    event_at TIMESTAMP NOT NULL,
+                    day DATE NOT NULL,
+                    message_id BIGINT,
+                    request_id BIGINT,
+                    dialog_id BIGINT,
+                    client_id BIGINT,
+                    c2d_operator_id BIGINT,
+                    channel_id BIGINT,
+                    transport TEXT,
+                    message_type TEXT,
+                    -- Тип обращения приходит ТОЛЬКО в событии new_request («common» или
+                    -- «rating»), зато приходит от самого вендора — гадать по составу
+                    -- ленты, автоопрос это или чат, больше не нужно.
+                    request_type TEXT,
+                    -- Телефон и имя водителя лежат в теле события, но вынесены колонками:
+                    -- «Чаты водителей» начинаются с поиска по номеру, а индекс по
+                    -- выражению над JSON и читается хуже, и живёт отдельной жизнью от
+                    -- условия в запросе.
+                    client_phone TEXT,
+                    client_name TEXT,
+                    is_new_request BOOLEAN,
+                    payload JSONB NOT NULL,
+                    received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            # Колонки появились после первой версии таблицы: там, где таблицу уже
+            # создали (стенд, промежуточный деплой), `CREATE TABLE IF NOT EXISTS` их
+            # не добавит, и запись падала бы UndefinedColumn.
+            cursor.execute("""
+                ALTER TABLE c2d_webhook_events ADD COLUMN IF NOT EXISTS request_type TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_webhook_events ADD COLUMN IF NOT EXISTS client_phone TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE c2d_webhook_events ADD COLUMN IF NOT EXISTS client_name TEXT;
+            """)
+            # Разрезы «Чатов водителей»: лента клиента за окно и поиск по номеру.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_webhook_events_client
+                ON c2d_webhook_events(client_id, event_at);
+            """)
+            # Хвост номера — тем же выражением, что у c2d_requests: иностранный номер
+            # называют без кода страны, и достроить его можно только по последним
+            # девяти цифрам. Выражение обязано совпадать с условием в запросе
+            # ДОСЛОВНО, иначе планировщик уйдёт в полный проход.
+            cursor.execute(r"""
+                CREATE INDEX IF NOT EXISTS idx_c2d_webhook_events_phone_tail
+                ON c2d_webhook_events (
+                    right(regexp_replace(client_phone, '\D', '', 'g'), 9))
+                WHERE client_id IS NOT NULL;
+            """)
+            # Разрез табло — сутки целиком, а внутри суток события собираются по
+            # обращению: оба поля в одном индексе, чтобы день читался одним проходом.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_webhook_events_day
+                ON c2d_webhook_events(day, request_id);
+            """)
+            # Ретеншн ходит по времени события, а не по времени приёма: повтор
+            # доставки через два часа не должен продлевать жизнь старым суткам.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_webhook_events_at
+                ON c2d_webhook_events(event_at);
+            """)
             # Оценка чата — обычная запись журнала (calls) с критериями направления
             # ЧМ; чат-специфика — ссылка на снапшот переписки и цитаты
             # ({messageId, text, comment}). Отдельная таблица оценок чатов была
@@ -24094,9 +24172,190 @@ class Database:
             """, values)
         return len(values)
 
-    def cleanup_c2d_eval_data(self, requests_days=45, snapshots_days=180):
+    # ── Chat2Desk: приём вебхуков (источник табло вместо опроса) ──────────────
+
+    def save_c2d_webhook_events(self, events):
+        """Идемпотентная запись событий вебхука в c2d_webhook_events.
+
+        events — уже нормализованные dict (см. _chat2desk_webhook_events в
+        bot_schedule2). Ключ дедупа — `event_key`: вендор повторяет неудачную
+        доставку трижды (через 10 секунд, 5 минут и 2 часа), и без него одно
+        сообщение посчиталось бы за три. Возвращает число ЗАПИСАННЫХ строк, а не
+        принятых: повтор — это ноль, и по этой цифре видно, что поток дублируется.
+        """
+        if not events:
+            return 0
+        values = []
+        for row in events:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get('event_key') or '').strip()
+            if not key or row.get('event_at') is None or row.get('day') is None:
+                continue
+            values.append((
+                key[:255],
+                str(row.get('hook_type') or '')[:64],
+                row.get('event_at'), row.get('day'),
+                row.get('message_id'), row.get('request_id'), row.get('dialog_id'),
+                row.get('client_id'), row.get('c2d_operator_id'), row.get('channel_id'),
+                (str(row.get('transport'))[:64] if row.get('transport') else None),
+                (str(row.get('message_type'))[:32] if row.get('message_type') else None),
+                (str(row.get('request_type'))[:32] if row.get('request_type') else None),
+                (str(row.get('client_phone'))[:64] if row.get('client_phone') else None),
+                (str(row.get('client_name'))[:255] if row.get('client_name') else None),
+                row.get('is_new_request'),
+                Json(row.get('payload') if isinstance(row.get('payload'), dict) else {}),
+            ))
+        if not values:
+            return 0
+        with self._get_cursor() as cursor:
+            execute_values(cursor, """
+                INSERT INTO c2d_webhook_events (
+                    event_key, hook_type, event_at, day, message_id, request_id,
+                    dialog_id, client_id, c2d_operator_id, channel_id, transport,
+                    message_type, request_type, client_phone, client_name,
+                    is_new_request, payload)
+                VALUES %s
+                ON CONFLICT (event_key) DO NOTHING
+            """, values, page_size=500)
+            return int(cursor.rowcount or 0)
+
+    def get_c2d_webhook_events(self, day_from, day_to=None):
+        """События вебхука за период, по возрастанию времени — сырьё для метрик табло.
+
+        Порядок задан здесь, а не у вызывающего: и первый ответ, и ответ внутри
+        чата считаются проходом по ленте обращения, и на неупорядоченной выборке
+        обе величины молча поедут."""
+        day_to = day_to or day_from
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT hook_type, event_at, day, message_id, request_id, dialog_id,
+                       client_id, c2d_operator_id, channel_id, transport,
+                       message_type, request_type, is_new_request
+                FROM c2d_webhook_events
+                WHERE day BETWEEN %s AND %s
+                ORDER BY event_at, id
+            """, (day_from, day_to))
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def get_c2d_operator_status_events(self, day_from, day_to):
+        """События смены статуса чатников за период, по возрастанию времени.
+
+        `online` и почта лежат в теле события, а не колонками: колонки таблицы общие
+        для всех событий вендора, и заводить под каждое своё поле значило бы менять
+        схему всякий раз, когда он добавит событие."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c2d_operator_id,
+                       event_at,
+                       (payload->>'online') AS online,
+                       COALESCE(message_type, payload->>'offline_type') AS offline_type,
+                       (payload->>'email') AS email
+                FROM c2d_webhook_events
+                WHERE hook_type IN ('operator_status_changed', 'operator_status_updated')
+                  AND c2d_operator_id IS NOT NULL
+                  AND day BETWEEN %s AND %s
+                ORDER BY event_at, id
+            """, (day_from, day_to))
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def get_c2d_operator_status_before(self, moment):
+        """Последний известный статус каждого чатника ДО момента — чем он начал сутки.
+
+        Без этого человек, который заступил вчера вечером и не трогал статус, выглядел
+        бы сегодня «не в системе»: событий за сегодня у него нет, а лента статусов
+        начинается с первого события суток."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT ON (c2d_operator_id)
+                       c2d_operator_id,
+                       event_at,
+                       (payload->>'online') AS online,
+                       COALESCE(message_type, payload->>'offline_type') AS offline_type,
+                       (payload->>'email') AS email
+                FROM c2d_webhook_events
+                WHERE hook_type IN ('operator_status_changed', 'operator_status_updated')
+                  AND c2d_operator_id IS NOT NULL
+                  AND event_at < %s
+                ORDER BY c2d_operator_id, event_at DESC, id DESC
+            """, (moment,))
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def get_c2d_open_chats_by_operator(self):
+        """{id оператора Chat2Desk: сколько чатов у него сейчас открыто}.
+
+        Открытый чат — обращение, по которому были сообщения и не приходило
+        `close_request`. Считаем в SQL, а не строками: открытым может быть и
+        позавчерашний чат, а тянуть ради счётчика всю неделю событий в память
+        значит платить памятью за одну цифру на плитке."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                WITH messages AS (
+                    SELECT request_id,
+                           MAX(event_at) FILTER (WHERE c2d_operator_id IS NOT NULL) AS last_at,
+                           (ARRAY_AGG(c2d_operator_id ORDER BY event_at DESC)
+                                FILTER (WHERE c2d_operator_id IS NOT NULL))[1] AS operator_id
+                    FROM c2d_webhook_events
+                    WHERE request_id IS NOT NULL
+                      AND hook_type IN ('inbox', 'outbox', 'imported_message', 'comment',
+                                        'dialog_transferred', 'new_request')
+                    GROUP BY request_id
+                )
+                SELECT m.operator_id, COUNT(*)::int
+                FROM messages m
+                WHERE m.operator_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM c2d_webhook_events c
+                      WHERE c.request_id = m.request_id
+                        AND c.hook_type IN ('close_request', 'close_dialog'))
+                GROUP BY 1
+            """)
+            return {int(row[0]): int(row[1]) for row in cursor.fetchall()}
+
+    def get_c2d_operator_names(self, days=30):
+        """{id оператора Chat2Desk: имя} из уже синхронизированных обращений.
+
+        Вебхук приносит только `operator_id`, а разрез табло по людям и почасовой
+        отчёт работают по именам учёток. Справочник берём из своей базы, а не из
+        `/v1/operators`: там он стоит запроса, а здесь уже лежит с ночного синка."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT ON (c2d_operator_id) c2d_operator_id, c2d_operator_name
+                FROM c2d_requests
+                WHERE c2d_operator_id IS NOT NULL
+                  AND NULLIF(c2d_operator_name, '') IS NOT NULL
+                  AND day >= CURRENT_DATE - %s
+                ORDER BY c2d_operator_id, day DESC
+            """, (int(days),))
+            return {int(row[0]): str(row[1]) for row in cursor.fetchall()}
+
+    def get_c2d_webhook_health(self):
+        """{first_event_at, last_event_at, events_today} — жив ли поток и с какого момента.
+
+        Табло решает по этим двум цифрам, можно ли верить базе:
+          * последнее событие — вендор отключает вебхук после пяти часов неуспешных
+            доставок, а молчание потока внешне неотличимо от «сегодня не было чатов»;
+          * первое событие — в сутки, начавшиеся ДО включения вебхука, поток по
+            определению неполон, и показывать по ним цифры нельзя: на стене это
+            выглядело бы не как «данных нет», а как упавший вдвое объём."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT MIN(event_at), MAX(event_at),
+                       COUNT(*) FILTER (WHERE day = CURRENT_DATE)::int
+                FROM c2d_webhook_events
+            """)
+            row = cursor.fetchone() or (None, None, 0)
+            return {'first_event_at': row[0], 'last_event_at': row[1],
+                    'events_today': int(row[2] or 0)}
+
+    def cleanup_c2d_eval_data(self, requests_days=45, snapshots_days=180,
+                              webhook_days=7):
         """Ретеншн раздела оценки чатов: заявки 45 дней, снапшоты переписки ~полгода.
-        Оценки не удаляются (при удалении снапшота snapshot_id -> NULL по FK)."""
+        Оценки не удаляются (при удалении снапшота snapshot_id -> NULL по FK).
+        Сырые вебхуки Chat2Desk живут неделю — столько же, сколько их читает табло."""
         with self._get_cursor() as cursor:
             marked_journal_episodes = self._mark_journal_evaluated_wazzup_episodes_tx(
                 cursor)
@@ -24125,14 +24384,23 @@ class Database:
                                          AND rc.call_id = s.id)""",
                 (int(snapshots_days),))
             deleted_snapshots = cursor.rowcount
-        if deleted_requests or deleted_snapshots or marked_journal_episodes:
+            # Сырьё вебхуков: неделя. Считаем по времени события, а не приёма —
+            # запоздавший повтор старых суток не должен продлевать им жизнь.
+            cursor.execute(
+                "DELETE FROM c2d_webhook_events WHERE day < CURRENT_DATE - %s",
+                (int(webhook_days),))
+            deleted_webhook_events = cursor.rowcount
+        if (deleted_requests or deleted_snapshots or marked_journal_episodes
+                or deleted_webhook_events):
             logging.info(
-                "c2d eval retention: удалено %s заявок, %s снапшотов; "
+                "c2d eval retention: удалено %s заявок, %s снапшотов, %s событий вебхука; "
                 "отмечено %s оценённых эпизодов Wazzup",
-                deleted_requests, deleted_snapshots, marked_journal_episodes)
+                deleted_requests, deleted_snapshots, deleted_webhook_events,
+                marked_journal_episodes)
         return {
             'requests': deleted_requests,
             'snapshots': deleted_snapshots,
+            'webhook_events': deleted_webhook_events,
             'wazzup_journal_marked': marked_journal_episodes,
         }
 

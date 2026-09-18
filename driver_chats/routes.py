@@ -240,6 +240,11 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         truncated = False
         client_id, messages, fetched_at = None, None, None
         pending_notes = []
+        # Поток вебхуков Chat2Desk: сообщения приходят сами и лежат неделю, то есть
+        # покрывают всё окно раздела. Пока он жив, у вендора не спрашиваем ничего —
+        # ни клиента по номеру, ни переписку, ни имена операторов.
+        webhook_payloads = None
+        webhook_names = {}
         # Хвост нашёл нескольких водителей — отвечаем после блока: внутри него
         # держится место в общем пуле соединений, и выходить из него с ответом
         # значит держать его дольше нужного.
@@ -259,9 +264,14 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 # Точные записи спрашиваем, только если номер собрался
                 # целиком: искать в базе по девяти цифрам без кода страны
                 # нечего — у вендора номер лежит с кодом.
+                stream_ok = queries.webhook_stream_covers(cursor, window_from)
+                variants = chat2desk.phone_variants(phone) if phone else []
                 client_id = (queries.cached_client_id(cursor, phone)
-                             or queries.local_client_id(
-                                 cursor, chat2desk.phone_variants(phone))) if phone else None
+                             or queries.local_client_id(cursor, variants)
+                             # Ночной срез заявок не знает тех, кто написал впервые
+                             # сегодня, — а поток знает.
+                             or (queries.webhook_client_id(cursor, variants)
+                                 if stream_ok else None)) if phone else None
                 if client_id is None:
                     # Точные записи не подошли — ищем по ХВОСТУ номера. Это
                     # единственный способ найти иностранный номер, названный без
@@ -270,6 +280,8 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                     # сотням кодов, а последние девять цифр у номера одни и те же
                     # в любой записи.
                     by_tail = queries.local_client_by_tail(cursor, tail)
+                    if by_tail is None and stream_ok:
+                        by_tail = queries.webhook_client_by_tail(cursor, tail)
                     if by_tail and by_tail[0] == 'ambiguous':
                         ambiguous_tail = True
                         # Пишем журнал ЗДЕСЬ же, уже открытым курсором: искать
@@ -290,7 +302,14 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                     # Читаем здесь, чтобы не открывать под них третий курсор.
                     pending_notes = queries.pending_handoff_notes(
                         cursor, client_id, PENDING_NOTE_MINUTES)
-                    if not force_fresh:
+                    if stream_ok:
+                        # Кеш переписки тут не нужен вовсе: он и заводился, чтобы не
+                        # ходить к вендору чаще раза в пять минут, а из событий лента
+                        # собирается на каждый заход и показывает сообщение сразу.
+                        webhook_payloads = queries.webhook_messages(
+                            cursor, client_id, window_from, window_to)
+                        webhook_names = queries.chat_author_names(cursor)
+                    elif not force_fresh:
                         messages, fetched_at = queries.cached_messages(
                             cursor, client_id, window_from, window_to,
                             CACHE_TTL_SECONDS)
@@ -341,8 +360,15 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # ответа водителя, который сейчас на линии. Отдать ему в ответ тот же
         # самый снимок — это «кнопка не работает», и он нажмёт «Передан» второй
         # раз.
-        from_cache = messages is not None
-        if not from_cache:
+        if webhook_payloads is not None:
+            # Лента из событий. Имена операторов — из своей базы; вендорский
+            # справочник остаётся запасным на случай пустого среза (новый чатник
+            # ещё не попал в ночной синк).
+            messages = chat2desk.messages_from_events(
+                webhook_payloads, webhook_names or chat2desk.operator_names())
+            fetched_at = chat2desk.now_almaty()
+        from_cache = messages is not None and webhook_payloads is None
+        if messages is None:
             raw, total = chat2desk.fetch_window_messages(client_id, window_from, window_to)
             names = chat2desk.operator_names()
             messages = [chat2desk.normalize_message(msg, names) for msg in raw]
@@ -376,7 +402,9 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # парк берётся из самого сообщения (channel_id) через справочник, а
         # ночной срез заявок остаётся лишь третьим запасным вариантом.
         with db._get_cursor() as cursor:
-            if not from_cache:
+            if not from_cache and webhook_payloads is None:
+                # Снимок переписки нужен только на вендорском пути: лента из событий
+                # и так лежит в базе, второй копией она бы просто устаревала.
                 queries.store_messages(cursor, client_id, phone, messages,
                                        window_from, window_to)
             # Обогащаемся по ВСЕМ обращениям чата, а не по одному: после склейки

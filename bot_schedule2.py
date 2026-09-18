@@ -39444,11 +39444,403 @@ def _chat_hourly_fetch_requests(day_str, *, cache=None):
             if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
 
 
-def _chat_hourly_fetch_operators():
+# === Chat2Desk: вебхуки вместо опроса ==========================================================
+# До 18.09.2026 табло СЗоВ «Чат» узнавало про обращения единственным способом — выкачивало у
+# вендора сутки заново: страница `operator_events` и весь `/v1/operators` каждые две минуты плюс
+# 1–3 страницы `request_stats` каждые десять. На этом уходила почти вся месячная квота компании
+# (замер 18.09.2026: 120–160 запросов в час, из них 66–78 — табло).
+# Chat2Desk умеет слать события сам (до пяти вебхуков, `POST /v1/webhooks`), и в его же мануале
+# про выкачку сообщений написано прямым текстом: «Use webhooks instead». Поэтому обращения табло
+# берёт из `c2d_webhook_events`.
+#
+# ВАЖНО про список событий: PDF-мануал 1.58 (2021) устарел, живой список — в документации
+# Postman (documenter.getpostman.com/view/8899980/UVC8BRBo). Сверх PDF там есть `new_request`
+# (с типом обращения), `comment` (внутренняя заметка), `system_message`, `imported_message` и
+# `operator_status_changed` — то есть статусы операторов вендор ВСЁ-ТАКИ шлёт, и опрос
+# `operator_events` для табло тоже заменяем (отдельным шагом, ему нужен стартовый снимок).
+#
+# Две ловушки того списка:
+#   * `imported_message` — сообщения, импортированные ручкой или пришедшие напрямую из
+#     мессенджера, НЕ поднимают inbox/outbox. Без подписки на это событие часть переписки
+#     просто не пришла бы, и недостача выглядела бы как спад объёма;
+#   * у `operator_status_changed` в теле стоит `hook_type: operator_status_updated` — имя
+#     подписки и имя в событии у вендора разные, принимаем оба.
+#
+# Чего вебхук не даёт и откуда мы это берём:
+#   * имя оператора — в событии только `operator_id` Chat2Desk. Справочник берём из своей же
+#     `c2d_requests` (`get_c2d_operator_names`), а не из API: там это лишний запрос на каждого.
+#   * сутки обращения — по ПЕРВОМУ его событию, как `request_start` у вендора. Поэтому читаем
+#     события за двое суток: ночной чат начался вчера и сегодняшним считаться не должен.
+
+CHAT2DESK_WEBHOOK_TOKEN = (os.getenv('CHAT2DESK_WEBHOOK_TOKEN') or '').strip()
+# Отклонять ли доставку с несошедшейся подписью. Выключено, пока на живом потоке не
+# видно, что подпись сходится: см. chat2desk_webhook_signature_ok.
+CHAT2DESK_WEBHOOK_SIGNATURE_STRICT = (
+    os.getenv('CHAT2DESK_WEBHOOK_SIGNATURE_STRICT') or '').strip().lower() in ('1', 'true', 'yes')
+# Сколько поток считается живым. Вендор отключает вебхук, если пять часов подряд не получал
+# успешного ответа, а молчание потока внешне неотличимо от «сегодня не было ни одного чата»,
+# поэтому табло возвращается к опросу заметно раньше этого срока.
+CHAT2DESK_WEBHOOK_STALE_SECONDS = _env_int(
+    'CHAT2DESK_WEBHOOK_STALE_SECONDS', 1800, minimum=300, maximum=21600)
+# Свежесть собранных из событий обращений. Это чтение своей базы, а не вызов вендора, поэтому
+# шаг короткий: табло от этого только живее.
+CHAT2DESK_WEBHOOK_ROWS_TTL_SECONDS = _env_int(
+    'CHAT2DESK_WEBHOOK_ROWS_TTL_SECONDS', 60, minimum=10, maximum=600)
+# Типы сообщений, которые вендор считает в incoming/outgoing_messages. Заметки оператора
+# (`comment`), автоответы и системные строки в его счётчики не входят — значит и во время
+# ответа входить не должны ([[chat2desk-chat-fetch-api]]: сверено по 17 заявкам со снапшотами).
+CHAT2DESK_WEBHOOK_CLIENT_TYPE = 'from_client'
+CHAT2DESK_WEBHOOK_OPERATOR_TYPE = 'to_client'
+# Что принимаем. Пишем шире, чем считает табло: пропущенное событие не восстановить, а
+# лишнее стоит строки в таблице с недельным ретеншном. `comment` и `imported_message`
+# нужны «Чатам водителей» (лента показывает заметки), `new_request` — единственный
+# источник типа обращения, `operator_status_changed` — будущая замена опросу статусов.
+CHAT2DESK_WEBHOOK_HOOK_TYPES = (
+    'inbox', 'outbox', 'imported_message', 'comment', 'system_message',
+    'new_request', 'close_request', 'close_dialog', 'dialog_transferred',
+    'operator_status_changed', 'operator_status_updated',
+)
+# Тип обращения, который вендор присылает в `new_request`: всё, что не он, — автоопрос
+# оценки и прочая служебная переписка, на табло им не место.
+CHAT2DESK_WEBHOOK_COMMON_REQUEST_TYPE = 'common'
+
+_chat2desk_webhook_rows_cache = {'day': None, 'ts': 0.0, 'rows': None, 'ready': False}
+_chat2desk_webhook_headers_logged = False
+
+
+def _chat2desk_webhook_event_key(hook_type, message_id, request_id, event_at,
+                                 operator_id=None):
+    """Ключ дедупа. Повтор доставки приходит тем же телом, значит и ключом тем же.
+
+    У сообщений ключ — их id: он уникален и не зависит от того, каким по счёту
+    заходом вендор дожал доставку. У событий без сообщения (новое и закрытое
+    обращение, передача диалога, смена статуса) id нет, поэтому ключ собирается из
+    того, к чему событие относится, и времени."""
+    if message_id:
+        return f"{hook_type}:{message_id}"
+    subject = request_id if request_id else f"op{operator_id or ''}"
+    return f"{hook_type}:{subject}:{event_at.strftime('%Y-%m-%d %H:%M:%S')}"
+
+
+def _chat2desk_webhook_events(payload):
+    """Тело вебхука -> строки для `c2d_webhook_events`. Чистая функция, под тестами.
+
+    Вендор шлёт по событию на запрос, но список тоже принимаем: так же устроен
+    приёмник Wazzup, и на повторной доставке пачкой это ничего не стоит."""
+    items = payload if isinstance(payload, list) else [payload]
+    target_tz = _chat2desk_sync_timezone()
+
+    def as_int(value):
+        parsed = _chat_metrics_parse_number(value)
+        return int(parsed) if parsed is not None else None
+
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        hook_type = str(item.get('hook_type') or '').strip()
+        if hook_type not in CHAT2DESK_WEBHOOK_HOOK_TYPES:
+            continue
+        event_at = _chat2desk_parse_datetime(item.get('event_time'), target_tz=target_tz)
+        if event_at is None:
+            # Без времени событие бесполезно: по нему строятся и лента обращения, и сутки.
+            continue
+        message_id = as_int(item.get('message_id'))
+        request_id = as_int(item.get('request_id'))
+        operator_id = as_int(item.get('operator_id'))
+        # Карточка клиента едет в каждом событии сообщения. Телефон достаём в колонку:
+        # у водителя, пришедшего в WhatsApp идентификатором, в `phone` лежит
+        # «[wa_gupshup] KZ.…», а настоящий номер — в `client_phone`, и «Чаты водителей»
+        # ищут именно по нему ([[chat2desk-whatsapp-identifier-clients]]).
+        client = item.get('client') if isinstance(item.get('client'), dict) else {}
+        client_phone = (str(client.get('client_phone') or '').strip()
+                        or str(client.get('phone') or '').strip() or None)
+        client_name = (str(client.get('assigned_name') or '').strip()
+                       or str(client.get('name') or '').strip() or None)
+        # Поле `type` у вендора значит разное: у сообщения это его вид
+        # (from_client/to_client/comment/system), а у `new_request` — вид самого
+        # обращения (common/rating). Разложены они поэтому по разным колонкам.
+        raw_type = str(item.get('type') or '').strip() or None
+        message_type, request_type = raw_type, None
+        if hook_type == 'new_request':
+            message_type, request_type = None, raw_type
+        elif hook_type in ('operator_status_changed', 'operator_status_updated'):
+            # У статуса нет ни сообщения, ни обращения: оператор здесь — это `id`,
+            # а вид события несёт `offline_type` (перерыв, обучение, занят).
+            operator_id = as_int(item.get('id'))
+            message_type = str(item.get('offline_type') or '').strip() or None
+        rows.append({
+            'event_key': _chat2desk_webhook_event_key(
+                hook_type, message_id, request_id, event_at, operator_id=operator_id),
+            'hook_type': hook_type,
+            'event_at': event_at,
+            'day': event_at.date(),
+            'message_id': message_id,
+            'request_id': request_id,
+            'dialog_id': as_int(item.get('dialog_id')),
+            'client_id': as_int(item.get('client_id')) or as_int(client.get('id')),
+            'c2d_operator_id': operator_id,
+            'channel_id': as_int(item.get('channel_id')),
+            'transport': str(item.get('transport') or '').strip() or None,
+            'message_type': message_type,
+            'request_type': request_type,
+            'client_phone': client_phone,
+            'client_name': client_name,
+            'is_new_request': (bool(item.get('is_new_request'))
+                               if 'is_new_request' in item else None),
+            'payload': item,
+        })
+    return rows
+
+
+def chat2desk_webhook_signature(raw_body, timestamp, key):
+    """HMAC-SHA256(ключ, сырое тело + метка времени) в hex — алгоритм подписи вендора.
+
+    Документация Postman, раздел Webhooks → Webhook Signature Verification. Проверено
+    их же контрольным примером (см. tests/test_chat2desk_webhook.py).
+    Метку времени намеренно не проверяем на свежесть: повтор неуспешной доставки
+    вендор шлёт через два часа тем же телом и той же меткой, и отказ по возрасту
+    превратил бы штатную повторную доставку в отказ, а пять часов отказов подряд —
+    в отключённый вебхук."""
+    body = raw_body if isinstance(raw_body, bytes) else str(raw_body or '').encode('utf-8')
+    key_bytes = key if isinstance(key, bytes) else str(key or '').encode('utf-8')
+    return hmac.new(key_bytes, body + str(timestamp or '').encode('utf-8'),
+                    hashlib.sha256).hexdigest()
+
+
+def chat2desk_webhook_signature_ok(raw_body, timestamp, signature, api_token):
+    """Сошлась ли подпись доставки.
+
+    Ключ — «your API token, hashed with MD5». В КАКОМ ВИДЕ берётся этот MD5 —
+    шестнадцатеричной строкой или сырыми байтами, — документация не говорит, а её
+    контрольный пример подставляет вместо ключа строку-заглушку и потому не
+    различает варианты. Поэтому принимаем оба: цена — один лишний HMAC, а цена
+    ошибки — отказ на КАЖДОЙ доставке и отключённый вендором вебхук через пять часов."""
+    if not signature or not timestamp or not api_token:
+        return False
+    digest = hashlib.md5(api_token.encode('utf-8'))
+    received = str(signature).strip().lower()
+    return any(hmac.compare_digest(
+        chat2desk_webhook_signature(raw_body, timestamp, key), received)
+        for key in (digest.hexdigest(), digest.digest()))
+
+
+@app.route('/api/chat2desk/webhook/<token>', methods=['POST'])
+def chat2desk_webhook(token):
+    """Приёмник вебхуков Chat2Desk: принял -> записал -> 200, и ничего больше.
+
+    Две проверки, и обе нужны. Секретный сегмент пути — как у приёмника Wazzup:
+    он работает всегда, даже если вендор перестанет подписывать. Подпись
+    `X-Signature` — от подделки тела тем, кто адрес всё-таки узнал; проверяем её
+    только когда заголовок пришёл, иначе первая же доставка от аккаунта без
+    подписи молча уехала бы в отказ.
+    На не-2xx вендор повторяет доставку трижды (через 10 секунд, 5 минут и 2 часа),
+    а запись идемпотентна по `event_key`, поэтому честный 500 при сбое записи
+    лучше, чем проглоченное событие."""
+    global _chat2desk_webhook_headers_logged
+    # Сравниваем байтами: `compare_digest` на строках с не-ASCII падает TypeError, и
+    # достаточно было бы одной русской буквы в секрете, чтобы приёмник отвечал 500 на
+    # каждую доставку — а вендор через пять часов таких ответов отключает вебхук.
+    if not CHAT2DESK_WEBHOOK_TOKEN or not hmac.compare_digest(
+            str(token).encode('utf-8'), CHAT2DESK_WEBHOOK_TOKEN.encode('utf-8')):
+        return jsonify({"error": "not found"}), 404
+    signature = request.headers.get('X-Signature')
+    if signature and not chat2desk_webhook_signature_ok(
+            request.get_data(), request.headers.get('X-Timestamp'), signature,
+            _chat2desk_api_token()):
+        # По умолчанию НЕ отказываем: настоящий замок здесь — секрет в пути, а вывод
+        # ключа подписи у вендора не задокументирован до конца. Отказ на догадке
+        # означал бы пять часов отказов и отключённый вебхук. Когда в логе будет
+        # видно, что подпись сходится, включаем CHAT2DESK_WEBHOOK_SIGNATURE_STRICT=1.
+        if CHAT2DESK_WEBHOOK_SIGNATURE_STRICT:
+            logging.warning("Chat2Desk webhook: подпись не сошлась, доставка отклонена")
+            return jsonify({"error": "forbidden"}), 403
+        logging.warning("Chat2Desk webhook: подпись не сошлась, доставка принята "
+                        "(CHAT2DESK_WEBHOOK_SIGNATURE_STRICT выключен)")
+    if not _chat2desk_webhook_headers_logged:
+        _chat2desk_webhook_headers_logged = True
+        logging.info("Chat2Desk webhook: заголовки первой доставки: %s",
+                     {key: value for key, value in request.headers.items()
+                      if key.lower() not in ('cookie', 'authorization')})
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, (dict, list)):
+        return jsonify({"error": "bad request"}), 400
+    try:
+        events = _chat2desk_webhook_events(payload)
+        stored = db.save_c2d_webhook_events(events) if events else 0
+    except Exception:
+        logging.exception("Chat2Desk webhook: ошибка записи")
+        return jsonify({"error": "internal"}), 500
+    return jsonify({"ok": True, "received": len(events), "stored": stored}), 200
+
+
+def build_chat_webhook_request_rows(events, day_str, operator_names=None):
+    """Обращения суток в форме строк `request_stats` — собранные из ленты событий.
+
+    Форма ответа та же, что у вендора, специально: показатели табло, почасового
+    отчёта и выгрузки считают одни и те же функции (`_chat_hourly_response_sums`),
+    и у одной величины не должно появиться второй формулы.
+    Правила счёта — вендорские:
+      * `reaction_time` — от первой реплики клиента до первого ответа оператора;
+      * `replies` / `total_replies_time` — ответы оператора на реплики клиента,
+        первый ответ входит (так устроена колонка `average_replies_time`,
+        [[chat-hourly-report]]); второе сообщение оператора подряд ответом не
+        считается — отвечать в этот момент не на что;
+      * сутки обращения — по первому его событию, поэтому `events` передают за
+        двое суток, а всё, что началось вчера, здесь отсеивается;
+      * автоопрос оценки отсеивается по типу из события `new_request` («common» или
+        «rating»). Если самого `new_request` в окне нет — чат начался раньше, — то по
+        составу ленты: у автоопроса в ней нет ни одного сообщения клиента или
+        оператора (сверено на всех 7 641 таком обращении за 10–17.09)."""
+    names = operator_names or {}
+    entries, order = {}, []
+    for event in events or []:
+        request_id = event.get('request_id')
+        event_at = event.get('event_at')
+        if not request_id or event_at is None:
+            continue
+        entry = entries.get(request_id)
+        if entry is None:
+            entry = entries[request_id] = {
+                'start': event_at, 'end': None, 'pending': None, 'replies': 0,
+                'total': 0.0, 'reaction': None, 'incoming': 0, 'outgoing': 0,
+                'operator_id': None, 'channel_id': event.get('channel_id'),
+                'transport': event.get('transport'), 'request_type': None,
+            }
+            order.append(request_id)
+        elif event_at < entry['start']:
+            entry['start'] = event_at
+        if event.get('request_type'):
+            entry['request_type'] = str(event['request_type']).strip()
+        hook_type = str(event.get('hook_type') or '')
+        if hook_type == 'close_request':
+            if entry['end'] is None or event_at > entry['end']:
+                entry['end'] = event_at
+            continue
+        if hook_type == 'dialog_transferred':
+            if event.get('c2d_operator_id'):
+                entry['operator_id'] = event['c2d_operator_id']
+            continue
+        message_type = str(event.get('message_type') or '').strip()
+        if message_type == CHAT2DESK_WEBHOOK_CLIENT_TYPE:
+            entry['incoming'] += 1
+            if entry['pending'] is None:
+                entry['pending'] = event_at
+        elif message_type == CHAT2DESK_WEBHOOK_OPERATOR_TYPE:
+            entry['outgoing'] += 1
+            if event.get('c2d_operator_id'):
+                entry['operator_id'] = event['c2d_operator_id']
+            if entry['pending'] is not None:
+                delta = max(0.0, (event_at - entry['pending']).total_seconds())
+                entry['replies'] += 1
+                entry['total'] += delta
+                if entry['reaction'] is None:
+                    entry['reaction'] = delta
+                entry['pending'] = None
+
+    rows = []
+    for request_id in order:
+        entry = entries[request_id]
+        known_type = entry['request_type']
+        if known_type:
+            # Тип сказал сам вендор — гадать не о чем.
+            if known_type != CHAT2DESK_WEBHOOK_COMMON_REQUEST_TYPE:
+                continue
+        elif not entry['incoming'] and not entry['outgoing']:
+            # Типа нет (обращение началось до включения потока), а в ленте ни одного
+            # сообщения клиента или оператора — это автоопрос оценки, а не чат.
+            continue
+        if entry['start'].strftime('%Y-%m-%d') != day_str:
+            continue
+        replies = entry['replies']
+        rows.append({
+            'request_id': request_id,
+            'request_start': entry['start'].strftime('%Y-%m-%d %H:%M:%S'),
+            'request_end': entry['end'].strftime('%Y-%m-%d %H:%M:%S') if entry['end'] else '',
+            'request_type': CHAT_HOURLY_REQUEST_TYPE,
+            'operator_id': entry['operator_id'],
+            'operator_name': names.get(entry['operator_id'], ''),
+            'reaction_time': entry['reaction'],
+            'replies': replies,
+            'total_replies_time': entry['total'] if replies else None,
+            'average_replies_time': (entry['total'] / replies) if replies else None,
+            'incoming_messages': entry['incoming'],
+            'outgoing_messages': entry['outgoing'],
+            'channel_id': entry['channel_id'],
+            'transport': entry['transport'],
+        })
+    return rows
+
+
+def _chat2desk_webhook_day_rows(day_str):
+    """(обращения суток, поток жив) из базы вебхуков. Ни одного вызова к вендору.
+
+    «Поток жив» решается по времени последнего события, а не по числу строк: сутки
+    без единого чата — законная картина, а отключённый вендором вебхук выглядит
+    точно так же, и спутать их значит показать на табло ноль вместо цифр."""
+    now = time.time()
+    cache = _chat2desk_webhook_rows_cache
+    if (cache['day'] == day_str and cache['rows'] is not None
+            and now - cache['ts'] < CHAT2DESK_WEBHOOK_ROWS_TTL_SECONDS):
+        return cache['rows'], cache['ready']
+    day = _chat_metrics_parse_date(day_str)
+    if day is None:
+        return [], False
+    health = db.get_c2d_webhook_health() or {}
+    last_event_at = health.get('last_event_at')
+    first_event_at = health.get('first_event_at')
+    ready = False
+    if last_event_at is not None and first_event_at is not None:
+        age = (datetime.now(_chat2desk_sync_timezone()).replace(tzinfo=None)
+               - last_event_at).total_seconds()
+        # Второе условие — про ПЕРВЫЕ сутки: вебхук включили днём, значит утро этих
+        # суток в поток не попало, и объём на табло был бы занижен молча. Такой день
+        # дорабатываем опросом, а с завтрашнего поток полный.
+        ready = (age <= CHAT2DESK_WEBHOOK_STALE_SECONDS
+                 and first_event_at <= datetime(day.year, day.month, day.day))
+    rows = []
+    if ready:
+        events = db.get_c2d_webhook_events(day - timedelta(days=1), day)
+        rows = build_chat_webhook_request_rows(
+            events, day_str, operator_names=_chat2desk_webhook_operator_names())
+    cache.update(day=day_str, ts=now, rows=rows, ready=ready)
+    return rows, ready
+
+
+_chat2desk_webhook_names_cache = {'ts': 0.0, 'names': None}
+# Имена учёток меняются раз в никогда, а справочник читается на каждой пересборке.
+_CHAT2DESK_WEBHOOK_NAMES_TTL_SECONDS = 600
+
+
+def _chat2desk_webhook_operator_names():
+    now = time.time()
+    cache = _chat2desk_webhook_names_cache
+    if cache['names'] is not None and now - cache['ts'] < _CHAT2DESK_WEBHOOK_NAMES_TTL_SECONDS:
+        return cache['names']
+    try:
+        names = db.get_c2d_operator_names()
+    except Exception:
+        logging.exception("Chat2Desk webhook: справочник операторов недоступен")
+        return cache['names'] or {}
+    cache.update(ts=now, names=names)
+    return names
+
+
+_chat_hourly_operators_cache = {'ts': 0.0, 'rows': None}
+
+
+def _chat_hourly_fetch_operators(ttl_seconds=0):
     """Живой список операторов Chat2Desk: кто залогинен и на каком статусе.
 
     Один запрос вместо перебора operator_events за день — там пришлось бы качать тысячи
-    строк, чтобы найти последнее событие каждого оператора."""
+    строк, чтобы найти последнее событие каждого оператора.
+    `ttl_seconds` — сколько держать ответ. Ноль (по умолчанию) означает «каждый раз
+    заново»: почасовому отчёту нужен именно живой статус. Табло при живом потоке
+    вебхуков берёт отсюда только состав учёток, статусы у него из событий, — и просит
+    долгий срок, потому что состав меняется раз в никогда, а вызов стоит квоты."""
+    cache = _chat_hourly_operators_cache
+    if ttl_seconds and cache['rows'] is not None and time.time() - cache['ts'] < ttl_seconds:
+        return cache['rows']
     authorization = _chat2desk_authorization_header()
     if not authorization:
         raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
@@ -39472,6 +39864,7 @@ def _chat_hourly_fetch_operators():
         offset += len(page_rows)
         if len(page_rows) < 200:
             break
+    _chat_hourly_operators_cache.update(ts=time.time(), rows=rows)
     return rows
 
 
@@ -40449,10 +40842,18 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
 
 
 def _szov_chat_wallboard_day_requests(day_str):
-    """Обращения за день. Перекачиваем не чаще REQUESTS_TTL — это самая дорогая часть снимка.
+    """Обращения за день: из потока вебхуков, а при его молчании — опросом вендора.
 
-    Между перекачками отдаём то, что уже накопил кэш дня, общий с почасовым отчётом: если
-    отчёт только что сходил за днём, табло сходит бесплатно, и наоборот."""
+    Штатный путь — своя база (`c2d_webhook_events`): она пополняется событиями, которые
+    Chat2Desk присылает сам, и не стоит ни одного запроса. Выкачка осталась запасным
+    путём — на первые сутки после включения вебхука, на случай, когда вендор его отключил
+    (он делает это после пяти часов неуспешных доставок), и на прошедшие дни, которых в
+    недельном окне событий уже нет.
+    Между перекачками запасной путь отдаёт то, что накопил кэш дня, общий с почасовым
+    отчётом: если отчёт только что сходил за днём, табло сходит бесплатно, и наоборот."""
+    rows, ready = _chat2desk_webhook_day_rows(day_str)
+    if ready:
+        return rows
     cache = _szov_chat_wallboard_requests_cache
     with _chat_hourly_lock:
         fresh = (cache.get('day') == day_str
@@ -40466,6 +40867,151 @@ def _szov_chat_wallboard_day_requests(day_str):
     with _chat_hourly_lock:
         cache.update(day=day_str, ts=time.time())
     return rows
+
+
+# ── Статусы чатников: те же события вместо опроса `operator_events` ───────────────────────────
+# Вторая половина расхода табло. Раньше каждая пересборка снимка стоила страницу
+# `operator_events` плюс ВЕСЬ `/v1/operators` — 60 запросов в час из 66–78. Вендор шлёт смену
+# статуса событием (`operator_status_changed`; в теле оно зовётся `operator_status_updated`),
+# поэтому лента статусов собирается из той же таблицы, что и обращения.
+# Что осталось за опросом и почему: `/v1/operators` — это РОСТЕР, список существующих учёток с
+# ролями. Он меняется раз в никогда, и события его не заменяют: в них есть id и почта, но нет
+# ни имени учётки, ни признака «учётка включена». Поэтому ростер тянем редко (раз в полчаса),
+# а не каждые две минуты, и берём из него только состав, а не статусы.
+# Открытые чаты («7 в работе» у человека) вендор отдавал полем `opened_dialogs` того же
+# ростера — раз в полчаса такая цифра врала бы. Считаем её сами из событий: обращение с
+# сообщениями и без `close_request` открыто, и это ровно то же определение.
+
+CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS = _env_int(
+    'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS', 1800, minimum=60, maximum=7200)
+
+_chat2desk_webhook_status_cache = {'day': None, 'ts': 0.0, 'rows': None}
+
+
+def chat2desk_webhook_status_name(online, offline_type):
+    """(online, offline_type) события -> название статуса в терминах отчёта `operator_events`.
+
+    Разбирает получившееся имя дальше общий `_szov_chat_wallboard_status`, поэтому здесь
+    важно не «перевести», а отдать ровно то слово, которое вендор кладёт в отчёт:
+    не залогинен — `logout`, залогинен со статусом — сам статус, иначе — `online`."""
+    status = str(offline_type or '').strip()
+    if not _chat_hourly_number(online):
+        return 'logout'
+    return status or 'online'
+
+
+def build_chat_webhook_status_rows(carried, events, day_str, roster=None):
+    """События статусов -> строки в форме отчёта `operator_events`.
+
+    Форма вендорская намеренно: ленты статусов, часы «на линии» и список смены строит
+    `_szov_chat_wallboard_timelines`, и у него не должно появиться второй версии под
+    другой источник.
+    `carried` — последний статус каждого чатника ДО начала суток. Он становится событием
+    на 00:00:00: человек, заступивший вчера вечером и не трогавший статус, иначе выглядел
+    бы «не в системе» — событий за сегодня у него нет вовсе.
+    `roster` — {id: {name, role}} из `/v1/operators`: в событии есть id и почта, а ленты
+    ключуются именем учётки."""
+    roster = roster or {}
+
+    def _row(event, moment):
+        operator_id = event.get('c2d_operator_id')
+        card = roster.get(int(operator_id)) if operator_id is not None else None
+        name = (card or {}).get('name') or ''
+        if not name:
+            # Учётки нет в ростере (удалили, переименовали) — имени взять негде, а
+            # безымянную ленту всё равно никто не сопоставит с сотрудником.
+            return None
+        return {
+            'event': chat2desk_webhook_status_name(event.get('online'),
+                                                   event.get('offline_type')),
+            'operator_name': name,
+            'operator_role': (card or {}).get('role') or '',
+            'created_at': moment.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+
+    day_start = None
+    parsed_day = _chat_metrics_parse_date(day_str)
+    if parsed_day is not None:
+        day_start = datetime(parsed_day.year, parsed_day.month, parsed_day.day)
+
+    rows = []
+    for event in carried or []:
+        if day_start is None:
+            continue
+        row = _row(event, day_start)
+        if row:
+            rows.append(row)
+    for event in events or []:
+        moment = event.get('event_at')
+        if moment is None:
+            continue
+        row = _row(event, moment)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _chat2desk_webhook_status_rows(day_str, roster=None):
+    """Лента статусов суток из событий. Кэш тот же по сроку, что у обращений."""
+    now = time.time()
+    cache = _chat2desk_webhook_status_cache
+    if (cache['day'] == day_str and cache['rows'] is not None
+            and now - cache['ts'] < CHAT2DESK_WEBHOOK_ROWS_TTL_SECONDS):
+        return cache['rows']
+    day = _chat_metrics_parse_date(day_str)
+    if day is None:
+        return []
+    day_start = datetime(day.year, day.month, day.day)
+    rows = build_chat_webhook_status_rows(
+        db.get_c2d_operator_status_before(day_start),
+        db.get_c2d_operator_status_events(day, day),
+        day_str,
+        roster=roster)
+    cache.update(day=day_str, ts=now, rows=rows)
+    return rows
+
+
+def _chat2desk_webhook_roster(operator_rows):
+    """{id учётки Chat2Desk: {name, role}} из живого списка операторов."""
+    roster = {}
+    for row in operator_rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            operator_id = int(row.get('id'))
+        except (TypeError, ValueError):
+            continue
+        name = _chat2desk_operator_display_name(row)
+        if not name:
+            continue
+        roster[operator_id] = {'name': name, 'role': str(row.get('role') or '').strip()}
+    return roster
+
+
+def _chat2desk_webhook_apply_open_chats(operator_rows):
+    """Проставляет в строки ростера СВОЙ счётчик открытых чатов вместо вендорского.
+
+    Вендорский `opened_dialogs` приезжает вместе с ростером, а ростер при живом потоке
+    обновляется раз в полчаса — на стене это была бы получасовой давности цифра рядом с
+    живым статусом. Считаем из событий, определение то же."""
+    try:
+        open_chats = db.get_c2d_open_chats_by_operator()
+    except Exception:
+        logging.exception("Табло СЗоВ (чат): открытые чаты из событий недоступны")
+        return operator_rows
+    updated = []
+    for row in operator_rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            operator_id = int(row.get('id'))
+        except (TypeError, ValueError):
+            updated.append(row)
+            continue
+        item = dict(row)
+        item['opened_dialogs'] = int(open_chats.get(operator_id, 0))
+        updated.append(item)
+    return updated
 
 
 def _szov_chat_wallboard_display_names(chat2desk_names, lookup):
@@ -40491,13 +41037,28 @@ def _szov_chat_wallboard_fetch_snapshot():
     now_seconds = max(1, now.hour * 3600 + now.minute * 60 + now.second)
 
     lookup, department_id = _szov_chat_wallboard_operator_lookup()
-    events = _szov_chat_wallboard_fetch_events(day_str)
-    operator_rows = _chat_hourly_fetch_operators()
-    request_rows = _szov_chat_wallboard_day_requests(day_str)
+    # Пока поток вебхуков жив, у вендора спрашиваем только состав учёток — и раз в
+    # полчаса. Статусы, обращения и открытые чаты берутся из событий.
+    request_rows, stream_ready = _chat2desk_webhook_day_rows(day_str)
+    operator_rows = _chat_hourly_fetch_operators(
+        ttl_seconds=CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS if stream_ready else 0)
+    if stream_ready:
+        events = _chat2desk_webhook_status_rows(
+            day_str, roster=_chat2desk_webhook_roster(operator_rows))
+        operator_rows = _chat2desk_webhook_apply_open_chats(operator_rows)
+    else:
+        events = _szov_chat_wallboard_fetch_events(day_str)
+        request_rows = _szov_chat_wallboard_day_requests(day_str)
 
-    timelines, unmatched_events = _szov_chat_wallboard_timelines(events, lookup)
+    # Обрезки выгрузки у потока событий не бывает: обрезаться нечему, события приходят
+    # по одному. Поэтому ночную смену достраиваем только когда данные пришли опросом —
+    # при живом потоке её даёт перенесённый статус на 00:00.
+    timelines, unmatched_events = _szov_chat_wallboard_timelines(
+        events, lookup, truncated=False if stream_ready else None)
     # Ночная смена, начатая вчера: событий сегодня нет, а линию человек держит с полуночи.
-    for row in operator_rows or []:
+    # При живом потоке её даёт перенесённый статус на 00:00, а живым флагам ростера верить
+    # уже нельзя — он обновляется раз в полчаса.
+    for row in (operator_rows or []) if not stream_ready else []:
         if not isinstance(row, dict) or str(row.get('status') or '').strip().lower() != 'enabled':
             continue
         oktell_name = _chat2desk_operator_display_name(row)
