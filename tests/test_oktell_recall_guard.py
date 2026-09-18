@@ -1039,6 +1039,23 @@ def test_the_window_is_pushed_back_on_top_while_it_is_shown():
     assert "news_overlay.hold_on_top()" in body
 
 
+def test_the_window_cannot_be_put_away():
+    """Увести объявление с экрана можно тремя штатными способами, и все три
+    надо возвращать: крестик, который Chrome сам показывает в полноэкранном
+    режиме у верхнего края (убрать его нельзя — рисует браузер), сворачивание с
+    панели задач и чужой TOPMOST. Обязательное объявление не может уходить по
+    движению мышью к верхнему краю."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    hold = source[source.index("    def hold_on_top(self) -> None:"):source.index("    def result(self)")]
+    assert "_restore_if_minimized" in hold
+    assert "self._go_fullscreen()" in hold
+    assert "_keep_on_top" in hold
+    # Фокус при возврате не забираем: выдернутая из-под рук клавиатура — это уже
+    # не контроль.
+    restore = source[source.index("def _restore_if_minimized("):source.index("def _keep_on_top(")]
+    assert "SW_SHOWNOACTIVATE = 4" in restore
+
+
 def test_the_press_is_picked_up_in_half_a_second_not_in_a_minute():
     """Круг агента — минута, и пока разбор нажатия жил в нём, человек после
     «Подтвердить» до минуты смотрел на «Отправляем…»: ни ответа, ни признака,

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Oktell Recall Guard — агент на машине оператора.
 
 Задача: по команде сервера выкинуть оператора из веб-клиента Oktell
@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.21"
+VERSION = "1.0.22"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -3166,6 +3166,24 @@ def _make_overlay(hwnd: int, rect) -> bool:
         return False
 
 
+def _restore_if_minimized(hwnd: int) -> None:
+    """Развернуть свёрнутое окно. SW_SHOWNOACTIVATE — без кражи фокуса.
+
+    Фокус не забираем намеренно: оператор мог свернуть окно, чтобы дописать
+    строчку в Excel, и выдернутая из-под рук клавиатура — это уже не контроль,
+    а вредительство. Окно вернётся на экран и подождёт.
+    """
+    if not IS_WINDOWS or not hwnd:
+        return
+    SW_SHOWNOACTIVATE = 4
+    try:
+        user32 = ctypes.windll.user32
+        if user32.IsIconic(ctypes.c_void_p(hwnd)):
+            user32.ShowWindow(ctypes.c_void_p(hwnd), SW_SHOWNOACTIVATE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _keep_on_top(hwnd: int) -> None:
     """Вернуть окно наверх, если его перекрыли.
 
@@ -3279,6 +3297,8 @@ class NewsOverlay:
             window_id = (window or {}).get("windowId")
             if window_id is None:
                 return
+            if str(((window or {}).get("bounds") or {}).get("windowState") or "") == "fullscreen":
+                return
             self.page.call("Browser.setWindowBounds",
                            {"windowId": window_id, "bounds": {"windowState": "fullscreen"}})
         except Exception:  # noqa: BLE001 — рамка хуже, чем отсутствие объявления
@@ -3290,8 +3310,25 @@ class NewsOverlay:
         return self.page is not None and getattr(self.page, "connected", False)
 
     def hold_on_top(self) -> None:
+        """Вернуть окно на место, если его увели. Зовётся каждые полсекунды.
+
+        Увести его можно тремя способами, и все три штатные для Windows:
+
+        * Chrome в полноэкранном режиме сам показывает крестик, стоит подвести
+          мышь к верхнему краю, — по нему окно выходит из полноэкранного и
+          сворачивается. Убрать эту кнопку нельзя (её рисует браузер), поэтому
+          просто возвращаем режим обратно;
+        * окно можно свернуть с панели задач или Win+D;
+        * другие программы тоже ставят себе TOPMOST и перекрывают наше.
+
+        Объявление обязательное — «свернул и не прочитал» способом быть не
+        должно. Само окно при этом никого не держит силой: закрыть его Windows
+        по-прежнему позволяет, и тогда агент показывает объявление заново.
+        """
         if not self.hwnd:
             self.hwnd = _window_by_title(NEWS_WINDOW_TITLE)
+        _restore_if_minimized(self.hwnd)
+        self._go_fullscreen()
         _keep_on_top(self.hwnd)
 
     def result(self) -> Optional[dict]:
