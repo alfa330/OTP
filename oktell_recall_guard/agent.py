@@ -62,7 +62,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.19"
+VERSION = "1.0.20"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -2891,6 +2891,345 @@ def build_news_close_js() -> str:
 """.strip()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Окно объявления поверх ВСЕХ окон
+#
+# Раньше объявление рисовалось внутри страницы Oktell — и жило только в пределах
+# её окна: свернул клиент АТС, ушёл в Excel или MicroSIP — и обязательного
+# объявления нет. Теперь у него своё окно: тот же Chromium, отдельная локальная
+# страница, размер по монитору и `HWND_TOPMOST` через Win32.
+#
+# Разметку и поведение берём ТЕ ЖЕ (build_news_js): страница-оболочка пустая, а
+# весь код объявления — один на оба места. Вторая копия правил показа, задержки
+# кнопки и разбора теста разъехалась бы с первой молча.
+#
+# Чем это отличается от шарика помощника (icore-orb-overlay): тому нужны
+# сквозные клики, а этому наоборот — он обязан перехватывать всё. Поэтому ни
+# прозрачности, ни WS_EX_TRANSPARENT здесь нет.
+# ─────────────────────────────────────────────────────────────────────────────
+
+NEWS_WINDOW_TITLE = "iCORE · Объявление"
+
+NEWS_PAGE_HTML = """<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>__TITLE__</title>
+<link rel="icon" href="data:image/png;base64,__ICON__">
+<style>
+  html, body { margin: 0; height: 100%; background: rgba(10,10,12,.88); overflow: hidden; }
+</style>
+</head>
+<body>
+<script>__NEWS_JS__</script>
+</body>
+</html>
+"""
+
+
+def news_page_path() -> Path:
+    return app_dir() / "news.html"
+
+
+def build_news_page(item: dict) -> str:
+    """Страница объявления: пустая оболочка плюс тот же самый код окна."""
+    return (NEWS_PAGE_HTML
+            .replace("__TITLE__", NEWS_WINDOW_TITLE)
+            .replace("__ICON__", LOGIN_ICON_B64)
+            .replace("__NEWS_JS__", build_news_js(item)))
+
+
+def _window_by_title(title: str):
+    """HWND окна Chrome с таким заголовком. 0 — нет такого.
+
+    Ищем И по классу: на машине оператора открыт клиент Oktell, и у него в
+    заголовке бывает то же слово — FindWindow без класса попадал в него.
+    """
+    if not IS_WINDOWS:
+        return 0
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def check(hwnd, _param):
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        cls = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, cls, 256)
+        if cls.value != "Chrome_WidgetWin_1":
+            return True
+        text = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, text, 512)
+        if text.value.strip() == title:
+            found.append(hwnd)
+            return False
+        return True
+
+    try:
+        ctypes.windll.user32.EnumWindows(check, None)
+    except Exception:  # noqa: BLE001
+        return 0
+    return found[0] if found else 0
+
+
+def _monitor_rect(hwnd_hint: int = 0):
+    """Границы монитора, на котором показывать объявление.
+
+    Берём монитор ОКНА OKTELL, а не основной: у оператора два экрана, клиент АТС
+    на одном из них, и объявление обязано накрыть тот, куда он смотрит.
+    Подсказки нет — берём монитор с курсором, он ближе к правде, чем основной.
+    """
+    if not IS_WINDOWS:
+        return None
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_ulong),
+                    ("rcMonitor", ctypes.c_long * 4),
+                    ("rcWork", ctypes.c_long * 4),
+                    ("dwFlags", ctypes.c_ulong)]
+
+    MONITOR_DEFAULTTONEAREST = 2
+    try:
+        if hwnd_hint:
+            monitor = ctypes.windll.user32.MonitorFromWindow(hwnd_hint, MONITOR_DEFAULTTONEAREST)
+        else:
+            point = ctypes.c_longlong()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+            monitor = ctypes.windll.user32.MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
+        info = MonitorInfo()
+        info.cbSize = ctypes.sizeof(MonitorInfo)
+        if not ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        left, top, right, bottom = info.rcMonitor
+        return left, top, right - left, bottom - top
+    except Exception:  # noqa: BLE001
+        logging.debug("Границы монитора не определились", exc_info=True)
+        return None
+
+
+def _set_window_pos(hwnd: int, left: int, top: int, width: int, height: int, flags: int) -> bool:
+    """SetWindowPos с HWND_TOPMOST и ПРАВИЛЬНЫМИ типами.
+
+    Типы здесь не занудство: `HWND_TOPMOST` это −1, и без argtypes ctypes
+    отдаёт его 32-битным числом, а параметр — указатель. Окно при этом послушно
+    меняло размер, но поверх всех не вставало — и заметить это можно было только
+    проверкой флага WS_EX_TOPMOST, а не глазами.
+    """
+    user32 = ctypes.windll.user32
+    user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    user32.SetWindowPos.restype = ctypes.c_bool
+    HWND_TOPMOST = ctypes.c_void_p(-1)
+    return bool(user32.SetWindowPos(ctypes.c_void_p(hwnd), HWND_TOPMOST,
+                                    left, top, width, height, flags))
+
+
+def _make_overlay(hwnd: int, rect, cfg_alpha: float = 0.93) -> bool:
+    """Снять рамку, накрыть монитор, поднять поверх всех окон.
+
+    Поверх ВСЕХ — это и есть постановка: объявление обязательное, и «сверну,
+    потом прочитаю» у него нет. Alt+Tab Windows при этом не отнимает ни у кого —
+    это потолок для любого приложения, включая Electron.
+    """
+    if not IS_WINDOWS or not hwnd:
+        return False
+    GWL_STYLE = -16
+    WS_CAPTION, WS_THICKFRAME = 0x00C00000, 0x00040000
+    SWP_SHOWWINDOW, SWP_FRAMECHANGED = 0x0040, 0x0020
+    GWL_EXSTYLE = -20
+    WS_EX_LAYERED = 0x00080000
+    LWA_ALPHA = 0x00000002
+    try:
+        user32 = ctypes.windll.user32
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME))
+        # Полупрозрачность — всему окну целиком (LWA_ALPHA). Попиксельной у окна
+        # Chrome не бывает: прозрачный фон при непрозрачной карточке умеет только
+        # своя оболочка вроде Electron, а это +100 МБ на оператора. Значение
+        # подобрано так, чтобы за тёмным полем угадывался рабочий стол, а текст
+        # карточки оставался читаемым.
+        alpha = int(max(0.5, min(1.0, float(cfg_alpha or 0.93))) * 255)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                              user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED)
+        user32.SetLayeredWindowAttributes(ctypes.c_void_p(hwnd), 0, alpha, LWA_ALPHA)
+        left, top, width, height = rect or (0, 0, 0, 0)
+        _set_window_pos(hwnd, int(left), int(top), int(width), int(height),
+                        SWP_SHOWWINDOW | SWP_FRAMECHANGED)
+        return True
+    except Exception:  # noqa: BLE001
+        logging.debug("Окно объявления не удалось поднять поверх всех", exc_info=True)
+        return False
+
+
+def _keep_on_top(hwnd: int) -> None:
+    """Вернуть окно наверх, если его перекрыли.
+
+    Нужно: другие программы тоже ставят себе TOPMOST, и объявление уезжает вниз.
+    Размер и положение не трогаем — окно уже накрыло монитор.
+    """
+    if not IS_WINDOWS or not hwnd:
+        return
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = 0x0002, 0x0001, 0x0010
+    try:
+        _set_window_pos(hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class NewsOverlay:
+    """Окно обязательного объявления поверх всех окон.
+
+    Живёт ровно столько, сколько показывается объявление: подтвердили — закрыли.
+    Держать его пустым и прятать было бы дешевле по запуску, но дороже по сути:
+    невидимое окно поверх всех — это то, что однажды перехватит клик и никто не
+    поймёт почему.
+    """
+
+    def __init__(self, cfg: dict, browser: "ManagedBrowser"):
+        self.cfg = cfg
+        self.browser = browser
+        self.page: Optional[CdpPage] = None
+        self.hwnd = 0
+        self.target_id = ""
+
+    # ---------- показ ----------
+
+    def show(self, item: dict) -> bool:
+        self.close()
+        chrome = self.browser.chrome_path()
+        if not chrome:
+            logging.error("Объявление показать нечем: браузер не найден")
+            return False
+        page_file = news_page_path()
+        try:
+            page_file.parent.mkdir(parents=True, exist_ok=True)
+            page_file.write_text(build_news_page(item), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            logging.exception("Страница объявления не записалась")
+            return False
+
+        rect = _monitor_rect(_window_by_title_like_oktell(self.browser))
+        args = [
+            str(chrome),
+            f"--user-data-dir={self.browser.profile_dir}",
+            f"--remote-debugging-port={int(self.browser.browser_cfg.get('cdp_port', 0) or 0)}",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-features=Translate,ChromeWhatsNewUI",
+            # Именно kiosk: снятия WS_CAPTION мало — заголовок у окна --app
+            # рисует сам Chrome внутри клиентской области, и системные стили о
+            # нём ничего не знают. Проверено снимком экрана: рамка оставалась.
+            "--kiosk",
+            f"--app={page_file.resolve().as_uri()}",
+        ]
+        if rect:
+            args.insert(-1, f"--window-position={int(rect[0])},{int(rect[1])}")
+            args.insert(-1, f"--window-size={int(rect[2])},{int(rect[3])}")
+        try:
+            subprocess.Popen(args, creationflags=CREATE_NO_WINDOW if IS_WINDOWS else 0,
+                             close_fds=True, env=child_env())
+        except Exception:  # noqa: BLE001
+            logging.exception("Окно объявления не запустилось")
+            return False
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            target = _login_target(self.browser, page_file.resolve().as_uri())
+            if target:
+                try:
+                    self.page = CdpPage(str(target["webSocketDebuggerUrl"]),
+                                        timeout=float(self.cfg.get("request_timeout_s", 10)))
+                    self.target_id = str(target.get("id") or "")
+                except Exception:  # noqa: BLE001
+                    time.sleep(0.4)
+                    continue
+                self.hwnd = _window_by_title(NEWS_WINDOW_TITLE)
+                _make_overlay(self.hwnd, rect, self.cfg.get("news_overlay_alpha", 0.93))
+                logging.info("Объявление #%s показано поверх всех окон", item.get("id"))
+                return True
+            time.sleep(0.4)
+        logging.warning("Окно объявления не открылось за 20 с")
+        return False
+
+    # ---------- общение ----------
+
+    def alive(self) -> bool:
+        return self.page is not None and getattr(self.page, "connected", False)
+
+    def hold_on_top(self) -> None:
+        if not self.hwnd:
+            self.hwnd = _window_by_title(NEWS_WINDOW_TITLE)
+        _keep_on_top(self.hwnd)
+
+    def result(self) -> Optional[dict]:
+        if not self.alive():
+            return None
+        try:
+            data = self.page.evaluate(build_news_result_js())
+        except Exception:  # noqa: BLE001
+            logging.debug("Ответ объявления не прочитан", exc_info=True)
+            return None
+        return data if isinstance(data, dict) else None
+
+    def feedback(self, payload: dict) -> None:
+        if not self.alive():
+            return
+        try:
+            self.page.evaluate(build_news_feedback_js(payload))
+        except Exception:  # noqa: BLE001
+            logging.debug("Отказ сервера не показан", exc_info=True)
+
+    def close(self) -> None:
+        if self.page is not None:
+            try:
+                self.page.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.page = None
+        if self.target_id:
+            _close_target(self.browser, self.target_id)
+            self.target_id = ""
+        self.hwnd = 0
+        try:
+            news_page_path().unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001
+            logging.debug("Страница объявления не удалилась", exc_info=True)
+
+
+def _window_by_title_like_oktell(browser: "ManagedBrowser") -> int:
+    """HWND окна Oktell — чтобы накрыть ТОТ монитор, где оператор работает."""
+    if not IS_WINDOWS:
+        return 0
+    origin = origin_of(str(browser.cfg.get("oktell_url") or ""))
+    host = urlparse(origin).hostname if origin else ""
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def check(hwnd, _param):
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        cls = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, cls, 256)
+        if cls.value != "Chrome_WidgetWin_1":
+            return True
+        text = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, text, 512)
+        title = text.value.strip()
+        if title and title != NEWS_WINDOW_TITLE and (
+                "oktell" in title.lower() or (host and host.lower() in title.lower())):
+            found.append(hwnd)
+            return False
+        return True
+
+    try:
+        ctypes.windll.user32.EnumWindows(check, None)
+    except Exception:  # noqa: BLE001
+        return 0
+    return found[0] if found else 0
+
+
 def build_autologin_js(login: str, password: str) -> str:
     """Подставить учётку кабинета в форму входа Oktell и нажать «Войти».
 
@@ -3522,51 +3861,11 @@ class ManagedBrowser:
             return False
         return bool(isinstance(result, dict) and result.get("ok"))
 
-    def show_news(self, item: dict) -> bool:
-        """Показать обязательное объявление поверх клиента."""
-        page = self.page()
-        if not page:
-            return False
-        try:
-            # Окно разворачиваем, но фокус не крадём: разговор уже кончился, а
-            # выдёргивать окно поверх чужой работы всё равно незачем.
-            self.ensure_window_visible(bring_to_front=False)
-            page.evaluate(build_news_js(item))
-            return True
-        except Exception:  # noqa: BLE001
-            logging.debug("Объявление не показано", exc_info=True)
-            self.close_page()
-            return False
-
-    def news_result(self) -> Optional[dict]:
-        """Нажатие «Ознакомлен», если оно было."""
-        page = self.page()
-        if not page:
-            return None
-        try:
-            data = page.evaluate(build_news_result_js())
-        except Exception:  # noqa: BLE001
-            logging.debug("Ответ объявления не прочитан", exc_info=True)
-            return None
-        return data if isinstance(data, dict) else None
-
-    def news_feedback(self, payload: dict) -> None:
-        page = self.page()
-        if not page:
-            return
-        try:
-            page.evaluate(build_news_feedback_js(payload))
-        except Exception:  # noqa: BLE001
-            logging.debug("Отказ сервера не показан", exc_info=True)
-
-    def close_news(self) -> None:
-        page = self.page()
-        if not page:
-            return
-        try:
-            page.evaluate(build_news_close_js())
-        except Exception:  # noqa: BLE001
-            logging.debug("Окно объявления не закрыто", exc_info=True)
+    # Показ объявления раньше жил здесь — внутри страницы Oktell. Переехал в
+    # собственное окно поверх всех окон (NewsOverlay): в странице он исчезал
+    # вместе со свёрнутым клиентом АТС, а объявление обязательное. Держать обе
+    # дороги нельзя: правила показа, задержки кнопки и разбора теста разъехались
+    # бы молча.
 
     def logout(self) -> dict:
         """Настоящий разлогин: WS-logout → снос сессии → чистка origin → reload.
@@ -3916,6 +4215,9 @@ def run_agent(cfg: dict) -> int:
     browser = ManagedBrowser(cfg)
     ledger = CommandLedger(app_dir() / "commands.json")
     link = ServerLink(cfg, session)
+    # Объявление живёт в СВОЁМ окне поверх всех, а не внутри страницы Oktell:
+    # там оно исчезало вместе со свёрнутым клиентом АТС.
+    news_overlay = NewsOverlay(cfg, browser)
 
     browser_cfg = cfg.get("browser", {}) or {}
     if browser_cfg.get("launch_on_start", True):
@@ -3964,12 +4266,20 @@ def run_agent(cfg: dict) -> int:
         nonlocal active_news, training_set, next_news_check
         if active_news is None:
             return False
-        pressed = browser.news_result()
+        if not news_overlay.alive():
+            # Окно закрыли, не подтвердив. Объявление обязательное — показываем
+            # снова: «закрыл крестиком» не может быть способом его не читать.
+            logging.info("Окно объявления закрыли — показываю снова")
+            if not news_overlay.show(active_news):
+                return False
+            return True
+        news_overlay.hold_on_top()
+        pressed = news_overlay.result()
         if not pressed:
             return False
         verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {})
         if verdict.get("ok"):
-            browser.close_news()
+            news_overlay.close()
             # Возвращаем статус только если сами его и забрали: у того, кто к
             # моменту объявления уже был на перерыве, статус не наш.
             if training_set:
@@ -3980,7 +4290,7 @@ def run_agent(cfg: dict) -> int:
             active_news = None
             next_news_check = time.time()   # очередь может быть длиннее одного
         else:
-            browser.news_feedback(verdict)
+            news_overlay.feedback(verdict)
         return True
 
     def wait_for_next_round(seconds: float) -> None:
@@ -4157,9 +4467,8 @@ def run_agent(cfg: dict) -> int:
                                 logging.warning(
                                     "Снять с линии не вышло — объявление покажем, "
                                     "но звонок может прийти во время чтения")
-                            if browser.show_news(item):
+                            if news_overlay.show(item):
                                 active_news = item
-                                logging.info("Показано объявление #%s", item.get("id"))
                             elif training_set:
                                 browser.set_operator_state(
                                     cfg.get("restore_frame") or ["setuserstate", {"onlunch": False}])

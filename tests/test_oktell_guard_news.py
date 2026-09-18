@@ -203,7 +203,7 @@ class TestLoopOrder:
         направить звонок — а окно АТС уже закрыто объявлением."""
         loop = self._loop()
         assert loop.index("training_set = browser.set_operator_state(frame)") < \
-               loop.index("if browser.show_news(item):")
+               loop.index("if news_overlay.show(item):")
 
     def test_nothing_is_shown_during_a_call(self):
         loop = self._loop()

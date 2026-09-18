@@ -979,6 +979,59 @@ def test_sign_out_takes_everything_down(tmp_path, monkeypatch):
     assert steps == ["разлогин в Oktell", "закрыто окно T1", "программа остановлена"], steps
 
 
+def test_the_announcement_lives_in_its_own_window_above_everything():
+    """В странице Oktell объявление исчезало вместе со свёрнутым клиентом АТС:
+    свернул, ушёл в Excel — и обязательного объявления нет. Теперь у него своё
+    окно, накрывающее монитор и поднятое поверх всех (HWND_TOPMOST)."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    assert "class NewsOverlay:" in source
+    # HWND_TOPMOST именно указателем: как 32-битное число −1 доезжает искажённым,
+    # окно послушно меняет размер, а поверх всех НЕ встаёт — и увидеть это можно
+    # только проверкой WS_EX_TOPMOST, глазами никак.
+    assert "HWND_TOPMOST = ctypes.c_void_p(-1)" in source
+    # И ни следа старой дороги: две копии правил показа разъехались бы молча.
+    assert "def show_news(" not in source
+    assert "def close_news(" not in source
+
+
+def test_both_windows_share_one_copy_of_the_announcement_code():
+    """Оболочка страницы пустая, а весь код объявления — тот же build_news_js.
+    Вторая копия правил задержки кнопки и разбора теста разъехалась бы с первой."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    page = source[source.index("def build_news_page("):source.index("def _window_by_title(")]
+    assert "build_news_js(item)" in page
+    assert "__NEWS_JS__" in page
+
+
+def test_a_closed_announcement_comes_back():
+    """«Закрыл крестиком» не может быть способом не читать обязательное."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def handle_news_press()"):source.index("def wait_for_next_round(")]
+    assert "if not news_overlay.alive():" in body
+    assert "news_overlay.show(active_news)" in body
+
+
+def test_the_window_has_no_frame_and_lets_the_desktop_through():
+    """Снятия WS_CAPTION мало: заголовок у окна `--app` рисует сам Chrome внутри
+    клиентской области, и системные стили о нём ничего не знают — на снимке
+    экрана рамка оставалась. Отсюда kiosk. Полупрозрачность — всему окну
+    целиком: попиксельной у окна Chrome не бывает, её умеет только своя оболочка
+    вроде Electron, а это +100 МБ на оператора."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    show = source[source.index("    def show(self, item: dict) -> bool:"):source.index("    # ---------- общение ----------")]
+    assert '"--kiosk"' in show
+    overlay = source[source.index("def _make_overlay("):source.index("def _keep_on_top(")]
+    assert "WS_EX_LAYERED" in overlay
+    assert "SetLayeredWindowAttributes" in overlay
+
+
+def test_the_window_is_pushed_back_on_top_while_it_is_shown():
+    """Другие программы тоже ставят себе TOPMOST, и объявление уезжает вниз."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def handle_news_press()"):source.index("def wait_for_next_round(")]
+    assert "news_overlay.hold_on_top()" in body
+
+
 def test_the_press_is_picked_up_in_half_a_second_not_in_a_minute():
     """Круг агента — минута, и пока разбор нажатия жил в нём, человек после
     «Подтвердить» до минуты смотрел на «Отправляем…»: ни ответа, ни признака,
