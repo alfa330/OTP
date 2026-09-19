@@ -11288,8 +11288,19 @@ class Database:
             (self.SHIFT_AUCTION_OPERATOR_LOCK_NAMESPACE, int(operator_id))
         )
 
-    def _shift_auction_break_minutes(self, breaks):
+    def _shift_auction_break_minutes(self, breaks, range_start_min, range_end_min):
+        """Минуты перерывов ВНУТРИ окна — ровно та их часть, что в него попала.
+
+        Окно не всегда равно смене: в чате её разбирают кусками, и у куска
+        17:00-20:00 смены 16:00-01:00 обед смены может быть на 20:15 (не его
+        вовсе) или наполовину торчать за границу. Целый перерыв тут занижал бы
+        часы, пропущенный — завышал, а экран оператора считает именно
+        пересечение (getAuctionLotBreakMinutes): норма обязана считать так же,
+        иначе человек видит «осталось 4 ч» и получает отказ на трёх.
+        """
         total = 0
+        window_start = min(range_start_min, range_end_min)
+        window_end = max(range_start_min, range_end_min)
         for item in (breaks or []):
             if not isinstance(item, dict):
                 continue
@@ -11300,13 +11311,20 @@ class Database:
                 continue
             if end_minute <= start_minute:
                 end_minute += 24 * 60
-            total += max(0, end_minute - start_minute)
+            # Окно за полночь живёт минутами «после 24:00», а перерыв хранится
+            # минутами суток — поднимаем его в те же сутки (правило
+            # _break_overlaps_minute_range).
+            if window_end > 24 * 60 and start_minute < window_start:
+                start_minute += 24 * 60
+                end_minute += 24 * 60
+            total += max(0, min(end_minute, window_end) - max(start_minute, window_start))
         return max(0, int(total))
 
     def _shift_auction_lot_minutes(self, start_time_value, end_time_value, breaks=None):
         start_minute, end_minute = self._schedule_interval_minutes(start_time_value, end_time_value)
         duration_minutes = max(0, end_minute - start_minute)
-        break_minutes = min(duration_minutes, self._shift_auction_break_minutes(breaks if isinstance(breaks, list) else []))
+        break_minutes = min(duration_minutes, self._shift_auction_break_minutes(
+            breaks if isinstance(breaks, list) else [], start_minute, end_minute))
         return {
             "duration_minutes": duration_minutes,
             "break_minutes": break_minutes,
@@ -11614,7 +11632,10 @@ class Database:
                 to_char({self.SHIFT_AUCTION_CLAIM_DATE_SQL}, 'YYYY-MM-DD') AS shift_date,
                 to_char(hc.claimed_start_time, 'HH24:MI') AS start_time,
                 to_char(hc.claimed_end_time, 'HH24:MI') AS end_time,
-                '[]'::jsonb AS breaks
+                -- Перерывы исходной смены (в лоте лежит их копия): без них кусок
+                -- шёл в норму валовым, и у разобравшего неделю кусками набегал
+                -- лишний час-другой против того, что показывает его же экран.
+                sh.breaks
             FROM shift_auction_historical_claims hc
             JOIN resource_saved_schedule_shifts sh
               ON sh.id = hc.source_schedule_shift_id
@@ -15384,19 +15405,13 @@ class Database:
                 claimed_rows=claimed_rows,
                 direction_mode=mode
             )
-            # Перерывы считаем только у тех, что попали в выбранный кусок.
+            # Перерывы смены отдаём целиком: в норму пойдёт ровно та их часть,
+            # что попала во взятое окно (_shift_auction_break_minutes).
             lot_breaks = lot[8] if isinstance(lot[8], list) else []
-            candidate_breaks = (
-                [
-                    brk for brk in lot_breaks
-                    if self._break_overlaps_minute_range(brk, candidate_start_min, candidate_end_min)
-                ]
-                if is_partial_claim else lot_breaks
-            )
             candidate_minutes = self._shift_auction_lot_minutes(
                 claim_range["start_time"],
                 claim_range["end_time"],
-                candidate_breaks
+                lot_breaks
             )
             # "Свой график" buys the group a fixed allowance over the norm — it is the
             # only ceiling such an operator has, so it applies to ordinary claims too.
