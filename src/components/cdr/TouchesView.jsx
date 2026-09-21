@@ -13,7 +13,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
     exportFileName, hms, hours, percent, prettyPhone, resultTone,
-    shortDay, shortTime, silence,
+    seconds, shortDay, shortTime, silence,
 } from './touchMeta';
 import DealsView from './DealsView';
 
@@ -504,7 +504,9 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
 
             <p className="mt-4 px-1 text-[11.5px] leading-relaxed text-slate-400">
                 Касание — это один вызов, а не строка CDR: плечи склеены по linkedid.
-                «Разговор» считается по плечу самого агента, без ожидания в очереди.
+                «IVR» — сколько человек слушал приветствие или меню до очереди, «Ожид. в очереди» —
+                от входа в очередь до ответа оператора (у потерянных — до отбоя). Прочерк значит,
+                что станция этой величины не назвала, а не ноль секунд.
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>
@@ -554,7 +556,7 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
     return (
         <>
             <div className={`${iosCard} mt-3 hidden overflow-x-auto md:block`}>
-                <table className="w-full min-w-[1020px] border-collapse">
+                <table className="w-full min-w-[1120px] border-collapse">
                     <thead className="bg-slate-50">
                         <tr>
                             <Th>Когда</Th>
@@ -563,7 +565,8 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                             <Th>Тип</Th>
                             <Th>Результат</Th>
                             <Th className="text-right">Разговор</Th>
-                            <Th className="text-right">Вызов</Th>
+                            <Th className="text-right">IVR</Th>
+                            <Th className="text-right">Ожид. в очереди</Th>
                             <Th>Очередь</Th>
                             <Th>Запись</Th>
                         </tr>
@@ -604,12 +607,17 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                     </span>
                                 </Td>
                                 <Td className="whitespace-nowrap text-right tabular-nums">{hms(touch.talk_seconds)}</Td>
-                                {/* Вся длительность вызова (duration из CDR), включая
-                                    разговор — не «сколько звонили до ответа». Подпись
-                                    честная, значение то же, что в прежних выгрузках. */}
+                                {/* Две величины вместо прежней «Вызов всего»: она складывала
+                                    приветствие, ожидание и разговор в одно число, и по ней
+                                    нельзя было сказать, где человек провёл эти минуты.
+                                    Прочерк значит «станция не сказала», а не «ноль секунд». */}
                                 <Td className="whitespace-nowrap text-right tabular-nums text-slate-500"
-                                    title="Вся длительность вызова, включая разговор">
-                                    {touch.dial_seconds ? hms(touch.dial_seconds) : '—'}
+                                    title="Сколько человек слушал приветствие или меню до попадания в очередь">
+                                    {seconds(touch.ivr_seconds)}
+                                </Td>
+                                <Td className="whitespace-nowrap text-right tabular-nums text-slate-500"
+                                    title="Сколько ждал в очереди: от входа в очередь до ответа оператора, а у потерянных — до отбоя">
+                                    {seconds(touch.wait_seconds)}
                                 </Td>
                                 <Td className="whitespace-nowrap tabular-nums text-slate-500">{touch.queue || '—'}</Td>
                                 <Td>
@@ -652,6 +660,14 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                             <span className="text-[12px] text-slate-500">{touch.call_type}</span>
                             {touch.talk_seconds > 0 ? (
                                 <span className="text-[12px] tabular-nums text-slate-500">· {hms(touch.talk_seconds)}</span>
+                            ) : null}
+                            {/* На карточке те же две величины, что в колонках, но только когда
+                                они известны: пара прочерков на телефоне — это шум. */}
+                            {touch.ivr_seconds !== null && touch.ivr_seconds !== undefined ? (
+                                <span className="text-[12px] tabular-nums text-slate-400">· IVR {seconds(touch.ivr_seconds)}</span>
+                            ) : null}
+                            {touch.wait_seconds !== null && touch.wait_seconds !== undefined ? (
+                                <span className="text-[12px] tabular-nums text-slate-400">· ждал {seconds(touch.wait_seconds)}</span>
                             ) : null}
                             {touch.recording_url ? (
                                 <a href={touch.recording_url} target="_blank" rel="noreferrer"

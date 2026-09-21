@@ -46,6 +46,19 @@ export const hms = (seconds) => {
     return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 };
 
+/** Секунды ожидания или приветствия: «26 с», «1:05» от минуты, прочерк — если НЕИЗВЕСТНО.
+ *
+ *  Отличается от `hms` ровно в одном месте, и оно важное: ноль здесь настоящее значение
+ *  («ответили в ту же секунду», «приветствия нет»), а прочерк ставится только тому, чего
+ *  станция не сказала. Поэтому null и число различаются, а не сливаются в «—». */
+export const seconds = (value) => {
+    if (value === null || value === undefined || value === '') return '—';
+    const total = Math.trunc(Number(value));
+    if (!Number.isFinite(total) || total < 0) return '—';
+    if (total < 60) return `${total} с`;
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+};
+
 /** Секунды → часы с одним знаком. Тем же способом, что на листе «Операторы». */
 export const hours = (seconds) => Math.round(((Number(seconds) || 0) / 3600) * 10) / 10;
 

@@ -77,7 +77,7 @@ IVR 19 с, в 3001 — автоинформатор 26 с и IVR 7 с. На да
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from cdr import touches as touches_mod
+from cdr import queue_facts as queue_facts_mod, touches as touches_mod
 
 DEFAULT_SL_SECONDS = 20
 DEFAULT_AR_MIN_PERCENT = 3
@@ -184,13 +184,9 @@ def _finish(bucket):
     return out
 
 
-def arrival_from_linkedid(linkedid):
-    """Секунда прихода звонка на станцию из linkedid («1789533127.1074887») — наивное время
-    Алматы. Хвост после точки — порядковый номер канала, к времени отношения не имеет."""
-    head = str(linkedid or '').split('.', 1)[0]
-    if not head.isdigit():
-        return None
-    return datetime.fromtimestamp(int(head), tz=_ALMATY).replace(tzinfo=None)
+# Приход звонка по linkedid считает `cdr.queue_facts`: то же правило нужно разделу
+# «Касания» для длины приветствия, а двум копиям было бы где разойтись.
+arrival_from_linkedid = queue_facts_mod.arrival_from_linkedid
 
 
 def _touch_queue(value):

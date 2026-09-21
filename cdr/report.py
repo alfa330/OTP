@@ -75,7 +75,11 @@ COLUMNS = (
     ('result', 'Результат', 20),
     ('talk_seconds', 'Разговор, с', 11),
     ('talk_human', 'Разговор', 11),
-    ('dial_seconds', 'Вызов всего, с', 14),
+    # Вместо прежней «Вызов всего, с» — две величины, которые она смешивала: сколько
+    # человек слушал приветствие до очереди и сколько ждал в самой очереди. Пусто там,
+    # где станция входа в очередь не назвала (сутки до 21.09.2026 и исходящие).
+    ('ivr_seconds', 'Приветствие/IVR, с', 18),
+    ('wait_seconds', 'Ожидание в очереди, с', 21),
     ('queue', 'Очередь', 10),
     ('has_recording', 'Есть запись', 11),
     ('recording_url', 'Ссылка на запись', 20),
@@ -252,7 +256,10 @@ def _touch_row(sheet, touch):
         touch.get('result') or '',
         int(touch.get('talk_seconds') or 0),
         hms(touch.get('talk_seconds')),
-        int(touch.get('dial_seconds') or 0),
+        # None, а не 0: «приветствия не было» и «станция не сказала» — разные вещи,
+        # и ноль в этой клетке испортил бы среднее у того, кто считает по файлу.
+        touch.get('ivr_seconds'),
+        touch.get('wait_seconds'),
         str(touch.get('queue') or ''),
         'да' if touch.get('has_recording') else 'нет',
         link,

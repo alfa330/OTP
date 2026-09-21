@@ -34,9 +34,13 @@
 Мост их не читает вовсе, иначе за одними сутками пришлось бы тянуть сотню тысяч строк.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from cdr import touches as touches_mod
+
+# Смещение Алматы: у Казахстана с 01.03.2024 одна зона без перевода часов, а tzdata
+# в контейнере моста может отсутствовать — поэтому сдвигом, а не ZoneInfo.
+_ALMATY = timezone(timedelta(hours=5))
 
 # Кого правим: у исходящего очереди нет, и совпадение callid у него означало бы чужой звонок.
 INCOMING_TYPES = (touches_mod.TYPE_IN, touches_mod.TYPE_IN_MISSED)
@@ -83,6 +87,36 @@ def _moment(value):
         except ValueError:
             return None
     return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+
+def arrival_from_linkedid(linkedid):
+    """Секунда прихода звонка на станцию из `linkedid` («1789533127.1074887») — наивное
+    время Алматы. Хвост после точки это номер канала, к времени отношения не имеет.
+
+    Живёт здесь, а не в табло: по этой же метке раздел «Касания» считает длину
+    приветствия, и две копии правила однажды разошлись бы."""
+    head = str(linkedid or '').split('.', 1)[0]
+    if not head.isdigit():
+        return None
+    return datetime.fromtimestamp(int(head), tz=_ALMATY).replace(tzinfo=None)
+
+
+# Приветствие или меню длиннее этого — не приветствие, а перепутанный linkedid.
+MAX_IVR_SECONDS = 600
+
+
+def ivr_seconds(linkedid, queued_at):
+    """Сколько человек слушал приветствие или меню до попадания в очередь.
+
+    Это разница между входом в очередь (его называет станция) и приходом звонка.
+    Без одного из двух — None: «ноль секунд приветствия» и «мы не знаем» на экране
+    должны выглядеть по-разному."""
+    arrival = arrival_from_linkedid(linkedid)
+    moment = _moment(queued_at)
+    if arrival is None or moment is None:
+        return None
+    seconds = int((moment - arrival).total_seconds())
+    return seconds if 0 <= seconds <= MAX_IVR_SECONDS else None
 
 
 def _seconds(value, limit):

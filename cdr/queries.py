@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 from psycopg2.extras import Json, execute_values
 
-from . import access, sync
+from . import access, queue_facts, sync
 from .schema import RETENTION_DAYS
 
 # Смещение Алматы от UTC. Render живёт в UTC, и «сегодня» у него до 06:00 по
@@ -489,10 +489,18 @@ def _params(day_from, day_to, filters):
 
 _COLUMNS = ("t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result, "
             "t.talk_seconds, t.dial_seconds, t.queue, t.recording_url, "
-            "t.linkedid, t.legs")
+            "t.linkedid, t.legs, t.queued_at, t.wait_seconds, t.talk_measured_seconds, "
+            "t.hangup_side")
 
 
 def _row_to_touch(row):
+    queued_at = row[12]
+    # Ожидание: сказанное станцией сильнее расчёта. Нет его — разность «ответили» и
+    # «вошёл в очередь», а без входа считать не из чего: `started_at` у входящего это
+    # строка, которую выбрала надстройка станции, и началом ожидания она не является.
+    wait = row[13]
+    if wait is None and queued_at and row[1]:
+        wait = max(0, int((row[1] - queued_at).total_seconds()))
     return {
         'started_at': row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else '',
         'answered_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else '',
@@ -500,6 +508,15 @@ def _row_to_touch(row):
         'talk_seconds': row[6], 'dial_seconds': row[7], 'queue': row[8] or '',
         'recording_url': row[9] or '', 'has_recording': bool(row[9]),
         'linkedid': row[10], 'legs': row[11],
+        # Приветствие (или меню) до очереди и ожидание в самой очереди — две разные
+        # величины, которые прежняя колонка «Вызов всего» смешивала в одну.
+        'queued_at': queued_at.strftime('%Y-%m-%d %H:%M:%S') if queued_at else '',
+        'ivr_seconds': queue_facts.ivr_seconds(row[10], queued_at),
+        'wait_seconds': None if wait is None else int(wait),
+        # Разговор без ожидания — им станция называет плечо агента. Пока его нет,
+        # раздел показывает прежний talk_seconds (billsec строки очереди).
+        'talk_measured_seconds': None if row[14] is None else int(row[14]),
+        'hangup_side': row[15] or '',
     }
 
 
