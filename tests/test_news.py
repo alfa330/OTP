@@ -360,9 +360,9 @@ class NewsPerimeterTests(unittest.TestCase):
         """
         routes = _code_only(_read('news', 'routes.py'))
         self.assertIn('def _may_read_post(', routes)
-        # Обе точечные двери ходят через него, и ни одна — через прежнюю
-        # проверку «только отдел».
-        self.assertEqual(routes.count('if not _may_read_post(ctx, post):'), 3)
+        # ВСЕ точечные двери ходят через него — карточка, журнал, его выгрузка
+        # в Excel — и ни одна не через прежнюю проверку «только отдел».
+        self.assertEqual(routes.count('if not _may_read_post(ctx, post):'), 4)
         self.assertNotIn("post.get('author_department_id') not in (", routes)
         # Меряется должностью автора, а не только отделом.
         self.assertIn("effective_role_level(post.get('author_role'))", routes)
@@ -800,9 +800,13 @@ class NewsPhotoTests(unittest.TestCase):
         """Кадр правит тот, кто правит текст: фотография — часть объявления."""
         routes = _code_only(_read('news', 'routes.py'))
         drop = routes[routes.index('def news_photo_drop('):]
+        # До следующей двери: дальше идут читающие роуты, и они про другое.
+        drop = drop[:drop.index('@news_route(')]
         self.assertIn('_may_edit(ctx, post)', drop)
-        # Периметр чтения не расширился: через него по-прежнему ходят три двери.
-        self.assertEqual(routes.count('if not _may_read_post(ctx, post):'), 3)
+        # Право ЧИТАТЬ кадру не подходит: через _may_read_post ходят только
+        # читающие точечные двери (карточка, журнал, выгрузка журнала), и
+        # правка кадра среди них не появилась.
+        self.assertNotIn('_may_read_post', drop)
 
     def test_someone_elses_photo_cannot_be_adopted(self):
         """Идентификатор кадра НЕ должен быть ключом доступа.
@@ -1181,10 +1185,22 @@ class NewsPassTests(unittest.TestCase):
         self.assertLess(create.index('queries.set_passes('), create.index('_launch('))
 
     def test_report_counts_passes_over_the_same_people(self):
+        """«Прошли 9» и «подтвердили 12 из 30» считаются по ОДНИМ людям.
+
+        Считает их одна чистая функция (access.report_summary), и знаменатель у
+        всех счётчиков один — нынешние адресаты. Раньше это была арифметика
+        внутри роута; с выгрузкой в Excel у неё стало два читателя, и разойтись
+        им нельзя.
+        """
+        summary = _function_code(_read('news', 'access.py'), 'report_summary')
+        self.assertIn("addressed = [row for row in rows if row.get('in_audience')]", summary)
+        for key in ('confirmed', 'quiz_passed', 'trainer_passed', 'quiz_failed'):
+            self.assertIn("for row in addressed", summary)
+            self.assertIn("'%s':" % key, summary)
+        # Экран и файл зовут её одну — своей арифметики у роутов нет.
         routes = _code_only(_read('news', 'routes.py'))
-        report = routes[routes.index('def news_post_report('):]
-        self.assertIn("for row in addressed if row['quiz_passed_at']", report)
-        self.assertIn("for row in addressed if row['trainer_passed_at']", report)
+        self.assertIn('news_access.report_summary(', routes)
+        self.assertNotIn("for row in addressed", routes)
 
 
 class NewsPassFrontendTests(unittest.TestCase):
@@ -2173,3 +2189,164 @@ class NewsScheduleTests(unittest.TestCase):
         preview = preview[:preview.index('@news_route')]
         self.assertIn('news_access.spread_preview(', preview)
         self.assertIn('_audience_refusal(', preview)
+
+
+class NewsAttemptsTests(unittest.TestCase):
+    """ТЗ #300, п.4.2: «количество попыток обязательно фиксировать в системе»."""
+
+    def test_every_attempt_is_recorded_including_the_successful_one(self):
+        """Удачная попытка — тоже попытка: «сдал с третьего раза» отличает
+        понятную инструкцию от непонятной, и без этой строки ответа нет."""
+        source = _read('news', 'queries.py')
+        confirm = _function_code(source, 'confirm_read')
+        self.assertIn('record_attempt(', confirm)
+        # Запись СТРОГО до ветки отказа — иначе в журнал попадали бы только
+        # проваленные попытки.
+        self.assertLess(confirm.index('record_attempt('),
+                        confirm.index("return 'quiz_wrong'"))
+        self.assertIn('record_attempt(', _function_code(source, 'pass_quiz'))
+
+    def test_the_number_is_counted_by_the_insert_itself(self):
+        """Отдельный SELECT ради счётчика открыл бы окно между «посчитали» и
+        «записали», и две попытки подряд легли бы под одним номером."""
+        record = _function_code(_read('news', 'queries.py'), 'record_attempt')
+        self.assertIn('COALESCE(MAX(attempt_no), 0) + 1', record)
+        self.assertNotIn('fetchone()[0] + 1', record)
+
+    def test_answers_are_cleaned_before_they_are_stored(self):
+        """Тело запроса приходит от клиента: складывать его как есть значило бы
+        хранить чужой JSON под видом ответов."""
+        key = [(1, 0), (2, 1)]
+        self.assertEqual(news_access.clean_answers(key, {'1': 0, '9': 3, '2': '1'}),
+                         {'1': 0, '2': 1})
+        # bool — не «вариант 1», и неотвеченный вопрос в словарь не попадает.
+        self.assertEqual(news_access.clean_answers(key, {'1': True, '2': None}), {})
+        self.assertEqual(news_access.clean_answers(key, None), {})
+
+    def test_the_table_has_its_own_latch(self):
+        """Запись попытки стоит на ПОДТВЕРЖДЕНИИ новости: ссылка на
+        несуществующую таблицу заперла бы смену всем, кому пришло обязательное
+        объявление."""
+        self.assertIn('def attempts_ready(', _read('news', 'schema.py'))
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('_attempts_ready(cursor)', routes)
+        queries = _read('news', 'queries.py')
+        self.assertIn('if with_attempts:', _function_code(queries, 'confirm_read'))
+
+    def test_the_oktell_window_records_attempts_too(self):
+        """Тест из окна АТС — такая же попытка: иначе «сдал с третьего раза»
+        считалось бы по половине операторов."""
+        agent = _read('oktell_guard', 'routes.py')
+        self.assertIn('with_attempts=_news_attempts_ready(cursor, news_attempts_ready)',
+                      agent)
+
+
+class NewsReportTests(unittest.TestCase):
+    """ТЗ #300, п.11–14: статусы, сводка руководителю, аналитика и выгрузка."""
+
+    @staticmethod
+    def _row(**kwargs):
+        row = {'in_audience': True, 'shown_at': None, 'confirmed_at': None,
+               'quiz_passed_at': None, 'trainer_passed_at': None, 'attempts': 0,
+               'worked_after': False}
+        row.update(kwargs)
+        return row
+
+    def test_statuses_cover_the_list_from_the_spec(self):
+        status = news_access.person_status
+        self.assertEqual(status(has_quiz=True, shown_at='t', confirmed_at='t',
+                                quiz_passed_at='t', attempts=1), 'passed')
+        self.assertEqual(status(has_quiz=False, shown_at='t', confirmed_at='t',
+                                quiz_passed_at=None), 'done')
+        self.assertEqual(status(has_quiz=True, shown_at='t', confirmed_at=None,
+                                quiz_passed_at=None, attempts=3), 'retrying')
+        self.assertEqual(status(has_quiz=True, shown_at='t', confirmed_at=None,
+                                quiz_passed_at=None, attempts=1), 'failed')
+        self.assertEqual(status(has_quiz=True, shown_at='t', confirmed_at=None,
+                                quiz_passed_at=None), 'pending')
+        self.assertEqual(status(has_quiz=True, shown_at=None, confirmed_at=None,
+                                quiz_passed_at=None, attendance_known=True,
+                                worked_after=False), 'absent')
+        self.assertEqual(set(news_access.PERSON_STATUS_LABELS), set(news_access.PERSON_STATUSES))
+
+    def test_absence_is_never_claimed_without_data(self):
+        """«Не выходил на смену» говорим, только когда источник посещаемости по
+        этому кругу вообще отвечает: обвинять в прогуле по отсутствию данных
+        нельзя. Молчит источник — человек просто не открывал объявление."""
+        blind = news_access.person_status(has_quiz=False, shown_at=None, confirmed_at=None,
+                                          quiz_passed_at=None, attendance_known=False,
+                                          worked_after=False)
+        self.assertEqual(blind, 'not_seen')
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn("attendance_known = any(row['worked_after'] for row in rows)", routes)
+
+    def test_the_summary_counts_only_the_current_audience(self):
+        rows = [self._row(confirmed_at='t', quiz_passed_at='t', attempts=1, status='passed'),
+                self._row(confirmed_at='t', attempts=2, status='retrying'),
+                self._row(status='not_seen'),
+                self._row(in_audience=False, confirmed_at='t', quiz_passed_at='t',
+                          attempts=1, status='passed')]
+        summary = news_access.report_summary(rows, has_quiz=True)
+        self.assertEqual(summary['assigned'], 3)
+        self.assertEqual(summary['confirmed'], 2)
+        self.assertEqual(summary['not_confirmed'], 1)
+        self.assertEqual(summary['quiz_passed'], 1)
+        # «Не прошли» — те, кто ПРОБОВАЛ и не сдал, а не все несдавшие: человек,
+        # который до теста ещё не дошёл, его не заваливал.
+        self.assertEqual(summary['quiz_failed'], 1)
+        self.assertEqual(summary['confirmed_outside'], 1)
+        self.assertEqual(summary['needs_attention'], 2)
+        # Процент — по тесту, когда он есть: 1 из 3.
+        self.assertEqual(summary['percent'], 33)
+        # Среднее — по тем, кто отвечал: (1 + 2) / 2, а не / 3.
+        self.assertEqual(summary['avg_attempts'], 1.5)
+
+    def test_the_percent_follows_confirmations_when_there_is_no_quiz(self):
+        rows = [self._row(confirmed_at='t', status='done'), self._row(status='not_seen')]
+        self.assertEqual(news_access.report_summary(rows, has_quiz=False)['percent'], 50)
+
+    def test_the_front_repeats_the_server_labels(self):
+        """Файл и экран обязаны называть одно состояние одним словом."""
+        form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        block = form[form.index('const STATUS_LABELS = {'):]
+        block = block[:block.index('};')]
+        found = dict(re.findall(r"(\w+): '([^']+)'", block))
+        self.assertEqual(found, news_access.PERSON_STATUS_LABELS)
+        # И должности: их печатает выгрузка, а на экране даёт newsShared.
+        shared = _read('src', 'components', 'news', 'newsShared.js')
+        titles = shared[shared.index('export const ROLE_TITLES = {'):]
+        titles = titles[:titles.index('};')]
+        self.assertEqual(dict(re.findall(r"(\w+): '([^']+)'", titles)),
+                         news_access.ROLE_TITLES)
+
+    def test_mistakes_count_people_and_not_attempts(self):
+        """«Вопрос №3 — ошиблись 38% сотрудников»: один человек, трижды
+        ошибшийся в одном вопросе, — это один человек, а не три ошибки."""
+        source = _function_code(_read('news', 'queries.py'), 'question_mistakes')
+        self.assertIn('COUNT(DISTINCT a.user_id)', source)
+        self.assertIn('COUNT(DISTINCT user_id)', source)
+        self.assertIn('wrong_ids @> to_jsonb(z.id)', source)
+
+    def test_the_export_repeats_the_journal_and_never_counts_its_own(self):
+        """Файл, расходящийся с экраном, хуже отсутствующего файла."""
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('def _report_data(', routes)
+        # Два читателя у одного сборщика: экран и файл.
+        self.assertEqual(routes.count('= _report_data(cursor, post)'), 2)
+        export = routes[routes.index('def news_post_report_export('):]
+        export = export[:export.index('@news_route(')]
+        self.assertIn('report_xlsx.build(post, rows)', export)
+        # Курсор закрыт ДО сборки книги: openpyxl не держит слот пула.
+        self.assertIn("defer_cursor=True", _read('news', 'routes.py'))
+        self.assertLess(export.index('_get_cursor'), export.index('report_xlsx.build('))
+
+    def test_the_export_has_the_minimum_columns_from_the_spec(self):
+        from news import report_xlsx
+        titles = [title for _key, title, _width in report_xlsx.COLUMNS]
+        for required in ('ФИО', 'ID сотрудника', 'Подразделение', 'Дата публикации',
+                         'Дата ознакомления', 'Результат теста', 'Попыток', 'Статус'):
+            self.assertIn(required, titles)
+        # Подпись статуса берётся у сервера, а не пишется в файле второй раз.
+        source = _read('news', 'report_xlsx.py')
+        self.assertIn('news_access.PERSON_STATUS_LABELS', source)
+        self.assertNotIn('Успешно пройден', source)

@@ -422,6 +422,45 @@ _STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_news_waves_due ON news_waves(planned_at) "
     "WHERE activated_at IS NULL;",
+    # ── ПОПЫТКИ ТЕСТА (ТЗ #300, п.4.2) ──────────────────────────────────────
+    #
+    # «Количество попыток не ограничивать, но обязательно фиксировать в
+    # системе». До этой таблицы в журнале стоял только ИТОГ (news_reads
+    # .quiz_passed_at): сдал или нет. По нему нельзя ответить ни «сколько раз
+    # пробовал», ни «на чём спотыкаются» — а это два из трёх вопросов, ради
+    # которых тест и заводят.
+    #
+    # Строка на КАЖДУЮ попытку, включая удачную: «сдал с третьего раза» — это
+    # ровно то, что отличает понятную инструкцию от непонятной.
+    """
+    CREATE TABLE IF NOT EXISTS news_quiz_attempts (
+        id         BIGSERIAL PRIMARY KEY,
+        news_id    INTEGER NOT NULL REFERENCES news_posts(id) ON DELETE CASCADE,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        -- Порядковый номер попытки ЭТОГО человека по ЭТОЙ новости. Считается
+        -- при вставке одним запросом: отдельный SELECT ради счётчика открыл бы
+        -- окно между «посчитали» и «записали».
+        attempt_no SMALLINT NOT NULL,
+        correct    SMALLINT NOT NULL,
+        total      SMALLINT NOT NULL,
+        -- Порог, который действовал В МОМЕНТ попытки. Снимком, а не ссылкой на
+        -- news_posts.pass_score_percent: у выпущенной новости он не меняется,
+        -- но у снятой и выпущенной заново — может, и тогда старые попытки
+        -- читались бы по новому правилу.
+        needed     SMALLINT NOT NULL,
+        passed     BOOLEAN NOT NULL,
+        -- Что человек выбрал: {id вопроса: индекс варианта}. Нужно аналитике
+        -- (п.12): «ошиблись в третьем» говорит ГДЕ, а выбранный вариант —
+        -- ПОЧЕМУ, если восемь человек из десяти выбрали один и тот же неверный.
+        answers    JSONB NOT NULL DEFAULT '{}'::jsonb,
+        -- Вопросы с ошибкой, посчитанные ОДИН раз при записи. Иначе аналитика
+        -- сверяла бы ответы с верными на каждой строке журнала.
+        wrong_ids  JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_news_quiz_attempts "
+    "ON news_quiz_attempts(news_id, user_id, attempt_no);",
 ]
 
 # Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.
@@ -596,6 +635,21 @@ def pass_ready(cursor):
     )
     row = cursor.fetchone()
     return bool(row and int(row[0]) == len(PASS_COLUMNS))
+
+
+def attempts_ready(cursor):
+    """Развёрнута ли таблица попыток (ТЗ #300, п.4.2).
+
+    Отдельно — по той же причине, что кадры, тест и планировщик. Здесь это
+    важнее прочего: запись попытки стоит на ПОДТВЕРЖДЕНИИ новости, и ссылка на
+    несуществующую таблицу уронила бы кнопку «Прочитал» у всех, кому пришло
+    обязательное объявление, — то есть заперла бы смену.
+
+    Нет таблицы — попытки просто не считаются: тест работает как до задачи.
+    """
+    cursor.execute("SELECT to_regclass('public.news_quiz_attempts') IS NOT NULL")
+    row = cursor.fetchone()
+    return bool(row and row[0])
 
 
 def plan_ready(cursor):

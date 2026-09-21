@@ -190,6 +190,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     # объявление ВСЕМ сразу, пока портал держит его по волнам. Одна растяжка,
     # два окна — и в одном из них её как будто нет.
     _news_plan = {'ready': False}
+    # Таблица попыток: тест из окна АТС — такая же попытка, как из портала, и
+    # не попади она в журнал, «сдал с третьего раза» считалось бы по половине
+    # операторов.
+    _news_attempts = {'ready': False}
 
     def _news_photos_ready(cursor, probe):
         if not _news_photos['ready']:
@@ -200,6 +204,11 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         if not _news_plan['ready']:
             _news_plan['ready'] = probe(cursor)
         return _news_plan['ready']
+
+    def _news_attempts_ready(cursor, probe):
+        if not _news_attempts['ready']:
+            _news_attempts['ready'] = probe(cursor)
+        return _news_attempts['ready']
 
     def _news_channel_ready(cursor, probe):
         if not _news_channel['ready']:
@@ -427,6 +436,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         разъезжаются, а это правило про документооборот.
         """
         from news import queries as news_queries
+        from news.schema import attempts_ready as news_attempts_ready
         from news.schema import plan_ready as news_plan_ready
 
         payload = request.get_json(silent=True) or {}
@@ -443,7 +453,8 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 answers=payload.get('answers'), with_quiz=True, with_pass=True,
                 # Порог теста и граница волны — те же, что у портала: правило
                 # про документооборот, и двух копий у него быть не должно.
-                with_plan=_news_plan_ready(cursor, news_plan_ready))
+                with_plan=_news_plan_ready(cursor, news_plan_ready),
+                with_attempts=_news_attempts_ready(cursor, news_attempts_ready))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
         if status == 'too_early':

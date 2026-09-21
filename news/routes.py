@@ -19,19 +19,22 @@
 """
 
 import logging
+import re
 from datetime import datetime
 from functools import wraps
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
 from wiki.sanitize import sanitize_html
 
 from . import access as news_access
 from . import photos as news_photos
 from . import queries
+from . import report_xlsx
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
                      MAX_SPREAD_MINUTES, MIN_SPREAD_MINUTES,
                      MIN_WAVE_INTERVAL_MINUTES,
+                     attempts_ready as schema_attempts_ready,
                      channel_ready as schema_channel_ready,
                      pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
@@ -127,6 +130,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _plan_columns['ready']:
             _plan_columns['ready'] = schema_plan_ready(cursor)
         return _plan_columns['ready']
+
+    # Таблица попыток (ТЗ #300, п.4.2) — тем же кэшем. Её спрашивает
+    # подтверждение новости, то есть самый горячий пишущий роут раздела.
+    _attempts_table = {'ready': False}
+
+    def _attempts_ready(cursor):
+        if not _attempts_table['ready']:
+            _attempts_table['ready'] = schema_attempts_ready(cursor)
+        return _attempts_table['ready']
 
     # Граница пространства (решение владельца 18.09.2026). Тем же приёмом и по
     # той же причине, что кадры и тест, но с одной особенностью: половина
@@ -747,7 +759,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             otp_role=ctx['otp_role'], subjects=ctx['subjects'],
             answers=payload.get('answers'), with_quiz=_quiz_ready(cursor),
             with_pass=_pass_ready(cursor), with_space=_space_ready(cursor),
-            with_plan=_plan_ready(cursor))
+            with_plan=_plan_ready(cursor), with_attempts=_attempts_ready(cursor))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
         if status == 'trainer_pending':
@@ -781,7 +793,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         status, detail = queries.pass_quiz(
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], answers=payload.get('answers'),
-            with_space=_space_ready(cursor), with_plan=_plan_ready(cursor))
+            with_space=_space_ready(cursor), with_plan=_plan_ready(cursor),
+            with_attempts=_attempts_ready(cursor))
         if status in ('not_found', 'no_quiz'):
             return jsonify({"error": "Теста у этой новости нет"}), 404
         if status == 'quiz_wrong':
@@ -1438,6 +1451,63 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         news_photos.drop_blobs(gcs, refs)
         return jsonify({"status": "deleted"})
 
+    def _report_data(cursor, post):
+        """Журнал новости: строки со статусом, сводка и аналитика ошибок.
+
+        ОДИН сборщик на экран и на выгрузку в Excel (ТЗ #300, п.11–14). Два
+        счёта одного журнала разошлись бы ровно там, где по ним принимают
+        решение о человеке, — и разошлись бы молча.
+        """
+        rows = queries.read_report(cursor, post['id'], with_pass=_pass_ready(cursor),
+                                   with_space=_space_ready(cursor),
+                                   with_plan=_plan_ready(cursor),
+                                   with_attempts=_attempts_ready(cursor))
+        has_quiz = bool(_quiz_ready(cursor)
+                        and queries.quiz_answer_key(cursor, post['id']))
+        # Источник посещаемости отвечает, только если хоть у кого-то из круга
+        # есть часы после публикации. Молчит — «не выходил на смену» не
+        # говорим: обвинять в прогуле по отсутствию данных нельзя.
+        attendance_known = any(row['worked_after'] for row in rows)
+        for row in rows:
+            row['status'] = news_access.person_status(
+                has_quiz=has_quiz, shown_at=row['shown_at'],
+                confirmed_at=row['confirmed_at'], quiz_passed_at=row['quiz_passed_at'],
+                attempts=row['attempts'], worked_after=row['worked_after'],
+                attendance_known=attendance_known)
+        summary = news_access.report_summary(
+            rows, has_quiz=has_quiz, has_trainer=bool(post.get('trainer_key')))
+        questions = (queries.question_mistakes(cursor, post['id'])
+                     if has_quiz and _attempts_ready(cursor) else [])
+        return rows, summary, questions
+
+    @news_route('/posts/<int:post_id>/report.xlsx', publisher=True, defer_cursor=True)
+    def news_post_report_export(ctx, post_id):
+        """Журнал ознакомления файлом (ТЗ #300, п.14).
+
+        defer_cursor: сборка книги — работа процессора, а слотов пула сорок на
+        весь портал. Курсор закрывается до того, как openpyxl начнёт считать.
+
+        Охват тот же, что у журнала на экране: те же строки, тот же статус, та
+        же сводка. Файл, расходящийся с экраном, хуже отсутствующего файла.
+        """
+        with db._get_cursor() as cursor:
+            post = _get_post(cursor, post_id)
+            if not post:
+                return jsonify({"error": "Новость не найдена"}), 404
+            if not _may_read_post(ctx, post):
+                return jsonify({"error": "Эта новость не из вашего периметра"}), 403
+            rows, _summary, _questions = _report_data(cursor, post)
+        stream = report_xlsx.build(post, rows)
+        # Имя файла — заголовком новости: в папке «Загрузки» пять одинаковых
+        # «Ознакомление.xlsx» не различить. Чистим то, чем давятся файловые
+        # системы, и режем: длинный заголовок делает имя нечитаемым.
+        safe = re.sub(r'[\\/:*?"<>|]+', ' ', post['title']).strip()[:60] or 'новость'
+        return send_file(
+            stream,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='Ознакомление — %s.xlsx' % safe)
+
     @news_route('/posts/<int:post_id>/report', publisher=True)
     def news_post_report(cursor, ctx, post_id):
         """Кто прочитал, кто нет. Ради этого журнала раздел и делали."""
@@ -1446,26 +1516,18 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_read_post(ctx, post):
             return jsonify({"error": "Эта новость не из вашего периметра"}), 403
-        rows = queries.read_report(cursor, post_id, with_pass=_pass_ready(cursor),
-                                   with_space=_space_ready(cursor),
-                                   with_plan=_plan_ready(cursor))
-        # Знаменатель — только НЫНЕШНИЕ адресаты: «из скольких» отвечает на
-        # вопрос «сколько человек это касается сейчас». Числитель — по тем же
-        # людям, чтобы «12 из 30» нельзя было прочитать двумя способами.
-        # Подтвердившие, которых уже нет в периметре, в списке остаются
-        # (in_audience=false) и посчитаны отдельно.
-        addressed = [row for row in rows if row['in_audience']]
+        rows, summary, questions = _report_data(cursor, post)
         return jsonify({
             "items": rows,
-            "total": len(addressed),
-            "confirmed": sum(1 for row in addressed if row['confirmed_at']),
-            "confirmed_outside": sum(1 for row in rows
-                                     if row['confirmed_at'] and not row['in_audience']),
-            # Задача #342: сколько нынешних адресатов прошли тест и тренажёр.
-            # Тем же знаменателем, что «подтвердили», — иначе «прошли 9» и
-            # «подтвердили 12 из 30» считались бы по разным людям.
-            "quiz_passed": sum(1 for row in addressed if row['quiz_passed_at']),
-            "trainer_passed": sum(1 for row in addressed if row['trainer_passed_at']),
+            # Знаменатель — только НЫНЕШНИЕ адресаты: «из скольких» отвечает на
+            # вопрос «сколько человек это касается сейчас». Подтвердившие,
+            # которых уже нет в периметре, в списке остаются (in_audience=false)
+            # и посчитаны отдельно (access.report_summary).
+            **summary,
+            # Прежнее имя счётчика: вкладка со старым бандлом читает его.
+            "total": summary['assigned'],
+            # ТЗ #300, п.12: где чаще ошибаются.
+            "questions": questions,
             # ТЗ #300, п.8.5: режим публикации, плановое и фактическое время
             # начала, период и интервал. Номер волны каждого сотрудника уже в
             # строках — считается там же, где и всё остальное про человека.

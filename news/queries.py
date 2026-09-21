@@ -534,6 +534,78 @@ def post_quiz(cursor, post_id):
              'correct': int(row[3])} for row in cursor.fetchall()]
 
 
+def record_attempt(cursor, *, news_id, user_id, result, answers):
+    """Записать попытку теста (ТЗ #300, п.4.2). Возвращает её номер.
+
+    Номер считает САМ запрос, а не питон: отдельный SELECT ради счётчика
+    открыл бы окно между «посчитали» и «записали», и две попытки подряд легли
+    бы под одним номером. Агрегат по пустому набору даёт NULL, COALESCE — 1,
+    поэтому первая попытка не требует отдельной ветки.
+
+    Пишется КАЖДАЯ попытка, включая удачную: «сдал с третьего раза» — это ровно
+    то, что отличает понятную инструкцию от непонятной (п.12).
+    """
+    cursor.execute(
+        """
+        INSERT INTO news_quiz_attempts
+               (news_id, user_id, attempt_no, correct, total, needed, passed,
+                answers, wrong_ids)
+        SELECT %(news)s, %(user)s, COALESCE(MAX(attempt_no), 0) + 1,
+               %(correct)s, %(total)s, %(needed)s, %(passed)s,
+               %(answers)s::jsonb, %(wrong)s::jsonb
+          FROM news_quiz_attempts
+         WHERE news_id = %(news)s AND user_id = %(user)s
+        RETURNING attempt_no
+        """,
+        {'news': news_id, 'user': user_id,
+         'correct': int(result.get('correct') or 0),
+         'total': int(result.get('total') or 0),
+         'needed': int(result.get('needed') or 0),
+         'passed': bool(result.get('passed')),
+         'answers': json.dumps(answers or {}, ensure_ascii=False),
+         'wrong': json.dumps(result.get('wrong') or [])},
+    )
+    return int(cursor.fetchone()[0])
+
+
+def question_mistakes(cursor, post_id):
+    """Где чаще ошибаются (ТЗ #300, п.12). Список вопросов со счётом ошибок.
+
+    «Вопрос №3 — ошиблись 38% сотрудников»: считаем ЛЮДЕЙ, а не попытки. Один
+    человек, трижды не ответивший на третий вопрос, — это один человек, которому
+    инструкция непонятна, а не три ошибки.
+
+    Знаменатель — те, кто вообще отвечал: доля от всех адресатов мерила бы не
+    понятность вопроса, а явку.
+    """
+    cursor.execute(
+        """
+        SELECT z.id, z.position, z.prompt,
+               COUNT(DISTINCT a.user_id) AS wrong_people,
+               (SELECT COUNT(DISTINCT user_id) FROM news_quiz_attempts
+                 WHERE news_id = %(post_id)s) AS people
+          FROM news_quiz_questions z
+          LEFT JOIN news_quiz_attempts a
+                 ON a.news_id = z.news_id
+                AND a.wrong_ids @> to_jsonb(z.id)
+         WHERE z.news_id = %(post_id)s
+         GROUP BY z.id, z.position, z.prompt
+         ORDER BY z.position, z.id
+        """,
+        {'post_id': post_id},
+    )
+    rows = cursor.fetchall()
+    return [{
+        'id': int(row[0]),
+        # Номер, как его видит сотрудник в окне: позиция с единицы.
+        'number': index,
+        'prompt': row[2],
+        'wrong_people': int(row[3] or 0),
+        'people': int(row[4] or 0),
+        'percent': round(int(row[3] or 0) * 100 / int(row[4])) if row[4] else 0,
+    } for index, row in enumerate(rows, start=1)]
+
+
 def set_quiz(cursor, *, post_id, quiz):
     """Полная замена теста. quiz уже прошёл news_access.normalize_quiz."""
     cursor.execute('DELETE FROM news_quiz_questions WHERE news_id = %s', (post_id,))
@@ -551,7 +623,7 @@ def set_quiz(cursor, *, post_id, quiz):
 
 def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
                  with_quiz=False, with_pass=False, with_space=False,
-                 with_plan=False):
+                 with_plan=False, with_attempts=False):
     """Принять «Прочитал». (status, подробность).
 
     Подробность — оставшиеся секунды у 'too_early' и итог попытки у
@@ -668,6 +740,11 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
         # прежнее правило слово в слово: непройденной попытку делает любая
         # ошибка.
         result = news_access.quiz_result(answer_key, answers, pass_score)
+        # Попытка пишется ДО решения и при любом исходе (ТЗ п.4.2): удачная
+        # отвечает на «с какого раза сдал», неудачная — на «где спотыкаются».
+        if with_attempts:
+            record_attempt(cursor, news_id=news_id, user_id=user_id, result=result,
+                           answers=news_access.clean_answers(answer_key, answers))
         if not result['passed']:
             # Список вопросов с ошибкой роут наружу НЕ отдаёт (решение владельца
             # 21.09.2026): попытка не засчитывается целиком, окно снимает весь
@@ -767,7 +844,7 @@ def _mark_pass(cursor, *, news_id, user_id, column):
 
 
 def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers,
-              with_space=False, with_plan=False):
+              with_space=False, with_plan=False, with_attempts=False):
     """«Проверить» у теста новости. (status, подробность).
 
     'not_found' — новости нет или она не этому человеку; 'no_quiz' — теста у
@@ -787,6 +864,9 @@ def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers,
     # «Проверить» и «Прочитал» обязаны засчитывать одну и ту же попытку.
     result = news_access.quiz_result(answer_key, answers,
                                      post['pass_score_percent'])
+    if with_attempts:
+        record_attempt(cursor, news_id=news_id, user_id=user_id, result=result,
+                       answers=news_access.clean_answers(answer_key, answers))
     if not result['passed']:
         return 'quiz_wrong', result
     _mark_pass(cursor, news_id=news_id, user_id=user_id, column='quiz_passed_at')
@@ -1668,7 +1748,8 @@ def poke_bell(cursor):
 # ЖУРНАЛ: кто прочитал, кто нет
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=False):
+def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=False,
+                with_attempts=False):
     """Адресаты новости с отметками показа и подтверждения.
 
     Круг адресатов считается ТЕМИ ЖЕ правилами, что и выдача окна
@@ -1706,6 +1787,34 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
                 "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at") + """
               FROM news_reads
              WHERE news_id = %(post_id)s
+        ),
+        -- Попытки теста (ТЗ п.4.2) и ПОСЛЕДНИЙ результат: «2 из 3» человек
+        -- читает сразу, а «сдал/не сдал» уже есть в reads.
+        attempts AS (""" + ("""
+            SELECT user_id,
+                   COUNT(*)                                          AS tries,
+                   (ARRAY_AGG(correct ORDER BY attempt_no DESC))[1]   AS last_correct,
+                   (ARRAY_AGG(total   ORDER BY attempt_no DESC))[1]   AS last_total,
+                   MAX(created_at)                                    AS last_at
+              FROM news_quiz_attempts
+             WHERE news_id = %(post_id)s
+             GROUP BY user_id""" if with_attempts else """
+            SELECT NULL::int AS user_id, 0::bigint AS tries,
+                   NULL::smallint AS last_correct, NULL::smallint AS last_total,
+                   NULL::timestamp AS last_at
+             WHERE FALSE""") + """
+        ),
+        -- Выходил ли человек на смену ПОСЛЕ публикации. Нужно единственному
+        -- статусу — «не выходил на смену после публикации» (ТЗ п.11.2), и
+        -- только когда источник по этому кругу людей вообще отвечает: молчит —
+        -- значит человек просто не открывал объявление, а не прогулял.
+        worked AS (
+            SELECT DISTINCT h.operator_id AS user_id
+              FROM daily_hours h
+              JOIN news_posts p ON p.id = %(post_id)s
+             WHERE p.published_at IS NOT NULL
+               AND h.day >= p.published_at::date
+               AND h.work_time > 0
         )
         SELECT COALESCE(a.id, u.id)                AS user_id,
                COALESCE(a.name, u.name)            AS name,
@@ -1714,11 +1823,17 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
                r.shown_at, r.confirmed_at,
                (a.id IS NOT NULL)                  AS in_audience,
                r.quiz_passed_at, r.trainer_passed_at,
-               {wave_no}, {wave_planned}, {wave_activated}
+               {wave_no}, {wave_planned}, {wave_activated},
+               COALESCE(t.tries, 0), t.last_correct, t.last_total, t.last_at,
+               (wk.user_id IS NOT NULL) AS worked_after
           FROM addressed a
           FULL JOIN reads r ON r.user_id = a.id
           LEFT JOIN users u ON u.id = r.user_id
           LEFT JOIN departments d ON d.id = u.department_id
+          LEFT JOIN attempts t  ON t.user_id = COALESCE(a.id, r.user_id)
+          -- Псевдоним wk, а не w: буква w уже занята расписанием волн, и
+          -- Postgres отвечает на это «table name "w" specified more than once».
+          LEFT JOIN worked   wk ON wk.user_id = COALESCE(a.id, r.user_id)
           {wave_join}
          WHERE COALESCE(a.id, r.user_id) IS NOT NULL
          ORDER BY (r.confirmed_at IS NULL) DESC, COALESCE(a.name, u.name)
@@ -1759,6 +1874,14 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
         'wave_no': (int(row[9]) + 1) if row[9] is not None else None,
         'wave_planned_at': row[10].isoformat() if row[10] else None,
         'wave_activated_at': row[11].isoformat() if row[11] else None,
+        # ТЗ #300, п.4.2 и п.11.2: сколько раз отвечал и с каким результатом.
+        # Результат — ПОСЛЕДНИЙ: он и есть ответ на «чем кончилось».
+        'attempts': int(row[12] or 0),
+        'last_correct': int(row[13]) if row[13] is not None else None,
+        'last_total': int(row[14]) if row[14] is not None else None,
+        'last_attempt_at': row[15].isoformat() if row[15] else None,
+        # Был ли на смене после публикации — только для статуса «не выходил».
+        'worked_after': bool(row[16]),
     } for row in cursor.fetchall()]
 
 

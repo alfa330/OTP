@@ -499,6 +499,27 @@ def quiz_mistakes(answer_key, answers):
     return wrong
 
 
+def clean_answers(answer_key, answers):
+    """Ответы человека, приведённые к {id вопроса: индекс} — для журнала попыток.
+
+    Только вопросы ИЗ ЭТОГО теста и только числа: тело запроса приходит от
+    клиента, и складывать его в базу как есть значило бы хранить чужой JSON под
+    видом ответов. Неотвеченный вопрос в словарь не попадает вовсе — «не
+    ответил» и «ответил неверно» это разные вещи, и аналитика их различает.
+    """
+    given = answers if isinstance(answers, dict) else {}
+    clean = {}
+    for question_id, _correct in (answer_key or ()):
+        value = given.get(str(question_id), given.get(question_id))
+        if isinstance(value, bool):
+            continue
+        try:
+            clean[str(int(question_id))] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return clean
+
+
 def normalize_pass_score(raw, default=DEFAULT_PASS_SCORE_PERCENT):
     """Проходной результат из формы, в процентах. Мусор — умолчание.
 
@@ -647,6 +668,119 @@ def channels_for_departments(department_codes):
     if OKTELL_DEPARTMENT_CODE in codes:
         return list(CHANNELS)
     return [DEFAULT_CHANNEL]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# СОСТОЯНИЕ СОТРУДНИКА В ЖУРНАЛЕ (ТЗ #300, п.11.2 и п.13)
+#
+# «Рекомендуемые статусы: не выходил на смену после публикации; ожидает
+# ознакомления; ознакомился, тест не пройден; проходит повторно; успешно
+# пройден».
+#
+# Правило ОДНО на три витрины: журнал у редактора, сводка для руководителя и
+# выгрузка в Excel. Две копии разошлись бы ровно там, где по ним принимают
+# решение о человеке.
+#
+# ЧЕСТНАЯ ОГОВОРКА ПРО СМЕНУ. «Не выходил на смену» мы говорим только когда
+# источник посещаемости по этому кругу людей вообще отвечает (у кого-то из них
+# часы есть). Молчит источник — человек просто «не открывал объявление»:
+# обвинять в прогуле по отсутствию данных нельзя.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PERSON_STATUSES = ('passed', 'done', 'retrying', 'failed', 'pending', 'absent', 'not_seen')
+
+# Должности по-русски — их печатает выгрузка в Excel. На экране ту же подпись
+# даёт newsShared.js (ROLE_TITLES), и совпадение сверяет тест: файл и журнал
+# обязаны называть должность одинаково, иначе их не свести.
+ROLE_TITLES = {
+    'super_admin': 'коммерческий директор',
+    'admin': 'руководитель',
+    'sv': 'супервайзер',
+    'supervisor': 'супервайзер',
+    'trainer': 'тренер',
+    'operator': 'оператор',
+    'trainee': 'стажёр',
+    'hr_manager': 'HR',
+    'accounting_manager': 'бухгалтерия',
+    'marketing_manager': 'маркетинг',
+}
+
+# Подписи нужны СЕРВЕРУ — их печатает выгрузка в Excel. Фронт держит свою копию
+# (WikiNews.jsx: STATUS_LABELS), и совпадение сверяет тест: файл и экран обязаны
+# называть одно состояние одним словом.
+PERSON_STATUS_LABELS = {
+    'passed': 'Успешно пройден',
+    'done': 'Ознакомился',
+    'retrying': 'Проходит повторно',
+    'failed': 'Тест не пройден',
+    'pending': 'Ожидает ознакомления',
+    'absent': 'Не выходил на смену после публикации',
+    'not_seen': 'Не открывал объявление',
+}
+
+
+def person_status(*, has_quiz, shown_at, confirmed_at, quiz_passed_at,
+                  attempts=0, worked_after=False, attendance_known=False):
+    """Состояние одного адресата. Код из PERSON_STATUSES.
+
+    Порядок ветвей — порядок вопросов, которые задаёт руководитель: сначала
+    «сделал ли», потом «застрял ли», и только в конце «а был ли вообще».
+    """
+    tries = int(attempts or 0)
+    if confirmed_at:
+        if not has_quiz or quiz_passed_at:
+            return 'passed' if has_quiz else 'done'
+        return 'retrying' if tries >= 2 else 'failed'
+    if quiz_passed_at:
+        # Тест сдан, а подтверждения нет: так бывает у необязательного теста,
+        # пройденного во вкладке «Новости». Ознакомления это не заменяет.
+        return 'pending'
+    if tries:
+        return 'retrying' if tries >= 2 else 'failed'
+    if shown_at:
+        return 'pending'
+    if attendance_known and not worked_after:
+        return 'absent'
+    return 'not_seen'
+
+
+def report_summary(rows, *, has_quiz=False, has_trainer=False):
+    """Сводка по новости (ТЗ п.11.1 и п.13). Чистая функция над строками журнала.
+
+    Знаменатель — НЫНЕШНИЕ адресаты: «из скольких» отвечает на вопрос «сколько
+    человек это касается сейчас». Подтвердившие, которых в круге уже нет,
+    считаются отдельной строкой и в проценты не идут — иначе прохождение
+    оказалось бы выше ста.
+
+    Среднее число попыток — только по тем, кто хоть раз отвечал: деля на всех,
+    мы получили бы «0,4 попытки», то есть число, которого ни у кого нет.
+    """
+    addressed = [row for row in rows if row.get('in_audience')]
+    assigned = len(addressed)
+    confirmed = sum(1 for row in addressed if row.get('confirmed_at'))
+    quiz_passed = sum(1 for row in addressed if row.get('quiz_passed_at'))
+    trainer_passed = sum(1 for row in addressed if row.get('trainer_passed_at'))
+    # «Не прошли тест» — это те, кто ПРОБОВАЛ и не сдал, а не все несдавшие:
+    # человек, который до теста ещё не дошёл, его не заваливал.
+    quiz_failed = sum(1 for row in addressed
+                      if not row.get('quiz_passed_at') and int(row.get('attempts') or 0))
+    tries = [int(row.get('attempts') or 0) for row in addressed if row.get('attempts')]
+    done = quiz_passed if has_quiz else confirmed
+    return {
+        'assigned': assigned,
+        'confirmed': confirmed,
+        'not_confirmed': assigned - confirmed,
+        'quiz_passed': quiz_passed,
+        'quiz_failed': quiz_failed,
+        'trainer_passed': trainer_passed,
+        'confirmed_outside': sum(1 for row in rows
+                                 if row.get('confirmed_at') and not row.get('in_audience')),
+        # Процент прохождения: по тесту, если он есть, иначе по подтверждениям.
+        'percent': round(done * 100 / assigned) if assigned else 0,
+        'avg_attempts': round(sum(tries) / len(tries), 1) if tries else 0,
+        'needs_attention': sum(1 for row in addressed
+                               if row.get('status') not in ('passed', 'done')),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

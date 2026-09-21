@@ -6,9 +6,9 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
-    AlertTriangle, Bold, Check, ChevronDown, Image as ImageIcon, Italic, Link2, List,
-    ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus, Sparkles,
-    Underline as UnderlineIcon, Users, X,
+    AlertTriangle, Bold, Check, ChevronDown, Download, Image as ImageIcon, Italic,
+    Link2, List, ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus,
+    Sparkles, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
@@ -114,6 +114,20 @@ const DEFAULT_WAVE_INTERVAL_MINUTES = 10;
 const PASS_SCORE_PRESETS = [100, 80, 60];
 
 const kindRule = (kind) => KIND_RULES[kind] || KIND_RULES.important;
+
+/* СОСТОЯНИЕ СОТРУДНИКА В ЖУРНАЛЕ (ТЗ #300, п.11.2). Считает его сервер
+   (news/access.py: person_status) — одним правилом на экран, сводку и выгрузку
+   в Excel. Здесь только подписи, и их совпадение с серверными сверяет тест:
+   файл и экран обязаны называть одно состояние одним словом. */
+const STATUS_LABELS = {
+    passed: 'Успешно пройден',
+    done: 'Ознакомился',
+    retrying: 'Проходит повторно',
+    failed: 'Тест не пройден',
+    pending: 'Ожидает ознакомления',
+    absent: 'Не выходил на смену после публикации',
+    not_seen: 'Не открывал объявление',
+};
 
 /* Часы и минуты человеческими словами — для расчёта рассылки и подписи строки:
    «120 минут» автор пересчитывает в уме, «2 часа» он прочитал в своём же
@@ -1558,6 +1572,7 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
     const [state, setState] = useState(null);
     const [loading, setLoading] = useState(false);
     const [onlyPending, setOnlyPending] = useState(false);
+    const [exporting, setExporting] = useState(false);
 
     useEffect(() => {
         if (!open || !post?.id) { setState(null); return; }
@@ -1576,12 +1591,41 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
 
     const rows = useMemo(() => {
         const items = state?.items || [];
-        // «Только непрочитавшие» — про тех, от кого ещё ждут: человек, который
-        // из адресатов выбыл, в этот список не попадает, дожимать его незачем.
+        /* «Требуют внимания» — про тех, от кого ещё чего-то ждут: не
+           подтвердил ИЛИ не сдал тест. Раньше фильтр умел только первое, и
+           человек, зависший на третьей попытке, в него не попадал — хотя
+           именно к нему и надо подойти. Выбывшего из адресатов не показываем:
+           дожимать его незачем. */
         return onlyPending
-            ? items.filter((row) => !row.confirmed_at && row.in_audience)
+            ? items.filter((row) => row.in_audience
+                && !['passed', 'done'].includes(row.status))
             : items;
     }, [state, onlyPending]);
+
+    /* Вопросы, на которых спотыкаются (ТЗ #300, п.12). Показываем только те, где
+       ошибались: список из десяти строк с нулями не говорит ничего. Самый
+       непонятный — сверху. */
+    const mistakes = useMemo(() => (state?.questions || [])
+        .filter((item) => item.wrong_people > 0)
+        .sort((a, b) => b.percent - a.percent), [state]);
+
+    const exportReport = () => {
+        if (!post?.id || exporting) return;
+        setExporting(true);
+        axios.get(`${apiBaseUrl}/api/news/posts/${post.id}/report.xlsx`,
+                  { headers, responseType: 'blob' })
+            .then((r) => {
+                const url = URL.createObjectURL(new Blob([r.data]));
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `Ознакомление — ${(post.title || 'новость').slice(0, 60)}.xlsx`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+            })
+            .finally(() => setExporting(false));
+    };
 
     return (
         <IosModal
@@ -1590,7 +1634,20 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
             title="Кто прочитал"
             subtitle={post?.title}
             maxWidth="max-w-xl"
-            footer={<button type="button" className={iosBtnSecondary} onClick={onClose}>Закрыть</button>}
+            footer={(
+                <>
+                    {/* Выгрузка — там же, где закрывают окно: её берут, когда
+                        журнал уже посмотрели (ТЗ #300, п.14). */}
+                    <button type="button" className={iosBtnSecondary}
+                            disabled={exporting || !state} onClick={exportReport}>
+                        {exporting
+                            ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
+                            : <Download className="mr-1 inline h-4 w-4" aria-hidden="true" />}
+                        Excel
+                    </button>
+                    <button type="button" className={iosBtnSecondary} onClick={onClose}>Закрыть</button>
+                </>
+            )}
         >
             {loading && (
                 <p className="py-8 text-center text-[13px] text-slate-400">
@@ -1612,10 +1669,23 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                     и ещё {state.confirmed_outside} — из тех, кто больше не в адресатах
                                 </p>
                             )}
+                            {/* Сводка для руководителя (ТЗ #300, п.13) — одной
+                                строкой и только тем, что есть у этой новости.
+                                «Ещё не ознакомились» отдельным числом не пишем:
+                                оно уже сказано в «12 из 30», а второй раз — шум. */}
                             {(hasQuiz || hasTrainer) && (
                                 <p className="text-[12px] text-slate-500 tabular-nums">
                                     {[hasTrainer ? `тренажёр прошли ${state.trainer_passed || 0}` : null,
-                                      hasQuiz ? `тест прошли ${state.quiz_passed || 0}` : null]
+                                      hasQuiz ? `тест прошли ${state.quiz_passed || 0} из ${
+                                          state.assigned ?? state.total ?? 0} (${state.percent ?? 0}%)` : null,
+                                      hasQuiz && state.quiz_failed ? `не прошли ${state.quiz_failed}` : null,
+                                      /* «попыток в среднем 1,7», а не «в среднем
+                                         1,7 попытки»: существительное перед
+                                         числом не надо склонять под каждое
+                                         значение, и строка не рвётся на слове. */
+                                      hasQuiz && state.avg_attempts
+                                          ? `попыток в среднем ${String(state.avg_attempts).replace('.', ',')}`
+                                          : null]
                                         .filter(Boolean).join(' · ')}
                                 </p>
                             )}
@@ -1641,12 +1711,36 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                         <button
                             type="button"
                             onClick={() => setOnlyPending((value) => !value)}
-                            className={`rounded-full px-3 py-1 text-[12px] transition active:scale-[0.98] ${
+                            className={`shrink-0 rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
                                 onlyPending ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}
                         >
-                            Только непрочитавшие
+                            Требуют внимания{state.needs_attention ? ` · ${state.needs_attention}` : ''}
                         </button>
                     </div>
+                    {/* ГДЕ ЧАЩЕ ОШИБАЮТСЯ (ТЗ #300, п.12): «позволит выявлять не
+                        только недостаток знаний, но и случаи, когда сама
+                        инструкция сформулирована недостаточно понятно».
+                        Вопросов без единой ошибки в списке нет — десять строк с
+                        нулями не говорят ничего. */}
+                    {mistakes.length > 0 && (
+                        <div className="mt-3 rounded-2xl bg-slate-50 px-3.5 py-3 ring-1 ring-slate-200/70">
+                            <p className="text-[12px] font-medium text-slate-500">Чаще ошибаются</p>
+                            <ul className="mt-1.5 space-y-1">
+                                {mistakes.map((item) => (
+                                    <li key={item.id}
+                                        className="flex items-baseline justify-between gap-3 text-[13px]">
+                                        <span className="min-w-0 truncate text-slate-900">
+                                            {item.number}. {item.prompt}
+                                        </span>
+                                        <span className="shrink-0 tabular-nums text-slate-500">
+                                            {item.percent}% ({item.wrong_people} из {item.people})
+                                        </span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+
                     <div className="mt-3 space-y-1">
                         {rows.length === 0 && (
                             <p className="py-6 text-center text-[13px] text-slate-400">
@@ -1679,16 +1773,22 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                     видно и так — они наверху (сортировка) и
                                     посчитаны в шапке. */}
                                 <span className="flex shrink-0 flex-col items-end gap-0.5">
-                                    <span className="text-[12px] tabular-nums text-slate-400">
+                                    {/* Подтвердил — показываем КОГДА: это ответ на
+                                        «успел ли». Не подтвердил — показываем
+                                        СОСТОЯНИЕ словом, и считает его сервер
+                                        (ТЗ #300, п.11.2): раньше здесь было две
+                                        самодельных фразы, и «не выходил на смену»
+                                        от «не открывал» они не отличали. */}
+                                    <span className="text-right text-[12px] tabular-nums text-slate-400">
                                         {row.confirmed_at
                                             ? publishedLabel(row.confirmed_at)
-                                            : (row.shown_at ? 'открыл, не подтвердил' : 'не видел')}
+                                            : (STATUS_LABELS[row.status] || 'не видел')}
                                     </span>
                                     {/* Пройденное — галочкой, непройденное не пишем
                                         вовсе: «не прошёл» у половины строк стало бы
                                         той же стеной серого, от которой ушли выше. */}
                                     {((hasTrainer && row.trainer_passed_at) || (hasQuiz && row.quiz_passed_at)) && (
-                                        <span className="flex items-center gap-2 text-[11.5px] text-slate-500">
+                                        <span className="flex items-center gap-2 text-[11.5px] tabular-nums text-slate-500">
                                             {hasTrainer && row.trainer_passed_at && (
                                                 <span className="inline-flex items-center gap-0.5">
                                                     <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} aria-hidden="true" />
@@ -1699,8 +1799,20 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                                 <span className="inline-flex items-center gap-0.5">
                                                     <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} aria-hidden="true" />
                                                     тест
+                                                    {/* «С первого раза» не пишем — это
+                                                        норма. А вот третья попытка уже
+                                                        говорит про инструкцию. */}
+                                                    {row.attempts > 1 && ` с ${row.attempts}-й попытки`}
                                                 </span>
                                             )}
+                                        </span>
+                                    )}
+                                    {/* Не сдал, но отвечал: сколько взял и сколько раз
+                                        пробовал (ТЗ #300, п.4.2 и п.11.2). */}
+                                    {hasQuiz && !row.quiz_passed_at && row.attempts > 0 && (
+                                        <span className="text-[11.5px] tabular-nums text-slate-500">
+                                            тест {row.last_correct ?? 0} из {row.last_total ?? 0}
+                                            {row.attempts > 1 && ` · попыток ${row.attempts}`}
                                         </span>
                                     )}
                                 </span>
