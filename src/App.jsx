@@ -438,8 +438,9 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     szov_wallboard: ['szov'],
     tez_wallboard: ['tez'],
     op_wallboard: ['op'],
-    // Телефония и программы
-    sip_settings: ['op', 'tez'],
+    // Телефония и программы. СЗоВ в списке с 21.09.2026: раздел открыт его главе
+    // и супервайзерам, и при выбранном отделе пункт обязан оставаться на месте.
+    sip_settings: ['szov', 'op', 'tez'],
     oktell_guard: ['szov'],
     /* ПУСТОЙ список — не «забыли заполнить», а «раздел не про отдел».
        «Провайдер ЭДО» и «Рассылки» работают с водителями таксопарков через
@@ -1982,6 +1983,26 @@ const isSipSettingsFleetDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
     && aiQaHeadDepartmentCodesOf(userLike).some((code) => SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES.has(code))
 );
+
+/* «Настройки SIP — Таксопарки»: СУПЕРВАЙЗЕРЫ отделов с локальной АТС. У продаж
+   это было с самого начала (проверка по id отдела в isOpSalesSupervisorForAiQa),
+   СЗоВ добавлен 21.09.2026 по просьбе владельца: номера и учётки кабинета Oktell
+   в отделе заводят СВ, а не только глава.
+
+   Разделу это не открывает ЧУЖИХ данных: бэкенд режет список до отдела
+   запросившего (_sip_department_scope), а подраздел — до провайдера этого же
+   отдела (_sip_section_allowed), поэтому «Тез» супервайзеру СЗоВ не откроется.
+   Зеркало на бэкенде — SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES.
+
+   Отдельный предикат, а не расширение isOpSalesSupervisorForAiQa: тот
+   переиспользуют «ИИ-оценка» и «Касания», и расширение молча отдало бы СВ СЗоВ
+   ещё два чужих раздела. */
+const isSipSettingsFleetSupervisor = (userLike) => {
+    if (!isSupervisorRole(userLike?.role)) return false;
+    if (isOpSalesSupervisorForAiQa(userLike)) return true;
+    const code = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    return SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES.has(code);
+};
 
 // «Настройки SIP — Tez»: только глава ТЭЗ. Проверяем и id отдела, и код —
 // ровно как в isChatAppDepartmentHead: код в базе заполнен не везде, а по
@@ -41180,12 +41201,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // раздел «Таксопарки» оставался достижим по ссылке даже главе ТЭЗ,
             // которому там нечего делать. У каждого раздела свой предикат.
             // Раздел разъехался на два: «Таксопарки» (локальная АТС) и «Tez» (Binotel).
-            // Главе видно только своё, админ и СВ ОП видят оба — СВ ОП работает по
-            // очередям Asterisk и в списке Тез ему нечего делать, но раздел един
-            // по правам, и резать его отдельным правилом смысла нет.
+            // Главе видно только своё; супервайзеру — «Таксопарки» его отдела
+            // (продажи, СЗоВ), и ничего кроме: список, карточки отдела и «История»
+            // режутся по его отделу на бэкенде.
             const canAccessSipSettingsFleet = isAdminLikeRole
                 || isSipSettingsFleetDepartmentHead(user)
-                || isOpSalesSupervisorForAiQa(user);
+                || isSipSettingsFleetSupervisor(user);
             const canAccessSipSettingsTez = isAdminLikeRole
                 || isSipSettingsTezDepartmentHead(user);
             // Раздел один, провайдер выбирается внутри. Порядок важен: первым
@@ -54982,8 +55003,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {/* Настройки SIP — Таксопарки: админ / глава отдела / СВ отдела продаж —
-                            общий раздел вне веток по ролям. Локальная АТС Asterisk. */}
+                        {/* Настройки SIP — Таксопарки: админ / глава отдела / СВ отдела с
+                            локальной АТС (продажи, СЗоВ) — общий раздел вне веток по ролям.
+                            Локальная АТС Asterisk. */}
                         {( view === "sip_settings" && (canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <SipSettingsView

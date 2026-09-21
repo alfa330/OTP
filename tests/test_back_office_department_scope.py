@@ -198,14 +198,21 @@ class BackOfficeSipSettingsTests(unittest.TestCase):
             app,
         )
         # Раздел разъехался на два, и общего флага не осталось: «Таксопарки»
-        # пускают главу отдела с локальной АТС и СВ ОП, «Tez» — только главу ТЭЗ.
+        # пускают главу отдела с локальной АТС и СВ того же отдела (продажи,
+        # СЗоВ), «Tez» — только главу ТЭЗ.
         self.assertNotIn("const canAccessSipSettings =", app)
         self.assertIn(
             "const canAccessSipSettingsFleet = isAdminLikeRole\n"
             "                || isSipSettingsFleetDepartmentHead(user)\n"
-            "                || isOpSalesSupervisorForAiQa(user);",
+            "                || isSipSettingsFleetSupervisor(user);",
             app,
         )
+        # Предикат СВ — СВОЙ, а не переиспользованный: isOpSalesSupervisorForAiQa
+        # раздают «ИИ-оценка» и «Касания», и расширь мы его на СЗоВ — супервайзер
+        # молча получил бы ещё два чужих раздела.
+        supervisor = app.split("const isSipSettingsFleetSupervisor = (userLike) => {", 1)[1].split("};", 1)[0]
+        self.assertIn("SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES.has(code)", supervisor)
+        self.assertIn("isSupervisorRole(userLike?.role)", supervisor)
         self.assertIn(
             "const canAccessSipSettingsTez = isAdminLikeRole\n"
             "                || isSipSettingsTezDepartmentHead(user);",
@@ -322,6 +329,10 @@ class SipSettingsGateRuntimeTests(unittest.TestCase):
             def get_user_department_id(self, user_id):
                 return own_department.get(user_id)
 
+        def _code_of(user_id):
+            department = outer.DEPARTMENTS.get(own_department.get(user_id)) or {}
+            return department.get('code', '')
+
         namespace = {
             'db': _Db(),
             '_headed_department_ids': lambda uid: frozenset(headed.get(uid, ())),
@@ -329,17 +340,19 @@ class SipSettingsGateRuntimeTests(unittest.TestCase):
             '_is_admin_role': lambda role: role in ('admin', 'super_admin'),
             '_is_super_admin_role': lambda role: role == 'super_admin',
             '_is_supervisor_role': lambda role: role == 'sv',
+            '_department_code_of_user': _code_of,
             'AI_QA_OP_DEPARTMENT_ID': 367,
         }
         exec(_function_source(BOT_PATH, '_is_global_admin_requester'), namespace)
         exec("SIP_SETTINGS_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})", namespace)
+        exec("SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})", namespace)
         exec(_function_source(BOT_PATH, '_is_sip_settings_department_head'), namespace)
         exec(_function_source(BOT_PATH, '_can_manage_sip_config'), namespace)
         return namespace['_can_manage_sip_config']
 
     def test_gate_lets_in_telephony_departments_only(self):
         headed = {10: {1499}, 11: {1500}, 12: {909}, 13: {1}, 14: {367}, 15: {560}}
-        own = {20: 367, 21: 1499, 22: 1499}
+        own = {20: 367, 21: 1499, 22: 1499, 23: 1, 24: 560, 25: 909}
         can = self._gate(headed, own)
 
         self.assertTrue(can(1, 'super_admin'))
@@ -356,7 +369,13 @@ class SipSettingsGateRuntimeTests(unittest.TestCase):
         self.assertTrue(can(15, 'admin'), 'глава ТЭЗ')
 
         self.assertTrue(can(20, 'sv'), 'СВ отдела продаж')
+        # СЗоВ открыт супервайзерам 21.09.2026: телефонию отдела ведут они.
+        self.assertTrue(can(23, 'sv'), 'СВ СЗоВ')
         self.assertFalse(can(21, 'sv'), 'СВ бэк-офиса')
+        # У Тез КЦ раздел остался у главы: супервайзеров туда не звали, и
+        # заодно со СЗоВ они попасть не должны.
+        self.assertFalse(can(24, 'sv'), 'СВ Тез КЦ')
+        self.assertFalse(can(25, 'sv'), 'СВ фронт-офисов')
         self.assertFalse(can(22, 'operator'), 'рядовой сотрудник')
 
     def test_head_of_two_departments_passes_by_the_telephony_one(self):

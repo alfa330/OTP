@@ -3074,3 +3074,91 @@ class OktellCabinetOnlyDepartmentTests(unittest.TestCase):
         """Без кода отдела в строке раздел не отличил бы СЗоВ от соседа по АТС."""
         select = _database_namespace({"_sip_operator_row"})["_SIP_OPERATOR_SELECT"]
         self.assertIn("COALESCE(dep.code, '') AS department_code", select)
+
+
+class SzovSupervisorAccessTests(unittest.TestCase):
+    """Раздел открыт супервайзерам СЗоВ (просьба владельца 21.09.2026).
+
+    Телефонию отдела ведут они, а не только глава: номера и учётки кабинета
+    Oktell заводят СВ. Данные при этом остаются своими — список, карточка отдела
+    и «История» режутся по отделу запросившего, а подраздел «Тез» закрыт
+    провайдером его же отдела.
+    """
+
+    def setUp(self):
+        self.app = _read(APP_PATH)
+        self.bot = _read(BOT_PATH)
+
+    def _function(self, name):
+        module = source_cache.parse(self.bot)
+        node = next(n for n in module.body
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+        return ast.get_source_segment(self.bot, node)
+
+    def test_backend_lets_in_supervisors_of_both_local_pbx_departments(self):
+        self.assertIn(
+            "SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})",
+            self.bot,
+        )
+        gate = self._function("_can_manage_sip_config")
+        self.assertIn("SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES", gate)
+        # Отдел СВ сверяем по коду: id засеян миграцией и в разных окружениях
+        # разный — тот же довод, что в oktell_guard.access.is_szov_supervisor.
+        self.assertIn("_department_code_of_user(requester_id)", gate)
+        self.assertNotIn("AI_QA_OP_DEPARTMENT_ID", gate)
+
+    def test_frontend_predicate_is_its_own_and_not_the_ai_qa_one(self):
+        self.assertIn("const isSipSettingsFleetSupervisor = (userLike) => {", self.app)
+        self.assertIn("|| isSipSettingsFleetSupervisor(user);", self.app)
+        # Расширять isOpSalesSupervisorForAiQa нельзя: на нём висят «ИИ-оценка»
+        # и «Касания», и СВ СЗоВ молча получил бы два чужих раздела.
+        predicate = self.app.split("const isOpSalesSupervisorForAiQa = (userLike) => (", 1)[1].split(");", 1)[0]
+        self.assertNotIn("SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES", predicate)
+        self.assertIn("SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES = new Set(['szov', 'op']);", self.app)
+
+    def test_the_sidebar_map_keeps_the_item_when_szov_is_picked(self):
+        """Карта разделов решает, виден ли пункт при выбранном отделе. Без 'szov'
+        раздел пропадал бы у того, кому его только что открыли."""
+        self.assertIn("sip_settings: ['szov', 'op', 'tez'],", self.app)
+
+    def test_supervisor_sees_only_his_own_department(self):
+        """«Доступ к разделу» и «доступ к данным» — разные вещи: список, отделы
+        и история берут область видимости у _sip_department_scope."""
+        scope = self._function("_sip_department_scope")
+        self.assertIn("_department_scope_id_for_requester(requester_id)", scope)
+        self.assertIn("return ([dept_id] if dept_id is not None else []), requester_id", scope)
+        for name in ("sip_config_operators_endpoint", "sip_config_history_endpoint",
+                     "sip_config_department_endpoint", "sip_config_operators_bulk_endpoint"):
+            self.assertIn("_sip_department_scope(requester_id, role)", self._function(name), name)
+
+    def test_the_tez_subsection_stays_closed_for_him(self):
+        """Подраздел даёт не роль, а провайдер отдела: у СЗоВ он локальный."""
+        allowed = self._function("_sip_section_allowed")
+        self.assertIn("db.get_sip_department_configs(department_ids=department_ids)", allowed)
+        self.assertIn("if not department_ids:\n        return False", allowed)
+        self.assertIn("...(canAccessSipSettingsTez ? ['binotel'] : []),", self.app)
+
+    def test_the_gate_runs_for_a_szov_supervisor(self):
+        """Строки строками, а решает исполнение: собираем гейт на двойниках."""
+        departments = {1: 'szov', 367: 'op', 560: 'tez', 909: 'front_office'}
+        own = {31: 1, 32: 367, 33: 560, 34: 909}
+        ns = {
+            '_is_admin_role': lambda role: role in ('admin', 'super_admin'),
+            '_is_super_admin_role': lambda role: role == 'super_admin',
+            '_is_supervisor_role': lambda role: role == 'sv',
+            '_headed_department_ids': lambda uid: frozenset(),
+            '_headed_department_id': lambda uid: None,
+            '_department_code_of_user': lambda uid: departments.get(own.get(uid), ''),
+            'db': type('_Db', (), {'get_department_by_id': lambda self, did: None})(),
+        }
+        exec(self._function('_is_global_admin_requester'), ns)
+        exec("SIP_SETTINGS_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})", ns)
+        exec("SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})", ns)
+        exec(self._function('_is_sip_settings_department_head'), ns)
+        exec(self._function('_can_manage_sip_config'), ns)
+        can = ns['_can_manage_sip_config']
+        self.assertTrue(can(31, 'sv'), 'СВ СЗоВ')
+        self.assertTrue(can(32, 'sv'), 'СВ отдела продаж — было и осталось')
+        self.assertFalse(can(33, 'sv'), 'СВ Тез КЦ раздела не просил')
+        self.assertFalse(can(34, 'sv'), 'СВ фронт-офисов — телефонии нет')
+        self.assertFalse(can(31, 'operator'), 'рядовой сотрудник СЗоВ')

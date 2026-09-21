@@ -27403,6 +27403,17 @@ CALL_CENTER_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})
 SIP_ASTERISK_DEPARTMENT_CODES = frozenset({'szov', 'op'})
 SIP_BINOTEL_DEPARTMENT_CODES = frozenset({'tez'})
 
+# Отделы, чьи СУПЕРВАЙЗЕРЫ ведут телефонию наравне с главой. У отдела продаж так
+# было с самого начала (проверка шла по id 367), СЗоВ добавлен 21.09.2026 по
+# просьбе владельца: номера и учётки кабинета Oktell в отделе заводят СВ.
+# Отдельный набор от SIP_SETTINGS_DEPARTMENT_CODES: там «кому раздел открыт
+# вообще», здесь — «кому он открыт БЕЗ поста главы». У Тез КЦ супервайзеры в
+# разделе не значатся, и молча получить его вместе со СЗоВ они не должны.
+# Данные это не расширяет: _sip_department_scope режет раздел до отдела
+# запросившего, а _sip_section_allowed — до его же провайдера.
+# Зеркало на фронте — isSipSettingsFleetSupervisor в src/App.jsx.
+SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
+
 
 # Отделы без операторских полей: ни направлений, ни групп, ни SIP-номера.
 # «Маркетинг» здесь по решению владельца (04.09.2026): его сотрудники на линии
@@ -27483,23 +27494,25 @@ def _is_sip_settings_department_head(requester_id):
 
 def _can_manage_sip_config(requester_id, role) -> bool:
     """Кто управляет настройками SIP (панель «Настройки SIP» в iCORE):
-    глобальный админ, глава отдела С ТЕЛЕФОНИЕЙ или супервайзер отдела продаж (367).
+    глобальный админ, глава отдела С ТЕЛЕФОНИЕЙ или супервайзер отдела из
+    SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES (продажи и СЗоВ).
 
     Роль главы отдела ЗАМЕНЯЕТ базовую: глава с role='admin' сюда проходит не
     как глобальный админ, а только если его отдел есть в
     SIP_SETTINGS_DEPARTMENT_CODES. Та же граница, что у ChatApp, табло СЗоВ и
     правил перерывов.
+
+    У супервайзера отдел сверяем по КОДУ, а не по id: id засеян миграцией и в
+    разных окружениях разный (тот же довод, что в oktell_guard.access). Код
+    берём через _department_code_of_user — у него есть запасной путь по id
+    отдела продаж, где код в справочнике заполнен не везде.
     """
     if _is_global_admin_requester(role, requester_id):
         return True
     if _is_sip_settings_department_head(requester_id):
         return True
     if _is_supervisor_role(role) and requester_id:
-        try:
-            dept_id = db.get_user_department_id(requester_id)
-        except Exception:
-            dept_id = None
-        return dept_id is not None and int(dept_id) == AI_QA_OP_DEPARTMENT_ID
+        return _department_code_of_user(requester_id) in SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES
     return False
 
 
