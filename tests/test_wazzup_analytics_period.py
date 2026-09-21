@@ -52,15 +52,18 @@ class _CursorContext:
 class _FakeCursor:
     def __init__(self):
         self.executions = []
+        # первый fetchall — строки таблицы, второй — направления и общий итог
+        # (is_total = 1 у итоговой строки GROUPING SETS)
+        self._fetchall = [
+            [],
+            [(1, None, None, 12, 34, 5, 7, 56.0, 44.0)],
+        ]
 
     def execute(self, query, params=None):
         self.executions.append((" ".join(query.split()), params))
 
     def fetchall(self):
-        return []
-
-    def fetchone(self):
-        return (12, 34, 56.0, 44.0, 7)
+        return self._fetchall.pop(0) if self._fetchall else []
 
 
 class WazzupAnalyticsPeriodTests(unittest.TestCase):
@@ -80,6 +83,7 @@ class WazzupAnalyticsPeriodTests(unittest.TestCase):
             date_to="2026-07-26",
         )
 
+        # два запроса одного окна: строки и «направления + общий итог»
         self.assertEqual(len(cursor.executions), 2)
         item_query, item_params = cursor.executions[0]
         summary_query, summary_params = cursor.executions[1]
@@ -102,6 +106,9 @@ class WazzupAnalyticsPeriodTests(unittest.TestCase):
             "COUNT(DISTINCT (grp, local_date, channel_id, chat_id))",
             summary_query,
         )
+        # общий итог и направления берутся из ОДНОГО снимка: иначе пришедшее
+        # между запросами сообщение разводит «Всего» и сумму направлений
+        self.assertIn("GROUP BY GROUPING SETS ((direction_id), ())", summary_query)
         self.assertEqual(result["summary"]["chats"], 12)
         self.assertEqual(result["summary"]["messages"], 34)
 

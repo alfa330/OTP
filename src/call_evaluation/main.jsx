@@ -2943,7 +2943,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
 const chatSquash = (text) => String(text || '').split(/\s+/).join(' ').trim().toLowerCase();
 
 // Ссылка на сам чат в веб-приложении Wazzup (там доступна и история старше 45
-// дней) — тот же формат, что в разделе «Чаты Верификаторов» (WazzupChatsView).
+// дней) — тот же формат, что в разделе «Чаты ОП» (WazzupChatsView).
 // Ключи берём из wazzup-снапшота: transport = chatType, wz_chat_id, wz_channel_id.
 const WAZZUP_APP_BASE = 'https://app.wazzup24.com/6757-7677';
 const wazzupChatUrlFromSnapshot = (s) => (

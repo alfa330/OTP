@@ -14,8 +14,10 @@ import {
     buildWazzupChatLink, findWazzupChatExact, matchWazzupChatsByPhone, syncWazzupChatDeepLink,
 } from './chatLink';
 
-/* Чаты Wazzup (Верификаторы): просмотр переписки «как в мессенджере» +
- * вкладка «Операторы» (привязка авторов Wazzup к нашим операторам).
+/* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
+ * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
+ * к нашим операторам). Раздел начинался с одних Верификаторов, но к Wazzup
+ * подключились и другие направления ОП — отсюда деление показателей.
  * Данные копятся вебхуком с 2026-07-17, ретеншн 30 дней (database.py:
  * cleanup_wazzup_messages, джоба зовёт её без аргументов) — более ранняя
  * история доступна только в самом Wazzup (кнопка «Открыть в Wazzup»). */
@@ -228,7 +230,17 @@ const SegButton = ({ active, onClick, icon: Icon, children }) => (
 
 /* ── Аналитика по менеджерам ──────────────────────────────────────────────
  * Диалоги повторяют агрегацию Wazzup: активные чаты считаются отдельно за
- * каждый день. Время ответа — локальная оценка по доступным webhook-событиям. */
+ * каждый день. Время ответа — локальная оценка по доступным webhook-событиям.
+ *
+ * Показатели делятся по направлениям отдела продаж (Верификаторы, Поток,
+ * остальные направления, «Без привязки»). Итоги групп приходят с бэкенда
+ * ГОТОВЫМИ: среднее и медиану времени ответа нельзя пересчитать из строк
+ * таблицы — их считают по сырым значениям, а не усреднением средних. Поэтому
+ * переключатель групп не фильтрует итог на фронте, а берёт нужный. */
+
+const ALL_GROUP = 'all';
+// близнец на бэкенде — WAZZUP_UNLINKED_GROUP_KEY (bot_schedule2.py)
+const UNLINKED_GROUP = 'unlinked';
 
 const ANALYTICS_COLS = [
     { key: 'name', label: 'Менеджер', num: false },
@@ -255,12 +267,13 @@ const PERIOD_PRESETS = [
 
 
 
-function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
+function AnalyticsTab({ apiBaseUrl, headers, showToast, onGoToMapping }) {
     const [from, setFrom] = useState(presetStart(30));
     const [to, setTo] = useState(isoDate(new Date()));
-    const [data, setData] = useState(null);          // {items, summary} | null = загрузка
+    const [data, setData] = useState(null);          // {items, summary, groups} | null = загрузка
     const [error, setError] = useState(null);
     const [filter, setFilter] = useState('');
+    const [group, setGroup] = useState(ALL_GROUP);
     const [sort, setSort] = useState({ key: 'dialogs', dir: 'desc' });
     const request = useRef({ id: 0 });
 
@@ -273,7 +286,8 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
             params: { from: range.from || undefined, to: range.to || undefined },
         }).then((r) => {
             if (requestId !== request.current.id) return;
-            setData({ items: r.data.items || [], summary: r.data.summary || {} });
+            setData({ items: r.data.items || [], summary: r.data.summary || {},
+                      groups: r.data.groups || [] });
         }).catch(() => {
             if (requestId !== request.current.id) return;
             setError('Не удалось загрузить аналитику');
@@ -294,9 +308,21 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
             : (from === presetStart(p.days) && to === isoDate(new Date()))
     ));
 
+    /* Группы для переключателя: «Все» + то, что прислал бэкенд. Пустые группы
+       остаются на месте — «Поток: 0 диалогов» это ответ, а не поломка. */
+    const groups = useMemo(() => ([
+        { key: ALL_GROUP, label: 'Все', ...(data?.summary || {}) },
+        ...(data?.groups || []),
+    ]), [data]);
+    const activeGroup = groups.find((g) => g.key === group) || groups[0];
+    const unlinked = (data?.groups || []).find((g) => g.key === UNLINKED_GROUP);
+
     const rows = useMemo(() => {
         const q = filter.trim().toLowerCase();
-        const list = (data?.items || []).filter((r) => !q || String(r.name || '').toLowerCase().includes(q));
+        const list = (data?.items || []).filter((r) => (
+            (group === ALL_GROUP || r.group === group)
+            && (!q || String(r.name || '').toLowerCase().includes(q))
+        ));
         const { key, dir } = sort;
         const mul = dir === 'asc' ? 1 : -1;
         return [...list].sort((a, b) => {
@@ -308,7 +334,7 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
             if (key === 'lastMessageAt') return (new Date(av) - new Date(bv)) * mul;
             return (av - bv) * mul;
         });
-    }, [data, filter, sort]);
+    }, [data, filter, group, sort]);
 
     const toggleSort = (key) => setSort((prev) => (
         prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
@@ -318,12 +344,12 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
     const exportCsv = () => {
         if (!rows.length) return;
         // имя файла — ASCII: не все корпоративные почтовики/диски переживают кириллицу
-        downloadCsv(`wazzup_analytics_${from || 'all'}_${to || 'now'}.csv`, [
-            ['Менеджер', 'Автор в Wazzup', 'Привязан', 'Диалоги', 'Сообщения',
+        downloadCsv(`wazzup_analytics_${group}_${from || 'all'}_${to || 'now'}.csv`, [
+            ['Менеджер', 'Направление', 'Автор в Wazzup', 'Привязан', 'Диалоги', 'Сообщения',
              'Первых ответов', 'Ср. время ответа', 'Ср. время ответа, сек',
              'Медиана времени ответа', 'Медиана, сек', 'Последняя активность'],
             ...rows.map((r) => [
-                r.name, r.authorName || '', r.linked ? 'да' : 'нет',
+                r.name, r.groupLabel || '', r.authorName || '', r.linked ? 'да' : 'нет',
                 r.dialogs, r.messages, r.answeredChats,
                 fmtDur(r.avgResponseSecs),
                 r.avgResponseSecs === null ? '' : Math.round(r.avgResponseSecs),
@@ -335,7 +361,7 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
         showToast?.(`Выгружено ${rows.length} строк`, 'success');
     };
 
-    const summary = data?.summary || {};
+    const summary = activeGroup || {};
     const cell = (col) => `px-3 py-2.5 ${col.num ? 'text-right tabular-nums' : 'text-left'}`;
 
     return (
@@ -373,15 +399,72 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
                 </div>
             </div>
 
+            {/* Деление по направлениям: карточки сразу показывают итоги каждой
+                группы (сравнение без переключений) и служат переключателем
+                таблицы. Активная — белая, как сегменты выше. */}
+            {data && (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                    {groups.map((g) => {
+                        const active = g.key === activeGroup?.key;
+                        return (
+                            <button key={g.key} onClick={() => setGroup(g.key)}
+                                    title={`${g.label}: ${g.managers ?? 0} менеджеров, ${g.messages ?? 0} сообщений`}
+                                    className={`rounded-2xl px-3.5 py-2.5 text-left transition-all ${
+                                        active ? 'bg-white shadow-[0_1px_3px_rgba(15,23,42,0.12)] ring-1 ring-blue-500/60'
+                                               : 'bg-slate-100/80 hover:bg-slate-100'}`}>
+                                <div className="flex items-baseline justify-between gap-2">
+                                    <span className={`truncate text-[12.5px] font-semibold ${
+                                        active ? 'text-slate-900' : 'text-slate-600'}`}>{g.label}</span>
+                                    <span className="shrink-0 text-[11px] text-slate-400">
+                                        {g.managers ?? 0} чел.
+                                    </span>
+                                </div>
+                                <div className="mt-0.5 text-[17px] font-semibold tabular-nums text-slate-900">
+                                    {g.chats ?? 0}
+                                </div>
+                                <div className="text-[11px] text-slate-400">
+                                    диалогов · ср. {fmtDur(g.avgResponseSecs)}
+                                </div>
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+
             {data && (
                 <div className="flex flex-wrap items-center gap-2">
-                    <IosBadge tone="slate">{data.items.length} менеджеров</IosBadge>
+                    <IosBadge tone="slate">{summary.managers ?? 0} менеджеров</IosBadge>
                     <IosBadge tone="blue">{summary.chats ?? 0} чатов</IosBadge>
                     <IosBadge tone="slate">{summary.messages ?? 0} сообщений</IosBadge>
                     <IosBadge tone="green">
                         <Timer size={11} /> ср. ответ {fmtDur(summary.avgResponseSecs)}
                     </IosBadge>
                     <IosBadge tone="slate">медиана {fmtDur(summary.medianResponseSecs)}</IosBadge>
+                    {group !== ALL_GROUP && (
+                        <button onClick={() => setGroup(ALL_GROUP)}
+                                className="text-[12px] font-semibold text-blue-600 hover:underline">
+                            показать все направления
+                        </button>
+                    )}
+                </div>
+            )}
+
+            {/* Непривязанный автор не попадает НИ В ОДНО направление — пока он
+                висит в «Без привязки», его цифры выпадают из деления. Говорим
+                это прямо и уводим туда, где это чинится. */}
+            {data && unlinked?.managers > 0 && group !== UNLINKED_GROUP && (
+                <div className={`${iosCard} flex flex-wrap items-center gap-2 px-4 py-3 text-[12.5px] text-slate-600`}>
+                    <AlertCircle size={14} className="text-amber-500" />
+                    <span>
+                        {unlinked.managers} авторов Wazzup не привязаны к операторам —
+                        их {unlinked.messages} сообщений не попали ни в одно направление.
+                    </span>
+                    {onGoToMapping && (
+                        <button onClick={onGoToMapping}
+                                className="font-semibold text-blue-600 hover:underline">
+                            Привязать
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -420,7 +503,10 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
                                     <tr>
                                         <td colSpan={ANALYTICS_COLS.length}
                                             className="px-4 py-10 text-center text-[13px] text-slate-400">
-                                            {filter ? 'Никого не найдено' : 'За выбранный период сообщений нет'}
+                                            {filter ? 'Никого не найдено'
+                                                : group === ALL_GROUP
+                                                    ? 'За выбранный период сообщений нет'
+                                                    : `За выбранный период в направлении «${activeGroup?.label}» сообщений нет`}
                                         </td>
                                     </tr>
                                 )}
@@ -432,7 +518,13 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
                                                 <div className="min-w-0">
                                                     <div className="flex items-center gap-1.5">
                                                         <span className="truncate font-semibold text-slate-900">{r.name}</span>
-                                                        {r.isVerifier && <IosBadge tone="blue">верификатор</IosBadge>}
+                                                        {/* направление показываем, только когда список общий:
+                                                            внутри группы оно у всех одно и лишь шумит */}
+                                                        {group === ALL_GROUP && r.linked && r.directionName && (
+                                                            <IosBadge tone={r.group === 'verifier' ? 'blue' : 'slate'}>
+                                                                {r.directionName}
+                                                            </IosBadge>
+                                                        )}
                                                     </div>
                                                     {!r.linked && (
                                                         <div className="text-[11px] text-amber-600">не привязан к оператору</div>
@@ -452,7 +544,13 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
                             {rows.length > 0 && (
                                 <tfoot className="sticky bottom-0 bg-slate-50/90 backdrop-blur-xl">
                                     <tr className="border-t border-slate-200/70 text-[12.5px] font-semibold text-slate-600">
-                                        <td className="px-3 py-2.5">Итого</td>
+                                        {/* итог считает бэкенд по сырым значениям, поэтому он
+                                            относится ко всей группе и поиском по имени не сужается */}
+                                        <td className="px-3 py-2.5"
+                                            title={filter ? 'Итог по всей группе — поиск по имени его не сужает' : undefined}>
+                                            Итого{group === ALL_GROUP ? '' : ` · ${activeGroup?.label}`}
+                                            {filter && <span className="font-normal text-slate-400"> (без учёта поиска)</span>}
+                                        </td>
                                         <td className="px-3 py-2.5 text-right tabular-nums" title="Сумма активных чатов менеджеров по дням">
                                             {summary.chats ?? 0}
                                         </td>
@@ -475,6 +573,8 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
                 Wazzup дополнительно учитывает ответственного по сделке, кнопку «конверт»,
                 рабочее время и источник ответа, поэтому время может отличаться. Авторы,
                 отмеченные ботами на вкладке «Привязка», в расчёт не входят.
+                Направление менеджера берётся из его карточки в системе, поэтому в
+                «Верификаторов» и «Поток» попадают только привязанные авторы.
             </p>
         </div>
     );
@@ -483,8 +583,16 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast }) {
 /* Вкладка «Привязка»: привязка авторов Wazzup к нашим операторам.
  * Привязка нужна атрибуции ИИ-оценки; «Бот» исключает авторассылки. */
 function AuthorRow({ author, operators, saving, onSave }) {
-    const verifiers = operators.filter((o) => o.isVerifier);
-    const others = operators.filter((o) => !o.isVerifier);
+    /* Операторы приходят уже в порядке групп показателей (Верификаторы, Поток,
+       остальные направления) — здесь только режем список на optgroup'ы, не
+       пересортировывая: иначе порядок в «Привязке» разойдётся с отчётом. */
+    const optGroups = [];
+    operators.forEach((o) => {
+        const label = o.group || 'Без направления';
+        const last = optGroups[optGroups.length - 1];
+        if (last && last.label === label) last.items.push(o);
+        else optGroups.push({ label, items: [o] });
+    });
     return (
         <div className={`flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 ${author.isBot ? 'opacity-55' : ''}`}>
             <div className="flex min-w-0 flex-1 items-center gap-3" style={{ minWidth: 220 }}>
@@ -514,14 +622,11 @@ function AuthorRow({ author, operators, saving, onSave }) {
                                 author.userId ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
                                               : 'bg-slate-100 text-slate-600'}`}>
                         <option value="">— не привязан —</option>
-                        <optgroup label="Верификаторы">
-                            {verifiers.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-                        </optgroup>
-                        {others.length > 0 && (
-                            <optgroup label="Остальные (отдел продаж)">
-                                {others.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                        {optGroups.map((g) => (
+                            <optgroup key={g.label} label={g.label}>
+                                {g.items.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
                             </optgroup>
-                        )}
+                        ))}
                     </select>
                     <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
                         {saving ? <Loader2 size={13} className="animate-spin" />
@@ -641,9 +746,11 @@ function AuthorsTab({ apiBaseUrl, headers, showToast }) {
                     {renderGroup('Привязанные и боты', done,
                         'Пока пусто: привяжите авторов к операторам или отметьте ботов')}
                     <p className="px-1 text-[11px] text-slate-500">
-                        Привязка соединяет автора исходящих сообщений Wazzup с оператором в системе —
-                        по ней ИИ-оценка будет относить диалоги к верификаторам. «Бот» исключает
-                        авторассылки и интеграции из оценки.
+                        Привязка соединяет автора исходящих сообщений Wazzup с оператором в системе.
+                        По ней показатели делятся на Верификаторов и Поток, и по ней же ИИ-оценка
+                        относит диалоги к людям: пока автор не привязан, его цифры стоят
+                        отдельной строкой «без привязки» и ни в одно направление не попадают.
+                        «Бот» исключает авторассылки и интеграции из оценки.
                     </p>
                 </>
             )}
@@ -664,7 +771,8 @@ function OperatorsTab({ apiBaseUrl, headers, showToast }) {
                            icon={Link2}>Привязка</SegButton>
             </div>
             {subTab === 'analytics'
-                ? <AnalyticsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                ? <AnalyticsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                                onGoToMapping={() => setSubTab('mapping')} />
                 : <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />}
         </div>
     );
@@ -990,7 +1098,7 @@ export default function WazzupChatsView(props) {
         <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
                 <div>
-                    <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты Верификаторов</h2>
+                    <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты ОП</h2>
                     <p className="text-xs text-slate-500">
                         Переписка Wazzup; история хранится 30 дней, более ранняя — в самом Wazzup
                     </p>

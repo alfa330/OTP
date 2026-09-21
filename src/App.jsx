@@ -314,7 +314,7 @@ const AI_QA_SUBJECT_DEPARTMENT_CODES = new Set(['op', 'szov', 'tez']);
 // Отдел-наблюдатель: своих оцениваемых направлений нет, смотрит разборы ОП
 // (решение владельца 06.08.2026).
 const AI_QA_OBSERVER_DEPARTMENT_CODES = new Set(['marketing']);
-// «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ и
+// «Чаты ОП» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ и
 // маркетинга он открыт исторически, Тез КЦ — нет: у него своя переписка в
 // «Чатах ChatApp». Рядовой наблюдатель «Маркетинга» вычитается отдельно.
 // Та же константа на бэкенде — VERIFIER_CHATS_HEAD_DEPARTMENT_CODES.
@@ -333,7 +333,7 @@ const AI_QA_HEAD_DEPARTMENT_CODES = new Set([
            а поимённая строка это и выражает — в отличие от роли, которую
            однажды поменяют. Та же константа на бэкенде — bot_schedule2.py. */
 const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183, 169]);
-/* «Чаты Верификаторов» — СВОЙ список, а не тот же самый. Раздел показывает
+/* «Чаты ОП» — СВОЙ список, а не тот же самый. Раздел показывает
    переписку Wazzup ОТДЕЛА ПРОДАЖ, и пока список был общий, любой человек,
    добавленный ради «ИИ-оценки», молча получал вместе с ней и чужую переписку.
    Периметр этого раздела и так перечислен явно (см. canAccessVerifierChatsForUser) —
@@ -2033,7 +2033,7 @@ const canAccessAiQaForUser = (userLike) => (
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
-/* «Чаты Верификаторов» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
+/* «Чаты ОП» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
    отдельный, а не расширение canAccessAiQaForUser. Раздел показывает саму
    переписку Wazzup, и по решению владельца её читают все глобальные админы;
    разборы ИИ им при этом не нужны и остаются закрытыми — иначе админ увидел бы
@@ -41425,7 +41425,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
-            // «Чаты Верификаторов» открыты шире «ИИ-оценки» — см.
+            // «Чаты ОП» открыты шире «ИИ-оценки» — см.
             // canAccessVerifierChatsForUser: в раздел допущены и глобальные админы.
             const canAccessVerifierChatsSection = canAccessVerifierChatsForUser(user);
             const isMarketingObserverUser = isMarketingObserver(user);
@@ -51898,7 +51898,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                                         >
-                                                            <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                            <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты ОП</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -52153,7 +52153,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 canAccessChatAppSection,
                                             )}
 
-                                            {/* «Чаты Верификаторов» — раздел отдела продаж (переписка
+                                            {/* «Чаты ОП» — раздел отдела продаж (переписка
                                                 Wazzup): у СЗоВ своя в Chat2Desk, у Тез КЦ — «Чаты ChatApp».
                                                 Второе слагаемое — прежний предикат СВ ОП, а не общий по
                                                 разделу: СВ СЗоВ и Тез КЦ раздел не нужен.
@@ -52172,7 +52172,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                                 >
-                                                    <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                    <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты ОП</span>
                                                 </button>
                                             </li>
                                             )}
@@ -52437,7 +52437,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
                                                 className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты ОП</span>
                                             </button>
                                         </li>
                                     )}

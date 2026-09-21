@@ -23746,8 +23746,21 @@ class Database:
                   int(updated_by) if updated_by is not None else None))
         return True
 
-    def list_wazzup_operator_candidates(self, department_id=367, verifier_direction_id=71):
-        """Кандидаты для привязки: действующие операторы отдела (Верификаторы первыми)."""
+    # Направления отдела продаж, по которым раздел «Чаты ОП» делит показатели.
+    # Порядок здесь — порядок групп на экране; названия направлений в базе
+    # единственного числа («Верификатор»), а на экране нужен коллектив —
+    # поэтому ярлык задаём рядом, а не берём из directions.name.
+    WAZZUP_ANALYTICS_DIRECTIONS = (
+        {'direction_id': 71, 'key': 'verifier', 'label': 'Верификаторы'},
+        {'direction_id': 74, 'key': 'potok', 'label': 'Поток'},
+    )
+
+    def list_wazzup_operator_candidates(self, department_id=367):
+        """Кандидаты для привязки: действующие операторы отдела.
+
+        Порядок — как группы показателей (Верификаторы, Поток, остальные
+        направления), чтобы список в «Привязке» читался так же, как отчёт."""
+        order = [d['direction_id'] for d in self.WAZZUP_ANALYTICS_DIRECTIONS]
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT u.id, u.name, u.direction_id, d.name
@@ -23756,8 +23769,10 @@ class Database:
                  WHERE u.role IN ('operator', 'trainee')
                    AND u.status NOT IN ('fired', 'dismissal')
                    AND d.department_id = %s
-                 ORDER BY (u.direction_id = %s) DESC, u.name
-            """, (int(department_id), int(verifier_direction_id)))
+                 ORDER BY COALESCE(array_position(%s::int[], u.direction_id),
+                                   array_length(%s::int[], 1) + 1),
+                          d.name, u.name
+            """, (int(department_id), order, order))
             return [{'id': r[0], 'name': r[1], 'direction_id': r[2], 'direction_name': r[3]}
                     for r in cursor.fetchall()]
 
@@ -23770,16 +23785,18 @@ class Database:
                    (m.dt AT TIME ZONE 'Asia/Almaty')::date AS local_date,
                    m.is_echo,
                    m.author_id, m.author_name,
-                   map.user_id, COALESCE(map.is_bot, FALSE) AS is_bot
+                   map.user_id, COALESCE(map.is_bot, FALSE) AS is_bot,
+                   u.direction_id
               FROM wazzup_messages m
               LEFT JOIN wazzup_operator_map map ON map.author_id = m.author_id
+              LEFT JOIN users u ON u.id = map.user_id
              WHERE NOT m.is_deleted AND {window}
         ),
         agent_msgs AS (
             -- исходящие живого менеджера; grp = оператор (если привязан), иначе автор,
             -- NULL — сообщение, которое некому засчитать (но «первым ответом» быть может)
             SELECT channel_id, chat_id, dt, local_date,
-                   author_id, author_name, user_id,
+                   author_id, author_name, user_id, direction_id,
                    COALESCE('u:' || user_id::text, 'a:' || author_id) AS grp
               FROM msgs
              WHERE is_echo AND NOT is_bot
@@ -23792,7 +23809,7 @@ class Database:
         first_reply AS (
             -- одно значение на чат: кто ответил клиенту первым, тому и время
             SELECT DISTINCT ON (a.channel_id, a.chat_id)
-                   a.grp, EXTRACT(EPOCH FROM (a.dt - c.at)) AS secs
+                   a.grp, a.direction_id, EXTRACT(EPOCH FROM (a.dt - c.at)) AS secs
               FROM agent_msgs a
               JOIN first_client c
                 ON c.channel_id = a.channel_id AND c.chat_id = a.chat_id
@@ -23815,6 +23832,13 @@ class Database:
 
         Строки группируются по привязанному оператору (несколько author_id одного
         человека сливаются в одну строку), непривязанные — по автору. Боты вне выборки.
+
+        Кроме общего итога возвращаются итоги ПО НАПРАВЛЕНИЯМ (Верификаторы,
+        Поток, прочие направления, «без привязки») — раздел делит показатели
+        между ними. Считаются они тем же запросом по сырым значениям: среднее и
+        медиану времени ответа усреднением строк не получить. Диалоги и там, и
+        в общем итоге считаются ВМЕСТЕ с grp, поэтому итог направления — ровно
+        сумма его строк, как и показывает подвал таблицы.
         """
         window, params = ["TRUE"], []
         if date_from:
@@ -23852,10 +23876,11 @@ class Database:
                 SELECT t.grp, t.user_id, u.name, t.author_name, t.author_id,
                        t.messages_count, t.dialogs_count, t.last_message_at,
                        COALESCE(r.answered, 0), r.avg_secs, r.median_secs,
-                       (u.direction_id = 71) AS is_verifier
+                       u.direction_id, d.name
                   FROM totals t
                   LEFT JOIN resp r ON r.grp = t.grp
                   LEFT JOIN users u ON u.id = t.user_id
+                  LEFT JOIN directions d ON d.id = u.direction_id
                  ORDER BY t.dialogs_count DESC, t.messages_count DESC
             """, params)
             items = [{'key': r[0], 'user_id': r[1], 'user_name': r[2],
@@ -23864,26 +23889,68 @@ class Database:
                       'last_message_at': r[7], 'answered_chats': r[8],
                       'avg_response_secs': float(r[9]) if r[9] is not None else None,
                       'median_response_secs': float(r[10]) if r[10] is not None else None,
-                      'is_verifier': bool(r[11])}
+                      'direction_id': r[11], 'direction_name': r[12]}
                      for r in cursor.fetchall()]
-            # Итог считается по сырым значениям, а не усреднением средних
+            # Направления И общий итог — ОДНИМ запросом через GROUPING SETS.
+            # Двумя запросами числа расходились: вебхук Wazzup пишет непрерывно, а
+            # READ COMMITTED даёт каждому запросу свой снимок — «Всего» на экране
+            # отличалось от суммы направлений на пришедшее между ними сообщение.
+            # Итоговую строку от строки «без привязки» отличает GROUPING(): у
+            # обеих direction_id = NULL.
+            # LEFT JOIN достаточно: first_reply выведен из agent_msgs, поэтому
+            # направления с «первым ответом» — подмножество направлений с
+            # сообщениями. Сравнение через IS NOT DISTINCT FROM — из-за тех же NULL.
             cursor.execute(cte + """
-                SELECT (SELECT COUNT(DISTINCT
-                                     (grp, local_date, channel_id, chat_id))
-                          FROM agent_msgs WHERE grp IS NOT NULL),
-                       (SELECT COUNT(*) FROM agent_msgs WHERE grp IS NOT NULL),
-                       (SELECT AVG(secs) FROM first_reply WHERE grp IS NOT NULL),
-                       (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY secs)
-                          FROM first_reply WHERE grp IS NOT NULL),
-                       (SELECT COUNT(*) FROM first_reply WHERE grp IS NOT NULL)
+                , by_dir AS (
+                    SELECT direction_id, GROUPING(direction_id) AS is_total,
+                           COUNT(DISTINCT (grp, local_date, channel_id, chat_id))
+                               AS chats,
+                           COUNT(*) AS messages,
+                           COUNT(DISTINCT grp) AS managers
+                      FROM agent_msgs WHERE grp IS NOT NULL
+                     GROUP BY GROUPING SETS ((direction_id), ())
+                ),
+                by_dir_resp AS (
+                    SELECT direction_id, GROUPING(direction_id) AS is_total,
+                           COUNT(*) AS answered,
+                           AVG(secs) AS avg_secs,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY secs)
+                               AS median_secs
+                      FROM first_reply WHERE grp IS NOT NULL
+                     GROUP BY GROUPING SETS ((direction_id), ())
+                )
+                SELECT t.is_total, t.direction_id, d.name,
+                       t.chats, t.messages, t.managers,
+                       COALESCE(r.answered, 0), r.avg_secs, r.median_secs
+                  FROM by_dir t
+                  LEFT JOIN by_dir_resp r
+                    ON r.is_total = t.is_total
+                   AND r.direction_id IS NOT DISTINCT FROM t.direction_id
+                  LEFT JOIN directions d ON d.id = t.direction_id
+                 ORDER BY t.is_total DESC, t.messages DESC
             """, params)
-            s = cursor.fetchone()
+            total, directions = None, []
+            for r in cursor.fetchall():
+                row = {'direction_id': r[1], 'direction_name': r[2],
+                       'chats': r[3] or 0, 'messages': r[4] or 0,
+                       'managers': r[5] or 0, 'answered_chats': r[6] or 0,
+                       'avg_response_secs': float(r[7]) if r[7] is not None else None,
+                       'median_response_secs': float(r[8]) if r[8] is not None else None}
+                if r[0]:
+                    total = row
+                else:
+                    directions.append(row)
+        summary = total or {'chats': 0, 'messages': 0, 'managers': 0,
+                            'answered_chats': 0, 'avg_response_secs': None,
+                            'median_response_secs': None}
         return {
             'items': items,
-            'summary': {'chats': s[0] or 0, 'messages': s[1] or 0,
-                        'avg_response_secs': float(s[2]) if s[2] is not None else None,
-                        'median_response_secs': float(s[3]) if s[3] is not None else None,
-                        'answered_chats': s[4] or 0},
+            'summary': {'chats': summary['chats'], 'messages': summary['messages'],
+                        'managers': summary['managers'],
+                        'avg_response_secs': summary['avg_response_secs'],
+                        'median_response_secs': summary['median_response_secs'],
+                        'answered_chats': summary['answered_chats']},
+            'directions': directions,
         }
 
     # ── Wazzup: сборка эпизодов (единица ИИ-оценки) ──────────────────────────

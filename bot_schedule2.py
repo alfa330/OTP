@@ -3067,7 +3067,7 @@ FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241
 #         не возглавляющий отдел), но раздел ей нужен наверняка, а поимённая
 #         строка это и выражает — в отличие от роли, которую однажды поменяют.
 AI_QA_EXTRA_ACCESS_USER_IDS = {183, 169}
-# «Чаты Верификаторов» — СВОЙ список, а не тот же самый. Раздел показывает
+# «Чаты ОП» — СВОЙ список, а не тот же самый. Раздел показывает
 # переписку Wazzup ОТДЕЛА ПРОДАЖ, и пока список был общий, любой человек,
 # добавленный ради «ИИ-оценки», молча получал вместе с ней и чужую переписку.
 # Периметр здесь и так перечислен явно (см. docstring _verifier_chats_guard) —
@@ -5232,7 +5232,7 @@ AI_QA_SUBJECT_DEPARTMENT_CODES = frozenset(call_qa_config.DEPARTMENT_CODES)
 # оставлен ровно прежним (только ОП): расширять его на СЗоВ и Тез КЦ вместе с
 # открытием раздела — не та задача, это отдельное решение владельца.
 AI_QA_OBSERVER_DEPARTMENT_CODES = frozenset({'marketing'})
-# «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ и
+# «Чаты ОП» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ и
 # маркетинга он открыт исторически (они смотрят те же разборы звонков ОП), а
 # Тез КЦ — нет: у него своя переписка в разделе «Чаты ChatApp». Рядовой
 # наблюдатель «Маркетинга» вычитается отдельно: разборы ему открыты, переписка в
@@ -5410,7 +5410,7 @@ def _ai_qa_guard():
 
 
 def _verifier_chats_guard():
-    """Доступ к разделу «Чаты Верификаторов» (/api/wazzup/*, кроме эпизодов).
+    """Доступ к разделу «Чаты ОП» (/api/wazzup/*, кроме эпизодов).
 
     Периметр ЗДЕСЬ СВОЙ и перечислен явно, а не выведен из аудитории
     «ИИ-оценки». Раньше гард заканчивался вызовом _ai_qa_guard(), и это было
@@ -5425,7 +5425,7 @@ def _verifier_chats_guard():
     admin-ролью область строго его отдел (_is_global_admin_requester).
 
     Наблюдатель «Маркетинга» ВЫЧИТАЕТСЯ явно: разборы звонков ему открыты, а
-    переписка Верификаторов в выданный ему перечень разделов не входит.
+    переписка отдела продаж в выданный ему перечень разделов не входит.
 
     Разборы ИИ глобальным админам открылись отдельно — см. _ai_qa_guard; здесь
     это ничего не меняет. Зеркало на фронте — canAccessVerifierChatsForUser.
@@ -6672,9 +6672,11 @@ def api_wazzup_chat_messages():
 
 # Казахские буквы → русские аналоги: «Тестбаев Нұрасыл» в Wazzup и «Тестбаев Нурасыл»
 # в users — один человек, подсказка не должна спотыкаться об алфавит.
+# Мягкий и твёрдый знаки просто выбрасываем: то же имя пишут и «Әділхан», и
+# «Адильхан» — казахское написание мягкого знака не знает, русское его вставляет.
 _WAZZUP_KAZ_TRANS = str.maketrans({
     'ә': 'а', 'ғ': 'г', 'қ': 'к', 'ң': 'н', 'ө': 'о', 'ұ': 'у', 'ү': 'у',
-    'һ': 'х', 'і': 'и',
+    'һ': 'х', 'і': 'и', 'ь': None, 'ъ': None,
 })
 
 
@@ -6702,6 +6704,75 @@ def _wazzup_suggest_user(author_name, operators):
     return partial[0] if len(partial) == 1 else None
 
 
+# Показатели раздела «Чаты ОП» делятся по направлениям отдела продаж.
+# Названные (Верификаторы, Поток) идут первыми и в заданном порядке — их
+# перечень живёт в Database.WAZZUP_ANALYTICS_DIRECTIONS, чтобы бэкенд и SQL
+# не разъезжались. Остальные направления получают ярлык из directions.name,
+# а менеджеры без привязки к оператору — свою, последнюю группу: без неё их
+# цифры молча выпали бы из суммы направлений.
+WAZZUP_UNLINKED_GROUP_KEY = 'unlinked'
+WAZZUP_UNLINKED_GROUP_LABEL = 'Без привязки'
+
+
+def _wazzup_group_meta(direction_id):
+    """Описание названной группы показателей или None."""
+    for meta in db.WAZZUP_ANALYTICS_DIRECTIONS:
+        if meta['direction_id'] == direction_id:
+            return meta
+    return None
+
+
+def _wazzup_group_key(direction_id):
+    meta = _wazzup_group_meta(direction_id)
+    if meta:
+        return meta['key']
+    return f'dir{direction_id}' if direction_id else WAZZUP_UNLINKED_GROUP_KEY
+
+
+def _wazzup_group_label(direction_id, direction_name):
+    meta = _wazzup_group_meta(direction_id)
+    if meta:
+        return meta['label']
+    return direction_name or WAZZUP_UNLINKED_GROUP_LABEL
+
+
+def _wazzup_direction_groups(directions):
+    """Итоги по направлениям → группы для экрана, в порядке показа.
+
+    Названные группы возвращаются ВСЕГДА, даже с нулями: пустой «Поток» — это
+    ответ («за период никто из направления не писал» или «авторы ещё не
+    привязаны»), а исчезнувший столбец выглядел бы как поломка раздела."""
+    named = [meta['direction_id'] for meta in db.WAZZUP_ANALYTICS_DIRECTIONS]
+    by_direction = {row['direction_id']: row for row in directions}
+    empty = {'managers': 0, 'chats': 0, 'messages': 0, 'answered_chats': 0,
+             'avg_response_secs': None, 'median_response_secs': None,
+             'direction_name': None}
+    groups = []
+    for direction_id in named + [d for d in by_direction if d not in named]:
+        row = by_direction.get(direction_id, empty)
+        if direction_id in named:
+            order = named.index(direction_id)
+        else:
+            # непривязанные — всегда в самом конце, прочие направления — между
+            order = len(named) + (1 if direction_id is None else 0)
+        groups.append({
+            'key': _wazzup_group_key(direction_id),
+            'label': _wazzup_group_label(direction_id, row['direction_name']),
+            'directionId': direction_id,
+            'managers': row['managers'],
+            'chats': row['chats'],
+            'messages': row['messages'],
+            'answeredChats': row['answered_chats'],
+            'avgResponseSecs': row['avg_response_secs'],
+            'medianResponseSecs': row['median_response_secs'],
+            '_order': order,
+        })
+    groups.sort(key=lambda g: (g['_order'], -g['messages']))
+    for group in groups:
+        group.pop('_order')
+    return groups
+
+
 @app.route('/api/wazzup/authors', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_wazzup_authors():
@@ -6725,8 +6796,11 @@ def api_wazzup_authors():
                 'suggestedUserId': suggested['id'] if suggested else None,
                 'suggestedUserName': suggested['name'] if suggested else None,
             })
-        ops = [{'id': op['id'], 'name': op['name'], 'directionName': op['direction_name'],
-                'isVerifier': op['direction_id'] == 71} for op in operators]
+        ops = [{'id': op['id'], 'name': op['name'],
+                'directionId': op['direction_id'],
+                'directionName': op['direction_name'],
+                'group': _wazzup_group_label(op['direction_id'], op['direction_name'])}
+               for op in operators]
         return jsonify({"status": "success", "items": items, "operators": ops}), 200
     except Exception as error:
         logging.exception("wazzup authors failed")
@@ -6776,7 +6850,9 @@ def _wazzup_analytics_date(value):
 @app.route('/api/wazzup/analytics', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_wazzup_analytics():
-    """Показатели менеджеров Wazzup за период: диалоги, сообщения, время ответа."""
+    """Показатели менеджеров Wazzup за период: диалоги, сообщения, время ответа.
+
+    Делятся по направлениям отдела продаж — см. _wazzup_direction_groups."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     _, err = _verifier_chats_guard()
@@ -6792,7 +6868,11 @@ def api_wazzup_analytics():
         items = [{'key': r['key'], 'userId': r['user_id'],
                   'name': r['user_name'] or r['author_name'] or r['author_id'],
                   'authorName': r['author_name'], 'authorId': r['author_id'],
-                  'linked': r['user_id'] is not None, 'isVerifier': r['is_verifier'],
+                  'linked': r['user_id'] is not None,
+                  'directionId': r['direction_id'],
+                  'directionName': r['direction_name'],
+                  'group': _wazzup_group_key(r['direction_id']),
+                  'groupLabel': _wazzup_group_label(r['direction_id'], r['direction_name']),
                   'dialogs': r['dialogs_count'], 'messages': r['messages_count'],
                   'answeredChats': r['answered_chats'],
                   'avgResponseSecs': r['avg_response_secs'],
@@ -6804,7 +6884,9 @@ def api_wazzup_analytics():
                         "summary": {'chats': s['chats'], 'messages': s['messages'],
                                     'answeredChats': s['answered_chats'],
                                     'avgResponseSecs': s['avg_response_secs'],
-                                    'medianResponseSecs': s['median_response_secs']},
+                                    'medianResponseSecs': s['median_response_secs'],
+                                    'managers': s['managers']},
+                        "groups": _wazzup_direction_groups(result['directions']),
                         "from": date_from, "to": date_to}), 200
     except Exception as error:
         logging.exception("wazzup analytics failed")
