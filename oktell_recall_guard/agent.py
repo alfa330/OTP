@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.27"
+VERSION = "1.0.28"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -2655,13 +2655,14 @@ def build_version_badge_js(version: str, note: str = "") -> str:
     box.setAttribute('style', [
       'position:fixed', 'right:10px', 'bottom:8px', 'z-index:2147483646',
       'font:500 11px/1 -apple-system,Segoe UI,Roboto,Arial,sans-serif',
-      'color:#8e8e93', 'background:rgba(255,255,255,.72)',
-      'border:1px solid rgba(0,0,0,.08)', 'border-radius:999px',
-      'padding:5px 9px', 'cursor:pointer', 'user-select:none',
-      'backdrop-filter:blur(4px)', 'transition:opacity .15s', 'opacity:.55'
+      'color:#3a3a3c', 'background:rgba(255,255,255,.92)',
+      'border:1px solid rgba(0,0,0,.14)', 'border-radius:999px',
+      'padding:5px 10px', 'cursor:pointer', 'user-select:none',
+      'box-shadow:0 1px 4px rgba(0,0,0,.12)',
+      'backdrop-filter:blur(4px)', 'transition:opacity .15s', 'opacity:.8'
     ].join(';'));
     box.addEventListener('mouseenter', function () {{ box.style.opacity = '1'; }});
-    box.addEventListener('mouseleave', function () {{ box.style.opacity = '.55'; }});
+    box.addEventListener('mouseleave', function () {{ box.style.opacity = '.8'; }});
     box.addEventListener('click', function () {{
       if (state.busy) {{ return; }}
       state.busy = true;
@@ -5119,6 +5120,10 @@ def run_open(cfg: dict) -> int:
             subprocess.Popen(browser.launch_args(chrome), close_fds=True, env=child_env())
     if ok:
         fill_oktell_login(browser, cfg)
+        # Метку ставим сразу: круг агента — минута, и всё это время оператор
+        # смотрел бы на окно без номера версии и без кнопки обновления. Ровно
+        # на это и пожаловался владелец: «нигде не показывается версия».
+        browser.show_version_badge()
     # Автозапуск watchdog: оператор открыл Oktell — контроль обязан быть поднят.
     if cfg.get("ensure_watchdog_alive", True) and not is_running_by_mutex(WATCHDOG_MUTEX_NAME):
         spawn_self()

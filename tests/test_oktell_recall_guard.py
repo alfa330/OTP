@@ -864,6 +864,17 @@ def test_the_operator_on_the_line_can_reach_the_update():
     assert "__oktell_guard_badge" in agent.build_badge_answer_js("готово")
 
 
+def test_the_badge_is_there_from_the_first_second():
+    """Круг агента — минута. Пока метку ставил только он, оператор всё это время
+    смотрел на окно без номера версии и без кнопки обновления — ровно на это и
+    пожаловался владелец. По ярлыку она появляется сразу."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_open("):source.index("def fill_oktell_login(")]
+    assert "browser.show_version_badge()" in body
+    loop = source.split("def run_agent", 1)[1]
+    assert "browser.show_version_badge()" in loop, "и на кругах тоже: страницу перезагружают"
+
+
 def test_the_badge_does_not_flicker():
     """Метку ставим раз, дальше только меняем подпись: пересоздание на каждом
     круге агента давало бы мигание поверх рабочего окна."""
