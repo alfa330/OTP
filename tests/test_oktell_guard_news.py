@@ -185,25 +185,43 @@ class TestNewsWindow:
         assert "fetch(" not in js
         assert "state.result" in agent.build_news_result_js()
 
-    def test_a_wrong_answer_keeps_the_answers_and_marks_the_question(self):
-        """Дефект 1.0.16: из-за одного неверного ответа окно стирало ВСЕ отметки
-        и возвращало к тексту — человек отвечал заново на весь тест и даже не
-        знал, где ошибся. Ответы остаются, помечается только неверный вопрос."""
+    def test_a_wrong_answer_keeps_the_answers_but_does_not_point_at_them(self):
+        """Две крайности, обе плохие, и правило между ними.
+
+        1.0.16 из-за одного неверного ответа стирала ВСЕ отметки и возвращала к
+        тексту: человек отвечал заново на весь тест. Следом появилась подсветка
+        неверных вопросов — и тест превратился в перебор: меняешь помеченный
+        ответ, жмёшь снова, подбираешь верный, ни разу не вернувшись к тексту.
+
+        Решение владельца 21.09.2026: ответы остаются, но ГДЕ ошибка — не
+        говорим. Одна строка на весь тест: «есть неверные ответы».
+        """
         js = agent.build_news_js(self._item())
         assert "NEWS_QUIZ_WRONG" in js
-        # Сброс ответов и возврат к тексту — ровно то, чего быть не должно.
         assert "state.answers = {}; drawQuiz(); state.step = 'read';" not in js
-        assert "state.wrong = (payload.wrong || []).slice();" in js
-        assert "Неверно — перечитайте новость и выберите другой вариант" in js
+        assert "state.wrong" not in js
+        assert "Неверно — перечитайте новость и выберите другой вариант" not in js
 
-    def test_the_marked_question_is_the_one_the_server_named(self):
-        """Своего мнения о верности у окна нет: красит те вопросы, которые
-        назвал сервер, и только выбранный в них вариант — подкрасить остальные
-        значило бы подсказать."""
+    def test_the_window_paints_nothing_red(self):
+        """Красная рамка вокруг вопроса и красный вариант — это и есть указание
+        на ошибку, каким бы способом оно ни рисовалось."""
         js = agent.build_news_js(self._item())
-        assert "function missed(id)" in js
-        assert "var chosen = state.answers[item.id] === optionIndex;" in js
-        assert "bad && chosen" in js
+        for marker in ("#ff3b30", "#fff1f0", "function missed(", "firstWrongBox"):
+            assert marker not in js, marker
+
+    def test_the_photos_are_shown(self):
+        """Кадры объявления раньше не доходили до окна вовсе: сервер их не
+        отдавал, потому что окно рисовалось внутри страницы АТС и подписанная на
+        час ссылка могла протухнуть. Теперь у объявления своё окно, и
+        показывается оно сразу за запросом."""
+        item = dict(self._item(), photos=[{"url": "https://storage/p1.png",
+                                           "width": 800, "height": 600}])
+        js = agent.build_news_js(item)
+        assert "https://storage/p1.png" in js
+        assert "data.photos || []" in js
+        # Битый кадр убираем: пустая рамка в обязательном окне читается как
+        # «программа сломалась», а сделать с этим человеку нечего.
+        assert "image.addEventListener('error'" in js
 
     def test_the_choice_survives_a_repaint(self):
         """Пометка приходит после ответа сервера, и перерисовка не должна
@@ -211,12 +229,10 @@ class TestNewsWindow:
         js = agent.build_news_js(self._item())
         assert "radio.checked = state.answers[item.id] === optionIndex;" in js
 
-    def test_fixing_the_answer_clears_the_mark(self):
-        """Красный на варианте, который человек только что сменил, говорил бы
-        неправду — как и отказ сервера про прошлый ответ."""
+    def test_changing_the_answer_clears_the_refusal(self):
+        """Отказ сервера был про ПРОШЛЫЙ ответ: висеть над новым он не должен."""
         js = agent.build_news_js(self._item())
         body = js.split("radio.addEventListener('change'", 1)[1].split("var text =", 1)[0]
-        assert "state.wrong = state.wrong.filter(" in body
         assert "note.textContent = '';" in body
 
 
@@ -290,12 +306,13 @@ class TestServerRules:
         assert "news_queries.confirm_read(" in body
         assert "NEWS_TOO_EARLY" in body and "NEWS_QUIZ_WRONG" in body
 
-    def test_the_wrong_questions_are_named(self):
-        """Без id вопросов окно агента умеет сказать только «где-то неверно»,
-        и человек переотвечает весь тест из-за одного вопроса. Портал их
-        отдаёт (news/routes.py) — агенту нужны те же."""
+    def test_the_wrong_questions_are_not_named(self):
+        """Список ошибочных вопросов не уходит даже в ответ сервера: то, чего
+        нет в сети, нельзя подсмотреть и в консоли. Решение владельца
+        21.09.2026 — подсветка превращала тест в перебор."""
         body = ROUTES.split("def oktell_guard_agent_news_read", 1)[1].split("@agent_route", 1)[0]
-        assert '"wrong": detail' in body
+        assert '"wrong": detail' not in body
+        assert '"code": "NEWS_QUIZ_WRONG"' in body
 
     def test_an_unknown_agent_gets_nothing(self):
         for name in ("oktell_guard_agent_news", "oktell_guard_agent_news_read"):

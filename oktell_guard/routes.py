@@ -183,6 +183,14 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     # каталог на каждый заход агента (полсотни машин по таймеру) значило бы
     # лишний запрос к базе ради ответа, который не меняется.
     _news_channel = {'ready': False}
+    # Готовность таблицы кадров — тем же приёмом: агентов полсотни, и каждый
+    # ходит за объявлениями по таймеру, спрашивать базу на каждый круг незачем.
+    _news_photos = {'ready': False}
+
+    def _news_photos_ready(cursor, probe):
+        if not _news_photos['ready']:
+            _news_photos['ready'] = probe(cursor)
+        return _news_photos['ready']
 
     def _news_channel_ready(cursor, probe):
         if not _news_channel['ready']:
@@ -355,8 +363,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         отдаём: она же точка отсчёта задержки кнопки, и поставить её всей
         очереди значило бы написать «открыл» про то, чего человек не видел.
         """
+        from news import photos as news_photos
         from news import queries as news_queries
         from news.schema import channel_ready as news_channel_ready
+        from news.schema import photos_ready as news_photos_ready
 
         with db._get_cursor() as cursor:
             owner = agent_owner(cursor)
@@ -367,9 +377,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             viewer = news_queries.load_viewer_context(cursor, owner['user_id'])
             if not viewer:
                 return jsonify({"item": None, "known_operator": False})
+            with_photos = _news_photos_ready(cursor, news_photos_ready)
             items = news_queries.pending_for_user(
                 cursor, user_id=viewer['user_id'], otp_role=viewer['otp_role'],
-                subjects=viewer['subjects'], with_photos=False,
+                subjects=viewer['subjects'], with_photos=with_photos,
                 with_quiz=True, with_pass=True,
                 # Готовность колонки спрашиваем ОДИН раз на процесс: агентов
                 # полсотни, и каждый ходит сюда по таймеру. Нет колонки —
@@ -381,9 +392,15 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 return jsonify({"item": None, "known_operator": True})
             item = mandatory[0]
             news_queries.mark_shown(cursor, news_ids=[item['id']], user_id=viewer['user_id'])
-        # Кадры объявления агент не показывает: окно рисуется внутри страницы
-        # АТС, а подписанные ссылки живут час и до показа успели бы протухнуть.
-        item.pop('photos', None)
+        # Кадры подписываем ЗДЕСЬ и отдаём вместе с объявлением. Раньше их не
+        # было вовсе: окно рисовалось внутри страницы АТС, и подписанная на час
+        # ссылка могла протухнуть до показа. Теперь у объявления своё окно, и
+        # показывается оно сразу за этим запросом — час ссылке заведомо хватает.
+        if with_photos:
+            item['photos'] = news_photos.sign_urls({'client': gcs_client_factory},
+                                                   item.get('photos') or [])
+        else:
+            item['photos'] = []
         return jsonify({"item": item, "known_operator": True})
 
     @agent_route('/news/<int:news_id>/read', methods=('POST',))
@@ -415,11 +432,14 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             return jsonify({"error": "Кнопка станет активной чуть позже",
                             "code": "NEWS_TOO_EARLY", "remaining_seconds": detail}), 409
         if status == 'quiz_wrong':
-            # wrong — id вопросов с ошибкой, как и у портала: без них окно агента
-            # умеет сказать только «где-то неверно», и человек переотвечает весь
-            # тест из-за одного вопроса.
+            # Какие именно вопросы неверны, НЕ отдаём (решение владельца
+            # 21.09.2026). Подсветка превращает тест в перебор: человек меняет
+            # помеченный ответ, жмёт снова — и подбирает верный, ни разу не
+            # вернувшись к тексту. Ради этого возврата тест и заведён. Список
+            # ошибок не уходит даже в ответ: то, чего нет в сети, нельзя
+            # подсмотреть и в консоли.
             return jsonify({"error": "Есть неверные ответы — перечитайте новость",
-                            "code": "NEWS_QUIZ_WRONG", "wrong": detail}), 409
+                            "code": "NEWS_QUIZ_WRONG"}), 409
         if status == 'trainer_pending':
             return jsonify({"error": "Сначала пройдите тренажёр",
                             "code": "NEWS_TRAINER_PENDING"}), 409

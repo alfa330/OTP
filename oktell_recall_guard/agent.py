@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.24"
+VERSION = "1.0.25"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -2626,7 +2626,7 @@ NEWS_JS_TEMPLATE = r"""
   var state = window.__oktellGuardNews = window.__oktellGuardNews || {};
   if (state.id === data.id && document.getElementById(ID)) { return true; }
   state.id = data.id; state.result = null; state.step = 'read';
-  state.answers = {}; state.wrong = [];
+  state.answers = {};
   var old = document.getElementById(ID);
   if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
@@ -2662,6 +2662,28 @@ NEWS_JS_TEMPLATE = r"""
   body.innerHTML = data.body || '';
   body.setAttribute('style', 'line-height:1.55');
 
+  // Кадры объявления. Адреса подписаны сервером на час и ведут прямо в
+  // хранилище — окно за ними не ходит никуда, кроме как за картинкой.
+  // Складываем в колонку, а не в карусель: у объявления их единицы, а листалка
+  // в обязательном окне — лишний повод в нём застрять.
+  var gallery = document.createElement('div');
+  gallery.setAttribute('style', 'margin-top:14px');
+  (data.photos || []).forEach(function (photo) {
+    if (!photo || !photo.url) { return; }
+    var image = document.createElement('img');
+    image.src = photo.url;
+    image.alt = '';
+    image.setAttribute('style', 'display:block;width:100%;max-height:52vh;object-fit:contain;'
+      + 'background:#f2f2f7;border-radius:14px;margin-bottom:10px');
+    // Битый кадр убираем совсем: пустая рамка с крестиком в обязательном окне
+    // читается как «программа сломалась», а причина может быть в протухшей
+    // подписи, и человеку с ней всё равно ничего не сделать.
+    image.addEventListener('error', function () {
+      if (image.parentNode) { image.parentNode.removeChild(image); }
+    });
+    gallery.appendChild(image);
+  });
+
   var quiz = document.createElement('div');
   quiz.style.display = 'none';
 
@@ -2682,6 +2704,7 @@ NEWS_JS_TEMPLATE = r"""
     + 'color:#007aff;font:500 13px/1 -apple-system,Segoe UI,Arial;cursor:pointer;display:none');
 
   card.appendChild(badge); card.appendChild(title); card.appendChild(body);
+  card.appendChild(gallery);
   card.appendChild(quiz); card.appendChild(button); card.appendChild(back); card.appendChild(note);
   root.appendChild(card);
   (document.body || document.documentElement).appendChild(root);
@@ -2698,28 +2721,24 @@ NEWS_JS_TEMPLATE = r"""
 
   function paint() {
     if (state.step === 'read') {
-      body.style.display = ''; quiz.style.display = 'none'; back.style.display = 'none';
+      body.style.display = ''; gallery.style.display = '';
+      quiz.style.display = 'none'; back.style.display = 'none';
       button.disabled = left > 0;
       button.textContent = left > 0 ? ('Ознакомлен · ' + left) : 'Ознакомлен';
     } else {
-      body.style.display = 'none'; quiz.style.display = ''; back.style.display = '';
+      body.style.display = 'none'; gallery.style.display = 'none';
+      quiz.style.display = ''; back.style.display = '';
       button.disabled = !answered();
       button.textContent = 'Подтвердить';
     }
     button.style.opacity = button.disabled ? '.45' : '1';
   }
 
-  function missed(id) {
-    for (var i = 0; i < state.wrong.length; i++) {
-      if (String(state.wrong[i]) === String(id)) { return true; }
-    }
-    return false;
-  }
-
-  // Перерисовщики вопросов. Отметка «неверно» приходит после ответа сервера, а
-  // перекладывать ради неё разметку заново нельзя: обработчик клика снёс бы
-  // сам переключатель, по которому только что щёлкнули. Поэтому каждый вопрос
-  // отдаёт функцию, которая красит УЖЕ нарисованное.
+  // КАКОЙ вопрос неверен, окно НЕ показывает (решение владельца 21.09.2026).
+  // Сервер это знает и присылает, но подсветка превращает тест в перебор:
+  // человек меняет помеченный ответ, жмёт снова — и подбирает верный, ни разу
+  // не вернувшись к тексту. Ради этого возврата тест и заведён. Ответ один на
+  // весь тест: «есть неверные ответы — перечитайте новость».
   var refreshers = [];
 
   function drawQuiz() {
@@ -2742,10 +2761,7 @@ NEWS_JS_TEMPLATE = r"""
         radio.checked = state.answers[item.id] === optionIndex;
         radio.addEventListener('change', function () {
           state.answers[item.id] = optionIndex;
-          // Пометку снимаем сразу: человек уже отвечает заново, и красный на
-          // только что выбранном варианте говорил бы неправду.
-          state.wrong = state.wrong.filter(function (id) { return String(id) !== String(item.id); });
-          // И отказ сервера убираем: он был про прошлый ответ.
+          // Отказ сервера убираем: он был про прошлый ответ.
           note.textContent = '';
           refresh();
           paint();
@@ -2756,22 +2772,9 @@ NEWS_JS_TEMPLATE = r"""
         box.appendChild(label);
         labels.push(label); radios.push(radio);
       });
-      var hint = document.createElement('div');
-      hint.textContent = 'Неверно — перечитайте новость и выберите другой вариант';
-      hint.setAttribute('style', 'color:#d70015;font-size:13px;margin-top:2px;display:none');
-      box.appendChild(hint);
-
       function refresh() {
-        var bad = missed(item.id);
-        box.style.boxShadow = bad ? 'inset 0 0 0 1.5px #ff3b30' : 'none';
-        hint.style.display = bad ? '' : 'none';
         labels.forEach(function (label, optionIndex) {
-          // Красным — только ВЫБРАННЫЙ вариант: подкрасить остальные значило бы
-          // подсказать верный.
-          var chosen = state.answers[item.id] === optionIndex;
-          label.style.background = bad && chosen ? '#fff1f0' : '#fff';
-          label.style.borderColor = bad && chosen ? '#ff3b30' : '#d1d1d6';
-          radios[optionIndex].checked = chosen;
+          radios[optionIndex].checked = state.answers[item.id] === optionIndex;
         });
       }
 
@@ -2782,15 +2785,6 @@ NEWS_JS_TEMPLATE = r"""
   }
 
   function refreshQuiz() { refreshers.forEach(function (one) { one.refresh(); }); }
-
-  // Первый помеченный вопрос — к нему и подводим: тест длиннее экрана, и
-  // «где-то выше» человек искать не обязан.
-  function firstWrongBox() {
-    for (var i = 0; i < refreshers.length; i++) {
-      if (missed(refreshers[i].id)) { return refreshers[i].box; }
-    }
-    return null;
-  }
 
   drawQuiz();
   paint();
@@ -2833,15 +2827,11 @@ NEWS_JS_TEMPLATE = r"""
     note.style.color = '#d70015';
     if (payload && payload.remaining_seconds) { left = Number(payload.remaining_seconds); }
     if (payload && payload.code === 'NEWS_QUIZ_WRONG') {
-      // ОТВЕТЫ ОСТАЮТСЯ НА МЕСТЕ, и человек остаётся на тесте. Сброс всех
-      // отметок с возвратом к тексту (так было в 1.0.16) заставлял отвечать
-      // заново на ВСЕ вопросы из-за одного неверного, а какой именно неверный —
-      // не говорил вовсе. Сервер называет вопросы с ошибкой (поле wrong) — их и
-      // помечаем, остальное человек уже ответил верно.
-      state.wrong = (payload.wrong || []).slice();
-      refreshQuiz();
-      var bad = firstWrongBox();
-      if (bad && bad.scrollIntoView) { bad.scrollIntoView({block: 'center'}); }
+      // ОТВЕТЫ ОСТАЮТСЯ НА МЕСТЕ, и человек остаётся на тесте: сброс всего с
+      // возвратом к тексту (так было в 1.0.16) заставлял отвечать заново на ВСЕ
+      // вопросы из-за одного неверного. Но и показывать, ГДЕ ошибка, нельзя —
+      // тогда её находят перебором, а не перечитыванием.
+      if (quiz.scrollIntoView) { quiz.scrollIntoView({block: 'start'}); }
     }
     state.result = null;
     paint();
@@ -2852,11 +2842,14 @@ NEWS_JS_TEMPLATE = r"""
 
 
 def build_news_js(item: dict) -> str:
-    """Окно обязательного объявления поверх клиента АТС.
+    """Разметка и поведение окна обязательного объявления.
 
-    Рисуем в самой странице — там же, где живёт плашка предупреждения: системное
-    окно оператор в полноэкранном клиенте не увидит, а наш процесс своего окна
-    не имеет и заводить его ради этого незачем.
+    Один код на оба места: им наполняется собственное окно поверх всех окон
+    (NewsOverlay), а раньше он же впрыскивался в страницу клиента АТС.
+
+    Наружу отдаём ТОЛЬКО то, что окно рисует. Служебные поля объявления (пути в
+    хранилище, адресаты, автор) в страницу не уходят вовсе — не по секретности,
+    а потому что окно про них ничего не знает и знать не должно.
     """
     payload = json.dumps(
         {
@@ -2864,6 +2857,12 @@ def build_news_js(item: dict) -> str:
             "title": item.get("title") or "",
             "body": item.get("body") or "",
             "remaining_seconds": int(item.get("remaining_seconds") or 0),
+            # Кадры уже подписаны сервером: у окна только адрес и размеры.
+            "photos": [
+                {"url": photo.get("url") or "",
+                 "width": photo.get("width"), "height": photo.get("height")}
+                for photo in (item.get("photos") or []) if photo.get("url")
+            ],
             "quiz": [
                 {"id": q.get("id"), "prompt": q.get("prompt") or "", "options": q.get("options") or []}
                 for q in (item.get("quiz") or [])
