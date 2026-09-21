@@ -815,9 +815,15 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     };
 
     const closeMove = () => {
+        const closing = move?.id;
         setMove((prev) => (prev ? { ...prev, open: false } : prev));
-        window.setTimeout(
-            () => setMove((prev) => (prev && !prev.open ? null : prev)), UNFOLD_MS);
+        /* Снимаем состояние по имени ЗАКРЫВАЕМОЙ строки, а не «если закрыто».
+           Открой человек перенос другой строки в эти же три десятых секунды —
+           и та панель тоже застаёт себя закрытой (первый кадр у неё такой
+           всегда), а таймер снёс бы её вместе с выбором. */
+        window.setTimeout(() => setMove(
+            (prev) => (prev && prev.id === closing && !prev.open ? null : prev)),
+            UNFOLD_MS);
     };
 
     const submitMove = (article) => {

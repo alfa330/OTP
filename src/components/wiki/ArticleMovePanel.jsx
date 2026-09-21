@@ -49,6 +49,20 @@ const TREE_MAX = 'max-h-[42vh]';
    кончится, — иначе в вид приезжает полоса нулевой высоты. */
 const UNFOLD_MS = 300;
 
+/* Показать элемент, ТОЛЬКО если он не виден целиком.
+ *
+ * Безусловный scrollIntoView дёргает страницу там, где дёргать нечего: на
+ * мониторе панель почти всегда открывается на виду. Хуже того, прокрутка гасит
+ * открытое меню строки (IosMenu закрывается от любого скролла — иначе оно
+ * «приклеилось» бы над чужой строкой), и человек, успевший открыть «три точки»
+ * соседней статьи, увидел бы, как меню тут же схлопнулось само. */
+const reveal = (el) => {
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    if (box.top >= 0 && box.bottom <= window.innerHeight) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+};
+
 const toggled = (set, id) => {
     const next = new Set(set);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -135,9 +149,7 @@ export default function ArticleMovePanel({
        раскрылась: прокрути раньше, и в вид приедет полоса нулевой высоты.
        Срок тот же, что у самого раскрытия (duration-300 в WikiCatalog). */
     useEffect(() => {
-        const id = window.setTimeout(
-            () => rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
-            UNFOLD_MS + 40);
+        const id = window.setTimeout(() => reveal(rootRef.current), UNFOLD_MS + 40);
         return () => window.clearTimeout(id);
     }, []);
 
@@ -179,9 +191,7 @@ export default function ArticleMovePanel({
         /* Полоса подтверждения раскрывается ниже дерева, и на невысоком экране
            она оказывается за краем — нажатие выглядело бы как «ничего не
            произошло». Показываем её сами, ближайшим движением. */
-        window.setTimeout(
-            () => confirmRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
-            UNFOLD_MS + 40);
+        window.setTimeout(() => reveal(confirmRef.current), UNFOLD_MS + 40);
     };
 
     const rowProps = (section, depth, hasChildren) => {
