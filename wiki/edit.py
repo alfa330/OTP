@@ -452,6 +452,45 @@ def attach_section(cursor, article_id, section_id):
     return cursor.rowcount > 0
 
 
+def move_section(cursor, article_id, *, from_section_id, to_section_id):
+    """Переложить статью ИЗ одного раздела В другой, остальные не трогая.
+
+    Отдельно и от set_sections, и от attach_section, и на то есть причины.
+
+    SET_SECTIONS ЗАМЕНЯЕТ НАБОР. Перенос через него означал бы «оставить один
+    выбранный раздел», то есть молча отвязать статью от соседних веток: статья
+    в трёх разделах — обычное дело, и у соседнего отдела регламент пропал бы без
+    следа. Кроме того, набор пришлось бы считать на клиенте, а список на экране
+    успевает устареть: статья, которую коллега минуту назад подключил к своей
+    ветке, отвязалась бы заодно (wiki_article_sections правят и adopt, и
+    редактор, и импорт).
+
+    ATTACH_SECTION НИЧЕГО НЕ ОТВЯЗЫВАЕТ — это заимствование, другое действие.
+
+    ПОРЯДОК ВАЖЕН: сначала INSERT, потом DELETE. Между ними статья ни на миг не
+    остаётся без раздела, а статья без раздела не видна НИКОМУ, кроме автора
+    (см. шапку default_section_id): оборвись транзакция посередине обратного
+    порядка — и документ исчез бы из витрины.
+
+    from_section_id = None — статья и так вне дерева (наследие импорта):
+    забирать не из чего, остаётся только положить.
+    """
+    cursor.execute(
+        'INSERT INTO wiki_article_sections (article_id, section_id) VALUES (%s, %s) '
+        'ON CONFLICT DO NOTHING',
+        (article_id, to_section_id),
+    )
+    added = cursor.rowcount > 0
+    removed = False
+    if from_section_id:
+        cursor.execute(
+            'DELETE FROM wiki_article_sections WHERE article_id = %s AND section_id = %s',
+            (article_id, from_section_id),
+        )
+        removed = cursor.rowcount > 0
+    return added or removed
+
+
 def fork_article(cursor, source_id, *, section_id, author_id, slug, title):
     """Своя копия чужой статьи: дальше расходится независимо от источника.
 

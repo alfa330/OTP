@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ChevronRight, Eye, FileText, Folder, FolderOpen, Layers, Loader2,
-    PenLine, Pencil, Search, User, X,
+    Archive, ChevronRight, Eye, FileText, Folder, FolderInput, FolderOpen, Layers,
+    Loader2, PenLine, Pencil, Search, User, X,
 } from 'lucide-react';
 import { iosCard, IosBadge, IosMenu, IosPager } from '../ui/ios';
 import { fetchArticleIndex } from './articleIndex';
+import { mayMove, moveSources } from './articleMove';
+import ArticleMovePanel from './ArticleMovePanel';
 import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 
 /* Вкладка «Статьи» — каталог: дерево разделов слева, статьи выбранного справа.
@@ -95,6 +97,12 @@ const ALL_ID = 'all';
  * по свежести, и «найти конкретную статью» — это набрать слово, а не долистать
  * до двадцатой страницы. */
 const ROWS_PER_PAGE = 10;
+
+/* Сколько длится раскрытие панели переноса. Дублирует duration-300 в её
+   разметке намеренно: по этому сроку состояние снимается ПОСЛЕ того, как панель
+   сложилась, и разойдись они — панель либо исчезала бы рывком, либо оставляла
+   бы за собой пустую полосу. */
+const UNFOLD_MS = 300;
 
 /* Окно страницы: какие строки показать и с какой они по счёту.
  *
@@ -298,10 +306,16 @@ const SectionRow = ({ section, depth, count, selected, open, hasChildren, onSele
  * В списке выбранного раздела ответ уже стоит в шапке колонки, и повторить его
  * на каждой строке значило бы засыпать список одним и тем же словом.
  */
-const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where }) => {
+const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where,
+                     panel = null }) => {
     const type = typeBadge(article.article_type);
     const ago = fmtAgo(article.updated_at);
     return (
+        /* Панель переноса — ВНУТРИ строки списка, но НЕ внутри самой строки
+           заголовка: мобильный слой правит её по месту в разметке
+           (wiki-mobile.css: .wiki-m-row > span:last-child — это меню), и
+           третий ребёнок сдвинул бы правила на чужие элементы. */
+        <div>
         <div className="wiki-m-row flex items-start transition hover:bg-slate-50">
             <button
                 type="button"
@@ -378,6 +392,8 @@ const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where }) 
                       />}
             </span>
         </div>
+        {panel}
+        </div>
     );
 };
 
@@ -396,6 +412,17 @@ const Blank = ({ icon: Icon, title, text, children }) => (
 export default function WikiCatalog({ base, headers, showToast, catalog, loading,
                                       bucket, onBucketChange, onOpenArticle,
                                       onEditArticle, reloadCatalog, space = null,
+                                      /* Ответ /structure — ради ПЕРЕНОСА статьи
+                                         в другой раздел. Каталог разделы знает,
+                                         но прав на них не несёт, а предлагать
+                                         ветку, куда сервер класть не даст, —
+                                         значит выдавать отказ за поломку. Права
+                                         по разделу есть только здесь, и тот же
+                                         ответ по той же причине читает выпадашка
+                                         раздела в редакторе. Запроса это не
+                                         добавляет: /structure грузится в
+                                         WikiView всегда. */
+                                      structure = null,
                                       /* Место в каталоге живёт у родителя: уход
                                          в статью размонтирует вкладку, и выбор
                                          раздела не пережил бы возврата (см.
@@ -412,6 +439,17 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                          меняется сама выборка. */
                                       page = 1, onPageChange = NOOP }) {
     const [items, setItems] = useState(null);         // null = ещё не ответили
+    /* Открытый перенос: { id статьи, from, to, open }.
+     *
+     * Одна статья за раз, и это не ограничение: панель раскрывается в строке,
+     * и вторая открытая панель увела бы первую под сгиб вместе с её выбором.
+     *
+     * open — только про анимацию. Панель раскрывается сеткой 0fr → 1fr, а
+     * такой переход виден лишь тогда, когда первый кадр отрисован ЗАКРЫТЫМ:
+     * поставь open сразу, и панель появилась бы рывком. По этой же причине
+     * закрытие сначала складывает её, а состояние убирает по окончании
+     * перехода — иначе сворачиваться было бы нечему. */
+    const [move, setMove] = useState(null);
     /* Ждём с самого начала: список «все статьи» экран грузит сам, не дожидаясь
        выбора. Начни busy с false — между первым кадром и первым эффектом
        колонка успела бы показать «Пусто» и тут же его убрать. */
@@ -468,6 +506,19 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
         const all = catalog?.sections || [];
         return space ? all.filter((x) => x.space_id === space.id) : all;
     }, [catalog, space]);
+    /* Дерево для переноса — из /structure, а не из каталога: только там у
+       раздела есть права (permissions.can_create), а без них панель предлагала
+       бы ветки, на которые сервер отвечает 403. Сужаем тем же пространством,
+       что и всё остальное на экране: перенос в соседнюю вику здесь не
+       предлагается — на экране живёт одна. */
+    const moveSections = useMemo(() => {
+        const all = structure?.sections || [];
+        return space ? all.filter((x) => x.space_id === space.id) : all;
+    }, [structure, space]);
+    const moveSpaces = useMemo(() => {
+        const all = structure?.spaces || [];
+        return space ? all.filter((sp) => sp.id === space.id) : all;
+    }, [structure, space]);
     const totals = catalog?.totals;
     const orphans = catalog?.orphans;
     const active = BUCKET_BY_KEY.get(bucket) || BUCKETS[0];
@@ -638,6 +689,9 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
            строки незачем. */
         if (!quiet) {
             wantedRef.current = wanted;
+            /* Открытая панель переноса принадлежит СТРОКЕ, а строки сейчас
+               сменятся: оставшись, она висела бы над чужой статьёй. */
+            setMove(null);
             if (pagedScopeRef.current !== null && pagedScopeRef.current !== wanted) setPage(1);
             pagedScopeRef.current = wanted;
             setBusy(true);
@@ -678,11 +732,15 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
      * первой. Вместо этого тихо перезапрашиваем список и счётчики корзин —
      * статья, ушедшая из открытой корзины, исчезает из него сама.
      */
-    const act = (article, send, done, fail) => {
+    const act = (article, send, done, fail, after = null) => {
         if (acting) return;
         setActing(article.id);
         send()
             .then(() => {
+                /* Сначала убираем то, чем действие вызвали (панель переноса), и
+                   только потом говорим об успехе: панель, оставшаяся открытой
+                   поверх успешного тоста, читается как «не сработало». */
+                after?.();
                 showToast?.(done, 'success');
                 /* Перезапрашиваем ТУ выборку, что сейчас на экране, — в том
                    числе «все статьи». Раньше здесь стояло `if (selected)`, и
@@ -724,6 +782,57 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
             'Статья убрана в архив', 'Не удалось убрать в архив');
     };
 
+    /* ── Перенос статьи в другой раздел ────────────────────────────────────
+     * Раньше это умел только редактор статьи: открыть статью, найти поле
+     * «Раздел» в форме, сменить, сохранить и вернуться. При разборе ветки на
+     * десяток статей это десяток кругов через чужой экран.
+     *
+     * ПЕРЕНОС АДРЕСНЫЙ: из одного раздела в другой, остальные разделы статьи
+     * остаются. Статья в трёх разделах — обычное дело, и «сменить раздел» на
+     * весь набор молча отвязало бы её от соседних веток: у соседнего отдела
+     * регламент пропал бы без следа. Считает это сервер
+     * (POST /articles/<id>/move) — по СВОЕМУ списку разделов, а не по
+     * присланному: список на экране успевает устареть, и статья, которую
+     * коллега минуту назад подключил к своей ветке, отвязалась бы заодно.
+     */
+    const moveSectionName = useCallback((id) => {
+        const found = moveSections.find((x) => Number(x.id) === Number(id));
+        return found?.name || sectionNames.get(Number(id)) || 'другой раздел';
+    }, [moveSections, sectionNames]);
+
+    const openMove = (article) => {
+        /* Откуда переносим по умолчанию. Выбранный в дереве раздел — это и есть
+           тот раздел, из-за которого строка на экране, поэтому он идёт первым.
+           Иначе — первый раздел статьи, откуда её вправе забрать. */
+        const sources = moveSources(article, moveSections, sectionNames);
+        const inSelected = selected && selected.id !== ORPHANS_ID
+            && sources.find((x) => x.id === selected.id && x.allowed);
+        const from = inSelected || sources.find((x) => x.allowed) || null;
+        setMove({ id: article.id, from: from ? from.id : null, to: null, open: false });
+        // Раскрытие — следующим кадром: см. комментарий у самого состояния.
+        window.requestAnimationFrame(() => setMove(
+            (prev) => (prev && prev.id === article.id ? { ...prev, open: true } : prev)));
+    };
+
+    const closeMove = () => {
+        setMove((prev) => (prev ? { ...prev, open: false } : prev));
+        window.setTimeout(
+            () => setMove((prev) => (prev && !prev.open ? null : prev)), UNFOLD_MS);
+    };
+
+    const submitMove = (article) => {
+        if (!move || move.id !== article.id || !move.to) return;
+        const target = moveSectionName(move.to);
+        act(
+            article,
+            () => axios.post(`${base}/articles/${article.id}/move`,
+                             { from_section_id: move.from, to_section_id: move.to },
+                             { headers }),
+            `Статья переехала в «${target}»`,
+            'Не удалось перенести статью',
+            closeMove);
+    };
+
     /* Пункты меню строки. Право берём из ответа сервера (permissions), а не из
        роли: у статьи есть свои правила доступа, и роль их не описывает —
        предложить «Редактировать» на статье, которую сервер откажется править,
@@ -731,19 +840,33 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
        сервера) — меню просто нет: IosMenu без пунктов не рисует и кнопку. */
     const menuFor = (article) => {
         const rights = article.permissions || {};
+        const canEdit = !!(onEditArticle && rights.can_edit);
         const canDraft = !!rights.can_edit && article.status !== 'draft';
+        /* Перенос — та же правка статьи (сервер спрашивает can_edit), но сверх
+           неё нужен раздел, ОТКУДА статью вправе забрать: пункт, открывающий
+           панель, в которой любое нажатие кончается отказом, — тот же отказ,
+           только неотличимый от поломки. Статью вне дерева переносить можно
+           всегда: забирать её не из чего. */
+        const canMove = !!rights.can_edit && mayMove(article, moveSections, sectionNames);
+        /* Что стоит выше черты. Пункты бывают условными, и «separatorBefore:
+           true» у первого же доступного пункта повесило бы волосяную линию под
+           самой крышкой меню. */
+        const hasTop = canEdit || canMove;
         return [
-            onEditArticle && rights.can_edit && {
+            canEdit && {
                 key: 'edit', label: 'Редактировать', icon: Pencil,
                 onSelect: () => onEditArticle(article) },
+            canMove && {
+                key: 'move', label: 'Переместить', icon: FolderInput,
+                onSelect: () => openMove(article) },
             /* Черновику этот пункт не нужен — он уже черновик. Зато нужен
                АРХИВНОЙ статье: из архива иначе нет пути назад. */
             canDraft && {
                 key: 'draft', label: 'Отправить в черновик', icon: PenLine,
-                separatorBefore: true, onSelect: () => toDraft(article) },
+                separatorBefore: hasTop, onSelect: () => toDraft(article) },
             rights.can_delete && article.status !== 'archived' && {
                 key: 'archive', label: 'Убрать в архив', icon: Archive,
-                danger: true, separatorBefore: !canDraft,
+                danger: true, separatorBefore: canDraft ? false : hasTop,
                 onSelect: () => archive(article) },
         ];
     };
@@ -1180,6 +1303,50 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                     menu={menuFor(article)}
                                     busy={acting === article.id}
                                     locked={acting !== null && acting !== article.id}
+                                    /* Панель переноса раскрывается ПОД строкой,
+                                       а не окном поверх списка: решение «куда
+                                       переложить» принимают, глядя на дерево
+                                       слева и на соседние строки, и модалка
+                                       закрыла бы собой ровно это.
+                                       Раскрытие сеткой 0fr → 1fr — тот же
+                                       приём, что у пояснений в «Новостях»:
+                                       высота считается по содержимому, поэтому
+                                       дерево из трёх разделов и из тридцати
+                                       раскрываются одинаково плавно. */
+                                    panel={move && move.id === article.id ? (
+                                        <div
+                                            className={`grid transition-all duration-300 ease-out ${
+                                                move.open
+                                                    ? 'grid-rows-[1fr] opacity-100'
+                                                    : 'grid-rows-[0fr] opacity-0'
+                                            }`}
+                                        >
+                                            <div className="overflow-hidden">
+                                                <div className="border-t border-slate-100 bg-slate-50/70 px-3 py-2.5">
+                                                    <ArticleMovePanel
+                                                        article={article}
+                                                        sections={moveSections}
+                                                        spaces={moveSpaces}
+                                                        names={sectionNames}
+                                                        fromId={move.from}
+                                                        toId={move.to}
+                                                        busy={acting === article.id}
+                                                        /* Сменили источник —
+                                                           выбранная цель сбрасывается:
+                                                           подтверждение «из А в Б»
+                                                           после смены А описывало бы
+                                                           уже не то действие. */
+                                                        onFrom={(id) => setMove((prev) => (
+                                                            prev ? { ...prev, from: id, to: null } : prev))}
+                                                        onTo={(id) => setMove((prev) => (
+                                                            prev ? { ...prev, to: id } : prev))}
+                                                        onConfirm={() => submitMove(article)}
+                                                        onClose={closeMove}
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : null}
                                 />
                             ))}
                         </div>

@@ -1225,6 +1225,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                     /* Смена статуса из списка меняет числа на
                                        переключателе корзин — они живут здесь. */
                                     reloadCatalog={loadCatalog}
+                                    /* Дерево с ПРАВАМИ на разделы — для
+                                       переноса статьи из строки списка. Тот же
+                                       ответ, что у «Структуры» и у выпадашки
+                                       раздела в редакторе: где человек вправе
+                                       положить статью, знает только он. */
+                                    structure={scopedStructure}
                                 />
                             ) : (
                                 <WikiStructure

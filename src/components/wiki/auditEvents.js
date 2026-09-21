@@ -61,6 +61,10 @@ export const ACTION_META = {
     'article.archive': { label: 'Статья в архиве', tone: REMOVED, icon: Archive },
     'article.restore': { label: 'Статья восстановлена из версии', tone: CHANGED, icon: RotateCcw },
     'article.adopt': { label: 'Статья добавлена в раздел', tone: CHANGED, icon: FileText },
+    /* Перенос — не правка статьи: текст остался тот же, сменился раздел, то
+       есть круг людей, которые статью видят. Отсюда и отдельная подпись, и
+       стрелка вместо пера — та же, что у перемещённого раздела. */
+    'article.move': { label: 'Статья перемещена', tone: CHANGED, icon: ArrowRightLeft },
     'article.fork': { label: 'Сделана копия статьи', tone: CREATED, icon: Copy },
     'article.import': { label: 'Загружен файл', tone: CHANGED, icon: FileDown },
     'article.ai_draft': { label: 'Черновик статьи от ИИ', tone: CHANGED, icon: Sparkles },
@@ -240,6 +244,7 @@ const CONSUMED = {
     'article.create': ['status'],
     'article.restore': ['version_id'],
     'article.adopt': ['section_id', 'section_name', 'already_there'],
+    'article.move': ['section_id', 'section_name', 'from_section_id', 'from_section_name'],
     'article.fork': ['section_id', 'section_name', 'source_article_id'],
     'article.import': ['file', 'kind', 'images'],
     'article.ai_draft': ['file', 'kind', 'tables', 'warnings', 'model'],
@@ -452,6 +457,15 @@ export function auditFacts(item, nameOf = null) {
         case 'article.adopt':
             if (details.section_name) facts.push(`в раздел «${details.section_name}»`);
             if (details.already_there) facts.push('статья уже была там');
+            break;
+        /* «Откуда» — первое, что спрашивают у этой записи: ищут её вопросом
+           «кто увёз регламент из моего раздела». У статьи вне дерева источника
+           нет вовсе, и выдумывать его нельзя. */
+        case 'article.move':
+            facts.push(details.from_section_name
+                ? `из «${details.from_section_name}»`
+                : 'из статей без раздела');
+            if (details.section_name) facts.push(`в «${details.section_name}»`);
             break;
         case 'article.fork':
             if (details.section_name) facts.push(`в раздел «${details.section_name}»`);

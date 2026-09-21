@@ -38,6 +38,7 @@
     "test:wiki-index-panel": "node --test tests/wiki_index_panel_published.test.mjs",
     "test:wiki-article-index": "node --test tests/wiki_article_index.test.mjs",
     "test:wiki-catalog-all": "node --test tests/wiki_catalog_all.test.mjs",
+    "test:wiki-article-move": "node --test tests/wiki_article_move.test.mjs",
     "test:wiki-copy-guard": "node --test tests/wiki_copy_guard.test.mjs",
   "test:wiki-section-grants": "node --test tests/wiki_section_grants.test.mjs",
   "test:wiki-section-access": "node --test tests/wiki_section_access_render.test.mjs",

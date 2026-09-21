@@ -245,6 +245,101 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                            ip_address=log_ip())
         return jsonify({"id": new_id, "slug": slug, "source_article_id": article_id}), 201
 
+    # ── Перенос статьи между разделами ───────────────────────────────────
+    #
+    # Отдельная дверь рядом с PATCH /articles/<id>, и не ради удобства.
+    #
+    # PATCH принимает ВЕСЬ набор разделов статьи, то есть заставляет клиента
+    # посчитать его самому: «взять текущие, убрать один, добавить другой».
+    # Список на экране к этому моменту успевает устареть — wiki_article_sections
+    # правят и заимствование (adopt), и редактор, и импорт, — и статья, которую
+    # коллега минуту назад подключил к своей ветке, отвязалась бы заодно, молча
+    # и без следа в журнале. Здесь клиент называет только ДВА раздела, а набор
+    # считает сервер по своей же строке (wiki_edit.move_section).
+    #
+    # Второе, что даёт отдельная дверь, — журнал. PATCH пишет
+    # article.update с перечнем ИЗМЕНЁННЫХ ПОЛЕЙ, а при переносе не меняется ни
+    # одно: запись выходила «Изменена статья» без единой подробности, и на
+    # вопрос «кто увёз регламент из моего раздела» журнал молчал.
+    @wiki_route('/articles/<int:article_id>/move', methods=('POST',))
+    def wiki_article_move(cursor, ctx, article_id):
+        """Переложить статью из одного её раздела в другой.
+
+        Права спрашиваются на ОБА раздела, и это не перестраховка: забрать
+        статью из чужой ветки — то же распоряжение её содержимым, что и
+        положить. Ровно так же считает PATCH (симметричная разность в
+        _forbidden_sections), и расходиться этим двум дверям нельзя.
+        """
+        article, permissions, error = _load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+        if not permissions.get('can_edit'):
+            return jsonify({
+                "error": "Нет права править эту статью",
+                "code": "WIKI_FORBIDDEN", "required": "can_edit",
+            }), 403
+
+        data = _body()
+        target, error = _target_section(cursor, ctx, _int_or_none(data.get('to_section_id')))
+        if error:
+            return error
+
+        current = [int(s) for s in (article.get('section_ids') or ())]
+        source_id = _int_or_none(data.get('from_section_id'))
+
+        # Статья уже там. 409, а не молчаливое «ок»: перенос в раздел, где
+        # статья и так лежит, — это НЕ перенос, а отвязка от источника, и
+        # выполнить его под видом переноса значило бы сделать не то, о чём
+        # просили.
+        if target['id'] in current:
+            return jsonify({
+                "error": "Статья уже лежит в разделе «%s»" % target['name'],
+                "code": "WIKI_ALREADY_THERE",
+            }), 409
+
+        # Источник обязан совпадать с тем, что в базе СЕЙЧАС. Разошлись —
+        # значит статью уже переложили, пока человек смотрел на список, и
+        # честный ответ «обновите список», а не перенос по устаревшей картинке.
+        if source_id is None:
+            if current:
+                return jsonify({
+                    "error": "Статья уже привязана к разделу — обновите список",
+                    "code": "WIKI_SOURCE_CHANGED",
+                }), 409
+        elif source_id not in current:
+            return jsonify({
+                "error": "Статья больше не лежит в том разделе, из которого её переносят",
+                "code": "WIKI_SOURCE_CHANGED",
+            }), 409
+
+        source_name = None
+        if source_id is not None:
+            denied = _forbidden_sections(cursor, ctx, [source_id])
+            if denied:
+                return _section_forbidden(denied, 'забирать статьи из')
+            cursor.execute('SELECT name FROM wiki_sections WHERE id = %s', (source_id,))
+            row = cursor.fetchone()
+            source_name = row[0] if row else None
+
+        wiki_edit.move_section(cursor, article_id,
+                               from_section_id=source_id, to_section_id=target['id'])
+        # Индекс помощника зависит от разделов статьи: раздел решает, попадает
+        # ли она под отказ от ИИ и кому её вообще показывают (wiki/ai/index.py).
+        indexed = _sync_ai_index(cursor, article_id)
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='article.move',
+                           entity_type='article', entity_id=article_id,
+                           details={'title': article['title'],
+                                    'from_section_id': source_id,
+                                    'from_section_name': source_name,
+                                    'section_id': target['id'],
+                                    'section_name': target['name'],
+                                    'ai_index': indexed.get('action')},
+                           ip_address=log_ip())
+        return jsonify({"status": "moved", "id": article_id,
+                        "from_section_id": source_id,
+                        "section_id": target['id'],
+                        "section_name": target['name']})
+
     # ── Создание ─────────────────────────────────────────────────────────
     @wiki_route('/articles', methods=('POST',), capability='can_create')
     def wiki_article_create(cursor, ctx):
