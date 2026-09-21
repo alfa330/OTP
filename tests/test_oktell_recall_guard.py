@@ -850,6 +850,38 @@ def test_the_operator_can_update_himself():
         assert text in body, text
 
 
+def test_the_operator_on_the_line_can_reach_the_update():
+    """Тот, кто уже на линии, окна входа не видит ВООБЩЕ: сессия живёт 12 часов.
+    До метки в углу клиента обновиться ему было негде — оставались ярлык и
+    командная строка, то есть для человека на смене ничего."""
+    js = agent.build_version_badge_js("1.2.3")
+    assert "Oktell ' + data.version" in js
+    assert "position:fixed" in js
+    assert "s.update = true" in agent.build_version_badge_js("1.2.3").replace("state.update = true", "s.update = true")
+    # Флаг снимается сразу: иначе обновление запускалось бы по кругу.
+    assert "s.update = false" in agent.build_badge_request_js()
+    # И ответ приходит в ту же метку, по которой человек нажал.
+    assert "__oktell_guard_badge" in agent.build_badge_answer_js("готово")
+
+
+def test_the_badge_does_not_flicker():
+    """Метку ставим раз, дальше только меняем подпись: пересоздание на каждом
+    круге агента давало бы мигание поверх рабочего окна."""
+    js = agent.build_version_badge_js("1.2.3")
+    assert "if (!box) {" in js
+    assert "if (!state.busy) {" in js
+
+
+def test_status_never_touches_the_page():
+    """`--status` — диагностика. С правом чинить она перезагружала страницу
+    оператора, и правило теряло перехваченные сокеты ровно на том опросе,
+    которым его проверяли: десять вызовов подряд показали «сокетов 0», а прямое
+    чтение той же страницы — один."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_status("):source.index("def run_sign_out(")]
+    assert "ManagedBrowser(cfg, heal=False)" in body
+
+
 def test_the_update_result_goes_into_the_same_window():
     """Своё окно с сообщением вылезло бы ПОВЕРХ окна входа, которое и так на
     экране: два окна там, где хватает строки."""

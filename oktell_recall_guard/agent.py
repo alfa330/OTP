@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.26"
+VERSION = "1.0.27"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -2625,6 +2625,87 @@ def build_clear_violations_js(keys) -> str:
 """.strip()
 
 
+def build_version_badge_js(version: str, note: str = "") -> str:
+    """Номер версии уголком прямо в клиенте АТС, и он же — кнопка обновления.
+
+    Зачем в странице, а не окном. Оператор, который уже на линии, наше окно
+    входа не видит ВООБЩЕ: сессия живёт 12 часов, и до следующего утра ему
+    негде ни посмотреть версию, ни обновиться, если версия сломалась. Ярлык и
+    командная строка — не ответ: это рабочий человек на смене, а не админ.
+
+    Единственная поверхность, которая у него перед глазами всю смену, — сама
+    страница Oktell. Поэтому метка живёт здесь: маленькая, полупрозрачная, в
+    углу, всплывает под курсором. Клик просит обновление, ответ приходит в неё
+    же.
+
+    Идемпотентно: метку ставим один раз, дальше только обновляем подпись —
+    иначе она пересоздавалась бы на каждом круге агента и мигала.
+    """
+    payload = json.dumps({"version": str(version or ""), "note": str(note or "")},
+                         ensure_ascii=False)
+    return rf"""
+(function () {{
+  var data = {payload};
+  var ID = '__oktell_guard_badge';
+  var state = window.__oktellGuardBadge = window.__oktellGuardBadge || {{}};
+  var box = document.getElementById(ID);
+  if (!box) {{
+    box = document.createElement('div');
+    box.id = ID;
+    box.setAttribute('style', [
+      'position:fixed', 'right:10px', 'bottom:8px', 'z-index:2147483646',
+      'font:500 11px/1 -apple-system,Segoe UI,Roboto,Arial,sans-serif',
+      'color:#8e8e93', 'background:rgba(255,255,255,.72)',
+      'border:1px solid rgba(0,0,0,.08)', 'border-radius:999px',
+      'padding:5px 9px', 'cursor:pointer', 'user-select:none',
+      'backdrop-filter:blur(4px)', 'transition:opacity .15s', 'opacity:.55'
+    ].join(';'));
+    box.addEventListener('mouseenter', function () {{ box.style.opacity = '1'; }});
+    box.addEventListener('mouseleave', function () {{ box.style.opacity = '.55'; }});
+    box.addEventListener('click', function () {{
+      if (state.busy) {{ return; }}
+      state.busy = true;
+      state.update = true;
+      box.textContent = 'Проверяем обновление…';
+    }});
+    (document.body || document.documentElement).appendChild(box);
+  }}
+  // Подпись обновляем всегда: ею же агент отвечает на нажатие.
+  if (!state.busy) {{
+    box.textContent = data.note || ('Oktell ' + data.version);
+    box.title = 'Нажмите, чтобы проверить обновление';
+  }}
+  return true;
+}})();
+""".strip()
+
+
+def build_badge_request_js() -> str:
+    """Нажали ли на метку. Флаг снимаем сразу — иначе сработает по кругу."""
+    return """
+(function () {
+  var s = window.__oktellGuardBadge;
+  if (!s || !s.update) { return false; }
+  s.update = false;
+  return true;
+})();
+""".strip()
+
+
+def build_badge_answer_js(text: str) -> str:
+    """Ответ агента в ту же метку — человек нажал именно её."""
+    payload = json.dumps(str(text or ""), ensure_ascii=False)
+    return rf"""
+(function () {{
+  var state = window.__oktellGuardBadge || {{}};
+  state.busy = false;
+  var box = document.getElementById('__oktell_guard_badge');
+  if (box) {{ box.textContent = {payload}; }}
+  return true;
+}})();
+""".strip()
+
+
 def build_banner_js(message: str, seconds: int) -> str:
     """Предупреждение поверх страницы. Ставится в самом документе, потому что
     системный toast оператор в полноэкранном софтфоне не увидит."""
@@ -4115,6 +4196,35 @@ class ManagedBrowser:
         except Exception:  # noqa: BLE001
             logging.debug("Не удалось очистить отправленные нарушения", exc_info=True)
 
+    def show_version_badge(self, note: str = "") -> None:
+        """Поставить (или обновить) метку версии в углу клиента АТС."""
+        page = self.page()
+        if not page:
+            return
+        try:
+            page.evaluate(build_version_badge_js(VERSION, note))
+        except Exception:  # noqa: BLE001
+            logging.debug("Метка версии не поставилась", exc_info=True)
+
+    def badge_update_requested(self) -> bool:
+        """Нажали ли на метку версии."""
+        page = self.page()
+        if not page:
+            return False
+        try:
+            return bool(page.evaluate(build_badge_request_js()))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def badge_answer(self, text: str) -> None:
+        page = self.page()
+        if not page:
+            return
+        try:
+            page.evaluate(build_badge_answer_js(text))
+        except Exception:  # noqa: BLE001
+            logging.debug("Ответ в метку версии не показан", exc_info=True)
+
     def show_banner(self, message: str, seconds: int) -> bool:
         page = self.page()
         if not page:
@@ -4641,25 +4751,42 @@ def run_agent(cfg: dict) -> int:
             news_overlay.feedback(verdict)
         return True
 
-    def wait_for_next_round(seconds: float) -> None:
-        """Пауза до следующего круга, но с ухом на окне объявления.
+    def handle_badge_press() -> bool:
+        """Нажатие на метку версии в углу клиента АТС — «обновиться сейчас».
 
-        Спать целую минуту можно только когда на экране ничего не ждут ответа.
-        Пока объявление показано, режем сон на полсекунды и на каждой проверяем
-        нажатие: для человека это «нажал — ответили», а не «нажал — тишина».
+        Оператор, который уже на линии, окна входа не видит вовсе: сессия живёт
+        12 часов. До этой метки обновиться ему было НЕГДЕ — оставались ярлык и
+        командная строка, то есть ничего.
         """
-        if active_news is None:
-            time.sleep(seconds)
-            return
-        step = 0.5
+        if not browser.badge_update_requested():
+            return False
+        code = run_update_now(cfg, quiet=True)
+        browser.badge_answer({
+            0: "Обновились — перезапустите Oktell",
+            1: f"Oktell {VERSION} — последняя",
+            2: "Обновиться не вышло, сообщите в IT",
+        }.get(code, "Обновиться не вышло, сообщите в IT"))
+        return True
+
+    def wait_for_next_round(seconds: float) -> None:
+        """Пауза до следующего круга, но с ухом на странице.
+
+        Спать целую минуту нельзя: человек нажимает в окне объявления или на
+        метку версии и ждёт ответа. Пока объявление показано, режем сон на
+        полсекунды, в остальное время — на две: метка отвечает достаточно
+        быстро, а лишних обращений к вкладке это почти не добавляет.
+        """
         deadline = time.time() + seconds
         while time.time() < deadline:
+            step = 0.5 if active_news is not None else 2.0
             time.sleep(min(step, max(0.0, deadline - time.time())))
             try:
-                if handle_news_press() and active_news is None:
-                    # Подтвердили — дальше ждать нечего, идём на круг за
-                    # следующим объявлением очереди.
-                    return
+                if active_news is not None:
+                    if handle_news_press() and active_news is None:
+                        # Подтвердили — идём на круг за следующим объявлением.
+                        return
+                else:
+                    handle_badge_press()
             except Exception:  # noqa: BLE001 — разбор нажатия не должен ронять цикл
                 logging.debug("Разбор нажатия не удался", exc_info=True)
                 return
@@ -4823,6 +4950,11 @@ def run_agent(cfg: dict) -> int:
                                 training_set = False
 
                 handle_news_press()
+
+                # Метка версии в углу клиента — единственное место, где человек
+                # на смене видит номер версии и может обновиться.
+                if state.browser.get("session"):
+                    browser.show_version_badge()
 
                 if data:
                     server_interval = data.get("poll_interval_s")
@@ -5029,7 +5161,12 @@ def fill_oktell_login(browser: "ManagedBrowser", cfg: dict, wait_s: float = 20.0
 
 
 def run_status(cfg: dict) -> int:
-    browser = ManagedBrowser(cfg)
+    # heal=False, и это не мелочь. `--status` — ДИАГНОСТИКА, а с правом чинить
+    # она перезагружала страницу оператора: правило теряло перехваченные сокеты
+    # и слепло ровно на том опросе, которым его проверяли. 21.09.2026 десять
+    # вызовов подряд показали «сокетов 0», а прямое чтение той же страницы —
+    # один. Смотреть можно, трогать нельзя.
+    browser = ManagedBrowser(cfg, heal=False)
     identity = current_identity(cfg)
     state = AgentState(identity=identity)
     state.browser = browser.probe() if browser.is_debug_port_alive() else {}
