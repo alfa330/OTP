@@ -6,7 +6,7 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
-    AlertTriangle, Bold, Check, ChevronDown, ChevronRight, Download, Image as ImageIcon,
+    AlertTriangle, Bold, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Image as ImageIcon,
     Italic, Link2, List, ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus,
     Sparkles, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
@@ -422,6 +422,80 @@ function TrainerScreen({ value, onChange, onDone }) {
    шеврон. Значение справа ОБЯЗАТЕЛЬНО, и это не украшение: строка без него
    заставляет открыть экран только затем, чтобы вспомнить, что там выбрано, —
    то есть ровно тот лишний шаг, ради снятия которого настройки и свёрнуты. */
+/* ЛИСТАЛКА ЗНАЧЕНИЙ прямо в строке — «как галерея фоток» (решение владельца
+   21.09.2026): стрелки по краям, значение посередине, пролистал и выбрал.
+   Для двух-трёх вариантов это короче отдельного экрана: ответ виден сразу и
+   меняется одним нажатием, а не «открыть → выбрать → вернуться».
+   Как в галерее, на краях листалка останавливается, а не заворачивается по
+   кругу: «Информационная» после «Критичной» означала бы, что у списка нет ни
+   начала, ни конца, и найти нужное можно только наугад.
+   Пальцем листается тем же движением, что кадры, — стрелки на телефоне мелкие. */
+function PickerRow({ label, value, options, onChange, disabled = false,
+                    badge = null, ariaLabel, children = null }) {
+    const index = Math.max(0, options.findIndex((item) => item.value === value));
+    /* Откуда приезжает новое значение: вперёд — справа, назад — слева. Без
+       этого движение читается как мигание, а не как перелистывание. */
+    const [forward, setForward] = useState(true);
+    const touchX = useRef(null);
+
+    const step = (delta) => {
+        const next = index + delta;
+        if (disabled || next < 0 || next >= options.length) return;
+        setForward(delta > 0);
+        onChange(options[next].value);
+    };
+
+    const arrow = (delta, Icon, title) => (
+        <button
+            type="button"
+            onClick={() => step(delta)}
+            disabled={index + delta < 0 || index + delta >= options.length}
+            aria-label={title}
+            /* Стрелки на сером кружке, а не плоские: рядом в той же карточке
+               стоит шеврон «открыть экран», и два одинаковых значка означали бы
+               два разных действия. Кружок читается как кнопка. */
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-90 disabled:pointer-events-none disabled:opacity-30"
+        >
+            <Icon className="h-4 w-4" aria-hidden="true" />
+        </button>
+    );
+
+    return (
+        <div className="px-3.5 py-3">
+            <div className="flex items-center gap-3">
+                <span className="shrink-0 text-[14px] text-slate-900">{label}</span>
+                <div
+                    className="ml-auto flex shrink-0 items-center gap-0.5"
+                    role="group"
+                    aria-label={ariaLabel || label}
+                    onTouchStart={(e) => { touchX.current = e.touches[0]?.clientX ?? null; }}
+                    onTouchEnd={(e) => {
+                        if (touchX.current === null) return;
+                        const shift = (e.changedTouches[0]?.clientX ?? 0) - touchX.current;
+                        touchX.current = null;
+                        if (Math.abs(shift) > 36) step(shift < 0 ? 1 : -1);
+                    }}
+                >
+                    {!disabled && arrow(-1, ChevronLeft, 'Предыдущее значение')}
+                    {/* key по значению — чтобы анимация проигрывалась на КАЖДОМ
+                        переключении, а не один раз за жизнь строки. */}
+                    <span
+                        key={options[index]?.value}
+                        aria-live="polite"
+                        className={`min-w-[7.5rem] truncate text-center text-[13px] font-medium text-slate-900 ${
+                            disabled ? '' : (forward ? 'animate-push-in' : 'animate-pop-in')}`}
+                    >
+                        {options[index]?.label}
+                    </span>
+                    {!disabled && arrow(1, ChevronRight, 'Следующее значение')}
+                </div>
+                {badge}
+            </div>
+            {children}
+        </div>
+    );
+}
+
 function SettingRow({ label, value, muted = false, badge = null, onOpen }) {
     return (
         <button
@@ -883,9 +957,7 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
        не отвечает на вопрос «что я сейчас настраиваю». */
     const SCREEN_TITLES = {
         main: post?.id ? 'Новость' : 'Новая новость',
-        kind: 'Тип новости',
         audience: 'Кому',
-        channel: 'Куда отправить',
         passes: 'Тест и тренажёр',
         trainer: 'Тренажёр к новости',
         schedule: 'Публикация и показ',
@@ -1110,72 +1182,161 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                             </div>
 
                             <div className={`${iosCard} mt-4 divide-y divide-slate-100`}>
-                                <SettingRow label="Тип" value={kindLabel}
-                                            onOpen={() => push('kind')} />
+                                {/* Тип листается прямо здесь: вариантов три, и
+                                    отдельный экран ради них был бы шагом туда и
+                                    обратно. У выпущенной новости стрелок нет —
+                                    тип заперт сервером (NEWS_KIND_LOCKED), и
+                                    показывать переключатель, который только
+                                    откажет, хуже, чем не показывать его. */}
+                                <PickerRow
+                                    label="Тип"
+                                    value={kind}
+                                    options={NEWS_KINDS.map(({ value, label }) => ({ value, label }))}
+                                    onChange={setKind}
+                                    disabled={quizLocked}
+                                    ariaLabel="Тип новости"
+                                >
+                                    {/* Одна строка под выбором — что он меняет. Это не
+                                        пересказ кнопки: сам по себе «Важная» не говорит,
+                                        чем она важнее. Остальное про тип — за «i». */}
+                                    <p className="mt-2 flex items-start gap-1.5 text-[12px] text-slate-500">
+                                        <span className="min-w-0">
+                                            {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).note}
+                                        </span>
+                                        <IosHint
+                                            label="Чем различаются типы"
+                                            text="Информационная — окно закрывается крестиком, подтверждение и тест по желанию. Важная — окно закрывается только кнопкой «Прочитал», тест прикрепляется по желанию. Критичная — тест обязателен, и пока он не сдан, окно не закрыть и работу продолжить нельзя. Тип опубликованной новости не меняется."
+                                        />
+                                    </p>
+                                </PickerRow>
                                 <SettingRow label="Кому" value={audienceSummary}
                                             muted={!audience.length}
                                             onOpen={() => push('audience')} />
+                                {/* Строки нет вовсе, когда канал один: в «Тез»
+                                    программы Oktell нет, и листалка с единственным
+                                    значением была бы вопросом без выбора. */}
                                 {channelOptions.length > 1 && (
-                                    <SettingRow
+                                    <PickerRow
                                         label="Куда отправить"
-                                        value={channelLabel}
-                                        /* Число на строке — то же предупреждение,
-                                           что и на экране канала: «троим не дойдёт»
-                                           надо знать ДО того, как откроешь экран. */
+                                        value={channel}
+                                        options={channelOptions}
+                                        onChange={setChannel}
+                                        disabled={channelLocked}
+                                        ariaLabel="Куда отправить объявление"
+                                        /* Предупреждение — РЯДОМ с листалкой, а не
+                                           строкой под карточкой: оно относится к
+                                           одному значению «Oktell», и отдельная
+                                           красная строка внизу читалась бы как
+                                           ошибка всей формы. Само число уже ответ:
+                                           «троим не дойдёт». */
                                         badge={sipMissing > 0 ? (
-                                            <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[12px] font-semibold tabular-nums text-amber-700 ring-1 ring-amber-200">
-                                                {sipMissing}
-                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setSipOpen((value) => !value)}
+                                                aria-expanded={sipOpen}
+                                                aria-label="Кто не увидит объявление в Oktell"
+                                                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-amber-50 pl-2.5 pr-2 text-[12.5px] font-semibold text-amber-700 ring-1 ring-amber-200 transition hover:bg-amber-100 active:scale-[0.97]"
+                                            >
+                                                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                                <span className="tabular-nums">{sipMissing}</span>
+                                                <ChevronDown
+                                                    className={`h-3.5 w-3.5 transition-transform duration-300 ${
+                                                        sipOpen ? 'rotate-180' : ''}`}
+                                                    aria-hidden="true"
+                                                />
+                                            </button>
                                         ) : null}
-                                        onOpen={() => push('channel')}
-                                    />
+                                    >
+                                        <p className="mt-2 flex items-start gap-1.5 text-[12px] text-slate-500">
+                                            <span className="min-w-0">
+                                                {channel === 'oktell'
+                                                    ? 'Окно поверх клиента АТС — только тем, у кого он установлен'
+                                                    : 'Окно «Новость дня» в портале — всем, кому адресована'}
+                                            </span>
+                                            <IosHint
+                                                label="Чем iCORE отличается от Oktell"
+                                                text="iCORE — окно «Новость дня» в портале: его видит каждый, кому новость адресована. Oktell — окно поверх клиента АТС, его рисует программа «Ограничитель Перезвона» и на время чтения снимает оператора с линии; увидят только те, у кого программа установлена. Необязательное объявление в клиент АТС не уходит вовсе. У опубликованной новости канал не меняется."
+                                            />
+                                        </p>
+                                    {/* Раскрытие СЕТКОЙ 0fr → 1fr, а не max-height с числом:
+                                        высота считается по содержимому, поэтому список из трёх
+                                        имён и из тридцати раскрываются одинаково плавно и без
+                                        рывка в конце, каким заканчивается всякий подобранный
+                                        на глаз максимум. */}
+                                    <div
+                                        className={`grid transition-all duration-300 ease-out ${
+                                            sipOpen ? 'mt-2.5 grid-rows-[1fr] opacity-100'
+                                                    : 'grid-rows-[0fr] opacity-0'}`}
+                                    >
+                                        <div className="overflow-hidden">
+                                            <div className="rounded-2xl bg-amber-50/70 px-3.5 py-3 ring-1 ring-amber-200/70">
+                                                {/* У ОДНОГО человека имя стоит прямо в заголовке, а
+                                                    списка нет вовсе: перечень из одной строки под
+                                                    фразой «без номера — 1 из 24» повторял бы сам себя.
+                                                    Дальше сразу инструкция — за ней сюда и пришли. */}
+                                                <p className="text-[13px] font-semibold text-amber-900">
+                                                    {sipOnly
+                                                        ? `Без SIP-номера — ${sipOnly.name}`
+                                                        : `Без SIP-номера — ${sipMissing} из ${sipCheck?.checked || 0}`}
+                                                    {sipOnly && (
+                                                        <span className="font-normal text-amber-900/60">
+                                                            {' · '}
+                                                            {[roleTitle(sipOnly.role), sipOnly.department_name]
+                                                                .filter(Boolean).join(', ')}
+                                                        </span>
+                                                    )}
+                                                </p>
+                                                <p className="mt-0.5 text-[12px] leading-snug text-amber-900/70">
+                                                    Объявление в Oktell показывает программа поверх клиента
+                                                    АТС — тот, кто в АТС не заведён, его не увидит.
+                                                </p>
+                                                {/* Имена — списком с прокруткой: отдел из сорока
+                                                    человек иначе вытолкнул бы кнопки формы за экран. */}
+                                                {sipMissing > 1 && (
+                                                    <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1">
+                                                        {(sipCheck?.missing || []).map((person) => (
+                                                            <li key={person.user_id}
+                                                                className="flex items-baseline justify-between gap-3 text-[12.5px]">
+                                                                <span className="min-w-0 truncate text-amber-900">
+                                                                    {person.name}
+                                                                </span>
+                                                                <span className="shrink-0 text-amber-900/60">
+                                                                    {[roleTitle(person.role), person.department_name]
+                                                                        .filter(Boolean).join(' · ')}
+                                                                </span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                )}
+                                                {sipMissing > (sipCheck?.missing || []).length && (
+                                                    <p className="mt-1 text-[12px] text-amber-900/60">
+                                                        …и ещё {sipMissing - (sipCheck?.missing || []).length}
+                                                    </p>
+                                                )}
+                                                {/* Инструкция — шагами в том порядке, в каком их делают,
+                                                    и названиями, которые человек увидит на экране. */}
+                                                <div className="mt-2.5 border-t border-amber-200/70 pt-2 text-[12px] leading-relaxed text-amber-900/80">
+                                                    <p className="font-medium text-amber-900">Как добавить номер</p>
+                                                    <ol className="mt-1 list-decimal space-y-0.5 pl-4">
+                                                        <li>Меню слева → «Настройки SIP».</li>
+                                                        <li>Выберите отдел сотрудника и найдите его в списке.</li>
+                                                        <li>Впишите номер в поле «SIP-номер» и нажмите «Сохранить».</li>
+                                                    </ol>
+                                                    <p className="mt-1.5">
+                                                        Номер появится у человека сразу — новость можно
+                                                        отправлять в Oktell после этого.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    </PickerRow>
                                 )}
                                 <SettingRow label="Тест и тренажёр" value={passesSummary}
                                             muted={!quiz.length && !trainerKey}
                                             onOpen={() => push('passes')} />
                                 <SettingRow label="Публикация и показ" value={scheduleSummary}
                                             onOpen={() => push('schedule')} />
-                            </div>
-                        </>
-                    )}
-
-                    {screen === 'kind' && (
-                        <>
-                            <div className={`${iosCard} p-3`}>
-                                {/* Сегментный контрол на всю ширину, а не строкой с подписью
-                                    справа: три слова «Информационная / Важная / Критичная» в
-                                    правой половине строки на телефоне не помещаются вовсе.
-
-                                    У выпущенной новости — строкой, как канал: тип решает и за
-                                    обязательность, и за обязательность прохождения, а обе у
-                                    неё заперты (сервер: NEWS_KIND_LOCKED). Показать
-                                    переключатель, который только откажет, — хуже, чем не
-                                    показать его вовсе. */}
-                                {quizLocked ? (
-                                    <p className="text-[14px] text-slate-900">
-                                        {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).label}
-                                    </p>
-                                ) : (
-                                    <IosSegmented
-                                        value={kind}
-                                        options={NEWS_KINDS.map(({ value, label }) => ({ value, label }))}
-                                        onChange={setKind}
-                                        ariaLabel="Тип новости"
-                                        stretch
-                                    />
-                                )}
-                                {/* Одна строка под выбором — что он меняет. Это не пересказ
-                                    кнопки: сам по себе «Важная» не говорит, чем она важнее.
-                                    Остальное про тип — за «i», как и всюду в форме. */}
-                                <p className="mt-2 flex items-start gap-1.5 text-[12px] text-slate-500">
-                                    <span className="min-w-0">
-                                        {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).note}
-                                    </span>
-                                    <IosHint
-                                        label="Чем различаются типы"
-                                        text="Информационная — окно закрывается крестиком, подтверждение и тест по желанию. Важная — окно закрывается только кнопкой «Прочитал», тест прикрепляется по желанию. Критичная — тест обязателен, и пока он не сдан, окно не закрыть и работу продолжить нельзя. Тип опубликованной новости не меняется."
-                                    />
-                                </p>
                             </div>
                         </>
                     )}
@@ -1187,140 +1348,6 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                             onChange={setAudience}
                             spaceName={spaceName}
                         />
-                    )}
-
-                    {screen === 'channel' && (
-                        <>
-                            <div className={`${iosCard} divide-y divide-slate-100`}>
-                                {/* Куда отправить — ПЕРВОЙ строкой: это решение про то, где
-                                    человек вообще увидит объявление, и принимают его до
-                                    настроек самого показа. Строки нет вовсе, когда канал
-                                    один: в «Тез» программы Oktell нет, и переключатель с
-                                    единственной кнопкой был бы вопросом без выбора. */}
-                                {channelOptions.length > 1 && (
-                                    <div className="px-3.5 py-3">
-                                        <div className="flex items-center justify-between gap-3">
-                                            <p className="flex min-w-0 items-center gap-2 text-[14px] text-slate-900">
-                                                Куда отправить
-                                                <IosHint
-                                                    label="Чем iCORE отличается от Oktell"
-                                                    text="iCORE — окно «Новость дня» в портале: его видит каждый, кому новость адресована. Oktell — окно поверх клиента АТС, его рисует программа «Ограничитель Перезвона» и на время чтения снимает оператора с линии; увидят только те, у кого программа установлена. У опубликованной новости канал не меняется."
-                                                />
-                                            </p>
-                                            <div className="flex shrink-0 items-center gap-2">
-                                                {/* Предупреждение — РЯДОМ с переключателем, а не строкой
-                                                    под ним: оно относится к одной кнопке «Oktell», и
-                                                    отдельная красная строка внизу карточки читалась бы
-                                                    как ошибка всей формы. Само число на кнопке — уже
-                                                    ответ: «троим не дойдёт». */}
-                                                {sipMissing > 0 && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setSipOpen((value) => !value)}
-                                                        aria-expanded={sipOpen}
-                                                        aria-label="Кто не увидит объявление в Oktell"
-                                                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-amber-50 pl-2.5 pr-2 text-[12.5px] font-semibold text-amber-700 ring-1 ring-amber-200 transition hover:bg-amber-100 active:scale-[0.97]"
-                                                    >
-                                                        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                                                        <span className="tabular-nums">{sipMissing}</span>
-                                                        <ChevronDown
-                                                            className={`h-3.5 w-3.5 transition-transform duration-300 ${
-                                                                sipOpen ? 'rotate-180' : ''}`}
-                                                            aria-hidden="true"
-                                                        />
-                                                    </button>
-                                                )}
-                                                {channelLocked ? (
-                                                    <span className="text-[13px] text-slate-500">
-                                                        {(NEWS_CHANNELS.find((item) => item.value === channel)
-                                                          || NEWS_CHANNELS[0]).label}
-                                                    </span>
-                                                ) : (
-                                                    <IosSegmented
-                                                        value={channel}
-                                                        options={channelOptions}
-                                                        onChange={setChannel}
-                                                        ariaLabel="Куда отправить объявление"
-                                                    />
-                                                )}
-                                            </div>
-                                        </div>
-                                        {/* Раскрытие СЕТКОЙ 0fr → 1fr, а не max-height с числом:
-                                            высота считается по содержимому, поэтому список из трёх
-                                            имён и из тридцати раскрываются одинаково плавно и без
-                                            рывка в конце, каким заканчивается всякий подобранный
-                                            на глаз максимум. */}
-                                        <div
-                                            className={`grid transition-all duration-300 ease-out ${
-                                                sipOpen ? 'mt-2.5 grid-rows-[1fr] opacity-100'
-                                                        : 'grid-rows-[0fr] opacity-0'}`}
-                                        >
-                                            <div className="overflow-hidden">
-                                                <div className="rounded-2xl bg-amber-50/70 px-3.5 py-3 ring-1 ring-amber-200/70">
-                                                    {/* У ОДНОГО человека имя стоит прямо в заголовке, а
-                                                        списка нет вовсе: перечень из одной строки под
-                                                        фразой «без номера — 1 из 24» повторял бы сам себя.
-                                                        Дальше сразу инструкция — за ней сюда и пришли. */}
-                                                    <p className="text-[13px] font-semibold text-amber-900">
-                                                        {sipOnly
-                                                            ? `Без SIP-номера — ${sipOnly.name}`
-                                                            : `Без SIP-номера — ${sipMissing} из ${sipCheck?.checked || 0}`}
-                                                        {sipOnly && (
-                                                            <span className="font-normal text-amber-900/60">
-                                                                {' · '}
-                                                                {[roleTitle(sipOnly.role), sipOnly.department_name]
-                                                                    .filter(Boolean).join(', ')}
-                                                            </span>
-                                                        )}
-                                                    </p>
-                                                    <p className="mt-0.5 text-[12px] leading-snug text-amber-900/70">
-                                                        Объявление в Oktell показывает программа поверх клиента
-                                                        АТС — тот, кто в АТС не заведён, его не увидит.
-                                                    </p>
-                                                    {/* Имена — списком с прокруткой: отдел из сорока
-                                                        человек иначе вытолкнул бы кнопки формы за экран. */}
-                                                    {sipMissing > 1 && (
-                                                        <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1">
-                                                            {(sipCheck?.missing || []).map((person) => (
-                                                                <li key={person.user_id}
-                                                                    className="flex items-baseline justify-between gap-3 text-[12.5px]">
-                                                                    <span className="min-w-0 truncate text-amber-900">
-                                                                        {person.name}
-                                                                    </span>
-                                                                    <span className="shrink-0 text-amber-900/60">
-                                                                        {[roleTitle(person.role), person.department_name]
-                                                                            .filter(Boolean).join(' · ')}
-                                                                    </span>
-                                                                </li>
-                                                            ))}
-                                                        </ul>
-                                                    )}
-                                                    {sipMissing > (sipCheck?.missing || []).length && (
-                                                        <p className="mt-1 text-[12px] text-amber-900/60">
-                                                            …и ещё {sipMissing - (sipCheck?.missing || []).length}
-                                                        </p>
-                                                    )}
-                                                    {/* Инструкция — шагами в том порядке, в каком их делают,
-                                                        и названиями, которые человек увидит на экране. */}
-                                                    <div className="mt-2.5 border-t border-amber-200/70 pt-2 text-[12px] leading-relaxed text-amber-900/80">
-                                                        <p className="font-medium text-amber-900">Как добавить номер</p>
-                                                        <ol className="mt-1 list-decimal space-y-0.5 pl-4">
-                                                            <li>Меню слева → «Настройки SIP».</li>
-                                                            <li>Выберите отдел сотрудника и найдите его в списке.</li>
-                                                            <li>Впишите номер в поле «SIP-номер» и нажмите «Сохранить».</li>
-                                                        </ol>
-                                                        <p className="mt-1.5">
-                                                            Номер появится у человека сразу — новость можно
-                                                            отправлять в Oktell после этого.
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </>
                     )}
 
                     {screen === 'passes' && (

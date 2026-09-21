@@ -1621,7 +1621,8 @@ class NewsChannelTests(unittest.TestCase):
         self.assertIn('            channel,', form)
         self.assertIn("setChannel(post?.channel || NEWS_CHANNELS[0].value)", form)
         self.assertIn('const channelLocked = quizLocked;', form)
-        self.assertIn('{channelLocked ? (', form)
+        # У выпущенной новости канал не листается: сервер его всё равно не примет.
+        self.assertIn('disabled={channelLocked}', form)
 
 
 class NewsExpiryTests(unittest.TestCase):
@@ -1792,20 +1793,22 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         """Предупреждение относится к одной кнопке «Oktell»: отдельная красная
         строка внизу карточки читалась бы как ошибка всей формы."""
         form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
-        row = form[form.index("{screen === 'channel' && ("):]
-        row = row[:row.index("{screen === 'passes' && (")]
-        self.assertIn('sipMissing > 0 && (', row)
+        row = form[form.index('label="Куда отправить"'):]
+        row = row[:row.index('</PickerRow>')]
+        self.assertIn('badge={sipMissing > 0 ? (', row)
         self.assertIn('aria-label="Кто не увидит объявление в Oktell"', row)
-        self.assertIn('<IosSegmented', row)
         self.assertIn('aria-expanded={sipOpen}', row)
+        # Листалка значений — тот самый «переключатель», рядом с которым стоит
+        # предупреждение (решение владельца 21.09.2026: выбирать пролистыванием).
+        self.assertIn('options={channelOptions}', row)
 
     def test_the_panel_opens_smoothly_and_without_a_second_modal(self):
         """Вторая модалка поверх формы — это два окна об одной новости.
         Плавность даёт сетка 0fr → 1fr: высота считается по содержимому, и три
         имени раскрываются так же ровно, как тридцать."""
         form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
-        row = form[form.index("{screen === 'channel' && ("):]
-        row = row[:row.index("{screen === 'passes' && (")]
+        row = form[form.index('label="Куда отправить"'):]
+        row = row[:row.index('</PickerRow>')]
         self.assertIn('grid transition-all duration-300 ease-out', row)
         self.assertIn('grid-rows-[1fr]', row)
         self.assertIn('grid-rows-[0fr]', row)
@@ -1841,6 +1844,33 @@ class NewsOktellSipWarningTests(unittest.TestCase):
                       'label="Тест и тренажёр"', 'label="Публикация и показ"'):
             self.assertIn(label, form, label)
         self.assertIn('function SettingRow(', code)
+
+    def test_short_lists_are_flipped_in_place_not_on_a_screen(self):
+        """Решение владельца 21.09.2026: «тип новости и кнопку куда отправить
+        сделать как в айос со стрелками, чтобы там же просто пролистывать и
+        выбрать, то есть это как галерея фоток».
+
+        У типа три значения, у канала два — отдельный экран ради них был бы
+        шагом туда и обратно. Как в галерее, листалка останавливается на краях:
+        «Информационная» после «Критичной» означала бы список без начала и
+        конца.
+        """
+        code = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        form = code[code.index('function NewsForm('):code.index('function NewsReport(')]
+        self.assertIn('function PickerRow(', code)
+        # Обе короткие настройки — листалки, и своих экранов у них больше нет.
+        self.assertEqual(form.count('<PickerRow'), 2)
+        for gone in ("push('kind')", "push('channel')", "screen === 'kind'",
+                     "screen === 'channel'"):
+            self.assertNotIn(gone, form, gone)
+        picker = code[code.index('function PickerRow('):code.index('function SettingRow(')]
+        # Края не заворачиваются по кругу.
+        self.assertIn('if (disabled || next < 0 || next >= options.length) return;', picker)
+        # Пальцем листается тем же движением, что кадры в галерее.
+        self.assertIn('onTouchStart', picker)
+        self.assertIn('onTouchEnd', picker)
+        # Значение приезжает с той стороны, в которую листают.
+        self.assertIn("forward ? 'animate-push-in' : 'animate-pop-in'", picker)
 
     def test_one_person_gets_the_instruction_not_a_list(self):
         """«Если один сотрудник — просто инструкция, как добавить номер»:
