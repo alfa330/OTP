@@ -1804,17 +1804,30 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
                    NULL::timestamp AS last_at
              WHERE FALSE""") + """
         ),
-        -- Выходил ли человек на смену ПОСЛЕ публикации. Нужно единственному
-        -- статусу — «не выходил на смену после публикации» (ТЗ п.11.2), и
-        -- только когда источник по этому кругу людей вообще отвечает: молчит —
-        -- значит человек просто не открывал объявление, а не прогулял.
-        worked AS (
-            SELECT DISTINCT h.operator_id AS user_id
+        -- Часы человека вокруг публикации. Нужны единственному статусу — «не
+        -- выходил на смену после публикации» (ТЗ п.11.2), и он требует ДВУХ
+        -- ответов, а не одного.
+        --
+        -- ПОЧЕМУ ДВУХ. Учёт часов ведётся не по всей компании: у фронт-офисов,
+        -- маркетинга, бухгалтерии и HR в daily_hours нет ни строки, да и внутри
+        -- отдела часы есть не у каждого. По одному «нет часов после публикации»
+        -- мы приписали бы прогул человеку, чьи смены просто нигде не считают, —
+        -- а это обвинение, и оно попадёт в выгрузку.
+        --
+        -- Поэтому отдельно спрашиваем, ЗНАЕТ ли источник этого человека вообще
+        -- (есть ли у него часы до публикации). Не знает — статус остаётся «не
+        -- открывал объявление». Окно в 60 дней ограничивает просмотр: таблица
+        -- большая, а «ведут ли ему часы» за два месяца видно наверняка.
+        hours AS (
+            SELECT h.operator_id                                  AS user_id,
+                   BOOL_OR(h.day >= p.published_at::date)         AS worked_after,
+                   BOOL_OR(h.day <  p.published_at::date)         AS worked_before
               FROM daily_hours h
               JOIN news_posts p ON p.id = %(post_id)s
              WHERE p.published_at IS NOT NULL
-               AND h.day >= p.published_at::date
                AND h.work_time > 0
+               AND h.day >= p.published_at::date - 60
+             GROUP BY h.operator_id
         )
         SELECT COALESCE(a.id, u.id)                AS user_id,
                COALESCE(a.name, u.name)            AS name,
@@ -1825,15 +1838,16 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
                r.quiz_passed_at, r.trainer_passed_at,
                {wave_no}, {wave_planned}, {wave_activated},
                COALESCE(t.tries, 0), t.last_correct, t.last_total, t.last_at,
-               (wk.user_id IS NOT NULL) AS worked_after
+               COALESCE(hh.worked_after, FALSE),
+               (hh.user_id IS NOT NULL)
           FROM addressed a
           FULL JOIN reads r ON r.user_id = a.id
           LEFT JOIN users u ON u.id = r.user_id
           LEFT JOIN departments d ON d.id = u.department_id
           LEFT JOIN attempts t  ON t.user_id = COALESCE(a.id, r.user_id)
-          -- Псевдоним wk, а не w: буква w уже занята расписанием волн, и
-          -- Postgres отвечает на это «table name "w" specified more than once».
-          LEFT JOIN worked   wk ON wk.user_id = COALESCE(a.id, r.user_id)
+          -- Псевдоним hh, а не h: буква h занята таблицей часов внутри CTE, а
+          -- w — расписанием волн («table name specified more than once»).
+          LEFT JOIN hours    hh ON hh.user_id = COALESCE(a.id, r.user_id)
           {wave_join}
          WHERE COALESCE(a.id, r.user_id) IS NOT NULL
          ORDER BY (r.confirmed_at IS NULL) DESC, COALESCE(a.name, u.name)
@@ -1882,6 +1896,9 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
         'last_attempt_at': row[15].isoformat() if row[15] else None,
         # Был ли на смене после публикации — только для статуса «не выходил».
         'worked_after': bool(row[16]),
+        # Ведут ли этому человеку часы вообще. Без этого «не выходил на смену»
+        # превращается в обвинение по отсутствию данных.
+        'attendance_tracked': bool(row[17]),
     } for row in cursor.fetchall()]
 
 

@@ -2277,8 +2277,14 @@ class NewsReportTests(unittest.TestCase):
                                           quiz_passed_at=None, attendance_known=False,
                                           worked_after=False)
         self.assertEqual(blind, 'not_seen')
+        # Знание ПЕРСОНАЛЬНОЕ: часы ведут не во всех отделах (у фронт-офисов,
+        # маркетинга, бухгалтерии и HR в daily_hours нет ни строки) и не
+        # каждому человеку внутри отдела.
         routes = _code_only(_read('news', 'routes.py'))
-        self.assertIn("attendance_known = any(row['worked_after'] for row in rows)", routes)
+        self.assertIn("attendance_known=row['attendance_tracked']", routes)
+        hours = _function_code(_read('news', 'queries.py'), 'read_report')
+        self.assertIn('worked_before', hours)
+        self.assertIn("'attendance_tracked': bool(", hours)
 
     def test_the_summary_counts_only_the_current_audience(self):
         rows = [self._row(confirmed_at='t', quiz_passed_at='t', attempts=1, status='passed'),

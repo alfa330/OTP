@@ -1464,16 +1464,16 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                    with_attempts=_attempts_ready(cursor))
         has_quiz = bool(_quiz_ready(cursor)
                         and queries.quiz_answer_key(cursor, post['id']))
-        # Источник посещаемости отвечает, только если хоть у кого-то из круга
-        # есть часы после публикации. Молчит — «не выходил на смену» не
-        # говорим: обвинять в прогуле по отсутствию данных нельзя.
-        attendance_known = any(row['worked_after'] for row in rows)
+        # «Не выходил на смену» говорим только про того, чьи часы вообще ведут
+        # (queries.read_report: CTE hours). Учёт есть не у всех отделов и не у
+        # каждого человека, и по одному «часов после публикации нет» мы
+        # приписали бы прогул тому, чьи смены просто нигде не считают.
         for row in rows:
             row['status'] = news_access.person_status(
                 has_quiz=has_quiz, shown_at=row['shown_at'],
                 confirmed_at=row['confirmed_at'], quiz_passed_at=row['quiz_passed_at'],
                 attempts=row['attempts'], worked_after=row['worked_after'],
-                attendance_known=attendance_known)
+                attendance_known=row['attendance_tracked'])
         summary = news_access.report_summary(
             rows, has_quiz=has_quiz, has_trainer=bool(post.get('trainer_key')))
         questions = (queries.question_mistakes(cursor, post['id'])
