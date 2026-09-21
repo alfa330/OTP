@@ -39,6 +39,7 @@ Oktell и результат исполнения команды.
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import hashlib
 import json
@@ -63,7 +64,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.28"
+VERSION = "1.0.31"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -446,6 +447,34 @@ def icore_login(cfg: dict, login: str, password: str) -> dict:
     if response.status_code == 401:
         return {"error": "Неправильный логин или пароль"}
     return {"error": f"Ошибка входа (код {response.status_code})"}
+
+
+def access_expires_at(session: dict) -> Optional[float]:
+    """Когда истекает access-токен. None — прочитать не вышло.
+
+    Читаем срок из самого токена (JWT, поле `exp`), а не гадаем по часам: у
+    сервера свой срок жизни, и зашитая в агента цифра однажды разойдётся с ним.
+    Подпись не проверяем и проверять не должны — это не доверие к токену, а
+    вопрос «не пора ли обновиться».
+    """
+    token = str((session or {}).get("access_token") or "")
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        body = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(body).decode("utf-8"))
+        return float(payload.get("exp"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def access_is_expiring(session: dict, skew_s: float = 120.0) -> bool:
+    """Пора ли обновлять access. True и когда срок прочитать не удалось."""
+    expires = access_expires_at(session)
+    if expires is None:
+        return False
+    return (time.time() + max(0.0, skew_s)) >= expires
 
 
 def icore_refresh(cfg: dict, session: dict) -> dict:
@@ -4512,6 +4541,9 @@ class ServerLink:
 
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
+        # Жалуемся на «не узнаю» ОДИН раз: иначе минутный круг превратит лог в
+        # сплошную стену из одной и той же строки.
+        self._unknown_reported = False
         self.set_operator_session(session or {})
 
     def set_operator_session(self, session: dict) -> None:
@@ -4542,7 +4574,18 @@ class ServerLink:
         return True
 
     def _request(self, method: str, url: str, **kwargs):
-        """Запрос с одной попыткой обновить сессию на 401."""
+        """Запрос с обновлением сессии ЗАРАНЕЕ и повтором на 401.
+
+        Заранее — это и есть главное. Access живёт полчаса, а обновлялись мы
+        только по 401. Но наши ручки на неузнанного отвечают не 401: `/news`
+        честно говорит «объявлений для тебя нет», `/config` — настройки без
+        учётки кабинета. То есть через полчаса после входа агент тихо становился
+        анонимным и объявлений не получал ВООБЩЕ до следующего входа, а это ещё
+        двенадцать часов. Ровно так 21.09.2026 потерялось объявление #26:
+        токен истёк в 10:09, объявление вышло в 10:31.
+        """
+        if self.operator_session and access_is_expiring(self.operator_session):
+            self._refresh_operator_session()
         response = self._session.request(method, url, timeout=self.timeout,
                                          verify=self.verify, **kwargs)
         if response.status_code == 401 and self._refresh_operator_session():
@@ -4576,7 +4619,24 @@ class ServerLink:
             response = self._request("GET", url)
             response.raise_for_status()
             data = response.json()
-            return data if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return None
+            # «Не узнаю тебя» при живой у нас сессии — это протухший access, а
+            # не «объявлений нет». Отличить их снаружи нечем: ответ одинаковый.
+            if not data.get("known_operator") and self.operator_session:
+                if not self._unknown_reported:
+                    self._unknown_reported = True
+                    logging.warning("Сервер не узнаёт оператора — обновляю сессию")
+                if self._refresh_operator_session():
+                    response = self._request("GET", url)
+                    response.raise_for_status()
+                    again = response.json()
+                    if isinstance(again, dict):
+                        self._unknown_reported = not again.get("known_operator")
+                        return again
+            else:
+                self._unknown_reported = False
+            return data
         except Exception:  # noqa: BLE001
             logging.debug("Объявления не получены", exc_info=True)
             return None
@@ -4752,6 +4812,8 @@ def run_agent(cfg: dict) -> int:
             news_overlay.feedback(verdict)
         return True
 
+    stop_after_update = False              # обновились по нажатию — пора уходить
+
     def handle_badge_press() -> bool:
         """Нажатие на метку версии в углу клиента АТС — «обновиться сейчас».
 
@@ -4761,12 +4823,16 @@ def run_agent(cfg: dict) -> int:
         """
         if not browser.badge_update_requested():
             return False
+        nonlocal stop_after_update
         code = run_update_now(cfg, quiet=True)
         browser.badge_answer({
             0: "Обновились — перезапустите Oktell",
             1: f"Oktell {VERSION} — последняя",
             2: "Обновиться не вышло, сообщите в IT",
         }.get(code, "Обновиться не вышло, сообщите в IT"))
+        # Обновились — этот процесс дальше не работник: он держит в памяти
+        # прежний код. Уходим, дальше сторож поднимет уже новую копию.
+        stop_after_update = code == 0
         return True
 
     def wait_for_next_round(seconds: float) -> None:
@@ -4788,6 +4854,8 @@ def run_agent(cfg: dict) -> int:
                         return
                 else:
                     handle_badge_press()
+                    if stop_after_update:
+                        return
             except Exception:  # noqa: BLE001 — разбор нажатия не должен ронять цикл
                 logging.debug("Разбор нажатия не удался", exc_info=True)
                 return
@@ -4985,6 +5053,9 @@ def run_agent(cfg: dict) -> int:
                         logging.info("Команда %s (%s) → %s", command_id, command.get("type"), report.get("status"))
 
                 wait_for_next_round(poll_s)
+                if stop_after_update:
+                    logging.info("Завершаюсь после ручного обновления: работу продолжит новая копия")
+                    return 0
             except KeyboardInterrupt:
                 logging.info("Агент остановлен с клавиатуры")
                 return 0
@@ -5257,6 +5328,13 @@ def run_update_now(cfg: dict, quiet: bool = False) -> int:
         return 1
 
     downloaded = download_update(cfg, manifest)
+    # Старые копии гасим ДО подмены, а не после. Прошлое обновление переименовало
+    # работающий exe в *.old.exe и оставило их жить из него — следующее уже не
+    # смогло этот файл удалить («Отказано в доступе»), а до того агент 1.0.28
+    # продолжал крутиться при 1.0.29 на диске: на экране версия новая, в памяти
+    # старая. Свой процесс и родителя _stop_installed_copies не трогает.
+    if downloaded:
+        _stop_installed_copies(installed_path())
     if not downloaded or not apply_update(downloaded):
         logging.error("Обновление до %s не установилось", remote)
         if not quiet:

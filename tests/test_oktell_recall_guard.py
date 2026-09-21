@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -722,6 +723,44 @@ def test_silent_mode_never_opens_the_login_window(tmp_path, monkeypatch):
     assert agent.ensure_session({"server_url": "http://x"}, ask=False) == {}
 
 
+def test_the_access_token_is_refreshed_before_it_dies():
+    """Access живёт полчаса, а обновлялись мы только по 401. Наши ручки на
+    неузнанного 401 не отдают: `/news` говорит «объявлений нет», `/config` —
+    настройки без учётки кабинета. Через полчаса после входа агент тихо
+    становился анонимным до следующего входа, то есть на двенадцать часов.
+    Так 21.09.2026 потерялось объявление: токен истёк в 10:09, объявление
+    вышло в 10:31."""
+    import base64
+    import json as _json
+
+    def token(exp):
+        head = base64.urlsafe_b64encode(b'{"alg":"HS256"}').decode().rstrip("=")
+        body = base64.urlsafe_b64encode(_json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        return f"{head}.{body}.signature"
+
+    now = time.time()
+    assert agent.access_is_expiring({"access_token": token(now + 30)}) is True
+    assert agent.access_is_expiring({"access_token": token(now + 3600)}) is False
+    # Срок не прочитался — не выдумываем: обновление по 401 всё равно сработает.
+    assert agent.access_is_expiring({"access_token": "не-jwt"}) is False
+    assert agent.access_is_expiring({}) is False
+
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("    def _request(self"):source.index("    def _url(self")]
+    assert "access_is_expiring(self.operator_session)" in body
+
+
+def test_an_unknown_operator_is_treated_as_a_stale_token():
+    """«Не узнаю тебя» при живой у нас сессии и «объявлений нет» — снаружи один
+    и тот же ответ. Различить их может только агент, у которого сессия есть."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("    def news(self)"):source.index("    def news_read(self")]
+    assert 'not data.get("known_operator") and self.operator_session' in body
+    assert "self._refresh_operator_session()" in body
+    # И жалуемся один раз: круг минутный, иначе лог станет стеной.
+    assert "self._unknown_reported" in body
+
+
 def test_a_network_hiccup_does_not_throw_the_operator_out(tmp_path, monkeypatch):
     """Сервер не ответил — это не «сессия истекла». Иначе одна потеря связи
     заставляла бы всю смену вводить пароль заново."""
@@ -891,6 +930,31 @@ def test_status_never_touches_the_page():
     source = Path(agent.__file__).read_text(encoding="utf-8")
     body = source[source.index("def run_status("):source.index("def run_sign_out(")]
     assert "ManagedBrowser(cfg, heal=False)" in body
+
+
+def test_a_manual_update_stops_the_old_copies():
+    """Подменить файл мало: старые агент и сторож держат в памяти прежний код и
+    работают дальше. На экране версия новая, работает старая — ровно так
+    21.09.2026 ручное обновление до 1.0.29 не починило ничего.
+
+    Гасим именно ПЕРЕИМЕНОВАННЫЙ файл: из него работают только старые копии, а
+    свежая уже запущена из нового и трогать её нельзя."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_update_now("):source.index("def run_sign_out(")]
+    assert "_stop_installed_copies(installed_path())" in body
+    # Порядок ОБРАТНЫЙ и это важно: погасить надо ДО подмены. Иначе старые копии
+    # держат переименованный *.old.exe, и следующее обновление не может его
+    # удалить — «Отказано в доступе».
+    assert body.index("_stop_installed_copies(") < body.index("apply_update(downloaded)")
+
+
+def test_the_agent_leaves_after_updating_itself():
+    """Обновившийся по нажатию агент держит в памяти ПРЕЖНИЙ код: на диске новая
+    версия, работает старая. Он обязан уйти, дальше сторож поднимет новую."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    loop = source.split("def run_agent", 1)[1]
+    assert "stop_after_update" in loop
+    assert "Завершаюсь после ручного обновления" in loop
 
 
 def test_the_update_result_goes_into_the_same_window():
