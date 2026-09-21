@@ -30,9 +30,12 @@ from . import access as news_access
 from . import photos as news_photos
 from . import queries
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
+                     MAX_SPREAD_MINUTES, MIN_SPREAD_MINUTES,
+                     MIN_WAVE_INTERVAL_MINUTES,
                      channel_ready as schema_channel_ready,
                      pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
+                     plan_ready as schema_plan_ready,
                      quiz_ready as schema_quiz_ready, schema_is_ready,
                      space_ready as schema_space_ready)
 
@@ -115,6 +118,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _pass_columns['ready']:
             _pass_columns['ready'] = schema_pass_ready(cursor)
         return _pass_columns['ready']
+
+    # Тип, проходной балл, планировщик и волны (ТЗ #300) — одной защёлкой и с
+    # тем же кэшем: её спрашивает /pending, то есть каждый вошедший в портал.
+    _plan_columns = {'ready': False}
+
+    def _plan_ready(cursor):
+        if not _plan_columns['ready']:
+            _plan_columns['ready'] = schema_plan_ready(cursor)
+        return _plan_columns['ready']
 
     # Граница пространства (решение владельца 18.09.2026). Тем же приёмом и по
     # той же причине, что кадры и тест, но с одной особенностью: половина
@@ -203,10 +215,11 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return channel, None
 
     def _get_post(cursor, post_id):
-        """Карточка с колонками #342, пространством и каналом, когда они есть."""
+        """Карточка с колонками #342, пространством, каналом и планом (#300)."""
         return queries.get_post(cursor, post_id, with_pass=_pass_ready(cursor),
                                 with_space=_space_ready(cursor),
-                                with_channel=_channel_ready(cursor))
+                                with_channel=_channel_ready(cursor),
+                                with_plan=_plan_ready(cursor))
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -492,6 +505,148 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                    "code": "NEWS_PASS_NOT_READY"}), 503)
         return {'pass_required': required, 'trainer_key': key}, None
 
+    def _moment_or_none(value):
+        """Время запуска из формы. Не разобрали — запуск не взводим.
+
+        СВОЙ разбор, а не _timestamp_or_none: тот считает полночь концом дня
+        (иначе «действует до 18.09» сгорало бы в начале суток), а «запустить
+        19.09 00:00» — это ровно полночь, и сдвинуть её на без секунды сутки
+        означало бы выпустить объявление на день позже, чем просили.
+        """
+        if not value:
+            return None
+        text = str(value).strip().replace('T', ' ')
+        if not text:
+            return None
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(text[:len(fmt) + 4], fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _plan_from_request(cursor, payload, post=None, publishing=False, has_quiz=False):
+        """(план, отказ): тип, проходной балл и режим запуска (ТЗ #300, п.4, 5, 8).
+
+        Ключа нет — берём прежнее значение карточки, как у тренажёра и
+        адресатов: правка одного поля не должна сносить остальные.
+
+        has_quiz — будет ли у новости тест ПОСЛЕ этого запроса. Им проверяется
+        критичный тип: критичная без теста — это важная, названная критичной.
+        """
+        current = post or {}
+        if 'kind' in payload:
+            kind = news_access.normalize_kind(payload.get('kind'))
+        elif current.get('kind'):
+            kind = news_access.normalize_kind(current['kind'])
+        else:
+            # Форма старого бандла про тип не знает. Выводим его из того, чем
+            # новость собрана, — тем же правилом, что и бэкфилл схемы, иначе
+            # объявление сменило бы тип от одного сохранения.
+            kind = news_access.kind_of(
+                is_mandatory=bool(payload.get('is_mandatory',
+                                              current.get('is_mandatory', True))),
+                pass_required=bool(payload.get('pass_required',
+                                               current.get('pass_required', True))),
+                has_quiz=has_quiz)
+        kind_problem = news_access.kind_refusal(kind, has_quiz=has_quiz)
+        if kind_problem:
+            return None, (jsonify({"error": kind_problem,
+                                   "code": "NEWS_KIND_NEEDS_QUIZ"}), 400)
+
+        mode = news_access.normalize_publish_mode(
+            payload.get('publish_mode', current.get('publish_mode')))
+        scheduled_at = (_moment_or_none(payload.get('scheduled_at'))
+                        if 'scheduled_at' in payload
+                        else _moment_or_none(current.get('scheduled_at')))
+        spread = _int_or_none(payload.get('spread_minutes',
+                                          current.get('spread_minutes')))
+        interval = _int_or_none(payload.get('wave_interval_minutes',
+                                            current.get('wave_interval_minutes')))
+        if mode == 'now':
+            # Запуск «сразу» ничего не взводит: оставить здесь прежнюю дату
+            # значило бы, что крон выпустит новость ВТОРОЙ раз. Этим же
+            # переключением автор и отменяет запланированный запуск.
+            scheduled_at, spread, interval = None, None, None
+        elif mode == 'later':
+            spread, interval = None, None
+        problem = news_access.schedule_refusal(
+            mode=mode, scheduled_at=scheduled_at, spread_minutes=spread,
+            wave_interval_minutes=interval, publishing=publishing)
+        if problem:
+            return None, (jsonify({"error": problem, "code": "NEWS_SCHEDULE"}), 400)
+        if (mode != 'now' or scheduled_at) and not _plan_ready(cursor):
+            # Прислали планировщик, а колонок нет: молча проглотить нельзя —
+            # автор решил бы, что запуск отложен, а объявление ушло бы сразу.
+            return None, (jsonify({"error": "Планировщик публикаций ещё разворачивается — "
+                                            "выпустите сразу или загляните позже",
+                                   "code": "NEWS_PLAN_NOT_READY"}), 503)
+        return {
+            'kind': kind,
+            'pass_score_percent': news_access.normalize_pass_score(
+                payload.get('pass_score_percent', current.get('pass_score_percent'))),
+            'publish_mode': mode,
+            'scheduled_at': scheduled_at,
+            'spread_minutes': spread,
+            'wave_interval_minutes': interval,
+        }, None
+
+    def _quiz_refusal(result):
+        """Ответ на непройденную попытку. Один на окно, ленту и клиент АТС.
+
+        КАКИЕ вопросы неверны, не называем (решение владельца 21.09.2026):
+        подсветка вернула бы подбор ответа переключением одного варианта. А вот
+        СКОЛЬКО верных и сколько нужно — говорим: при проходном балле ниже ста
+        «есть неверные ответы» не объясняет, почему тест не засчитан, хотя
+        часть ответов верна (ТЗ #300, п.4).
+        """
+        detail = result if isinstance(result, dict) else {}
+        total = int(detail.get('total') or 0)
+        needed = int(detail.get('needed') or 0)
+        correct = int(detail.get('correct') or 0)
+        if total and needed and needed < total:
+            message = ('Верных ответов %d из %d, нужно не меньше %d — '
+                       'перечитайте новость' % (correct, total, needed))
+        else:
+            message = 'Есть неверные ответы — перечитайте новость'
+        return {"error": message, "code": "NEWS_QUIZ_WRONG",
+                "correct": correct, "total": total, "needed": needed}
+
+    def _build_waves(cursor, post_id, plan, start_at):
+        """Разложить адресатов по волнам. Только для режима растяжки.
+
+        Считается В МОМЕНТ ВЫПУСКА, а не при взведении: между «запланировал в
+        понедельник» и «вышло в среду» люди приходят и уходят, и волны обязаны
+        быть про тех, кому объявление правда уходит сейчас.
+        """
+        user_ids = queries.audience_user_ids(cursor, post_id,
+                                             with_space=_space_ready(cursor))
+        queries.set_waves(cursor, post_id=post_id, plan=news_access.plan_waves(
+            user_ids=user_ids, start_at=start_at,
+            spread_minutes=plan.get('spread_minutes'),
+            wave_interval_minutes=plan.get('wave_interval_minutes')))
+
+    def _launch(cursor, post_id, plan, audience_max_role_level):
+        """Выпуск по плану. 'scheduled' — запуск взведён, 'published' — ушло.
+
+        Одна дверь на создание с публикацией и на кнопку «Опубликовать»: две
+        копии этого выбора разъехались бы ровно в том, чего не видно, — в том,
+        строятся ли волны.
+        """
+        moment = datetime.now()
+        start = plan.get('scheduled_at')
+        if plan.get('publish_mode') != 'now' and start and start > moment:
+            queries.schedule_post(cursor, post_id=post_id, scheduled_at=start,
+                                  audience_max_role_level=audience_max_role_level)
+            return 'scheduled'
+        # Растяжка «сразу» считается от ЭТОЙ минуты: первая волна открывается
+        # немедленно, остальные догоняют по расписанию.
+        if plan.get('publish_mode') == 'spread' and _plan_ready(cursor):
+            _build_waves(cursor, post_id, plan, start_at=moment)
+        queries.publish_post(cursor, post_id=post_id,
+                             audience_max_role_level=audience_max_role_level)
+        return 'published'
+
     def _set_photos_refusal(cursor, ctx, post_id, payload):
         """Привязка кадров, если форма их прислала. Строка отказа или None.
 
@@ -591,7 +746,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             cursor, news_id=post_id, user_id=ctx['user_id'],
             otp_role=ctx['otp_role'], subjects=ctx['subjects'],
             answers=payload.get('answers'), with_quiz=_quiz_ready(cursor),
-            with_pass=_pass_ready(cursor), with_space=_space_ready(cursor))
+            with_pass=_pass_ready(cursor), with_space=_space_ready(cursor),
+            with_plan=_plan_ready(cursor))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
         if status == 'trainer_pending':
@@ -607,8 +763,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # а подсказка «ошибка во втором» вернула бы подбор ответа
             # переключением одного варианта — при том что сеть у браузера
             # открыта любому.
-            return jsonify({"error": "Есть неверные ответы — перечитайте новость",
-                            "code": "NEWS_QUIZ_WRONG"}), 409
+            return jsonify(_quiz_refusal(detail)), 409
         return jsonify({"status": "ok"})
 
     @news_route('/<int:post_id>/quiz', methods=('POST',))
@@ -626,13 +781,12 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         status, detail = queries.pass_quiz(
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], answers=payload.get('answers'),
-            with_space=_space_ready(cursor))
+            with_space=_space_ready(cursor), with_plan=_plan_ready(cursor))
         if status in ('not_found', 'no_quiz'):
             return jsonify({"error": "Теста у этой новости нет"}), 404
         if status == 'quiz_wrong':
             # Вопросы с ошибкой не называем — как и у /read.
-            return jsonify({"error": "Есть неверные ответы — перечитайте новость",
-                            "code": "NEWS_QUIZ_WRONG"}), 409
+            return jsonify(_quiz_refusal(detail)), 409
         return jsonify({"status": "ok"})
 
     @news_route('/<int:post_id>/trainer', methods=('POST',))
@@ -648,7 +802,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             "code": "NEWS_PASS_NOT_READY"}), 503
         status, _detail = queries.mark_trainer_passed(
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            subjects=ctx['subjects'], with_space=_space_ready(cursor))
+            subjects=ctx['subjects'], with_space=_space_ready(cursor),
+            with_plan=_plan_ready(cursor))
         if status in ('not_found', 'no_trainer'):
             return jsonify({"error": "Тренажёра у этой новости нет"}), 404
         return jsonify({"status": "ok"})
@@ -668,6 +823,9 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             subjects=ctx['subjects'], limit=limit, offset=offset,
             with_photos=_photos_ready(cursor), with_quiz=_quiz_ready(cursor),
             with_pass=_pass_ready(cursor), with_space=_space_ready(cursor),
+            # Волна режет и ленту: раньше своей волны человек не должен
+            # увидеть объявление даже списком.
+            with_plan=_plan_ready(cursor),
             # Лента живёт во вкладке вики, и вкладка всегда открыта В
             # пространстве: «Новости» в «Тез» — это новости Тез.
             space_id=_request_space(cursor))
@@ -681,7 +839,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             cursor, news_id=post_id, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             subjects=ctx['subjects'], with_photos=with_photos,
             with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
-            with_space=_space_ready(cursor))
+            with_space=_space_ready(cursor), with_plan=_plan_ready(cursor))
         if post is None:
             return jsonify({"error": "Новость не найдена"}), 404
         post['photos'] = news_photos.sign_urls(gcs, post['photos']) if with_photos else []
@@ -712,6 +870,14 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "ceiling": ctx['ceiling'],
             "bounded": ctx['departments'] is not None,
             "default_confirm_delay_seconds": DEFAULT_CONFIRM_DELAY_SECONDS,
+            # Пределы планировщика и теста — ОТ СЕРВЕРА (ТЗ #300, п.4 и п.8).
+            # Форма рисует по ним поля и не держит своей копии чисел: копия
+            # разъехалась бы, и автор получал бы отказ на значение, которое ему
+            # только что предложили.
+            "plan_ready": _plan_ready(cursor),
+            "min_spread_minutes": MIN_SPREAD_MINUTES,
+            "max_spread_minutes": MAX_SPREAD_MINUTES,
+            "min_wave_interval_minutes": MIN_WAVE_INTERVAL_MINUTES,
             "subjects": queries.subject_catalog(cursor, ctx['departments'],
                                                 space_department_ids=space_departments),
             "people": queries.targetable_people(
@@ -756,6 +922,43 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         "missing": missing[:SIP_MISSING_LIMIT],
                         "missing_count": len(missing)})
 
+    @news_route('/audience/preview', methods=('POST',), publisher=True)
+    def news_audience_preview(cursor, ctx):
+        """Расчёт рассылки ДО подтверждения публикации (ТЗ #300, п.8.4).
+
+        «Позволит администратору оценить влияние обязательной новости на
+        доступность операторов до её запуска»: сколько человек получит
+        объявление, на сколько волн они разойдутся, по скольку в волне и когда
+        дойдёт до последнего.
+
+        Считается ТЕМИ ЖЕ функциями, что и настоящий выпуск: число получателей —
+        правилами журнала, волны — access.wave_count. Вторая формула в форме
+        обещала бы одно, а происходило бы другое.
+
+        Правила приезжают несохранёнными — их набирают прямо сейчас; периметр
+        проверяется тем же _audience_refusal, что у сохранения, иначе ручка
+        стала бы способом пересчитать чужой отдел.
+        """
+        payload = request.get_json(silent=True) or {}
+        rules = _rules_from_request(payload)
+        space_id = _request_space(cursor)
+        if rules:
+            refusal = _audience_refusal(cursor, ctx, rules, space_id=space_id)
+            if refusal:
+                return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
+        recipients = queries.audience_count_for_rules(
+            cursor, rules=rules, author_id=ctx['user_id'],
+            audience_max_role_level=ctx['ceiling'],
+            space_id=space_id, with_space=_space_ready(cursor))
+        start = _moment_or_none(payload.get('scheduled_at')) or datetime.now()
+        preview = news_access.spread_preview(
+            recipients=recipients, start_at=start,
+            spread_minutes=_int_or_none(payload.get('spread_minutes')),
+            wave_interval_minutes=_int_or_none(payload.get('wave_interval_minutes')))
+        preview['starts_at'] = preview['starts_at'].isoformat()
+        preview['ends_at'] = preview['ends_at'].isoformat()
+        return jsonify(preview)
+
     @news_route('/posts', publisher=True)
     def news_posts(cursor, ctx):
         limit = min(max(_int_or_none(request.args.get('limit')) or 50, 1), 200)
@@ -766,7 +969,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             viewer_level=news_access.effective_role_level(ctx['otp_role']),
             departments=ctx['departments'], status=status,
             limit=limit, offset=offset, with_photos=_photos_ready(cursor),
-            with_channel=_channel_ready(cursor),
+            with_channel=_channel_ready(cursor), with_plan=_plan_ready(cursor),
             with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
             with_space=_space_ready(cursor), space_id=_request_space(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
@@ -814,16 +1017,28 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         channel, channel_refusal = _channel_from_request(cursor, payload, space_id)
         if channel_refusal:
             return channel_refusal
+        # План (тип, проходной балл, режим запуска) — тоже до первой записи и по
+        # той же причине. Тип решает за обязательность и за обязательность
+        # прохождения: два тумблера отвечали на этот вопрос порознь и позволяли
+        # собрать «необязательную новость с обязательным тестом».
+        plan, plan_refusal = _plan_from_request(
+            cursor, payload, publishing=bool(payload.get('publish')),
+            has_quiz=bool(quiz))
+        if plan_refusal:
+            return plan_refusal
+        mandatory, passes['pass_required'] = news_access.kind_flags(
+            plan['kind'], pass_required=passes['pass_required'])
 
         post_id = queries.create_post(
             cursor, title=title, body=body, author_id=ctx['user_id'],
             author_department_id=ctx['department_id'],
             space_id=space_id, with_space=_space_ready(cursor),
             channel=channel, with_channel=_channel_ready(cursor),
+            plan=plan, with_plan=_plan_ready(cursor),
             # С ОБЯЗАТЕЛЬНЫМ прохождением — всегда обязательна: у необязательной
             # крестик подтверждал бы прочтение без единого ответа. Необязательный
             # тест или тренажёр (#342) обязательность не навязывают.
-            is_mandatory=bool(payload.get('is_mandatory', True)) or news_access.must_pass(
+            is_mandatory=mandatory or news_access.must_pass(
                 pass_required=passes['pass_required'], has_quiz=bool(quiz),
                 has_trainer=bool(passes['trainer_key'])),
             confirm_delay_seconds=news_access.normalize_delay(
@@ -850,8 +1065,10 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             refusal = _expiry_refusal(_get_post(cursor, post_id)['expires_at'], True)
             if refusal:
                 return jsonify({"error": refusal, "code": "NEWS_EXPIRED"}), 400
-            queries.publish_post(cursor, post_id=post_id,
-                                 audience_max_role_level=ctx['ceiling'])
+            # Волны строятся ВНУТРИ _launch и ДО publish_post — в той же
+            # транзакции и по той же причине, что кадры и тест: объявление,
+            # всплывшее раньше своего расписания, второй раз не всплывёт.
+            _launch(cursor, post_id, plan, audience_max_role_level=ctx['ceiling'])
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id))), 201
 
     @news_route('/posts/<int:post_id>', methods=('PATCH',), publisher=True)
@@ -888,7 +1105,10 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # тумблер задним числом, автор превратил бы «закрыл, не читая» в
         # «подтвердил прочтение» у всех, кто уже успел её закрыть, и журнал
         # соврал бы ровно там, где к нему обращаются.
-        wants_mandatory = bool(payload.get('is_mandatory', post['is_mandatory']))
+        #
+        # Само значение считается ниже, из ТИПА новости (ТЗ #300, п.5): тумблер
+        # «обязательно к прочтению» остался способом исполнения, а вопрос
+        # автору задаётся один — насколько это важно.
         # Тест ВЫПУСКАВШЕЙСЯ новости не меняется: часть отдела уже ответила на эти
         # вопросы, и подменённый тест сделал бы журнал «Кто прочитал» журналом
         # другой новости. По published_at, а не по статусу — как у удаления: снятая
@@ -904,6 +1124,12 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             quiz, quiz_refusal = _quiz_from_request(cursor, payload)
             if quiz_refusal:
                 return quiz_refusal
+        # Тест, который останется у новости: присланный в этой правке или прежний.
+        # Считаем ЗДЕСЬ, до плана: по нему проверяется критичный тип, а он
+        # обязан смотреть на то, чем новость станет, а не чем была.
+        keeps_quiz = (bool(quiz) if quiz is not None
+                      else bool(_quiz_ready(cursor)
+                                and queries.quiz_answer_key(cursor, post_id)))
         # Тренажёр и обязательность прохождения выпускавшейся новости не
         # меняются по той же причине, что тест: часть отдела уже прошла или
         # подтвердила её на прежних условиях. Сравниваем со значением, а не с
@@ -911,6 +1137,32 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         passes, pass_refusal = _passes_from_request(cursor, payload, post)
         if pass_refusal:
             return pass_refusal
+        plan, plan_refusal = _plan_from_request(
+            cursor, payload, post, publishing=bool(payload.get('publish')),
+            has_quiz=keeps_quiz)
+        if plan_refusal:
+            return plan_refusal
+        # ТИП ВЫПУЩЕННОЙ НОВОСТИ НЕ МЕНЯЕТСЯ. Он решает и за обязательность, и
+        # за обязательность прохождения, а обе у выпущенной заперты (ниже и в
+        # NEWS_PASS_LOCKED). Отдельный отказ нужен, чтобы автор прочитал
+        # «тип не меняется», а не «обязательность» — он менял тип.
+        if post['published_at'] and plan['kind'] != post.get('kind'):
+            return jsonify({
+                "error": "Тип опубликованной новости не меняется — "
+                         "опубликуйте новую новость",
+                "code": "NEWS_KIND_LOCKED",
+            }), 409
+        # Проходной балл — под тем же замком, что и сам тест: часть отдела уже
+        # сдала его по прежнему порогу, и журнал стал бы журналом другой новости.
+        if post['published_at'] and (
+                plan['pass_score_percent'] != post.get('pass_score_percent')):
+            return jsonify({
+                "error": "Проходной балл опубликованной новости не меняется — "
+                         "опубликуйте новую новость",
+                "code": "NEWS_SCORE_LOCKED",
+            }), 409
+        wants_mandatory, passes['pass_required'] = news_access.kind_flags(
+            plan['kind'], pass_required=passes['pass_required'])
         if post['published_at'] and (
                 passes['trainer_key'] != post['trainer_key']
                 or passes['pass_required'] != post['pass_required']):
@@ -948,9 +1200,6 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             }), 409
         # С обязательным прохождением — тем более: у необязательной новости
         # крестик и есть подтверждение, без единого ответа.
-        # Тест, который останется у новости: присланный в этой правке или прежний.
-        keeps_quiz = (bool(quiz) if quiz is not None
-                      else bool(_quiz_ready(cursor) and queries.quiz_answer_key(cursor, post_id)))
         if not wants_mandatory and news_access.must_pass(
                 pass_required=passes['pass_required'], has_quiz=keeps_quiz,
                 has_trainer=bool(passes['trainer_key'])):
@@ -967,7 +1216,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 payload.get('confirm_delay_seconds', post['confirm_delay_seconds'])),
             expires_at=_timestamp_or_none(
                 payload.get('expires_at', post['expires_at'])),
-            channel=channel, with_channel=_channel_ready(cursor))
+            channel=channel, with_channel=_channel_ready(cursor),
+            plan=plan, with_plan=_plan_ready(cursor))
         if 'audience' in payload:
             queries.set_audience(cursor, post_id=post_id, rules=rules,
                                  audience_max_role_level=ctx['ceiling'])
@@ -997,8 +1247,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         refusal = _expiry_refusal(post['expires_at'], True)
         if refusal:
             return jsonify({"error": refusal, "code": "NEWS_EXPIRED"}), 400
-        queries.publish_post(cursor, post_id=post_id,
-                             audience_max_role_level=ctx['ceiling'])
+        # План берём У САМОЙ НОВОСТИ: кнопка «Опубликовать» тела не присылает, а
+        # режим запуска автор выбрал в форме и сохранил вместе с остальным.
+        plan, plan_refusal = _plan_from_request(cursor, {}, post, publishing=True,
+                                                has_quiz=bool(_quiz_ready(cursor)
+                                                              and queries.quiz_answer_key(
+                                                                  cursor, post_id)))
+        if plan_refusal:
+            return plan_refusal
+        _launch(cursor, post_id, plan, audience_max_role_level=ctx['ceiling'])
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>/archive', methods=('POST',), publisher=True)
@@ -1190,7 +1447,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _may_read_post(ctx, post):
             return jsonify({"error": "Эта новость не из вашего периметра"}), 403
         rows = queries.read_report(cursor, post_id, with_pass=_pass_ready(cursor),
-                                   with_space=_space_ready(cursor))
+                                   with_space=_space_ready(cursor),
+                                   with_plan=_plan_ready(cursor))
         # Знаменатель — только НЫНЕШНИЕ адресаты: «из скольких» отвечает на
         # вопрос «сколько человек это касается сейчас». Числитель — по тем же
         # людям, чтобы «12 из 30» нельзя было прочитать двумя способами.
@@ -1208,6 +1466,21 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # «подтвердили 12 из 30» считались бы по разным людям.
             "quiz_passed": sum(1 for row in addressed if row['quiz_passed_at']),
             "trainer_passed": sum(1 for row in addressed if row['trainer_passed_at']),
+            # ТЗ #300, п.8.5: режим публикации, плановое и фактическое время
+            # начала, период и интервал. Номер волны каждого сотрудника уже в
+            # строках — считается там же, где и всё остальное про человека.
+            "plan": {
+                "kind": post.get('kind'),
+                "pass_score_percent": post.get('pass_score_percent'),
+                "publish_mode": post.get('publish_mode'),
+                "scheduled_at": post.get('scheduled_at'),
+                "published_at": post.get('published_at'),
+                "spread_minutes": post.get('spread_minutes'),
+                "wave_interval_minutes": post.get('wave_interval_minutes'),
+                "waves": (news_access.wave_count(post.get('spread_minutes'),
+                                                 post.get('wave_interval_minutes'))
+                          if post.get('publish_mode') == 'spread' else 0),
+            },
         })
 
     return bp

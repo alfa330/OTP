@@ -10,8 +10,8 @@
  * публикации тест, который сервер отвергнет, — или не пускала бы годный.
  */
 
-export const QUIZ_MIN_QUESTIONS = 2;
-export const QUIZ_MAX_QUESTIONS = 3;
+export const QUIZ_MIN_QUESTIONS = 1;
+export const QUIZ_MAX_QUESTIONS = 10;
 export const QUIZ_MIN_OPTIONS = 2;
 export const QUIZ_MAX_OPTIONS = 4;
 
@@ -61,7 +61,7 @@ export const quizProblem = (quiz) => {
         }
     }
     if (items.length < QUIZ_MIN_QUESTIONS || items.length > QUIZ_MAX_QUESTIONS) {
-        return `В тесте должно быть ${QUIZ_MIN_QUESTIONS}–${QUIZ_MAX_QUESTIONS} вопроса`;
+        return `В тесте должно быть от ${QUIZ_MIN_QUESTIONS} до ${QUIZ_MAX_QUESTIONS} вопросов`;
     }
     return null;
 };

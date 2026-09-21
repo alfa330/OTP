@@ -63448,6 +63448,75 @@ async def run_task_reminders_async():
         logging.exception("task reminders job failed")
 
 
+def publish_scheduled_news_job():
+    """Планировщик раздела «Новости» (ТЗ #300, п.8): выпуск и волны.
+
+    Две работы, обе идемпотентные:
+      * выпустить запланированные объявления, у которых настало время;
+      * отметить наступившие волны фактическим временем активации.
+
+    ПОКАЗ ОТ ЭТОГО ЗАДАНИЯ НЕ ЗАВИСИТ. Выдача смотрит на плановое время волны
+    (news/queries.py: _wave_gate), поэтому опоздание крона, рестарт процесса
+    или его падение сдвигают только отметки в отчёте, а не момент, когда
+    человек увидит окно. Единственное, что задание делает для показа, — будит
+    открытые вкладки: без тычка они спросят своё /pending при следующем заходе.
+
+    Запланированная новость — это черновик со взведённым временем
+    (news/schema.py), поэтому ни статусов, ни прав здесь не проверяется: право
+    выпускать проверено, когда автор нажал «Опубликовать», и потолок должности
+    зафиксирован тогда же (queries.schedule_post).
+    """
+    from news import access as news_access
+    from news import queries as news_queries
+    from news.schema import plan_ready as news_plan_ready
+    from news.schema import space_ready as news_space_ready
+
+    published = waves = 0
+    try:
+        with db._get_cursor() as cursor:
+            if not news_plan_ready(cursor):
+                # Колонки ещё не приехали — планировать нечего. Не ошибка:
+                # ровно один деплой раздел живёт без них.
+                return None
+            with_space = news_space_ready(cursor)
+            for post in news_queries.due_scheduled_posts(cursor):
+                if post['publish_mode'] == 'spread':
+                    # Расписание считается СЕЙЧАС, а не при взведении: между
+                    # «запланировал в понедельник» и «вышло в среду» люди
+                    # приходят и уходят, и волны обязаны быть про тех, кому
+                    # объявление правда уходит.
+                    news_queries.set_waves(
+                        cursor, post_id=post['id'],
+                        plan=news_access.plan_waves(
+                            user_ids=news_queries.audience_user_ids(
+                                cursor, post['id'], with_space=with_space),
+                            start_at=datetime.now(),
+                            spread_minutes=post['spread_minutes'],
+                            wave_interval_minutes=post['wave_interval_minutes']))
+                # Волны — ДО выпуска и в той же транзакции: объявление,
+                # всплывшее раньше своего расписания, второй раз не всплывёт.
+                if news_queries.publish_scheduled(cursor, post['id']):
+                    published += 1
+            waves = news_queries.activate_due_waves(cursor)
+            if published or waves:
+                news_queries.poke_bell(cursor)
+    except Exception:
+        logging.exception("news scheduler job failed")
+        return None
+    if published or waves:
+        logging.info("Новости: выпущено по расписанию %s, открыто волн %s",
+                     published, waves)
+    return {'published': published, 'waves': waves}
+
+
+async def run_news_scheduler_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, publish_scheduled_news_job)
+    except Exception:
+        logging.exception("news scheduler job failed")
+
+
 def autoclose_due_survey_tests_job():
     """Закрывает начатые попытки тестов, у которых истекло время."""
     try:
@@ -64346,6 +64415,19 @@ if __name__ == '__main__':
         CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
         id='task_deadline_reminders',
         misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Планировщик новостей: каждую минуту. Минута — не прихоть: волна
+    # растяжки бывает пятиминутной, и отметка «активирована» с точностью до
+    # пяти минут описывала бы уже следующую волну. Само задание дешёвое —
+    # один индекс по взведённым и один UPDATE по наступившим волнам.
+    scheduler.add_job(
+        run_news_scheduler_async,
+        CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty')),
+        id='news_publish_scheduler',
+        misfire_grace_time=300,
         max_instances=1,
         coalesce=True
     )

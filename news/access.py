@@ -25,6 +25,7 @@
 
 import json
 import re
+from datetime import datetime, timedelta
 
 from wiki import access as wiki_access
 from wiki.access import ROLE_LEVELS, normalize_role, role_level_of  # noqa: F401  (реэкспорт)
@@ -33,7 +34,11 @@ from wiki.access import ROLE_LEVELS, normalize_role, role_level_of  # noqa: F401
 # ни flask, ни базы он не тянет.
 from oktell_guard.access import SECTION_DEPARTMENT_CODE as OKTELL_DEPARTMENT_CODE
 
-from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_CONFIRM_DELAY_SECONDS,
+from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, DEFAULT_NEWS_KIND,
+                     DEFAULT_PASS_SCORE_PERCENT, DEFAULT_PUBLISH_MODE,
+                     MAX_CONFIRM_DELAY_SECONDS, MAX_SPREAD_MINUTES, MAX_WAVES,
+                     MIN_PASS_SCORE_PERCENT, MIN_SPREAD_MINUTES,
+                     MIN_WAVE_INTERVAL_MINUTES, NEWS_KINDS, PUBLISH_MODES,
                      QUIZ_MAX_OPTION_LENGTH, QUIZ_MAX_OPTIONS, QUIZ_MAX_PROMPT_LENGTH,
                      QUIZ_MAX_QUESTIONS, QUIZ_MIN_OPTIONS, QUIZ_MIN_QUESTIONS,
                      TRAINER_KEY_MAX_LENGTH)
@@ -463,8 +468,8 @@ def normalize_quiz(raw):
             return [], 'В вопросе %d не отмечен верный вариант' % number
         quiz.append({'prompt': prompt, 'options': options, 'correct': correct})
     if not QUIZ_MIN_QUESTIONS <= len(quiz) <= QUIZ_MAX_QUESTIONS:
-        return [], 'В тесте должно быть %d–%d вопроса' % (QUIZ_MIN_QUESTIONS,
-                                                          QUIZ_MAX_QUESTIONS)
+        return [], 'В тесте должно быть от %d до %d вопросов' % (QUIZ_MIN_QUESTIONS,
+                                                                 QUIZ_MAX_QUESTIONS)
     return quiz, None
 
 
@@ -492,6 +497,59 @@ def quiz_mistakes(answer_key, answers):
         if value != int(correct):
             wrong.append(int(question_id))
     return wrong
+
+
+def normalize_pass_score(raw, default=DEFAULT_PASS_SCORE_PERCENT):
+    """Проходной результат из формы, в процентах. Мусор — умолчание.
+
+    Режем в диапазон, а не отказываем: поле числовое, и «120» означает «хочу
+    строже некуда», а не ошибку, которую стоит показывать отдельным экраном.
+    Форма старого бандла балла не присылает вовсе — там умолчание и есть
+    прежнее поведение теста (все ответы верны).
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(MIN_PASS_SCORE_PERCENT, min(100, value))
+
+
+def needed_correct(total, pass_score_percent=DEFAULT_PASS_SCORE_PERCENT):
+    """Сколько вопросов надо взять верно при таком проходном балле.
+
+    Порог автор ставит в ПРОЦЕНТАХ (так написано в ТЗ), а считается он в
+    вопросах: «нужно не меньше 2 из 3» человек проверяет на пальцах, а 66% ему
+    пришлось бы делить в уме.
+
+    Округление ВВЕРХ: 80% от пяти вопросов — это четыре, а не три с хвостом. И
+    хотя бы один верный нужен всегда, иначе «проходной балл 1%» означал бы
+    тест, который проходит пустой бланк.
+    """
+    count = int(total or 0)
+    if count <= 0:
+        return 0
+    percent = normalize_pass_score(pass_score_percent)
+    return max(1, min(count, -(-count * percent // 100)))
+
+
+def quiz_result(answer_key, answers, pass_score_percent=DEFAULT_PASS_SCORE_PERCENT):
+    """Итог попытки: {correct, total, needed, passed, wrong}.
+
+    Единственное место, где решается «сдал или нет», — и у окна портала, и у
+    окна поверх клиента АТС, и у кнопки «Проверить». При проходном балле 100
+    ответ тот же, что до ТЗ #300: непройденной попытку делает любая ошибка.
+
+    `wrong` остаётся в итоге, но НАРУЖУ не отдаётся (решение владельца
+    21.09.2026): подсветка вопроса вернула бы подбор ответа переключением
+    одного варианта. Он нужен журналу и разбору — тому, кто смотрит в логи, а
+    не в окно.
+    """
+    total = len(answer_key or ())
+    wrong = quiz_mistakes(answer_key, answers)
+    correct = total - len(wrong)
+    needed = needed_correct(total, pass_score_percent)
+    return {'correct': correct, 'total': total, 'needed': needed,
+            'passed': correct >= needed, 'wrong': wrong}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,3 +647,218 @@ def channels_for_departments(department_codes):
     if OKTELL_DEPARTMENT_CODE in codes:
         return list(CHANNELS)
     return [DEFAULT_CHANNEL]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТИП НОВОСТИ (ТЗ #300, п.5)
+#
+# Таблица из постановки дословно:
+#
+#   Информационная — ознакомление подтверждением, тест необязателен, работу не
+#                    блокирует;
+#   Важная         — ознакомление обязательное, тест настраиваемый;
+#   Критичная      — ознакомление обязательное, тест ОБЯЗАТЕЛЕН, и работа
+#                    заперта до успешного прохождения.
+#
+# ЗАЧЕМ ТИП, ЕСЛИ ЕСТЬ ДВА ТУМБЛЕРА. Автор думает не про «обязательность» и
+# «обязательность прохождения» по отдельности — он думает «насколько это
+# важно». Два независимых тумблера позволяли собрать и бессмысленное
+# («необязательная новость с обязательным тестом»), и опасное («критичное
+# изменение, которое закрывают крестиком»). Тип отвечает на вопрос один раз, а
+# тумблеры остаются тем, чем были, — способом исполнения.
+#
+# ПРАВИЛО ЖИВЁТ ЗДЕСЬ И ТОЛЬКО ЗДЕСЬ. Сервер зовёт kind_flags при создании и
+# правке, форма рисует по нему же (src/components/wiki/WikiNews.jsx: NEWS_KINDS).
+# Разъехавшись, они дали бы новость, выглядящую в форме не тем, чем она
+# записана в базу.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# None у pass_required означает «решает автор» — это и есть «настраиваемая»
+# строка таблицы ТЗ у важной новости.
+KIND_RULES = {
+    'info':      {'mandatory': False, 'quiz_required': False, 'pass_required': False},
+    'important': {'mandatory': True,  'quiz_required': False, 'pass_required': None},
+    'critical':  {'mandatory': True,  'quiz_required': True,  'pass_required': True},
+}
+
+
+def normalize_kind(raw, default=DEFAULT_NEWS_KIND):
+    """Тип из формы. Незнакомое значение — умолчание, а не отказ.
+
+    Так же, как канал: форма старого бандла типа не присылает, и новость
+    обязана лечь такой, какой её положили бы до этой задачи, — обязательной.
+    """
+    value = str(raw or '').strip().lower()
+    return value if value in NEWS_KINDS else default
+
+
+def kind_of(*, is_mandatory, pass_required, has_quiz):
+    """Тип новости, выведенный из того, как она себя ведёт.
+
+    Нужен там, где колонки типа ещё нет (schema.plan_ready сказал «нет») и
+    старым строкам, которым его проставляет бэкфилл. Правило то же, что в DDL:
+    одно поведение — один тип, и в двух местах оно записано одинаково.
+    """
+    if not is_mandatory:
+        return 'info'
+    if pass_required and has_quiz:
+        return 'critical'
+    return 'important'
+
+
+def kind_flags(kind, *, pass_required=True):
+    """(обязательность, обязательность прохождения), которые навязывает тип."""
+    rule = KIND_RULES[normalize_kind(kind)]
+    forced = rule['pass_required']
+    return rule['mandatory'], (bool(pass_required) if forced is None else forced)
+
+
+def kind_refusal(kind, *, has_quiz):
+    """Отказ, если тип требует того, чего в новости нет. Иначе None.
+
+    Критичная без теста — это важная, названная критичной: блокировать работу
+    «до успешного прохождения» нечем. Молча понизить тип нельзя — автор
+    выпустил бы объявление не тем, каким собрал.
+    """
+    if normalize_kind(kind) == 'critical' and not has_quiz:
+        return ('Критичная новость выпускается с тестом: добавьте вопросы '
+                'или выберите тип «Важная»')
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПЛАНИРОВЩИК ПУБЛИКАЦИИ (ТЗ #300, п.8)
+#
+# «Чтобы при запуске обновления не блокировать одновременно всех операторов
+# выбранной аудитории»: обязательное объявление снимает человека с линии, и
+# выпуск на весь отдел разом — это отдел, одновременно вышедший из очереди.
+#
+# Три режима: сразу, отложенно и растяжкой по волнам. Всё, что ниже, — чистая
+# арифметика над списком адресатов: её зовут и сервер при выпуске, и роут
+# предварительного расчёта, и крон. Общая функция здесь означает, что
+# обещанное автору «12 волн примерно по 10 человек» и то, что ляжет в базу, —
+# один и тот же счёт.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_publish_mode(raw, default=DEFAULT_PUBLISH_MODE):
+    """Режим запуска из формы. Незнакомое — «сразу»."""
+    value = str(raw or '').strip().lower()
+    return value if value in PUBLISH_MODES else default
+
+
+def post_state(status, scheduled_at, scheduled_armed=True):
+    """Состояние новости для витрин: draft | scheduled | published | archived.
+
+    «Запланирована» своего статуса не имеет (см. news/schema.py): это черновик
+    со ВЗВЕДЁННЫМ запуском. Выводится оно здесь — одной функцией на список,
+    карточку и крон, чтобы «Запланирована» везде значило одно и то же.
+
+    Взведённость обязательна вместе с датой: время запуска живёт в черновике с
+    того момента, как автор выбрал его в форме, а взводит запуск только нажатие
+    «Опубликовать». Считай мы по одной дате — черновик, отложенный «на всякий
+    случай», крон выпустил бы сам.
+    """
+    if status == 'draft' and scheduled_at and scheduled_armed:
+        return 'scheduled'
+    return status
+
+
+def wave_count(spread_minutes, wave_interval_minutes):
+    """Сколько волн уместится в период. Не меньше одной.
+
+    Делим период на интервал БЕЗ +1: последняя волна включается за интервал до
+    конца периода, то есть внутри него. Пример из ТЗ — два часа с шагом десять
+    минут — даёт ровно двенадцать волн, как там и написано.
+    """
+    period = int(spread_minutes or 0)
+    step = int(wave_interval_minutes or 0)
+    if period <= 0 or step <= 0:
+        return 1
+    return max(1, min(MAX_WAVES, period // step))
+
+
+def plan_waves(*, user_ids, start_at, spread_minutes, wave_interval_minutes):
+    """Расписание: [(user_id, номер волны, когда включится)].
+
+    Аудитория делится на равные части номером по порядку: `i * волн // всего`.
+    Это тот же приём, что раскладывает n предметов по k корзинам без остатка в
+    одной из них — 125 человек на 12 волн лягут как 11, 11, 11, 11, 11, 10, 10…,
+    а не 11×11 и одна из четырёх.
+
+    Порядок списка ЗНАЧИМ и приходит из запроса (по имени): волна должна быть
+    воспроизводимой, а не зависеть от того, в каком порядке Postgres сегодня
+    вернул строки.
+    """
+    ids = list(user_ids or ())
+    total = len(ids)
+    if not total:
+        return []
+    waves = wave_count(spread_minutes, wave_interval_minutes)
+    step = max(1, int(wave_interval_minutes or 0))
+    plan = []
+    for index, user_id in enumerate(ids):
+        wave_no = index * waves // total
+        plan.append((user_id, wave_no, start_at + timedelta(minutes=wave_no * step)))
+    return plan
+
+
+def spread_preview(*, recipients, start_at, spread_minutes, wave_interval_minutes):
+    """Расчёт, который показывается ДО подтверждения публикации (ТЗ п.8.4).
+
+    «Это позволит администратору оценить влияние обязательной новости на
+    доступность операторов до её запуска» — то есть считать надо ровно то, что
+    потом и произойдёт. Поэтому число волн берётся той же wave_count, что и у
+    plan_waves, а не считается в форме второй формулой.
+
+    Завершение — включение ПОСЛЕДНЕЙ волны, а не конец периода: администратор
+    спрашивает «когда объявление дойдёт до всех», и ответ на это — момент
+    последней волны.
+    """
+    count = max(0, int(recipients or 0))
+    waves = wave_count(spread_minutes, wave_interval_minutes)
+    step = max(1, int(wave_interval_minutes or 0))
+    return {
+        'recipients': count,
+        'waves': waves,
+        'per_wave': -(-count // waves) if count else 0,
+        'interval_minutes': step,
+        'spread_minutes': int(spread_minutes or 0),
+        'starts_at': start_at,
+        'ends_at': start_at + timedelta(minutes=(waves - 1) * step),
+    }
+
+
+def schedule_refusal(*, mode, scheduled_at, spread_minutes, wave_interval_minutes,
+                     publishing, now=None):
+    """Отказ по режиму запуска либо None.
+
+    publishing=False — новость сохраняют черновиком, и время запуска не
+    взводится вовсе: проверять «дата в прошлом» у того, что никуда не уйдёт,
+    значило бы мешать автору собирать объявление заранее.
+
+    Прошедшее время у ВЫПУСКА отвергаем: отложенный запуск «на вчера» крон
+    выполнит в ближайшую минуту, и автор получит немедленную публикацию там,
+    где просил отложенную, — молча, как сгоревший срок показа 18.09.2026.
+    """
+    if not publishing:
+        return None
+    mode = normalize_publish_mode(mode)
+    if mode == 'now':
+        return None
+    moment = now or datetime.now()
+    if mode == 'later' and not scheduled_at:
+        return 'Укажите дату и время запуска'
+    if scheduled_at and scheduled_at <= moment:
+        return 'Время запуска уже прошло — укажите будущее время'
+    if mode != 'spread':
+        return None
+    period = int(spread_minutes or 0)
+    step = int(wave_interval_minutes or 0)
+    if not MIN_SPREAD_MINUTES <= period <= MAX_SPREAD_MINUTES:
+        return 'Период растяжки — от %d минут до %d часов' % (
+            MIN_SPREAD_MINUTES, MAX_SPREAD_MINUTES // 60)
+    if step < MIN_WAVE_INTERVAL_MINUTES:
+        return 'Интервал между волнами — не меньше %d минут' % MIN_WAVE_INTERVAL_MINUTES
+    if step > period:
+        return 'Интервал между волнами не может быть длиннее самого периода'
+    return None

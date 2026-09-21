@@ -60,11 +60,87 @@ const NEWS_CHANNELS = [
 
 const BUCKETS = [
     { value: 'published', label: 'Опубликованные' },
+    /* Запланированные — своя корзина, а не подмножество черновиков: объявление,
+       ждущее своего часа, и недописанный черновик — разные вещи. */
+    { value: 'scheduled', label: 'Запланированные' },
     { value: 'draft', label: 'Черновики' },
     { value: 'archived', label: 'Архив' },
     /* Новости, адресованные самому редактору: сверху они приходят и ему. */
     { value: 'mine', label: 'Для меня' },
 ];
+
+/* ТИП НОВОСТИ (ТЗ #300, п.5). Один вопрос автору — «насколько это важно» —
+   вместо двух несвязанных тумблеров, которыми можно было собрать и
+   бессмысленное («необязательная новость с обязательным тестом»), и опасное
+   («критичное изменение, которое закрывают крестиком»).
+
+   ПРАВИЛО ТО ЖЕ, ЧТО НА СЕРВЕРЕ (news/access.py: KIND_RULES), и их совпадение
+   сверяет тест: разойдись они — форма показывала бы новость не такой, какой её
+   записывает сервер. passRequired: null — «решает автор», это и есть
+   «настраиваемая» строка таблицы ТЗ у важной новости. */
+const NEWS_KINDS = [
+    { value: 'info', label: 'Информационная',
+      note: 'Окно можно закрыть крестиком, тест — по желанию' },
+    { value: 'important', label: 'Важная',
+      note: 'Окно закрывается только кнопкой «Прочитал»' },
+    { value: 'critical', label: 'Критичная',
+      note: 'Тест обязателен: пока он не сдан, окно не закрыть' },
+];
+
+const KIND_RULES = {
+    info: { mandatory: false, passRequired: false, quizRequired: false },
+    important: { mandatory: true, passRequired: null, quizRequired: false },
+    critical: { mandatory: true, passRequired: true, quizRequired: true },
+};
+
+/* РЕЖИМ ЗАПУСКА (ТЗ #300, п.8). «Растянуть» существует ради одного: выпуск на
+   весь отдел разом — это отдел, одновременно вышедший из очереди. */
+const PUBLISH_MODES = [
+    { value: 'now', label: 'Сразу' },
+    { value: 'later', label: 'Отложить' },
+    { value: 'spread', label: 'Растянуть' },
+];
+
+/* Периоды и интервалы — примеры из ТЗ. Пределы приходят от сервера
+   (/api/news/access), и кнопка вне пределов просто не рисуется: предлагать
+   значение, которое сервер отвергнет, нельзя. */
+const SPREAD_PRESETS = [120, 240, 480, 1440];
+const WAVE_INTERVAL_PRESETS = [5, 10, 15, 30];
+
+const DEFAULT_SPREAD_MINUTES = 120;
+const DEFAULT_WAVE_INTERVAL_MINUTES = 10;
+
+/* Проходной балл: сто — «все ответы верны», как тест вёл себя до ТЗ #300. */
+const PASS_SCORE_PRESETS = [100, 80, 60];
+
+const kindRule = (kind) => KIND_RULES[kind] || KIND_RULES.important;
+
+/* Часы и минуты человеческими словами — для расчёта рассылки и подписи строки:
+   «120 минут» автор пересчитывает в уме, «2 часа» он прочитал в своём же
+   выборе. */
+/* «09:00» у сегодняшнего момента и «22.09 09:00» у любого другого: расчёт
+   читают прямо перед нажатием «Опубликовать», и дата в нём нужна ровно тогда,
+   когда она не сегодняшняя. */
+const whenLabel = (iso) => {
+    if (!iso) return '';
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return '';
+    const time = at.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const today = new Date();
+    const sameDay = at.getFullYear() === today.getFullYear()
+        && at.getMonth() === today.getMonth()
+        && at.getDate() === today.getDate();
+    return sameDay ? time
+        : `${at.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} ${time}`;
+};
+
+const minutesLabel = (minutes) => {
+    const value = Number(minutes) || 0;
+    if (value < 60) return `${value} мин`;
+    const hours = Math.floor(value / 60);
+    const rest = value % 60;
+    return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+};
 
 /* Виды адресата в том порядке, в каком их выбирают: сначала «кому вообще»
    (отдел, направление, группа), потом поимённо. Должность стоит последней и
@@ -290,7 +366,10 @@ function TrainerPicker({ open, value, onClose, onChange }) {
 function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, headers,
                    spaceId = null, spaceName = '' }) {
     const [title, setTitle] = useState('');
-    const [mandatory, setMandatory] = useState(true);
+    /* Тип решает и за обязательность, и за обязательность прохождения (ТЗ #300,
+       п.5): отдельного тумблера «обязательно к прочтению» в форме больше нет —
+       он спрашивал бы то же самое во второй раз. */
+    const [kind, setKind] = useState('important');
     const [delay, setDelay] = useState(access?.default_confirm_delay_seconds ?? 10);
     const [expires, setExpires] = useState('');
     const [audience, setAudience] = useState([]);
@@ -316,6 +395,18 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     const [trainerKey, setTrainerKey] = useState(null);
     const [passRequired, setPassRequired] = useState(true);
     const [trainerPickerOpen, setTrainerPickerOpen] = useState(false);
+    /* Проходной результат теста (ТЗ #300, п.4). Сто — прежнее поведение: любая
+       ошибка не засчитывает попытку. */
+    const [passScore, setPassScore] = useState(100);
+    /* Режим запуска и растяжка (ТЗ #300, п.8). */
+    const [publishMode, setPublishMode] = useState('now');
+    const [scheduledAt, setScheduledAt] = useState('');
+    const [spreadMinutes, setSpreadMinutes] = useState(DEFAULT_SPREAD_MINUTES);
+    const [waveInterval, setWaveInterval] = useState(DEFAULT_WAVE_INTERVAL_MINUTES);
+    /* Предварительный расчёт рассылки (ТЗ п.8.4). Считает СЕРВЕР теми же
+       функциями, что и настоящий выпуск: вторая формула в форме обещала бы
+       одно, а происходило бы другое. */
+    const [spreadPreview, setSpreadPreview] = useState(null);
     /* Куда отправить объявление (решение владельца 18.09.2026): 'icore' — окно
        портала, 'oktell' — окно поверх клиента АТС, которое рисует «Ограничитель
        Перезвона». Какие каналы вообще есть в этом пространстве, говорит сервер
@@ -340,9 +431,22 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
        объявление уже показано людям там, куда его отправили. */
     const channelLocked = quizLocked;
     const trainerCard = TRAINER_CARDS.find((item) => item.key === trainerKey) || null;
+    /* Что навязывает тип — тем же правилом, что на сервере (kind_flags). */
+    const rule = kindRule(kind);
+    const mandatory = rule.mandatory;
+    const passEffective = rule.passRequired === null ? passRequired : rule.passRequired;
     /* Держит ли прохождение подтверждение — то же правило, что на сервере
        (news/access.py: must_pass). Держит — новость обязательна всегда. */
-    const mustPass = passRequired && (quiz.length > 0 || !!trainerKey);
+    const mustPass = passEffective && (quiz.length > 0 || !!trainerKey);
+    /* Планировщик рисуется, только когда он развёрнут: предлагать отложенный
+       запуск, который сервер отвергнет, — обещание, которое он не выполнит. */
+    const planReady = access?.plan_ready !== false;
+    const spreadChoices = SPREAD_PRESETS.filter(
+        (value) => value >= (access?.min_spread_minutes ?? 5)
+            && value <= (access?.max_spread_minutes ?? 1440));
+    const waveChoices = WAVE_INTERVAL_PRESETS.filter(
+        (value) => value >= (access?.min_wave_interval_minutes ?? 5)
+            && value <= spreadMinutes);
     // Что отдали в URL.createObjectURL — освобождаем при закрытии формы, иначе
     // байты кадров висят в памяти вкладки до перезагрузки страницы.
     const localUrls = useRef([]);
@@ -369,7 +473,7 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     useEffect(() => {
         if (!open) return;
         setTitle(post?.title || '');
-        setMandatory(post ? !!post.is_mandatory : true);
+        setKind(post?.kind || 'important');
         setDelay(post ? post.confirm_delay_seconds : (access?.default_confirm_delay_seconds ?? 10));
         setExpires(post?.expires_at ? String(post.expires_at).slice(0, 16) : '');
         setAudience((post?.audience || []).map((rule) => ({
@@ -386,6 +490,12 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setQuizBusy(false);
         setTrainerKey(post?.trainer_key || null);
         setPassRequired(post ? post.pass_required !== false : true);
+        setPassScore(post?.pass_score_percent || 100);
+        setPublishMode(post?.publish_mode || 'now');
+        setScheduledAt(post?.scheduled_at ? String(post.scheduled_at).slice(0, 16) : '');
+        setSpreadMinutes(post?.spread_minutes || DEFAULT_SPREAD_MINUTES);
+        setWaveInterval(post?.wave_interval_minutes || DEFAULT_WAVE_INTERVAL_MINUTES);
+        setSpreadPreview(null);
         setChannel(post?.channel || NEWS_CHANNELS[0].value);
         setSipCheck(null);
         setSipOpen(false);
@@ -396,13 +506,6 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         })));
         editor?.commands.setContent(post?.body || '');
     }, [open, post, access, editor]);
-
-    // Новость с ОБЯЗАТЕЛЬНЫМ тестом или тренажёром всегда обязательна: у
-    // необязательной крестик подтверждал бы прочтение без единого ответа
-    // (сервер: NEWS_QUIZ_MANDATORY).
-    useEffect(() => {
-        if (mustPass) setMandatory(true);
-    }, [mustPass]);
 
     /* Проверка SIP-номеров — ТОЛЬКО когда выбран Oktell и есть кому адресовать.
        В портале номер ни при чём, и запрос «на всякий случай» на каждый щелчок
@@ -442,6 +545,39 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     useEffect(() => {
         if (!sipCheck?.missing_count) setSipOpen(false);
     }, [sipCheck?.missing_count]);
+
+    /* Расчёт рассылки — ТОЛЬКО у растяжки и только когда есть кому адресовать
+       (ТЗ п.8.4). Пауза и отмена прошлого ответа — те же, что у проверки
+       SIP-номеров: адресатов набирают подряд, а медленный первый ответ,
+       пришедший после быстрого второго, показал бы расчёт для уже снятого
+       отдела. */
+    useEffect(() => {
+        if (!open || publishMode !== 'spread' || !audienceKey) {
+            setSpreadPreview(null);
+            return undefined;
+        }
+        let alive = true;
+        const timer = setTimeout(() => {
+            axios.post(`${apiBaseUrl}/api/news/audience/preview`, {
+                space_id: spaceId,
+                scheduled_at: scheduledAt || null,
+                spread_minutes: spreadMinutes,
+                wave_interval_minutes: waveInterval,
+                audience: audience.map((item) => ({
+                    subject_type: item.subject_type,
+                    subject_id: item.subject_id,
+                    subject_role: item.subject_role,
+                })),
+            }, { headers })
+                .then((r) => { if (alive) setSpreadPreview(r.data); })
+                /* Молча: расчёт — подсказка перед запуском, а не условие
+                   публикации. */
+                .catch(() => { if (alive) setSpreadPreview(null); });
+        }, 400);
+        return () => { alive = false; clearTimeout(timer); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, publishMode, audienceKey, scheduledAt, spreadMinutes, waveInterval,
+        apiBaseUrl, headers, spaceId]);
 
     /* «Составить ИИ» — по тому, что уже написано в форме. Ответ модели ложится
        в тот же редактор: проверить и поправить его человек обязан сам, выпускает
@@ -577,10 +713,30 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         if (quizBusy) { setError('Дождитесь, пока ИИ составит тест'); return; }
         const quizIssue = quiz.length && !quizLocked ? quizProblem(quiz) : null;
         if (quizIssue) { setError(quizIssue); return; }
+        /* Те же отказы, что у сервера, — до запроса: критичная новость без
+           теста блокировать работу «до успешного прохождения» не может, а
+           отложенный запуск без времени не запуск. */
+        if (rule.quizRequired && !quiz.length && !quizLocked) {
+            setError('Критичная новость выпускается с тестом: добавьте вопросы '
+                     + 'или выберите тип «Важная»');
+            return;
+        }
+        if (publish && publishMode === 'later' && !scheduledAt) {
+            setError('Укажите дату и время запуска'); return;
+        }
+        if (publish && publishMode !== 'now' && scheduledAt
+            && new Date(scheduledAt).getTime() <= Date.now()) {
+            setError('Время запуска уже прошло — укажите будущее время'); return;
+        }
         setError('');
         onSave({
             title: text,
             body,
+            kind,
+            publish_mode: publishMode,
+            scheduled_at: publishMode === 'now' ? null : (scheduledAt || null),
+            spread_minutes: publishMode === 'spread' ? spreadMinutes : null,
+            wave_interval_minutes: publishMode === 'spread' ? waveInterval : null,
             is_mandatory: mandatory || mustPass,
             // Тест опубликованной новости не отправляется вовсе: сервер его не
             // меняет (NEWS_QUIZ_LOCKED), а пустой список читался бы как «убрать».
@@ -588,7 +744,8 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
             ...(quizLocked ? {} : {
                 quiz: quiz.map(({ prompt, options, correct }) => ({ prompt, options, correct })),
                 trainer_key: trainerKey,
-                pass_required: passRequired,
+                pass_required: passEffective,
+                pass_score_percent: passScore,
             }),
             confirm_delay_seconds: Number(delay) || 0,
             expires_at: expires || null,
@@ -807,6 +964,44 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                     )}
                 </div>
 
+                <label className={`${iosGroupLabel} mt-4`}>Тип новости</label>
+                <div className={`${iosCard} p-3`}>
+                    {/* Сегментный контрол на всю ширину, а не строкой с подписью
+                        справа: три слова «Информационная / Важная / Критичная» в
+                        правой половине строки на телефоне не помещаются вовсе.
+
+                        У выпущенной новости — строкой, как канал: тип решает и за
+                        обязательность, и за обязательность прохождения, а обе у
+                        неё заперты (сервер: NEWS_KIND_LOCKED). Показать
+                        переключатель, который только откажет, — хуже, чем не
+                        показать его вовсе. */}
+                    {quizLocked ? (
+                        <p className="text-[14px] text-slate-900">
+                            {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).label}
+                        </p>
+                    ) : (
+                        <IosSegmented
+                            value={kind}
+                            options={NEWS_KINDS.map(({ value, label }) => ({ value, label }))}
+                            onChange={setKind}
+                            ariaLabel="Тип новости"
+                            stretch
+                        />
+                    )}
+                    {/* Одна строка под выбором — что он меняет. Это не пересказ
+                        кнопки: сам по себе «Важная» не говорит, чем она важнее.
+                        Остальное про тип — за «i», как и всюду в форме. */}
+                    <p className="mt-2 flex items-start gap-1.5 text-[12px] text-slate-500">
+                        <span className="min-w-0">
+                            {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).note}
+                        </span>
+                        <IosHint
+                            label="Чем различаются типы"
+                            text="Информационная — окно закрывается крестиком, подтверждение и тест по желанию. Важная — окно закрывается только кнопкой «Прочитал», тест прикрепляется по желанию. Критичная — тест обязателен, и пока он не сдан, окно не закрыть и работу продолжить нельзя. Тип опубликованной новости не меняется."
+                        />
+                    </p>
+                </div>
+
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                     <span className={`${iosGroupLabel} flex items-center gap-1.5`}>
                         Тест и тренажёр
@@ -913,15 +1108,53 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                         ))}
                     </div>
 
-                    {/* Тумблер — только когда есть что проходить: без теста и
-                        тренажёра он настраивал бы то, чего нет. */}
-                    {(quiz.length > 0 || trainerKey) && (
+                    {/* Проходной балл — только у теста: у тренажёра баллов нет.
+                        Процент, как в ТЗ, но подпись считает его в вопросах —
+                        «нужно 4 из 5» автор проверяет глазами, а 80% ему
+                        пришлось бы делить в уме (ТЗ #300, п.4). */}
+                    {quiz.length > 0 && (
+                        <div className="px-3.5 py-3">
+                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                Проходной результат
+                                <IosHint
+                                    label="Зачем проходной результат"
+                                    text="Сколько ответов надо взять верно, чтобы тест был засчитан. Сто процентов — прежнее правило: ошибка не засчитывает попытку целиком. Для критичных изменений так и оставляют. Число попыток не ограничено, но каждая видна в журнале."
+                                />
+                            </p>
+                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                {PASS_SCORE_PRESETS.map((preset) => (
+                                    <button
+                                        key={preset}
+                                        type="button"
+                                        disabled={quizLocked}
+                                        onClick={() => setPassScore(preset)}
+                                        className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] disabled:opacity-50 ${
+                                            Number(passScore) === preset
+                                                ? 'bg-slate-900 text-white'
+                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        {preset} %
+                                    </button>
+                                ))}
+                                <span className="text-[12px] tabular-nums text-slate-500">
+                                    нужно верных: {Math.max(1, Math.ceil(quiz.length * passScore / 100))}
+                                    {' из '}{quiz.length}
+                                </span>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Тумблер — только когда есть что проходить И когда выбор
+                        вообще за автором: у информационной и критичной новости
+                        обязательность прохождения решает тип, и тумблер рядом
+                        спрашивал бы о том, что уже решено. */}
+                    {(quiz.length > 0 || trainerKey) && rule.passRequired === null && (
                         <div className="flex items-center justify-between gap-3 px-3.5 py-3">
                             <p className="flex items-center gap-2 text-[14px] text-slate-900">
                                 Пройти обязательно
                                 <IosHint
                                     label="Что значит «пройти обязательно»"
-                                    text="Включено — сотрудник не подтвердит новость и не закроет окно, пока не пройдёт тест и тренажёр; такая новость всегда обязательна к прочтению. Выключено — пройти можно по желанию: в окне новости или позже во вкладке «Новости», а прочитать и закрыть новость — и без этого."
+                                    text="Включено — сотрудник не подтвердит новость и не закроет окно, пока не пройдёт тест и тренажёр. Выключено — пройти можно по желанию: в окне новости или позже во вкладке «Новости», а прочитать и закрыть новость — и без этого."
                                 />
                             </p>
                             <IosToggle checked={passRequired} onChange={setPassRequired} disabled={quizLocked} />
@@ -1102,27 +1335,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                             </div>
                         </div>
                     )}
-                    <div className="flex items-center justify-between gap-3 px-3.5 py-3">
-                        <div className="min-w-0">
-                            {/* Оба состояния — в ОДНОМ пузырьке, а не подписью,
-                                которая переписывается на каждый щелчок тумблера:
-                                мигающая строка под переключателем читается как
-                                ошибка, а не как пояснение. */}
-                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
-                                Обязательно к прочтению
-                                <IosHint
-                                    label="Что меняет обязательность"
-                                    text="Обязательную новость нельзя закрыть крестиком — только кнопкой «Прочитал», и отметка попадёт в журнал «Кто прочитал». Необязательная закрывается крестиком, и журнал по ней не ведётся."
-                                />
-                            </p>
-                        </div>
-                        {/* У новости с обязательным тестом или тренажёром
-                            обязательность не снимается: у необязательной крестик
-                            подтверждал бы прочтение без единого ответа. Сервер
-                            держит то же правило (NEWS_QUIZ_MANDATORY). */}
-                        <IosToggle checked={mandatory} onChange={setMandatory} disabled={mustPass} />
-                    </div>
-                    {/* Задержка нужна только обязательной: у необязательной
+                    {/* Тумблера «обязательно к прочтению» здесь больше нет: на
+                        этот вопрос отвечает ТИП новости (ТЗ #300, п.5), и два
+                        места для одного ответа разошлись бы в первый же день.
+                        Задержка нужна только обязательной: у необязательной
                         кнопки «Прочитал» нет вовсе, и поле рядом с ней было бы
                         настройкой того, чего не существует. */}
                     {mandatory && (
@@ -1196,6 +1412,124 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                         />
                     </div>
                 </div>
+
+                {/* ── КОГДА ОПУБЛИКОВАТЬ (ТЗ #300, п.8) ──────────────────────
+                    Последней секцией: это последнее решение перед кнопкой, и
+                    расчёт рассылки под ним читают прямо перед нажатием.
+                    Опубликованной новости секции нет вовсе — планировать в ней
+                    уже нечего. */}
+                {planReady && post?.status !== 'published' && (
+                    <>
+                        <label className={`${iosGroupLabel} mt-4`}>Когда опубликовать</label>
+                        <div className={`${iosCard} divide-y divide-slate-100`}>
+                            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-3">
+                                <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                    Запуск
+                                    <IosHint
+                                        label="Зачем откладывать и растягивать"
+                                        text="Обязательное объявление снимает человека с линии, поэтому выпуск на весь отдел разом — это отдел, одновременно вышедший из очереди. «Отложить» запускает новость в указанное время, «Растянуть» делит адресатов на волны и включает их порциями. До своей волны сотрудник работает как обычно."
+                                    />
+                                </p>
+                                <IosSegmented
+                                    value={publishMode}
+                                    options={PUBLISH_MODES}
+                                    onChange={setPublishMode}
+                                    ariaLabel="Режим запуска"
+                                />
+                            </div>
+
+                            {publishMode !== 'now' && (
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-3">
+                                    <div className="min-w-0">
+                                        <p className="text-[14px] text-slate-900">Начать</p>
+                                        {/* У растяжки поле можно оставить пустым — это
+                                            «сразу», и так прямо написано: пустое поле
+                                            без подписи читается как незаполненное. */}
+                                        <p className="text-[12px] text-slate-500">
+                                            {publishMode === 'spread'
+                                                ? 'Пусто — начать сразу после публикации'
+                                                : 'До этого времени новость никого не потревожит'}
+                                        </p>
+                                    </div>
+                                    <input
+                                        type="datetime-local"
+                                        value={scheduledAt}
+                                        onChange={(e) => setScheduledAt(e.target.value)}
+                                        aria-label="Дата и время запуска"
+                                        className="rounded-xl bg-slate-100 px-3 py-1.5 text-[13px] text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                                    />
+                                </div>
+                            )}
+
+                            {publishMode === 'spread' && (
+                                <div className="px-3.5 py-3">
+                                    <p className="text-[14px] text-slate-900">Распределить за</p>
+                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                        {spreadChoices.map((value) => (
+                                            <button
+                                                key={value}
+                                                type="button"
+                                                onClick={() => setSpreadMinutes(value)}
+                                                className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                                    Number(spreadMinutes) === value
+                                                        ? 'bg-slate-900 text-white'
+                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                            >
+                                                {minutesLabel(value)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <p className="mt-3 text-[14px] text-slate-900">Интервал между волнами</p>
+                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                        {waveChoices.map((value) => (
+                                            <button
+                                                key={value}
+                                                type="button"
+                                                onClick={() => setWaveInterval(value)}
+                                                className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                                    Number(waveInterval) === value
+                                                        ? 'bg-slate-900 text-white'
+                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                            >
+                                                {minutesLabel(value)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* РАСЧЁТ ПЕРЕД ЗАПУСКОМ (ТЗ п.8.4): «позволит оценить
+                                влияние обязательной новости на доступность
+                                операторов до её запуска». Считает сервер теми же
+                                функциями, что и сам выпуск. */}
+                            {publishMode === 'spread' && spreadPreview && (
+                                <div className="px-3.5 py-3">
+                                    {/* Существительное перед числом — чтобы не
+                                        склонять его под каждое значение: «волн 12»
+                                        и «волн 1» одинаково верны, а «12 волн» и
+                                        «1 волна» требовали бы разбора числа ради
+                                        одной строки. */}
+                                    <p className="text-[13px] text-slate-900">
+                                        Получателей{' '}
+                                        <span className="font-semibold tabular-nums">
+                                            {spreadPreview.recipients}
+                                        </span>
+                                        {' · волн '}
+                                        <span className="tabular-nums">{spreadPreview.waves}</span>
+                                        {' · в волне ≈'}
+                                        <span className="tabular-nums">{spreadPreview.per_wave}</span>
+                                    </p>
+                                    <p className="mt-0.5 text-[12px] tabular-nums text-slate-500">
+                                        {whenLabel(spreadPreview.starts_at)}
+                                        {' → '}
+                                        {whenLabel(spreadPreview.ends_at)}
+                                        {', шаг '}{minutesLabel(spreadPreview.interval_minutes)}
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    </>
+                )}
             </IosModal>
 
             <AudiencePicker
@@ -1285,6 +1619,24 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                         .filter(Boolean).join(' · ')}
                                 </p>
                             )}
+                            {/* Строка про растяжку — только у растянутой новости
+                                (ТЗ п.8.5). У обычной её нет вовсе: «опубликована
+                                сразу» и так видно по дате выпуска. */}
+                            {state.plan?.publish_mode === 'spread' && (
+                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                    волнами: {state.plan.waves} по {minutesLabel(state.plan.wave_interval_minutes)}
+                                    {', всего '}{minutesLabel(state.plan.spread_minutes)}
+                                </p>
+                            )}
+                            {/* Запланированный запуск против фактического: если
+                                они разошлись, это первое, что спросят. */}
+                            {state.plan?.scheduled_at && (
+                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                    запуск по плану {publishedLabel(state.plan.scheduled_at)}
+                                    {state.plan.published_at
+                                        ? `, вышла ${publishedLabel(state.plan.published_at)}` : ''}
+                                </p>
+                            )}
                         </div>
                         <button
                             type="button"
@@ -1308,6 +1660,13 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                     <p className="truncate text-[14px] text-slate-900">{row.name}</p>
                                     <p className="truncate text-[12px] text-slate-400">
                                         {[roleTitle(row.role), row.department_name,
+                                          /* Номер волны — там же, где отдел: это
+                                             свойство человека в этой рассылке, а
+                                             не отдельная колонка (ТЗ п.8.5).
+                                             Пусто — растяжки не было или человек
+                                             попал в адресаты уже после выпуска,
+                                             и объявление ему видно сразу. */
+                                          row.wave_no ? `волна ${row.wave_no}` : null,
                                           row.in_audience ? null : 'уже не в адресатах']
                                             .filter(Boolean).join(' · ')}
                                     </p>
@@ -1469,12 +1828,21 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
             .then((response) => {
                 setFormPost(undefined);
                 closeCompose(payload.publish ? response?.data?.id : null);
-                toastRef.current?.(payload.publish ? 'Новость опубликована' : 'Черновик сохранён',
-                                   'success');
+                /* Что сказать, решает ОТВЕТ СЕРВЕРА, а не нажатая кнопка:
+                   «Опубликовать» с отложенным запуском новость не публикует, и
+                   тост «Новость опубликована» соврал бы ровно в тот момент,
+                   когда автор проверяет, что всё сделал верно. */
+                const state = response?.data?.state;
+                toastRef.current?.(
+                    !payload.publish ? 'Черновик сохранён'
+                        : state === 'scheduled' ? 'Запуск запланирован'
+                            : 'Новость опубликована',
+                    'success');
                 /* Уводим в ту корзину, где сохранённое теперь лежит: иначе
                    черновик, сохранённый со вкладки «Опубликованные», исчезает
                    без следа — список перечитывается, а его в нём нет. */
-                const target = payload.publish ? 'published' : 'draft';
+                const target = !payload.publish ? 'draft'
+                    : state === 'scheduled' ? 'scheduled' : 'published';
                 if (bucket !== target) setBucket(target);
                 else load();
             })
@@ -1492,14 +1860,31 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                                + 'Вместе с ней пропадёт журнал «Кто прочитал» — кто из '
                                + 'сотрудников подтвердил объявление и прошёл тест. '
                                + 'Вернуть его будет нельзя.')) return;
-        const url = `${apiBaseUrl}/api/news/posts/${post.id}${action === 'delete' ? '' : `/${action}`}`;
+        const url = `${apiBaseUrl}/api/news/posts/${post.id}${
+            ['delete', 'launch_now', 'unschedule'].includes(action) ? '' : `/${action}`}`;
+        /* Отмена запуска и выпуск «сейчас» — это одна и та же правка: режим
+           «Сразу» снимает взвод (сервер: scheduled_armed). Разница только в
+           том, идёт ли следом публикация. Своих роутов им не заводим: новое
+           правило хранилось бы в двух местах. */
+        const reset = { publish_mode: 'now', scheduled_at: null,
+                        spread_minutes: null, wave_interval_minutes: null };
         const request = action === 'delete'
             ? axios.delete(url, { headers })
-            : axios.post(url, {}, { headers });
+            : action === 'unschedule'
+                ? axios.patch(url, reset, { headers })
+                : action === 'launch_now'
+                    ? axios.patch(url, reset, { headers }).then(() => axios.post(
+                        `${url}/publish`, {}, { headers }))
+                    : axios.post(url, {}, { headers });
         request
-            .then(() => {
+            .then((response) => {
                 toastRef.current?.({
-                    publish: 'Новость опубликована',
+                    /* Та же оговорка, что у формы: у новости с отложенным
+                       запуском «Опубликовать» взводит запуск, а не выпускает. */
+                    publish: (response?.data?.state === 'scheduled'
+                        ? 'Запуск запланирован' : 'Новость опубликована'),
+                    launch_now: 'Новость опубликована',
+                    unschedule: 'Запуск отменён — объявление вернулось в черновики',
                     archive: 'Новость снята с показа',
                     delete: post.published_at ? 'Новость удалена' : 'Черновик удалён',
                 }[action], 'success');
@@ -1583,9 +1968,16 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                             {/* Плашка только у того, что не опубликовано:
                                 «опубликована» и так видно по вкладке, а метка
                                 на каждой строке была бы шумом. */}
-                            {post.status === 'draft' && <IosBadge tone="slate">черновик</IosBadge>}
+                            {post.state === 'draft' && <IosBadge tone="slate">черновик</IosBadge>}
+                            {/* Запланированная — не черновик: её никто не
+                                допишет, она ждёт своего часа. */}
+                            {post.state === 'scheduled' && <IosBadge tone="blue">запланирована</IosBadge>}
                             {post.status === 'archived' && <IosBadge tone="slate">снята</IosBadge>}
                             {!post.is_mandatory && <IosBadge tone="slate">необязательная</IosBadge>}
+                            {/* Растяжку показываем меткой: объявление уходит не
+                                всем сразу, и это первое, что спросят, увидев в
+                                журнале «подтвердили 10 из 120». */}
+                            {post.publish_mode === 'spread' && <IosBadge tone="slate">волнами</IosBadge>}
                             {/* Куда ушло объявление — только у Oktell: портал
                                 это умолчание, и метка «в iCORE» стояла бы
                                 почти у каждой строки, ничего не различая. */}
@@ -1606,7 +1998,12 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                         </div>
                         <p className="mt-1 truncate text-[12px] text-slate-400">
                             {[post.author_name, post.author_department,
-                              publishedLabel(post.published_at || post.created_at)]
+                              /* У запланированной в строке стоит ВРЕМЯ ЗАПУСКА, а
+                                 не дата создания: «когда это выйдет» — весь смысл
+                                 такой строки, а созданием её никто не меряет. */
+                              post.state === 'scheduled'
+                                  ? `запуск ${publishedLabel(post.scheduled_at)}`
+                                  : publishedLabel(post.published_at || post.created_at)]
                                 .filter(Boolean).join(' · ')}
                         </p>
                         {post.status === 'published' && hasJournal(post) && (
@@ -1635,7 +2032,17 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                                 ? [{ key: 'edit', label: 'Изменить',
                                      onSelect: () => openForm(post) }]
                                 : []),
-                            ...(post.can_edit && post.status !== 'published'
+                            /* У запланированной «Опубликовать» не значит
+                               ничего: сервер прочтёт её же расписание и
+                               взведёт запуск заново. Поэтому ей — два прямых
+                               действия, а обычному черновику остаётся прежнее. */
+                            ...(post.can_edit && post.state === 'scheduled'
+                                ? [{ key: 'launch_now', label: 'Выпустить сейчас',
+                                     onSelect: () => act(post, 'launch_now') },
+                                   { key: 'unschedule', label: 'Отменить запуск',
+                                     onSelect: () => act(post, 'unschedule') }]
+                                : []),
+                            ...(post.can_edit && post.state === 'draft'
                                 ? [{ key: 'publish', label: 'Опубликовать',
                                      onSelect: () => act(post, 'publish') }]
                                 : []),

@@ -272,8 +272,9 @@ class QuizRulesTests(unittest.TestCase):
 
     def test_refusals_name_the_question(self):
         cases = [
-            (lambda q: q[:1], 'В тесте должно быть 2–3 вопроса'),
-            (lambda q: q + q[:2], 'В тесте должно быть 2–3 вопроса'),
+            # Один вопрос — законный тест (ТЗ #300, п.4: число вопросов решает
+            # автор). Границы теперь стережёт только потолок.
+            (lambda q: q * 6, 'В тесте должно быть от 1 до 10 вопросов'),
             (lambda q: [dict(q[0], correct=None), q[1]], 'В вопросе 1 не отмечен верный вариант'),
             (lambda q: [q[0], dict(q[1], correct=True)], 'В вопросе 2 не отмечен верный вариант'),
             (lambda q: [q[0], dict(q[1], options=['Всем', 'всем'])], 'В вопросе 2 варианты повторяются'),
@@ -323,7 +324,9 @@ class QuizRulesTests(unittest.TestCase):
         modal = _jsx_code_only(_read('src', 'components', 'news', 'NewsOfDayModal.jsx'))
         self.assertIn('NEWS_QUIZ_WRONG', modal)
         self.assertIn('{ answers: attempt.answers }', modal)
-        self.assertIn('attempt.fail();', modal)
+        # Итог попытки уходит в сброс вместе с отказом: при мягком проходном
+        # балле окно говорит «верных 2 из 3, нужно 3» (ТЗ #300, п.4).
+        self.assertIn('attempt.fail(e.response.data);', modal)
         self.assertIn("'Подтвердить'", modal)
 
 

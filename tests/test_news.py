@@ -255,11 +255,13 @@ class NewsDelayTests(unittest.TestCase):
         set_audience = set_audience[:set_audience.index('\n\ndef ')]
         self.assertIn('audience_max_role_level', set_audience)
         routes = _code_only(_read('news', 'routes.py'))
-        # Пять мест: четыре записи (создание, правка адресатов, публикация) и
-        # проверка SIP-номеров, которая считает круг адресатов ТЕМ ЖЕ потолком.
-        # Возьми она другой — предупреждение было бы про других людей, чем сама
-        # публикация.
-        self.assertEqual(routes.count("audience_max_role_level=ctx['ceiling']"), 5)
+        # Шесть мест: две записи адресатов (создание и правка), два выпуска
+        # (создание с публикацией и кнопка «Опубликовать» — оба через _launch,
+        # который взводит запланированный запуск тем же потолком) и два
+        # расчёта круга адресатов, проверка SIP-номеров и предварительный
+        # расчёт рассылки. Возьми любой из них другой потолок — предупреждение
+        # и расчёт были бы про других людей, чем сама публикация.
+        self.assertEqual(routes.count("audience_max_role_level=ctx['ceiling']"), 6)
 
     def test_server_decides_the_gate(self):
         """Задержку проверяет СЕРВЕР, а не таймер в браузере.
@@ -612,7 +614,6 @@ class NewsFrontendTests(unittest.TestCase):
         shared = _read('src', 'components', 'news', 'newsShared.js')
         self.assertEqual(len(re.findall(r'ROLE_TITLES = \{', shared)), 1)
 
-
     def test_deleting_a_released_news_is_asked_out_loud(self):
         """Вместе с новостью пропадает журнал «Кто прочитал» — про такое
         спрашивают вслух. У черновика спрашивать нечего: его никто не видел."""
@@ -839,7 +840,7 @@ class NewsPhotoTests(unittest.TestCase):
         create = routes[routes.index('def news_post_create('):]
         create = create[:create.index('def news_post_update(')]
         self.assertLess(create.index('_set_photos_refusal('),
-                        create.index('queries.publish_post('))
+                        create.index('_launch('))
 
     def test_a_missing_photo_table_does_not_break_the_portal(self):
         """Нет таблицы кадров — «фотографий нет», а не «раздел разворачивается».
@@ -1021,7 +1022,7 @@ class NewsFormQuizTests(unittest.TestCase):
         routes = _read('news', 'routes.py')
         create = routes[routes.index('def news_post_create('):routes.index('def news_post_update(')]
         self.assertLess(create.index('_quiz_from_request('), create.index('queries.create_post('))
-        self.assertLess(create.index('queries.set_quiz('), create.index('queries.publish_post('))
+        self.assertLess(create.index('queries.set_quiz('), create.index('_launch('))
         # Обязательность навязывает только ОБЯЗАТЕЛЬНОЕ прохождение (#342).
         self.assertIn('or news_access.must_pass(', create)
 
@@ -1177,7 +1178,7 @@ class NewsPassTests(unittest.TestCase):
         self.assertIn('NEWS_PASS_LOCKED', update)
         self.assertLess(update.index('NEWS_PASS_LOCKED'), update.index('queries.update_post('))
         create = routes[routes.index('def news_post_create('):routes.index('def news_post_update(')]
-        self.assertLess(create.index('queries.set_passes('), create.index('queries.publish_post('))
+        self.assertLess(create.index('queries.set_passes('), create.index('_launch('))
 
     def test_report_counts_passes_over_the_same_people(self):
         routes = _code_only(_read('news', 'routes.py'))
@@ -1245,10 +1246,12 @@ class NewsPassFrontendTests(unittest.TestCase):
         правильные и попробовать заново, тест будет завершен если он все ответы
         выберет корректно»."""
         passes = _jsx_code_only(_read(self.PASSES))
-        self.assertIn('const fail = useCallback(() => { setAnswers({}); setFailed(true); }, []);',
-                      passes)
+        # Попытка сбрасывается ЦЕЛИКОМ; итог (сколько верных из скольких) при
+        # этом запоминается — он нужен мягкому порогу (ТЗ #300, п.4).
+        self.assertIn('setAnswers({});', passes)
+        self.assertIn('setFailed(true);', passes)
         self.assertIn('Ответы неверные — выбор сброшен, пройдите тест заново', passes)
-        self.assertIn('attempt.fail();', passes)
+        self.assertIn('attempt.fail(e.response.data);', passes)
         # Пометки «вот этот вопрос неверный» не осталось: сервер её и не шлёт.
         for forbidden in ('Неверно — перечитайте новость', 'wrong', 'rose-50 text-rose-900'):
             self.assertNotIn(forbidden, passes, forbidden)
@@ -1276,9 +1279,11 @@ class NewsPassFrontendTests(unittest.TestCase):
         lock = tab[tab.index('...(quizLocked ? {} : {'):]
         lock = lock[:lock.index('}),')]
         self.assertIn('trainer_key: trainerKey', lock)
-        self.assertIn('pass_required: passRequired', lock)
+        # Обязательность прохождения считается из ТИПА новости (ТЗ #300, п.5):
+        # у информационной и критичной её решает тип, у важной — автор.
+        self.assertIn('pass_required: passEffective', lock)
         self.assertIn('is_mandatory: mandatory || mustPass', tab)
-        self.assertIn('disabled={mustPass}', tab)
+        self.assertIn('const passEffective = rule.passRequired === null', tab)
         # Список тренажёров — из реестра, а не своим перечнем.
         self.assertIn("import { TRAINER_CARDS } from './trainers/registry';", _read(self.TAB))
 
@@ -1772,7 +1777,7 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         строка внизу карточки читалась бы как ошибка всей формы."""
         form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
         row = form[form.index('Куда отправить'):]
-        row = row[:row.index('Обязательно к прочтению')]
+        row = row[:row.index('Задержка кнопки')]
         self.assertIn('sipMissing > 0 && (', row)
         self.assertIn('aria-label="Кто не увидит объявление в Oktell"', row)
         self.assertIn('<IosSegmented', row)
@@ -1784,7 +1789,7 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         имени раскрываются так же ровно, как тридцать."""
         form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
         row = form[form.index('Куда отправить'):]
-        row = row[:row.index('Обязательно к прочтению')]
+        row = row[:row.index('Задержка кнопки')]
         self.assertIn('grid transition-all duration-300 ease-out', row)
         self.assertIn('grid-rows-[1fr]', row)
         self.assertIn('grid-rows-[0fr]', row)
@@ -1803,3 +1808,368 @@ class NewsOktellSipWarningTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _function(source, name):
+    """Тело функции от её `def` до следующей на том же уровне."""
+    start = source.index('def %s(' % name)
+    rest = source[start:]
+    end = rest.find('\ndef ')
+    return rest if end < 0 else rest[:end]
+
+
+def _function_code(source, name):
+    """То же, но БЕЗ строки документации.
+
+    _code_only здесь не годится: он снимает любые тройные кавычки, а SQL в этом
+    модуле живёт как раз в них — и проверять было бы нечего.
+    """
+    body = _function(source, name)
+    if '"""' in body:
+        body = body.split('"""', 2)[-1]
+    return body
+
+
+class NewsKindTests(unittest.TestCase):
+    """ТЗ #300, п.5: тип новости вместо двух несвязанных тумблеров.
+
+    Два тумблера («обязательно к прочтению» и «пройти обязательно») отвечали на
+    один вопрос порознь и позволяли собрать бессмысленное — необязательную
+    новость с обязательным тестом — и опасное: критичное изменение, которое
+    закрывают крестиком.
+    """
+
+    def test_the_table_from_the_spec_is_the_rule(self):
+        self.assertEqual(news_schema.NEWS_KINDS, ('info', 'important', 'critical'))
+        # Информационная: окно закрывается крестиком, прохождение не держит.
+        self.assertEqual(news_access.kind_flags('info', pass_required=True), (False, False))
+        # Важная: ознакомление обязательное, прохождение «настраиваемое».
+        self.assertEqual(news_access.kind_flags('important', pass_required=False), (True, False))
+        self.assertEqual(news_access.kind_flags('important', pass_required=True), (True, True))
+        # Критичная: и то, и другое — обязательно, что бы ни прислала форма.
+        self.assertEqual(news_access.kind_flags('critical', pass_required=False), (True, True))
+
+    def test_critical_without_a_quiz_is_refused(self):
+        """Критичная без теста — это важная, названная критичной.
+
+        Блокировать работу «до успешного прохождения» ей нечем, а молча понизить
+        тип нельзя: автор выпустил бы объявление не тем, каким собрал.
+        """
+        self.assertIsNone(news_access.kind_refusal('critical', has_quiz=True))
+        self.assertIsNone(news_access.kind_refusal('important', has_quiz=False))
+        self.assertIn('тест', news_access.kind_refusal('critical', has_quiz=False))
+
+    def test_an_unknown_kind_behaves_like_before_the_task(self):
+        """Форма старого бандла типа не присылает вовсе."""
+        self.assertEqual(news_access.normalize_kind(None), 'important')
+        self.assertEqual(news_access.normalize_kind('важная'), 'important')
+
+    def test_derived_kind_repeats_the_backfill_word_for_word(self):
+        """Правило «поведение → тип» записано дважды: в DDL и в питоне.
+
+        Бэкфилл проставляет тип старым строкам, kind_of отвечает за строки,
+        приехавшие без колонки. Разъедься они — одна и та же новость называлась
+        бы в списке по-разному до и после рестарта.
+        """
+        self.assertEqual(news_access.kind_of(is_mandatory=False, pass_required=True,
+                                             has_quiz=True), 'info')
+        self.assertEqual(news_access.kind_of(is_mandatory=True, pass_required=True,
+                                             has_quiz=True), 'critical')
+        self.assertEqual(news_access.kind_of(is_mandatory=True, pass_required=False,
+                                             has_quiz=True), 'important')
+        self.assertEqual(news_access.kind_of(is_mandatory=True, pass_required=True,
+                                             has_quiz=False), 'important')
+        backfill = [st for st in news_schema._STATEMENTS if 'SET kind = CASE' in st]
+        self.assertEqual(len(backfill), 1)
+        self.assertIn("WHEN NOT is_mandatory THEN 'info'", backfill[0])
+        self.assertIn("THEN 'critical'", backfill[0])
+        self.assertIn("ELSE 'important'", backfill[0])
+        # Трогает только строки без типа: иначе он переписывал бы выбор автора
+        # на каждом старте процесса.
+        self.assertIn('WHERE kind IS NULL', backfill[0])
+
+    def test_the_kind_of_a_published_news_is_locked(self):
+        routes = _read('news', 'routes.py')
+        update = routes[routes.index('def news_post_update('):
+                        routes.index('def news_post_publish(')]
+        self.assertIn('NEWS_KIND_LOCKED', update)
+        self.assertLess(update.index('NEWS_KIND_LOCKED'), update.index('queries.update_post('))
+
+    def test_the_form_has_no_second_place_for_mandatory(self):
+        """Тумблер «обязательно к прочтению» из формы убран целиком.
+
+        Оставь мы его рядом с типом — на один вопрос было бы два ответа, и они
+        разошлись бы в первый же день.
+        """
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertNotIn('setMandatory', form)
+        self.assertNotIn('Обязательно к прочтению', form)
+        for label in ('Информационная', 'Важная', 'Критичная'):
+            self.assertIn(label, form)
+
+    def test_the_form_repeats_the_server_rule(self):
+        """KIND_RULES формы и KIND_RULES сервера обязаны совпадать.
+
+        Разойдись они — форма показывала бы новость не такой, какой её
+        записывает сервер, и молча.
+        """
+        form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        block = form[form.index('const KIND_RULES = {'):]
+        block = block[:block.index('};')]
+        found = re.findall(
+            r'(\w+): \{ mandatory: (true|false), passRequired: (true|false|null), '
+            r'quizRequired: (true|false) \}', block)
+        self.assertEqual({item[0] for item in found}, set(news_access.KIND_RULES))
+        words = {'true': True, 'false': False, 'null': None}
+        for kind, mandatory, pass_required, quiz_required in found:
+            rule = news_access.KIND_RULES[kind]
+            self.assertEqual(words[mandatory], rule['mandatory'], kind)
+            self.assertEqual(words[pass_required], rule['pass_required'], kind)
+            self.assertEqual(words[quiz_required], rule['quiz_required'], kind)
+
+
+class NewsPassScoreTests(unittest.TestCase):
+    """ТЗ #300, п.4: проходной результат теста."""
+
+    KEY = [(1, 0), (2, 1), (3, 0)]
+    PERFECT = {'1': 0, '2': 1, '3': 0}
+    ONE_WRONG = {'1': 0, '2': 1, '3': 1}
+
+    def test_a_hundred_percent_is_exactly_the_old_rule(self):
+        """Умолчание не меняет поведение ни одной прежней новости."""
+        self.assertEqual(news_schema.DEFAULT_PASS_SCORE_PERCENT, 100)
+        self.assertTrue(news_access.quiz_result(self.KEY, self.PERFECT, 100)['passed'])
+        self.assertFalse(news_access.quiz_result(self.KEY, self.ONE_WRONG, 100)['passed'])
+
+    def test_a_softer_threshold_is_counted_in_questions(self):
+        result = news_access.quiz_result(self.KEY, self.ONE_WRONG, 60)
+        self.assertTrue(result['passed'])
+        self.assertEqual((result['correct'], result['total'], result['needed']), (2, 3, 2))
+        # Округление вверх: 80% от пяти вопросов — четыре, а не три с хвостом.
+        self.assertEqual(news_access.needed_correct(5, 80), 4)
+        self.assertEqual(news_access.needed_correct(3, 60), 2)
+
+    def test_a_test_that_passes_an_empty_form_is_impossible(self):
+        self.assertEqual(news_access.normalize_pass_score(0), news_schema.MIN_PASS_SCORE_PERCENT)
+        self.assertEqual(news_access.normalize_pass_score(500), 100)
+        self.assertEqual(news_access.normalize_pass_score('нет'), 100)
+        self.assertEqual(news_access.needed_correct(10, 1), 1)
+        self.assertEqual(news_access.needed_correct(0, 100), 0)
+
+    def test_the_threshold_of_a_published_news_is_locked(self):
+        """Часть отдела уже сдала тест по прежнему порогу."""
+        routes = _read('news', 'routes.py')
+        update = routes[routes.index('def news_post_update('):
+                        routes.index('def news_post_publish(')]
+        self.assertIn('NEWS_SCORE_LOCKED', update)
+        self.assertLess(update.index('NEWS_SCORE_LOCKED'), update.index('queries.update_post('))
+
+    def test_the_refusal_names_the_score_but_never_the_questions(self):
+        """Сколько верных — говорим, какие именно неверны — нет.
+
+        Подсветка вопроса вернула бы подбор ответа переключением одного
+        варианта (решение владельца 21.09.2026), а «есть неверные ответы» при
+        мягком пороге не объясняет, почему тест не засчитан.
+        """
+        routes = _read('news', 'routes.py')
+        refusal = _function(routes.replace('\n    def ', '\ndef '), '_quiz_refusal')
+        self.assertIn('needed', refusal)
+        self.assertIn('correct', refusal)
+        self.assertNotIn("'wrong'", refusal)
+        self.assertNotIn('"wrong"', refusal)
+        # И ровно один сборщик на оба места: окно портала и лента.
+        self.assertEqual(routes.count('_quiz_refusal(detail)'), 2)
+
+    def test_the_window_shows_the_score(self):
+        passes = _jsx_code_only(_read('src', 'components', 'news', 'NewsPasses.jsx'))
+        self.assertIn('attempt.score', passes)
+        self.assertIn('attempt.fail(e.response.data)', passes)
+        modal = _jsx_code_only(_read('src', 'components', 'news', 'NewsOfDayModal.jsx'))
+        self.assertIn('attempt.fail(e.response.data)', modal)
+
+
+class NewsScheduleTests(unittest.TestCase):
+    """ТЗ #300, п.8: отложенный запуск и растяжка публикации по волнам."""
+
+    @staticmethod
+    def _start():
+        from datetime import datetime
+        return datetime(2026, 9, 22, 9, 0)
+
+    def test_the_example_from_the_spec(self):
+        """«120 операторов, период 2 часа, интервал 10 минут → 12 волн по 10»."""
+        from collections import Counter
+        plan = news_access.plan_waves(user_ids=list(range(120)), start_at=self._start(),
+                                      spread_minutes=120, wave_interval_minutes=10)
+        sizes = Counter(wave for _user, wave, _at in plan)
+        self.assertEqual(len(sizes), 12)
+        self.assertEqual(set(sizes.values()), {10})
+        preview = news_access.spread_preview(recipients=120, start_at=self._start(),
+                                             spread_minutes=120, wave_interval_minutes=10)
+        self.assertEqual((preview['waves'], preview['per_wave']), (12, 10))
+        # Последняя волна включается ВНУТРИ периода, а не за ним.
+        self.assertEqual(preview['ends_at'].hour, 10)
+        self.assertEqual(preview['ends_at'].minute, 50)
+
+    def test_nobody_lands_in_two_waves(self):
+        """ТЗ п.8.3 дословно: «не должен попадать более чем в одну волну».
+
+        В базе это первичный ключ (news_id, user_id), здесь — сам расчёт.
+        """
+        plan = news_access.plan_waves(user_ids=list(range(125)), start_at=self._start(),
+                                      spread_minutes=120, wave_interval_minutes=10)
+        self.assertEqual(len(plan), 125)
+        self.assertEqual(len({user for user, _wave, _at in plan}), 125)
+        waves = news_schema._STATEMENTS
+        self.assertTrue(any('PRIMARY KEY (news_id, user_id)' in st and 'news_waves' in st
+                            for st in waves))
+
+    def test_waves_are_even_and_never_leave_a_stub(self):
+        from collections import Counter
+        sizes = Counter(wave for _u, wave, _at in news_access.plan_waves(
+            user_ids=list(range(125)), start_at=self._start(),
+            spread_minutes=120, wave_interval_minutes=10))
+        self.assertEqual(sorted(set(sizes.values())), [10, 11])
+
+    def test_refusals_say_what_to_fix(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 9, 22, 9, 0)
+        later = now + timedelta(hours=1)
+        earlier = now - timedelta(hours=1)
+        check = news_access.schedule_refusal
+        # Черновик не проверяем вовсе: автор собирает объявление заранее.
+        self.assertIsNone(check(mode='later', scheduled_at=None, spread_minutes=None,
+                                wave_interval_minutes=None, publishing=False, now=now))
+        self.assertIn('дату и время', check(mode='later', scheduled_at=None,
+                                            spread_minutes=None, wave_interval_minutes=None,
+                                            publishing=True, now=now))
+        self.assertIn('прошло', check(mode='later', scheduled_at=earlier, spread_minutes=None,
+                                      wave_interval_minutes=None, publishing=True, now=now))
+        self.assertIsNone(check(mode='later', scheduled_at=later, spread_minutes=None,
+                                wave_interval_minutes=None, publishing=True, now=now))
+        # Растяжка без времени начала — это «сразу», и она законна.
+        self.assertIsNone(check(mode='spread', scheduled_at=None, spread_minutes=120,
+                                wave_interval_minutes=10, publishing=True, now=now))
+        self.assertIn('Период', check(mode='spread', scheduled_at=None, spread_minutes=1,
+                                      wave_interval_minutes=1, publishing=True, now=now))
+        self.assertIn('Интервал', check(mode='spread', scheduled_at=None, spread_minutes=120,
+                                        wave_interval_minutes=1, publishing=True, now=now))
+        self.assertIn('длиннее', check(mode='spread', scheduled_at=None, spread_minutes=10,
+                                       wave_interval_minutes=30, publishing=True, now=now))
+
+    def test_scheduled_is_a_draft_with_a_time_and_not_a_new_status(self):
+        """Своего статуса у запланированной нет — и это решение.
+
+        CHECK на status объявлен внутри CREATE TABLE, и расширить его
+        идемпотентно нечем: ALTER TABLE ADD CONSTRAINT без IF NOT EXISTS упал бы
+        на втором старте и утащил бы за собой весь SAVEPOINT схемы.
+        """
+        self.assertEqual(news_schema.STATUSES, ('draft', 'published', 'archived'))
+        self.assertEqual(news_access.post_state('draft', None), 'draft')
+        self.assertEqual(news_access.post_state('draft', '2026-09-22T09:00:00'), 'scheduled')
+        self.assertEqual(news_access.post_state('published', '2026-09-22T09:00:00'), 'published')
+        schema = _read('news', 'schema.py')
+        self.assertNotIn("'scheduled'", schema[:schema.index('PASS_COLUMNS')])
+
+    def test_a_draft_with_a_time_is_not_armed(self):
+        """Дефект, пойманный прогоном на живой базе.
+
+        Автор выбрал «Отложить», поставил время и нажал «В черновики». Черновик
+        обязан ПОМНИТЬ время (иначе, вернувшись завтра, автор нашёл бы пустое
+        поле), но выпускать его по этому времени нельзя: «в черновики» и
+        означает «никуда не отправлять». Разводит это отдельный признак
+        scheduled_armed, а не наличие даты.
+        """
+        self.assertEqual(news_access.post_state('draft', '2026-09-22T09:00', False), 'draft')
+        self.assertEqual(news_access.post_state('draft', '2026-09-22T09:00', True), 'scheduled')
+        source = _read('news', 'queries.py')
+        # Взводит только публикация…
+        self.assertIn('scheduled_armed = TRUE', _function_code(source, 'schedule_post'))
+        # …и спрашивают признак, а не дату, обе двери крона.
+        self.assertIn('AND scheduled_armed', _function_code(source, 'due_scheduled_posts'))
+        self.assertIn('AND scheduled_armed', _function_code(source, 'publish_scheduled'))
+        # Поля формы взвод не ставят никогда.
+        from news import queries as news_queries
+        self.assertNotIn('scheduled_armed', news_queries._PLAN_FIELDS)
+        self.assertNotIn('scheduled_armed', news_queries._PLAN_INSERT_COLUMNS)
+
+    def test_switching_the_launch_back_to_now_disarms_it(self):
+        """Иначе крон выпустил бы новость, которую уже отвязали от расписания."""
+        from news import queries as news_queries
+        self.assertIn('scheduled_armed = CASE WHEN %(plan_scheduled_at)s IS NULL',
+                      news_queries._PLAN_UPDATE_SET)
+        # И выпуск снимает взвод: снятая с показа и выпущенная заново не должна
+        # пойти по старому расписанию второй раз.
+        self.assertIn('scheduled_armed = FALSE',
+                      _function_code(_read('news', 'queries.py'), 'publish_scheduled'))
+
+    def test_a_scheduled_news_gets_its_own_actions_in_the_list(self):
+        """«Опубликовать» у запланированной не значит ничего: сервер прочёл бы
+        её же расписание и взвёл запуск заново."""
+        form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        self.assertIn("post.can_edit && post.state === 'scheduled'", form)
+        self.assertIn('Выпустить сейчас', form)
+        self.assertIn('Отменить запуск', form)
+        self.assertIn("post.can_edit && post.state === 'draft'", form)
+
+    def test_the_wave_gate_stands_in_every_viewer_query(self):
+        """Окно, подтверждение, лента и карточка ленты — все четыре двери.
+
+        Забытая дверь означала бы, что объявление, отложенное для окна, видно
+        списком, а тест по нему проходится заранее.
+        """
+        source = _read('news', 'queries.py')
+        for name in ('pending_for_user', 'confirm_read', '_viewer_post',
+                     'feed_for_user', 'feed_post'):
+            self.assertIn('_wave_gate(with_plan)', _function(source, name), name)
+
+    def test_the_report_shows_everyone_including_the_waiting_waves(self):
+        """Журнал волной НЕ режется: «кому ушла новость» — про весь круг."""
+        report = _function_code(_read('news', 'queries.py'), 'read_report')
+        self.assertNotIn('_wave_gate(', report)
+        for field in ('wave_no', 'planned_at', 'activated_at'):
+            self.assertIn(field, report)
+
+    def test_showing_depends_on_the_plan_and_not_on_the_cron(self):
+        """Крон может опоздать — объявление обязано открыться вовремя."""
+        gate = _function_code(_read('news', 'queries.py'), '_wave_gate')
+        self.assertIn('planned_at', gate)
+        self.assertNotIn('activated_at', gate)
+
+    def test_waves_are_built_before_the_news_goes_out(self):
+        """Объявление, всплывшее раньше своего расписания, второй раз не всплывёт."""
+        routes = _read('news', 'routes.py').replace('\n    def ', '\ndef ')
+        launch = _function(routes, '_launch')
+        self.assertLess(launch.index('_build_waves('), launch.index('queries.publish_post('))
+        # И то же самое в кроне — второй точке выпуска.
+        job = _function(_read('bot_schedule2.py'), 'publish_scheduled_news_job')
+        self.assertLess(job.index('set_waves('), job.index('publish_scheduled('))
+
+    def test_the_cron_job_is_registered_and_never_touches_request(self):
+        """Напоминания о задачах уже падали в кроне на `request` вне контекста."""
+        bot = _read('bot_schedule2.py')
+        self.assertIn("id='news_publish_scheduler'", bot)
+        self.assertIn('run_news_scheduler_async', bot)
+        job = _function(bot, 'publish_scheduled_news_job')
+        self.assertNotIn('request', job)
+        self.assertIn('plan_ready', job)
+
+    def test_the_oktell_window_gets_the_same_schedule(self):
+        """Расписание одно на оба окна.
+
+        Иначе объявление, отложенное для портала, вышло бы поверх клиента АТС
+        немедленно — и человек подтвердил бы его раньше своей волны.
+        """
+        agent = _read('oktell_guard', 'routes.py')
+        self.assertEqual(agent.count('with_plan=_news_plan_ready(cursor, news_plan_ready)'), 2)
+
+    def test_the_form_asks_the_server_for_the_calculation(self):
+        """ТЗ п.8.4: расчёт перед запуском считает тот же код, что и выпуск."""
+        form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        self.assertIn('/api/news/audience/preview', form)
+        self.assertIn("publishMode === 'spread'", form)
+        routes = _read('news', 'routes.py')
+        preview = routes[routes.index('def news_audience_preview('):]
+        preview = preview[:preview.index('@news_route')]
+        self.assertIn('news_access.spread_preview(', preview)
+        self.assertIn('_audience_refusal(', preview)

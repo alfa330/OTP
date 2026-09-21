@@ -183,7 +183,7 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                    (решение владельца 21.09.2026). Строки ошибки у кнопки при
                    этом нет: сказать одно и то же дважды на одном экране — шум. */
                 if (e?.response?.data?.code === 'NEWS_QUIZ_WRONG') {
-                    attempt.fail();
+                    attempt.fail(e.response.data);
                     setError('');
                     return;
                 }

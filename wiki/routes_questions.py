@@ -477,6 +477,16 @@ def register(bp, wiki_route, db, log_ip, edit_helpers):
             author_department_id=author['department_id'], is_mandatory=True,
             confirm_delay_seconds=news_schema.DEFAULT_CONFIRM_DELAY_SECONDS,
             expires_at=None, created_by=ctx['user_id'],
+            # Тип проставляем СРАЗУ (ТЗ #300, п.5), а не оставляем на бэкфилл:
+            # объявление обязательное и с обязательным тестом, то есть ровно
+            # «критичное» по правилу news_access.kind_of. Без типа строка
+            # выглядела бы в списке пустой до следующего рестарта.
+            plan={'kind': 'critical',
+                  'pass_score_percent': news_schema.DEFAULT_PASS_SCORE_PERCENT,
+                  'publish_mode': news_schema.DEFAULT_PUBLISH_MODE,
+                  'scheduled_at': None, 'spread_minutes': None,
+                  'wave_interval_minutes': None},
+            with_plan=news_schema.plan_ready(cursor),
             with_space=news_space_ready,
             space_id=(news_queries.space_of_department(cursor, item['department_id'])
                       if news_space_ready else None))

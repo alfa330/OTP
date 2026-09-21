@@ -208,6 +208,95 @@ def _pass_columns_sql(with_pass):
             "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at")
 
 
+def _plan_columns_sql(with_plan):
+    """Колонки ТЗ #300 (тип, балл, планировщик) для выборок с `p` = news_posts.
+
+    Без развёрнутых колонок — литералы прежнего поведения: тип выводится из
+    обязательности уже в питоне, балл сто, режим «сразу», расписания нет.
+    Форма строки одна при любой готовности схемы, и разбор ниже не гадает.
+    """
+    if with_plan:
+        return ("p.kind, p.pass_score_percent, p.publish_mode, p.scheduled_at, "
+                "p.scheduled_armed, p.spread_minutes, p.wave_interval_minutes")
+    return ("NULL::varchar AS kind, %d::smallint AS pass_score_percent, "
+            "'%s'::varchar AS publish_mode, NULL::timestamp AS scheduled_at, "
+            "FALSE AS scheduled_armed, "
+            "NULL::int AS spread_minutes, NULL::int AS wave_interval_minutes"
+            % (news_access.DEFAULT_PASS_SCORE_PERCENT, news_access.DEFAULT_PUBLISH_MODE))
+
+
+# Поля планировщика в порядке колонок. Один список на вставку, правку и разбор
+# ответа: разъехавшись, они дали бы новость, записанную не тем, чем её собрали.
+_PLAN_FIELDS = ('kind', 'pass_score_percent', 'publish_mode', 'scheduled_at',
+                'spread_minutes', 'wave_interval_minutes')
+_PLAN_INSERT_COLUMNS = ''.join(', ' + name for name in _PLAN_FIELDS)
+_PLAN_INSERT_VALUES = ''.join(', %%(plan_%s)s' % name for name in _PLAN_FIELDS)
+# Признака «взведён» среди полей формы НЕТ: его ставит только публикация
+# (schedule_post). Зато правка обязана его СНИМАТЬ, когда автор переключил
+# запуск на «Сразу»: иначе крон выпустил бы новость, которую уже отвязали от
+# расписания.
+_PLAN_UPDATE_SET = (''.join('%s = %%(plan_%s)s, ' % (name, name) for name in _PLAN_FIELDS)
+                    + 'scheduled_armed = CASE WHEN %(plan_scheduled_at)s IS NULL '
+                      'THEN FALSE ELSE scheduled_armed END, ')
+
+
+def _plan_params(plan):
+    """Параметры плана с префиксом `plan_`.
+
+    Префикс не для красоты: в том же запросе живут `title`, `body` и `channel`
+    из формы, и поле с именем `kind` однажды столкнулось бы с чужим.
+    """
+    data = plan or {}
+    return {('plan_' + name): data.get(name) for name in _PLAN_FIELDS}
+
+
+def _status_filter(status, with_plan):
+    """Условие корзины списка редактора. Требует параметра %(status)s.
+
+    «Запланированные» — отдельная корзина, а не подмножество черновиков:
+    объявление, ждущее своего часа, и недописанный черновик — разные вещи, и
+    лежать вперемешку им незачем. Своего статуса у запланированной нет
+    (см. news/schema.py), поэтому обе корзины описываются здесь, в одном месте.
+    """
+    if not status:
+        return ''
+    if status == 'scheduled':
+        # Нет колонок — нет и запланированных: пустая корзина честнее, чем
+        # список черновиков под чужой подписью.
+        return ("AND p.status = 'draft' AND p.scheduled_armed"
+                if with_plan else "AND FALSE")
+    if status == 'draft' and with_plan:
+        return "AND p.status = 'draft' AND NOT p.scheduled_armed"
+    return "AND p.status = %(status)s"
+
+
+def _wave_gate(with_plan):
+    """Условие «волна этого человека уже наступила» для выборок с `p` = news_posts.
+
+    Требует параметра %(user_id)s. Пустая строка, пока таблицы волн нет
+    (schema.plan_ready): растяжки тогда не бывает вовсе, и упоминание
+    несуществующей таблицы уронило бы /pending всему порталу.
+
+    НЕТ СТРОКИ — ПОКАЗЫВАЕМ. Расписание считается снимком в момент выпуска, и
+    те, кто пришёл в круг адресатов после (вышел на работу, перевёлся, дописан
+    правкой), в нём отсутствуют. Обратное правило означало бы объявление,
+    которое молча не доехало, — а тишина в этом разделе уже трижды стоила
+    ровно того, ради чего он сделан.
+
+    Решает ТОЛЬКО planned_at, отметка крона (activated_at) на показ не влияет:
+    крон может опоздать на минуту, не запуститься после рестарта или отстать на
+    сотне новостей, а объявление обязано открыться вовремя.
+    """
+    if not with_plan:
+        return ''
+    return """
+           AND NOT EXISTS (SELECT 1 FROM news_waves w
+                            WHERE w.news_id = p.id
+                              AND w.user_id = %(user_id)s
+                              AND w.planned_at > @NOW@)
+        """.replace('@NOW@', _NOW)
+
+
 def _space_filter(with_space):
     """Условие «новость этого пространства» для выборок с `p` = news_posts.
 
@@ -242,7 +331,7 @@ def _channel_filter(channel):
 
 def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
                      with_quiz=False, with_pass=False, with_space=False,
-                     channel=None):
+                     with_plan=False, channel=None):
     """Новости, которые этому человеку сейчас показывают. Свои — не показываем.
 
     Порядок: обязательные раньше необязательных, внутри — по публикации. Автор
@@ -294,7 +383,7 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
                 OR p.published_at > @NOW@ - INTERVAL '@HORIZON@ days')
            AND p.author_id IS DISTINCT FROM %(user_id)s
            AND r.confirmed_at IS NULL
-           """ + _channel_filter(channel) + """
+           """ + _channel_filter(channel) + _wave_gate(with_plan) + """
            AND
         """ + viewer_match(with_space) + """
          ORDER BY p.is_mandatory DESC, p.published_at, p.id
@@ -461,12 +550,13 @@ def set_quiz(cursor, *, post_id, quiz):
 
 
 def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
-                 with_quiz=False, with_pass=False, with_space=False):
+                 with_quiz=False, with_pass=False, with_space=False,
+                 with_plan=False):
     """Принять «Прочитал». (status, подробность).
 
-    Подробность — оставшиеся секунды у 'too_early' и id вопросов с неверным
-    ответом у 'quiz_wrong'. 'trainer_pending' — обязательный тренажёр ещё не
-    пройден (задача #342).
+    Подробность — оставшиеся секунды у 'too_early' и итог попытки у
+    'quiz_wrong' (access.quiz_result: сколько верных, сколько нужно).
+    'trainer_pending' — обязательный тренажёр ещё не пройден (задача #342).
 
     Задержку проверяет СЕРВЕР — по своей же отметке о показе. Клиентский
     таймер это удобство: без серверной проверки подтверждение уходило бы из
@@ -484,13 +574,22 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
                GREATEST(0, p.confirm_delay_seconds
                         - EXTRACT(EPOCH FROM ({now} - COALESCE(r.shown_at, {now})))
                )::int AS remaining,
-               {passes}
+               {passes}, {score}
           FROM news_posts p
           LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
          WHERE p.id = %(news_id)s
            AND p.status = 'published'
+           {wave}
            AND
-        """.format(now=_NOW, passes=_pass_columns_sql(with_pass)) + viewer_match(with_space),
+        """.format(now=_NOW, passes=_pass_columns_sql(with_pass),
+                   # Проходной балл берём ТУТ ЖЕ, а не вторым запросом: сверка
+                   # ответов и порог, по которому она решает, — один вопрос.
+                   score=('p.pass_score_percent' if with_plan
+                          else '%d::smallint' % news_access.DEFAULT_PASS_SCORE_PERCENT),
+                   # Подтверждение до своей волны — та же дверь, что чтение:
+                   # без неё перебором id человек «прочитал» бы объявление,
+                   # которого ещё не видел, и окно не показалось бы ему никогда.
+                   wave=_wave_gate(with_plan)) + viewer_match(with_space),
         params,
     )
     row = cursor.fetchone()
@@ -506,7 +605,8 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
     if row is None:
         return 'not_found', 0
     (is_mandatory, shown_at, confirmed_at, remaining,
-     pass_required, trainer_key, quiz_passed_at, trainer_passed_at) = row
+     pass_required, trainer_key, quiz_passed_at, trainer_passed_at,
+     pass_score) = row
     if confirmed_at is not None:
         return 'already', 0
 
@@ -564,13 +664,16 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
         return 'trainer_pending', 0
     quiz_passed_now = False
     if 'quiz' in left:
-        wrong = news_access.quiz_mistakes(answer_key, answers)
-        if wrong:
+        # Порог — проходной балл новости (ТЗ #300, п.4). При ста процентах это
+        # прежнее правило слово в слово: непройденной попытку делает любая
+        # ошибка.
+        result = news_access.quiz_result(answer_key, answers, pass_score)
+        if not result['passed']:
             # Список вопросов с ошибкой роут наружу НЕ отдаёт (решение владельца
             # 21.09.2026): попытка не засчитывается целиком, окно снимает весь
             # выбор и просит пройти тест заново. Здесь он остаётся как ответ на
             # вопрос «почему отказ» — для журнала и разбора, не для клиента.
-            return 'quiz_wrong', wrong
+            return 'quiz_wrong', result
         quiz_passed_now = True
 
     cursor.execute(
@@ -610,7 +713,7 @@ FEED_PREVIEW_LENGTH = 220
 
 
 def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass,
-                 with_space=False):
+                 with_space=False, with_plan=False):
     """Опубликованная новость, адресованная человеку, со своими отметками. None — нет.
 
     Своя новость сюда НЕ попадает: автор её не получает (как и окно).
@@ -620,21 +723,28 @@ def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass,
     params['news_id'] = news_id
     cursor.execute(
         """
-        SELECT p.id, {passes}, r.confirmed_at
+        SELECT p.id, {passes}, r.confirmed_at, {score}
           FROM news_posts p
           LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
          WHERE p.id = %(news_id)s
            AND p.status = 'published'
            AND p.author_id IS DISTINCT FROM %(user_id)s
+           {wave}
            AND
-        """.format(passes=_pass_columns_sql(with_pass)) + viewer_match(with_space),
+        """.format(passes=_pass_columns_sql(with_pass),
+                   score=('p.pass_score_percent' if with_plan
+                          else '%d::smallint' % news_access.DEFAULT_PASS_SCORE_PERCENT),
+                   # Та же дверь, что у окна: до своей волны новости для
+                   # человека ещё нет — ни прочитать, ни пройти её тест.
+                   wave=_wave_gate(with_plan)) + viewer_match(with_space),
         params,
     )
     row = cursor.fetchone()
     if row is None:
         return None
     return {'id': row[0], 'pass_required': bool(row[1]), 'trainer_key': row[2],
-            'quiz_passed_at': row[3], 'trainer_passed_at': row[4], 'confirmed_at': row[5]}
+            'quiz_passed_at': row[3], 'trainer_passed_at': row[4], 'confirmed_at': row[5],
+            'pass_score_percent': int(row[6] or news_access.DEFAULT_PASS_SCORE_PERCENT)}
 
 
 def _mark_pass(cursor, *, news_id, user_id, column):
@@ -657,30 +767,34 @@ def _mark_pass(cursor, *, news_id, user_id, column):
 
 
 def pass_quiz(cursor, *, news_id, user_id, otp_role, subjects, answers,
-              with_space=False):
+              with_space=False, with_plan=False):
     """«Проверить» у теста новости. (status, подробность).
 
     'not_found' — новости нет или она не этому человеку; 'no_quiz' — теста у
-    неё нет; 'quiz_wrong' — id вопросов с ошибкой; 'ok' — тест пройден и
-    отмечен в журнале. Подтверждение прочтения здесь НЕ ставится: это другой
-    вопрос, и отвечает на него кнопка «Прочитал».
+    неё нет; 'quiz_wrong' — итог попытки (access.quiz_result); 'ok' — тест
+    пройден и отмечен в журнале. Подтверждение прочтения здесь НЕ ставится: это
+    другой вопрос, и отвечает на него кнопка «Прочитал».
     """
     post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
-                        subjects=subjects, with_pass=True, with_space=with_space)
+                        subjects=subjects, with_pass=True, with_space=with_space,
+                        with_plan=with_plan)
     if post is None:
         return 'not_found', 0
     answer_key = quiz_answer_key(cursor, news_id)
     if not answer_key:
         return 'no_quiz', 0
-    wrong = news_access.quiz_mistakes(answer_key, answers)
-    if wrong:
-        return 'quiz_wrong', wrong
+    # Порог берём у новости — тот же, по которому решает подтверждение окна:
+    # «Проверить» и «Прочитал» обязаны засчитывать одну и ту же попытку.
+    result = news_access.quiz_result(answer_key, answers,
+                                     post['pass_score_percent'])
+    if not result['passed']:
+        return 'quiz_wrong', result
     _mark_pass(cursor, news_id=news_id, user_id=user_id, column='quiz_passed_at')
     return 'ok', 0
 
 
 def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects,
-                        with_space=False):
+                        with_space=False, with_plan=False):
     """Тренажёр новости дошёл до конца. (status, 0).
 
     Итог урока присылает браузер: сценарий живёт в коде фронта, и сервер
@@ -689,7 +803,8 @@ def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects,
     новость опубликована, адресована этому человеку и тренажёр у неё правда есть.
     """
     post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
-                        subjects=subjects, with_pass=True, with_space=with_space)
+                        subjects=subjects, with_pass=True, with_space=with_space,
+                        with_plan=with_plan)
     if post is None:
         return 'not_found', 0
     if not post['trainer_key']:
@@ -700,7 +815,7 @@ def mark_trainer_passed(cursor, *, news_id, user_id, otp_role, subjects,
 
 def feed_for_user(cursor, *, user_id, otp_role, subjects, limit=20, offset=0,
                   with_photos=False, with_quiz=False, with_pass=False,
-                  with_space=False, space_id=None):
+                  with_space=False, with_plan=False, space_id=None):
     """Лента «мои новости»: опубликованные и адресованные человеку. (всего, строки).
 
     Свежие сверху. Без тела и без кадров — строка списка отвечает на «что это
@@ -716,9 +831,12 @@ def feed_for_user(cursor, *, user_id, otp_role, subjects, limit=20, offset=0,
     params = news_access.audience_params(subjects, user_id, otp_role)
     params.update(_role_params())
     params.update({'limit': int(limit), 'offset': int(offset), 'space': space_id})
+    # Волна режет и ленту: до своей волны новости для человека ещё нет, и
+    # увидеть её списком раньше, чем окном, он не должен.
     where = """
          WHERE p.status = 'published'
            AND p.author_id IS DISTINCT FROM %(user_id)s
+        """ + _wave_gate(with_plan) + """
            AND
         """ + viewer_match(with_space) + _space_filter(with_space)
     cursor.execute(
@@ -780,7 +898,7 @@ def _plain_preview(text):
 
 
 def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False,
-              with_quiz=False, with_pass=False, with_space=False):
+              with_quiz=False, with_pass=False, with_space=False, with_plan=False):
     """Карточка новости из ленты — тем же периметром, что и лента. None — не его.
 
     Тест — БЕЗ верных ответов, как в окне: сверяет сервер (pass_quiz).
@@ -798,8 +916,10 @@ def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False
          WHERE p.id = %(news_id)s
            AND p.status = 'published'
            AND p.author_id IS DISTINCT FROM %(user_id)s
+           {wave}
            AND
         """.format(
+            wave=_wave_gate(with_plan),
             quiz=("""COALESCE((
                        SELECT json_agg(json_build_object(
                                   'id', z.id, 'prompt', z.prompt, 'options', z.options)
@@ -837,7 +957,7 @@ def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                limit=50, offset=0, with_photos=False, with_quiz=False, with_pass=False,
-               with_space=False, space_id=None, with_channel=False):
+               with_space=False, space_id=None, with_channel=False, with_plan=False):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
@@ -864,11 +984,13 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                {photo_count} AS photo_count,
                {quiz_count} AS quiz_count,
                {trainer_key} AS trainer_key,
-               {channel} AS channel
+               {channel} AS channel,
+               {plan}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
-         WHERE (%(status)s::text IS NULL OR p.status = %(status)s)
+         WHERE TRUE
+           {status}
            AND (
                 %(depts)s::int[] IS NULL
              OR p.author_id = %(viewer)s
@@ -896,6 +1018,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
             # объявление, не открывая карточку.
             channel=("p.channel" if with_channel
                      else "'%s'::varchar" % news_access.DEFAULT_CHANNEL),
+            plan=_plan_columns_sql(with_plan),
+            status=_status_filter(status, with_plan),
         ),
         params,
     )
@@ -909,7 +1033,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         SELECT COUNT(*)
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
-         WHERE (%(status)s::text IS NULL OR p.status = %(status)s)
+         WHERE TRUE
+           {status}
            AND (
                 %(depts)s::int[] IS NULL
              OR p.author_id = %(viewer)s
@@ -917,7 +1042,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                  AND {author_level} <= %(viewer_level)s)
            )
            {space}
-        """.format(author_level=author_level, space=_space_filter(with_space)),
+        """.format(author_level=author_level, space=_space_filter(with_space),
+                   status=_status_filter(status, with_plan)),
         params,
     )
     total = int(cursor.fetchone()[0])
@@ -945,6 +1071,21 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         # Куда ушло объявление: 'icore' — окно портала, 'oktell' — окно поверх
         # клиента АТС.
         'channel': row[16] or news_access.DEFAULT_CHANNEL,
+        # ТЗ #300. Тип строки списка выводится из поведения, когда колонки ещё
+        # нет: строка обязана читаться одинаково до и после деплоя. Число
+        # вопросов здесь под рукой — значит и «критичная» выводится точно.
+        # pass_required=True — умолчание колонки (#342): до неё тест новости был
+        # обязателен всегда, а вывод нужен ровно для тех строк, что старше.
+        'kind': row[17] or news_access.kind_of(
+            is_mandatory=bool(row[3]), pass_required=True, has_quiz=bool(row[14])),
+        'pass_score_percent': int(row[18] or news_access.DEFAULT_PASS_SCORE_PERCENT),
+        'publish_mode': row[19] or news_access.DEFAULT_PUBLISH_MODE,
+        'scheduled_at': row[20].isoformat() if row[20] else None,
+        'scheduled_armed': bool(row[21]),
+        'spread_minutes': row[22],
+        'wave_interval_minutes': row[23],
+        # «Запланирована» для колонок и подписи строки.
+        'state': news_access.post_state(row[2], row[20], row[21]),
         # Заполняется ниже одним запросом на всю страницу: считать его
         # подзапросом по news_reads значило бы считать НЕ ТО, что показывает
         # журнал (там знаменатель — нынешние адресаты), и «Прочитали: 14» на
@@ -993,7 +1134,8 @@ def audience_stats(cursor, post_ids, with_space=False):
     return {int(row[0]): (int(row[1]), int(row[2])) for row in cursor.fetchall()}
 
 
-def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=False):
+def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=False,
+             with_plan=False):
     """Карточка новости с адресатами. None — нет такой.
 
     with_pass — развёрнуты ли колонки тренажёра и обязательности прохождения
@@ -1011,7 +1153,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
                p.confirm_delay_seconds, p.published_at, p.expires_at,
                p.author_id, p.author_department_id, p.audience_max_role_level,
                u.name, d.name, p.created_at, p.updated_at, u.role,
-               {pass_required}, {trainer_key}, {space_id}, {channel}
+               {pass_required}, {trainer_key}, {space_id}, {channel},
+               {plan}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -1020,7 +1163,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
                    trainer_key='p.trainer_key' if with_pass else 'NULL::varchar',
                    space_id='p.space_id' if with_space else 'NULL::int',
                    channel=('p.channel' if with_channel
-                            else "'%s'::varchar" % news_access.DEFAULT_CHANNEL)),
+                            else "'%s'::varchar" % news_access.DEFAULT_CHANNEL),
+                   plan=_plan_columns_sql(with_plan)),
         (post_id,),
     )
     row = cursor.fetchone()
@@ -1052,6 +1196,24 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
         'space_id': row[18],
         # Куда отправлено: портал или окно поверх клиента АТС.
         'channel': row[19] or news_access.DEFAULT_CHANNEL,
+        # ТЗ #300: тип, проходной балл теста и режим запуска. Тип у старой
+        # строки выводится из поведения — тем же правилом, что и в бэкфилле
+        # схемы, чтобы карточка и список говорили одно и то же.
+        # has_quiz=False здесь не небрежность: без колонки (один деплой) тип
+        # никуда не пишется, и «важная» вместо «критичной» — это подпись, а не
+        # поведение. Ведут новость по-прежнему сами флаги.
+        'kind': row[20] or news_access.kind_of(
+            is_mandatory=bool(row[4]), pass_required=bool(row[16]), has_quiz=False),
+        'pass_score_percent': int(row[21] or news_access.DEFAULT_PASS_SCORE_PERCENT),
+        'publish_mode': row[22] or news_access.DEFAULT_PUBLISH_MODE,
+        'scheduled_at': row[23].isoformat() if row[23] else None,
+        'scheduled_armed': bool(row[24]),
+        'spread_minutes': row[25],
+        'wave_interval_minutes': row[26],
+        # «Запланирована» — выведенное состояние, своего статуса у неё нет
+        # (см. news/schema.py). Считает его access.post_state — одна функция на
+        # карточку, список и крон.
+        'state': news_access.post_state(row[3], row[23], row[24]),
         'audience': audience_rules(cursor, post_id),
     }
 
@@ -1125,7 +1287,8 @@ def roles_of_users(cursor, user_ids):
 def create_post(cursor, *, title, body, author_id, author_department_id,
                 is_mandatory, confirm_delay_seconds, expires_at, created_by,
                 space_id=None, with_space=False,
-                channel=None, with_channel=False):
+                channel=None, with_channel=False,
+                plan=None, with_plan=False):
     """Черновик новости. space_id — вика, в которой её пишут.
 
     with_space=False — колонки пространства ещё нет (schema.space_ready):
@@ -1139,47 +1302,59 @@ def create_post(cursor, *, title, body, author_id, author_department_id,
     соседнюю вику — это не опечатка в тексте, а другой круг адресатов: у
     опубликованной новости он уже показан людям и посчитан в журнале.
     """
+    params = {'title': title, 'body': body, 'author': author_id,
+              'dept': author_department_id, 'mandatory': is_mandatory,
+              'delay': confirm_delay_seconds, 'expires': expires_at,
+              'created_by': created_by, 'space': space_id,
+              'channel': channel or news_access.DEFAULT_CHANNEL}
+    params.update(_plan_params(plan))
     cursor.execute(
         """
         INSERT INTO news_posts (title, body, author_id, author_department_id,
                                 status, is_mandatory, confirm_delay_seconds,
-                                expires_at, created_by{space_column}{channel_column})
+                                expires_at, created_by{space_column}{channel_column}{plan_columns})
         VALUES (%(title)s, %(body)s, %(author)s, %(dept)s, 'draft',
                 %(mandatory)s, %(delay)s, %(expires)s,
-                %(created_by)s{space_value}{channel_value})
+                %(created_by)s{space_value}{channel_value}{plan_values})
         RETURNING id
         """.format(space_column=', space_id' if with_space else '',
                    space_value=', %(space)s' if with_space else '',
                    channel_column=', channel' if with_channel else '',
-                   channel_value=', %(channel)s' if with_channel else ''),
-        {'title': title, 'body': body, 'author': author_id,
-         'dept': author_department_id, 'mandatory': is_mandatory,
-         'delay': confirm_delay_seconds, 'expires': expires_at,
-         'created_by': created_by, 'space': space_id,
-         'channel': channel or news_access.DEFAULT_CHANNEL},
+                   channel_value=', %(channel)s' if with_channel else '',
+                   plan_columns=_PLAN_INSERT_COLUMNS if with_plan else '',
+                   plan_values=_PLAN_INSERT_VALUES if with_plan else ''),
+        params,
     )
     return int(cursor.fetchone()[0])
 
 
 def update_post(cursor, *, post_id, title, body, is_mandatory,
                 confirm_delay_seconds, expires_at,
-                channel=None, with_channel=False):
+                channel=None, with_channel=False,
+                plan=None, with_plan=False):
     """Правка черновика. channel меняется только у невыпущенной новости —
-    правило держит роут (NEWS_CHANNEL_LOCKED), здесь оно просто исполняется."""
+    правило держит роут (NEWS_CHANNEL_LOCKED), здесь оно просто исполняется.
+
+    plan — тип, проходной балл и режим запуска (ТЗ #300). Пишется целиком, как
+    и остальные поля формы: роут уже подставил в него прежние значения для
+    того, чего в запросе не было."""
+    params = {'id': post_id, 'title': title, 'body': body, 'mandatory': is_mandatory,
+              'delay': confirm_delay_seconds, 'expires': expires_at,
+              'channel': channel}
+    params.update(_plan_params(plan))
     cursor.execute(
         """
         UPDATE news_posts
            SET title = %(title)s, body = %(body)s, is_mandatory = %(mandatory)s,
                confirm_delay_seconds = %(delay)s, expires_at = %(expires)s,
-               {channel_set}
+               {channel_set}{plan_set}
                updated_at = {now}
          WHERE id = %(id)s
         """.format(now=_NOW,
                    channel_set=('channel = %(channel)s,'
-                                if with_channel and channel else '')),
-        {'id': post_id, 'title': title, 'body': body, 'mandatory': is_mandatory,
-         'delay': confirm_delay_seconds, 'expires': expires_at,
-         'channel': channel},
+                                if with_channel and channel else ''),
+                   plan_set=_PLAN_UPDATE_SET if with_plan else ''),
+        params,
     )
 
 
@@ -1280,13 +1455,220 @@ def delete_post(cursor, post_id, with_photos=False):
         refs = [(row[0], row[1]) for row in cursor.fetchall()]
     cursor.execute("DELETE FROM news_posts WHERE id = %s", (post_id,))
     return refs
+# ─────────────────────────────────────────────────────────────────────────────
+# ПЛАНИРОВЩИК ПУБЛИКАЦИИ (ТЗ #300, п.8)
+#
+# Три вопроса, на которые отвечает этот кусок: кому уйдёт объявление (чтобы
+# разложить людей по волнам), кого пора выпускать (крон) и чья волна уже
+# наступила (отметка факта для отчётности).
+#
+# Арифметику волн сюда НЕ переписываем — она в news/access.py, чистой функцией,
+# и её же зовёт предварительный расчёт в форме. Обещание «12 волн примерно по
+# 10 человек» и то, что ляжет в базу, обязаны быть одним счётом.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def audience_user_ids(cursor, post_id, with_space=False):
+    """Кому адресована СОХРАНЁННАЯ новость. Список id в порядке имени.
+
+    Правила те же, что у журнала (report_match): по ним же считается «12 из
+    30». Считать «кому уйдёт» вторым способом означало бы волны по одним людям
+    и показ другим.
+
+    Порядок по имени, а не по id: волна должна быть воспроизводимой и
+    объяснимой («первыми ушли А–В»), а не зависеть от того, в каком порядке
+    Postgres сегодня вернул строки.
+    """
+    params = {'post_id': post_id}
+    params.update(_role_params())
+    cursor.execute(
+        "WITH " + _VIEWER_SUBJECTS_CTE + """
+        SELECT v.id
+          FROM news_posts p
+          JOIN viewers v ON TRUE
+         WHERE p.id = %(post_id)s
+           AND v.id IS DISTINCT FROM p.author_id
+           AND
+        """ + report_match(with_space) + """
+         ORDER BY v.name, v.id
+        """,
+        params,
+    )
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
+def audience_count_for_rules(cursor, *, rules, author_id, audience_max_role_level,
+                             space_id=None, with_space=False):
+    """Сколько человек под НЕСОХРАНЁННЫМИ правилами формы. Для расчёта п.8.4.
+
+    Приём тот же, что у audience_sip_check: имя CTE перекрывает таблицу, и
+    шаблон адресата читает набор из формы, ничего об этом не зная. Своей
+    формулы у расчёта нет намеренно — иначе обещанное число получателей
+    разошлось бы с тем, что потом уйдёт.
+    """
+    if not rules:
+        return 0
+    payload = json.dumps([{
+        'subject_type': rule.get('subject_type'),
+        'subject_id': rule.get('subject_id'),
+        'subject_role': rule.get('subject_role'),
+        'min_role_level': rule.get('min_role_level'),
+    } for rule in rules], ensure_ascii=False)
+    params = {'rules': payload, 'author': author_id,
+              'ceiling': audience_max_role_level, 'space': space_id}
+    params.update(_role_params())
+    cursor.execute(
+        """
+        WITH news_posts AS (
+            SELECT 0::int AS id, %(author)s::int AS author_id,
+                   %(ceiling)s::int AS audience_max_role_level,
+                   %(space)s::int AS space_id
+        ),
+        news_audience_rules AS (
+            SELECT 0::int AS news_id, r.subject_type, r.subject_id,
+                   r.subject_role, r.min_role_level
+              FROM jsonb_to_recordset(%(rules)s::jsonb)
+                AS r(subject_type text, subject_id int, subject_role text,
+                     min_role_level int)
+        ),
+        """ + _VIEWER_SUBJECTS_CTE + """
+        SELECT COUNT(*)
+          FROM news_posts p
+          JOIN viewers v ON TRUE
+         WHERE v.id IS DISTINCT FROM p.author_id
+           AND
+        """ + report_match(with_space),
+        params,
+    )
+    return int(cursor.fetchone()[0])
+
+
+def set_waves(cursor, *, post_id, plan):
+    """Полная замена расписания волн. plan — из access.plan_waves.
+
+    Полная, а не добавление: расписание отвечает на один вопрос — «когда кому»,
+    и собирать его из двух источников значило бы держать два ответа. Пустой
+    план просто чистит таблицу: так снимается растяжка у перепланированной
+    новости.
+    """
+    cursor.execute("DELETE FROM news_waves WHERE news_id = %s", (post_id,))
+    for user_id, wave_no, planned_at in (plan or ()):
+        cursor.execute(
+            """
+            INSERT INTO news_waves (news_id, user_id, wave_no, planned_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (news_id, user_id) DO NOTHING
+            """,
+            (post_id, int(user_id), int(wave_no), planned_at),
+        )
+
+
+def schedule_post(cursor, *, post_id, scheduled_at, audience_max_role_level):
+    """Взвести отложенный запуск. Новость остаётся черновиком.
+
+    Потолок должности фиксируется ЗДЕСЬ, а не в момент выпуска: выпускает крон,
+    и должности автора у него под рукой нет. Смысл тот же, что у publish_post, —
+    снимок прав на момент, когда автор нажал «Опубликовать».
+    """
+    cursor.execute(
+        """
+        UPDATE news_posts
+           SET scheduled_at = %(when)s,
+               scheduled_armed = TRUE,
+               audience_max_role_level = COALESCE(%(ceiling)s, audience_max_role_level),
+               updated_at = {now}
+         WHERE id = %(id)s
+        """.format(now=_NOW),
+        {'id': post_id, 'when': scheduled_at, 'ceiling': audience_max_role_level},
+    )
+
+
+def due_scheduled_posts(cursor, limit=20):
+    """Кого пора выпускать. Для крона.
+
+    Черновик со взведённым временем — это и есть «Запланирована»
+    (access.post_state). Своего статуса у неё нет, и спрашивать его не о чем.
+    """
+    cursor.execute(
+        """
+        SELECT id, publish_mode, spread_minutes, wave_interval_minutes
+          FROM news_posts
+         WHERE status = 'draft'
+           AND scheduled_armed
+           AND scheduled_at <= {now}
+         ORDER BY scheduled_at
+         LIMIT %s
+        """.format(now=_NOW),
+        (int(limit),),
+    )
+    return [{'id': int(row[0]), 'publish_mode': row[1],
+             'spread_minutes': row[2], 'wave_interval_minutes': row[3]}
+            for row in cursor.fetchall()]
+
+
+def publish_scheduled(cursor, post_id):
+    """Выпустить запланированную новость. True — выпустили именно мы.
+
+    Условие повторяет отбор: двум кронам (рестарт, второй процесс) одна новость
+    достанется один раз, и дата выпуска не переедет. Потолок адресата уже
+    зафиксирован взведением (schedule_post) — трогать его тут нечем и незачем.
+    """
+    cursor.execute(
+        """
+        UPDATE news_posts
+           SET status = 'published',
+               published_at = {now},
+               -- Снимаем взвод: вышедшая новость расписанием больше не
+               -- управляется, а снятая с показа и выпущенная заново пошла бы
+               -- по нему второй раз.
+               scheduled_armed = FALSE,
+               updated_at = {now}
+         WHERE id = %s
+           AND status = 'draft'
+           AND scheduled_armed
+           AND scheduled_at <= {now}
+        """.format(now=_NOW),
+        (post_id,),
+    )
+    return bool(cursor.rowcount)
+
+
+def activate_due_waves(cursor):
+    """Отметить наступившие волны фактическим временем. Сколько отметили.
+
+    На ПОКАЗ это не влияет ничем: выдача смотрит на planned_at (см. _wave_gate),
+    потому что крон может опоздать или не подняться после рестарта, а
+    объявление обязано открыться вовремя. Отметка нужна отчётности (ТЗ п.8.5:
+    «плановое и фактическое время активации новости для сотрудника») и разбору
+    «почему человек увидел позже плана».
+    """
+    cursor.execute(
+        """
+        UPDATE news_waves
+           SET activated_at = {now}
+         WHERE activated_at IS NULL
+           AND planned_at <= {now}
+        """.format(now=_NOW))
+    return cursor.rowcount or 0
+
+
+def poke_bell(cursor):
+    """Разбудить открытые вкладки: пусть перезапросят своё /pending.
+
+    Тем же каналом и тем же сообщением, что и триггеры колокола
+    (database.py: bell_notify_change) — прямым NOTIFY, а не правкой строки ради
+    срабатывания триггера. Новая волна не меняет в news_posts ничего, и
+    выдумывать ей ложное изменение, чтобы вызвать побочное действие, значило бы
+    оставить в коде ловушку для того, кто однажды тот триггер поправит.
+    """
+    cursor.execute("SELECT pg_notify('bell_events', '{\"b\":1}')")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ЖУРНАЛ: кто прочитал, кто нет
 # ─────────────────────────────────────────────────────────────────────────────
 
-def read_report(cursor, post_id, with_pass=False, with_space=False):
+def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=False):
     """Адресаты новости с отметками показа и подтверждения.
 
     Круг адресатов считается ТЕМИ ЖЕ правилами, что и выдача окна
@@ -1331,14 +1713,29 @@ def read_report(cursor, post_id, with_pass=False, with_space=False):
                COALESCE(a.department_name, d.name) AS department_name,
                r.shown_at, r.confirmed_at,
                (a.id IS NOT NULL)                  AS in_audience,
-               r.quiz_passed_at, r.trainer_passed_at
+               r.quiz_passed_at, r.trainer_passed_at,
+               {wave_no}, {wave_planned}, {wave_activated}
           FROM addressed a
           FULL JOIN reads r ON r.user_id = a.id
           LEFT JOIN users u ON u.id = r.user_id
           LEFT JOIN departments d ON d.id = u.department_id
+          {wave_join}
          WHERE COALESCE(a.id, r.user_id) IS NOT NULL
          ORDER BY (r.confirmed_at IS NULL) DESC, COALESCE(a.name, u.name)
-        """,
+        """.format(
+            # Волна сотрудника — ТЗ п.8.5: «номер волны для каждого сотрудника,
+            # плановое и фактическое время активации». Джойн, а не подзапрос:
+            # строка волны у человека ровно одна (первичный ключ), размножить
+            # выборку ей нечем.
+            wave_no='w.wave_no' if with_plan else 'NULL::smallint AS wave_no',
+            wave_planned=('w.planned_at' if with_plan
+                          else 'NULL::timestamp AS planned_at'),
+            wave_activated=('w.activated_at' if with_plan
+                            else 'NULL::timestamp AS activated_at'),
+            wave_join=('LEFT JOIN news_waves w ON w.news_id = %(post_id)s '
+                       'AND w.user_id = COALESCE(a.id, r.user_id)'
+                       if with_plan else ''),
+        ),
         params,
     )
     return [{
@@ -1356,6 +1753,12 @@ def read_report(cursor, post_id, with_pass=False, with_space=False):
         # необязательный тест проходят и после «Прочитал», и не проходят вовсе.
         'quiz_passed_at': row[7].isoformat() if row[7] else None,
         'trainer_passed_at': row[8].isoformat() if row[8] else None,
+        # Волна человека (ТЗ #300, п.8.5). Пусто — растяжки у новости не было
+        # или человек пришёл в круг адресатов уже после выпуска: такому
+        # объявление видно сразу (см. _wave_gate).
+        'wave_no': (int(row[9]) + 1) if row[9] is not None else None,
+        'wave_planned_at': row[10].isoformat() if row[10] else None,
+        'wave_activated_at': row[11].isoformat() if row[11] else None,
     } for row in cursor.fetchall()]
 
 

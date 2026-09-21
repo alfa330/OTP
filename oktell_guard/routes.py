@@ -186,11 +186,20 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     # Готовность таблицы кадров — тем же приёмом: агентов полсотни, и каждый
     # ходит за объявлениями по таймеру, спрашивать базу на каждый круг незачем.
     _news_photos = {'ready': False}
+    # Планировщик и волны (ТЗ #300): без него окно агента показало бы
+    # объявление ВСЕМ сразу, пока портал держит его по волнам. Одна растяжка,
+    # два окна — и в одном из них её как будто нет.
+    _news_plan = {'ready': False}
 
     def _news_photos_ready(cursor, probe):
         if not _news_photos['ready']:
             _news_photos['ready'] = probe(cursor)
         return _news_photos['ready']
+
+    def _news_plan_ready(cursor, probe):
+        if not _news_plan['ready']:
+            _news_plan['ready'] = probe(cursor)
+        return _news_plan['ready']
 
     def _news_channel_ready(cursor, probe):
         if not _news_channel['ready']:
@@ -367,6 +376,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         from news import queries as news_queries
         from news.schema import channel_ready as news_channel_ready
         from news.schema import photos_ready as news_photos_ready
+        from news.schema import plan_ready as news_plan_ready
 
         with db._get_cursor() as cursor:
             owner = agent_owner(cursor)
@@ -382,6 +392,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 cursor, user_id=viewer['user_id'], otp_role=viewer['otp_role'],
                 subjects=viewer['subjects'], with_photos=with_photos,
                 with_quiz=True, with_pass=True,
+                # Волна растяжки режет очередь и здесь: расписание одно на оба
+                # окна, иначе объявление, отложенное для портала, вышло бы
+                # поверх клиента АТС немедленно.
+                with_plan=_news_plan_ready(cursor, news_plan_ready),
                 # Готовность колонки спрашиваем ОДИН раз на процесс: агентов
                 # полсотни, и каждый ходит сюда по таймеру. Нет колонки —
                 # канала нет, и агент работает как до этой задачи.
@@ -413,6 +427,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         разъезжаются, а это правило про документооборот.
         """
         from news import queries as news_queries
+        from news.schema import plan_ready as news_plan_ready
 
         payload = request.get_json(silent=True) or {}
         with db._get_cursor() as cursor:
@@ -425,7 +440,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             status, detail = news_queries.confirm_read(
                 cursor, news_id=news_id, user_id=viewer['user_id'],
                 otp_role=viewer['otp_role'], subjects=viewer['subjects'],
-                answers=payload.get('answers'), with_quiz=True, with_pass=True)
+                answers=payload.get('answers'), with_quiz=True, with_pass=True,
+                # Порог теста и граница волны — те же, что у портала: правило
+                # про документооборот, и двух копий у него быть не должно.
+                with_plan=_news_plan_ready(cursor, news_plan_ready))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
         if status == 'too_early':

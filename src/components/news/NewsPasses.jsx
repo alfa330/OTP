@@ -90,17 +90,26 @@ export function NewsQuiz({ quiz, answers, onAnswer, disabled = false }) {
 export function useQuizAttempt(postId) {
     const [answers, setAnswers] = useState({});
     const [failed, setFailed] = useState(false);
+    /* Итог непройденной попытки от сервера: сколько верных и сколько нужно
+       (ТЗ #300, п.4). КАКИЕ вопросы неверны, сервер не отдаёт и здесь их нет —
+       подсветка вернула бы подбор ответа переключением одного варианта. */
+    const [score, setScore] = useState(null);
     // Следующая новость — свой тест с чистого листа.
-    useEffect(() => { setAnswers({}); setFailed(false); }, [postId]);
+    useEffect(() => { setAnswers({}); setFailed(false); setScore(null); }, [postId]);
     const answer = useCallback((questionId, index) => {
         setAnswers((prev) => ({ ...prev, [questionId]: index }));
         // Уведомление было про прошлую попытку — человек уже отвечает заново.
         setFailed(false);
     }, []);
-    const fail = useCallback(() => { setAnswers({}); setFailed(true); }, []);
+    const fail = useCallback((detail) => {
+        setAnswers({});
+        setFailed(true);
+        setScore(detail && Number.isFinite(detail.total) ? detail : null);
+    }, []);
     /* Ссылка на объект стабильна: попытку кладут в зависимости обработчиков, и
        новый объект на каждый рендер пересобирал бы их без всякой причины. */
-    return useMemo(() => ({ answers, failed, answer, fail }), [answers, failed, answer, fail]);
+    return useMemo(() => ({ answers, failed, score, answer, fail }),
+                   [answers, failed, score, answer, fail]);
 }
 
 /* Название тренажёра по ключу. Реестр грузится динамически и один раз на
@@ -207,7 +216,7 @@ export default function NewsPasses({
                 // Хоть один неверный — попытка целиком не засчитана: выбор
                 // снимается, и тест проходится заново (решение владельца).
                 if (e?.response?.data?.code === 'NEWS_QUIZ_WRONG') {
-                    attempt.fail();
+                    attempt.fail(e.response.data);
                     return;
                 }
                 setError(errText(e, 'Не удалось проверить ответы'));
@@ -290,7 +299,15 @@ export default function NewsPasses({
                             className="flex items-start gap-2 rounded-xl bg-rose-50 px-3 py-2.5 text-[13px] leading-snug text-rose-700 ring-1 ring-rose-200"
                         >
                             <AlertCircle className="mt-px h-4 w-4 shrink-0" aria-hidden="true" />
-                            <span>Ответы неверные — выбор сброшен, пройдите тест заново</span>
+                            {/* Со строгим порогом — прежняя фраза. С мягким
+                                («нужно 3 из 5») без чисел было бы непонятно,
+                                почему тест не засчитан: часть ответов верна. */}
+                            <span>
+                                {attempt.score && attempt.score.needed < attempt.score.total
+                                    ? `Верных ответов ${attempt.score.correct} из ${attempt.score.total}, `
+                                      + `нужно ${attempt.score.needed} — выбор сброшен, пройдите тест заново`
+                                    : 'Ответы неверные — выбор сброшен, пройдите тест заново'}
+                            </span>
                         </div>
                     )}
                     <NewsQuiz

@@ -24,7 +24,8 @@ test('пустой черновик ИИ добивается пустыми в�
 });
 
 test('лишние вопросы черновика отрезаются по потолку', () => {
-    const many = Array.from({ length: 5 }, (_, i) => ({ prompt: `В${i}`, options: ['а', 'б'], correct: 0 }));
+    const many = Array.from({ length: QUIZ_MAX_QUESTIONS + 3 },
+                            (_, i) => ({ prompt: `В${i}`, options: ['а', 'б'], correct: 0 }));
     assert.equal(quizForForm(many).length, QUIZ_MAX_QUESTIONS);
 });
 
@@ -42,8 +43,10 @@ test('причина называет номер вопроса', () => {
     assert.equal(quizProblem(quiz), 'В вопросе 2 варианты повторяются');
 });
 
-test('один вопрос — мало', () => {
-    assert.equal(quizProblem(good().slice(0, 1)), 'В тесте должно быть 2–3 вопроса');
+test('один вопрос — законный тест, лишние — нет', () => {
+    assert.equal(quizProblem(good().slice(0, 1)), null);
+    assert.equal(quizProblem([...good(), ...good(), ...good(), ...good(), ...good(), ...good()]),
+                 'В тесте должно быть от 1 до 10 вопросов');
 });
 
 test('удаление варианта сдвигает отметку верного, а удалённый верный её снимает', () => {
