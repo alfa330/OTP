@@ -1792,8 +1792,8 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         """Предупреждение относится к одной кнопке «Oktell»: отдельная красная
         строка внизу карточки читалась бы как ошибка всей формы."""
         form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
-        row = form[form.index('Куда отправить'):]
-        row = row[:row.index('Задержка кнопки')]
+        row = form[form.index("{screen === 'channel' && ("):]
+        row = row[:row.index("{screen === 'passes' && (")]
         self.assertIn('sipMissing > 0 && (', row)
         self.assertIn('aria-label="Кто не увидит объявление в Oktell"', row)
         self.assertIn('<IosSegmented', row)
@@ -1804,12 +1804,43 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         Плавность даёт сетка 0fr → 1fr: высота считается по содержимому, и три
         имени раскрываются так же ровно, как тридцать."""
         form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
-        row = form[form.index('Куда отправить'):]
-        row = row[:row.index('Задержка кнопки')]
+        row = form[form.index("{screen === 'channel' && ("):]
+        row = row[:row.index("{screen === 'passes' && (")]
         self.assertIn('grid transition-all duration-300 ease-out', row)
         self.assertIn('grid-rows-[1fr]', row)
         self.assertIn('grid-rows-[0fr]', row)
         self.assertNotIn('IosModal', row)
+
+    def test_the_form_is_one_window_with_screens_inside(self):
+        """Решение владельца 21.09.2026: «модалка слишком перегружена… убрать
+        двойную модалку».
+
+        Открытым на главном экране остаётся только то, ради чего новость и
+        пишут, — заголовок, текст и кадры. Остальное свёрнуто в строки со
+        значением справа, а второй уровень открывается ТУТ ЖЕ, сдвигом, и
+        возвращается шевроном: окно поверх окна — это два окна об одной
+        новости, и «закрыть» у них означает разное.
+        """
+        code = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        form = code[code.index('function NewsForm('):code.index('function NewsReport(')]
+        # Одно окно на всю форму, ни одного вложенного.
+        self.assertEqual(form.count('<IosModal'), 1)
+        # Выбор адресата и тренажёра — экраны, а не окна.
+        for name in ('function AudienceScreen(', 'function TrainerScreen('):
+            self.assertIn(name, code, name)
+        for gone in ('function AudiencePicker(', 'function TrainerPicker(',
+                     'pickerOpen', 'trainerPickerOpen'):
+            self.assertNotIn(gone, code, gone)
+        # Шеврон «назад» ведёт на предыдущий уровень, а не наружу.
+        self.assertIn("onBack={screen === 'main' ? null : back}", form)
+        self.assertIn("setScreen(screen === 'trainer' ? 'passes' : 'main')", form)
+        # Кнопки формы — только на главном экране.
+        self.assertIn("footer={screen !== 'main' ? null : (", form)
+        # Каждая настройка — строка со значением справа.
+        for label in ('label="Тип"', 'label="Кому"', 'label="Куда отправить"',
+                      'label="Тест и тренажёр"', 'label="Публикация и показ"'):
+            self.assertIn(label, form, label)
+        self.assertIn('function SettingRow(', code)
 
     def test_one_person_gets_the_instruction_not_a_list(self):
         """«Если один сотрудник — просто инструкция, как добавить номер»:

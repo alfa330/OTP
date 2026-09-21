@@ -6,8 +6,8 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
-    AlertTriangle, Bold, Check, ChevronDown, Download, Image as ImageIcon, Italic,
-    Link2, List, ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus,
+    AlertTriangle, Bold, Check, ChevronDown, ChevronRight, Download, Image as ImageIcon,
+    Italic, Link2, List, ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus,
     Sparkles, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
@@ -176,7 +176,26 @@ const SUBJECT_TITLES = {
     otp_role: 'должность',
 };
 
+const questionsWord = (count) => (
+    count % 10 === 1 && count % 100 !== 11 ? 'вопрос'
+        : ([2, 3, 4].includes(count % 10) && ![12, 13, 14].includes(count % 100) ? 'вопроса' : 'вопросов')
+);
+
 const ruleKey = (rule) => `${rule.subject_type}:${rule.subject_id ?? rule.subject_role}`;
+
+/* Подпись правила адресата. Живёт на уровне модуля, а не внутри формы: её
+   одинаково спрашивают и строка «Кому» на главном экране, и сам экран выбора,
+   а две копии подписали бы одно правило по-разному. */
+const audienceRuleLabel = (rule, access) => {
+    if (rule.subject_type === 'otp_role') {
+        return roleTitle(rule.subject_role) || rule.subject_role;
+    }
+    if (rule.subject_name) return rule.subject_name;
+    const pool = rule.subject_type === 'user'
+        ? (access?.people || [])
+        : (access?.subjects?.[rule.subject_type] || []);
+    return pool.find((item) => item.id === rule.subject_id)?.name || '—';
+};
 
 /* Журнал нужен обязательной новости и новости, которую можно ПРОЙТИ: у
    необязательной с тестом или тренажёром подтверждений не ждут, а «кто прошёл»
@@ -191,7 +210,7 @@ const DELAY_PRESETS = [0, 10, 30, 60];
 // Выбор адресатов
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AudiencePicker({ open, onClose, access, value, onChange, spaceName = '' }) {
+function AudienceScreen({ access, value, onChange, spaceName = '' }) {
     const [tab, setTab] = useState('department');
     const [query, setQuery] = useState('');
 
@@ -254,19 +273,43 @@ function AudiencePicker({ open, onClose, access, value, onChange, spaceName = ''
     };
 
     return (
-        <IosModal
-            open={open}
-            onClose={onClose}
-            title="Кому показать новость"
-            /* Почему список сужен — под «i», а не подзаголовком: IosModal
-               рисует subtitle одной строкой с truncate, и на телефоне фраза
-               обрывалась на середине. Объяснение читают один раз, а место в
-               шапке оно занимало всегда. */
-            maxWidth="max-w-xl"
-            footer={(
-                <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
+        <div className="space-y-3">
+            {/* Отмеченные — первым делом и здесь же снимаются: экран отвечает
+                на один вопрос «кому», и ответ на него должен быть виден сразу,
+                а не за прокруткой списка. */}
+            {value.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                    {value.map((rule) => (
+                        <span key={ruleKey(rule)}
+                              className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 py-1 pl-2.5 pr-1 text-[12px] text-slate-700">
+                            {audienceRuleLabel(rule, access)}
+                            <button
+                                type="button"
+                                onClick={() => onChange(value.filter(
+                                    (item) => ruleKey(item) !== ruleKey(rule)))}
+                                className="grid h-4 w-4 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                                aria-label={`Убрать ${audienceRuleLabel(rule, access)}`}
+                            >
+                                <X className="h-3 w-3" aria-hidden="true" />
+                            </button>
+                        </span>
+                    ))}
+                </div>
             )}
-        >
+            {/* ЕДИНСТВЕННОЕ пояснение раздела, оставшееся на виду, — и это не
+                недоделка. Остальные объясняют то, что человек и так видит на
+                экране; это — границу, которой на экране НЕТ: потолок
+                audience_max_role_level режет уже выбранный отдел на выдаче.
+                Автор публикует «отделу», журнал показывает знаменатель меньше
+                состава отдела, и это читается как дефект данных. Прочитать надо
+                ДО «Опубликовать», а подсказку за «i» читают после — то есть
+                никогда. slate-500, а не slate-400: на белом slate-400 даёт
+                около 2.8:1 при норме 4.5. */}
+            <p className="text-[12px] text-slate-500">
+                {value.length
+                    ? 'Из выбранного новость увидят только те, кто ниже вас по должности'
+                    : 'Новость увидят только те, кто ниже вас по должности'}
+            </p>
             <div className="flex items-center gap-2">
                 {tabs.length > 1 && (
                     <div className="min-w-0 flex-1">
@@ -330,7 +373,7 @@ function AudiencePicker({ open, onClose, access, value, onChange, spaceName = ''
                     );
                 })}
             </div>
-        </IosModal>
+        </div>
     );
 }
 
@@ -340,19 +383,18 @@ function AudiencePicker({ open, onClose, access, value, onChange, spaceName = ''
 
 /* Список тех же тренажёров, что во вкладке «Тренажёры» вики, — из реестра, а не
    своим перечнем: сценарии живут в коде, и второй список отстал бы от первого
-   на первом же новом тренажёре. Нажатие выбирает и закрывает окно — как выбор
+   на первом же новом тренажёре. Нажатие выбирает и возвращает назад — как выбор
    значения в «Настройках» iOS. */
-function TrainerPicker({ open, value, onClose, onChange }) {
+function TrainerScreen({ value, onChange, onDone }) {
     return (
-        <IosModal open={open} onClose={onClose} title="Тренажёр к новости" maxWidth="max-w-lg">
-            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                 {TRAINER_CARDS.map((trainer) => {
                     const active = trainer.key === value;
                     return (
                         <button
                             key={trainer.key}
                             type="button"
-                            onClick={() => { onChange(trainer.key); onClose(); }}
+                            onClick={() => { onChange(trainer.key); onDone(); }}
                             className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100"
                         >
                             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
@@ -368,14 +410,35 @@ function TrainerPicker({ open, value, onClose, onChange }) {
                         </button>
                     );
                 })}
-            </div>
-        </IosModal>
+        </div>
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Форма новости
 // ─────────────────────────────────────────────────────────────────────────────
+
+/* Строка настройки — пункт «Настроек» iOS: слева имя, справа текущее значение и
+   шеврон. Значение справа ОБЯЗАТЕЛЬНО, и это не украшение: строка без него
+   заставляет открыть экран только затем, чтобы вспомнить, что там выбрано, —
+   то есть ровно тот лишний шаг, ради снятия которого настройки и свёрнуты. */
+function SettingRow({ label, value, muted = false, badge = null, onOpen }) {
+    return (
+        <button
+            type="button"
+            onClick={onOpen}
+            className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100"
+        >
+            <span className="shrink-0 text-[14px] text-slate-900">{label}</span>
+            <span className={`ml-auto min-w-0 truncate text-[13px] ${
+                muted ? 'text-slate-400' : 'text-slate-500'}`}>
+                {value}
+            </span>
+            {badge}
+            <ChevronRight className="h-4 w-4 shrink-0 text-slate-300" aria-hidden="true" />
+        </button>
+    );
+}
 
 function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, headers,
                    spaceId = null, spaceName = '' }) {
@@ -387,8 +450,12 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     const [delay, setDelay] = useState(access?.default_confirm_delay_seconds ?? 10);
     const [expires, setExpires] = useState('');
     const [audience, setAudience] = useState([]);
-    const [pickerOpen, setPickerOpen] = useState(false);
     const [error, setError] = useState('');
+    /* Какой экран формы открыт. Второй уровень живёт ВНУТРИ того же окна:
+       окно поверх окна — это два окна об одной новости, и «закрыть» у них
+       означает разное. Стек не нужен: у каждого экрана ровно один родитель. */
+    const [screen, setScreen] = useState('main');
+    const [anim, setAnim] = useState('');
     /* Кадры: [{ key, id, url, localUrl, busy, failed }].
        id и url появляются, когда файл доехал до сервера; localUrl живёт до
        этого момента и показывает плитку сразу после выбора — иначе человек
@@ -408,7 +475,6 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
        и тренажёр — постановка говорит об одной настройке обязательности. */
     const [trainerKey, setTrainerKey] = useState(null);
     const [passRequired, setPassRequired] = useState(true);
-    const [trainerPickerOpen, setTrainerPickerOpen] = useState(false);
     /* Проходной результат теста (ТЗ #300, п.4). Сто — прежнее поведение: любая
        ошибка не засчитывает попытку. */
     const [passScore, setPassScore] = useState(100);
@@ -445,6 +511,13 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
        объявление уже показано людям там, куда его отправили. */
     const channelLocked = quizLocked;
     const trainerCard = TRAINER_CARDS.find((item) => item.key === trainerKey) || null;
+    const push = (next) => { setAnim('animate-push-in'); setScreen(next); };
+    /* Назад — всегда к родителю: у тренажёра это «Тест и тренажёр», у
+       остальных главный экран. */
+    const back = () => {
+        setAnim('animate-pop-in');
+        setScreen(screen === 'trainer' ? 'passes' : 'main');
+    };
     /* Что навязывает тип — тем же правилом, что на сервере (kind_flags). */
     const rule = kindRule(kind);
     const mandatory = rule.mandatory;
@@ -455,6 +528,27 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     /* Планировщик рисуется, только когда он развёрнут: предлагать отложенный
        запуск, который сервер отвергнет, — обещание, которое он не выполнит. */
     const planReady = access?.plan_ready !== false;
+    /* Значения в строках настроек. Каждая отвечает на свой вопрос одним
+       коротким словом — иначе строка заставляет открыть экран только затем,
+       чтобы вспомнить выбранное. */
+    const kindLabel = (NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).label;
+    const channelLabel = (NEWS_CHANNELS.find((item) => item.value === channel)
+                          || NEWS_CHANNELS[0]).label;
+    const audienceSummary = audience.length === 0
+        ? 'Не выбрано'
+        : (audience.length === 1
+            ? audienceRuleLabel(audience[0], access)
+            : `${audienceRuleLabel(audience[0], access)} и ещё ${audience.length - 1}`);
+    const passesSummary = [
+        // «Тест · 2» человек читает как «тест номер два»: число тут — вопросы,
+        // и сказать это надо словом.
+        quiz.length ? `${quiz.length} ${questionsWord(quiz.length)}` : '',
+        trainerKey ? 'тренажёр' : '',
+    ].filter(Boolean).join(' · ') || 'Нет';
+    const scheduleSummary = [
+        (PUBLISH_MODES.find((item) => item.value === publishMode) || PUBLISH_MODES[0]).label,
+        mandatory ? `кнопка через ${delay} с` : '',
+    ].filter(Boolean).join(' · ');
     const spreadChoices = SPREAD_PRESETS.filter(
         (value) => value >= (access?.min_spread_minutes ?? 5)
             && value <= (access?.max_spread_minutes ?? 1440));
@@ -477,7 +571,7 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         content: '',
         editorProps: {
             attributes: {
-                class: 'news-body min-h-[180px] focus:outline-none',
+                class: 'news-body min-h-[120px] focus:outline-none',
             },
         },
     }, []);
@@ -513,7 +607,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setChannel(post?.channel || NEWS_CHANNELS[0].value);
         setSipCheck(null);
         setSipOpen(false);
-        setTrainerPickerOpen(false);
+        // Открываем всегда с главного: форма, начатая на третьем экране, —
+        // это форма, у которой человек не видел ни заголовка, ни текста.
+        setScreen('main');
+        setAnim('');
         // Уже прикреплённые кадры приезжают с карточкой готовыми адресами.
         setPhotos((post?.photos || []).map((photo) => ({
             key: `id:${photo.id}`, id: photo.id, url: photo.url,
@@ -700,17 +797,6 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         });
     }, []);
 
-    const audienceLabel = useCallback((rule) => {
-        if (rule.subject_type === 'otp_role') {
-            return roleTitle(rule.subject_role) || rule.subject_role;
-        }
-        if (rule.subject_name) return rule.subject_name;
-        const pool = rule.subject_type === 'user'
-            ? (access?.people || [])
-            : (access?.subjects?.[rule.subject_type] || []);
-        return pool.find((item) => item.id === rule.subject_id)?.name || '—';
-    }, [access]);
-
     const submit = (publish) => {
         const text = title.trim();
         if (!text) { setError('Укажите заголовок'); return; }
@@ -793,19 +879,38 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         </button>
     );
 
+    /* Заголовок шапки — имя текущего экрана: на втором уровне «Новая новость»
+       не отвечает на вопрос «что я сейчас настраиваю». */
+    const SCREEN_TITLES = {
+        main: post?.id ? 'Новость' : 'Новая новость',
+        kind: 'Тип новости',
+        audience: 'Кому',
+        channel: 'Куда отправить',
+        passes: 'Тест и тренажёр',
+        trainer: 'Тренажёр к новости',
+        schedule: 'Публикация и показ',
+    };
+
     return (
-        <>
             <IosModal
                 open={open}
-                onClose={onClose}
-                title={post?.id ? 'Новость' : 'Новая новость'}
+                /* Крестик и клик мимо окна на втором уровне возвращают на шаг
+                   назад, а не закрывают форму: промах мышью по затемнению не
+                   должен стоить набранного текста. */
+                onClose={screen === 'main' ? onClose : back}
+                onBack={screen === 'main' ? null : back}
+                title={SCREEN_TITLES[screen]}
                 /* Подзаголовка нет: у опубликованной там стояло «правка не
                    сбрасывает подтверждения», и IosModal резал эту строку
                    посередине (subtitle рисуется с truncate). Сказать её надо
                    один раз и в том месте, где решение принимают, — у кнопки
                    «Сохранить», за «i». */
                 maxWidth="max-w-2xl"
-                footer={(
+                /* Кнопки — только на главном экране. На втором их нет намеренно:
+                   значение применяется сразу, как в «Настройках», и «Готово»
+                   рядом с шевроном «назад» было бы второй кнопкой того же
+                   действия. */
+                footer={screen !== 'main' ? null : (
                     <>
                         {error && <span className="mr-auto text-[12px] text-rose-600">{error}</span>}
                         {post?.status === 'published' && (
@@ -830,737 +935,770 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                     </>
                 )}
             >
-                <label className={iosGroupLabel}>Заголовок</label>
-                <input
-                    className={iosInput}
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    placeholder="Например: Акция «Приведи друга» — во всех таксопарках"
-                    maxLength={255}
-                />
+                {/* ЭКРАНЫ ВНУТРИ ОДНОГО ОКНА, а не окно поверх окна.
+                    Форма отвечает на восемь вопросов сразу, и вываленные в один
+                    свиток они давали полтора экрана прокрутки и семь значков «i»
+                    на первом же взгляде. Открытым остаётся только то, ради чего
+                    новость и пишут, — заголовок, текст и кадры; остальное свёрнуто
+                    в строки со значением справа, как в «Настройках».
+                    Второй уровень открывается ТУТ ЖЕ, сдвигом, и возвращается
+                    шевроном в шапке: окно поверх окна — это два окна об одной
+                    новости, и закрытие одного из них попадает не туда. */}
+                <div key={screen} className={anim}>
+                    {screen === 'main' && (
+                        <>
+                            <label className={iosGroupLabel}>Заголовок</label>
+                            <input
+                                className={iosInput}
+                                value={title}
+                                onChange={(e) => setTitle(e.target.value)}
+                                placeholder="Например: Акция «Приведи друга» — во всех таксопарках"
+                                maxLength={255}
+                            />
 
-                <label className={`${iosGroupLabel} mt-4`}>Текст</label>
-                <div className={`${iosCard} overflow-hidden`}>
-                    <div className="flex flex-wrap items-center gap-0.5 border-b border-slate-100 px-2 py-1.5">
-                        {toolbarButton(editor?.isActive('bold'),
-                            () => editor?.chain().focus().toggleBold().run(), Bold, 'Полужирный')}
-                        {toolbarButton(editor?.isActive('italic'),
-                            () => editor?.chain().focus().toggleItalic().run(), Italic, 'Курсив')}
-                        {toolbarButton(editor?.isActive('underline'),
-                            () => editor?.chain().focus().toggleUnderline().run(), UnderlineIcon, 'Подчёркнутый')}
-                        <span className="mx-1 h-5 w-px bg-slate-200" />
-                        {toolbarButton(editor?.isActive('bulletList'),
-                            () => editor?.chain().focus().toggleBulletList().run(), List, 'Список')}
-                        {toolbarButton(editor?.isActive('orderedList'),
-                            () => editor?.chain().focus().toggleOrderedList().run(), ListOrdered, 'Нумерованный список')}
-                        <span className="mx-1 h-5 w-px bg-slate-200" />
-                        {toolbarButton(editor?.isActive('link'), () => {
-                            const previous = editor?.getAttributes('link')?.href || '';
-                            const href = window.prompt('Адрес ссылки', previous);
-                            if (href === null) return;
-                            if (!href) { editor?.chain().focus().unsetLink().run(); return; }
-                            editor?.chain().focus().extendMarkRange('link')
-                                .setLink({ href, target: '_blank' }).run();
-                        }, Link2, 'Ссылка')}
-                    </div>
-                    <div className="px-3.5 py-3">
-                        <EditorContent editor={editor} />
-                    </div>
-                </div>
-
-                <div className="mt-4 flex items-center justify-between px-1">
-                    <span className={`${iosGroupLabel} flex items-center gap-2 px-0`}>
-                        Фотографии
-                        <IosHint
-                            label="Что будет с фотографиями"
-                            text="Снимки уменьшаются и переводятся в WebP прямо в браузере — уходит десятая часть исходного веса. Сотрудник видит их каруселью над текстом новости и листает пальцем, стрелками или трекпадом. Порядок здесь и есть порядок показа: первый кадр он увидит первым."
-                        />
-                    </span>
-                    <span className="text-[12px] tabular-nums text-slate-400">
-                        {photos.length} / {PHOTO_MAX_COUNT}
-                    </span>
-                </div>
-                <div className={`${iosCard} p-2`}>
-                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-                        {photos.map((photo, index) => (
-                            <div
-                                key={photo.key}
-                                className={`relative aspect-square overflow-hidden rounded-xl bg-slate-100 ring-1 ${
-                                    photo.failed ? 'ring-rose-300' : 'ring-slate-200/70'}`}
-                            >
-                                <img
-                                    src={photo.localUrl || photo.url}
-                                    alt=""
-                                    loading="lazy"
-                                    decoding="async"
-                                    className="h-full w-full object-cover"
-                                />
-                                {photo.busy && (
-                                    <span className="absolute inset-0 grid place-items-center bg-white/60">
-                                        <Loader2 className="h-4 w-4 animate-spin text-slate-500" aria-hidden="true" />
-                                    </span>
-                                )}
-                                {/* Номер = место в карусели: он же отвечает на
-                                    вопрос «что сотрудник увидит первым». */}
-                                <span className="absolute left-1 top-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-slate-900/55 px-1 text-[10.5px] tabular-nums text-white backdrop-blur">
-                                    {index + 1}
-                                </span>
-                                {/* Крестик виден ВСЕГДА, а не по наведению: на
-                                    телефоне наведения нет, и спрятанная там
-                                    кнопка просто не существует. */}
-                                <button
-                                    type="button"
-                                    onClick={() => dropPhoto(photo)}
-                                    aria-label={`Убрать фотографию ${index + 1}`}
-                                    className="absolute right-1 top-1 grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-white backdrop-blur transition active:scale-95"
-                                >
-                                    <X className="h-3 w-3" aria-hidden="true" />
-                                </button>
-                                <div className="absolute inset-x-1 bottom-1 flex justify-between">
-                                    <button
-                                        type="button"
-                                        disabled={index === 0}
-                                        onClick={() => movePhoto(index, -1)}
-                                        aria-label={`Переставить фотографию ${index + 1} левее`}
-                                        className="grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-[13px] leading-none text-white backdrop-blur transition active:scale-95 disabled:opacity-0"
-                                    >
-                                        ‹
-                                    </button>
-                                    <button
-                                        type="button"
-                                        disabled={index === photos.length - 1}
-                                        onClick={() => movePhoto(index, 1)}
-                                        aria-label={`Переставить фотографию ${index + 1} правее`}
-                                        className="grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-[13px] leading-none text-white backdrop-blur transition active:scale-95 disabled:opacity-0"
-                                    >
-                                        ›
-                                    </button>
+                            <label className={`${iosGroupLabel} mt-4`}>Текст</label>
+                            <div className={`${iosCard} overflow-hidden`}>
+                                <div className="flex flex-wrap items-center gap-0.5 border-b border-slate-100 px-2 py-1.5">
+                                    {toolbarButton(editor?.isActive('bold'),
+                                        () => editor?.chain().focus().toggleBold().run(), Bold, 'Полужирный')}
+                                    {toolbarButton(editor?.isActive('italic'),
+                                        () => editor?.chain().focus().toggleItalic().run(), Italic, 'Курсив')}
+                                    {toolbarButton(editor?.isActive('underline'),
+                                        () => editor?.chain().focus().toggleUnderline().run(), UnderlineIcon, 'Подчёркнутый')}
+                                    <span className="mx-1 h-5 w-px bg-slate-200" />
+                                    {toolbarButton(editor?.isActive('bulletList'),
+                                        () => editor?.chain().focus().toggleBulletList().run(), List, 'Список')}
+                                    {toolbarButton(editor?.isActive('orderedList'),
+                                        () => editor?.chain().focus().toggleOrderedList().run(), ListOrdered, 'Нумерованный список')}
+                                    <span className="mx-1 h-5 w-px bg-slate-200" />
+                                    {toolbarButton(editor?.isActive('link'), () => {
+                                        const previous = editor?.getAttributes('link')?.href || '';
+                                        const href = window.prompt('Адрес ссылки', previous);
+                                        if (href === null) return;
+                                        if (!href) { editor?.chain().focus().unsetLink().run(); return; }
+                                        editor?.chain().focus().extendMarkRange('link')
+                                            .setLink({ href, target: '_blank' }).run();
+                                    }, Link2, 'Ссылка')}
+                                </div>
+                                <div className="px-3.5 py-3">
+                                    <EditorContent editor={editor} />
                                 </div>
                             </div>
-                        ))}
-                        {photos.length < PHOTO_MAX_COUNT && (
-                            <label className="grid aspect-square cursor-pointer place-items-center rounded-xl border border-dashed border-slate-300 text-slate-400 transition hover:border-slate-400 hover:bg-slate-50">
-                                <Plus className="h-4 w-4" aria-hidden="true" />
-                                <input
-                                    type="file"
-                                    accept={PHOTO_ACCEPT}
-                                    multiple
-                                    className="hidden"
-                                    onChange={(e) => {
-                                        addFiles(Array.from(e.target.files || []));
-                                        // Сбрасываем, иначе повторный выбор того
-                                        // же файла не поднимет событие.
-                                        e.target.value = '';
-                                    }}
-                                />
-                            </label>
-                        )}
-                    </div>
-                    {photoError && <p className="mt-2 px-1 text-[12px] text-rose-600">{photoError}</p>}
-                    {photos.filter((photo) => photo.url).length > 1 && (
-                        <button
-                            type="button"
-                            onClick={() => setPreview((value) => !value)}
-                            className="mt-2 px-1 text-[12px] text-indigo-600 transition hover:underline"
-                        >
-                            {preview ? 'Скрыть предпросмотр' : 'Как увидит сотрудник'}
-                        </button>
-                    )}
-                    {/* Плитка КРОПАЕТ (квадрат, object-cover), а карусель нет:
-                        вертикальный плакат в сетке выглядит нормально, а в окне
-                        встанет узкой полосой. Поэтому предпросмотр рисует ТОТ ЖЕ
-                        компонент, что и окно сотрудника, из того же CSS — один
-                        компонент, одна правда. */}
-                    {preview && (
-                        <div className="mt-2">
-                            <NewsGallery photos={photos.filter((photo) => photo.url)} />
-                        </div>
-                    )}
-                </div>
 
-                <label className={`${iosGroupLabel} mt-4`}>Тип новости</label>
-                <div className={`${iosCard} p-3`}>
-                    {/* Сегментный контрол на всю ширину, а не строкой с подписью
-                        справа: три слова «Информационная / Важная / Критичная» в
-                        правой половине строки на телефоне не помещаются вовсе.
-
-                        У выпущенной новости — строкой, как канал: тип решает и за
-                        обязательность, и за обязательность прохождения, а обе у
-                        неё заперты (сервер: NEWS_KIND_LOCKED). Показать
-                        переключатель, который только откажет, — хуже, чем не
-                        показать его вовсе. */}
-                    {quizLocked ? (
-                        <p className="text-[14px] text-slate-900">
-                            {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).label}
-                        </p>
-                    ) : (
-                        <IosSegmented
-                            value={kind}
-                            options={NEWS_KINDS.map(({ value, label }) => ({ value, label }))}
-                            onChange={setKind}
-                            ariaLabel="Тип новости"
-                            stretch
-                        />
-                    )}
-                    {/* Одна строка под выбором — что он меняет. Это не пересказ
-                        кнопки: сам по себе «Важная» не говорит, чем она важнее.
-                        Остальное про тип — за «i», как и всюду в форме. */}
-                    <p className="mt-2 flex items-start gap-1.5 text-[12px] text-slate-500">
-                        <span className="min-w-0">
-                            {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).note}
-                        </span>
-                        <IosHint
-                            label="Чем различаются типы"
-                            text="Информационная — окно закрывается крестиком, подтверждение и тест по желанию. Важная — окно закрывается только кнопкой «Прочитал», тест прикрепляется по желанию. Критичная — тест обязателен, и пока он не сдан, окно не закрыть и работу продолжить нельзя. Тип опубликованной новости не меняется."
-                        />
-                    </p>
-                </div>
-
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                    <span className={`${iosGroupLabel} flex items-center gap-1.5`}>
-                        Тест и тренажёр
-                        <IosHint
-                            label="Что дают тест и тренажёр"
-                            text="Тест — 2–3 вопроса под текстом новости: ошибка подсвечивается у вопроса, правильный ответ не подсказывается. Тренажёр — урок из вкладки «Тренажёры», сотрудник открывает его прямо из новости. Кто что прошёл, видно в журнале «Кто прочитал»."
-                        />
-                    </span>
-                    {quiz.length > 0 && !quizLocked && (
-                        <span className="flex flex-wrap items-center gap-1">
-                            <button type="button" onClick={draftQuiz} disabled={quizBusy}
-                                    className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
-                                {quizBusy
-                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                                    : <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />}
-                                {quizBusy ? 'Составляем…' : 'Составить заново'}
-                            </button>
-                            <button type="button" disabled={quizBusy}
-                                    onClick={() => { setQuiz([]); setQuizNotes([]); }}
-                                    className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
-                                Убрать тест
-                            </button>
-                        </span>
-                    )}
-                </div>
-                <div className={`${iosCard} divide-y divide-slate-100`}>
-                    <div className="p-3">
-                        {quiz.length === 0 ? (
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                                <p className="flex items-center gap-2.5 text-[14px] text-slate-900">
-                                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
-                                        <ListChecks className="h-[18px] w-[18px]" aria-hidden="true" />
-                                    </span>
-                                    {quizLocked ? 'Теста нет' : 'Тест'}
-                                </p>
-                                {!quizLocked && (
-                                    <span className="flex flex-wrap gap-2">
-                                        <button type="button" className={iosBtnSecondary} disabled={quizBusy}
-                                                onClick={() => setQuiz(quizForForm([]))}>
-                                            <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
-                                            Добавить вопросы
-                                        </button>
-                                        <button type="button" className={iosBtnSecondary} disabled={quizBusy}
-                                                onClick={draftQuiz}>
-                                            {quizBusy
-                                                ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
-                                                : <Sparkles className="mr-1 inline h-4 w-4" aria-hidden="true" />}
-                                            {quizBusy ? 'Составляем…' : 'Составить ИИ'}
-                                        </button>
-                                    </span>
-                                )}
-                            </div>
-                        ) : (
-                            <>
-                                {quizLocked && (
-                                    <p className="mb-2 text-[12px] text-slate-500">
-                                        Тест опубликованной новости не меняется: часть отдела уже ответила
-                                    </p>
-                                )}
-                                <NewsQuizEditor quiz={quiz} onChange={setQuiz} disabled={quizBusy || quizLocked} />
-                                {quizNotes.length > 0 && (
-                                    <ul className="mt-2 space-y-1 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-900 ring-1 ring-amber-200/70">
-                                        {quizNotes.map((note) => <li key={note}>{note}</li>)}
-                                    </ul>
-                                )}
-                            </>
-                        )}
-                    </div>
-
-                    {/* Тренажёр — строкой, как пункт «Настроек»: иконка, название,
-                        действие справа. Описание урока здесь не нужно — автор
-                        выбирает из знакомого списка вкладки «Тренажёры». */}
-                    <div className="flex items-center gap-2.5 px-3 py-3">
-                        <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
-                            trainerKey ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
-                            <PlayCircle className="h-[18px] w-[18px]" aria-hidden="true" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[14px] text-slate-900">
-                                {trainerKey ? (trainerCard?.title || 'Тренажёр недоступен') : (quizLocked ? 'Тренажёра нет' : 'Тренажёр')}
-                            </span>
-                            {trainerCard?.subtitle && (
-                                <span className="block truncate text-[12px] text-slate-500">{trainerCard.subtitle}</span>
-                            )}
-                        </span>
-                        {!quizLocked && (trainerKey ? (
-                            <span className="flex shrink-0 items-center gap-1">
-                                <button type="button" onClick={() => setTrainerPickerOpen(true)}
-                                        className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
-                                    Сменить
-                                </button>
-                                <button type="button" onClick={() => setTrainerKey(null)}
-                                        aria-label="Убрать тренажёр" title="Убрать тренажёр"
-                                        className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-rose-500 active:scale-95">
-                                    <X className="h-4 w-4" aria-hidden="true" />
-                                </button>
-                            </span>
-                        ) : (
-                            <button type="button" className={iosBtnSecondary}
-                                    onClick={() => setTrainerPickerOpen(true)}>
-                                <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
-                                Выбрать
-                            </button>
-                        ))}
-                    </div>
-
-                    {/* Проходной балл — только у теста: у тренажёра баллов нет.
-                        Процент, как в ТЗ, но подпись считает его в вопросах —
-                        «нужно 4 из 5» автор проверяет глазами, а 80% ему
-                        пришлось бы делить в уме (ТЗ #300, п.4). */}
-                    {quiz.length > 0 && (
-                        <div className="px-3.5 py-3">
-                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
-                                Проходной результат
-                                <IosHint
-                                    label="Зачем проходной результат"
-                                    text="Сколько ответов надо взять верно, чтобы тест был засчитан. Сто процентов — прежнее правило: ошибка не засчитывает попытку целиком. Для критичных изменений так и оставляют. Число попыток не ограничено, но каждая видна в журнале."
-                                />
-                            </p>
-                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                {PASS_SCORE_PRESETS.map((preset) => (
-                                    <button
-                                        key={preset}
-                                        type="button"
-                                        disabled={quizLocked}
-                                        onClick={() => setPassScore(preset)}
-                                        className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] disabled:opacity-50 ${
-                                            Number(passScore) === preset
-                                                ? 'bg-slate-900 text-white'
-                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                                    >
-                                        {preset} %
-                                    </button>
-                                ))}
-                                <span className="text-[12px] tabular-nums text-slate-500">
-                                    нужно верных: {Math.max(1, Math.ceil(quiz.length * passScore / 100))}
-                                    {' из '}{quiz.length}
-                                </span>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Тумблер — только когда есть что проходить И когда выбор
-                        вообще за автором: у информационной и критичной новости
-                        обязательность прохождения решает тип, и тумблер рядом
-                        спрашивал бы о том, что уже решено. */}
-                    {(quiz.length > 0 || trainerKey) && rule.passRequired === null && (
-                        <div className="flex items-center justify-between gap-3 px-3.5 py-3">
-                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
-                                Пройти обязательно
-                                <IosHint
-                                    label="Что значит «пройти обязательно»"
-                                    text="Включено — сотрудник не подтвердит новость и не закроет окно, пока не пройдёт тест и тренажёр. Выключено — пройти можно по желанию: в окне новости или позже во вкладке «Новости», а прочитать и закрыть новость — и без этого."
-                                />
-                            </p>
-                            <IosToggle checked={passRequired} onChange={setPassRequired} disabled={quizLocked} />
-                        </div>
-                    )}
-                </div>
-
-                <label className={`${iosGroupLabel} mt-4`}>Кому</label>
-                <div className={`${iosCard} p-3`}>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                        {audience.map((rule) => (
-                            <span key={ruleKey(rule)}
-                                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 py-1 pl-2.5 pr-1 text-[12px] text-slate-700">
-                                {audienceLabel(rule)}
-                                <button
-                                    type="button"
-                                    onClick={() => setAudience(audience.filter(
-                                        (item) => ruleKey(item) !== ruleKey(rule)))}
-                                    className="grid h-4 w-4 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-                                    aria-label={`Убрать ${audienceLabel(rule)}`}
-                                >
-                                    <X className="h-3 w-3" aria-hidden="true" />
-                                </button>
-                            </span>
-                        ))}
-                        <button
-                            type="button"
-                            onClick={() => setPickerOpen(true)}
-                            className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[12px] font-medium text-indigo-700 transition hover:bg-indigo-100 active:scale-[0.98]"
-                        >
-                            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                            Добавить
-                        </button>
-                    </div>
-                    {/* ЕДИНСТВЕННОЕ пояснение формы, оставшееся на виду, — и
-                        это не недоделка. Остальные объясняют то, что человек
-                        и так видит на экране; это — границу, которой на экране
-                        НЕТ: потолок audience_max_role_level режет уже выбранный
-                        отдел на выдаче, а форма при сохранении об этом молчит.
-                        Автор публикует «отделу», журнал показывает знаменатель
-                        меньше состава отдела, и это читается как дефект данных.
-                        Прочитать надо ДО нажатия «Опубликовать», а подсказку за
-                        «i» читают после — то есть никогда.
-                        slate-500, а не slate-400: на белом slate-400 даёт около
-                        2.8:1 при норме 4.5. */}
-                    <p className="mt-2 text-[12px] text-slate-500">
-                        {audience.length
-                            ? 'Из выбранного новость увидят только те, кто ниже вас по должности'
-                            : 'Новость увидят только те, кто ниже вас по должности'}
-                    </p>
-                </div>
-
-                <div className={`${iosCard} mt-4 divide-y divide-slate-100`}>
-                    {/* Куда отправить — ПЕРВОЙ строкой: это решение про то, где
-                        человек вообще увидит объявление, и принимают его до
-                        настроек самого показа. Строки нет вовсе, когда канал
-                        один: в «Тез» программы Oktell нет, и переключатель с
-                        единственной кнопкой был бы вопросом без выбора. */}
-                    {channelOptions.length > 1 && (
-                        <div className="px-3.5 py-3">
-                            <div className="flex items-center justify-between gap-3">
-                                <p className="flex min-w-0 items-center gap-2 text-[14px] text-slate-900">
-                                    Куда отправить
+                            <div className="mt-4 flex items-center justify-between px-1">
+                                <span className={`${iosGroupLabel} flex items-center gap-2 px-0`}>
+                                    Фотографии
                                     <IosHint
-                                        label="Чем iCORE отличается от Oktell"
-                                        text="iCORE — окно «Новость дня» в портале: его видит каждый, кому новость адресована. Oktell — окно поверх клиента АТС, его рисует программа «Ограничитель Перезвона» и на время чтения снимает оператора с линии; увидят только те, у кого программа установлена. У опубликованной новости канал не меняется."
+                                        label="Что будет с фотографиями"
+                                        text="Снимки уменьшаются и переводятся в WebP прямо в браузере — уходит десятая часть исходного веса. Сотрудник видит их каруселью над текстом новости и листает пальцем, стрелками или трекпадом. Порядок здесь и есть порядок показа: первый кадр он увидит первым."
                                     />
-                                </p>
-                                <div className="flex shrink-0 items-center gap-2">
-                                    {/* Предупреждение — РЯДОМ с переключателем, а не строкой
-                                        под ним: оно относится к одной кнопке «Oktell», и
-                                        отдельная красная строка внизу карточки читалась бы
-                                        как ошибка всей формы. Само число на кнопке — уже
-                                        ответ: «троим не дойдёт». */}
-                                    {sipMissing > 0 && (
-                                        <button
-                                            type="button"
-                                            onClick={() => setSipOpen((value) => !value)}
-                                            aria-expanded={sipOpen}
-                                            aria-label="Кто не увидит объявление в Oktell"
-                                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-amber-50 pl-2.5 pr-2 text-[12.5px] font-semibold text-amber-700 ring-1 ring-amber-200 transition hover:bg-amber-100 active:scale-[0.97]"
-                                        >
-                                            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                                            <span className="tabular-nums">{sipMissing}</span>
-                                            <ChevronDown
-                                                className={`h-3.5 w-3.5 transition-transform duration-300 ${
-                                                    sipOpen ? 'rotate-180' : ''}`}
-                                                aria-hidden="true"
-                                            />
-                                        </button>
-                                    )}
-                                    {channelLocked ? (
-                                        <span className="text-[13px] text-slate-500">
-                                            {(NEWS_CHANNELS.find((item) => item.value === channel)
-                                              || NEWS_CHANNELS[0]).label}
-                                        </span>
-                                    ) : (
-                                        <IosSegmented
-                                            value={channel}
-                                            options={channelOptions}
-                                            onChange={setChannel}
-                                            ariaLabel="Куда отправить объявление"
-                                        />
-                                    )}
-                                </div>
+                                </span>
+                                <span className="text-[12px] tabular-nums text-slate-400">
+                                    {photos.length} / {PHOTO_MAX_COUNT}
+                                </span>
                             </div>
-                            {/* Раскрытие СЕТКОЙ 0fr → 1fr, а не max-height с числом:
-                                высота считается по содержимому, поэтому список из трёх
-                                имён и из тридцати раскрываются одинаково плавно и без
-                                рывка в конце, каким заканчивается всякий подобранный
-                                на глаз максимум. */}
-                            <div
-                                className={`grid transition-all duration-300 ease-out ${
-                                    sipOpen ? 'mt-2.5 grid-rows-[1fr] opacity-100'
-                                            : 'grid-rows-[0fr] opacity-0'}`}
-                            >
-                                <div className="overflow-hidden">
-                                    <div className="rounded-2xl bg-amber-50/70 px-3.5 py-3 ring-1 ring-amber-200/70">
-                                        {/* У ОДНОГО человека имя стоит прямо в заголовке, а
-                                            списка нет вовсе: перечень из одной строки под
-                                            фразой «без номера — 1 из 24» повторял бы сам себя.
-                                            Дальше сразу инструкция — за ней сюда и пришли. */}
-                                        <p className="text-[13px] font-semibold text-amber-900">
-                                            {sipOnly
-                                                ? `Без SIP-номера — ${sipOnly.name}`
-                                                : `Без SIP-номера — ${sipMissing} из ${sipCheck?.checked || 0}`}
-                                            {sipOnly && (
-                                                <span className="font-normal text-amber-900/60">
-                                                    {' · '}
-                                                    {[roleTitle(sipOnly.role), sipOnly.department_name]
-                                                        .filter(Boolean).join(', ')}
+                            <div className={`${iosCard} p-2`}>
+                                {/* Плитки мельче, чем были: на пустой форме ряд из
+                                    трёх крупных квадратов занимал треть экрана ради
+                                    одной кнопки «+». Десять кадров в два ряда по
+                                    шесть читаются так же, а места просят вдвое
+                                    меньше. */}
+                                {/* Ширина колонки задана СТИЛЕМ, а не классом
+                                    grid-cols-*: мобильная оболочка схлопывает
+                                    такие сетки в две колонки (это правило про
+                                    плитки показателей), и «фотоплёнка» на
+                                    телефоне превращалась в два квадрата по
+                                    167 px — треть экрана ради одной кнопки «+». */}
+                                <div
+                                    className="grid gap-2"
+                                    style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(88px, 1fr))' }}
+                                >
+                                    {photos.map((photo, index) => (
+                                        <div
+                                            key={photo.key}
+                                            className={`relative aspect-square overflow-hidden rounded-xl bg-slate-100 ring-1 ${
+                                                photo.failed ? 'ring-rose-300' : 'ring-slate-200/70'}`}
+                                        >
+                                            <img
+                                                src={photo.localUrl || photo.url}
+                                                alt=""
+                                                loading="lazy"
+                                                decoding="async"
+                                                className="h-full w-full object-cover"
+                                            />
+                                            {photo.busy && (
+                                                <span className="absolute inset-0 grid place-items-center bg-white/60">
+                                                    <Loader2 className="h-4 w-4 animate-spin text-slate-500" aria-hidden="true" />
                                                 </span>
                                             )}
-                                        </p>
-                                        <p className="mt-0.5 text-[12px] leading-snug text-amber-900/70">
-                                            Объявление в Oktell показывает программа поверх клиента
-                                            АТС — тот, кто в АТС не заведён, его не увидит.
-                                        </p>
-                                        {/* Имена — списком с прокруткой: отдел из сорока
-                                            человек иначе вытолкнул бы кнопки формы за экран. */}
-                                        {sipMissing > 1 && (
-                                            <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1">
-                                                {(sipCheck?.missing || []).map((person) => (
-                                                    <li key={person.user_id}
-                                                        className="flex items-baseline justify-between gap-3 text-[12.5px]">
-                                                        <span className="min-w-0 truncate text-amber-900">
-                                                            {person.name}
-                                                        </span>
-                                                        <span className="shrink-0 text-amber-900/60">
-                                                            {[roleTitle(person.role), person.department_name]
-                                                                .filter(Boolean).join(' · ')}
-                                                        </span>
-                                                    </li>
-                                                ))}
-                                            </ul>
-                                        )}
-                                        {sipMissing > (sipCheck?.missing || []).length && (
-                                            <p className="mt-1 text-[12px] text-amber-900/60">
-                                                …и ещё {sipMissing - (sipCheck?.missing || []).length}
-                                            </p>
-                                        )}
-                                        {/* Инструкция — шагами в том порядке, в каком их делают,
-                                            и названиями, которые человек увидит на экране. */}
-                                        <div className="mt-2.5 border-t border-amber-200/70 pt-2 text-[12px] leading-relaxed text-amber-900/80">
-                                            <p className="font-medium text-amber-900">Как добавить номер</p>
-                                            <ol className="mt-1 list-decimal space-y-0.5 pl-4">
-                                                <li>Меню слева → «Настройки SIP».</li>
-                                                <li>Выберите отдел сотрудника и найдите его в списке.</li>
-                                                <li>Впишите номер в поле «SIP-номер» и нажмите «Сохранить».</li>
-                                            </ol>
-                                            <p className="mt-1.5">
-                                                Номер появится у человека сразу — новость можно
-                                                отправлять в Oktell после этого.
-                                            </p>
+                                            {/* Номер = место в карусели: он же отвечает на
+                                                вопрос «что сотрудник увидит первым». */}
+                                            <span className="absolute left-1 top-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-slate-900/55 px-1 text-[10.5px] tabular-nums text-white backdrop-blur">
+                                                {index + 1}
+                                            </span>
+                                            {/* Крестик виден ВСЕГДА, а не по наведению: на
+                                                телефоне наведения нет, и спрятанная там
+                                                кнопка просто не существует. */}
+                                            <button
+                                                type="button"
+                                                onClick={() => dropPhoto(photo)}
+                                                aria-label={`Убрать фотографию ${index + 1}`}
+                                                className="absolute right-1 top-1 grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-white backdrop-blur transition active:scale-95"
+                                            >
+                                                <X className="h-3 w-3" aria-hidden="true" />
+                                            </button>
+                                            <div className="absolute inset-x-1 bottom-1 flex justify-between">
+                                                <button
+                                                    type="button"
+                                                    disabled={index === 0}
+                                                    onClick={() => movePhoto(index, -1)}
+                                                    aria-label={`Переставить фотографию ${index + 1} левее`}
+                                                    className="grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-[13px] leading-none text-white backdrop-blur transition active:scale-95 disabled:opacity-0"
+                                                >
+                                                    ‹
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    disabled={index === photos.length - 1}
+                                                    onClick={() => movePhoto(index, 1)}
+                                                    aria-label={`Переставить фотографию ${index + 1} правее`}
+                                                    className="grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-[13px] leading-none text-white backdrop-blur transition active:scale-95 disabled:opacity-0"
+                                                >
+                                                    ›
+                                                </button>
+                                            </div>
                                         </div>
-                                    </div>
+                                    ))}
+                                    {photos.length < PHOTO_MAX_COUNT && (
+                                        <label className="grid aspect-square cursor-pointer place-items-center rounded-xl border border-dashed border-slate-300 text-slate-400 transition hover:border-slate-400 hover:bg-slate-50">
+                                            <Plus className="h-4 w-4" aria-hidden="true" />
+                                            <input
+                                                type="file"
+                                                accept={PHOTO_ACCEPT}
+                                                multiple
+                                                className="hidden"
+                                                onChange={(e) => {
+                                                    addFiles(Array.from(e.target.files || []));
+                                                    // Сбрасываем, иначе повторный выбор того
+                                                    // же файла не поднимет событие.
+                                                    e.target.value = '';
+                                                }}
+                                            />
+                                        </label>
+                                    )}
                                 </div>
-                            </div>
-                        </div>
-                    )}
-                    {/* Тумблера «обязательно к прочтению» здесь больше нет: на
-                        этот вопрос отвечает ТИП новости (ТЗ #300, п.5), и два
-                        места для одного ответа разошлись бы в первый же день.
-                        Задержка нужна только обязательной: у необязательной
-                        кнопки «Прочитал» нет вовсе, и поле рядом с ней было бы
-                        настройкой того, чего не существует. */}
-                    {mandatory && (
-                        <div className="px-3.5 py-3">
-                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
-                                Задержка кнопки «Прочитал»
-                                <IosHint
-                                    label="Зачем задержка"
-                                    text="Пока идёт задержка, кнопка «Прочитал» неактивна — чтобы объявление не закрыли, не читая. Отсчёт ведёт сервер с того момента, как окно открылось у сотрудника. Больше десяти минут поставить нельзя."
-                                />
-                            </p>
-                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                {DELAY_PRESETS.map((preset) => (
+                                {photoError && <p className="mt-2 px-1 text-[12px] text-rose-600">{photoError}</p>}
+                                {photos.filter((photo) => photo.url).length > 1 && (
                                     <button
-                                        key={preset}
                                         type="button"
-                                        onClick={() => setDelay(preset)}
-                                        className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
-                                            Number(delay) === preset
-                                                ? 'bg-slate-900 text-white'
-                                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                        onClick={() => setPreview((value) => !value)}
+                                        className="mt-2 px-1 text-[12px] text-indigo-600 transition hover:underline"
                                     >
-                                        {preset === 0 ? 'сразу' : `${preset} с`}
+                                        {preview ? 'Скрыть предпросмотр' : 'Как увидит сотрудник'}
                                     </button>
-                                ))}
-                                <input
-                                    type="number"
-                                    min={0}
-                                    max={600}
-                                    value={delay}
-                                    /* Режем здесь же: сервер всё равно приведёт
-                                       значение к потолку, и «1000» в поле рядом
-                                       с подписью «загорится через 1000 с» было
-                                       бы обещанием, которого он не выполнит. */
-                                    onChange={(e) => setDelay(Math.max(0, Math.min(600,
-                                        Number(e.target.value) || 0)))}
-                                    className="w-20 rounded-xl bg-slate-100 px-3 py-1 text-[12px] tabular-nums text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-                                    aria-label="Задержка в секундах"
-                                />
+                                )}
+                                {/* Плитка КРОПАЕТ (квадрат, object-cover), а карусель нет:
+                                    вертикальный плакат в сетке выглядит нормально, а в окне
+                                    встанет узкой полосой. Поэтому предпросмотр рисует ТОТ ЖЕ
+                                    компонент, что и окно сотрудника, из того же CSS — один
+                                    компонент, одна правда. */}
+                                {preview && (
+                                    <div className="mt-2">
+                                        <NewsGallery photos={photos.filter((photo) => photo.url)} />
+                                    </div>
+                                )}
                             </div>
-                            {/* Строки «загорится через N секунд» здесь больше
-                                нет: она пересказывала нажатый чип и число в
-                                соседнем поле — то есть третий раз повторяла
-                                одно и то же значение. */}
-                        </div>
-                    )}
-                    <div className="flex items-center justify-between gap-3 px-3.5 py-3">
-                        <div className="min-w-0">
-                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
-                                Показывать до
-                                <IosHint
-                                    label="Что значит срок показа"
-                                    text="Дата — момент, когда окно перестанет всплывать, даже если человек его не подтвердил. Оставите пусто — окно показывается до подтверждения, но не дольше 14 дней с публикации: иначе вышедший из отпуска получил бы подряд все объявления за год. Журнал «Кто прочитал» не обрезается ни в том, ни в другом случае."
-                                />
-                            </p>
-                            {/* Строку не спрятали, а ИСПРАВИЛИ: «пусто — пока
-                                не подтвердят» было неправдой. Показ снимает
-                                ещё и горизонт SHOW_HORIZON_DAYS = 14 дней
-                                (news/queries.py), про который форма молчала.
-                                Прятать неправду под «i» нельзя — её надо
-                                убрать. */}
-                            <p className="text-[12px] text-slate-500">
-                                Пусто — до подтверждения, максимум 14 дней
-                            </p>
-                        </div>
-                        <input
-                            type="datetime-local"
-                            value={expires}
-                            onChange={(e) => setExpires(e.target.value)}
-                            className="rounded-xl bg-slate-100 px-3 py-1.5 text-[13px] text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-                        />
-                    </div>
-                </div>
 
-                {/* ── КОГДА ОПУБЛИКОВАТЬ (ТЗ #300, п.8) ──────────────────────
-                    Последней секцией: это последнее решение перед кнопкой, и
-                    расчёт рассылки под ним читают прямо перед нажатием.
-                    Опубликованной новости секции нет вовсе — планировать в ней
-                    уже нечего. */}
-                {planReady && post?.status !== 'published' && (
-                    <>
-                        <label className={`${iosGroupLabel} mt-4`}>Когда опубликовать</label>
-                        <div className={`${iosCard} divide-y divide-slate-100`}>
-                            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-3">
-                                <p className="flex items-center gap-2 text-[14px] text-slate-900">
-                                    Запуск
+                            <div className={`${iosCard} mt-4 divide-y divide-slate-100`}>
+                                <SettingRow label="Тип" value={kindLabel}
+                                            onOpen={() => push('kind')} />
+                                <SettingRow label="Кому" value={audienceSummary}
+                                            muted={!audience.length}
+                                            onOpen={() => push('audience')} />
+                                {channelOptions.length > 1 && (
+                                    <SettingRow
+                                        label="Куда отправить"
+                                        value={channelLabel}
+                                        /* Число на строке — то же предупреждение,
+                                           что и на экране канала: «троим не дойдёт»
+                                           надо знать ДО того, как откроешь экран. */
+                                        badge={sipMissing > 0 ? (
+                                            <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[12px] font-semibold tabular-nums text-amber-700 ring-1 ring-amber-200">
+                                                {sipMissing}
+                                            </span>
+                                        ) : null}
+                                        onOpen={() => push('channel')}
+                                    />
+                                )}
+                                <SettingRow label="Тест и тренажёр" value={passesSummary}
+                                            muted={!quiz.length && !trainerKey}
+                                            onOpen={() => push('passes')} />
+                                <SettingRow label="Публикация и показ" value={scheduleSummary}
+                                            onOpen={() => push('schedule')} />
+                            </div>
+                        </>
+                    )}
+
+                    {screen === 'kind' && (
+                        <>
+                            <div className={`${iosCard} p-3`}>
+                                {/* Сегментный контрол на всю ширину, а не строкой с подписью
+                                    справа: три слова «Информационная / Важная / Критичная» в
+                                    правой половине строки на телефоне не помещаются вовсе.
+
+                                    У выпущенной новости — строкой, как канал: тип решает и за
+                                    обязательность, и за обязательность прохождения, а обе у
+                                    неё заперты (сервер: NEWS_KIND_LOCKED). Показать
+                                    переключатель, который только откажет, — хуже, чем не
+                                    показать его вовсе. */}
+                                {quizLocked ? (
+                                    <p className="text-[14px] text-slate-900">
+                                        {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).label}
+                                    </p>
+                                ) : (
+                                    <IosSegmented
+                                        value={kind}
+                                        options={NEWS_KINDS.map(({ value, label }) => ({ value, label }))}
+                                        onChange={setKind}
+                                        ariaLabel="Тип новости"
+                                        stretch
+                                    />
+                                )}
+                                {/* Одна строка под выбором — что он меняет. Это не пересказ
+                                    кнопки: сам по себе «Важная» не говорит, чем она важнее.
+                                    Остальное про тип — за «i», как и всюду в форме. */}
+                                <p className="mt-2 flex items-start gap-1.5 text-[12px] text-slate-500">
+                                    <span className="min-w-0">
+                                        {(NEWS_KINDS.find((item) => item.value === kind) || NEWS_KINDS[1]).note}
+                                    </span>
                                     <IosHint
-                                        label="Зачем откладывать и растягивать"
-                                        text="Обязательное объявление снимает человека с линии, поэтому выпуск на весь отдел разом — это отдел, одновременно вышедший из очереди. «Отложить» запускает новость в указанное время, «Растянуть» делит адресатов на волны и включает их порциями. До своей волны сотрудник работает как обычно."
+                                        label="Чем различаются типы"
+                                        text="Информационная — окно закрывается крестиком, подтверждение и тест по желанию. Важная — окно закрывается только кнопкой «Прочитал», тест прикрепляется по желанию. Критичная — тест обязателен, и пока он не сдан, окно не закрыть и работу продолжить нельзя. Тип опубликованной новости не меняется."
                                     />
                                 </p>
-                                <IosSegmented
-                                    value={publishMode}
-                                    options={PUBLISH_MODES}
-                                    onChange={setPublishMode}
-                                    ariaLabel="Режим запуска"
-                                />
                             </div>
+                        </>
+                    )}
 
-                            {publishMode !== 'now' && (
-                                <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-3">
+                    {screen === 'audience' && (
+                        <AudienceScreen
+                            access={access}
+                            value={audience}
+                            onChange={setAudience}
+                            spaceName={spaceName}
+                        />
+                    )}
+
+                    {screen === 'channel' && (
+                        <>
+                            <div className={`${iosCard} divide-y divide-slate-100`}>
+                                {/* Куда отправить — ПЕРВОЙ строкой: это решение про то, где
+                                    человек вообще увидит объявление, и принимают его до
+                                    настроек самого показа. Строки нет вовсе, когда канал
+                                    один: в «Тез» программы Oktell нет, и переключатель с
+                                    единственной кнопкой был бы вопросом без выбора. */}
+                                {channelOptions.length > 1 && (
+                                    <div className="px-3.5 py-3">
+                                        <div className="flex items-center justify-between gap-3">
+                                            <p className="flex min-w-0 items-center gap-2 text-[14px] text-slate-900">
+                                                Куда отправить
+                                                <IosHint
+                                                    label="Чем iCORE отличается от Oktell"
+                                                    text="iCORE — окно «Новость дня» в портале: его видит каждый, кому новость адресована. Oktell — окно поверх клиента АТС, его рисует программа «Ограничитель Перезвона» и на время чтения снимает оператора с линии; увидят только те, у кого программа установлена. У опубликованной новости канал не меняется."
+                                                />
+                                            </p>
+                                            <div className="flex shrink-0 items-center gap-2">
+                                                {/* Предупреждение — РЯДОМ с переключателем, а не строкой
+                                                    под ним: оно относится к одной кнопке «Oktell», и
+                                                    отдельная красная строка внизу карточки читалась бы
+                                                    как ошибка всей формы. Само число на кнопке — уже
+                                                    ответ: «троим не дойдёт». */}
+                                                {sipMissing > 0 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setSipOpen((value) => !value)}
+                                                        aria-expanded={sipOpen}
+                                                        aria-label="Кто не увидит объявление в Oktell"
+                                                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-amber-50 pl-2.5 pr-2 text-[12.5px] font-semibold text-amber-700 ring-1 ring-amber-200 transition hover:bg-amber-100 active:scale-[0.97]"
+                                                    >
+                                                        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                                        <span className="tabular-nums">{sipMissing}</span>
+                                                        <ChevronDown
+                                                            className={`h-3.5 w-3.5 transition-transform duration-300 ${
+                                                                sipOpen ? 'rotate-180' : ''}`}
+                                                            aria-hidden="true"
+                                                        />
+                                                    </button>
+                                                )}
+                                                {channelLocked ? (
+                                                    <span className="text-[13px] text-slate-500">
+                                                        {(NEWS_CHANNELS.find((item) => item.value === channel)
+                                                          || NEWS_CHANNELS[0]).label}
+                                                    </span>
+                                                ) : (
+                                                    <IosSegmented
+                                                        value={channel}
+                                                        options={channelOptions}
+                                                        onChange={setChannel}
+                                                        ariaLabel="Куда отправить объявление"
+                                                    />
+                                                )}
+                                            </div>
+                                        </div>
+                                        {/* Раскрытие СЕТКОЙ 0fr → 1fr, а не max-height с числом:
+                                            высота считается по содержимому, поэтому список из трёх
+                                            имён и из тридцати раскрываются одинаково плавно и без
+                                            рывка в конце, каким заканчивается всякий подобранный
+                                            на глаз максимум. */}
+                                        <div
+                                            className={`grid transition-all duration-300 ease-out ${
+                                                sipOpen ? 'mt-2.5 grid-rows-[1fr] opacity-100'
+                                                        : 'grid-rows-[0fr] opacity-0'}`}
+                                        >
+                                            <div className="overflow-hidden">
+                                                <div className="rounded-2xl bg-amber-50/70 px-3.5 py-3 ring-1 ring-amber-200/70">
+                                                    {/* У ОДНОГО человека имя стоит прямо в заголовке, а
+                                                        списка нет вовсе: перечень из одной строки под
+                                                        фразой «без номера — 1 из 24» повторял бы сам себя.
+                                                        Дальше сразу инструкция — за ней сюда и пришли. */}
+                                                    <p className="text-[13px] font-semibold text-amber-900">
+                                                        {sipOnly
+                                                            ? `Без SIP-номера — ${sipOnly.name}`
+                                                            : `Без SIP-номера — ${sipMissing} из ${sipCheck?.checked || 0}`}
+                                                        {sipOnly && (
+                                                            <span className="font-normal text-amber-900/60">
+                                                                {' · '}
+                                                                {[roleTitle(sipOnly.role), sipOnly.department_name]
+                                                                    .filter(Boolean).join(', ')}
+                                                            </span>
+                                                        )}
+                                                    </p>
+                                                    <p className="mt-0.5 text-[12px] leading-snug text-amber-900/70">
+                                                        Объявление в Oktell показывает программа поверх клиента
+                                                        АТС — тот, кто в АТС не заведён, его не увидит.
+                                                    </p>
+                                                    {/* Имена — списком с прокруткой: отдел из сорока
+                                                        человек иначе вытолкнул бы кнопки формы за экран. */}
+                                                    {sipMissing > 1 && (
+                                                        <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1">
+                                                            {(sipCheck?.missing || []).map((person) => (
+                                                                <li key={person.user_id}
+                                                                    className="flex items-baseline justify-between gap-3 text-[12.5px]">
+                                                                    <span className="min-w-0 truncate text-amber-900">
+                                                                        {person.name}
+                                                                    </span>
+                                                                    <span className="shrink-0 text-amber-900/60">
+                                                                        {[roleTitle(person.role), person.department_name]
+                                                                            .filter(Boolean).join(' · ')}
+                                                                    </span>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                    {sipMissing > (sipCheck?.missing || []).length && (
+                                                        <p className="mt-1 text-[12px] text-amber-900/60">
+                                                            …и ещё {sipMissing - (sipCheck?.missing || []).length}
+                                                        </p>
+                                                    )}
+                                                    {/* Инструкция — шагами в том порядке, в каком их делают,
+                                                        и названиями, которые человек увидит на экране. */}
+                                                    <div className="mt-2.5 border-t border-amber-200/70 pt-2 text-[12px] leading-relaxed text-amber-900/80">
+                                                        <p className="font-medium text-amber-900">Как добавить номер</p>
+                                                        <ol className="mt-1 list-decimal space-y-0.5 pl-4">
+                                                            <li>Меню слева → «Настройки SIP».</li>
+                                                            <li>Выберите отдел сотрудника и найдите его в списке.</li>
+                                                            <li>Впишите номер в поле «SIP-номер» и нажмите «Сохранить».</li>
+                                                        </ol>
+                                                        <p className="mt-1.5">
+                                                            Номер появится у человека сразу — новость можно
+                                                            отправлять в Oktell после этого.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    )}
+
+                    {screen === 'passes' && (
+                        <>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className={`${iosGroupLabel} flex items-center gap-1.5 px-0`}>
+                                    Что прикрепить
+                                    <IosHint
+                                        label="Что дают тест и тренажёр"
+                                        text="Тест — 2–3 вопроса под текстом новости: ошибка подсвечивается у вопроса, правильный ответ не подсказывается. Тренажёр — урок из вкладки «Тренажёры», сотрудник открывает его прямо из новости. Кто что прошёл, видно в журнале «Кто прочитал»."
+                                    />
+                                </span>
+                                {quiz.length > 0 && !quizLocked && (
+                                    <span className="flex flex-wrap items-center gap-1">
+                                        <button type="button" onClick={draftQuiz} disabled={quizBusy}
+                                                className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
+                                            {quizBusy
+                                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                                                : <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />}
+                                            {quizBusy ? 'Составляем…' : 'Составить заново'}
+                                        </button>
+                                        <button type="button" disabled={quizBusy}
+                                                onClick={() => { setQuiz([]); setQuizNotes([]); }}
+                                                className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
+                                            Убрать тест
+                                        </button>
+                                    </span>
+                                )}
+                            </div>
+                            <div className={`${iosCard} divide-y divide-slate-100`}>
+                                <div className="p-3">
+                                    {quiz.length === 0 ? (
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <p className="flex items-center gap-2.5 text-[14px] text-slate-900">
+                                                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+                                                    <ListChecks className="h-[18px] w-[18px]" aria-hidden="true" />
+                                                </span>
+                                                {quizLocked ? 'Теста нет' : 'Тест'}
+                                            </p>
+                                            {!quizLocked && (
+                                                <span className="flex flex-wrap gap-2">
+                                                    <button type="button" className={iosBtnSecondary} disabled={quizBusy}
+                                                            onClick={() => setQuiz(quizForForm([]))}>
+                                                        <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
+                                                        Добавить вопросы
+                                                    </button>
+                                                    <button type="button" className={iosBtnSecondary} disabled={quizBusy}
+                                                            onClick={draftQuiz}>
+                                                        {quizBusy
+                                                            ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
+                                                            : <Sparkles className="mr-1 inline h-4 w-4" aria-hidden="true" />}
+                                                        {quizBusy ? 'Составляем…' : 'Составить ИИ'}
+                                                    </button>
+                                                </span>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <>
+                                            {quizLocked && (
+                                                <p className="mb-2 text-[12px] text-slate-500">
+                                                    Тест опубликованной новости не меняется: часть отдела уже ответила
+                                                </p>
+                                            )}
+                                            <NewsQuizEditor quiz={quiz} onChange={setQuiz} disabled={quizBusy || quizLocked} />
+                                            {quizNotes.length > 0 && (
+                                                <ul className="mt-2 space-y-1 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-900 ring-1 ring-amber-200/70">
+                                                    {quizNotes.map((note) => <li key={note}>{note}</li>)}
+                                                </ul>
+                                            )}
+                                                    </>
+                                                )}
+                                            </div>
+
+                                            {/* Тренажёр — строкой, как пункт «Настроек»: иконка, название,
+                                                действие справа. Описание урока здесь не нужно — автор
+                                                выбирает из знакомого списка вкладки «Тренажёры». */}
+                                            <div className="flex items-center gap-2.5 px-3 py-3">
+                                                <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
+                                                    trainerKey ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'}`}>
+                                                    <PlayCircle className="h-[18px] w-[18px]" aria-hidden="true" />
+                                                </span>
+                                                <span className="min-w-0 flex-1">
+                                                    <span className="block truncate text-[14px] text-slate-900">
+                                                        {trainerKey ? (trainerCard?.title || 'Тренажёр недоступен') : (quizLocked ? 'Тренажёра нет' : 'Тренажёр')}
+                                                    </span>
+                                                    {trainerCard?.subtitle && (
+                                                        <span className="block truncate text-[12px] text-slate-500">{trainerCard.subtitle}</span>
+                                                    )}
+                                                </span>
+                                                {!quizLocked && (trainerKey ? (
+                                                    <span className="flex shrink-0 items-center gap-1">
+                                                        <button type="button" onClick={() => push('trainer')}
+                                                                className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
+                                                            Сменить
+                                                        </button>
+                                                        <button type="button" onClick={() => setTrainerKey(null)}
+                                                                aria-label="Убрать тренажёр" title="Убрать тренажёр"
+                                                                className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-rose-500 active:scale-95">
+                                                            <X className="h-4 w-4" aria-hidden="true" />
+                                                        </button>
+                                                    </span>
+                                                ) : (
+                                                    <button type="button" className={iosBtnSecondary}
+                                                            onClick={() => push('trainer')}>
+                                                        <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
+                                                        Выбрать
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            {/* Проходной балл — только у теста: у тренажёра баллов нет.
+                                                Процент, как в ТЗ, но подпись считает его в вопросах —
+                                                «нужно 4 из 5» автор проверяет глазами, а 80% ему
+                                                пришлось бы делить в уме (ТЗ #300, п.4). */}
+                                            {quiz.length > 0 && (
+                                                <div className="px-3.5 py-3">
+                                                    <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                                        Проходной результат
+                                                        <IosHint
+                                                            label="Зачем проходной результат"
+                                                            text="Сколько ответов надо взять верно, чтобы тест был засчитан. Сто процентов — прежнее правило: ошибка не засчитывает попытку целиком. Для критичных изменений так и оставляют. Число попыток не ограничено, но каждая видна в журнале."
+                                                        />
+                                                    </p>
+                                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                        {PASS_SCORE_PRESETS.map((preset) => (
+                                                            <button
+                                                                key={preset}
+                                                                type="button"
+                                                                disabled={quizLocked}
+                                                                onClick={() => setPassScore(preset)}
+                                                                className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] disabled:opacity-50 ${
+                                                                    Number(passScore) === preset
+                                                                        ? 'bg-slate-900 text-white'
+                                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                                            >
+                                                                {preset} %
+                                                            </button>
+                                                        ))}
+                                                        <span className="text-[12px] tabular-nums text-slate-500">
+                                                            нужно верных: {Math.max(1, Math.ceil(quiz.length * passScore / 100))}
+                                                            {' из '}{quiz.length}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Тумблер — только когда есть что проходить И когда выбор
+                                                вообще за автором: у информационной и критичной новости
+                                                обязательность прохождения решает тип, и тумблер рядом
+                                                спрашивал бы о том, что уже решено. */}
+                                            {(quiz.length > 0 || trainerKey) && rule.passRequired === null && (
+                                                <div className="flex items-center justify-between gap-3 px-3.5 py-3">
+                                                    <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                                        Пройти обязательно
+                                                        <IosHint
+                                                            label="Что значит «пройти обязательно»"
+                                                            text="Включено — сотрудник не подтвердит новость и не закроет окно, пока не пройдёт тест и тренажёр. Выключено — пройти можно по желанию: в окне новости или позже во вкладке «Новости», а прочитать и закрыть новость — и без этого."
+                                                        />
+                                                    </p>
+                                                    <IosToggle checked={passRequired} onChange={setPassRequired} disabled={quizLocked} />
+                                                </div>
+                                            )}
+                                        </div>
+                        </>
+                    )}
+
+                    {screen === 'trainer' && (
+                        <TrainerScreen
+                            value={trainerKey}
+                            onChange={setTrainerKey}
+                            onDone={() => back()}
+                        />
+                    )}
+
+                    {screen === 'schedule' && (
+                        <>
+                            {/* Сначала КОГДА выпустить, потом КАК показывать: второе
+                                имеет смысл только после первого, и обратный порядок
+                                заставлял бы возвращаться вверх. */}
+                            {/* ── КОГДА ОПУБЛИКОВАТЬ (ТЗ #300, п.8) ──────────────────────
+                                Опубликованной новости этой части нет вовсе — планировать
+                                в ней уже нечего. */}
+                            {planReady && post?.status !== 'published' && (
+                                <>
+                                    <label className={iosGroupLabel}>Когда опубликовать</label>
+                                    <div className={`${iosCard} divide-y divide-slate-100`}>
+                                        <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-3">
+                                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                                Запуск
+                                                <IosHint
+                                                    label="Зачем откладывать и растягивать"
+                                                    text="Обязательное объявление снимает человека с линии, поэтому выпуск на весь отдел разом — это отдел, одновременно вышедший из очереди. «Отложить» запускает новость в указанное время, «Растянуть» делит адресатов на волны и включает их порциями. До своей волны сотрудник работает как обычно."
+                                                />
+                                            </p>
+                                            <IosSegmented
+                                                value={publishMode}
+                                                options={PUBLISH_MODES}
+                                                onChange={setPublishMode}
+                                                ariaLabel="Режим запуска"
+                                            />
+                                        </div>
+
+                                        {publishMode !== 'now' && (
+                                            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-3">
+                                                <div className="min-w-0">
+                                                    <p className="text-[14px] text-slate-900">Начать</p>
+                                                    {/* У растяжки поле можно оставить пустым — это
+                                                        «сразу», и так прямо написано: пустое поле
+                                                        без подписи читается как незаполненное. */}
+                                                    <p className="text-[12px] text-slate-500">
+                                                        {publishMode === 'spread'
+                                                            ? 'Пусто — начать сразу после публикации'
+                                                            : 'До этого времени новость никого не потревожит'}
+                                                    </p>
+                                                </div>
+                                                <input
+                                                    type="datetime-local"
+                                                    value={scheduledAt}
+                                                    onChange={(e) => setScheduledAt(e.target.value)}
+                                                    aria-label="Дата и время запуска"
+                                                    className="rounded-xl bg-slate-100 px-3 py-1.5 text-[13px] text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                                                />
+                                            </div>
+                                        )}
+
+                                        {publishMode === 'spread' && (
+                                            <div className="px-3.5 py-3">
+                                                <p className="text-[14px] text-slate-900">Распределить за</p>
+                                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                    {spreadChoices.map((value) => (
+                                                        <button
+                                                            key={value}
+                                                            type="button"
+                                                            onClick={() => setSpreadMinutes(value)}
+                                                            className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                                                Number(spreadMinutes) === value
+                                                                    ? 'bg-slate-900 text-white'
+                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                                        >
+                                                            {minutesLabel(value)}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                                <p className="mt-3 text-[14px] text-slate-900">Интервал между волнами</p>
+                                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                    {waveChoices.map((value) => (
+                                                        <button
+                                                            key={value}
+                                                            type="button"
+                                                            onClick={() => setWaveInterval(value)}
+                                                            className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                                                Number(waveInterval) === value
+                                                                    ? 'bg-slate-900 text-white'
+                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                                        >
+                                                            {minutesLabel(value)}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* РАСЧЁТ ПЕРЕД ЗАПУСКОМ (ТЗ п.8.4): «позволит оценить
+                                            влияние обязательной новости на доступность
+                                            операторов до её запуска». Считает сервер теми же
+                                            функциями, что и сам выпуск. */}
+                                        {publishMode === 'spread' && spreadPreview && (
+                                            <div className="px-3.5 py-3">
+                                                {/* Существительное перед числом — чтобы не
+                                                    склонять его под каждое значение: «волн 12»
+                                                    и «волн 1» одинаково верны, а «12 волн» и
+                                                    «1 волна» требовали бы разбора числа ради
+                                                    одной строки. */}
+                                                <p className="text-[13px] text-slate-900">
+                                                    Получателей{' '}
+                                                    <span className="font-semibold tabular-nums">
+                                                        {spreadPreview.recipients}
+                                                    </span>
+                                                    {' · волн '}
+                                                    <span className="tabular-nums">{spreadPreview.waves}</span>
+                                                    {' · в волне ≈'}
+                                                    <span className="tabular-nums">{spreadPreview.per_wave}</span>
+                                                </p>
+                                                <p className="mt-0.5 text-[12px] tabular-nums text-slate-500">
+                                                    {whenLabel(spreadPreview.starts_at)}
+                                                    {' → '}
+                                                    {whenLabel(spreadPreview.ends_at)}
+                                                    {', шаг '}{minutesLabel(spreadPreview.interval_minutes)}
+                                                </p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
+
+                            <label className={`${iosGroupLabel} mt-4`}>Как показывать</label>
+                            <div className={`${iosCard} divide-y divide-slate-100`}>
+                                {/* Тумблера «обязательно к прочтению» здесь больше нет: на
+                                    этот вопрос отвечает ТИП новости (ТЗ #300, п.5), и два
+                                    места для одного ответа разошлись бы в первый же день.
+                                    Задержка нужна только обязательной: у необязательной
+                                    кнопки «Прочитал» нет вовсе, и поле рядом с ней было бы
+                                    настройкой того, чего не существует. */}
+                                {mandatory && (
+                                    <div className="px-3.5 py-3">
+                                        <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                            Задержка кнопки «Прочитал»
+                                            <IosHint
+                                                label="Зачем задержка"
+                                                text="Пока идёт задержка, кнопка «Прочитал» неактивна — чтобы объявление не закрыли, не читая. Отсчёт ведёт сервер с того момента, как окно открылось у сотрудника. Больше десяти минут поставить нельзя."
+                                            />
+                                        </p>
+                                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                            {DELAY_PRESETS.map((preset) => (
+                                                <button
+                                                    key={preset}
+                                                    type="button"
+                                                    onClick={() => setDelay(preset)}
+                                                    className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                                        Number(delay) === preset
+                                                            ? 'bg-slate-900 text-white'
+                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                                >
+                                                    {preset === 0 ? 'сразу' : `${preset} с`}
+                                                </button>
+                                            ))}
+                                            <input
+                                                type="number"
+                                                min={0}
+                                                max={600}
+                                                value={delay}
+                                                /* Режем здесь же: сервер всё равно приведёт
+                                                   значение к потолку, и «1000» в поле рядом
+                                                   с подписью «загорится через 1000 с» было
+                                                   бы обещанием, которого он не выполнит. */
+                                                onChange={(e) => setDelay(Math.max(0, Math.min(600,
+                                                    Number(e.target.value) || 0)))}
+                                                className="w-20 rounded-xl bg-slate-100 px-3 py-1 text-[12px] tabular-nums text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                                                aria-label="Задержка в секундах"
+                                            />
+                                        </div>
+                                        {/* Строки «загорится через N секунд» здесь больше
+                                            нет: она пересказывала нажатый чип и число в
+                                            соседнем поле — то есть третий раз повторяла
+                                            одно и то же значение. */}
+                                    </div>
+                                )}
+                                <div className="flex items-center justify-between gap-3 px-3.5 py-3">
                                     <div className="min-w-0">
-                                        <p className="text-[14px] text-slate-900">Начать</p>
-                                        {/* У растяжки поле можно оставить пустым — это
-                                            «сразу», и так прямо написано: пустое поле
-                                            без подписи читается как незаполненное. */}
+                                        <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                            Показывать до
+                                            <IosHint
+                                                label="Что значит срок показа"
+                                                text="Дата — момент, когда окно перестанет всплывать, даже если человек его не подтвердил. Оставите пусто — окно показывается до подтверждения, но не дольше 14 дней с публикации: иначе вышедший из отпуска получил бы подряд все объявления за год. Журнал «Кто прочитал» не обрезается ни в том, ни в другом случае."
+                                            />
+                                        </p>
+                                        {/* Строку не спрятали, а ИСПРАВИЛИ: «пусто — пока
+                                            не подтвердят» было неправдой. Показ снимает
+                                            ещё и горизонт SHOW_HORIZON_DAYS = 14 дней
+                                            (news/queries.py), про который форма молчала.
+                                            Прятать неправду под «i» нельзя — её надо
+                                            убрать. */}
                                         <p className="text-[12px] text-slate-500">
-                                            {publishMode === 'spread'
-                                                ? 'Пусто — начать сразу после публикации'
-                                                : 'До этого времени новость никого не потревожит'}
+                                            Пусто — до подтверждения, максимум 14 дней
                                         </p>
                                     </div>
                                     <input
                                         type="datetime-local"
-                                        value={scheduledAt}
-                                        onChange={(e) => setScheduledAt(e.target.value)}
-                                        aria-label="Дата и время запуска"
+                                        value={expires}
+                                        onChange={(e) => setExpires(e.target.value)}
                                         className="rounded-xl bg-slate-100 px-3 py-1.5 text-[13px] text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
                                     />
                                 </div>
-                            )}
-
-                            {publishMode === 'spread' && (
-                                <div className="px-3.5 py-3">
-                                    <p className="text-[14px] text-slate-900">Распределить за</p>
-                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                        {spreadChoices.map((value) => (
-                                            <button
-                                                key={value}
-                                                type="button"
-                                                onClick={() => setSpreadMinutes(value)}
-                                                className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
-                                                    Number(spreadMinutes) === value
-                                                        ? 'bg-slate-900 text-white'
-                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                                            >
-                                                {minutesLabel(value)}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    <p className="mt-3 text-[14px] text-slate-900">Интервал между волнами</p>
-                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                        {waveChoices.map((value) => (
-                                            <button
-                                                key={value}
-                                                type="button"
-                                                onClick={() => setWaveInterval(value)}
-                                                className={`rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
-                                                    Number(waveInterval) === value
-                                                        ? 'bg-slate-900 text-white'
-                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                                            >
-                                                {minutesLabel(value)}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* РАСЧЁТ ПЕРЕД ЗАПУСКОМ (ТЗ п.8.4): «позволит оценить
-                                влияние обязательной новости на доступность
-                                операторов до её запуска». Считает сервер теми же
-                                функциями, что и сам выпуск. */}
-                            {publishMode === 'spread' && spreadPreview && (
-                                <div className="px-3.5 py-3">
-                                    {/* Существительное перед числом — чтобы не
-                                        склонять его под каждое значение: «волн 12»
-                                        и «волн 1» одинаково верны, а «12 волн» и
-                                        «1 волна» требовали бы разбора числа ради
-                                        одной строки. */}
-                                    <p className="text-[13px] text-slate-900">
-                                        Получателей{' '}
-                                        <span className="font-semibold tabular-nums">
-                                            {spreadPreview.recipients}
-                                        </span>
-                                        {' · волн '}
-                                        <span className="tabular-nums">{spreadPreview.waves}</span>
-                                        {' · в волне ≈'}
-                                        <span className="tabular-nums">{spreadPreview.per_wave}</span>
-                                    </p>
-                                    <p className="mt-0.5 text-[12px] tabular-nums text-slate-500">
-                                        {whenLabel(spreadPreview.starts_at)}
-                                        {' → '}
-                                        {whenLabel(spreadPreview.ends_at)}
-                                        {', шаг '}{minutesLabel(spreadPreview.interval_minutes)}
-                                    </p>
-                                </div>
-                            )}
-                        </div>
-                    </>
-                )}
+                            </div>
+                        </>
+                    )}
+                </div>
             </IosModal>
-
-            <AudiencePicker
-                open={pickerOpen}
-                onClose={() => setPickerOpen(false)}
-                access={access}
-                value={audience}
-                onChange={setAudience}
-                spaceName={spaceName}
-            />
-            <TrainerPicker
-                open={trainerPickerOpen}
-                value={trainerKey}
-                onClose={() => setTrainerPickerOpen(false)}
-                onChange={setTrainerKey}
-            />
-        </>
     );
 }
 
