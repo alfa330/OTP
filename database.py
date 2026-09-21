@@ -28629,7 +28629,13 @@ class Database:
             (NULLIF(b.cabinet_password, '') IS NOT NULL) AS has_binotel_cabinet_password,
             -- Учётка кабинета Oktell: логин видно, пароль — только фактом.
             COALESCE(ok.cabinet_login, '') AS oktell_cabinet_login,
-            (NULLIF(ok.cabinet_password, '') IS NOT NULL) AS has_oktell_cabinet_password
+            (NULLIF(ok.cabinet_password, '') IS NOT NULL) AS has_oktell_cabinet_password,
+            -- Код отдела. По нему панель узнаёт отдел, чья телефония — кабинет
+            -- Oktell (СЗоВ): там у сотрудника нет ни регистрации по SIP, ни
+            -- автодозвона, ни FOP2, и карточка показывает только учётку кабинета
+            -- (departmentCodeUsesOktellCabinet в src/utils/departmentViews.js).
+            -- Имени отдела для этого мало: оно меняется, а код — нет.
+            COALESCE(dep.code, '') AS department_code
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
@@ -28702,8 +28708,9 @@ class Database:
             # после входа по учётке iCORE, поэтому логин показываем в карточке,
             # а пароль — никогда, только признаком «задан».
             "oktell_cabinet_login": row[35] or "",
-            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
             "has_oktell_cabinet_password": bool(row[36]),
+            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
+            "department_code": row[37] or "",
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,

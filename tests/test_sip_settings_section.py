@@ -594,7 +594,10 @@ class SaveUserSipSettingsTests(unittest.TestCase):
             columns[34].endswith("AS has_binotel_cabinet_password"), columns[34])
         self.assertTrue(columns[35].endswith("AS oktell_cabinet_login"), columns[35])
         self.assertTrue(
-            columns[-1].endswith("AS has_oktell_cabinet_password"), columns[-1])
+            columns[36].endswith("AS has_oktell_cabinet_password"), columns[36])
+        # Код отдела дописан следующим и стал новым хвостом: по нему карточка
+        # узнаёт отдел, чья телефония — кабинет Oktell.
+        self.assertTrue(columns[-1].endswith("AS department_code"), columns[-1])
 
     def test_the_auto_answer_columns_are_read_raw_and_not_collapsed(self):
         """COALESCE(s.auto_answer, FALSE) схлопнул бы «как у отдела» с «выключено».
@@ -2964,7 +2967,110 @@ class OktellCabinetFrontendTests(unittest.TestCase):
 
     def test_the_pair_is_sent_only_by_the_local_pbx_form(self):
         """У Теза этих полей нет вовсе — отправлять их оттуда значит врать бэкенду."""
-        payload = self.view.split("const operatorPayload = () => (isBinotel", 1)[1]
-        binotel, local = payload.split("        : {", 1)
+        payload = self.view.split("const operatorPayload = () => {", 1)[1]
+        binotel = payload.split("if (isBinotel) {", 1)[1].split("        }\n        return {", 1)[0]
+        local = payload.split("        }\n        return {", 1)[1]
         self.assertNotIn("oktell_cabinet_login", binotel)
         self.assertIn("oktell_cabinet_login: form.oktell_cabinet_login", local)
+
+
+class OktellCabinetOnlyDepartmentTests(unittest.TestCase):
+    """Отдел, чья телефония — кабинет Oktell (СЗоВ).
+
+    Оператор такого отдела работает в клиенте Oktell: по SIP он не
+    регистрируется, автодозвона, очередей FOP2 и автопринятия у него нет вовсе,
+    а от нас клиенту нужна одна пара «логин + пароль кабинета». Поэтому карточка
+    сотрудника показывает только её — остальные поля были бы обещанием настроек,
+    которых не существует (шум владелец считает браком).
+
+    Внутренний номер при этом живёт: в Oktell это логин агента
+    (oktell_guard/queries.py) и ключ привязки звонков в табло и оценках —
+    карточка его не показывает, но и не трогает, правят его в «Учёте
+    сотрудников».
+    """
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+        self.department_views = _read(ROOT / "src" / "utils" / "departmentViews.js")
+        # Карточка «кабинетного» отдела: от своей ветки тернарника до ветки
+        # «Таксопарков». Режем по исходнику, а не ищем строки по всему файлу:
+        # соседние формы содержат ровно те поля, которых здесь быть не должно.
+        self.card = self.view.split(") : editingOktellCabinet ? (", 1)[1].split(
+            "                ) : (\n                    /* ─── Таксопарки", 1)[0]
+
+    def test_the_department_list_lives_in_the_shared_module(self):
+        """Признак — свойство отдела, а не деталь одного экрана: копия в разделе
+        разъехалась бы с карточкой сотрудника при первой же правке."""
+        self.assertIn("const OKTELL_CABINET_DEPARTMENTS = new Set(['szov']);",
+                      self.department_views)
+        self.assertIn("export const departmentCodeUsesOktellCabinet", self.department_views)
+        self.assertIn("import { departmentCodeUsesOktellCabinet } from '../../utils/departmentViews';",
+                      self.view)
+        # Код отдела приезжает строкой сотрудника — имя для этого не годится.
+        self.assertIn("departmentCodeUsesOktellCabinet(op?.department_code)", self.view)
+
+    def test_the_card_holds_nothing_but_the_cabinet(self):
+        """Ни номера, ни автодозвона, ни FOP2, ни автопринятия — их у отдела нет."""
+        self.assertIn("Кабинет Oktell", self.card)
+        self.assertIn("form.oktell_cabinet_login", self.card)
+        self.assertIn("form.oktell_cabinet_password", self.card)
+        for absent in ("form.sip_number", "form.sip_password", "form.sip_domain",
+                       "autodial", "fop2_enabled", "autoAnswerSection",
+                       "Данные для телефона", "setShowAdvanced"):
+            self.assertNotIn(absent, self.card, absent)
+
+    def test_the_password_stays_write_only_here_too(self):
+        """Правило кабинета не зависит от формы: наружу пароль не отдают никогда."""
+        self.assertIn("editing?.has_oktell_cabinet_password && !replacingOktellPassword", self.card)
+        self.assertIn("setReplacingOktellPassword(true)", self.card)
+        self.assertIn("'пусто — оставить прежний'", self.card)
+
+    def test_only_the_cabinet_pair_is_sent(self):
+        """Лишние поля бэкенд вычистил бы сам, но в истории это выглядит как
+        правка, которой не было."""
+        payload = self.view.split("const operatorPayload = () => {", 1)[1]
+        branch = payload.split("if (editingOktellCabinet) {", 1)[1].split("        }", 1)[0]
+        self.assertIn("oktell_cabinet_login: form.oktell_cabinet_login", branch)
+        self.assertIn("oktell_cabinet_password: form.oktell_cabinet_password", branch)
+        for absent in ("sip_number", "sip_domain", "fop2_enabled", "autoAnswerPayload"):
+            self.assertNotIn(absent, branch, absent)
+
+    def test_saving_is_never_blocked_by_a_number_nobody_sees(self):
+        """Занятость номера — правило локальной АТС; здесь оно заперло бы учётку
+        из-за поля, которого в карточке нет."""
+        self.assertIn("const saveBlocked = editingOktellCabinet\n        ? false", self.view)
+
+    def test_the_number_is_offered_by_a_button_and_not_filled_in_silently(self):
+        """В Oktell логин кабинета обычно равен внутреннему номеру — но «обычно»
+        не «всегда», и проставлять его за человека нельзя."""
+        self.assertIn("oktell_cabinet_login: editingNumber", self.card)
+        self.assertIn("const editingNumber = String(editing?.sip_number || '').trim();", self.view)
+
+    def test_half_a_pair_is_called_out(self):
+        """Логин без пароля выглядит заполненным, а клиент им не войдёт."""
+        self.assertIn("editingCabinetReady", self.card)
+        self.assertIn("клиент Oktell не сможет войти за оператора", self.card)
+
+    def test_the_list_row_shows_the_cabinet_instead_of_the_number(self):
+        """Логин кабинета и внутренний номер в Oktell совпадают: показать оба —
+        это то же число дважды."""
+        self.assertIn("const oktellCabinet = usesOktellCabinet(op);", self.view)
+        self.assertIn("{oktellCabinet ? (", self.view)
+        self.assertIn("кабинет не выдан", self.view)
+        # Значок автопринятия общий для обоих разделов — но не для этого отдела.
+        self.assertIn("{!oktellCabinet && autoAnswerOwn(op) && (", self.view)
+
+    def test_the_header_counts_cabinets_not_numbers(self):
+        self.assertIn("с кабинетом Oktell: ${stats.withOktellCabinet}", self.view)
+        self.assertIn("withOktellCabinet: operators.filter(oktellCabinetReady).length", self.view)
+
+    def test_bulk_editing_is_not_offered_to_such_a_department(self):
+        """Массово здесь меняют пароль, домен, FOP2 и автоприём — механику АТС.
+        Пара кабинета у каждого своя, одной на всех не бывает."""
+        self.assertIn("canEdit && !isBinotel && !sectionOktellCabinet", self.view)
+        self.assertIn("учётка кабинета Oktell у каждого своя — правится по одному", self.view)
+
+    def test_the_operator_row_carries_the_department_code(self):
+        """Без кода отдела в строке раздел не отличил бы СЗоВ от соседа по АТС."""
+        select = _database_namespace({"_sip_operator_row"})["_SIP_OPERATOR_SELECT"]
+        self.assertIn("COALESCE(dep.code, '') AS department_code", select)

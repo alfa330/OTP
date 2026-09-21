@@ -316,6 +316,27 @@ export const departmentCodeHidesEmployeeSip = (code) => {
 
 export const departmentHidesEmployeeSip = (user) => departmentCodeHidesEmployeeSip(departmentCodeOf(user));
 
+// Отделы, чья телефония — кабинет Oktell, а не наш SIP-телефон. У СЗоВ оператор
+// работает в клиенте Oktell: регистрации по SIP там нет, а автодозвона, очередей
+// FOP2 и автопринятия — тем более (всё это механика локальной АТС и iCORE Phone,
+// которого отделу не выдают, см. download_oktell против download_icore_phone в
+// App.jsx). От нас клиенту нужна ровно одна пара «логин + пароль кабинета»,
+// которой он входит за оператора, — её и показывает карточка сотрудника в
+// «Настройках SIP», без единого лишнего поля.
+//
+// Внутренний номер (users.sip_number) у таких отделов остаётся и дальше: в Oktell
+// это логин агента (oktell_guard/queries.py) и ключ привязки звонков к оператору
+// в табло и оценках. Скрытие полей его не трогает — правится он в «Учёте
+// сотрудников», где заводят самого человека.
+const OKTELL_CABINET_DEPARTMENTS = new Set(['szov']);
+
+export const departmentCodeUsesOktellCabinet = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && OKTELL_CABINET_DEPARTMENTS.has(normalized));
+};
+
+export const departmentUsesOktellCabinet = (user) => departmentCodeUsesOktellCabinet(departmentCodeOf(user));
+
 // Роль, с которой заводится рядовой сотрудник отдела. 'operator' в этой
 // системе означает человека НА ЛИНИИ — с направлением, группой, часами и
 // оценками; бухгалтеру и кадровику она давала бы разделы и поля, которых у

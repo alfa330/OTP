@@ -6,6 +6,7 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosBadge, IosModal, IosToggle, IosSegmented,
 } from '../ui/ios';
+import { departmentCodeUsesOktellCabinet } from '../../utils/departmentViews';
 
 /*
  * Раздел «Настройки SIP» (iCORE Phone).
@@ -21,6 +22,14 @@ import {
  *   provider='binotel'  — те же три вкладки. На «Общих» у отдела свой набор:
  *                         общий SIP-сервер и адрес кабинета (логин и пароль
  *                         остаются персональными — их «на отдел» не задать).
+ *
+ * Внутри «Таксопарков» есть ещё одна форма карточки — у отделов, чья телефония
+ * это кабинет Oktell (СЗоВ, departmentCodeUsesOktellCabinet). Оператор там сидит
+ * в клиенте Oktell: по SIP он не регистрируется, автодозвона, очередей FOP2 и
+ * автопринятия у него нет вовсе, и от нас клиенту нужна ровно одна пара «логин +
+ * пароль кабинета». Поэтому карточка такого сотрудника показывает только её, а
+ * список — только её состояние. Внутренний номер при этом живёт своей жизнью: в
+ * Oktell он логин агента, и правят его в «Учёте сотрудников».
  *
  * Глобального яруса «общие настройки для отделов без своих» больше нет ни у
  * того, ни у другого: значения по умолчанию берутся ТОЛЬКО из карточки отдела.
@@ -201,6 +210,15 @@ const formFromOperator = (op) => ({
 });
 
 const hasPersonalPassword = (op) => Boolean(op?.sip_password || op?.autodial_password);
+
+// Отдел, чья телефония — кабинет Oktell (СЗоВ). Признак общий с «Учётом
+// сотрудников» и живёт в departmentViews: разъехавшиеся копии такого правила и
+// есть самый простой способ показать человеку поля, которых у него нет.
+const usesOktellCabinet = (op) => departmentCodeUsesOktellCabinet(op?.department_code);
+
+// Учётка кабинета выдана целиком, когда есть и логин, и пароль: с одним логином
+// клиент Oktell войти не сможет, и «выдан» про такую пару было бы неправдой.
+const oktellCabinetReady = (op) => Boolean(op?.oktell_cabinet_login && op?.has_oktell_cabinet_password);
 
 // Интересно только выключенное состояние: включённый FOP2 — норма, и помечать
 // им весь список нечего.
@@ -525,6 +543,21 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
        гейт был бы лишним щелчком на пустом месте. */
     const requiresDepartment = !isBinotel;
 
+    // Код выбранного отдела. Берём из его же карточки, а если отдел в списке
+    // настроек не встретился (он туда попадает только активным) — из строки
+    // любого его сотрудника: обе стороны приезжают одним запросом.
+    const selectedDepartmentCode = useMemo(() => {
+        if (!departmentFilter) return '';
+        const dept = departments.find((d) => String(d.department_id) === departmentFilter);
+        if (dept?.department_code) return dept.department_code;
+        const op = operators.find((row) => String(row.department_id ?? '') === departmentFilter);
+        return op?.department_code || '';
+    }, [departmentFilter, departments, operators]);
+
+    // Раздел смотрит на отдел с кабинетом Oktell: ни массовой правки полей АТС,
+    // ни счётчика номеров здесь смысла не имеет — телефонии у отдела нет.
+    const sectionOktellCabinet = !isBinotel && departmentCodeUsesOktellCabinet(selectedDepartmentCode);
+
     // Единственный доступный отдел выбираем сами: у главы отдела и супервайзера
     // область видимости и так одна, и требовать от них выбор без выбора незачем.
     useEffect(() => {
@@ -633,10 +666,26 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         withAutodial: operators.filter((op) => op.autodial_number).length,
         withLogin: operators.filter((op) => op.sip_login).length,
         withCabinet: operators.filter((op) => op.has_binotel_cabinet_password).length,
+        // Отдел на кабинете Oktell меряется одним: у скольких человек клиент
+        // сможет войти за оператора. Пара без пароля в счёт не идёт.
+        withOktellCabinet: operators.filter(oktellCabinetReady).length,
     }), [operators]);
 
     /* ─── эффективные значения (что уйдёт в телефон) ─── */
     const editingCommon = useMemo(() => commonFor(editing), [commonFor, editing]);
+
+    // Открыта карточка сотрудника отдела с кабинетом Oktell: номера, автодозвона,
+    // FOP2 и автопринятия у него нет — только пара для входа в АТС.
+    const editingOktellCabinet = !isBinotel && usesOktellCabinet(editing);
+    // Внутренний номер сотрудника: в Oktell это логин агента, и в кабинете он
+    // обычно тот же. Предлагаем его кнопкой, но не проставляем сами.
+    const editingNumber = String(editing?.sip_number || '').trim();
+    // Войдёт ли клиент ПОСЛЕ этой правки. Пустое поле пароля значит «оставить
+    // прежний», поэтому засчитываем и уже сохранённый.
+    const editingCabinetReady = Boolean(
+        form.oktell_cabinet_login.trim()
+        && (editing?.has_oktell_cabinet_password || form.oktell_cabinet_password.trim())
+    );
 
     const effective = useMemo(() => {
         const number = form.sip_number.trim();
@@ -712,9 +761,13 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         return '';
     }, [isBinotel, editing, form.sip_domain, form.sip_login, form.sip_password]);
 
-    const saveBlocked = isBinotel
-        ? Boolean(loginConflict || binotelMissing)
-        : Boolean(conflicts.sip_number || conflicts.autodial_number);
+    // В карточке отдела на кабинете Oktell номеров нет вовсе — блокировать
+    // «Сохранить» их занятостью значило бы запереть учётку из-за чужого поля.
+    const saveBlocked = editingOktellCabinet
+        ? false
+        : (isBinotel
+            ? Boolean(loginConflict || binotelMissing)
+            : Boolean(conflicts.sip_number || conflicts.autodial_number));
 
     const selectedOperators = useMemo(
         () => operators.filter((op) => selected.has(op.id)),
@@ -869,21 +922,33 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         </section>
     );
 
-    const operatorPayload = () => (isBinotel
-        ? {
-            sip_number: form.sip_number,
-            sip_login: form.sip_login,
-            sip_password: form.sip_password,
-            sip_domain: form.sip_domain,
-            ...autoAnswerPayload(),
-            binotel_cabinet_login: form.binotel_cabinet_login,
-            // Пусто = «не менять»: пароль кабинета наружу не отдаётся, и стереть
-            // его случайной пересохранкой карточки нельзя.
-            binotel_cabinet_password: form.binotel_cabinet_password,
-            binotel_employee_id: form.binotel_employee_id,
-            binotel_cabinet_url: form.binotel_cabinet_url,
+    const operatorPayload = () => {
+        // Отдел на кабинете Oktell: полей локальной АТС у сотрудника нет вовсе,
+        // и слать их значило бы писать в историю правку, которой не было.
+        if (editingOktellCabinet) {
+            return {
+                oktell_cabinet_login: form.oktell_cabinet_login,
+                // Пусто = «не менять»: пароль наружу не отдаётся, и пересохранение
+                // карточки ради логина не должно стирать человеку доступ в АТС.
+                oktell_cabinet_password: form.oktell_cabinet_password,
+            };
         }
-        : {
+        if (isBinotel) {
+            return {
+                sip_number: form.sip_number,
+                sip_login: form.sip_login,
+                sip_password: form.sip_password,
+                sip_domain: form.sip_domain,
+                ...autoAnswerPayload(),
+                binotel_cabinet_login: form.binotel_cabinet_login,
+                // Пусто = «не менять»: пароль кабинета наружу не отдаётся, и стереть
+                // его случайной пересохранкой карточки нельзя.
+                binotel_cabinet_password: form.binotel_cabinet_password,
+                binotel_employee_id: form.binotel_employee_id,
+                binotel_cabinet_url: form.binotel_cabinet_url,
+            };
+        }
+        return {
             sip_number: form.sip_number,
             sip_password: form.sip_password,
             sip_domain: form.sip_domain,
@@ -896,7 +961,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             // Пусто = «не менять», как и у кабинета Binotel: пересохранение
             // карточки ради номера не должно стирать человеку доступ в АТС.
             oktell_cabinet_password: form.oktell_cabinet_password,
-        });
+        };
+    };
 
     const saveOperator = async () => {
         if (!editing || !canEdit) return;
@@ -1132,7 +1198,12 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             <p className="text-[12px] text-slate-400">
                                 {isBinotel
                                     ? `Сотрудников: ${stats.total} · с SIP-логином: ${stats.withLogin} · с учёткой кабинета: ${stats.withCabinet}`
-                                    : `Сотрудников: ${stats.total} · с номером: ${stats.withSip} · автодозвон: ${stats.withAutodial}`}
+                                    : (sectionOktellCabinet
+                                        /* У отдела на кабинете Oktell номера и автодозвон
+                                           ничего не говорят: считаем то единственное, чем
+                                           раздел для него занят. */
+                                        ? `Сотрудников: ${stats.total} · с кабинетом Oktell: ${stats.withOktellCabinet}`
+                                        : `Сотрудников: ${stats.total} · с номером: ${stats.withSip} · автодозвон: ${stats.withAutodial}`)}
                             </p>
                         </div>
                     </div>
@@ -1295,6 +1366,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 && duplicateKeys.has(numberKey(op.autodial_number, autodialDomain));
                             const isLoginDuplicate = Boolean(op.sip_login)
                                 && duplicateLogins.has(normLogin(op.sip_login));
+                            // Отдел на кабинете Oktell: в строке нечего показывать, кроме
+                            // состояния учётки — номер там свой, но правят его не здесь.
+                            const oktellCabinet = usesOktellCabinet(op);
                             const isSelected = selected.has(op.id);
                             return (
                                 <button
@@ -1325,7 +1399,26 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         </div>
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1.5">
-                                        {isBinotel ? (
+                                        {oktellCabinet ? (
+                                            /* Одна пара — одна метка. Логин рядом с внутренним
+                                               номером был бы тем же числом дважды: в Oktell
+                                               они совпадают, и вторая строка ничего не
+                                               добавляет, кроме шума. */
+                                            oktellCabinetReady(op) ? (
+                                                <IosBadge tone="blue" title="Клиент Oktell входит этой учёткой за оператора">
+                                                    <FaIcon className="fas fa-desktop" style={{ width: 11, height: 11 }} />
+                                                    <span className="font-mono">{op.oktell_cabinet_login}</span>
+                                                </IosBadge>
+                                            ) : op.oktell_cabinet_login ? (
+                                                <IosBadge tone="amber" title="Логин есть, пароля нет — клиент Oktell войти не сможет">
+                                                    <FaIcon className="fas fa-desktop" style={{ width: 11, height: 11 }} />
+                                                    <span className="font-mono">{op.oktell_cabinet_login}</span>
+                                                    <span>· без пароля</span>
+                                                </IosBadge>
+                                            ) : (
+                                                <span className="text-[11.5px] text-slate-300">кабинет не выдан</span>
+                                            )
+                                        ) : isBinotel ? (
                                             <>
                                                 {/* Внутренний номер в Binotel не логин: он нужен только
                                                     для привязки звонков, и дублей по нему не считаем. */}
@@ -1424,8 +1517,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         {/* Автопринятие — вне ветки провайдера: настройка живёт в
                                             телефоне и одинаково видна в обоих разделах. Метим
                                             только СВОЮ настройку: общая стоит у всего отдела, и
-                                            значок на каждой строке был бы шумом, а не сведением. */}
-                                        {autoAnswerOwn(op) && (
+                                            значок на каждой строке был бы шумом, а не сведением.
+                                            У отдела на кабинете Oktell телефона нет вовсе —
+                                            там значку нечего обозначать. */}
+                                        {!oktellCabinet && autoAnswerOwn(op) && (
                                             <span
                                                 className="hidden h-6 w-6 place-items-center rounded-full bg-blue-50 text-blue-600 sm:grid"
                                                 title={autoAnswerOn(op)
@@ -1454,7 +1549,15 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 у Binotel сервер, логин и пароль у каждого свои — правятся по одному
                             </span>
                         )}
-                        {canEdit && !isBinotel && (
+                        {/* Массово здесь меняют пароль, домен, FOP2 и автоприём — всё это
+                            механика локальной АТС. Отделу на кабинете Oktell менять нечего:
+                            пара у каждого своя, и пароль на всех один не выдают. */}
+                        {sectionOktellCabinet && (
+                            <span className="max-w-[280px] px-1.5 text-[12px] leading-snug text-slate-300">
+                                учётка кабинета Oktell у каждого своя — правится по одному
+                            </span>
+                        )}
+                        {canEdit && !isBinotel && !sectionOktellCabinet && (
                             <button
                                 type="button"
                                 onClick={openBulk}
@@ -2299,6 +2402,103 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 </div>
                             </section>
                         )}
+
+                        {editing?.updated_at && (
+                            <p className="px-1 text-[11.5px] text-slate-400">
+                                Изменено {fmtDateTime(editing.updated_at)}{editing.updated_by_name ? ` · ${editing.updated_by_name}` : ''}
+                            </p>
+                        )}
+                    </div>
+                ) : editingOktellCabinet ? (
+                    /* ─── СЗоВ: телефония — кабинет Oktell, и только он ───
+                       Оператор работает в клиенте Oktell: по SIP он не
+                       регистрируется, автодозвона, очередей FOP2 и автопринятия у
+                       него нет. Поля локальной АТС здесь были бы не «пустые, но
+                       вдруг пригодятся», а обещанием настроек, которых не
+                       существует, — поэтому карточка ровно про одну пару. */
+                    <div className="space-y-4">
+                        <section className="space-y-1.5">
+                            <div className={iosGroupLabel}>Кабинет Oktell</div>
+                            <div className={`${iosCard} space-y-3 p-4`}>
+                                <p className="text-[11.5px] leading-relaxed text-slate-500">
+                                    Этой парой клиент Oktell входит за оператора: сам он вводит
+                                    только свою учётку iCORE. Заменить пароль можно здесь —
+                                    переустанавливать клиент не нужно.
+                                </p>
+                                <div>
+                                    <label className="text-[12.5px] font-medium text-slate-600">Логин кабинета</label>
+                                    {/* Кнопка рядом, а не автоподстановка: в Oktell логин
+                                        обычно и есть внутренний номер, но «обычно» — не
+                                        «всегда», и проставлять его за человека нельзя. */}
+                                    <div className="mt-1 flex items-center gap-2">
+                                        <input
+                                            type="text"
+                                            value={form.oktell_cabinet_login}
+                                            onChange={(e) => setForm((f) => ({ ...f, oktell_cabinet_login: e.target.value }))}
+                                            placeholder="логин оператора в Oktell"
+                                            autoComplete="off"
+                                            disabled={!canEdit}
+                                            className={`${iosInput} font-mono`}
+                                        />
+                                        {canEdit && editingNumber && form.oktell_cabinet_login.trim() !== editingNumber && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setForm((f) => ({ ...f, oktell_cabinet_login: editingNumber }))}
+                                                className={`${iosBtnSecondary} whitespace-nowrap`}
+                                                title="Подставить внутренний номер сотрудника — в Oktell логин обычно равен ему"
+                                            >
+                                                <FaIcon className="fas fa-phone" />
+                                                {editingNumber}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="text-[12.5px] font-medium text-slate-600">Пароль кабинета</label>
+                                    {editing?.has_oktell_cabinet_password && !replacingOktellPassword ? (
+                                        // Пароль наружу не отдаётся никогда — показываем только
+                                        // признак. Пустое поле рядом с «задан» читалось бы как
+                                        // «пароля нет», и его завели бы заново поверх рабочего.
+                                        <div className="mt-1 flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
+                                            <IosBadge tone="green">Задан</IosBadge>
+                                            {canEdit && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setReplacingOktellPassword(true)}
+                                                    className={iosBtnSecondary}
+                                                >
+                                                    <FaIcon className="fas fa-pen" />
+                                                    Заменить
+                                                </button>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="mt-1">
+                                            <SecretInput
+                                                value={form.oktell_cabinet_password}
+                                                onChange={(v) => setForm((f) => ({ ...f, oktell_cabinet_password: v }))}
+                                                placeholder={editing?.has_oktell_cabinet_password
+                                                    ? 'пусто — оставить прежний'
+                                                    : 'пароль от кабинета Oktell'}
+                                                disabled={!canEdit}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                                {/* Половина пары — не «почти готово»: клиент такой учёткой
+                                    не войдёт, и знать об этом надо до конца смены. */}
+                                {!editingCabinetReady && (
+                                    <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-700">
+                                        <FaIcon className="fas fa-triangle-exclamation mt-0.5 shrink-0" style={{ width: 11, height: 11 }} />
+                                        <span>
+                                            {form.oktell_cabinet_login.trim()
+                                                ? 'Пароля нет — клиент Oktell не сможет войти за оператора.'
+                                                : 'Учётка не выдана — клиент Oktell не сможет войти за оператора.'}
+                                        </span>
+                                    </p>
+                                )}
+                            </div>
+                        </section>
 
                         {editing?.updated_at && (
                             <p className="px-1 text-[11.5px] text-slate-400">
