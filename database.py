@@ -180,6 +180,13 @@ def shift_auction_mode_matches_direction(direction_name, department_code):
 # Отдел, чьи менеджеры считаются в обзвоне регионов (задача #159).
 FRONT_OFFICE_DEPARTMENT_CODE = 'front_office'
 
+# Отделы, где статусы приезжают ПУШЕМ с телефона (iCORE Phone шлёт событие сразу,
+# см. append_operator_status_event), а не выгрузкой по расписанию. Только у них
+# таймлайн и соответствие имеет смысл показывать «живыми»: у Oktell забор идёт
+# несколько раз в сутки, и дорисованный до «сейчас» хвост был бы выдумкой.
+# Задача #330: владелец ограничил живой режим отделом Тез КЦ.
+LIVE_STATUS_TRACK_DEPARTMENT_CODES = ('tez',)
+
 PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received', 'on_hand')
 
 
@@ -45105,6 +45112,44 @@ class Database:
                 continue
             target['aggregatedScheduleFlagsDays'] = flags_map.get(int(op_id), {})
 
+    def _imported_status_segment_payload(self, calculation_model, status_date_value, start_at_value,
+                                         end_at_value, duration_sec, status_key, state_note):
+        """Один отрезок статуса в том виде, в каком его ждёт фронт.
+
+        Вынесено из _load_imported_status_segments_for_operators, потому что тем
+        же набором признаков описывается и ТЕКУЩИЙ, ещё не закрытый статус
+        (см. _load_live_status_tail_for_operators). Собери его отдельно — и
+        признаки разъедутся: «Готов» в сохранённом отрезке считался бы работой,
+        а в живом хвосте нет, и проценты у оператора пошли бы своей дорогой.
+        """
+        day_key = status_date_value.strftime('%Y-%m-%d') if hasattr(status_date_value, 'strftime') else str(status_date_value or '')
+        if not day_key:
+            return None
+
+        status_key_norm = self._normalize_import_status_key(status_key)
+        if not status_key_norm:
+            return None
+
+        status_profile = self._status_profile_for_calculation_model(
+            calculation_model or CALCULATION_MODEL_OPERATOR
+        )
+        return {
+            'statusDate': day_key,
+            'start': start_at_value.isoformat() if hasattr(start_at_value, 'isoformat') else str(start_at_value or ''),
+            'end': end_at_value.isoformat() if hasattr(end_at_value, 'isoformat') else str(end_at_value or ''),
+            'durationSec': int(duration_sec or 0),
+            'stateName': str(self._status_label_from_key(status_key_norm) or ''),
+            'stateKey': str(status_key_norm or ''),
+            'stateNote': str(state_note or ''),
+            'isWork': status_key_norm in set(status_profile.get('work') or set()),
+            'isBreak': status_key_norm in set(status_profile.get('break') or set()),
+            'isTraining': status_key_norm in set(status_profile.get('training') or set()),
+            'isLateStart': status_key_norm in set(status_profile.get('late_start') or set()),
+            'isTechnicalReason': bool(self._schedule_auto_is_tech_reason_status_key(status_key_norm)),
+            'isLateExcused': bool(self._schedule_auto_is_late_excused_status_key(status_key_norm)),
+            'isNoPhone': status_key_norm == SCHEDULE_AUTO_NO_PHONE_STATUS_KEY
+        }
+
     def _load_imported_status_segments_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
         operator_ids = [int(v) for v in (operator_ids or []) if v is not None]
         result = {op_id: {} for op_id in operator_ids}
@@ -45121,41 +45166,18 @@ class Database:
             if target is None:
                 return
 
-            day_key = status_date_value.strftime('%Y-%m-%d') if hasattr(status_date_value, 'strftime') else str(status_date_value or '')
-            if not day_key:
-                return
-
-            status_key_norm = self._normalize_import_status_key(status_key)
-            if not status_key_norm:
-                return
-            status_profile = self._status_profile_for_calculation_model(
-                calculation_model_by_operator.get(int(op_id), CALCULATION_MODEL_OPERATOR)
+            payload = self._imported_status_segment_payload(
+                calculation_model=calculation_model_by_operator.get(int(op_id), CALCULATION_MODEL_OPERATOR),
+                status_date_value=status_date_value,
+                start_at_value=start_at_value,
+                end_at_value=end_at_value,
+                duration_sec=duration_sec,
+                status_key=status_key,
+                state_note=state_note
             )
-            state_label_value = self._status_label_from_key(status_key_norm)
-            is_work = status_key_norm in set(status_profile.get('work') or set())
-            is_break = status_key_norm in set(status_profile.get('break') or set())
-            is_training = status_key_norm in set(status_profile.get('training') or set())
-            is_late_start = status_key_norm in set(status_profile.get('late_start') or set())
-            is_technical_reason = self._schedule_auto_is_tech_reason_status_key(status_key_norm)
-            is_late_excused = self._schedule_auto_is_late_excused_status_key(status_key_norm)
-            is_no_phone = status_key_norm == SCHEDULE_AUTO_NO_PHONE_STATUS_KEY
-
-            target.setdefault(day_key, []).append({
-                'statusDate': day_key,
-                'start': start_at_value.isoformat() if hasattr(start_at_value, 'isoformat') else str(start_at_value or ''),
-                'end': end_at_value.isoformat() if hasattr(end_at_value, 'isoformat') else str(end_at_value or ''),
-                'durationSec': int(duration_sec or 0),
-                'stateName': str(state_label_value or ''),
-                'stateKey': str(status_key_norm or ''),
-                'stateNote': str(state_note or ''),
-                'isWork': bool(is_work),
-                'isBreak': bool(is_break),
-                'isTraining': bool(is_training),
-                'isLateStart': bool(is_late_start),
-                'isTechnicalReason': bool(is_technical_reason),
-                'isLateExcused': bool(is_late_excused),
-                'isNoPhone': bool(is_no_phone)
-            })
+            if payload is None:
+                return
+            target.setdefault(payload['statusDate'], []).append(payload)
 
         query = """
             SELECT
@@ -45229,6 +45251,316 @@ class Database:
             if target is None:
                 continue
             target['importedStatusTimelineDays'] = timeline_map.get(int(op_id), {})
+
+    # ── Живой хвост статусов (задача #330) ─────────────────────────────
+    #
+    # Отрезок в operator_status_segments строится МЕЖДУ двумя событиями, а хвост
+    # до «сейчас» дописывается только в момент пересборки, то есть в момент
+    # прихода события. Значит статуса, который идёт прямо сейчас, в сегментах
+    # нет вовсе: человек час в «Готов» — этого часа на полосе не будет, пока он
+    # не переключится, и никакое обновление страницы его не покажет. Поэтому
+    # текущий статус строим отдельно, из сырого события.
+    #
+    # Только для отделов из LIVE_STATUS_TRACK_DEPARTMENT_CODES: там телефон шлёт
+    # событие сразу. У Oktell забор идёт несколько раз в сутки, и дорисованный
+    # до «сейчас» хвост был бы не «реальным временем», а выдумкой.
+
+    # Запас на ранний вход: статус, поставленный за час до смены, — всё ещё
+    # статус этой смены (см. пол в _live_status_tail_window_tx).
+    LIVE_STATUS_TAIL_EARLY_LOGIN_MARGIN = timedelta(hours=1)
+
+    def _live_status_track_operator_ids_tx(self, cursor, operator_ids=None):
+        """Из переданных операторов — те, чьи статусы приезжают пушем."""
+        codes = [str(code).strip().lower() for code in LIVE_STATUS_TRACK_DEPARTMENT_CODES if str(code).strip()]
+        if not codes:
+            return []
+        query = """
+            SELECT u.id
+            FROM users u
+            JOIN departments d ON d.id = u.department_id
+            WHERE LOWER(d.code) = ANY(%s)
+              AND u.role = 'operator'
+              AND (u.status IS NULL OR u.status <> 'fired')
+        """
+        params = [codes]
+        op_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        if operator_ids is not None:
+            if not op_ids:
+                return []
+            query += " AND u.id = ANY(%s)"
+            params.append(op_ids)
+        query += " ORDER BY u.id"
+        cursor.execute(query, params)
+        return [int(row[0]) for row in (cursor.fetchall() or [])]
+
+    def get_live_status_track_operator_ids(self, operator_ids=None):
+        with self._get_cursor() as cursor:
+            return self._live_status_track_operator_ids_tx(cursor, operator_ids=operator_ids)
+
+    @staticmethod
+    def _timeline_days_last_end(timeline_days):
+        """Докуда уже доведены сохранённые отрезки дня (или None).
+
+        Пересборка после каждого события дописывает отрезок до момента самой
+        пересборки, поэтому сохранённый кусок и живой хвост идут от одного и
+        того же события. Если не сдвинуть начало хвоста, в подписях под полосой
+        «Готов» посчитается дважды: у сетки и у оператора разъедутся минуты.
+        """
+        last_end = None
+        for segments in (timeline_days or {}).values():
+            for segment in (segments or []):
+                raw = segment.get('end') if isinstance(segment, dict) else None
+                if not raw:
+                    continue
+                try:
+                    value = datetime.fromisoformat(str(raw))
+                except ValueError:
+                    continue
+                if last_end is None or value > last_end:
+                    last_end = value
+        return last_end
+
+    def _load_live_status_tail_for_operators(self, cursor, operator_ids, as_of=None, known_until=None):
+        """{operator_id: хвост} — текущий незакрытый статус каждого оператора.
+
+        Хвост отдаётся отрезком той же формы, что и обычный сегмент, поэтому
+        дальше живёт обычной полосой. Рамки (докуда тянуть и с какого события
+        статус вообще считается текущим) ставит _live_status_tail_window_tx —
+        здесь, на сервере, чтобы у оператора и у руководителя они совпадали.
+        Признак isLiveTail нужен интерфейсу для одного: соответствие идущей
+        смены считается до этого момента, а не на всю её длину.
+        """
+        result = {}
+        live_ids = self._live_status_track_operator_ids_tx(cursor, operator_ids=operator_ids)
+        if not live_ids:
+            return result
+
+        as_of_dt = as_of if isinstance(as_of, datetime) else datetime.now()
+        # То же окно, что у хвоста в пересборке: событие старше двух суток —
+        # это не «текущий статус», а забытый телефон.
+        window_start = as_of_dt - timedelta(hours=48)
+        action_status_keys = sorted({
+            self._normalize_import_status_key(item)
+            for item in CHAT_MANAGER_ACTION_STATUS_KEYS
+            if self._normalize_import_status_key(item)
+        })
+
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (operator_id)
+                operator_id, event_at, status_key, state_note
+            FROM operator_status_events
+            WHERE operator_id = ANY(%s)
+              AND COALESCE(event_kind, 'status') <> 'action'
+              AND COALESCE(is_authoritative, FALSE) = FALSE
+              AND NOT (LOWER(TRIM(status_key)) = ANY(%s))
+              AND event_at >= %s
+              AND event_at <= %s
+            ORDER BY operator_id, event_at DESC, id DESC
+            """,
+            (live_ids, action_status_keys, window_start, as_of_dt)
+        )
+        rows = cursor.fetchall() or []
+        if not rows:
+            return result
+
+        row_operator_ids = [int(row[0]) for row in rows]
+        calculation_model_by_operator = self._load_operator_calculation_models_tx(cursor, row_operator_ids)
+        tail_window_by_operator = self._live_status_tail_window_tx(cursor, row_operator_ids, as_of_dt)
+        for operator_id, event_at_value, status_key, state_note in rows:
+            if not isinstance(event_at_value, datetime) or event_at_value >= as_of_dt:
+                continue
+            op_id = int(operator_id)
+            window = tail_window_by_operator.get(op_id)
+            if window is None:
+                continue
+            tail_floor, tail_end = window
+            if tail_end <= event_at_value or event_at_value < tail_floor:
+                continue
+            # Пол по смене проверен по СОБЫТИЮ, а рисуем с того места, где
+            # кончились сохранённые отрезки: иначе хвост лёг бы поверх них.
+            tail_start = event_at_value
+            already_until = (known_until or {}).get(op_id)
+            if isinstance(already_until, datetime) and already_until > tail_start:
+                tail_start = min(already_until, tail_end)
+            if tail_end <= tail_start:
+                continue
+            payload = self._imported_status_segment_payload(
+                calculation_model=calculation_model_by_operator.get(op_id, CALCULATION_MODEL_OPERATOR),
+                status_date_value=tail_start.date(),
+                start_at_value=tail_start,
+                end_at_value=tail_end,
+                duration_sec=int((tail_end - tail_start).total_seconds()),
+                status_key=status_key,
+                state_note=state_note
+            )
+            if payload is None:
+                continue
+            payload['isLiveTail'] = True
+            result[op_id] = payload
+        return result
+
+    def _live_status_tail_window_tx(self, cursor, operator_ids, as_of_dt):
+        """{operator_id: (не раньше, не позже)} — рамки текущего статуса.
+
+        **Потолок** — конец смены: дальше него «Готов» рос бы у человека, чей
+        телефон не прислал «выключен» при уходе домой (у Тез КЦ такие сутки не
+        редкость — см. сегменты по 24 часа). Внутри смены потолок не мешает:
+        там хвост упирается в «сейчас».
+
+        **Пол** — начало той же смены с часом запаса на ранний вход. Без него
+        забытый со вчерашнего дня «Готов» на следующее утро расцветал бы во всю
+        смену: у человека со сменой 12:00–16:00 и последним событием вчера в
+        08:23 полоса в 12:01 показала бы «работает с полуночи» и 100 %
+        соответствия. Статус, поставленный не в эту смену, текущим не считаем.
+
+        Смены берём за сегодня и за вчера: ночная 21:00–09:00 заходит в
+        сегодняшний день своим концом, и без вчерашней строки утро такой смены
+        осталось бы без рамок. Дня без смены здесь нет намеренно: сравнивать не
+        с чем, а растущая полоса в выходной — тот самый лишний шум.
+        """
+        op_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        if not op_ids:
+            return {}
+
+        day = as_of_dt.date()
+        day_start = datetime.combine(day, dt_time.min)
+        prev_day_start = day_start - timedelta(days=1)
+        now_min = (as_of_dt - day_start).total_seconds() / 60.0
+
+        cursor.execute(
+            """
+            SELECT operator_id, shift_date, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = ANY(%s)
+              AND shift_date >= %s
+              AND shift_date <= %s
+            """,
+            (op_ids, day - timedelta(days=1), day)
+        )
+
+        parts_by_operator = {}
+        for operator_id, shift_date, start_time_value, end_time_value in (cursor.fetchall() or []):
+            if shift_date is None or start_time_value is None or end_time_value is None:
+                continue
+            start_min = start_time_value.hour * 60 + start_time_value.minute
+            end_min = end_time_value.hour * 60 + end_time_value.minute
+            if end_min <= start_min:
+                end_min += 1440
+            if shift_date == day:
+                part_start, part_end = max(0, start_min), min(1440, end_min)
+                shift_start_dt = day_start + timedelta(minutes=start_min)
+            elif end_min > 1440:
+                part_start, part_end = 0, min(1440, end_min - 1440)
+                shift_start_dt = prev_day_start + timedelta(minutes=start_min)
+            else:
+                continue
+            if part_end <= part_start:
+                continue
+            parts_by_operator.setdefault(int(operator_id), []).append(
+                (part_start, part_end, shift_start_dt)
+            )
+
+        result = {}
+        for op_id in op_ids:
+            parts = parts_by_operator.get(op_id) or []
+            if not parts:
+                continue
+            covering = [p for p in parts if p[0] <= now_min <= p[1]]
+            chosen = max(covering, key=lambda p: p[1]) if covering else None
+            if chosen is None:
+                finished = [p for p in parts if p[1] <= now_min]
+                chosen = max(finished, key=lambda p: p[1]) if finished else None
+            if chosen is None:
+                continue
+            cap_dt = min(as_of_dt, day_start + timedelta(minutes=float(chosen[1])))
+            floor_dt = chosen[2] - self.LIVE_STATUS_TAIL_EARLY_LOGIN_MARGIN
+            result[op_id] = (floor_dt, cap_dt)
+        return result
+
+    def _status_range_covers_today(self, start_date_obj=None, end_date_obj=None):
+        """Живой хвост имеет смысл только у сегодняшнего дня. Открытый период
+        (обе границы пусты) — это «всё, что есть», сегодня туда входит."""
+        today = datetime.now().date()
+        if start_date_obj and start_date_obj > today:
+            return False
+        if end_date_obj and end_date_obj < today:
+            return False
+        return True
+
+    def _attach_live_status_tail_to_operators(self, cursor, operators_map, operator_ids, as_of=None):
+        known_until = {}
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            last_end = self._timeline_days_last_end(target.get('importedStatusTimelineDays'))
+            if last_end is not None:
+                known_until[int(op_id)] = last_end
+        tails = self._load_live_status_tail_for_operators(
+            cursor, operator_ids, as_of=as_of, known_until=known_until
+        )
+        as_of_dt = as_of if isinstance(as_of, datetime) else datetime.now()
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            tail = tails.get(int(op_id))
+            if tail is None:
+                continue
+            target['liveStatusTail'] = tail
+            target['statusTrackAsOf'] = as_of_dt.isoformat(timespec='seconds')
+
+    def get_live_status_track(self, date_value, operator_ids=None):
+        """Узкий срез для автообновления: статусы одного дня и текущий статус.
+
+        Отдельно от get_operators_with_shifts намеренно: тот тянет смены,
+        перерывы, выходные, периоды статусов и признаки брака за весь видимый
+        период — раз в полминуты такое дёргать нельзя. Здесь только то, что
+        меняется от минуты к минуте.
+
+        Соседние сутки приезжают вместе с запрошенными: ночная смена 21:00–09:00
+        забирает статусы из двух дней, и без них у неё пустел бы один конец.
+        """
+        date_obj = self._normalize_schedule_date(date_value)
+        as_of_dt = datetime.now()
+        result = {
+            'date': date_obj.strftime('%Y-%m-%d'),
+            'asOf': as_of_dt.isoformat(timespec='seconds'),
+            'operators': []
+        }
+
+        with self._get_cursor() as cursor:
+            live_ids = self._live_status_track_operator_ids_tx(cursor, operator_ids=operator_ids)
+            if not live_ids:
+                return result
+
+            timeline_map = self._load_imported_status_segments_for_operators(
+                cursor=cursor,
+                operator_ids=live_ids,
+                start_date_obj=date_obj,
+                end_date_obj=date_obj
+            )
+            known_until = {}
+            for op_id in live_ids:
+                last_end = self._timeline_days_last_end(timeline_map.get(int(op_id)))
+                if last_end is not None:
+                    known_until[int(op_id)] = last_end
+            tails = (
+                self._load_live_status_tail_for_operators(
+                    cursor, live_ids, as_of=as_of_dt, known_until=known_until
+                )
+                if date_obj == as_of_dt.date()
+                else {}
+            )
+
+            for op_id in live_ids:
+                result['operators'].append({
+                    'id': int(op_id),
+                    'importedStatusTimelineDays': timeline_map.get(int(op_id), {}),
+                    'liveStatusTail': tails.get(int(op_id))
+                })
+        return result
 
     def _load_technical_issue_segments_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
         op_ids = [int(v) for v in (operator_ids or []) if v is not None]
@@ -45807,6 +46139,14 @@ class Database:
                     start_date_obj=start_date_obj,
                     end_date_obj=end_date_obj
                 )
+                # Текущий статус в сегментах не лежит — см. «Живой хвост
+                # статусов». Просим его, только если в периоде есть сегодня.
+                if self._status_range_covers_today(start_date_obj, end_date_obj):
+                    self._attach_live_status_tail_to_operators(
+                        cursor=cursor,
+                        operators_map=result_map,
+                        operator_ids=operator_ids
+                    )
             if include_technical_issues:
                 self._attach_technical_issue_segments_to_operators(
                     cursor=cursor,
@@ -45966,6 +46306,12 @@ class Database:
                     start_date_obj=start_date_obj,
                     end_date_obj=end_date_obj
                 )
+                if self._status_range_covers_today(start_date_obj, end_date_obj):
+                    self._attach_live_status_tail_to_operators(
+                        cursor=cursor,
+                        operators_map={operator_id: result},
+                        operator_ids=[operator_id]
+                    )
             if include_technical_issues:
                 self._attach_technical_issue_segments_to_operators(
                     cursor=cursor,

@@ -13499,6 +13499,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const PLANNER_STATUS_NO_PHONE_KEY = 'без телефона';
             const PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS = 30;
+            /* Как часто перечитываются живые статусы (задача #330). Полминуты —
+               это «в реальном времени» для глаза и всего два запроса в минуту на
+               открытую вкладку; секундный опрос дал бы ту же картинку дороже. */
+            const LIVE_STATUS_TRACK_REFRESH_MS = 30000;
             const plannerStatusPad2 = (n) => String(n).padStart(2, '0');
             const plannerStatusNormalizeKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
             const plannerStatusCompactKey = (v) => plannerStatusNormalizeKey(v).replace(/[\s._-]+/g, '');
@@ -13839,8 +13843,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return coveredUntil;
             };
             const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
-            const shiftIntervals = mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start);
-            const breakIntervals = mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start);
+            /* Идущая смена считается ДО «сейчас», а не на всю длину (задача #330).
+               Момент берём из живого хвоста статусов: он и есть «данные по этот
+               миг». Иначе в 12:00 у смены 09:00–18:00 знаменателем шли бы все
+               девять часов, и соответствие весь день выглядело бы проваленным,
+               медленно подползая к правде к вечеру.
+               Часы берём с сервера, а не с часов браузера: у оператора и у
+               руководителя число должно быть одно и то же. Дни без живого хвоста
+               (вчера, чужой отдел) считаются как раньше — потолка нет. */
+            const liveClampEndMin = (statusBars || []).reduce((acc, seg) => {
+                if (!seg?.isLiveTail) return acc;
+                const end = Number(seg?.endMin ?? seg?.end ?? 0);
+                if (!Number.isFinite(end)) return acc;
+                return acc == null ? end : Math.max(acc, end);
+            }, null);
+            const clipToLiveClamp = (list) => (liveClampEndMin == null
+                ? list
+                : list
+                    .map(i => ({ ...i, start: Number(i?.start || 0), end: Math.min(Number(i?.end || 0), liveClampEndMin) }))
+                    .filter(i => i.end > i.start));
+            const shiftIntervals = clipToLiveClamp(mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start));
+            const breakIntervals = clipToLiveClamp(mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start));
             const workScheduleIntervals = plannerSubtractIntervals(shiftIntervals, breakIntervals);
             const bars = (statusBars || [])
                 .map(seg => ({
@@ -13920,7 +13943,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const compliancePct = totalScheduledMin > 0 ? (matchedTotalMin / totalScheduledMin) * 100 : null;
 
             const perShift = (shiftParts || []).map((part, idx) => {
-                const shiftInterval = { start: Number(part?.start || 0), end: Number(part?.end || 0) };
+                const shiftRawEnd = Number(part?.end || 0);
+                const shiftEnd = liveClampEndMin == null ? shiftRawEnd : Math.min(shiftRawEnd, liveClampEndMin);
+                const shiftInterval = { start: Number(part?.start || 0), end: shiftEnd };
+                // Смена ещё идёт — её конца мы не видели.
+                const shiftInProgress = liveClampEndMin != null && shiftEnd < shiftRawEnd;
+                // Смена, которая сегодня ещё не начиналась, из разбора выпадает
+                // целиком: показывать по ней ноль процентов и «ранний уход во всю
+                // смену» — неправда, а не строгость.
+                if (shiftInterval.end <= shiftInterval.start) return null;
                 const shiftDurMin = Math.max(0, shiftInterval.end - shiftInterval.start);
                 const shiftBreakIntervals = plannerIntersectIntervalWithList(shiftInterval, breakIntervals);
                 const shiftWorkScheduleIntervals = plannerSubtractIntervals([shiftInterval], shiftBreakIntervals);
@@ -13965,7 +13996,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         Math.min(lastExcusedEnd, shiftInterval.end)
                     );
                     lateMin = Math.max(0, firstWorkStart - lateStartMin);
-                    earlyLeaveMin = Math.max(0, shiftInterval.end - lastActiveEnd);
+                    /* У идущей смены раннего ухода нет: человек ещё работает, а
+                       обычная формула «конец смены минус последняя активность»
+                       на перерыве в 12:00 написала бы ему уход на полдня. */
+                    earlyLeaveMin = shiftInProgress ? 0 : Math.max(0, shiftInterval.end - lastActiveEnd);
                 }
                 return {
                     id: `${String(part?.sourceDate || '')}:${Number(part?.sourceIndex ?? idx)}`,
@@ -13983,7 +14017,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     earlyLeaveMin,
                     hasWorkStatus
                 };
-            }).sort((a, b) => a.start - b.start);
+            }).filter(Boolean).sort((a, b) => a.start - b.start);
 
             const lateTotalMin = perShift.reduce((s, it) => s + (Number(it?.lateMin || 0)), 0);
             const earlyLeaveTotalMin = perShift.reduce((s, it) => s + (Number(it?.earlyLeaveMin || 0)), 0);
@@ -14398,6 +14432,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 days: daysArr
             };
             };
+            /* Карта «день → статусы» вместе с ТЕКУЩИМ, ещё не закрытым статусом
+               (задача #330). Отрезок в базе строится между двумя переключениями,
+               поэтому идущего прямо сейчас статуса там нет вовсе — его присылает
+               сервер отдельным полем liveStatusTail, уже обрезанным концом смены.
+               Дальше он живёт обычным отрезком: и в сетке, и у оператора, и в
+               выгрузке — один и тот же кусок, второй формулы нет. */
+            const plannerTimelineDaysWithLiveTail = (op) => {
+            const days = (op?.importedStatusTimelineDays && typeof op.importedStatusTimelineDays === 'object')
+                ? op.importedStatusTimelineDays
+                : {};
+            const tail = op?.liveStatusTail;
+            const tailDayKey = String(tail?.statusDate || '').trim();
+            if (!tail || !tailDayKey || !tail.start || !tail.end) return days;
+            const dayList = Array.isArray(days[tailDayKey]) ? days[tailDayKey] : [];
+            return { ...days, [tailDayKey]: [...dayList, tail] };
+            };
             const buildPlannerStatusAnalysisFromOperators = (operatorsList = []) => {
             const days = new Map();
             const overallByOperator = new Map();
@@ -14420,7 +14470,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             (Array.isArray(operatorsList) ? operatorsList : []).forEach(op => {
                 const operatorName = String(op?.name || op?.login || (op?.id ? `Оператор ${op.id}` : '')).trim();
                 if (!operatorName) return;
-                const timelineByDay = (op?.importedStatusTimelineDays && typeof op.importedStatusTimelineDays === 'object') ? op.importedStatusTimelineDays : {};
+                const timelineByDay = plannerTimelineDaysWithLiveTail(op);
                 Object.entries(timelineByDay).forEach(([dateKeyRaw, dayTimelineRaw]) => {
                     const dateKey = String(dateKeyRaw || '').trim();
                     if (!dateKey) return;
@@ -14475,7 +14525,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             isLateStart,
                             isLateExcused,
                             isNoPhone,
-                            isNoPhoneAnomaly
+                            isNoPhoneAnomaly,
+                            // По нему соответствие считается до «сейчас», а не на
+                            // всю смену: см. plannerComputeShiftStatusMatchMetrics.
+                            isLiveTail: Boolean(seg?.isLiveTail)
                         };
                         validSegments += 1;
                         const overall = ensureOverall(operatorName);
@@ -15523,6 +15576,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
             const [myScheduleError, setMyScheduleError] = useState('');
             const [myScheduleReloadNonce, setMyScheduleReloadNonce] = useState(0);
+            /* Живые статусы за сегодня (задача #330): узкий срез, который
+               обновляется сам. Держим отдельно от myScheduleData и от operators,
+               чтобы обновление раз в полминуты не перетряхивало смены, перерывы
+               и запросы на замену — там меняться нечему. Момент, на который
+               посчитано, показываем рядом с полосой. */
+            const [myStatusTrackLive, setMyStatusTrackLive] = useState(null);
+            const [myStatusTrackLoading, setMyStatusTrackLoading] = useState(false);
+            const [plannerStatusTrackAsOf, setPlannerStatusTrackAsOf] = useState('');
+            const [plannerStatusTrackLoading, setPlannerStatusTrackLoading] = useState(false);
             const [operatorSelfTab, setOperatorSelfTab] = useState('schedule');
             /* Телефон: выбранный день недели в «Сменах» и в «Коллегах», лист
                подтверждения отказа/отмены запроса, раскрытые списки запросов.
@@ -17295,6 +17357,90 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setViewMode('week');
             }, [isNarrowShell, isOperatorSelfSchedules, viewMode]);
             const operatorTodayKey = todayDateStr(new Date());
+            /* Живые статусы текущего дня для сетки (задача #330).
+
+               Тяжёлый /operators остаётся на своём месте — он привозит смены,
+               перерывы, выходные и признаки брака на три дня; раз в полминуты
+               такое дёргать нельзя. Здесь узкий срез: статусы одного дня и
+               текущий, ещё не закрытый. Он ложится поверх уже загруженного, а
+               остальное в карточке оператора не трогается.
+
+               Канал есть не у всех отделов — ручка отвечает пустым списком там,
+               где статусы приезжают выгрузкой по расписанию, и таймер тогда не
+               заводится вовсе. */
+            const loadPlannerStatusTrack = useCallback(async (dateKey, { silent = true } = {}) => {
+                if (!user?.id || user?.role === 'operator') return { available: false };
+                const date = String(dateKey || '').trim();
+                if (!date) return { available: false };
+                if (!silent) setPlannerStatusTrackLoading(true);
+                try {
+                    const qs = new URLSearchParams({ date });
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/status_track?${qs.toString()}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    if (!response.ok) return { available: false };
+                    const data = await response.json();
+                    const rows = Array.isArray(data?.operators) ? data.operators : [];
+                    if (rows.length === 0) {
+                        setPlannerStatusTrackAsOf('');
+                        return { available: false };
+                    }
+                    const rowById = new Map(rows.map(row => [Number(row?.id), row]));
+                    setOperators(prev => prev.map(op => {
+                        const row = rowById.get(Number(op?.id));
+                        if (!row) return op;
+                        return clonePlannerOperator({
+                            ...op,
+                            importedStatusTimelineDays: {
+                                ...(op?.importedStatusTimelineDays || {}),
+                                ...(row.importedStatusTimelineDays || {})
+                            },
+                            liveStatusTail: row.liveStatusTail || null
+                        });
+                    }));
+                    setPlannerStatusTrackAsOf(String(data?.asOf || ''));
+                    return { available: true };
+                } catch (error) {
+                    console.warn('Error loading planner status track:', error);
+                    return { available: false };
+                } finally {
+                    if (!silent) setPlannerStatusTrackLoading(false);
+                }
+            }, [user?.id, user?.role]);
+
+            const plannerLiveStatusDateKey = (viewMode === 'day' && Array.isArray(visibleRange))
+                ? String(visibleRange[0] || '')
+                : '';
+            useEffect(() => {
+                if (!user?.id || user?.role === 'operator') return;
+                // Живой хвост есть только у сегодняшнего дня: вчерашние сутки
+                // закрыты, и перечитывать их каждые полминуты незачем.
+                if (!plannerLiveStatusDateKey || plannerLiveStatusDateKey !== operatorTodayKey) {
+                    setPlannerStatusTrackAsOf('');
+                    return;
+                }
+                let cancelled = false;
+                let timer = null;
+                const tick = () => {
+                    if (document.visibilityState === 'visible') loadPlannerStatusTrack(plannerLiveStatusDateKey);
+                };
+                const onVisibilityChange = () => {
+                    if (document.visibilityState === 'visible') tick();
+                };
+                (async () => {
+                    const result = await loadPlannerStatusTrack(plannerLiveStatusDateKey);
+                    if (cancelled || !result?.available) return;
+                    timer = setInterval(tick, LIVE_STATUS_TRACK_REFRESH_MS);
+                    document.addEventListener('visibilitychange', onVisibilityChange);
+                })();
+                return () => {
+                    cancelled = true;
+                    if (timer) clearInterval(timer);
+                    document.removeEventListener('visibilitychange', onVisibilityChange);
+                };
+            }, [user?.id, user?.role, plannerLiveStatusDateKey, operatorTodayKey, loadPlannerStatusTrack]);
+
             const makeSelectedCellKey = (opId, date) => `${String(opId)}|${date}`;
             const sortSelectedTargets = (targets = []) => (
                 [...targets].sort((a, b) => {
@@ -17787,6 +17933,73 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 loadMyLiveSchedules();
                 return () => { cancelled = true; };
             }, [isOperatorSelfSchedules, user, operatorTodayKey, myScheduleReloadNonce]);
+
+            /* Живые статусы за сегодня (задача #330).
+
+               Отдельный узкий запрос: /api/work_schedules/my тянет весь видимый
+               период со сменами, перерывами и запросами на замену — раз в
+               полминуты дёргать его нельзя, да и меняться там нечему. Здесь
+               едут только статусы текущего дня и текущий, ещё не закрытый.
+
+               Канал есть не у всех: ручка отвечает пустым списком тем, у кого
+               статусы приезжают не пушем, а выгрузкой по расписанию. Тогда
+               таймер не заводится вовсе — один запрос на открытие раздела. */
+            const loadMyStatusTrack = useCallback(async ({ silent = true } = {}) => {
+                if (!user?.id) return { available: false };
+                const dateKey = todayDateStr(new Date());
+                if (!silent) setMyStatusTrackLoading(true);
+                try {
+                    const qs = new URLSearchParams({ date: dateKey });
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/status_track?${qs.toString()}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    if (!response.ok) return { available: false };
+                    const data = await response.json();
+                    const mine = (Array.isArray(data?.operators) ? data.operators : [])
+                        .find(item => Number(item?.id) === Number(user.id)) || null;
+                    if (!mine) {
+                        setMyStatusTrackLive(null);
+                        return { available: false };
+                    }
+                    setMyStatusTrackLive({
+                        date: String(data?.date || dateKey),
+                        asOf: String(data?.asOf || ''),
+                        timelineDays: mine.importedStatusTimelineDays || {},
+                        tail: mine.liveStatusTail || null
+                    });
+                    return { available: true };
+                } catch (error) {
+                    console.warn('Error loading my status track:', error);
+                    return { available: false };
+                } finally {
+                    if (!silent) setMyStatusTrackLoading(false);
+                }
+            }, [user?.id]);
+
+            useEffect(() => {
+                if (!isOperatorSelfSchedules || !user?.id) return;
+                let cancelled = false;
+                let timer = null;
+                const tick = () => {
+                    // Скрытая вкладка не опрашивает: смотреть там некому.
+                    if (document.visibilityState === 'visible') loadMyStatusTrack();
+                };
+                const onVisibilityChange = () => {
+                    if (document.visibilityState === 'visible') tick();
+                };
+                (async () => {
+                    const result = await loadMyStatusTrack();
+                    if (cancelled || !result?.available) return;
+                    timer = setInterval(tick, LIVE_STATUS_TRACK_REFRESH_MS);
+                    document.addEventListener('visibilitychange', onVisibilityChange);
+                })();
+                return () => {
+                    cancelled = true;
+                    if (timer) clearInterval(timer);
+                    document.removeEventListener('visibilitychange', onVisibilityChange);
+                };
+            }, [isOperatorSelfSchedules, user?.id, operatorTodayKey, myScheduleReloadNonce, loadMyStatusTrack]);
 
             const buildModalStatusDraftForDate = (opId, date) => {
                 const fallbackDate = typeof date === 'string' && date ? date : '';
@@ -19090,7 +19303,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     isTraining: typeof seg?.isTraining === 'boolean' ? seg.isTraining : plannerStatusIsTrainingKey(statusKey),
                     isTechnicalReason: typeof seg?.isTechnicalReason === 'boolean' ? seg.isTechnicalReason : plannerStatusIsTechReasonKey(statusKey),
                     isLateStart: typeof seg?.isLateStart === 'boolean' ? seg.isLateStart : PLANNER_IMPORTED_LATE_START_STATUS_KEYS.has(statusKey),
-                    isLateExcused: typeof seg?.isLateExcused === 'boolean' ? seg.isLateExcused : plannerStatusIsLateExcusedKey(statusKey)
+                    isLateExcused: typeof seg?.isLateExcused === 'boolean' ? seg.isLateExcused : plannerStatusIsLateExcusedKey(statusKey),
+                    isLiveTail: Boolean(seg?.isLiveTail)
                 };
             };
 
@@ -19100,9 +19314,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const operatorName = String(op?.name || op?.login || (op?.id ? `Оператор ${op.id}` : '')).trim();
                     const operatorNameKey = plannerStatusNormalizeOperatorName(operatorName);
                     if (!operatorNameKey) return;
-                    const timelineByDay = (op?.importedStatusTimelineDays && typeof op.importedStatusTimelineDays === 'object')
-                        ? op.importedStatusTimelineDays
-                        : {};
+                    // Тот же источник, что у сетки: иначе выгрузка за сегодня
+                    // считала бы идущую смену на всю длину, а экран — до «сейчас».
+                    const timelineByDay = plannerTimelineDaysWithLiveTail(op);
                     Object.entries(timelineByDay).forEach(([dateKeyRaw, dayTimelineRaw]) => {
                         const dateKey = String(dateKeyRaw || '').trim();
                         if (!dateKey) return;
@@ -22936,14 +23150,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 : null;
             const myTimelineOperator = useMemo(() => {
                 if (!myScheduleData) return null;
-                return {
+                /* Свежий срез сегодняшних статусов кладём поверх того, что
+                   приехало с общим запросом периода: он перечитывается раз в
+                   полминуты, тот — только при открытии раздела. */
+                const baseDays = myScheduleData.importedStatusTimelineDays || {};
+                const liveDays = myStatusTrackLive?.timelineDays || null;
+                const base = {
                     ...myScheduleData,
                     shifts: myScheduleData.shifts || {},
                     technicalIssueTimelineDays: myScheduleData.technicalIssueTimelineDays || {},
                     offlineActivityTimelineDays: myScheduleData.offlineActivityTimelineDays || {},
-                    importedStatusTimelineDays: myScheduleData.importedStatusTimelineDays || {}
+                    importedStatusTimelineDays: liveDays ? { ...baseDays, ...liveDays } : baseDays,
+                    liveStatusTail: myStatusTrackLive
+                        ? (myStatusTrackLive.tail || null)
+                        : (myScheduleData.liveStatusTail || null)
                 };
-            }, [myScheduleData]);
+                return { ...base, importedStatusTimelineDays: plannerTimelineDaysWithLiveTail(base) };
+            }, [myScheduleData, myStatusTrackLive]);
             /* Фактические статусы под ленту смен — то же, что видит руководитель в
                «Графиках работы» (дорожка «ст» и строка соответствия), только про
                себя и без спецрежима: оператору переключать нечего.
@@ -23020,9 +23243,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return {
                     bars: timelineBars,
                     totals: Array.from(totalsByLabel.values()).sort((a, b) => b.minutes - a.minutes),
-                    metrics: metrics && metrics.totalScheduledMin > 0 ? metrics : null
+                    metrics: metrics && metrics.totalScheduledMin > 0 ? metrics : null,
+                    /* «на 11:25» — момент, по который посчитано. Без него живая
+                       полоса выглядит как обычная, и непонятно, почему смена
+                       обрывается на середине. Часы серверные (Алматы), поэтому
+                       берём их из строки, а не из часов браузера. */
+                    asOfLabel: (targetDate === operatorTodayKey && myStatusTrackLive?.asOf)
+                        ? String(myStatusTrackLive.asOf).slice(11, 16)
+                        : ''
                 };
-            }, [myTimelineOperator, plannerTrainingsByOperator]);
+            }, [myTimelineOperator, plannerTrainingsByOperator, myStatusTrackLive, operatorTodayKey]);
             const myCurrentDayStatusTrack = useMemo(
                 () => getMyStatusTrackForDate(myCurrentDayCard?.date),
                 [getMyStatusTrackForDate, myCurrentDayCard?.date]
@@ -25922,6 +26152,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             totals={track.totals.map(item => ({ ...item, value: statusDuration(item.minutes) }))}
                             note={note}
                             showHours={Boolean(withHours)}
+                            asOf={track.asOfLabel || ''}
+                            refreshing={myStatusTrackLoading}
+                            onRefresh={track.asOfLabel ? () => loadMyStatusTrack({ silent: false }) : null}
                         />
                     );
                 };
@@ -31738,6 +31971,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         {plannerStatusSpecialViewEnabled ? 'вкл' : 'выкл'}
                                                     </span>
                                                 </button>
+                                                {/* Кнопка появляется только там, где статусы живые: в
+                                                    остальных отделах перечитывать нечего — источник
+                                                    обновляется выгрузкой по расписанию, и кнопка
+                                                    обещала бы то, чего не делает. Полоса и так
+                                                    перечитывается сама раз в полминуты, кнопка — для
+                                                    «хочу прямо сейчас». */}
+                                                {plannerStatusTrackAsOf && (
+                                                    <button
+                                                        onClick={() => loadPlannerStatusTrack(plannerLiveStatusDateKey, { silent: false })}
+                                                        disabled={plannerStatusTrackLoading}
+                                                        className={PLANNER_MENU_ITEM}
+                                                        title="Перечитать статусы за сегодня"
+                                                    >
+                                                        <FaIcon className={`fas ${plannerStatusTrackLoading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} text-slate-400`}></FaIcon>
+                                                        <span className="min-w-0 flex-1 truncate">Обновить статусы</span>
+                                                        <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">
+                                                            на {String(plannerStatusTrackAsOf).slice(11, 16)}
+                                                        </span>
+                                                    </button>
+                                                )}
                                                 {plannerStatusSpecialViewEnabled && (
                                                     <div className="flex items-center gap-2 rounded-xl px-2.5 py-1.5">
                                                         <span className="flex-1 text-[13px] font-medium text-slate-500">Масштаб</span>

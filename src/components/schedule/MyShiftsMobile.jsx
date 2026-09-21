@@ -279,11 +279,41 @@ export const MyShiftsTimeline = ({
  * полминуты) держим на 2 px, иначе они исчезают с ленты вовсе.
  * Компонент общий с настольным видом: там у полос ещё и подсказка по наведению.
  */
-export const MyShiftsStatusTrack = ({ label = 'Статусы', bars = [], totals = [], note = null, showHours = false }) => {
+export const MyShiftsStatusTrack = ({
+  label = 'Статусы',
+  bars = [],
+  totals = [],
+  note = null,
+  showHours = false,
+  asOf = '',
+  refreshing = false,
+  onRefresh = null,
+}) => {
   if (!bars.length) return null;
   return (
     <div>
-      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</div>
+      {/* «на 11:25» и обновление стоят в строке заголовка, а не над полосой:
+          отдельная панель ради двух знаков — лишний ряд на телефоне. Появляются
+          только там, где статусы живые (сегодняшний день), иначе строка пустая
+          и обещать нечего. */}
+      <div className="mb-1 flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</span>
+        {asOf ? (
+          <span className="shrink-0 text-[11px] tabular-nums text-slate-400">на {asOf}</span>
+        ) : null}
+        {onRefresh ? (
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition active:scale-95 disabled:opacity-50"
+            title="Обновить статусы"
+            aria-label="Обновить статусы"
+          >
+            <FaIcon className={`fas ${refreshing ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} text-[11px]`}></FaIcon>
+          </button>
+        ) : null}
+      </div>
       {/* Свою шкалу часов рисуем только когда над полосой нет ленты смен (день без
           смены): два одинаковых ряда цифр подряд читаются как ошибка вёрстки. */}
       {showHours ? (

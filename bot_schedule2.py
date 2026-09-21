@@ -46566,6 +46566,61 @@ def get_my_work_schedules():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/work_schedules/status_track', methods=['GET'])
+@require_api_key
+def get_work_schedule_status_track():
+    """Статусы одного дня + текущий статус — для автообновления (задача #330).
+
+    Отдельная узкая ручка: раз в полминуты дёргать /operators (смены, перерывы,
+    выходные и признаки брака всего отдела за три дня) или /my (весь видимый
+    период) нельзя. Здесь едет только то, что меняется от минуты к минуте.
+
+    Оператор получает себя, руководитель — своих людей по обычному периметру
+    графиков. И тот и другой — только по отделам с живым источником статусов
+    (LIVE_STATUS_TRACK_DEPARTMENT_CODES); остальным ручка честно отвечает
+    пустым списком, и интерфейс остаётся на прежнем поведении.
+
+    Query params: date (YYYY-MM-DD, по умолчанию сегодня).
+    """
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        date_raw = (request.args.get('date') or '').strip() or datetime.now().strftime('%Y-%m-%d')
+        try:
+            datetime.strptime(date_raw, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+
+        if _normalize_user_role(requester[3]) == 'operator':
+            operator_ids = [int(requester_id)]
+        else:
+            viewer_id, viewer, viewer_error = _resolve_work_schedule_viewer()
+            if viewer_error:
+                message, status_code = viewer_error
+                return jsonify({"error": message}), status_code
+            allowed = _filter_operators_for_requester_scope(
+                viewer,
+                viewer_id,
+                [{'id': op_id} for op_id in (db.get_live_status_track_operator_ids() or [])]
+            )
+            operator_ids = [_operator_item_id(item) for item in allowed]
+            operator_ids = [op_id for op_id in operator_ids if op_id is not None]
+
+        started_at = time.perf_counter()
+        payload = db.get_live_status_track(date_raw, operator_ids=operator_ids)
+        _record_elapsed_server_timing("status-track-db", started_at)
+        return jsonify(payload), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting work schedule status track: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/work_schedules/direction', methods=['GET'])
 @require_api_key
 def get_direction_work_schedules():
