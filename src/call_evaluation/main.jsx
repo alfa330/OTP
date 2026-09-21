@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
 import FaIcon from '../components/common/FaIcon';
+import { CALL_KIND_ANY, CALL_KIND_OPTIONS, callKindFlags } from './randomCallKind';
 import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody, watchAuthTokensFromOtherTabs } from '../utils/authRefresh';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
@@ -2754,8 +2755,10 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
         return { start, end };
     };
     const [range, setRange] = useState(rcInitialRange);
-    const [incoming, setIncoming] = useState(true);
-    const [outgoing, setOutgoing] = useState(true);
+    // Один выбор из трёх вместо двух галочек: см. randomCallKind.js — нажатие на
+    // «Входящие» раньше снимало галочку и оставляло ровно противоположное.
+    const [callKind, setCallKind] = useState(CALL_KIND_ANY);
+    const { incoming, outgoing } = callKindFlags(callKind);
     const [minDur, setMinDur] = useState('');
     const [maxDur, setMaxDur] = useState('');
     const [count, setCount] = useState(1);
@@ -2767,7 +2770,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
     useEffect(() => {
         if (!isOpen) return;
         setRange(rcInitialRange());
-        setIncoming(true); setOutgoing(true); setMinDur(''); setMaxDur(''); setCount(1);
+        setCallKind(CALL_KIND_ANY); setMinDur(''); setMaxDur(''); setCount(1);
         setBusy(false); setError(''); setResults([]);
         importedMonthsRef.current = new Set();
     }, [isOpen, selectedMonth]);
@@ -2824,14 +2827,14 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
         onClose?.();
     };
 
-    const TypeCheck = ({ checked, onToggle, label }) => (
-        <button type="button" onClick={onToggle}
-            style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 'var(--radius)', cursor: 'pointer',
-                border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-strong)'}`,
-                background: checked ? 'var(--accent-light)' : 'var(--surface)' }}>
-            <span style={{ width: 18, height: 18, flexShrink: 0, borderRadius: 5, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#fff',
-                background: checked ? 'var(--accent)' : 'transparent', border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-strong)'}` }}>
-                {checked ? <FaIcon className="fas fa-check" /> : null}
+    const TypeChoice = ({ active, onPick, label }) => (
+        <button type="button" onClick={onPick} aria-pressed={active}
+            style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '9px 12px', borderRadius: 'var(--radius)', cursor: 'pointer',
+                border: `1px solid ${active ? 'var(--accent)' : 'var(--border-strong)'}`,
+                background: active ? 'var(--accent-light)' : 'var(--surface)' }}>
+            <span style={{ width: 16, height: 16, flexShrink: 0, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                border: `1px solid ${active ? 'var(--accent)' : 'var(--border-strong)'}` }}>
+                {active ? <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--accent)' }} /> : null}
             </span>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{label}</span>
         </button>
@@ -2862,8 +2865,11 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
 
                     <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Тип звонка</label>
                     <div style={{ display: 'flex', gap: 8 }}>
-                        <TypeCheck checked={outgoing} label="Исходящие" onToggle={() => { if (outgoing && !incoming) return; setOutgoing(v => !v); }} />
-                        <TypeCheck checked={incoming} label="Входящие" onToggle={() => { if (incoming && !outgoing) return; setIncoming(v => !v); }} />
+                        {CALL_KIND_OPTIONS.map(option => (
+                            <TypeChoice key={option.value} label={option.label}
+                                active={callKind === option.value}
+                                onPick={() => setCallKind(option.value)} />
+                        ))}
                     </div>
 
                     <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Сколько звонков (1–{RC_MAX_COUNT})</label>
