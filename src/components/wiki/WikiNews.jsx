@@ -1483,6 +1483,15 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
     }, [apiBaseUrl, headers, formPost, bucket, load, closeCompose, spaceId]);
 
     const act = useCallback((post, action) => {
+        /* Удаление выпускавшейся новости спрашивают вслух: вместе с ней
+           пропадает журнал «Кто прочитал» (решение владельца 21.09.2026), а он
+           и есть ответ на вопрос, был ли сотрудник проинформирован. У
+           черновика спрашивать нечего — его никто не видел. */
+        if (action === 'delete' && post.published_at
+            && !window.confirm(`Удалить новость «${post.title}» навсегда?\n\n`
+                               + 'Вместе с ней пропадёт журнал «Кто прочитал» — кто из '
+                               + 'сотрудников подтвердил объявление и прошёл тест. '
+                               + 'Вернуть его будет нельзя.')) return;
         const url = `${apiBaseUrl}/api/news/posts/${post.id}${action === 'delete' ? '' : `/${action}`}`;
         const request = action === 'delete'
             ? axios.delete(url, { headers })
@@ -1492,7 +1501,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                 toastRef.current?.({
                     publish: 'Новость опубликована',
                     archive: 'Новость снята с показа',
-                    delete: 'Черновик удалён',
+                    delete: post.published_at ? 'Новость удалена' : 'Черновик удалён',
                 }[action], 'success');
                 load();
             })

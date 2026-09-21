@@ -1012,23 +1012,37 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         queries.set_status(cursor, post_id=post_id, status='archived')
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
-    @news_route('/posts/<int:post_id>', methods=('DELETE',), publisher=True)
-    def news_post_delete(cursor, ctx, post_id):
-        post = _get_post(cursor, post_id)
-        if not post:
-            return jsonify({"error": "Новость не найдена"}), 404
-        if not _may_edit(ctx, post):
-            return jsonify({"error": "Удалить новость может её автор"}), 403
-        if post['published_at']:
-            # Удаляется только то, что НИ РАЗУ не выходило к людям. Проверять
-            # текущий статус мало: снятая новость перестаёт быть 'published', и
-            # через «снять → удалить» журнал прочтений стирался в два нажатия —
-            # а он и есть ответ на вопрос «был ли сотрудник проинформирован»,
-            # ради которого раздел делали.
-            return jsonify({"error": "Выпущенную новость можно только снять с показа — "
-                                     "журнал прочтений остаётся",
-                            "code": "NEWS_PUBLISHED"}), 409
-        queries.delete_post(cursor, post_id)
+    # defer_cursor: между удалением строк и сносом блобов стоит чужая сеть, и
+    # снести байты раньше, чем база подтвердила удаление, значило бы получить
+    # новость с пустыми рамками, если транзакция не доедет.
+    @news_route('/posts/<int:post_id>', methods=('DELETE',), publisher=True,
+                defer_cursor=True)
+    def news_post_delete(ctx, post_id):
+        """Удалить новость насовсем — вместе с журналом прочтений и тестом.
+
+        Решение владельца 21.09.2026: «в архиве должна быть кнопка удалить,
+        чтобы можно было удалить новость навсегда, журнал его тоже удалится кто
+        прочитал». До него удалялось только то, что ни разу не выходило к
+        людям, и снятая новость оставалась в архиве навсегда.
+
+        Порог остался ровно один и он про ПОКАЗ, а не про прошлое: объявление,
+        висящее у людей на экране прямо сейчас, сначала снимают. Иначе
+        обязательное окно исчезало бы у читающего его человека в середине
+        текста, а «Прочитал» отвечало бы, что новости нет.
+        """
+        with db._get_cursor() as cursor:
+            post = _get_post(cursor, post_id)
+            if not post:
+                return jsonify({"error": "Новость не найдена"}), 404
+            if not _may_edit(ctx, post):
+                return jsonify({"error": "Удалить новость может её автор"}), 403
+            if post['status'] == 'published':
+                return jsonify({"error": "Новость на показе — сначала снимите её",
+                                "code": "NEWS_PUBLISHED"}), 409
+            refs = queries.delete_post(cursor, post_id,
+                                       with_photos=_photos_ready(cursor))
+        # ПОСЛЕ фиксации — тем же приёмом, что и снятие одного кадра.
+        news_photos.drop_blobs(gcs, refs)
         return jsonify({"status": "deleted"})
 
     # ── ФОТОГРАФИИ ───────────────────────────────────────────────────────

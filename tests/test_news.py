@@ -394,15 +394,39 @@ class NewsPerimeterTests(unittest.TestCase):
         self.assertIn('_may_read_post(ctx, post)', take_down)
         self.assertIn('>', take_down)
 
-    def test_a_published_news_can_never_be_deleted(self):
-        """Журнал прочтений — доказательство, и стирается он вместе с новостью.
+    def test_a_news_on_show_is_taken_down_before_it_is_deleted(self):
+        """Решение владельца 21.09.2026: «в архиве должна быть кнопка удалить,
+        чтобы можно было удалить новость навсегда, журнал его тоже удалится кто
+        прочитал».
 
-        Проверки одного лишь текущего статуса мало: снятая перестаёт быть
-        'published', и «снять → удалить» уносило бы журнал в два нажатия.
+        Порог остался ровно один и он про ПОКАЗ, а не про прошлое: объявление,
+        висящее у людей на экране прямо сейчас, сначала снимают — иначе
+        обязательное окно исчезло бы у читающего его человека в середине текста.
         """
         routes = _code_only(_read('news', 'routes.py'))
-        self.assertIn("if post['published_at']:", routes)
-        self.assertNotIn("if post['status'] == 'published':", routes)
+        delete = routes[routes.index('def news_post_delete('):
+                        routes.index('def news_quiz_draft(')]
+        self.assertIn("if post['status'] == 'published':", delete)
+        self.assertNotIn("if post['published_at']:", delete)
+
+    def test_deleting_a_news_takes_its_photos_out_of_the_bucket(self):
+        """Каскад живёт в базе, а картинка — в бакете: без отдельного снятия от
+        каждой удалённой новости оставалось бы до десяти файлов навсегда,
+        сборщика сирот в проекте нет. И сносятся они ПОСЛЕ фиксации."""
+        routes = _code_only(_read('news', 'routes.py'))
+        delete = routes[routes.index('def news_post_delete('):
+                        routes.index('def news_quiz_draft(')]
+        self.assertIn('with_photos=_photos_ready(cursor)', delete)
+        self.assertLess(delete.index('queries.delete_post('),
+                        delete.index('news_photos.drop_blobs('))
+        self.assertIn("methods=('DELETE',), publisher=True,\n                defer_cursor=True",
+                      _read('news', 'routes.py'))
+        drop = _code_only(_read('news', 'queries.py'))
+        drop = drop[drop.index('def delete_post('):]
+        drop = drop[:drop.index('def ', 10)]
+        self.assertIn('DELETE FROM news_photos WHERE news_id = %s RETURNING bucket, blob_path',
+                      drop)
+        self.assertLess(drop.index('news_photos'), drop.index('DELETE FROM news_posts'))
 
     def test_reading_routes_do_not_pay_for_publishing_rights(self):
         """/pending дёргает каждый вошедший и каждая вкладка на каждый тычок.
@@ -587,6 +611,17 @@ class NewsFrontendTests(unittest.TestCase):
             self.assertIn('newsShared', _read(path), path)
         shared = _read('src', 'components', 'news', 'newsShared.js')
         self.assertEqual(len(re.findall(r'ROLE_TITLES = \{', shared)), 1)
+
+
+    def test_deleting_a_released_news_is_asked_out_loud(self):
+        """Вместе с новостью пропадает журнал «Кто прочитал» — про такое
+        спрашивают вслух. У черновика спрашивать нечего: его никто не видел."""
+        tab = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn("if (action === 'delete' && post.published_at", tab)
+        self.assertIn('window.confirm(', tab)
+        self.assertIn('Вернуть его будет нельзя', tab)
+        # Кнопка «Удалить» есть у всего, что не на показе, — то есть и в архиве.
+        self.assertIn("post.can_edit && post.status !== 'published'", tab)
 
 
 class NewsPhotoTests(unittest.TestCase):

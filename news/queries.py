@@ -1259,8 +1259,27 @@ def set_status(cursor, *, post_id, status):
     )
 
 
-def delete_post(cursor, post_id):
+def delete_post(cursor, post_id, with_photos=False):
+    """Сносит новость целиком. Возвращает ссылки на блобы её кадров.
+
+    Журнал прочтений, тест и кадры уходят каскадом (news/schema.py), и это
+    решение владельца 21.09.2026: «удалить новость навсегда, журнал его тоже
+    удалится кто прочитал».
+
+    А вот БАЙТЫ кадров каскад не трогает — он живёт в базе, картинка в бакете.
+    Поэтому строки кадров снимаются отдельно и с RETURNING: сборщика сирот в
+    проекте нет, и без этого от каждой удалённой новости в хранилище оставалось
+    бы до десяти файлов навсегда. Сносит их ВЫЗЫВАЮЩИЙ и только после фиксации
+    транзакции (news/photos.py: drop_blobs).
+    """
+    refs = []
+    if with_photos:
+        cursor.execute(
+            "DELETE FROM news_photos WHERE news_id = %s RETURNING bucket, blob_path",
+            (post_id,))
+        refs = [(row[0], row[1]) for row in cursor.fetchall()]
     cursor.execute("DELETE FROM news_posts WHERE id = %s", (post_id,))
+    return refs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
