@@ -802,7 +802,7 @@ def test_the_name_in_the_login_window_is_the_one_on_the_shortcut():
     """Внутреннее имя оператор не видит нигде: он пришёл сюда по ярлыку
     «Oktell», и в шапке окна должно стоять то же слово."""
     assert agent.APP_NAME_SHORT == "Oktell"
-    assert "<title>Oktell</title>" in agent.build_login_html()
+    assert agent.LOGIN_WINDOW_TITLE.startswith("Oktell ")
     assert "Вход в Oktell" in agent.build_login_html()
 
 
@@ -827,6 +827,36 @@ def test_the_remembered_login_is_escaped_before_it_goes_into_the_page():
 def test_the_login_page_carries_the_version_like_the_phone_does():
     """«Какая у тебя версия» спрашивают как раз когда человек ещё не вошёл."""
     assert f"версия {agent.VERSION}" in agent.build_login_html()
+    # И в заголовке окна: карточку человек опишет словами, а заголовок прочитает.
+    assert agent.LOGIN_WINDOW_TITLE == f"Oktell {agent.VERSION}"
+    assert f"<title>{agent.LOGIN_WINDOW_TITLE}</title>" in agent.build_login_html()
+
+
+def test_the_operator_can_update_himself():
+    """Само обновление приходит при старте и раз в 6 часов. Не хватает этого
+    ровно тогда, когда версия сломана: ждать полдня оператору нечем."""
+    html = agent.build_login_html()
+    assert 'id="update"' in html
+    assert "window.__guardLogin.update = true" in html
+    # Страница на сервер не ходит — нажатие забирает агент, как и вход.
+    assert "fetch(" not in html
+
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    assert "def run_update_now(" in source
+    assert '"--update"' in source
+    # И отвечает словами: «обновились», «уже последняя», «не вышло».
+    body = source[source.index("def _run_update_from_window("):source.index("def run_login_window(")]
+    for text in ("Обновились", "последняя версия", "не вышло"):
+        assert text in body, text
+
+
+def test_the_update_result_goes_into_the_same_window():
+    """Своё окно с сообщением вылезло бы ПОВЕРХ окна входа, которое и так на
+    экране: два окна там, где хватает строки."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def _run_update_from_window("):source.index("def run_login_window(")]
+    assert "quiet=True" in body
+    assert "__guardUpdateDone" in body
 
 
 def test_the_server_speaks_english_and_the_operator_should_not_read_it():

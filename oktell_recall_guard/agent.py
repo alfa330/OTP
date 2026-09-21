@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.25"
+VERSION = "1.0.26"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -1209,6 +1209,13 @@ LOGIN_PAGE_HTML = """<!doctype html>
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .version { margin: 14px 0 0; text-align: center; font-size: 12px; color: var(--slate-400); }
+  /* «обновить» рядом с версией, а не кнопкой: обновляются раз в жизни, когда
+     версия сломана, и полноразмерная кнопка спорила бы за внимание с «Войти». */
+  .linkish {
+    padding: 0; border: none; background: none; font: inherit; color: var(--indigo-600);
+    cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .linkish:disabled { color: var(--slate-400); cursor: default; text-decoration: none; }
 </style>
 </head>
 <body>
@@ -1247,14 +1254,16 @@ LOGIN_PAGE_HTML = """<!doctype html>
         <span id="submit-text">Войти</span>
       </button>
     </form>
-    <p class="version">версия __VERSION__</p>
+    <p class="version">
+      версия __VERSION__ · <button id="update" class="linkish" type="button">обновить</button>
+    </p>
   </main>
 
 <script>
 (function () {
   // Единственный канал наружу. Пароль здесь и остаётся: страница его никуда не
   // шлёт — забирает агент через CDP и стирает эту пару сразу же.
-  window.__guardLogin = { pending: null, closing: false };
+  window.__guardLogin = { pending: null, closing: false, update: false };
 
   var form = document.getElementById('form');
   var login = document.getElementById('login');
@@ -1283,6 +1292,23 @@ LOGIN_PAGE_HTML = """<!doctype html>
   // Агент зовёт это, когда сервер ответил.
   window.__guardSay = function (text, isError) { busy(false); say(text, !!isError); };
   window.__guardBusy = function (text) { busy(true); say(text || '', false); };
+
+  // Обновление по требованию. Само оно приходит при старте и раз в 6 часов —
+  // не хватает этого ровно тогда, когда версия сломана и ждать полдня нечем.
+  // Забирает нажатие агент, как и вход: страница на сервер не ходит.
+  var updateButton = document.getElementById('update');
+  updateButton.addEventListener('click', function () {
+    if (updateButton.disabled) { return; }
+    updateButton.disabled = true;
+    updateButton.textContent = 'проверяем…';
+    say('Проверяем обновление…', false);
+    window.__guardLogin.update = true;
+  });
+  window.__guardUpdateDone = function (text, isError) {
+    updateButton.disabled = false;
+    updateButton.textContent = 'обновить';
+    say(text || '', !!isError);
+  };
 
   eye.addEventListener('click', function () {
     var shown = pass.type === 'text';
@@ -1325,7 +1351,7 @@ def build_login_html(prefill: str = "") -> str:
             .replace("<", "&lt;").replace(">", "&gt;"))
     return (LOGIN_PAGE_HTML
             .replace("__ICON__", LOGIN_ICON_B64)
-            .replace("__TITLE__", APP_NAME_SHORT)
+            .replace("__TITLE__", LOGIN_WINDOW_TITLE)
             .replace("__SUBTITLE__", f"Вход в {APP_NAME_SHORT}")
             .replace("__PREFILL__", safe)
             .replace("__VERSION__", VERSION))
@@ -1368,6 +1394,38 @@ def _set_window_bounds(page: "CdpPage", bounds: dict) -> None:
         page.call("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
     except Exception:  # noqa: BLE001
         logging.debug("Размер окна не задан", exc_info=True)
+
+
+def _take_update_request(page: "CdpPage") -> bool:
+    """Нажали ли «обновить». Флаг снимаем сразу — иначе сработает по кругу."""
+    try:
+        return bool(page.evaluate(
+            "(function(){var s=window.__guardLogin;"
+            "if(!s||!s.update){return false;}s.update=false;return true;})()"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _run_update_from_window(cfg: dict, page: "CdpPage") -> None:
+    """Обновиться по нажатию в окне входа и ответить человеку в это же окно.
+
+    Своего окна с сообщением тут не показываем: оно вылезло бы ПОВЕРХ окна
+    входа, которое и так на экране, — человек получил бы два окна там, где
+    хватает одной строки.
+    """
+    code = run_update_now(cfg, quiet=True)
+    texts = {
+        0: ("Обновились. Закройте это окно и откройте Oktell заново.", False),
+        1: (f"У вас последняя версия — {VERSION}.", False),
+        2: ("Обновиться не вышло. Проверьте интернет или сообщите в IT.", True),
+    }
+    text, is_error = texts.get(code, texts[2])
+    try:
+        page.evaluate("window.__guardUpdateDone(%s, %s)"
+                      % (json.dumps(text, ensure_ascii=False),
+                         "true" if is_error else "false"))
+    except Exception:  # noqa: BLE001 — окно могли закрыть, пока мы качали
+        logging.debug("Итог обновления показать некому", exc_info=True)
 
 
 def run_login_window(cfg: dict, prefill: str = "") -> dict:
@@ -1452,6 +1510,8 @@ def run_login_window(cfg: dict, prefill: str = "") -> dict:
                 continue
 
             if not pending:
+                if _take_update_request(page):
+                    _run_update_from_window(cfg, page)
                 time.sleep(0.3)
                 continue
 
@@ -2930,6 +2990,9 @@ def build_news_close_js() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 NEWS_WINDOW_TITLE = "iCORE · Объявление"
+# Заголовок окна входа. Версия прямо в нём: «какая у тебя версия» — первый
+# вопрос при разборе, а до меню оператор доберётся только после входа.
+LOGIN_WINDOW_TITLE = f"{APP_NAME_SHORT} {VERSION}"
 
 NEWS_PAGE_HTML = """<!doctype html>
 <html lang="ru">
@@ -3387,7 +3450,7 @@ def _window_by_title_like_oktell(browser: "ManagedBrowser") -> int:
         text = ctypes.create_unicode_buffer(512)
         ctypes.windll.user32.GetWindowTextW(hwnd, text, 512)
         title = text.value.strip()
-        if title and title != NEWS_WINDOW_TITLE and (
+        if title and title not in (NEWS_WINDOW_TITLE, LOGIN_WINDOW_TITLE) and (
                 "oktell" in title.lower() or (host and host.lower() in title.lower())):
             found.append(hwnd)
             return False
@@ -5001,6 +5064,52 @@ def run_logout_now(cfg: dict) -> int:
     return 0 if report.get("status") == "done" else 1
 
 
+def run_update_now(cfg: dict, quiet: bool = False) -> int:
+    """«Обновиться сейчас» — то же обновление, но по требованию человека.
+
+    Само оно приходит при старте и раз в 6 часов, и почти всегда этого хватает.
+    Не хватает ровно тогда, когда версия сломана: ждать полдня, пока агент
+    соберётся проверить, оператору нечем. Отдельный режим отвечает СЛОВАМИ —
+    «обновились», «уже последняя», «сервер не ответил», — иначе человек нажимает
+    и не понимает, случилось что-нибудь или нет.
+
+    Возврат: 0 — обновились (процесс сейчас же сменится новым), 1 — уже
+    последняя, 2 — не вышло.
+    """
+    setup_logging(cfg, "agent.log")
+    if not getattr(sys, "frozen", False):
+        logging.info("Обновление из исходников не ставится")
+        return 1
+
+    manifest = fetch_update_manifest(cfg)
+    if not manifest:
+        logging.warning("Обновление: сервер не ответил")
+        if not quiet:
+            show_message("Не получилось спросить сервер о новой версии. "
+                         "Проверьте интернет и попробуйте ещё раз.", error=True)
+        return 2
+
+    remote = str(manifest.get("version") or "")
+    if not should_update(VERSION, remote):
+        logging.info("Обновление: у вас уже %s, на сервере %s", VERSION, remote or "—")
+        if not quiet:
+            show_message(f"У вас последняя версия — {VERSION}.")
+        return 1
+
+    downloaded = download_update(cfg, manifest)
+    if not downloaded or not apply_update(downloaded):
+        logging.error("Обновление до %s не установилось", remote)
+        if not quiet:
+            show_message(f"Новая версия {remote} есть, но установить её не вышло. "
+                         "Сообщите в IT.", error=True)
+        return 2
+
+    logging.info("Обновление до %s установлено вручную", remote)
+    if not quiet:
+        show_message(f"Обновились до версии {remote}. Программа перезапустилась.")
+    return 0
+
+
 def run_sign_out(cfg: dict) -> int:
     """«Выход»: закончить работу на этой машине целиком.
 
@@ -5054,6 +5163,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--open", action="store_true", help="открыть управляемое окно Oktell")
     parser.add_argument("--sign-out", dest="sign_out", action="store_true",
                         help="забыть учётку iCORE на этой машине")
+    parser.add_argument("--update", dest="update_now", action="store_true",
+                        help="проверить и поставить новую версию прямо сейчас")
     parser.add_argument("--logout-now", action="store_true", help="разлогинить прямо сейчас (проверка)")
     parser.add_argument("--status", action="store_true", help="состояние в JSON")
     parser.add_argument("--install", action="store_true", help="установить себя и запустить")
@@ -5081,6 +5192,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_logout_now(cfg)
     if args.sign_out:
         return run_sign_out(cfg)
+    if args.update_now:
+        return run_update_now(cfg, quiet=args.quiet)
     if args.status:
         return run_status(cfg)
     # Всё ниже поднимает контроль. Копия пользователя от снятой установки на
