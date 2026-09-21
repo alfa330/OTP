@@ -63,7 +63,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.23"
+VERSION = "1.0.24"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -3456,8 +3456,30 @@ def build_autologin_js(login: str, password: str) -> str:
 """.strip()
 
 
+def build_read_status_js() -> str:
+    """Где оператор сейчас: статус и причина перерыва.
+
+    Причина нужна не для отчётности. Человека, которого мы сняли с линии ради
+    объявления, надо вернуть ТУДА ЖЕ: был на «Перерыве» — вернуть на «Перерыв»,
+    а не на «Тренинг» и не в «Готов». Один статус этого не описывает: и обед, и
+    тренинг, и тех.причина — всё это `break`, различает их только причина.
+    """
+    return """
+(function () {
+  var root = window.app && window.app.oktell;
+  if (!root || typeof root.getUserStatus !== 'function') { return null; }
+  var out = {};
+  try { out.status = root.getUserStatus(); } catch (e) { out.status = null; }
+  try { out.reason = root.getCurrentBreakReason ? root.getCurrentBreakReason() : null; }
+  catch (e) { out.reason = null; }
+  try { out.inCallCenter = root.inCallCenter ? !!root.inCallCenter() : null; } catch (e) {}
+  return out;
+})();
+""".strip()
+
+
 def build_set_status_js(status: str, reason_id: Optional[int] = None) -> str:
-    """Сменить статус ЕГО ЖЕ методом — `app.oktell.setStatus`.
+    """Сменить статус ЕГО ЖЕ методом — `app.oktell.setUserStatus`.
 
     Раньше мы собирали кадр сами и слали в перехваченный сокет. Кадр оказался
     неполным, и АТС его молча игнорировала: оператор на время чтения объявления
@@ -3471,32 +3493,30 @@ def build_set_status_js(status: str, reason_id: Optional[int] = None) -> str:
     дело вендора, и собирать его руками нельзя. Метод же лежит в той же
     странице, что и кнопка статуса, по которой жмёт оператор.
 
-    Возвращаем и ПРЕЖНИЙ статус: вернуть человека надо туда, где он был, а не в
-    «Готов». У того, кто к моменту объявления был без телефона или на обеде,
-    «Готов» означал бы, что мы поставили его на линию сами.
+    Именно `setUserStatus`. Похожий `setStatus` подпричину ТЕРЯЕТ: снято с
+    провода — `setStatus('break', 3)` шлёт кадр без `lunchreasonid`, и вместо
+    «Тренинга» оператор уходит в перерыв по умолчанию.
     """
     payload = json.dumps({"status": status, "reason": reason_id}, ensure_ascii=False)
     return rf"""
 (function () {{
   var want = {payload};
   var root = window.app && window.app.oktell;
-  // Именно setUserStatus. Похожий setStatus подпричину ТЕРЯЕТ: снято с провода —
-  // setStatus('break', 3) шлёт кадр без lunchreasonid, и вместо «Тренинга»
-  // оператор уходит в перерыв по умолчанию. Разница видна только на проводе.
   var method = (root && typeof root.setUserStatus === 'function') ? 'setUserStatus'
              : (root && typeof root.setStatus === 'function') ? 'setStatus' : null;
   if (!method) {{
     return {{ok: false, reason: 'в странице нет app.oktell.setUserStatus'}};
   }}
-  var before = null;
-  try {{ before = root.getUserStatus ? root.getUserStatus() : null; }} catch (e) {{}}
   try {{
     var done = (want.reason === null || want.reason === undefined)
       ? root[method](want.status)
       : root[method](want.status, want.reason);
-    return {{ok: done !== false, before: before, status: want.status, used: method}};
+    // `setUserStatus` возвращает undefined всегда — по нему судить о результате
+    // нельзя. Отсюда `done !== false`: это «вызов не отвергнут», а не «АТС
+    // применила». Применила или нет, проверяет вызывающий, перечитав статус.
+    return {{ok: done !== false, status: want.status, used: method}};
   }} catch (e) {{
-    return {{ok: false, reason: String(e), before: before}};
+    return {{ok: false, reason: String(e)}};
   }}
 }})();
 """.strip()
@@ -4043,15 +4063,35 @@ class ManagedBrowser:
             return {"ok": False, "reason": str(exc)}
         return result if isinstance(result, dict) else {"ok": False, "reason": "нет ответа"}
 
-    def set_operator_status(self, status: str, reason_id: Optional[int] = None) -> Optional[str]:
-        """Сменить статус оператора. Возвращает ПРЕЖНИЙ статус либо None.
+    def operator_status(self) -> Optional[dict]:
+        """Где оператор сейчас: {status, reason}. None — спросить не у кого."""
+        page = self.page()
+        if not page:
+            return None
+        try:
+            data = page.evaluate(build_read_status_js())
+        except Exception:  # noqa: BLE001
+            logging.debug("Статус не прочитан", exc_info=True)
+            return None
+        return data if isinstance(data, dict) else None
 
-        None — не вышло: сказать об этом надо честно, иначе объявление покажется
-        человеку, оставшемуся на линии, и звонок придёт посреди чтения.
+    def set_operator_status(self, status: str, reason_id: Optional[int] = None,
+                            verify_s: float = 4.0) -> Optional[dict]:
+        """Сменить статус и УБЕДИТЬСЯ, что АТС его применила.
+
+        Возвращает состояние ДО смены ({status, reason}) либо None, если не
+        вышло. Проверка обязательна: `setUserStatus` возвращает undefined всегда,
+        и по вызову судить о результате нельзя. Без неё агент считал успехом сам
+        факт вызова — 21.09.2026 объявление показалось человеку, оставшемуся на
+        линии, а в логе не было ни строчки о том, что что-то пошло не так.
+
+        Ждём применения, а не отвечаем сразу: смена статуса идёт на сервер АТС и
+        возвращается кадром, то есть занимает сотни миллисекунд.
         """
         page = self.page()
         if not page or not status:
             return None
+        before = self.operator_status() or {}
         try:
             result = page.evaluate(build_set_status_js(status, reason_id))
         except Exception:  # noqa: BLE001
@@ -4061,9 +4101,29 @@ class ManagedBrowser:
             logging.warning("Статус «%s» не поставлен: %s", status,
                             (result or {}).get("reason") if isinstance(result, dict) else "нет ответа")
             return None
-        # Прежний статус может быть пустым (клиент его ещё не знает) — тогда
-        # возвращать будем в «Готов», это единственное осмысленное умолчание.
-        return str((result or {}).get("before") or "ready")
+
+        deadline = time.time() + max(0.5, verify_s)
+        while time.time() < deadline:
+            time.sleep(0.4)
+            now = self.operator_status() or {}
+            if str(now.get("status") or "") != status:
+                continue
+            if reason_id is not None and now.get("reason") not in (None, reason_id):
+                continue
+            logging.info("Статус оператора: было %s/%s, стало %s/%s",
+                         before.get("status"), before.get("reason"),
+                         now.get("status"), now.get("reason"))
+            return {"status": before.get("status") or "ready", "reason": before.get("reason")}
+
+        # Самая частая причина — оператор не на линии: из «Без телефона» АТС на
+        # перерыв не переводит. Молчать об этом нельзя: снаружи это выглядит как
+        # «программа не работает», и искать будут в программе.
+        now = self.operator_status() or {}
+        logging.warning(
+            "АТС не применила статус «%s»: оператор остался %s/%s (на линии: %s). "
+            "Объявление покажем, но звонок может прийти во время чтения",
+            status, now.get("status"), now.get("reason"), now.get("inCallCenter"))
+        return None
 
     # Показ объявления раньше жил здесь — внутри страницы Oktell. Переехал в
     # собственное окно поверх всех окон (NewsOverlay): в странице он исчезал
@@ -4453,7 +4513,10 @@ def run_agent(cfg: dict) -> int:
     next_news_check = time.time()
     active_news: Optional[dict] = None     # показанное объявление, ждём подтверждения
     training_set = False                   # это мы сняли оператора с линии
-    status_before = ""                     # куда возвращать: туда, где он был
+    status_before: dict = {}               # куда возвращать: туда, где он был,
+                                           # включая ПРИЧИНУ перерыва: обед и
+                                           # тренинг — оба `break`, и один
+                                           # статус их не различает
 
     def rule_print(current: dict) -> str:
         """Отпечаток того, что реально уедет в окно: правило плюс обкатка."""
@@ -4488,7 +4551,8 @@ def run_agent(cfg: dict) -> int:
             # Возвращаем статус только если сами его и забрали: у того, кто к
             # моменту объявления уже был на перерыве, статус не наш.
             if training_set:
-                browser.set_operator_status(status_before)
+                browser.set_operator_status(status_before.get("status"),
+                                            status_before.get("reason"))
                 training_set = False
             logging.info("Объявление #%s подтверждено", pressed.get("id"))
             active_news = None
@@ -4674,7 +4738,8 @@ def run_agent(cfg: dict) -> int:
                             if news_overlay.show(item):
                                 active_news = item
                             elif training_set:
-                                browser.set_operator_status(status_before)
+                                browser.set_operator_status(status_before.get("status"),
+                                                            status_before.get("reason"))
                                 training_set = False
 
                 handle_news_press()

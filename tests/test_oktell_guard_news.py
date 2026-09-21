@@ -116,12 +116,22 @@ class TestOperatorState:
 
     def test_the_operator_goes_back_where_he_was(self):
         """Возвращать в «Готов» нельзя: того, кто был без телефона или на обеде,
-        мы бы поставили на линию сами."""
-        js = agent.build_set_status_js("break", 3)
-        assert "getUserStatus" in js
-        assert "before" in js
+        мы бы поставили на линию сами. И возвращать надо С ПРИЧИНОЙ: обед,
+        тренинг и тех.причина — всё это `break`, один статус их не различает, и
+        человек вернулся бы с объявления на чужую причину перерыва."""
+        assert "getCurrentBreakReason" in agent.build_read_status_js()
         loop = AGENT_SOURCE.split("def run_agent", 1)[1]
-        assert "browser.set_operator_status(status_before)" in loop
+        assert 'status_before.get("status")' in loop
+        assert 'status_before.get("reason")' in loop
+
+    def test_a_call_is_not_taken_for_an_applied_status(self):
+        """`setUserStatus` возвращает undefined ВСЕГДА — по вызову судить о
+        результате нельзя. 21.09.2026 агент считал успехом сам факт вызова:
+        объявление показалось человеку, оставшемуся на линии, и в логе не было
+        ни строчки. Теперь статус перечитывается, пока АТС его не применит."""
+        body = AGENT_SOURCE.split("def set_operator_status", 1)[1].split("    def ", 1)[0]
+        assert "self.operator_status()" in body
+        assert "АТС не применила статус" in body
 
     def test_the_training_reason_is_three(self):
         """Справочник подпричин Oktell: 1 Тех.причина, 2 Перезвон, 3 Тренинг,
