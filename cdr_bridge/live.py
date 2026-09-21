@@ -16,9 +16,18 @@
 появились или изменились. Раз в десять минут — полный проход по дню: страховка от строки,
 которую станция дописала задним числом позже двух часов (длинный разговор через перевод).
 
+Откуда берутся точные ожидание и ответ
+--------------------------------------
+Кроме CDR хвост читает журнал очередей станции (`cdr_bridge/pbxdb.py`, таблица `queuelog`)
+за то же окно и дописывает касаниям вход в очередь, момент ответа, ожидание, разговор и
+сторону отбоя. До этого табло выводило их из длины автоинформатора и событий телефонов
+iCORE, и аудит 17.09.2026 намерил из-за этого 3–5 п.п. лишнего SL. Журнал недоступен —
+касания едут как раньше, без этих полей: точность важна, но не важнее данных.
+
 Что он НИКОГДА не делает
 ------------------------
-Не трогает ничего, кроме `/freepbx/cdr` — того же пути, что читает суточное задание.
+Не трогает у станции ничего, кроме `/freepbx/cdr` — того же пути, что читает суточное
+задание, — и чтения журнала очередей одним запросом по индексу.
 Не повторяет запрос после таймаута: станция низкоконкурентная, повтор только добавит ей
 работы. Не роняет мост: любая ошибка здесь — строка в журнале и следующая попытка через
 интервал, а после трёх подряд — пауза подольше. Не шлёт порталу то, что не изменилось, —
@@ -32,7 +41,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta
 
-from cdr import touches as touches_mod
+from cdr import queue_facts as queue_facts_mod, touches as touches_mod
 from cdr_bridge.station import StationError
 
 log = logging.getLogger('cdr_bridge.live')
@@ -53,10 +62,14 @@ HEARTBEAT_SECONDS = 60
 # Касание сравнивается по этим полям: прочее (URL записи) либо выводится из них, либо
 # меняется вместе с ними.
 _FINGERPRINT_FIELDS = ('started_at', 'answered_at', 'ext', 'call_type', 'result',
-                       'talk_seconds', 'dial_seconds', 'queue', 'legs', 'recording_url')
+                       'talk_seconds', 'dial_seconds', 'queue', 'legs', 'recording_url',
+                       # Точные поля журнала очередей: ответ приходит позже входа, и
+                       # касание обязано доехать до портала второй раз, когда он известен.
+                       'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side')
 
 TOUCH_FIELDS = ('linkedid', 'phone', 'started_at', 'answered_at', 'ext', 'call_type', 'result',
-                'talk_seconds', 'dial_seconds', 'queue', 'recording_url', 'legs')
+                'talk_seconds', 'dial_seconds', 'queue', 'recording_url', 'legs',
+                'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side')
 
 
 def _row_key(row):
@@ -88,15 +101,18 @@ def _wire(touch):
 
 
 class LiveTail:
-    def __init__(self, post, station, interval_seconds, today=None):
+    def __init__(self, post, station, interval_seconds, today=None, pbxdb=None):
         """post(path, payload) — отправка на портал (подписанная, как у моста);
-        station — тот же Station, что читает сутки; today — для тестов."""
+        station — тот же Station, что читает сутки; pbxdb — журнал очередей станции
+        (`cdr_bridge/pbxdb.py`), может отсутствовать; today — для тестов."""
         self._post = post
         self._station = station
+        self._pbxdb = pbxdb
         self.interval = max(5, int(interval_seconds))
         self._today = today or (lambda: date.today())
         self.day = None
         self.rows = {}           # ключ плеча → строка CDR
+        self.facts = {}          # callid → точные факты очереди (журнал станции)
         self.sent = {}           # (linkedid, phone) → отпечаток отправленного касания
         self.cycles = 0
         self.failures = 0
@@ -135,12 +151,13 @@ class LiveTail:
     def _reset(self, day):
         self.day = day
         self.rows = {}
+        self.facts = {}
         self.sent = {}
         self.cycles = 0
 
     def window(self):
-        """(from_dt, to_dt, полный ли проход). Хвост до 01:00 завтра — как у суточного
-        задания: звонок, начатый в 23:59, собирается целиком."""
+        """(начало, конец, полный ли проход) временем. Хвост до 01:00 завтра — как у
+        суточного задания: звонок, начатый в 23:59, собирается целиком."""
         day = self.day
         end = datetime.combine(day + timedelta(days=1), datetime.min.time()) + timedelta(hours=1)
         full = not self.rows or self.cycles % FULL_REFRESH_EVERY == 0
@@ -150,14 +167,29 @@ class LiveTail:
                           if m is not None), default=None)
             if latest is not None:
                 start = max(start, latest - timedelta(minutes=OVERLAP_MINUTES))
-        return _fmt(start), _fmt(end), full
+        return start, end, full
+
+    def _queue_facts(self, start, end):
+        """Точные факты очередей за окно или None, если журнал сейчас недоступен.
+
+        None и пустой словарь — разные вещи: пустой означает «в окне не было ни одного
+        звонка в очередь», а None — «спросить не вышло». Перепутать их значит на полном
+        проходе стереть накопленное и разослать порталу касания без входа в очередь."""
+        if self._pbxdb is None or not getattr(self._pbxdb, 'enabled', False):
+            return None
+        try:
+            return self._pbxdb.facts(start, end)
+        except Exception as exc:  # noqa: BLE001
+            log.warning('Живой хвост: журнал очередей не прочитался: %s', exc)
+            return None
 
     def step(self, now=None):
         now = time.time() if now is None else now
         today = self._today()
         if self.day != today:
             self._reset(today)
-        from_dt, to_dt, full = self.window()
+        start, end, full = self.window()
+        from_dt, to_dt = _fmt(start), _fmt(end)
         fresh = list(self._station.iter_cdr(from_dt, to_dt))
         if full:
             self.rows = {}
@@ -165,8 +197,14 @@ class LiveTail:
             if isinstance(row, dict):
                 self.rows[_row_key(row)] = row
         self.cycles += 1
+        # Журнал очередей — за то же окно, что и CDR: полный проход перечитывает день
+        # целиком, приращение накапливается поверх (см. queue_facts.merge).
+        facts = self._queue_facts(start, end)
+        if facts is not None:
+            self.facts = facts if full else queue_facts_mod.merge(self.facts, facts)
 
-        built = touches_mod.build_touches(list(self.rows.values()))
+        built = queue_facts_mod.attach(touches_mod.build_touches(list(self.rows.values())),
+                                       self.facts)
         day_text = self.day.isoformat()
         current = {}
         changed = []

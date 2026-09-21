@@ -247,26 +247,18 @@ def replace_day_touches(cursor, day, touches):
     cursor.execute("DELETE FROM cdr_touches WHERE call_day = %s", (day,))
     if not touches:
         return 0
-    payload = [(
-        str(touch['linkedid'])[:64], touch['phone'][:16], day,
-        touch['started_at'], touch['answered_at'] or None,
-        (touch['ext'] or '')[:8], touch['call_type'][:32], touch['result'][:32],
-        int(touch['talk_seconds']), int(touch['dial_seconds']),
-        (touch['queue'] or '')[:64], touch['recording_url'] or None,
-        min(int(touch['legs']), 32000),
-    ) for touch in touches]
-    execute_values(cursor, """
-        INSERT INTO cdr_touches (
-            linkedid, phone, call_day, started_at, answered_at, ext, call_type,
-            result, talk_seconds, dial_seconds, queue, recording_url, legs)
-        VALUES %s
+    payload = _touch_values(day, touches)
+    execute_values(cursor, _TOUCH_INSERT_SQL + """
         ON CONFLICT (linkedid, phone) DO UPDATE SET
             call_day = EXCLUDED.call_day, started_at = EXCLUDED.started_at,
             answered_at = EXCLUDED.answered_at, ext = EXCLUDED.ext,
             call_type = EXCLUDED.call_type, result = EXCLUDED.result,
             talk_seconds = EXCLUDED.talk_seconds, dial_seconds = EXCLUDED.dial_seconds,
             queue = EXCLUDED.queue, recording_url = EXCLUDED.recording_url,
-            legs = EXCLUDED.legs
+            legs = EXCLUDED.legs, queued_at = EXCLUDED.queued_at,
+            wait_seconds = EXCLUDED.wait_seconds,
+            talk_measured_seconds = EXCLUDED.talk_measured_seconds,
+            hangup_side = EXCLUDED.hangup_side
     """, payload, page_size=1000)
     return len(payload)
 
@@ -275,19 +267,45 @@ def replace_day_touches(cursor, day, touches):
 # Состояние моста
 # ─────────────────────────────────────────────────────────────────────────────
 
-_TOUCH_UPSERT_SQL = """
+_TOUCH_INSERT_SQL = """
         INSERT INTO cdr_touches (
             linkedid, phone, call_day, started_at, answered_at, ext, call_type,
-            result, talk_seconds, dial_seconds, queue, recording_url, legs)
+            result, talk_seconds, dial_seconds, queue, recording_url, legs,
+            queued_at, wait_seconds, talk_measured_seconds, hangup_side)
         VALUES %s
+"""
+
+# Приращение не стирает точные факты очереди: COALESCE оставляет прежнее значение,
+# когда мост прислал пусто. Иначе цикл, в котором журнал очередей станции не
+# ответил, обнулял бы уже известное ожидание — и табло теряло бы SL до конца суток.
+# Полный проход по суткам (`replace_day_touches`) кладёт своё поверх: он истина.
+_TOUCH_UPSERT_SQL = _TOUCH_INSERT_SQL + """
         ON CONFLICT (linkedid, phone) DO UPDATE SET
             call_day = EXCLUDED.call_day, started_at = EXCLUDED.started_at,
-            answered_at = EXCLUDED.answered_at, ext = EXCLUDED.ext,
+            answered_at = COALESCE(EXCLUDED.answered_at, cdr_touches.answered_at),
+            ext = EXCLUDED.ext,
             call_type = EXCLUDED.call_type, result = EXCLUDED.result,
             talk_seconds = EXCLUDED.talk_seconds, dial_seconds = EXCLUDED.dial_seconds,
             queue = EXCLUDED.queue, recording_url = EXCLUDED.recording_url,
-            legs = EXCLUDED.legs
+            legs = EXCLUDED.legs,
+            queued_at = COALESCE(EXCLUDED.queued_at, cdr_touches.queued_at),
+            wait_seconds = COALESCE(EXCLUDED.wait_seconds, cdr_touches.wait_seconds),
+            talk_measured_seconds = COALESCE(EXCLUDED.talk_measured_seconds,
+                                             cdr_touches.talk_measured_seconds),
+            hangup_side = CASE WHEN EXCLUDED.hangup_side <> '' THEN EXCLUDED.hangup_side
+                               ELSE cdr_touches.hangup_side END
 """
+
+
+def _int_or_none(value):
+    """Секунды из тела моста: None означает «станция не сказала», и ноль его не заменяет."""
+    if value is None or value == '':
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 def _touch_values(day, touches):
@@ -298,6 +316,10 @@ def _touch_values(day, touches):
         int(touch['talk_seconds']), int(touch['dial_seconds']),
         (touch['queue'] or '')[:64], touch['recording_url'] or None,
         min(int(touch['legs']), 32000),
+        touch.get('queued_at') or None,
+        _int_or_none(touch.get('wait_seconds')),
+        _int_or_none(touch.get('talk_measured_seconds')),
+        (touch.get('hangup_side') or '')[:16],
     ) for touch in touches]
 
 
@@ -604,7 +626,8 @@ def day_touches_compact(cursor, day):
     индексу call_day, тысячи строк, считается в памяти за миллисекунды."""
     cursor.execute("""
         SELECT started_at, answered_at, ext, call_type, result, talk_seconds,
-               dial_seconds, queue, linkedid
+               dial_seconds, queue, linkedid,
+               queued_at, wait_seconds, talk_measured_seconds, hangup_side
           FROM cdr_touches
          WHERE call_day = %s
     """, (day,))
@@ -617,6 +640,12 @@ def day_touches_compact(cursor, day):
         # Целая часть linkedid — секунда, когда звонок пришёл на станцию; табло по ней
         # находит вход в очередь после автоинформатора (op_wallboard.snapshot).
         'linkedid': row[8] or '',
+        # Точные факты станции. Пусто — их нет, и табло считает по-старому; ноль
+        # в ожидании значит «ответили в ту же секунду» и подменять его нечем.
+        'queued_at': row[9].strftime('%Y-%m-%d %H:%M:%S') if row[9] else '',
+        'wait_seconds': None if row[10] is None else int(row[10]),
+        'talk_measured_seconds': None if row[11] is None else int(row[11]),
+        'hangup_side': row[12] or '',
     } for row in cursor.fetchall()]
 
 

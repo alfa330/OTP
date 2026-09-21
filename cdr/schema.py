@@ -85,6 +85,16 @@ CREATE TABLE IF NOT EXISTS cdr_touches (
     recording_url TEXT,
     legs          SMALLINT     NOT NULL DEFAULT 1,
 
+    -- ── Точные факты из журнала очередей станции (`queuelog`) ──────────────
+    -- Заполняются мостом с 21.09.2026, когда у нас появилась учётка на чтение
+    -- базы АТС. NULL значит «станция не сказала»: до этого ожидание выводилось
+    -- из длины автоинформатора, и аудит 17.09.2026 намерил у такого расчёта
+    -- 3–5 п.п. лишнего SL. Нулём заменять нельзя — ноль это «ответили сразу».
+    queued_at             TIMESTAMP,   -- вход в очередь (ENTERQUEUE)
+    wait_seconds          INTEGER,     -- ожидание до ответа ИЛИ до отказа клиента
+    talk_measured_seconds INTEGER,     -- разговор без ожидания (COMPLETE*)
+    hangup_side           VARCHAR(16) NOT NULL DEFAULT '',  -- client | operator | ''
+
     PRIMARY KEY (linkedid, phone)
 );
 
@@ -204,6 +214,13 @@ CDR_SCHEMA_MIGRATIONS = (
     # Когда мост в последний раз прислал ЖИВОЕ приращение сегодняшних суток. Табло по нему
     # отличает «данные свежие» от «мост на связи, но сегодняшний хвост давно не обновлялся».
     "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS live_at TIMESTAMPTZ",
+    # Точные факты очереди со станции (21.09.2026). На боевой базе таблица создана давно,
+    # поэтому колонки добавляются отдельно; заполняет их мост, старые касания остаются
+    # с NULL и считаются по-прежнему.
+    "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS queued_at TIMESTAMP",
+    "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS wait_seconds INTEGER",
+    "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS talk_measured_seconds INTEGER",
+    "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS hangup_side VARCHAR(16) NOT NULL DEFAULT ''",
 )
 
 

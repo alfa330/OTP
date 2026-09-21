@@ -11,8 +11,25 @@
     владельца ровно на секунду в каждой строке;
   * «онлайн» = свободные + в разговоре; перерыв, тренинг, тех.причина, исход — не онлайн.
 
-Откуда момент ответа (и почему не из CDR)
------------------------------------------
+Откуда ожидание и момент ответа
+-------------------------------
+С 21.09.2026 у нас есть журнал очередей самой станции (`asteriskcdrdb.queuelog`), и мост
+приносит из него точные `queued_at` (вход в очередь), `answered_at`, `wait_seconds` и
+`talk_measured_seconds` — см. `cdr/queue_facts.py`. Если у касания они есть, считается по
+ним и больше ни по чему: это то, что записал сам Asterisk.
+
+Всё, что описано ниже, — расчёт для касаний БЕЗ этих полей: прошлые сутки, собранные до
+21.09, и любой день, когда журнал не прочитался. Аудит 17.09.2026 показал, чего этот
+расчёт стоит: SL завышался на 3–5 п.п., у 15 % входящих ожидание выходило двухсекундным
+вместо настоящего. Поэтому порядок предпочтений — станция, потом телефоны iCORE, потом
+длина автоинформатора; убирать запасные пути нельзя, пока в базе есть сутки без журнала.
+
+Ожидание тех, кто не дождался, до журнала не считалось вовсе (в CDR у брошенного звонка
+длительность строки — это длина приветствия). Теперь оно есть, и живёт отдельной
+величиной `avg_abandon_wait_seconds`: в ASA принятых его подмешивать нельзя.
+
+Откуда момент ответа без журнала (и почему не из CDR)
+-----------------------------------------------------
 SL и среднее ожидание считаются по `answered_at` касания — моменту, когда трубку снял
 сотрудник. С обновлением станции 09.09.2026 («один звонок = одна строка») плечо агента из
 выдачи CDR исчезло: очередь «отвечает» звонок сама в секунду входа (`duration == billsec`),
@@ -29,8 +46,8 @@ SL по неполному измерению: у части телефонов 
 ответа известен; при нуле измеренных SL и ожидание — None (на экране «—»), а не 0 %: ноль
 здесь читался бы как катастрофа на линии.
 
-Откуда вход в очередь (и почему не `started_at`)
-------------------------------------------------
+Откуда вход в очередь без журнала (и почему не `started_at`)
+-------------------------------------------------------------
 Ожидание считается от входа в очередь, а не от прихода звонка на станцию (решение владельца
 16.09.2026): перед каждой очередью ОП играет автоинформатор или IVR почти постоянной длины
 (Jana → 3034 16 с, iTaxi → 3001 и Ноль Такси → 3041 26 с, Центр регистрации → 3010 7 с,
@@ -115,8 +132,20 @@ def _ratio(numerator, denominator):
 
 def _bucket():
     return {'arrived': 0, 'answered': 0, 'missed': 0, 'served_sl': 0,
-            'talk_seconds': 0, 'talk_measured_seconds': 0, 'wait_seconds': 0, 'waited': 0,
+            'talk_seconds': 0, 'talk_measured_seconds': 0, 'talk_measured': 0,
+            'wait_seconds': 0, 'waited': 0,
+            'abandon_wait_seconds': 0, 'abandon_measured': 0,
             'outgoing': 0, 'outgoing_answered': 0}
+
+
+def _seconds(value):
+    """Секунды из касания: None значит «неизвестно» и нулём не подменяется."""
+    if value is None or value == '':
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _finish(bucket):
@@ -134,15 +163,24 @@ def _finish(bucket):
     else:
         out['sl'] = None
     out['wait_measured'] = waited
-    # Усечение, а не округление: см. докстринг модуля. Разговор — по измеренным телефоном,
+    # Усечение, а не округление: см. докстринг модуля. Разговор — по измеренным,
     # где они есть: у остальных billsec очереди включает ожидание и завышает разговор.
-    if waited:
-        out['avg_talk_seconds'] = bucket['talk_measured_seconds'] // waited
+    measured_talk = bucket['talk_measured']
+    if measured_talk:
+        out['avg_talk_seconds'] = bucket['talk_measured_seconds'] // measured_talk
     else:
         out['avg_talk_seconds'] = bucket['talk_seconds'] // answered if answered else None
     out['avg_wait_seconds'] = (bucket['wait_seconds'] // waited if waited else None)
+    # Сколько ждал тот, кто не дождался. Из CDR это не узнать вовсе (у брошенного
+    # длительность строки — длина приветствия), поэтому величина появляется только
+    # вместе с журналом очередей станции и живёт отдельно от ожидания принятых:
+    # смешать их значило бы улучшать ASA чужими неудачами.
+    abandoned = bucket['abandon_measured']
+    out['avg_abandon_wait_seconds'] = (bucket['abandon_wait_seconds'] // abandoned
+                                       if abandoned else None)
     out.pop('waited', None)
     out.pop('talk_measured_seconds', None)
+    out.pop('abandon_wait_seconds', None)
     return out
 
 
@@ -205,6 +243,10 @@ def attach_queue_entry(touches, announce_seconds):
     остаётся от started_at. Возвращает новые словари, исходные не трогает."""
     out = []
     for touch in touches:
+        if touch.get('queued_at'):
+            # Станция назвала вход в очередь сама (журнал очередей) — вычислять нечего.
+            out.append(touch)
+            continue
         started = _parse(touch.get('started_at'))
         seconds = (announce_seconds or {}).get(_touch_queue(touch.get('queue')))
         arrival = arrival_from_linkedid(touch.get('linkedid'))
@@ -291,18 +333,30 @@ def attach_answer_moments(touches, phone_events, ext_by_operator, is_talking,
     return out
 
 
-def _count_incoming(bucket, answered, talk, wait, sl_seconds):
+def _count_incoming(bucket, answered, talk, wait, sl_seconds, talk_measured=None,
+                    lost_wait=None):
     """Один входящий в разрез: итоги дня и час считаются одним и тем же правилом."""
     bucket['arrived'] += 1
     if not answered:
         bucket['missed'] += 1
+        if lost_wait is not None:
+            bucket['abandon_measured'] += 1
+            bucket['abandon_wait_seconds'] += max(0, lost_wait)
         return
     bucket['answered'] += 1
     bucket['talk_seconds'] += talk
+    if talk_measured is not None:
+        bucket['talk_measured'] += 1
+        bucket['talk_measured_seconds'] += talk_measured
     if wait is not None:
         bucket['waited'] += 1
         bucket['wait_seconds'] += max(0, wait)
-        bucket['talk_measured_seconds'] += talk
+        if talk_measured is None:
+            # Разговора без ожидания станция не назвала, но момент ответа известен из
+            # событий телефона — а с ними `talk_seconds` касания уже и есть разговор
+            # (attach_answer_moments переписал его от «занят» до «готов»).
+            bucket['talk_measured'] += 1
+            bucket['talk_measured_seconds'] += talk
         if wait <= sl_seconds:
             bucket['served_sl'] += 1
 
@@ -373,11 +427,20 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
             continue
         answered = call_type == touches_mod.TYPE_IN and talk > 0
         answered_at = _parse(touch.get('answered_at'))
-        # Ожидание — от входа в очередь (queued_at), а без него — от начала строки.
+        # Ожидание: сказанное станцией сильнее любого нашего вывода. Нет его — считаем
+        # от входа в очередь (queued_at), а без входа — от начала строки, как раньше.
+        exact_wait = _seconds(touch.get('wait_seconds'))
         queued = _parse(touch.get('queued_at')) or started
-        wait = int((answered_at - queued).total_seconds()) if (answered and answered_at) else None
+        if answered:
+            wait = exact_wait if exact_wait is not None else (
+                int((answered_at - queued).total_seconds()) if answered_at else None)
+            lost_wait = None
+        else:
+            wait, lost_wait = None, exact_wait
         for bucket in (totals, hourly[_incoming_hour(touch, started)]):
-            _count_incoming(bucket, answered, talk, wait, sl_seconds)
+            _count_incoming(bucket, answered, talk, wait, sl_seconds,
+                            talk_measured=_seconds(touch.get('talk_measured_seconds')),
+                            lost_wait=lost_wait)
         if person is not None:
             person['answered' if answered else 'missed'] += 1
             person['talk_seconds'] += talk if answered else 0

@@ -34,7 +34,7 @@ try:
 except ImportError:  # pragma: no cover
     Flask = None
 
-from cdr import routes as cdr_routes
+from cdr import queries, routes as cdr_routes
 
 # Токен ASCII, как в жизни: HTTP-заголовок ходит в latin-1, и кириллицу в него
 # не положить. Отдельный тест ниже проверяет, что не-ASCII токен даёт честный
@@ -372,6 +372,76 @@ class CleanTouchTests(unittest.TestCase):
         self.assertIsNone(cdr_routes._clean_touch(
             {'linkedid': '1.1', 'phone': '7015550001',
              'started_at': '2026-08-25'}, TODAY))
+
+    def _station_touch(self, **over):
+        base = {'linkedid': '1.1', 'phone': '7015550001', 'started_at': '2026-08-25 09:00:00',
+                'queued_at': '2026-08-25 09:00:26', 'wait_seconds': 4,
+                'talk_measured_seconds': 86, 'hangup_side': 'client'}
+        base.update(over)
+        return cdr_routes._clean_touch(base, TODAY)
+
+    def test_station_queue_fields_are_kept(self):
+        cleaned = self._station_touch()
+        self.assertEqual(cleaned['queued_at'], '2026-08-25 09:00:26')
+        self.assertEqual((cleaned['wait_seconds'], cleaned['talk_measured_seconds']), (4, 86))
+        self.assertEqual(cleaned['hangup_side'], 'client')
+
+    def test_old_bridge_without_the_journal_still_passes(self):
+        """Мост версии 1.2.0 этих полей не шлёт вовсе: касание обязано доехать без них."""
+        cleaned = cdr_routes._clean_touch(
+            {'linkedid': '1.1', 'phone': '7015550001',
+             'started_at': '2026-08-25 09:00:00'}, TODAY)
+        self.assertEqual(cleaned['queued_at'], '')
+        self.assertIsNone(cleaned['wait_seconds'])
+        self.assertEqual(cleaned['hangup_side'], '')
+
+    def test_zero_wait_survives_but_nonsense_does_not(self):
+        """Ноль — это «ответили в ту же секунду», и терять его нельзя. А мусор и
+        отрицательные секунды обязаны стать «неизвестно», а не попасть в среднее."""
+        self.assertEqual(self._station_touch(wait_seconds=0)['wait_seconds'], 0)
+        for bad in ('', None, 'много', -5, 99999):
+            self.assertIsNone(self._station_touch(wait_seconds=bad)['wait_seconds'],
+                              'ожидание %r не должно доезжать' % (bad,))
+
+
+class TouchValuesTests(unittest.TestCase):
+    """Значения для вставки идут позиционно: лишняя колонка в SQL без значения (или
+    наоборот) валит вставку всех суток целиком, и увидели бы мы это только на проде."""
+
+    TOUCH = {'linkedid': '1.1', 'phone': '7015550001', 'started_at': '2026-08-25 09:00:00',
+             'answered_at': '', 'ext': '6650', 'call_type': 'Входящий', 'result': 'Разговор',
+             'talk_seconds': 30, 'dial_seconds': 40, 'queue': '3000', 'recording_url': None,
+             'legs': 1}
+
+    def columns(self):
+        head = queries._TOUCH_INSERT_SQL.split('(', 1)[1].split(')', 1)[0]
+        return [name.strip() for name in head.split(',')]
+
+    def test_every_column_gets_a_value(self):
+        values = queries._touch_values(date(2026, 8, 25), [self.TOUCH])[0]
+        self.assertEqual(len(values), len(self.columns()))
+
+    def test_station_fields_land_in_their_columns(self):
+        touch = dict(self.TOUCH, queued_at='2026-08-25 09:00:26', wait_seconds=0,
+                     talk_measured_seconds=26, hangup_side='operator')
+        values = dict(zip(self.columns(), queries._touch_values(date(2026, 8, 25), [touch])[0]))
+        self.assertEqual(values['queued_at'], '2026-08-25 09:00:26')
+        self.assertEqual(values['wait_seconds'], 0, 'ноль секунд ожидания — это значение')
+        self.assertEqual(values['talk_measured_seconds'], 26)
+        self.assertEqual(values['hangup_side'], 'operator')
+
+    def test_touch_without_station_fields_stores_nulls(self):
+        values = dict(zip(self.columns(), queries._touch_values(date(2026, 8, 25), [self.TOUCH])[0]))
+        self.assertIsNone(values['queued_at'])
+        self.assertIsNone(values['wait_seconds'])
+        self.assertEqual(values['hangup_side'], '')
+
+    def test_increment_never_erases_what_the_station_already_told_us(self):
+        """Цикл, в котором журнал очередей не ответил, не должен обнулять ожидание:
+        в приращении колонки накрыты COALESCE, а сторона отбоя — CASE."""
+        self.assertIn('COALESCE(EXCLUDED.wait_seconds', queries._TOUCH_UPSERT_SQL)
+        self.assertIn('COALESCE(EXCLUDED.queued_at', queries._TOUCH_UPSERT_SQL)
+        self.assertIn("WHEN EXCLUDED.hangup_side <> ''", queries._TOUCH_UPSERT_SQL)
 
 
 if __name__ == '__main__':

@@ -67,6 +67,12 @@ Render и до сети не дотягивается — значит, ходи
     CDR_PORTAL_PROXY      (необязательно)      единственный выход наружу
     CDR_PORTAL_CA_BUNDLE  (необязательно)      файл с корнями, которым верим
     CDR_HEARTBEAT_FILE    (необязательно)      куда писать отметку живости
+    CDR_PBXDB_HOST        (необязательно)      база станции: журнал очередей на чтение
+    CDR_PBXDB_USER / _PASSWORD / _PORT / _NAME  учётка с одним правом SELECT
+
+Журнал очередей (`cdr_bridge/pbxdb.py`) даёт касаниям точные вход в очередь, момент
+ответа, ожидание и сторону отбоя — то, чего в HTTP-выдаче станции нет с 09.09.2026.
+Не настроен или не ответил — касания едут как раньше, просто без этих полей.
 """
 
 import argparse
@@ -85,8 +91,8 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cdr import touches as touches_mod  # noqa: E402
-from cdr_bridge import live, signing  # noqa: E402
+from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: E402
+from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
 VERSION = '1.2.0'
@@ -165,6 +171,16 @@ def load_config(argv_overrides=None):
         # отдаёт только GET по относительному пути файла). Напрямую к серверу записей
         # мосту нельзя — фаервол пускает его только на loopback.
         'records': value('CDR_RECORDS_URL', RECORDS_DEFAULT).rstrip('/'),
+        # Журнал очередей станции: точные вход в очередь, ожидание, разговор и сторона
+        # отбоя (`cdr_bridge/pbxdb.py`). Учётка — только на чтение. Пусто — мост работает
+        # как раньше, а табло считает ожидание по длине автоинформатора.
+        # FREEPBX_MYSQL_* — те же значения в доступах проекта, чтобы при локальной
+        # отладке не переписывать их второй раз под другими именами.
+        'pbxdb_host': value('CDR_PBXDB_HOST') or value('FREEPBX_MYSQL_HOST'),
+        'pbxdb_port': value('CDR_PBXDB_PORT') or value('FREEPBX_MYSQL_PORT', '3306'),
+        'pbxdb_user': value('CDR_PBXDB_USER') or value('FREEPBX_MYSQL_USER'),
+        'pbxdb_password': value('CDR_PBXDB_PASSWORD') or value('FREEPBX_MYSQL_PASSWORD'),
+        'pbxdb_name': value('CDR_PBXDB_NAME') or value('FREEPBX_MYSQL_DB', 'asteriskcdrdb'),
     }
     config.update({k: v for k, v in (argv_overrides or {}).items() if v})
     return config
@@ -195,7 +211,7 @@ def job_window(job):
 
 
 class Bridge:
-    def __init__(self, config, station=None, session=None):
+    def __init__(self, config, station=None, session=None, pbxdb_source=None):
         self.config = config
         self.portal = config['portal']
         self.token = config.get('token') or ''
@@ -203,13 +219,16 @@ class Bridge:
         self.signer = self._build_signer(config)
         self.station = station or Station(config['station'], config['login'],
                                           config['password'])
+        # Журнал очередей станции. Выключен настройками или без драйвера — мост
+        # ведёт себя ровно как до появления точных фактов.
+        self.pbxdb = pbxdb_source if pbxdb_source is not None else pbxdb.from_config(config)
         self.records_session = self._build_records_session()
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         try:
             live_interval = int(str(config.get('live_interval') or '0').strip() or 0)
         except ValueError:
             live_interval = 0
-        self.live = (live.LiveTail(self._post, self.station, live_interval)
+        self.live = (live.LiveTail(self._post, self.station, live_interval, pbxdb=self.pbxdb)
                      if live_interval > 0 else None)
 
     @staticmethod
@@ -303,7 +322,7 @@ class Bridge:
         day = str(job.get('day') or '?')
         started = time.time()
         try:
-            job_window(job)
+            window_start, window_end = job_window(job)
         except ValueError as exc:
             # На станцию не идём: такое задание — либо ошибка портала, либо
             # чужая рука на нём. В обоих случаях исполнять нельзя.
@@ -332,7 +351,8 @@ class Bridge:
             log.error('Сутки %s: склейка не удалась: %s', day, exc, exc_info=True)
             self._report_failure(day, 'склейка: %s' % exc)
             return False
-        own = [t for t in built if t['started_at'][:10] == day]
+        own = self._attach_queue_facts([t for t in built if t['started_at'][:10] == day],
+                                       window_start, window_end, day)
         payload = {
             'day': day,
             'rows_fetched': len(rows),
@@ -343,6 +363,12 @@ class Bridge:
                 'talk_seconds': t['talk_seconds'], 'dial_seconds': t['dial_seconds'],
                 'queue': t['queue'], 'recording_url': t['recording_url'],
                 'legs': t['legs'],
+                # Точные поля журнала очередей станции; нет журнала — пусто, и портал
+                # оставит эти колонки незаполненными (см. cdr/queue_facts.py).
+                'queued_at': t.get('queued_at') or '',
+                'wait_seconds': t.get('wait_seconds'),
+                'talk_measured_seconds': t.get('talk_measured_seconds'),
+                'hangup_side': t.get('hangup_side') or '',
             } for t in own],
         }
         try:
@@ -358,6 +384,21 @@ class Bridge:
                  day, len(rows), len(own), time.time() - started,
                  'закрыты' if result.get('complete') else 'ещё дописываются')
         return True
+
+    def _attach_queue_facts(self, touches, start, end, day):
+        """Дописать касаниям точные вход в очередь, ожидание, разговор и сторону отбоя.
+
+        Журнал очередей — источник вспомогательный: его отказ не должен стоить нам суток.
+        Не прочитался — сутки уезжают как раньше, а табло считает ожидание по длине
+        автоинформатора."""
+        if self.pbxdb is None or not self.pbxdb.enabled:
+            return touches
+        try:
+            facts = self.pbxdb.facts(start, end)
+        except Exception as exc:  # noqa: BLE001
+            log.warning('Сутки %s: журнал очередей не прочитался: %s', day, exc)
+            return touches
+        return queue_facts_mod.attach(touches, facts)
 
     def _report_failure(self, day, error):
         """Сказать порталу, что сутки не вышли. Если и это не дошло — записать в

@@ -22,7 +22,7 @@ from unittest import mock
 
 from flask import Flask
 
-from cdr import agent_auth, routes as cdr_routes
+from cdr import agent_auth, queue_facts, routes as cdr_routes
 from cdr_bridge import live, signing
 from cdr_bridge.station import StationError
 
@@ -185,6 +185,96 @@ class LiveTailTests(unittest.TestCase):
         self.tail.maybe_step(now=1_000_000.0)
         self.assertFalse(self.tail.maybe_step(now=1_000_000.0 + 5))
         self.assertEqual(len(self.station.calls), 1)
+
+
+class _Journal:
+    """Журнал очередей станции: отдаёт события, попавшие в окно запроса."""
+
+    def __init__(self, rows=None, fail=None):
+        self.rows = rows or []
+        self.fail = fail
+        self.windows = []
+        self.enabled = True
+
+    def facts(self, start, end):
+        self.windows.append((start, end))
+        if self.fail:
+            raise self.fail
+        return queue_facts.build_facts([r for r in self.rows if start <= r['time'] < end])
+
+
+def queue_event(callid, time_text, event, **data):
+    return dict({'time': datetime.strptime(time_text, '%Y-%m-%d %H:%M:%S'), 'callid': callid,
+                 'queuename': '3000', 'agent': 'NONE', 'event': event,
+                 'data1': '', 'data2': '', 'data3': ''}, **data)
+
+
+class LiveTailJournalTests(unittest.TestCase):
+    """Точные факты очереди едут вместе с касаниями и не теряются между окнами."""
+
+    def setUp(self):
+        self.posts = []
+        self.station = _Station()
+        self.journal = _Journal()
+        self.tail = live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                                  self.station, 20, today=lambda: TODAY, pbxdb=self.journal)
+        self.station.rows = [cdr_row('1.1', '2026-09-15 09:00:00')]
+        self.journal.rows = [
+            queue_event('1.1', '2026-09-15 09:00:26', 'ENTERQUEUE', data2='+77015550001'),
+            queue_event('1.1', '2026-09-15 09:00:30', 'CONNECT', agent='op', data1='4'),
+        ]
+
+    def test_touch_carries_the_exact_queue_fields(self):
+        self.tail.step()
+        touch = self.posts[0][1]['touches'][0]
+        self.assertEqual(touch['queued_at'], '2026-09-15 09:00:26')
+        self.assertEqual(touch['answered_at'], '2026-09-15 09:00:30')
+        self.assertEqual(touch['wait_seconds'], 4)
+        self.assertEqual(set(touch), set(live.TOUCH_FIELDS))
+
+    def test_journal_is_asked_for_the_same_window_as_cdr(self):
+        self.tail.step()
+        self.assertEqual(self.journal.windows[0],
+                         (datetime(2026, 9, 15), datetime(2026, 9, 16, 1)))
+
+    def test_late_hangup_updates_the_touch(self):
+        """Ответ и завершение приходят разными циклами: касание обязано уехать второй раз,
+        иначе разговор и сторона отбоя остались бы на портале пустыми."""
+        self.tail.step()
+        self.journal.rows.append(queue_event('1.1', '2026-09-15 09:02:00', 'COMPLETECALLER',
+                                             agent='op', data1='4', data2='86'))
+        self.tail.step()
+        touch = self.posts[1][1]['touches'][0]
+        self.assertEqual((touch['talk_measured_seconds'], touch['hangup_side']), (86, 'client'))
+
+    def test_narrow_window_does_not_strip_the_morning_call(self):
+        """Приращение спрашивает журнал за последние два часа, а касания пересобирает за
+        день: без накопления утренний звонок уехал бы на портал без входа в очередь."""
+        self.tail.step()
+        self.station.rows = [cdr_row('1.1', '2026-09-15 09:00:00'),
+                             cdr_row('2.2', '2026-09-15 15:00:00', src='+77015550002')]
+        self.tail.step()
+        touches = {t['linkedid']: t for t in self.posts[1][1]['touches']}
+        self.assertEqual(self.tail.facts['1.1']['queued_at'], datetime(2026, 9, 15, 9, 0, 26))
+        self.assertNotIn('1.1', touches, 'у утреннего звонка ничего не изменилось')
+
+    def test_unavailable_journal_keeps_the_tail_and_the_known_facts(self):
+        self.tail.step()
+        self.journal.fail = RuntimeError('база станции не ответила')
+        self.station.rows = [cdr_row('1.1', '2026-09-15 09:00:00', billsec=45, duration=55)]
+        self.tail.step()
+        touch = self.posts[1][1]['touches'][0]
+        self.assertEqual(touch['talk_seconds'], 45, 'касания едут и без журнала')
+        self.assertEqual(touch['queued_at'], '2026-09-15 09:00:26',
+                         'накопленное не стирается отказом журнала')
+
+    def test_tail_works_without_a_journal_at_all(self):
+        tail = live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                             self.station, 20, today=lambda: TODAY)
+        tail.step()
+        touch = self.posts[0][1]['touches'][0]
+        self.assertEqual(touch['queued_at'], None)
+        self.assertEqual(touch['wait_seconds'], None)
 
 
 # ── портал ────────────────────────────────────────────────────────────────────

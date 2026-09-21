@@ -1132,6 +1132,21 @@ def _dedupe(items):
     return list(out.values())
 
 
+def _seconds_or_none(value):
+    """Секунды из тела моста. None — «станция не сказала», и это НЕ ноль: ноль в
+    ожидании означает «ответили в ту же секунду», а отсутствие — что мерить нечем.
+
+    Потолок — сутки: чужое или испорченное значение должно испортить одно поле,
+    а не среднее ожидание на стене."""
+    if value is None or value == '':
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= 86400 else None
+
+
 def _clean_touch(item, day_value):
     """Приводит присланное мостом касание к тому, что примет база.
 
@@ -1152,11 +1167,18 @@ def _clean_touch(item, day_value):
     if not phone or not item.get('linkedid'):
         return None
     answered = str(item.get('answered_at') or '')[:19]
+    queued = str(item.get('queued_at') or '')[:19]
     return {
         'linkedid': str(item['linkedid'])[:64],
         'phone': phone,
         'started_at': started,
         'answered_at': answered if len(answered) == 19 else '',
+        # Точные факты журнала очередей станции. Их может не быть вовсе (старый мост,
+        # журнал не прочитался) — тогда пусто, и табло считает ожидание по-прежнему.
+        'queued_at': queued if len(queued) == 19 else '',
+        'wait_seconds': _seconds_or_none(item.get('wait_seconds')),
+        'talk_measured_seconds': _seconds_or_none(item.get('talk_measured_seconds')),
+        'hangup_side': str(item.get('hangup_side') or '')[:16],
         'ext': str(item.get('ext') or '')[:8],
         'call_type': str(item.get('call_type') or '')[:32] or 'Исходящий',
         'result': str(item.get('result') or '')[:32] or 'неизвестно',

@@ -250,6 +250,97 @@ class QueueEntryTests(unittest.TestCase):
         self.assertNotIn('queued_at', S.attach_queue_entry([short], {'3034': 16})[0])
 
 
+class StationJournalTests(unittest.TestCase):
+    """Точные поля журнала очередей станции сильнее любых наших выводов (21.09.2026).
+
+    До журнала ожидание выводилось из длины автоинформатора, а момент ответа — из событий
+    телефонов iCORE; аудит 17.09.2026 намерил у такого расчёта 3–5 п.п. лишнего SL.
+    """
+
+    def exact(self, started='2026-09-21 13:12:44', answered='2026-09-21 13:13:11', talk=117,
+              queue='3041', linkedid=None, **station_fields):
+        """Касание с полями от станции. Числа — боевого звонка 21.09.2026 13:13."""
+        call = touch(started=started, answered=answered, talk=talk, queue=queue,
+                     linkedid=linkedid or linkedid_at(started))
+        call.update({'queued_at': '2026-09-21 13:13:10', 'wait_seconds': 1,
+                     'talk_measured_seconds': 90, 'hangup_side': 'client'})
+        call.update(station_fields)
+        return call
+
+    def test_station_wait_beats_the_announcement_guess(self):
+        # Строка станции начинается за 26 с до входа в очередь (это автоинформатор Ноль Такси),
+        # а ждал клиент одну секунду. Без журнала табло считало бы ожидание от прихода.
+        totals = S.aggregate([self.exact()], sl_seconds=20)['totals']
+        self.assertEqual(totals['avg_wait_seconds'], 1)
+        self.assertEqual(totals['wait_measured'], 1)
+        self.assertEqual(totals['served_sl'], 1)
+        self.assertAlmostEqual(totals['sl'], 1.0)
+
+    def test_station_talk_excludes_the_queue_wait(self):
+        # billsec строки очереди (117 с) включает ожидание; разговор по журналу — 90 с.
+        totals = S.aggregate([self.exact()], sl_seconds=20)['totals']
+        self.assertEqual(totals['avg_talk_seconds'], 90)
+
+    def test_long_wait_is_not_counted_as_served(self):
+        call = self.exact(wait_seconds=68, answered='2026-09-21 13:14:18')
+        totals = S.aggregate([call], sl_seconds=20)['totals']
+        self.assertEqual((totals['served_sl'], totals['avg_wait_seconds']), (0, 68))
+        self.assertAlmostEqual(totals['sl'], 0.0)
+
+    def test_zero_wait_is_a_number_not_a_gap(self):
+        """Ноль значит «ответили в ту же секунду» и обязан попасть в SL: подменить его
+        расчётом по автоинформатору значило бы наказать за мгновенный ответ."""
+        totals = S.aggregate([self.exact(wait_seconds=0)], sl_seconds=20)['totals']
+        self.assertEqual((totals['wait_measured'], totals['served_sl']), (1, 1))
+        self.assertEqual(totals['avg_wait_seconds'], 0)
+
+    def test_abandoned_wait_lives_apart_from_asa(self):
+        """Ожидание того, кто не дождался, до журнала взять было негде. Смешивать его с
+        ожиданием принятых нельзя: 95 с брошенного не должны портить ASA, а ASA —
+        прятать их."""
+        lost = touch(call_type='Входящий (не приняли)', talk=0, ext='', queue='3034',
+                     started='2026-09-21 12:54:16')
+        lost.update({'queued_at': '2026-09-21 12:54:42', 'wait_seconds': 95})
+        totals = S.aggregate([self.exact(), lost], sl_seconds=20)['totals']
+        self.assertEqual(totals['avg_wait_seconds'], 1, 'ASA — только по принятым')
+        self.assertEqual(totals['avg_abandon_wait_seconds'], 95)
+        self.assertEqual(totals['abandon_measured'], 1)
+        self.assertEqual((totals['arrived'], totals['missed']), (2, 1))
+
+    def test_day_without_the_journal_counts_as_before(self):
+        """Сутки, собранные до 21.09, полей станции не имеют — и считаются по-старому."""
+        call = touch(started='2026-09-16 09:32:07', answered='2026-09-16 09:32:29', talk=12,
+                     queue='3034', linkedid=linkedid_at('2026-09-16 09:32:07'))
+        call['dial_seconds'] = 33
+        out = S.attach_queue_entry([call], {'3034': 16})
+        self.assertEqual(S.aggregate(out, sl_seconds=20)['totals']['avg_wait_seconds'], 6)
+
+    def test_announcement_guess_does_not_touch_an_exact_entry(self):
+        out = S.attach_queue_entry([self.exact()], {'3041': 26})
+        self.assertEqual(out[0]['queued_at'], '2026-09-21 13:13:10',
+                         'вход от станции пересчитывать нечем')
+
+    def test_phone_events_do_not_override_the_station(self):
+        """Событие телефона приходит к тому же звонку, но станция уже назвала ответ —
+        второй источник обязан промолчать, иначе одна цифра зависела бы от порядка вызовов."""
+        call = self.exact()
+        events = [event(1, datetime(2026, 9, 21, 13, 13, 30)),
+                  event(1, datetime(2026, 9, 21, 13, 14, 41), key='готов')]
+        out = S.attach_answer_moments([call], events, {1: '6229'}, is_talking)
+        self.assertEqual(out[0]['answered_at'], '2026-09-21 13:13:11')
+        self.assertEqual(out[0]['talk_seconds'], 117, 'разговор станции лежит отдельным полем')
+
+    def test_hour_of_the_call_is_the_hour_of_the_queue_entry(self):
+        # Пришёл в 09:59:50, в очередь попал в 10:00:16 — звонок и его ожидание принадлежат
+        # десятому часу, иначе SL часа считается не за тот час.
+        call = self.exact(started='2026-09-21 09:59:50', answered='2026-09-21 10:00:20',
+                          queued_at='2026-09-21 10:00:16', wait_seconds=4,
+                          linkedid=linkedid_at('2026-09-21 09:59:50'))
+        hourly = S.aggregate([call], sl_seconds=20)['hourly']
+        self.assertEqual(hourly[10]['arrived'], 1)
+        self.assertEqual(hourly[9]['arrived'], 0)
+
+
 def event(operator_id, at, key='занят'):
     return {'operator_id': operator_id, 'event_at': at, 'status_key': key}
 
