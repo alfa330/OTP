@@ -317,10 +317,13 @@ class QuizRulesTests(unittest.TestCase):
             self.assertIsNotNone(match, name)
             self.assertEqual(int(match.group(1)), getattr(news_schema, name), name)
 
-    def test_window_sends_answers_and_marks_mistakes(self):
+    def test_window_sends_answers_and_starts_over_on_a_mistake(self):
+        """Ответы уходят подтверждением, а неверные сбрасывают весь тест
+        (решение владельца 21.09.2026, см. useQuizAttempt в NewsPasses)."""
         modal = _jsx_code_only(_read('src', 'components', 'news', 'NewsOfDayModal.jsx'))
         self.assertIn('NEWS_QUIZ_WRONG', modal)
-        self.assertIn('{ answers }', modal)
+        self.assertIn('{ answers: attempt.answers }', modal)
+        self.assertIn('attempt.fail();', modal)
         self.assertIn("'Подтвердить'", modal)
 
 

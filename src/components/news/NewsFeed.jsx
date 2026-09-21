@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Check, ChevronRight, Image as ImageIcon, ListChecks, Loader2, PlayCircle } from 'lucide-react';
 import { iosBtnSecondary, iosCard, IosModal } from '../ui/ios';
 import NewsGallery from './NewsGallery';
-import NewsPasses from './NewsPasses';
+import NewsPasses, { useQuizAttempt } from './NewsPasses';
 import { publishedLabel } from './newsShared';
 import './news-modal.css';
 
@@ -75,8 +75,10 @@ function FeedPost({ open, postId, apiBaseUrl, headers, onClose, onPassed }) {
     const [post, setPost] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
-    const [answers, setAnswers] = useState({});
-    const [wrong, setWrong] = useState([]);
+    /* Попытка теста — общая с окном (useQuizAttempt): правило «один неверный
+       ответ снимает весь выбор» одно на оба места. Чистый лист при смене
+       новости хук ставит сам. */
+    const attempt = useQuizAttempt(postId);
     const [quizPassed, setQuizPassed] = useState(false);
     const [trainerPassed, setTrainerPassed] = useState(false);
     const [trainerOpen, setTrainerOpen] = useState(false);
@@ -87,8 +89,6 @@ function FeedPost({ open, postId, apiBaseUrl, headers, onClose, onPassed }) {
         setLoading(true);
         setError('');
         setPost(null);
-        setAnswers({});
-        setWrong([]);
         setTrainerOpen(false);
         axios.get(`${apiBaseUrl}/api/news/feed/${postId}`, { headers })
             .then((r) => {
@@ -131,10 +131,7 @@ function FeedPost({ open, postId, apiBaseUrl, headers, onClose, onPassed }) {
                         post={post}
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
-                        answers={answers}
-                        onAnswer={(questionId, index) => setAnswers((prev) => ({ ...prev, [questionId]: index }))}
-                        wrong={wrong}
-                        onWrong={setWrong}
+                        attempt={attempt}
                         quizPassed={quizPassed}
                         onQuizPassed={() => { setQuizPassed(true); onPassed?.(post.id, 'quiz'); }}
                         trainerPassed={trainerPassed}

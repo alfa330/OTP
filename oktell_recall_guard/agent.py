@@ -2686,7 +2686,7 @@ NEWS_JS_TEMPLATE = r"""
   var state = window.__oktellGuardNews = window.__oktellGuardNews || {};
   if (state.id === data.id && document.getElementById(ID)) { return true; }
   state.id = data.id; state.result = null; state.step = 'read';
-  state.answers = {};
+  state.answers = {}; state.failed = false;
   var old = document.getElementById(ID);
   if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
@@ -2744,6 +2744,13 @@ NEWS_JS_TEMPLATE = r"""
     gallery.appendChild(image);
   });
 
+  // Уведомление о неверных ответах — ОДНО на весь тест и над вопросами. Это
+  // единственное красное в окне: какой именно ответ неверен, оно не говорит.
+  var warn = document.createElement('div');
+  warn.textContent = 'Ответы неверные — выбор сброшен, пройдите тест заново';
+  warn.setAttribute('style', 'display:none;margin-bottom:12px;padding:11px 13px;border-radius:12px;'
+    + 'background:#fff1f0;color:#b3120b;font:500 13.5px/1.35 -apple-system,Segoe UI,Arial');
+
   var quiz = document.createElement('div');
   quiz.style.display = 'none';
 
@@ -2765,7 +2772,8 @@ NEWS_JS_TEMPLATE = r"""
 
   card.appendChild(badge); card.appendChild(title); card.appendChild(body);
   card.appendChild(gallery);
-  card.appendChild(quiz); card.appendChild(button); card.appendChild(back); card.appendChild(note);
+  card.appendChild(warn); card.appendChild(quiz);
+  card.appendChild(button); card.appendChild(back); card.appendChild(note);
   root.appendChild(card);
   (document.body || document.documentElement).appendChild(root);
 
@@ -2783,22 +2791,24 @@ NEWS_JS_TEMPLATE = r"""
     if (state.step === 'read') {
       body.style.display = ''; gallery.style.display = '';
       quiz.style.display = 'none'; back.style.display = 'none';
+      warn.style.display = 'none';
       button.disabled = left > 0;
       button.textContent = left > 0 ? ('Ознакомлен · ' + left) : 'Ознакомлен';
     } else {
       body.style.display = 'none'; gallery.style.display = 'none';
       quiz.style.display = ''; back.style.display = '';
+      warn.style.display = state.failed ? '' : 'none';
       button.disabled = !answered();
       button.textContent = 'Подтвердить';
     }
     button.style.opacity = button.disabled ? '.45' : '1';
   }
 
-  // КАКОЙ вопрос неверен, окно НЕ показывает (решение владельца 21.09.2026).
-  // Сервер это знает и присылает, но подсветка превращает тест в перебор:
-  // человек меняет помеченный ответ, жмёт снова — и подбирает верный, ни разу
-  // не вернувшись к тексту. Ради этого возврата тест и заведён. Ответ один на
-  // весь тест: «есть неверные ответы — перечитайте новость».
+  // КАКОЙ вопрос неверен, окно НЕ показывает, и сервер его больше не присылает
+  // (решение владельца 21.09.2026). Подсветка превращала тест в перебор: человек
+  // менял помеченный ответ, жал снова — и подбирал верный, ни разу не вернувшись
+  // к тексту. Ради этого возврата тест и заведён. Поэтому неверная попытка не
+  // засчитывается целиком: весь выбор снимается, и тест проходится заново.
   var refreshers = [];
 
   function drawQuiz() {
@@ -2821,7 +2831,8 @@ NEWS_JS_TEMPLATE = r"""
         radio.checked = state.answers[item.id] === optionIndex;
         radio.addEventListener('change', function () {
           state.answers[item.id] = optionIndex;
-          // Отказ сервера убираем: он был про прошлый ответ.
+          // Уведомление и отказ сервера убираем: они были про прошлую попытку.
+          state.failed = false;
           note.textContent = '';
           refresh();
           paint();
@@ -2887,11 +2898,18 @@ NEWS_JS_TEMPLATE = r"""
     note.style.color = '#d70015';
     if (payload && payload.remaining_seconds) { left = Number(payload.remaining_seconds); }
     if (payload && payload.code === 'NEWS_QUIZ_WRONG') {
-      // ОТВЕТЫ ОСТАЮТСЯ НА МЕСТЕ, и человек остаётся на тесте: сброс всего с
-      // возвратом к тексту (так было в 1.0.16) заставлял отвечать заново на ВСЕ
-      // вопросы из-за одного неверного. Но и показывать, ГДЕ ошибка, нельзя —
-      // тогда её находят перебором, а не перечитыванием.
-      if (quiz.scrollIntoView) { quiz.scrollIntoView({block: 'start'}); }
+      // Правило владельца (21.09.2026) дословно: «если один вариант не правилен,
+      // ответы сбрасываются и выходит уведомление о том что ответы не правильные
+      // и попробовать заново, тест будет завершен если он все ответы выберет
+      // корректно». Снимаем ВЕСЬ выбор, показываем уведомление и оставляем
+      // человека на тесте: «Перечитать новость» под рукой, а подтвердить он
+      // сможет, только ответив заново на все вопросы верно.
+      state.answers = {}; state.failed = true;
+      drawQuiz();
+      // Отказ сервера строкой под кнопкой повторил бы уведомление над тестом:
+      // два красных текста об одном и том же — шум.
+      note.textContent = '';
+      if (warn.scrollIntoView) { warn.scrollIntoView({block: 'start'}); }
     }
     state.result = null;
     paint();

@@ -1120,6 +1120,16 @@ class NewsPassTests(unittest.TestCase):
             block = block[:block.index('\ndef ', 10)]
             self.assertIn('_viewer_post(', block, name)
 
+    def test_the_wrong_questions_are_never_named_to_the_client(self):
+        """Правило владельца (21.09.2026): один неверный вариант сбрасывает весь
+        тест, и «завершён» он, только когда все ответы выбраны верно. Назови
+        сервер вопрос с ошибкой — и ответ подбирался бы переключением одного
+        варианта: сеть у браузера открыта любому."""
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn('NEWS_QUIZ_WRONG', routes)
+        self.assertNotIn('"wrong"', routes)
+        self.assertNotIn("'wrong'", routes)
+
     def test_a_pass_mark_is_never_moved_by_a_retry(self):
         source = _read('news', 'queries.py')
         mark = source[source.index('def _mark_pass('):source.index('def pass_quiz(')]
@@ -1188,10 +1198,37 @@ class NewsPassFrontendTests(unittest.TestCase):
 
     def test_one_block_serves_the_window_and_the_feed(self):
         for path in (self.MODAL, self.FEED):
-            self.assertIn("import NewsPasses from './NewsPasses';", _read(path), path)
+            self.assertIn("import NewsPasses, { useQuizAttempt } from './NewsPasses';",
+                          _read(path), path)
         passes = _jsx_code_only(_read(self.PASSES))
         self.assertIn('/api/news/${post.id}/quiz', passes)
         self.assertIn('/api/news/${post.id}/trainer', passes)
+
+    def test_a_wrong_answer_resets_the_whole_quiz(self):
+        """Правило владельца (21.09.2026) дословно: «если один вариант не
+        правилен, ответы сбрасываются и выходит уведомление о том что ответы не
+        правильные и попробовать заново, тест будет завершен если он все ответы
+        выберет корректно»."""
+        passes = _jsx_code_only(_read(self.PASSES))
+        self.assertIn('const fail = useCallback(() => { setAnswers({}); setFailed(true); }, []);',
+                      passes)
+        self.assertIn('Ответы неверные — выбор сброшен, пройдите тест заново', passes)
+        self.assertIn('attempt.fail();', passes)
+        # Пометки «вот этот вопрос неверный» не осталось: сервер её и не шлёт.
+        for forbidden in ('Неверно — перечитайте новость', 'wrong', 'rose-50 text-rose-900'):
+            self.assertNotIn(forbidden, passes, forbidden)
+
+    def test_the_attempt_is_one_for_the_window_and_the_feed(self):
+        """Правило «неверно — начинай заново» одно на оба места: своя копия в
+        окне и в ленте разъехалась бы, а журнал прохождений у редактора один."""
+        passes = _jsx_code_only(_read(self.PASSES))
+        self.assertIn('export function useQuizAttempt(postId)', passes)
+        for path in (self.MODAL, self.FEED):
+            code = _jsx_code_only(_read(path))
+            self.assertIn("import NewsPasses, { useQuizAttempt } from './NewsPasses';", code, path)
+            self.assertIn('attempt={attempt}', code, path)
+            # Своего состояния ответов у места больше нет.
+            self.assertNotIn('setAnswers(', code, path)
 
     def test_feed_shows_nothing_about_the_author(self):
         """Как и окно: сотрудник читает объявление, а не карточку автора."""

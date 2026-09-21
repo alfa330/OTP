@@ -185,29 +185,36 @@ class TestNewsWindow:
         assert "fetch(" not in js
         assert "state.result" in agent.build_news_result_js()
 
-    def test_a_wrong_answer_keeps_the_answers_but_does_not_point_at_them(self):
-        """Две крайности, обе плохие, и правило между ними.
+    def test_a_wrong_answer_resets_the_whole_test(self):
+        """Правило владельца 21.09.2026 дословно: «если один вариант не правилен,
+        ответы сбрасываются и выходит уведомление о том что ответы не правильные
+        и попробовать заново, тест будет завершен если он все ответы выберет
+        корректно».
 
-        1.0.16 из-за одного неверного ответа стирала ВСЕ отметки и возвращала к
-        тексту: человек отвечал заново на весь тест. Следом появилась подсветка
-        неверных вопросов — и тест превратился в перебор: меняешь помеченный
-        ответ, жмёшь снова, подбираешь верный, ни разу не вернувшись к тексту.
-
-        Решение владельца 21.09.2026: ответы остаются, но ГДЕ ошибка — не
-        говорим. Одна строка на весь тест: «есть неверные ответы».
+        До него было две крайности, обе плохие: подсветка неверных вопросов
+        превращала тест в перебор (меняешь помеченный ответ, жмёшь снова,
+        подбираешь верный, ни разу не вернувшись к тексту), а молчаливый отказ с
+        сохранением ответов давал тот же перебор, только вслепую.
         """
         js = agent.build_news_js(self._item())
         assert "NEWS_QUIZ_WRONG" in js
-        assert "state.answers = {}; drawQuiz(); state.step = 'read';" not in js
+        assert "state.answers = {}; state.failed = true;" in js
+        assert "Ответы неверные — выбор сброшен, пройдите тест заново" in js
         assert "state.wrong" not in js
         assert "Неверно — перечитайте новость и выберите другой вариант" not in js
+        # К тексту человека не выбрасывает: «Перечитать новость» он нажимает сам.
+        assert "state.step = 'read';" not in js.split("NEWS_QUIZ_WRONG", 1)[1]
 
-    def test_the_window_paints_nothing_red(self):
+    def test_the_window_never_points_at_a_question(self):
         """Красная рамка вокруг вопроса и красный вариант — это и есть указание
-        на ошибку, каким бы способом оно ни рисовалось."""
+        на ошибку, каким бы способом оно ни рисовалось. Единственное красное в
+        окне — уведомление НАД тестом, одно на весь тест."""
         js = agent.build_news_js(self._item())
-        for marker in ("#ff3b30", "#fff1f0", "function missed(", "firstWrongBox"):
+        for marker in ("#ff3b30", "function missed(", "firstWrongBox",
+                       "box.style.boxShadow", "label.style.background"):
             assert marker not in js, marker
+        assert js.count("#fff1f0") == 1
+        assert "card.appendChild(warn); card.appendChild(quiz);" in js
 
     def test_the_photos_are_shown(self):
         """Кадры объявления раньше не доходили до окна вовсе: сервер их не
@@ -230,10 +237,12 @@ class TestNewsWindow:
         assert "radio.checked = state.answers[item.id] === optionIndex;" in js
 
     def test_changing_the_answer_clears_the_refusal(self):
-        """Отказ сервера был про ПРОШЛЫЙ ответ: висеть над новым он не должен."""
+        """Отказ сервера и уведомление были про ПРОШЛУЮ попытку: висеть над
+        новым ответом они не должны."""
         js = agent.build_news_js(self._item())
         body = js.split("radio.addEventListener('change'", 1)[1].split("var text =", 1)[0]
         assert "note.textContent = '';" in body
+        assert "state.failed = false;" in body
 
 
 class TestLoopOrder:

@@ -1,6 +1,6 @@
-import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Loader2, PlayCircle } from 'lucide-react';
+import { AlertCircle, Check, Loader2, PlayCircle } from 'lucide-react';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 
@@ -26,60 +26,81 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
 
 /* Варианты — кнопками на всю ширину: окно читают и с телефона, между звонками,
  * и в кружок на 16 пикселей пальцем не попасть. Верного ответа здесь нет и не
- * бывает — сервер отдаёт только формулировки и сверяет сам. Цвет — только у
- * ошибки и только у выбранного варианта: подкрасить остальные значило бы
- * подсказать. */
-export function NewsQuiz({ quiz, answers, wrong, onAnswer, disabled = false }) {
+ * бывает — сервер отдаёт только формулировки и сверяет сам.
+ *
+ * ЦВЕТА ОШИБКИ ЗДЕСЬ НЕТ. Неверный ответ не помечает вопрос — он снимает весь
+ * выбор и показывает одно уведомление над тестом (useQuizAttempt, решение
+ * владельца 21.09.2026). Подсветить вопрос значило бы вернуть подбор ответа
+ * переключением одного варианта, а тест засчитывается, только когда все ответы
+ * выбраны верно сразу.
+ */
+export function NewsQuiz({ quiz, answers, onAnswer, disabled = false }) {
     return (
         <div className="space-y-4">
-            {quiz.map((item, index) => {
-                const missed = wrong.includes(item.id);
-                return (
-                    <fieldset key={item.id} className="space-y-2" disabled={disabled}>
-                        <legend className="text-[14px] font-medium leading-snug text-slate-900">
-                            {index + 1}. {item.prompt}
-                        </legend>
-                        <div className="space-y-1.5" role="radiogroup">
-                            {(item.options || []).map((option, optionIndex) => {
-                                const chosen = answers[item.id] === optionIndex;
-                                const miss = missed && chosen;
-                                return (
-                                    <button
-                                        key={optionIndex}
-                                        type="button"
-                                        role="radio"
-                                        aria-checked={chosen}
-                                        onClick={() => onAnswer(item.id, optionIndex)}
-                                        className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[14px] ring-1 transition active:scale-[0.99] ${
-                                            miss
-                                                ? 'bg-rose-50 text-rose-900 ring-rose-200'
-                                                : chosen
-                                                    ? 'bg-indigo-50 text-slate-900 ring-indigo-200'
-                                                    : 'bg-white text-slate-700 ring-slate-200 hover:bg-slate-50'
-                                        }`}
-                                    >
-                                        <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full ring-1 ${
-                                            chosen
-                                                ? (miss ? 'bg-rose-500 ring-rose-500' : 'bg-indigo-600 ring-indigo-600')
-                                                : 'bg-white ring-slate-300'
-                                        }`}>
-                                            {chosen && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                                        </span>
-                                        <span className="min-w-0 break-words">{option}</span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        {missed && (
-                            <p className="text-[12px] text-rose-600">
-                                Неверно — перечитайте новость и выберите другой вариант
-                            </p>
-                        )}
-                    </fieldset>
-                );
-            })}
+            {quiz.map((item, index) => (
+                <fieldset key={item.id} className="space-y-2" disabled={disabled}>
+                    <legend className="text-[14px] font-medium leading-snug text-slate-900">
+                        {index + 1}. {item.prompt}
+                    </legend>
+                    <div className="space-y-1.5" role="radiogroup">
+                        {(item.options || []).map((option, optionIndex) => {
+                            const chosen = answers[item.id] === optionIndex;
+                            return (
+                                <button
+                                    key={optionIndex}
+                                    type="button"
+                                    role="radio"
+                                    aria-checked={chosen}
+                                    onClick={() => onAnswer(item.id, optionIndex)}
+                                    className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[14px] ring-1 transition active:scale-[0.99] ${
+                                        chosen
+                                            ? 'bg-indigo-50 text-slate-900 ring-indigo-200'
+                                            : 'bg-white text-slate-700 ring-slate-200 hover:bg-slate-50'
+                                    }`}
+                                >
+                                    <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full ring-1 ${
+                                        chosen ? 'bg-indigo-600 ring-indigo-600' : 'bg-white ring-slate-300'
+                                    }`}>
+                                        {chosen && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                    </span>
+                                    <span className="min-w-0 break-words">{option}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </fieldset>
+            ))}
         </div>
     );
+}
+
+/* ОДНА ПОПЫТКА ТЕСТА: выбранные варианты и отказ сервера по ним.
+ *
+ * Живёт СНАРУЖИ NewsPasses, потому что обязательный тест сверяет не кнопка
+ * «Проверить», а само подтверждение окна: ответы нужны и ему.
+ *
+ * ПРАВИЛО ВЛАДЕЛЬЦА (21.09.2026) дословно: «если один вариант не правилен,
+ * ответы сбрасываются и выходит уведомление о том что ответы не правильные и
+ * попробовать заново, тест будет завершен если он все ответы выберет
+ * корректно». Отсюда fail(): снимает ВЕСЬ выбор, а не помечает вопрос.
+ *
+ * Правило одно на окно и ленту — и держится оно здесь, в общем хуке. Копия в
+ * каждом из мест разъехалась бы, а журнал прохождений у редактора один.
+ */
+export function useQuizAttempt(postId) {
+    const [answers, setAnswers] = useState({});
+    const [failed, setFailed] = useState(false);
+    // Следующая новость — свой тест с чистого листа.
+    useEffect(() => { setAnswers({}); setFailed(false); }, [postId]);
+    const answer = useCallback((questionId, index) => {
+        setAnswers((prev) => ({ ...prev, [questionId]: index }));
+        // Уведомление было про прошлую попытку — человек уже отвечает заново.
+        setFailed(false);
+    }, []);
+    const fail = useCallback(() => { setAnswers({}); setFailed(true); }, []);
+    /* Ссылка на объект стабильна: попытку кладут в зависимости обработчиков, и
+       новый объект на каждый рендер пересобирал бы их без всякой причины. */
+    return useMemo(() => ({ answers, failed, answer, fail }), [answers, failed, answer, fail]);
 }
 
 /* Название тренажёра по ключу. Реестр грузится динамически и один раз на
@@ -135,13 +156,14 @@ function PassedRow({ children }) {
  * Блок под текстом новости: тренажёр строкой и тест.
  *
  * post        — { id, quiz, trainer_key, pass_required, quiz_passed, trainer_passed }
- * answers     — выбранные варианты; ими же окно подтверждает обязательный тест
+ * attempt     — попытка теста из useQuizAttempt; ответами из неё окно
+ *               подтверждает и обязательный тест
  * checkable   — показывать ли «Проверить». В окне — только у НЕОБЯЗАТЕЛЬНОГО теста:
  *               обязательный сверяется самим подтверждением.
  * layer       — 'top' в окне: тренажёр встаёт над его z-index.
  */
 export default function NewsPasses({
-    post, apiBaseUrl, headers, answers, onAnswer, wrong, onWrong,
+    post, apiBaseUrl, headers, attempt,
     quizPassed, onQuizPassed, trainerPassed, onTrainerPassed,
     trainerOpen, onTrainerOpenChange, checkable, layer = null,
 }) {
@@ -152,8 +174,16 @@ export default function NewsPasses({
     const [checking, setChecking] = useState(false);
     const [markFailed, setMarkFailed] = useState(false);
     const [error, setError] = useState('');
+    const failRef = useRef(null);
 
     useEffect(() => { setMarkFailed(false); setError(''); }, [post?.id]);
+
+    /* К уведомлению подводим прокруткой: выбор снят у всех вопросов, и отвечать
+       человек начинает сверху, а кнопка, по которой он только что щёлкнул,
+       стоит под длинным тестом. */
+    useEffect(() => {
+        if (attempt.failed) failRef.current?.scrollIntoView({ block: 'center' });
+    }, [attempt.failed]);
 
     const markTrainer = useCallback(() => {
         if (!post?.id) return;
@@ -165,17 +195,19 @@ export default function NewsPasses({
             .catch(() => setMarkFailed(true));
     }, [apiBaseUrl, headers, onTrainerPassed, post?.id]);
 
-    const quizAnswered = quiz.every((item) => Number.isInteger(answers[item.id]));
+    const quizAnswered = quiz.every((item) => Number.isInteger(attempt.answers[item.id]));
 
     const check = () => {
         if (checking || !quizAnswered || !post?.id) return;
         setChecking(true);
         setError('');
-        axios.post(`${apiBaseUrl}/api/news/${post.id}/quiz`, { answers }, { headers })
-            .then(() => { onWrong([]); onQuizPassed?.(); })
+        axios.post(`${apiBaseUrl}/api/news/${post.id}/quiz`, { answers: attempt.answers }, { headers })
+            .then(() => onQuizPassed?.())
             .catch((e) => {
+                // Хоть один неверный — попытка целиком не засчитана: выбор
+                // снимается, и тест проходится заново (решение владельца).
                 if (e?.response?.data?.code === 'NEWS_QUIZ_WRONG') {
-                    onWrong(e.response.data.wrong || []);
+                    attempt.fail();
                     return;
                 }
                 setError(errText(e, 'Не удалось проверить ответы'));
@@ -247,15 +279,25 @@ export default function NewsPasses({
                 <PassedRow>{trainerKey ? 'Тест пройден' : 'Пройден'}</PassedRow>
             ) : (
                 <section className={`space-y-3 ${trainerKey ? 'pt-2' : ''}`}>
+                    {/* Уведомление ОДНО на весь тест и стоит над вопросами:
+                        какой именно ответ неверен, не говорит ни оно, ни
+                        сервер — иначе ответ подбирался бы переключением
+                        одного варианта. */}
+                    {attempt.failed && (
+                        <div
+                            ref={failRef}
+                            role="alert"
+                            className="flex items-start gap-2 rounded-xl bg-rose-50 px-3 py-2.5 text-[13px] leading-snug text-rose-700 ring-1 ring-rose-200"
+                        >
+                            <AlertCircle className="mt-px h-4 w-4 shrink-0" aria-hidden="true" />
+                            <span>Ответы неверные — выбор сброшен, пройдите тест заново</span>
+                        </div>
+                    )}
                     <NewsQuiz
                         quiz={quiz}
-                        answers={answers}
-                        wrong={wrong}
+                        answers={attempt.answers}
                         disabled={checking}
-                        onAnswer={(questionId, index) => {
-                            onAnswer(questionId, index);
-                            onWrong(wrong.filter((id) => id !== questionId));
-                        }}
+                        onAnswer={attempt.answer}
                     />
                     {checkable && (
                         <div className="flex items-center justify-end gap-3">

@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Bell, Check, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import NewsGallery from './NewsGallery';
-import NewsPasses from './NewsPasses';
+import NewsPasses, { useQuizAttempt } from './NewsPasses';
 import { subscribeNewsPoke } from './newsShared';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
@@ -47,9 +47,6 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     const [remaining, setRemaining] = useState(0);
     const [sending, setSending] = useState(false);
     const [error, setError] = useState('');
-    /* Тест: выбранные варианты и вопросы, где сервер нашёл ошибку. */
-    const [answers, setAnswers] = useState({});
-    const [wrong, setWrong] = useState([]);
     /* Прохождение в этой вкладке (задача #342). Сервер присылает своё в
        quiz_passed/trainer_passed, здесь — то, что случилось после его ответа. */
     const [quizPassedHere, setQuizPassedHere] = useState(false);
@@ -63,7 +60,10 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     const headers = useMemo(() => (getHeaders ? getHeaders() : {}), [getHeaders]);
     const current = queue[0] || null;
     const quiz = current?.quiz || [];
-    const quizAnswered = quiz.every((item) => Number.isInteger(answers[item.id]));
+    /* Попытка теста — общая с лентой (useQuizAttempt): и правило «один неверный
+       ответ снимает весь выбор» тоже общее. */
+    const attempt = useQuizAttempt(current?.id);
+    const quizAnswered = quiz.every((item) => Number.isInteger(attempt.answers[item.id]));
     const quizPassed = quizPassedHere || !!current?.quiz_passed;
     const trainerPassed = trainerPassedHere || !!current?.trainer_passed;
     /* Что держит кнопку — то же правило, что на сервере
@@ -134,10 +134,9 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
         setError('');
     }, [current]);
 
-    // Следующая новость — свой тест и тренажёр с чистого листа.
+    // Следующая новость — свой тренажёр с чистого листа (тест обнуляет сам
+    // useQuizAttempt: он ключуется на id новости).
     useEffect(() => {
-        setAnswers({});
-        setWrong([]);
         setQuizPassedHere(false);
         setTrainerPassedHere(false);
         setTrainerOpen(false);
@@ -167,7 +166,7 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
         if (!current || sending || remaining > 0 || trainerLeft || (quizLeft && !quizAnswered)) return;
         setSending(true);
         axios.post(`${apiBaseUrl}/api/news/${current.id}/read`,
-                   quizLeft ? { answers } : {}, { headers })
+                   quizLeft ? { answers: attempt.answers } : {}, { headers })
             .then(() => {
                 dropCurrent();
                 /* Сервер отмечает «показали» только ТОЙ новости, что человек
@@ -178,10 +177,13 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 load(true);
             })
             .catch((e) => {
-                /* Неверные ответы подсвечиваются у вопросов, а не строкой
-                   ошибки у кнопки: человек видит, где именно ошибся. */
+                /* Хоть один неверный ответ — попытка не засчитана целиком:
+                   выбор снимается, над тестом встаёт уведомление, и кнопка
+                   гаснет сама, пока человек не ответит заново на ВСЕ вопросы
+                   (решение владельца 21.09.2026). Строки ошибки у кнопки при
+                   этом нет: сказать одно и то же дважды на одном экране — шум. */
                 if (e?.response?.data?.code === 'NEWS_QUIZ_WRONG') {
-                    setWrong(e.response.data.wrong || []);
+                    attempt.fail();
                     setError('');
                     return;
                 }
@@ -204,7 +206,7 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 }
             })
             .finally(() => setSending(false));
-    }, [answers, apiBaseUrl, current, dropCurrent, headers, quizAnswered, quizLeft,
+    }, [attempt, apiBaseUrl, current, dropCurrent, headers, quizAnswered, quizLeft,
         remaining, sending, trainerLeft]);
 
     /* Необязательную новость закрывают крестиком, и это ТОЖЕ отметка о
@@ -307,10 +309,7 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                         post={current}
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
-                        answers={answers}
-                        onAnswer={(questionId, index) => setAnswers((prev) => ({ ...prev, [questionId]: index }))}
-                        wrong={wrong}
-                        onWrong={setWrong}
+                        attempt={attempt}
                         quizPassed={quizPassed}
                         onQuizPassed={() => setQuizPassedHere(true)}
                         trainerPassed={trainerPassed}

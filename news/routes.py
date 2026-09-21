@@ -602,9 +602,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             "code": "NEWS_TOO_EARLY",
                             "remaining_seconds": detail}), 409
         if status == 'quiz_wrong':
+            # Какие именно вопросы неверны, НЕ называем (решение владельца
+            # 21.09.2026): окно снимает весь выбор и просит пройти тест заново,
+            # а подсказка «ошибка во втором» вернула бы подбор ответа
+            # переключением одного варианта — при том что сеть у браузера
+            # открыта любому.
             return jsonify({"error": "Есть неверные ответы — перечитайте новость",
-                            "code": "NEWS_QUIZ_WRONG",
-                            "wrong": detail}), 409
+                            "code": "NEWS_QUIZ_WRONG"}), 409
         return jsonify({"status": "ok"})
 
     @news_route('/<int:post_id>/quiz', methods=('POST',))
@@ -626,8 +630,9 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if status in ('not_found', 'no_quiz'):
             return jsonify({"error": "Теста у этой новости нет"}), 404
         if status == 'quiz_wrong':
+            # Вопросы с ошибкой не называем — как и у /read.
             return jsonify({"error": "Есть неверные ответы — перечитайте новость",
-                            "code": "NEWS_QUIZ_WRONG", "wrong": detail}), 409
+                            "code": "NEWS_QUIZ_WRONG"}), 409
         return jsonify({"status": "ok"})
 
     @news_route('/<int:post_id>/trainer', methods=('POST',))
