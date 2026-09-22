@@ -104,7 +104,7 @@ import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -2145,41 +2145,17 @@ const canAccessGroupLateBotForUser = (userLike) => {
     return role === 'admin' && !isDepartmentHead(userLike);
 };
 
-/* «Учет сотрудников» у отдела кадров (решение владельца 22.09.2026). Раздел
-   открыт ему НА ПРОСМОТР и сразу по ВСЕЙ КОМПАНИИ: кадровый учёт ведётся не по
-   своему отделу, а по всей фирме — то же решение, что у «Отметок»
-   (GROUP_LATE_BOT_FULL_DEPARTMENT_CODES выше). Своим отделом кадровик видел бы
-   трёх человек, то есть самого себя.
-
-   Признак доступа — ЧЛЕНСТВО В ОТДЕЛЕ, а не роль: у кадровика роль hr_manager
-   с уровнем как у оператора, и проверка по роли открыла бы раздел человеку,
-   которого из отдела уже перевели.
-
-   Глава отдела кадров сюда попадает намеренно: охват списка у него тот же, вся
-   компания. Правку владелец ему оставил — но только в своём отделе, и решает
-   это canEditEmployeeRecordForUser ниже. Зеркало на бэкенде —
-   EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODE и _is_employee_accounting_observer. */
-const EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODES = new Set(['hr']);
-
-const canViewEmployeeAccountingForUser = (userLike) => EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODES.has(
-    normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
-);
-
-/* Кого кадровик может ПРАВИТЬ в «Учете сотрудников». Рядовой — никого:
-   раздел выдан ему на просмотр. Глава отдела кадров — своих, как и до
-   открытия раздела: список у него вырос до всей компании, права остались
-   прежними. Зеркало на бэкенде — _requester_can_access_target_user: он
-   упирает главу в headed_dept_ids, а рядового кадровика не пускает вовсе.
-
-   Функция отвечает ТОЛЬКО за кадровиков: для всех остальных ролей раздел
-   работает как раньше, и звать её незачем — см. canEditEmployeeRecord в
-   компоненте. */
-const canEditEmployeeRecordForUser = (userLike, employee) => {
-    if (!isDepartmentHead(userLike)) return false;
-    const headed = headedDepartmentId(userLike);
-    if (headed == null || employee?.department_id == null) return false;
-    return Number(employee.department_id) === Number(headed);
-};
+/* Состав выпадашки «Учет сотрудников» у кадровика — те же четыре списка, что у
+   супер-админа, и в том же порядке. Данными, а не четырьмя копиями разметки:
+   ветка кадровика в сайдбаре отдельная от админской (у роли hr_manager своей
+   ветки нет вовсе), и без общего списка пункты разъехались бы при первой
+   правке одной из них. */
+const EMPLOYEE_ACCOUNTING_MANAGER_MENU = [
+    { view: 'sv_list', icon: 'fa-users', label: 'Супервайзеры' },
+    { view: 'manage_users', icon: 'fa-user-cog', label: 'Сотрудники' },
+    { view: 'manage_trainers', icon: 'fa-book', label: 'Тренеры' },
+    { view: 'manage_admins', icon: 'fa-user-shield', label: 'Админы' },
+];
 
 // Раздел «Табло СЗоВ» — онлайн-нагрузка входящей линии. Доступ: админы, глава отдела
 // СЗоВ и СВ этого же отдела. Сверяем по КОДУ отдела, а не по id: id СЗоВ засеян
@@ -2537,12 +2513,23 @@ const canAccessOpFunnelSectionForUser = (userLike) => {
 // записи в «Моих оценках». Правило повторяет серверное (crm/access.py,
 // wiki/access.py, parcels/access.py): экран с замком — удобство, а доступом
 // является ответ сервера.
+/* Должности, у которых чувствительные разделы спрашивают подтверждение QR.
+   Дословное зеркало QR_GATED_ROLES в wiki/access.py: разойдись они — экран
+   покажет замок там, где сервер пускает, или наоборот.
+
+   Перечисление, а не «бэк-офис целиком» (isBackOfficeEmployeeRole): с
+   22.09.2026 должности бэк-офиса разошлись — у кадровика подтверждения больше
+   нет (решение владельца), у бухгалтерии и маркетинга осталось. Общий предикат
+   такую разницу не выразит, а молча сняв её, снял бы гейт всем троим.
+
+   Бухгалтерия и маркетинг остаются здесь по прежней причине: их роль отделена
+   от 'operator' ради разделов и полей карточки, а не ради этого гейта, и
+   переименование должности — не повод снять подтверждение. Стажёра тут
+   намеренно нет: у него свой, более широкий замок в «Чатах водителей». */
+const SENSITIVE_QR_GATED_ROLES = new Set(['operator', 'accounting_manager', 'marketing_manager']);
+
 const sensitiveSectionQrRequiredFor = (userLike) => (
-    // Бэк-офис здесь наравне с операторами: их роль отделена от 'operator' ради
-    // разделов и полей карточки, а не ради этого гейта — переименование
-    // должности не повод молча снять подтверждение. Зеркало QR_GATED_ROLES в
-    // wiki/access.py (стажёра там намеренно нет).
-    (normalizeRole(userLike?.role) === 'operator' || isBackOfficeEmployeeRole(userLike?.role))
+    SENSITIVE_QR_GATED_ROLES.has(normalizeRole(userLike?.role))
     && !isDepartmentHead(userLike)
 );
 
@@ -41486,31 +41473,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // весь свой отдел со всеми группами, поэтому окно параметров у них одинаковое.
             const canSupervisorExportOperators = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;
             const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;
-            /* Отдел кадров: «Учет сотрудников» по всей компании, на просмотр.
-               Флаг взводится и у ГЛАВЫ отдела кадров — он про охват списка, а
-               не про права: правку ему считает canEditEmployeeRecord ниже. */
-            const isEmployeeAccountingObserver = canViewEmployeeAccountingForUser(user);
+            /* Отдел кадров: «Учет сотрудников» по всей компании, с правкой.
+               Флаг взводится и у ГЛАВЫ отдела кадров — с 22.09.2026 их права
+               по людям совпадают. */
+            const isEmployeeAccountingManager = managesEmployeeAccounting(user);
             /* Фильтр по отделу кадровику обязателен: без него над списком всей
                компании нет ни одного способа сузить выборку, а колонки «Все
                отделы» он и так получает (manageUsersSelectedDeptCode). */
-            const canFilterByDepartment = isAdminLikeRole || isPlainTrainer || isEmployeeAccountingObserver;
-            /* Кого можно править в «Учете сотрудников». Ветка ровно одна — про
-               кадровиков: у остальных ролей охват раздела и право правки
-               совпадают (что вижу, то и правлю), и спрашивать тут нечего.
-               Зовётся из разметки, в зависимости эффектов не входит. */
-            const canEditEmployeeRecord = useCallback((employee) => (
-                !isEmployeeAccountingObserver || canEditEmployeeRecordForUser(user, employee)
-            ), [isEmployeeAccountingObserver, user]);
-            /* Кнопка «Добавить сотрудника». У главы отдела кадров остаётся: он
-               заводит людей в свой отдел, как и до открытия раздела (бэкенд
-               держит ту же границу — add_user + _requester_can_access_target_user). */
-            const canCreateEmployeeRecord = !isEmployeeAccountingObserver || isDepartmentHeadUser;
-            /* Массовая правка (Ctrl + клик) отключена всему отделу кадров, в том
-               числе главе. Причина не в правах, а в том, что список у них —
-               вся компания: из полусотни отмеченных строк глава может изменить
-               только своих, остальные вернулись бы ошибкой по одной. Точечная
-               правка своего отдела у него осталась — в карточке. */
-            const canBulkEditEmployees = !isEmployeeAccountingObserver;
+            const canFilterByDepartment = isAdminLikeRole || isPlainTrainer || isEmployeeAccountingManager;
+            /* Раздел выдан кадровику целиком: правка, заведение новых и
+               массовые операции — как у админа. Отдельных предикатов «кому
+               можно» здесь больше нет намеренно: пока они были, у кадровика и
+               админа получались два разных экрана одного раздела. Право на
+               каждое действие считает бэкенд (_is_employee_accounting_manager),
+               а разметка показывает раздел одинаково всем, кому он открыт. */
             // Кнопка «Закрепить» стоит в карточке задачи безусловно, поэтому у того,
             // кому раздел выдан, флаг обязан быть true: иначе клик кладёт задачу в
             // state, а виджет не рисуется — кнопка без эффекта и без объяснения.
@@ -41624,14 +41600,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const viewRef = useRef(view);
             useEffect(() => { viewRef.current = view; }, [view]);
             const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users', 'manage_trainers'].includes(view);
-            /* Раздел «Учет сотрудников» у кадровика. Ровно один вид, а не три:
-               «Супервайзеры» и «Тренеры» — отдельные пункты выпадашки, которых
-               у отделов с упрощённым учётом нет вовсе
-               (SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS), и открывать их кадровику
-               владелец не просил. Флаг нужен разметке ниже: вся ветка раздела
-               живёт под одним условием, и без него у кадровика пункт меню был бы,
-               а содержимого — нет. */
-            const isEmployeeAccountingObserverView = isEmployeeAccountingObserver && view === 'manage_users';
+            /* Раздел «Учет сотрудников» у кадровика — все четыре списка
+               выпадашки. Флаг нужен разметке ниже: вся ветка раздела живёт под
+               одним условием, и без него у кадровика пункт меню был бы, а
+               содержимого — нет. Список видов один с меню (EMPLOYEE_ACCOUNTING_MANAGER_MENU),
+               чтобы пункт и его экран не разъехались. */
+            const isEmployeeAccountingManagerView = isEmployeeAccountingManager
+                && EMPLOYEE_ACCOUNTING_MANAGER_MENU.some((item) => item.view === view);
             const [pinnedTask, setPinnedTask] = useState(null);
             const [pinnedTaskPool, setPinnedTaskPool] = useState([]);
             const [isPinnedTaskPoolLoading, setIsPinnedTaskPoolLoading] = useState(false);
@@ -46753,7 +46728,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                чужой отдел это не даёт — поле «Отдел» в карточке главе
                                заперто всегда (isDeptScoped), а сервер при создании
                                сотрудника выбор клиента игнорирует. */
-                            const nextDepartments = (scopedDepartmentId != null && !isEmployeeAccountingObserver)
+                            const nextDepartments = (scopedDepartmentId != null && !isEmployeeAccountingManager)
                                 ? data.departments.filter((dept) => Number(dept?.id) === Number(scopedDepartmentId))
                                 : data.departments;
                             setDepartments(nextDepartments);
@@ -46836,7 +46811,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             // управленцами: у него на экране вся компания, и
                             // узкий набор молча съел бы стажёров — их в фирме
                             // больше, чем кадровиков.
-                            const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingObserver)
+                            const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingManager)
                                 ? new Set(['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES])
                                 : new Set(['operator', ...BACK_OFFICE_EMPLOYEE_ROLES]);
                             setAdminUsers(nextUsers);
@@ -49324,11 +49299,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, []);
 
             const handleManageUserRowClick = useCallback((event, userId) => {
-                if (!canBulkEditEmployees) return;
                 if (!(event?.ctrlKey || event?.metaKey)) return;
                 event.preventDefault();
                 toggleManageUsersSelection(userId);
-            }, [canBulkEditEmployees, toggleManageUsersSelection]);
+            }, [toggleManageUsersSelection]);
 
             const applyBulkManageUsersChanges = useCallback(async () => {
                 const selectedIds = Array.from(selectedManageUsersIds)
@@ -49687,9 +49661,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 /* У главы отдела фильтр игнорируем: сервер всё равно заведёт
                    человека в ЕГО отдел (add_user: «выбор клиента игнорируем»),
                    а подставив отдел из фильтра, форма выбрала бы чужую роль по
-                   чужому коду отдела. До открытия раздела кадрам фильтра у главы
-                   не было вовсе, и расхождение не всплывало. */
-                const createDeptId = isScopedDepartmentHead ? "" : (manageUsersDeptFilter || "");
+                   чужому коду отдела. Кадровик — исключение: ему сервер отдел
+                   НЕ переписывает, он заводит людей по всей компании. */
+                const createDeptId = (isScopedDepartmentHead && !isEmployeeAccountingManager)
+                    ? ""
+                    : (manageUsersDeptFilter || "");
                 const createDeptCode = createDeptId
                     ? (departments || []).find((d) => Number(d?.id) === Number(createDeptId))?.code
                     : (isScopedDepartmentHead
@@ -50550,18 +50526,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchUsers();
                     fetchDirections();
                     fetchDepartments();
-                } else if (isEmployeeAccountingObserver) {
+                } else if (isEmployeeAccountingManager) {
                     /* Кадровик. Ветка стоит ПОСЛЕ ролевых намеренно: глава
                        отдела кадров — это isDepartmentManager, и он уже забрал
-                       своё выше вместе со списком супервайзеров.
-
-                       Справочника НАПРАВЛЕНИЙ здесь нет намеренно: /api/admin/directions
-                       отвечает кадровику 403, а ответ ручки показывается красной
-                       плашкой — то есть при каждом входе. И он не нужен: имя
-                       направления приходит строкой списка, а карточка подмешивает
-                       его отдельной опцией (UserEditModal). То же со списком групп —
-                       см. гейт fetchUserModalGroups ниже. */
+                       своё выше. Набор тот же, что у админа: он правит карточки
+                       всей компании, и селекты направления и супервайзера без
+                       этих справочников стояли бы пустыми. */
+                    fetchSvList();
                     fetchUsers();
+                    fetchDirections();
                     fetchDepartments();
                 }
 
@@ -50569,7 +50542,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchSensitiveAccessStatus();
                     fetchSurveysPendingBadgeCount();
                 }
-            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager, isPlainTrainer, isEmployeeAccountingObserver]);
+            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager, isPlainTrainer, isEmployeeAccountingManager]);
 
             // Гард видимости разделов по отделу (Этап 10): если отдел ограничивает
             // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
@@ -50581,6 +50554,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
                 if (!departmentRestrictsViews(user)) return;
+                // Кадровик — ДО ветки главы отдела: у отдела кадров упрощённый
+                // учёт (SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS), и та ветка
+                // увела бы главу кадров из «Супервайзеров» в «Сотрудников».
+                if (isEmployeeAccountingManager
+                    && EMPLOYEE_ACCOUNTING_MANAGER_MENU.some((item) => item.view === view)) return;
                 if (
                     isDepartmentHeadUser &&
                     canUseAdminEmployeeAccounting &&
@@ -50605,7 +50583,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // этой строки проверка ниже выкинула бы его в «Профиль». Вписать
                 // раздел в allowlist нельзя: карта раздаёт пункты по отделу
                 // смотрящего, а здесь охват — вся компания.
-                if (view === 'manage_users' && isEmployeeAccountingObserver) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings'
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
@@ -50657,13 +50634,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingObserver, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
             useEffect(() => {
                 if (!user?.id) return;
-                if (!(isAdminLikeRole || isDepartmentManager || isEmployeeAccountingObserver
+                if (!(isAdminLikeRole || isDepartmentManager || isEmployeeAccountingManager
                       || normalizeRole(user?.role) === 'trainer')) return;
                 const managementViews = ['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins', 'manage_operators', 'departments', 'surveys'];
                 if (showUserEditModal || managementViews.includes(view)) {
@@ -50674,18 +50651,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // тоже меняет группу, поэтому список греем при входе в его раздел —
                 // иначе селект секунду стоит пустым. В разделе супервайзеров группы
                 // нужны переводу СВ в операторы: там выбирают его будущую группу.
-                // Отделу кадров группы не нужны и не выдаются: /api/groups отвечает
-                // ему 403 (ошибку глотают молча, но запрос всё равно лишний), а в
-                // карточке сотрудника бэк-офиса поля «Группа» нет вовсе — у отдела
-                // без линии групп не бывает. Чужую группу карточка показывает
-                // отдельной опцией по имени из строки списка.
-                if (!isEmployeeAccountingObserver
-                    && (showUserEditModal || view === 'manage_users' || view === 'employees'
-                        || view === 'sv_list'
-                        || (view === 'manage_operators' && isDepartmentManager))) {
+                if (showUserEditModal || view === 'manage_users' || view === 'employees'
+                    || view === 'sv_list'
+                    || (view === 'manage_operators' && isDepartmentManager)) {
                     fetchUserModalGroups();
                 }
-            }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager, isEmployeeAccountingObserver]);
+            }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager, isEmployeeAccountingManager]);
 
             useEffect(() => {
                 if (!user || !user.id || !isSupervisorRole(user?.role)) return;
@@ -51681,15 +51652,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         нет, и в ролевых блоках ниже пункт не отрисовался бы вовсе.
                                         Главу отдела кадров это условие НЕ трогает: он проходит как
                                         isDepartmentManager и получает свой пункт ниже — иначе в меню
-                                        оказалось бы два одинаковых «Учета сотрудников». */}
-                                    {isEmployeeAccountingObserver && !isAdminLikeRole && !isDepartmentManager && !isPlainTrainer && (
-                                        <li>
+                                        оказалось бы два одинаковых «Учета сотрудников».
+
+                                        Выпадашка из ЧЕТЫРЁХ списков, как у админа: раздел открыт
+                                        кадровику целиком (решение владельца 22.09.2026). «Админы»
+                                        здесь без проверки на супер-админа — в админской ветке ниже
+                                        пункт выдаётся только ему, а кадровику его выдал владелец.
+
+                                        Ветка одна на ВЕСЬ отдел кадров, включая главу: права у них
+                                        совпадают, и два одинаковых меню в разных блоках разъехались
+                                        бы при первой правке. Поэтому ветки главы ниже кадровика
+                                        исключают. */}
+                                    {isEmployeeAccountingManager && !isAdminLikeRole && (
+                                        <li className="relative" ref={sidebarEmployeesRef}>
                                             <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'manage_users')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}
+                                                onClick={stableSidebarHandleToggleEmployeesDropdown}
+                                                className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
+                                                    ['sv_list', 'manage_users', 'manage_trainers', 'manage_admins'].includes(view) ? 'bg-blue-700' : ''
+                                                }`}
+                                                aria-expanded={showSidebarEmployeesDropdown}
+                                                aria-haspopup="menu"
                                             >
                                                 <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                             </button>
+
+                                            {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
+                                                <div
+                                                    className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                    style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
+                                                >
+                                                    {EMPLOYEE_ACCOUNTING_MANAGER_MENU.map(({ view: itemView, icon, label }, index) => (
+                                                        <React.Fragment key={itemView}>
+                                                            {index > 0 && <div className="border-t border-gray-200" />}
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, itemView, { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === itemView ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className={`fas ${icon} mr-2`}></FaIcon> {label}
+                                                            </button>
+                                                        </React.Fragment>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </li>
                                     )}
 
@@ -51786,14 +51791,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
-                                            {isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (
+                                            {isDepartmentHeadUser && !isEmployeeAccountingManager && departmentUsesSimpleEmployeeAccounting(user) && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
                                                 </button>
                                             </li>
                                             )}
-                                            {isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (
+                                            {isDepartmentHeadUser && !isEmployeeAccountingManager && !departmentUsesSimpleEmployeeAccounting(user) && (
                                             <li className="relative" ref={sidebarEmployeesRef}>
                                                 <button
                                                     onClick={stableSidebarHandleToggleEmployeesDropdown}
@@ -53882,7 +53887,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
-                        {(isAdminLikeRole || isDepartmentHeadAdminEmployeeView || isEmployeeAccountingObserverView) && (
+                        {(isAdminLikeRole || isDepartmentHeadAdminEmployeeView || isEmployeeAccountingManagerView) && (
                         <>
                             {view === 'qr_access' && (
                                 <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка сканера…</div>}>
@@ -54419,13 +54424,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ? { value: manageUsersDeptFilter, onChange: setManageUsersDeptFilter, options: departments }
                                         : null,
                                     birthdays: upcomingManageUsersBirthdays,
-                                    onAdd: canCreateEmployeeRecord ? openCreateManageUsersEmployee : null,
+                                    onAdd: openCreateManageUsersEmployee,
                                     addLabel: 'Добавить сотрудника',
                                     onReport: openUsersReportModal,
                                     reportBusy: isLoading,
                                     // Массовая правка — те же поля, что у панели Ctrl + клик:
                                     // группа и направление только у отдела с линией.
-                                    selection: !canBulkEditEmployees ? null : {
+                                    selection: {
                                         ids: selectedManageUsersIds,
                                         onToggle: toggleManageUsersSelection,
                                         onClear: clearManageUsersSelection,
@@ -54446,10 +54451,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         },
                                     },
                                     actionsFor: (employee) => [
-                                        // Кадровику пункта нет: карточка человека и так
-                                        // открыта нажатием на строку, а «Изменить» вело бы
-                                        // в форму, которая всё равно ничего не сохранит.
-                                        canEditEmployeeRecord(employee) && {
+                                        {
                                             key: 'edit',
                                             label: 'Изменить',
                                             onClick: () => {
@@ -54460,7 +54462,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         employeeHistoryPhoneAction(employee),
                                         // Повышать может только админ: у остальных пункт
                                         // заканчивался бы отказом уже после нажатия.
-                                        isAdminLikeRole && canEditEmployeeRecord(employee) && {
+                                        (isAdminLikeRole || isEmployeeAccountingManager) && {
                                             key: 'promote',
                                             label: promotingUserId === Number(employee?.id) ? 'Повышение…' : 'Перевести в супервайзеры',
                                             disabled: promotingUserId === Number(employee?.id),
@@ -54492,14 +54494,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </select>
                                         </div>
                                         )}
-                                        {canCreateEmployeeRecord && (
                                         <button
                                         onClick={openCreateManageUsersEmployee}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
                                         <FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника
                                         </button>
-                                        )}
 
                                         {/* Generate Report Button */}
                                         <button
@@ -54716,10 +54716,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <tr
                                                             key={u.id}
                                                             onClick={(event) => handleManageUserRowClick(event, u.id)}
-                                                            className={`transition-colors duration-200 group ${canBulkEditEmployees ? 'cursor-pointer' : ''} ${
+                                                            className={`transition-colors duration-200 group cursor-pointer ${
                                                                 isSelectedForBulk ? 'bg-blue-100/70 hover:bg-blue-100' : 'hover:bg-gray-50'
                                                             }`}
-                                                            title={canBulkEditEmployees ? "Для мультивыбора: Ctrl + клик" : undefined}
+                                                            title="Для мультивыбора: Ctrl + клик"
                                                         >
                                                             {manageUsersSectionColumns.map((column) => (
                                                                 <td
@@ -54736,10 +54736,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 <div className="relative inline-block text-left">
                                                                 <button
                                                                     onClick={(e) => {
-                                                                        /* Высота считается по числу пунктов (44 px на пункт):
-                                                                           у кадровика их два, и прежние 132 px отодвигали бы
-                                                                           меню от строки на пустой пункт. */
-                                                                        openRowActionMenu(e, u.id, { width: 208, height: 44 * (canEditEmployeeRecord(u) ? 3 : 2) });
+                                                                        openRowActionMenu(e, u.id, { width: 208, height: 132 });
                                                                     }}
                                                                     className="p-2 rounded-full hover:bg-gray-100"
                                                                 >
@@ -54756,11 +54753,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             zIndex: 10000
                                                                         }}
                                                                     >
-                                                                    {/* Кадровику та же карточка открывается на просмотр,
-                                                                        поэтому и пункт называется по делу: «Править» у него
-                                                                        обещало бы то, чего форма не сделает. Пункт остаётся —
-                                                                        без него на компьютере карточку не открыть вовсе:
-                                                                        простое нажатие на строку её не открывает. */}
                                                                     <button
                                                                         onClick={() => {
                                                                         setUserToEdit(u);
@@ -54769,10 +54761,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         }}
                                                                         className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                                     >
-                                                                        <FaIcon className={`fas ${canEditEmployeeRecord(u) ? 'fa-edit' : 'fa-id-card'} mr-2`}></FaIcon>
-                                                                        {canEditEmployeeRecord(u) ? 'Править' : 'Карточка'}
+                                                                        <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
                                                                     </button>
-                                                                    {canEditEmployeeRecord(u) && (
                                                                     <button
                                                                         onClick={() => {
                                                                         setOpenMenuId(null);
@@ -54793,7 +54783,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         </>
                                                                         )}
                                                                     </button>
-                                                                    )}
                                                                     <button
                                                                         onClick={() => {
                                                                         setSelectedUserForHistory(u);
@@ -54845,11 +54834,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderEmployeeTableSectionSwitcher()}
                                 </div>
                                 ))}
-                                {view === 'manage_admins' && isSuperAdmin && renderEmployeeDirectorySection({
+                                {view === 'manage_admins' && (isSuperAdmin || isEmployeeAccountingManager) && renderEmployeeDirectorySection({
                                     title: 'Админы',
                                     addLabel: 'Добавить админа',
                                     addIcon: 'fas fa-user-shield',
                                     role: 'admin',
+                                    /* Завести НОВОГО админа кадровик не может: владелец открыл
+                                       ему правку заведённых людей и заведение сотрудников, а
+                                       выдачу администраторских прав не называл. Бэкенд тут
+                                       строже разметки (add_user: «Only super admins can create
+                                       admins»), и кнопка заканчивалась бы отказом. */
+                                    canAdd: isSuperAdmin,
                                     items: systemAdmins,
                                     activeStatusTab: activeAdminTab,
                                     setActiveStatusTab: setActiveAdminTab,
@@ -54862,7 +54857,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     canDismissAdmin: true,
                                 })}
 
-                                {false && view === 'manage_admins' && isSuperAdmin && (
+                                {false && view === 'manage_admins' && (isSuperAdmin || isEmployeeAccountingManager) && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Админы</h2>
@@ -59839,12 +59834,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     isOpen={showUserEditModal}
                                     onClose={() => setShowUserEditModal(false)}
                                     userToEdit={userToEdit}
-                                    /* Кадровик открывает ту же карточку на просмотр.
-                                       Проверяем только правку существующего: форму
-                                       создания запирать нечем и незачем — кнопку,
-                                       которая её открывает, гасит canCreateEmployeeRecord,
-                                       а отдела у черновика ещё нет. */
-                                    readOnly={Boolean(userToEdit?.id) && !canEditEmployeeRecord(userToEdit)}
                                     svList={svList}
                                     directions={directions}
                                     departments={departments}

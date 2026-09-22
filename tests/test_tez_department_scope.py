@@ -91,7 +91,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         # Кадровик идёт по тому же широкому набору: список у него — вся компания.
-        self.assertIn("const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingObserver)", source)
+        self.assertIn("const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingManager)", source)
         # Множество выросло вместе с бэк-офисом: тот же фильтр режет и его
         # сотрудников, см. test_back_office_department_scope.
         self.assertIn(
@@ -124,7 +124,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         )
         # Фильтр по отделу есть и у кадровика — иначе список всей компании
         # нечем сузить (см. test_hr_employee_accounting_scope).
-        self.assertIn("const canFilterByDepartment = isAdminLikeRole || isPlainTrainer || isEmployeeAccountingObserver;", source)
+        self.assertIn("const canFilterByDepartment = isAdminLikeRole || isPlainTrainer || isEmployeeAccountingManager;", source)
         # Хвост про рядового сотрудника бэк-офиса появился вместе с выдачей ему
         # раздела «Задачи»; смысл проверки прежний — глава-тренер идёт по
         # правилам главы, а не «чистого тренера».
@@ -314,7 +314,11 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         add_user = _function_source(BOT_PATH, "add_user")
         # Отдел нового сотрудника берётся из клиента только для ГЛОБАЛЬНОГО админа;
         # глава отдела/СВ принудительно получают свой отдел (requester_dept_id).
-        self.assertIn("if _is_global_admin_requester(requester_role, requester_id):", add_user)
+        # Условие выросло кадровиком: он выбирает отдел нового сотрудника сам.
+        self.assertIn(
+            "if _is_global_admin_requester(requester_role, requester_id) or personnel_manager:",
+            add_user,
+        )
         self.assertIn("department_id = requester_dept_id", add_user)
         self.assertIn(
             "requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)",
@@ -328,7 +332,9 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
             admin_update_user,
         )
         self.assertIn(
-            "if field == 'department_id' and not _is_global_admin_requester(requester_role, requester_id):",
+            "if (field == 'department_id'\n"
+            "                and not _is_global_admin_requester(requester_role, requester_id)\n"
+            "                and not personnel_manager):",
             admin_update_user,
         )
 
@@ -337,7 +343,8 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         # Глава отдела меняет ставку как админ — в любой день, без sv-ограничений;
         # «чистый» СВ по-прежнему ограничен 1-м числом месяца и своими операторами.
         self.assertIn(
-            "if field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv' and headed_dept_id is None:",
+            "if (field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv'\n"
+            "                and headed_dept_id is None and not personnel_manager):",
             admin_update_user,
         )
         self.assertIn(
@@ -404,7 +411,7 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         )
         self.assertLess(
             scope_helper.index(headed_branch),
-            scope_helper.index("if _is_global_admin_requester(requester_role, requester_id):"),
+            scope_helper.index("_is_global_admin_requester(requester_role, requester_id)"),
         )
 
         for function_name in (
@@ -454,7 +461,8 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
 
         self.assertIn("headed_dept_id = _headed_department_id(requester_id)", bulk_update)
         self.assertIn(
-            "if requester_role not in ('super_admin', 'admin', 'sv') and headed_dept_id is None:",
+            "if (requester_role not in ('super_admin', 'admin', 'sv')\n"
+            "                and headed_dept_id is None and not personnel_manager):",
             bulk_update,
         )
         self.assertIn("_requester_can_access_target_user(", bulk_update)
@@ -491,7 +499,8 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         group_members = _function_source(BOT_PATH, "group_members_endpoint")
         recompute = _function_source(BOT_PATH, "recompute_month_snapshot_endpoint")
 
-        self.assertIn("if _is_global_admin_requester(role, requester_id):", scope_helper)
+        # Ветка кадровика встала перед админской — сверяем по её началу.
+        self.assertIn("_is_global_admin_requester(role, requester_id)", scope_helper)
         self.assertIn("grp.get('department_id') != headed_dept", scope_helper)
         self.assertIn(
             "department_id = data.get('department_id') if _is_global_admin_requester(role, requester_id) else headed_dept",

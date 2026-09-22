@@ -132,6 +132,7 @@ class AuthenticatedLoginChangeTests(unittest.TestCase):
                 "jsonify": lambda payload: payload,
                 "_normalize_user_role": lambda role: str(role or "").strip().lower(),
                 "_headed_department_id": lambda _user_id: None,
+                "_is_employee_accounting_manager": lambda *_a, **_k: False,
                 "_is_super_admin_role": lambda role: role == "super_admin",
                 "_is_admin_role": lambda role: role in ("admin", "super_admin"),
                 "_requester_can_access_target_user": lambda *_args, **_kwargs: False,
@@ -183,6 +184,7 @@ class TargetUserScopeBehaviorTests(unittest.TestCase):
                 "db": fake_db,
                 "_normalize_user_role": lambda role: str(role or "").strip().lower(),
                 "_headed_department_id": headed_department_id,
+                "_is_employee_accounting_manager": lambda *_a, **_k: False,
                 "_headed_department_ids": headed_department_ids,
                 "_department_scope_id_for_requester": lambda user_id: scopes.get(int(user_id)),
                 "_is_super_admin_role": lambda role: role == "super_admin",
@@ -289,6 +291,7 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
                 "_get_authenticated_requester": lambda: (10, self.requester, None),
                 "_normalize_user_role": normalize_role,
                 "_headed_department_id": lambda user_id: 7 if int(user_id) == 10 else None,
+                "_is_employee_accounting_manager": lambda *_a, **_k: False,
                 "_is_global_admin_requester": lambda _role, _user_id: False,
                 "_is_super_admin_role": lambda role: normalize_role(role) == "super_admin",
                 "_is_admin_role": lambda role: normalize_role(role) in ("admin", "super_admin"),
@@ -521,6 +524,7 @@ class OperatorScopeHelpersTests(unittest.TestCase):
                 "db": fake_db,
                 "_normalize_user_role": normalize_role,
                 "_headed_department_id": headed_department_id,
+                "_is_employee_accounting_manager": lambda *_a, **_k: False,
                 "_headed_department_ids": headed_department_ids,
                 "_department_scope_id_for_requester": lambda user_id: (
                     headed_department_id(user_id) or departments.get(int(user_id))

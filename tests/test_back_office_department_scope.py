@@ -229,7 +229,7 @@ class BackOfficeSipSettingsTests(unittest.TestCase):
         # Роль главы отдела ЗАМЕНЯЕТ базовую: глава с role='admin' проходил
         # первой же строкой как глобальный админ.
         self.assertNotIn("if _is_admin_role(role):", guard)
-        self.assertIn("if _is_global_admin_requester(role, requester_id):", guard)
+        self.assertIn("_is_global_admin_requester(role, requester_id)", guard)
         self.assertIn("if _is_sip_settings_department_head(requester_id):", guard)
         self.assertNotIn("if _headed_department_id(requester_id) is not None:", guard)
 
@@ -265,10 +265,21 @@ class BackOfficeQrAccessTests(unittest.TestCase):
 
     def test_operator_needs_qr_confirmation_for_sensitive_sections(self):
         app = _read(APP_PATH)
-        # Роли бэк-офиса здесь наравне с оператором: до появления собственной
-        # должности эти люди БЫЛИ операторами, и подтверждение им требовалось.
+        # Бухгалтерия и маркетинг здесь наравне с оператором: до появления
+        # собственной должности эти люди БЫЛИ операторами, и подтверждение им
+        # требовалось. Кадровика в наборе нет — снят 22.09.2026 по решению
+        # владельца, см. test_hr_manager_enters_the_wiki_without_a_qr.
+        #
+        # Перечисление, а не isBackOfficeEmployeeRole: общий предикат не выразит
+        # разницу между должностями бэк-офиса и, сняв гейт кадровику, снял бы
+        # его молча всем троим.
         self.assertIn(
-            "    (normalizeRole(userLike?.role) === 'operator' || isBackOfficeEmployeeRole(userLike?.role))\n"
+            "const SENSITIVE_QR_GATED_ROLES = new Set("
+            "['operator', 'accounting_manager', 'marketing_manager']);",
+            app,
+        )
+        self.assertIn(
+            "    SENSITIVE_QR_GATED_ROLES.has(normalizeRole(userLike?.role))\n"
             "    && !isDepartmentHead(userLike)\n"
             ");",
             app,
@@ -288,7 +299,14 @@ class BackOfficeHeadSidebarTests(unittest.TestCase):
 
     def test_simple_employee_accounting_sidebar_item(self):
         app = _read(APP_PATH)
-        self.assertIn("{isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (", app)
+        # Условие выросло исключением для кадров: у отдела HR учёт больше не
+        # упрощённый — ему выдан полный набор списков (см.
+        # tests/test_hr_employee_accounting_scope.py).
+        self.assertIn(
+            "{isDepartmentHeadUser && !isEmployeeAccountingManager "
+            "&& departmentUsesSimpleEmployeeAccounting(user) && (",
+            app,
+        )
         self.assertIn(
             "else if (departmentUsesSimpleEmployeeAccounting(user) && "
             "['sv_list', 'manage_trainers'].includes(view)) redirectToView('manage_users');",
@@ -661,15 +679,36 @@ class BackOfficeEmployeeRoleTests(unittest.TestCase):
 
     def test_qr_gate_survives_the_rename(self):
         # До появления своей роли эти люди были операторами и подтверждение QR
-        # для «Вики» им требовалось. Переименование должности не повод снять его.
+        # для «Вики» им требовалось. Переименование должности не повод снять его —
+        # бухгалтерия и маркетинг проходят подтверждение по-прежнему.
         wiki = _read(WIKI_ACCESS_PATH)
         self.assertIn(
-            "QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager', 'marketing_manager'})",
+            "QR_GATED_ROLES = frozenset({'operator', 'accounting_manager', 'marketing_manager'})",
             wiki,
         )
         self.assertIn("return normalize_role(otp_role) in QR_GATED_ROLES", wiki)
+
+    def test_hr_manager_enters_the_wiki_without_a_qr(self):
+        """22.09.2026 владелец снял подтверждение ИМЕННО у кадровиков.
+
+        Дословно: «убери данное подтверждение, пусть будет доступ без него
+        именно у hr менеджеров». Снято только у одной должности: подтвердить
+        доступ кадровику было некому — супервайзеров в отделе нет, оставался
+        один глава.
+
+        Оба набора проверяем вместе: фронт и бэкенд обязаны совпадать, иначе
+        экран покажет замок там, где сервер пускает.
+        """
+        wiki = _read(WIKI_ACCESS_PATH)
+        self.assertNotIn("'hr_manager'", wiki.split("QR_GATED_ROLES = frozenset(")[1].split(')')[0])
         app = _read(APP_PATH)
-        self.assertIn("|| isBackOfficeEmployeeRole(userLike?.role))", app)
+        gated = app.split("const SENSITIVE_QR_GATED_ROLES = new Set(")[1].split(');')[0]
+        self.assertNotIn("hr_manager", gated)
+        # Бухгалтерию и маркетинг снятие не задело.
+        for role in ("accounting_manager", "marketing_manager"):
+            with self.subTest(role=role):
+                self.assertIn(role, gated)
+                self.assertIn(role, wiki.split("QR_GATED_ROLES = frozenset(")[1].split(')')[0])
 
     def test_helper_runtime(self):
         departments = {
@@ -1128,7 +1167,7 @@ class SensitiveQrRolesSingleSourceTests(unittest.TestCase):
         import sys as _sys
         module = importlib.import_module("wiki.access")
         self.assertEqual(
-            {"operator", "hr_manager", "accounting_manager", "marketing_manager"},
+            {"operator", "accounting_manager", "marketing_manager"},
             set(module.QR_GATED_ROLES),
         )
         self.assertNotIn("bot_schedule2", _sys.modules)

@@ -1259,7 +1259,9 @@ class GrantAccessRouteTests(unittest.TestCase):
         fake_db = self._db(
             users={
                 2: _user(2, 'admin', 'Глава СЗоВ'),
-                448: _user(448, 'hr_manager', 'HR чужого отдела'),
+                # Бухгалтерия, а не кадры: подтверждение у кадровиков снято
+                # 22.09.2026, и роль hr_manager в периметр больше не входит.
+                448: _user(448, 'accounting_manager', 'Бухгалтер чужого отдела'),
             },
             headed={2: [5]},
             departments={2: 5, 448: 9},

@@ -106,8 +106,16 @@ class FrontOfficeHeadSidebarTests(unittest.TestCase):
 
     def test_simple_employee_accounting_sidebar_and_labels(self):
         app = _read(APP_PATH)
-        self.assertIn("{isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (", app)
-        self.assertIn("{isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (", app)
+        self.assertIn(
+            "{isDepartmentHeadUser && !isEmployeeAccountingManager "
+            "&& departmentUsesSimpleEmployeeAccounting(user) && (",
+            app,
+        )
+        self.assertIn(
+            "{isDepartmentHeadUser && !isEmployeeAccountingManager "
+            "&& !departmentUsesSimpleEmployeeAccounting(user) && (",
+            app,
+        )
         self.assertIn(
             "else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) redirectToView('manage_users');",
             app,
@@ -163,7 +171,7 @@ class FrontOfficeHeadSidebarTests(unittest.TestCase):
 
     def test_break_rules_read_is_scoped_for_department_heads(self):
         endpoint = _function_source(BOT_PATH, "get_work_schedule_break_rules")
-        self.assertIn("if _is_global_admin_requester(role, requester_id):", endpoint)
+        self.assertIn("_is_global_admin_requester(role, requester_id)", endpoint)
         self.assertNotIn("if _is_admin_role(role):", endpoint)
         self.assertIn("db.get_work_schedule_break_rules(department_id=scope_dept)", endpoint)
 
@@ -184,8 +192,8 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
             " departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor,"
             " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
             " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
-            " departmentUsesSimpleEmployeeAccounting, firstAllowedView,"
-            " isBackOfficeEmployeeRole } from './utils/departmentViews';",
+            " departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole,"
+            " managesEmployeeAccounting } from './utils/departmentViews';",
             source,
         )
         self.assertIn(
@@ -280,7 +288,8 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
 
         self.assertIn(
             "import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
-            " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle }"
+            " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
+            " managesEmployeeAccounting }"
             " from '../../utils/departmentViews';",
             modal,
         )

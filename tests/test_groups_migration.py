@@ -710,11 +710,16 @@ class SupervisorGroupChangeTests(unittest.TestCase):
     def test_direction_change_is_denied_for_plain_supervisor(self):
         upd = BOT.split("def admin_update_user():", 1)[1].split("def admin_bulk_update_users():", 1)[0]
         self.assertIn(
-            "if field == 'direction_id' and requester_role == 'sv' and headed_dept_id is None:",
+            "if (field == 'direction_id' and requester_role == 'sv'\n"
+            "                and headed_dept_id is None and not personnel_manager):",
             upd,
         )
         bulk = BOT.split("def admin_bulk_update_users():", 1)[1].split("def admin_promote_to_supervisor():", 1)[0]
-        self.assertIn("if requester_role == 'sv' and headed_dept_id is None:", bulk)
+        # Условие выросло кадровиком: направление он меняет по всей компании.
+        self.assertIn(
+            "if requester_role == 'sv' and headed_dept_id is None and not personnel_manager:",
+            bulk,
+        )
         self.assertIn(
             "Направление сотрудника меняет админ или глава отдела — супервайзер меняет группу",
             bulk,
@@ -742,9 +747,7 @@ class SupervisorGroupChangeTests(unittest.TestCase):
         )
 
     def test_supervisor_section_prefetches_groups(self):
-        # Скобка лишняя против прежнего: всё условие обёрнуто проверкой отдела
-        # кадров — ему группы не выдаются (tests/test_hr_employee_accounting_scope.py).
-        self.assertIn("|| (view === 'manage_operators' && isDepartmentManager))) {", APP)
+        self.assertIn("|| (view === 'manage_operators' && isDepartmentManager)) {", APP)
 
 
 if __name__ == "__main__":

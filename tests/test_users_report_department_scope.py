@@ -61,7 +61,7 @@ class _UsersReportDB:
 
 class UsersReportEndpointScopeTests(unittest.TestCase):
     def _call(self, *, role, headed=(), query=None, departments=None, own_department=None,
-              employee_accounting_observer=False):
+              employee_accounting_manager=False):
         headed = {int(value) for value in headed}
         fake_db = _UsersReportDB(role, departments=departments)
         fake_request = SimpleNamespace(
@@ -93,8 +93,8 @@ class UsersReportEndpointScopeTests(unittest.TestCase):
                 ),
                 # Кадровик: выгрузка идёт по всей компании — см.
                 # tests/test_hr_employee_accounting_scope.py.
-                "_is_employee_accounting_observer": (
-                    lambda _user_id: employee_accounting_observer
+                "_is_employee_accounting_manager": (
+                    lambda _user_id: employee_accounting_manager
                 ),
             },
         )

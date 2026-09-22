@@ -1902,27 +1902,28 @@ def _is_marketing_observer(requester_id, role=None):
 
 
 # ─────────────────── «Учет сотрудников» у отдела кадров ───────────────────
-# Отдел, которому раздел открыт НА ПРОСМОТР, и притом по всей компании:
-# кадровый учёт ведётся не по своему отделу, а по всей фирме — то же решение
-# владельца, что у «Отметок» (GROUP_LATE_BOT_FULL_DEPARTMENT_CODE ниже).
-# Сверяем по КОДУ, а не по id: id засеян миграцией и в разных окружениях разный.
-# Зеркало на фронте — EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODES в src/App.jsx.
-EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODE = 'hr'
+# Отдел, который ведёт кадровый учёт ПО ВСЕЙ КОМПАНИИ. Сверяем по КОДУ, а не по
+# id: id засеян миграцией и в разных окружениях разный. Зеркало на фронте —
+# EMPLOYEE_ACCOUNTING_DEPARTMENT_CODES в src/App.jsx.
+EMPLOYEE_ACCOUNTING_DEPARTMENT_CODE = 'hr'
 
 
-def _is_employee_accounting_observer(requester_id):
-    """Сотрудник отдела кадров: «Учет сотрудников» ему открыт по всей компании.
+def _is_employee_accounting_manager(requester_id):
+    """Сотрудник отдела кадров: в «Учете сотрудников» он равен супер-админу.
 
-    Роль НЕ проверяется — признак доступа это членство в отделе: у кадровика
-    роль hr_manager с уровнем как у оператора, а проверка по роли открыла бы
-    раздел человеку, которого из отдела уже перевели.
+    22.09.2026 владелец открыл отделу раздел сперва на просмотр, в тот же день —
+    на правку: «открой доступ к редактированию и к другим вариантам сотрудников,
+    то есть это админы, сотрудники и супервайзеры». На вопрос, распространяется
+    ли это на логины и пароли админов, ответил «без исключений».
 
-    Глава отдела кадров сюда попадает НАМЕРЕННО, в отличие от
-    _is_marketing_observer: ему расширяется только ОХВАТ списка (вся компания
-    вместо своего отдела), а право правки осталось прежним — свой отдел, и
-    держит его _requester_can_access_target_user на каждой пишущей ручке.
-    Отдельного «наблюдателя-без-главы» здесь не нужно: ни одна пишущая ручка
-    этой функции не спрашивает.
+    Поэтому предикат означает ровно одно: ПО ЛЮДЯМ границ нет — ни по отделу, ни
+    по должности цели. Других разделов он не открывает: доступ к ним считают свои
+    предикаты, и в них этой функции нет.
+
+    Роль НЕ проверяется — признак доступа это членство в отделе: у кадровика роль
+    hr_manager с уровнем как у оператора, а проверка по роли открыла бы раздел
+    человеку, которого из отдела уже перевели. Глава отдела кадров попадает сюда
+    наравне с рядовым: с 22.09.2026 их права по людям совпадают.
 
     Ответ запоминается на время запроса (flask.g): отдел за один запрос не
     меняется, а функция стоит на ручках, которые зовут её по нескольку раз.
@@ -1931,7 +1932,7 @@ def _is_employee_accounting_observer(requester_id):
         return False
 
     try:
-        cached = getattr(g, '_employee_accounting_observer_cache', None)
+        cached = getattr(g, '_employee_accounting_manager_cache', None)
     except Exception:
         cached = None
     try:
@@ -1947,12 +1948,12 @@ def _is_employee_accounting_observer(requester_id):
     except Exception:
         department = {}
     verdict = (str(department.get('code') or '').strip().lower()
-               == EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODE)
+               == EMPLOYEE_ACCOUNTING_DEPARTMENT_CODE)
 
     try:
         if not isinstance(cached, dict):
             cached = {}
-            g._employee_accounting_observer_cache = cached
+            g._employee_accounting_manager_cache = cached
         cached[key] = verdict
     except Exception:
         pass
@@ -2374,6 +2375,17 @@ def _requester_can_access_target_user(
     target_user_id = int(target_user[0])
 
     if allow_self and requester_id == target_user_id:
+        return True
+
+    # Кадровик — раньше границы отдела и раньше проверки должности цели: по
+    # ЛЮДЯМ у него границ нет вовсе (решение владельца 22.09.2026, «без
+    # исключений»). Ветка стоит первой намеренно: глава отдела кадров тоже
+    # кадровик, и ветка headed_dept_ids ниже заперла бы его в своём отделе.
+    #
+    # Через эту функцию ходят почти все пишущие ручки раздела — точечная и
+    # массовая правка, смена логина и пароля, аватар, периоды статусов, история.
+    # Поэтому правило живёт здесь одной строкой, а не переписывается в каждой.
+    if _is_employee_accounting_manager(requester_id):
         return True
 
     headed_dept_ids = _headed_department_ids(requester_id)
@@ -4822,6 +4834,9 @@ def _resolve_avatar_target_user(requester, requester_id, target_user_id):
         return None, ("User not found", 404)
     requester_role = _normalize_user_role(requester[3])
     if requester_id == target_user[0]:
+        return target_user, None
+    # Кадровик ведёт карточки всей компании — фотография её часть.
+    if _is_employee_accounting_manager(requester_id):
         return target_user, None
     headed_dept_id = _headed_department_id(requester_id)
     if headed_dept_id is not None and not _is_super_admin_role(requester_role):
@@ -14927,9 +14942,9 @@ def get_admin_users():
         # 22.09.2026). Проверка стоит ДО операторской ветки ниже: человека с
         # ролью 'operator', переведённого в отдел кадров, та ветка увела бы на
         # урезанную проекцию из семи полей — без телефонов, статусов и отдела.
-        employee_accounting_observer = _is_employee_accounting_observer(requester_id)
+        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
 
-        if requester_role == 'operator' and not headed_dept_ids and not employee_accounting_observer:
+        if requester_role == 'operator' and not headed_dept_ids and not employee_accounting_manager:
             # Operator can only read a limited user projection.
             visible_roles = ['operator', 'trainee', 'trainer']
             with db._get_cursor() as cursor:
@@ -14969,13 +14984,15 @@ def get_admin_users():
             return jsonify({"status": "success", "users": users}), 200
 
         if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer')
-                or headed_dept_ids or employee_accounting_observer):
+                or headed_dept_ids or employee_accounting_manager):
             return jsonify({"error": "Forbidden"}), 403
 
         visible_roles = ['operator', 'trainee', 'trainer', *sorted(BACK_OFFICE_EMPLOYEE_ROLES)]
-        if headed_dept_ids or employee_accounting_observer:
+        if headed_dept_ids or employee_accounting_manager:
             visible_roles.extend(['sv', 'supervisor'])
-        if requester_role == 'super_admin':
+        # Админы — тому, у кого есть пункт «Админы»: супер-админу и кадровику.
+        # Супер-админов в списке нет ни у кого, и кадровик здесь не исключение.
+        if requester_role == 'super_admin' or employee_accounting_manager:
             visible_roles.append('admin')
         with db._get_cursor() as cursor:
             cursor.execute("""
@@ -15149,7 +15166,7 @@ def get_admin_users():
         # в headed_dept_ids, а рядового кадровика не пускает вовсе.
         if ((requester_role == 'sv' or headed_dept_ids)
                 and not _is_super_admin_role(requester_role)
-                and not employee_accounting_observer):
+                and not employee_accounting_manager):
             if headed_dept_ids:
                 users = [
                     item for item in users
@@ -15327,16 +15344,24 @@ def admin_update_user():
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         headed_dept_id = _headed_department_id(requester_id)
-        if requester_role not in ('super_admin', 'admin', 'sv') and headed_dept_id is None:
+        # Кадровик ведёт учёт по всей компании и правит любого — включая админа
+        # и включая перевод между отделами (решение владельца 22.09.2026).
+        personnel_manager = _is_employee_accounting_manager(requester_id)
+        if (requester_role not in ('super_admin', 'admin', 'sv')
+                and headed_dept_id is None and not personnel_manager):
             return jsonify({"error": "Only admins can update users"}), 403
-        if target_role in ('admin', 'super_admin') and requester_role != 'super_admin':
+        if (target_role in ('admin', 'super_admin')
+                and requester_role != 'super_admin' and not personnel_manager):
             return jsonify({"error": "Only super admins can update admin users"}), 403
-        if field == 'department_id' and not _is_global_admin_requester(requester_role, requester_id):
+        if (field == 'department_id'
+                and not _is_global_admin_requester(requester_role, requester_id)
+                and not personnel_manager):
             return jsonify({"error": "Only admins can reassign a user's department"}), 403
         # Направление сотрудника обычный СВ больше не меняет (задача #228): у него
         # есть смена ГРУППЫ, которая заодно переставляет супервайзера. Направление
         # осталось за админом и главой отдела.
-        if field == 'direction_id' and requester_role == 'sv' and headed_dept_id is None:
+        if (field == 'direction_id' and requester_role == 'sv'
+                and headed_dept_id is None and not personnel_manager):
             return jsonify({"error": "Направление сотрудника меняет админ или глава отдела — супервайзер меняет группу"}), 403
         scoped_target_roles = ('operator', 'trainee', 'trainer', 'sv') if headed_dept_id is not None else ('operator', 'trainee')
         if not _is_global_admin_requester(requester_role, requester_id) and not _requester_can_access_target_user(
@@ -15347,7 +15372,11 @@ def admin_update_user():
             supervisor_target_roles=scoped_target_roles
         ):
             return jsonify({"error": "Forbidden for this user"}), 403
-        relation_error = _validate_scoped_user_relation_update(
+        # Проверка «направление и супервайзер из отдела сотрудника» — про
+        # СУЖЕННОГО управленца; кадровик вместе с глобальным админом её минует.
+        # Иначе она отбивала бы правку человека, у которого отдел ещё не
+        # проставлен («Target user has no department»), а такие в базе есть.
+        relation_error = None if personnel_manager else _validate_scoped_user_relation_update(
             requester_role,
             requester_id,
             target_user,
@@ -15359,7 +15388,8 @@ def admin_update_user():
             return jsonify({"error": message}), status_code
         # Глава отдела меняет ставку как админ (в любой день, без sv-ограничений):
         # скоуп «только свой отдел» уже обеспечен _requester_can_access_target_user выше.
-        if field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv' and headed_dept_id is None:
+        if (field == 'rate' and not _is_admin_role(requester_role) and requester_role != 'sv'
+                and headed_dept_id is None and not personnel_manager):
             return jsonify({"error": "Only admins and supervisors can change rate"}), 403
         if field == 'rate' and requester_role == 'sv' and headed_dept_id is None:
             if not _is_supervisor_rate_change_day():
@@ -15442,7 +15472,9 @@ def admin_bulk_update_users():
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         headed_dept_id = _headed_department_id(requester_id)
-        if requester_role not in ('super_admin', 'admin', 'sv') and headed_dept_id is None:
+        personnel_manager = _is_employee_accounting_manager(requester_id)
+        if (requester_role not in ('super_admin', 'admin', 'sv')
+                and headed_dept_id is None and not personnel_manager):
             return jsonify({"error": "Only admins can update users"}), 403
 
         user_ids = []
@@ -15464,7 +15496,7 @@ def admin_bulk_update_users():
         updates = {}
         if 'direction_id' in changes_raw:
             # То же правило, что и в точечной правке: направление — не к СВ.
-            if requester_role == 'sv' and headed_dept_id is None:
+            if requester_role == 'sv' and headed_dept_id is None and not personnel_manager:
                 return jsonify({"error": "Направление сотрудника меняет админ или глава отдела — супервайзер меняет группу"}), 403
             direction_value = changes_raw.get('direction_id')
             if direction_value in [None, '']:
@@ -15478,7 +15510,7 @@ def admin_bulk_update_users():
         if 'group_id' in changes_raw:
             # Массовый перевод — только админ и глава отдела. У СВ смена группы
             # есть точечно, в карточке сотрудника (/api/admin/groups/<id>/operators).
-            if not (_is_admin_role(requester_role) or headed_dept_id is not None):
+            if not (_is_admin_role(requester_role) or headed_dept_id is not None or personnel_manager):
                 return jsonify({"error": "Only admins or department heads can change groups"}), 403
             group_value = changes_raw.get('group_id')
             if group_value in [None, '']:
@@ -15492,7 +15524,10 @@ def admin_bulk_update_users():
                 return jsonify({"error": "Группа не найдена"}), 400
             if target_group.get('status') != 'active':
                 return jsonify({"error": "Группа в архиве — выберите активную группу"}), 400
-            if not _is_global_admin_requester(requester_role, requester_id):
+            # Кадровик переводит людей в группы любых отделов — «своего отдела»
+            # у него в этом смысле нет: группы есть на линии, а он ведёт учёт
+            # всей компании. Границу отдела проверяем всем остальным.
+            if not _is_global_admin_requester(requester_role, requester_id) and not personnel_manager:
                 scope_dept = headed_dept_id if headed_dept_id is not None else db.get_user_department_id(requester_id)
                 if scope_dept is None or target_group.get('department_id') != scope_dept:
                     return jsonify({"error": "Группа не из вашего отдела"}), 403
@@ -15505,7 +15540,8 @@ def admin_bulk_update_users():
             if rate_value not in [1.0, 0.75, 0.5]:
                 return jsonify({"error": "Invalid rate value"}), 400
             updates['rate'] = rate_value
-            if requester_role == 'sv' and headed_dept_id is None and not _is_supervisor_rate_change_day():
+            if (requester_role == 'sv' and headed_dept_id is None and not personnel_manager
+                    and not _is_supervisor_rate_change_day()):
                 return jsonify({"error": "Supervisor can change rate only on the first day of the month"}), 403
 
         if not updates and target_group is None:
@@ -15618,7 +15654,8 @@ def admin_promote_to_supervisor():
             return jsonify({"error": "Invalid X-User-Id header"}), 400
 
         requester = db.get_user(id=requester_id)
-        if not requester or not _is_admin_role(requester[3]):
+        if not requester or not (_is_admin_role(requester[3])
+                                 or _is_employee_accounting_manager(requester_id)):
             return jsonify({"error": "Only admins can promote users"}), 403
 
         promoted_user = db.promote_operator_to_supervisor(target_user_id, changed_by=requester_id)
@@ -15705,7 +15742,7 @@ def admin_demote_to_operator():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        if not _is_admin_role(requester_role):
+        if not (_is_admin_role(requester_role) or _is_employee_accounting_manager(requester_id)):
             return jsonify({"error": "Понижать сотрудников может только администратор"}), 403
 
         target_user = db.get_user(id=target_user_id)
@@ -15795,7 +15832,7 @@ def api_admin_departments():
             # отдел, мы бы оставили фильтр с единственным пунктом над списком из
             # всех отделов. Справочник — это имена отделов, данных сотрудников
             # в нём нет.
-            if _is_employee_accounting_observer(requester_id):
+            if _is_employee_accounting_manager(requester_id):
                 return jsonify({"status": "success", "departments": db.get_departments()}), 200
             if headed_dept_ids and not _is_super_admin_role(requester_role):
                 departments = [
@@ -15956,7 +15993,7 @@ def get_user_history():
         # открыт ему по всей компании, а история — то же чтение, только по
         # одному человеку. Ветка стоит первой и для ГЛАВЫ отдела кадров тоже:
         # иначе он видел бы в списке всю фирму, а «Историю» открывал лишь своим.
-        if _is_employee_accounting_observer(requester_id):
+        if _is_employee_accounting_manager(requester_id):
             if _is_admin_role(_normalize_user_role(target_user[3])) and not _is_admin_role(requester_role):
                 return jsonify({"error": "Unauthorized to view this user's history"}), 403
         elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
@@ -16008,7 +16045,13 @@ def change_password():
         target_role = _normalize_user_role(target_user[3])
         if requester_id != user_id:
             headed_dept_id = _headed_department_id(requester_id)
-            if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+            # Кадровик меняет учётные данные кому угодно, включая админов:
+            # владелец 22.09.2026 на прямой вопрос ответил «без исключений».
+            # Ветка первая — глава отдела кадров тоже кадровик, и ветка
+            # headed_dept_id ниже заперла бы его своим отделом.
+            if _is_employee_accounting_manager(requester_id):
+                pass
+            elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
                 if not _requester_can_access_target_user(
                     requester,
                     requester_id,
@@ -17048,7 +17091,13 @@ def change_login():
         target_role = _normalize_user_role(target_user[3])
         if requester_id != user_id:
             headed_dept_id = _headed_department_id(requester_id)
-            if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+            # Кадровик меняет учётные данные кому угодно, включая админов:
+            # владелец 22.09.2026 на прямой вопрос ответил «без исключений».
+            # Ветка первая — глава отдела кадров тоже кадровик, и ветка
+            # headed_dept_id ниже заперла бы его своим отделом.
+            if _is_employee_accounting_manager(requester_id):
+                pass
+            elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
                 if not _requester_can_access_target_user(
                     requester,
                     requester_id,
@@ -17144,12 +17193,16 @@ def get_sv_list():
         headed_dept_ids = _headed_department_ids(requester_id)
         # Наблюдатель «Маркетинга»: список СВ нужен «Журналу оценок», чтобы
         # выбрать, чьи оценки смотреть. Ручка только на чтение.
+        # Кадровик: «Супервайзеры» — один из четырёх его списков, и карточку он
+        # там правит наравне с админом, поэтому профиль ему нужен полный.
+        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
         if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)
-                or headed_dept_ids or _is_marketing_observer(requester_id, requester_role)):
+                or headed_dept_ids or employee_accounting_manager
+                or _is_marketing_observer(requester_id, requester_role)):
             return jsonify({"error": "Only admins, supervisors or department heads can access supervisors list"}), 403
 
         is_global_admin = _is_global_admin_requester(requester_role, requester_id)
-        include_full_profile = is_global_admin or bool(headed_dept_ids)
+        include_full_profile = is_global_admin or bool(headed_dept_ids) or employee_accounting_manager
         with db._get_cursor() as cursor:
             if include_full_profile:
                 cursor.execute("""
@@ -17207,7 +17260,12 @@ def get_sv_list():
                     ORDER BY name
                 """)
                 supervisors = cursor.fetchall()
-                if headed_dept_ids and not is_global_admin:
+                # Кадровика граница отдела не касается: «Супервайзеры» — один из
+                # его четырёх списков, и он видит их по всей компании. Без этого
+                # ГЛАВА отдела кадров получал бы пустой список (супервайзеров в
+                # отделе нет), а рядовой кадровик — полный: два разных экрана
+                # одного раздела у людей с одинаковыми правами.
+                if headed_dept_ids and not is_global_admin and not employee_accounting_manager:
                     supervisors = [
                         supervisor for supervisor in supervisors
                         if supervisor[39] is not None and int(supervisor[39]) in headed_dept_ids
@@ -20834,7 +20892,12 @@ def add_user():
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         requester_headed_dept = db.headed_department_id_for_user(requester_id)
-        if requester_role not in ('super_admin', 'admin', 'sv') and requester_headed_dept is None:
+        # Кадровик заводит людей по всей компании: приём на работу — его работа.
+        # Создание АДМИНА ему всё равно закрыто ниже — владелец такой кнопки не
+        # называл, а «без исключений» относилось к правке уже заведённых.
+        personnel_manager = _is_employee_accounting_manager(requester_id)
+        if (requester_role not in ('super_admin', 'admin', 'sv')
+                and requester_headed_dept is None and not personnel_manager):
             return jsonify({"error": "Only admins can add users"}), 403
 
         name = str(data.get('name') or '').strip()
@@ -20847,11 +20910,12 @@ def add_user():
             return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, sv, admin, hr_manager, accounting_manager, marketing_manager"}), 400
         if role == 'admin' and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can create admins"}), 403
-        if role == 'sv' and not _is_admin_role(requester_role):
+        if role == 'sv' and not _is_admin_role(requester_role) and not personnel_manager:
             return jsonify({"error": "Only admins can create supervisors"}), 403
         # Глава бэк-офиса заводит своих сотрудников их же ролью — без этого
         # он не может завести никого, кроме оператора, которых у него нет.
         if (requester_role == 'sv' or requester_headed_dept is not None) and not _is_admin_role(requester_role) \
+                and not personnel_manager \
                 and role not in ('operator', 'trainee') and role not in BACK_OFFICE_EMPLOYEE_ROLES:
             return jsonify({"error": "Scoped managers can create only operators, trainees or back-office employees"}), 403
 
@@ -20872,7 +20936,7 @@ def add_user():
         # и пропасть из скоупа главы (см. get_admin_users).
         requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)
         department_id = None
-        if _is_global_admin_requester(requester_role, requester_id):
+        if _is_global_admin_requester(requester_role, requester_id) or personnel_manager:
             department_raw = data.get('department_id')
             if department_raw not in [None, '']:
                 try:
@@ -21294,16 +21358,21 @@ def get_directions():
         # 'operator' здесь означает «рядовой»: справочник направлений нужен
         # рядовому в «Опросах» и «Конкурсах», а наблюдателю «Маркетинга» — ещё
         # и в «Журнале оценок». Литерал не расширяем до всех рядовых ролей:
-        # кадровику и бухгалтеру направления не нужны, а лишний список — лишние
-        # данные.
+        # бухгалтеру направления не нужны, а лишний список — лишние данные.
+        #
+        # Кадровик — отдельной проверкой и с 22.09.2026: он правит направление
+        # оператора ЛЮБОГО отдела, поэтому ему нужен весь справочник, а не свой
+        # (своих направлений у отдела кадров нет вовсе — вышел бы пустой селект).
+        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
         if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'
-                or headed_dept_ids or _is_marketing_observer(requester_id, role)):
+                or headed_dept_ids or employee_accounting_manager
+                or _is_marketing_observer(requester_id, role)):
             return jsonify({"error": "Only admins, supervisors, department heads and operators can access directions"}), 403
 
         # Скоуп по отделу: админ/супер-админ видят все направления (опц. фильтр
         # ?department_id=); глава отдела / супервайзер / оператор — только направления
         # СВОЕГО отдела (изоляция отделов, в т.ч. в настройках перерывов графиков).
-        if _is_global_admin_requester(role, requester_id):
+        if _is_global_admin_requester(role, requester_id) or employee_accounting_manager:
             scope_dept = None
             dep_param = request.args.get('department_id')
             if dep_param not in (None, ''):
@@ -21430,7 +21499,8 @@ def _ensure_group_operator_manager():
         return None, None, None, (jsonify({"error": message}), status_code)
     role = _normalize_user_role(requester[3])
     headed_dept = _headed_department_id(requester_id)
-    if not (_is_admin_role(role) or headed_dept is not None or _is_supervisor_role(role)):
+    if not (_is_admin_role(role) or headed_dept is not None or _is_supervisor_role(role)
+            or _is_employee_accounting_manager(requester_id)):
         return None, None, None, (
             jsonify({"error": "Only admins, department heads or supervisors can move operators between groups"}),
             403,
@@ -21462,7 +21532,9 @@ def _ensure_group_in_requester_scope(group_id, requester_id, role):
     """Изоляция отделов: глава отдела управляет только группами своего отдела.
     Глобальный админ/супер-админ — любыми группами. Возвращает (resp, code) при
     отказе, иначе None."""
-    if _is_global_admin_requester(role, requester_id):
+    # Кадровик — наравне с глобальным админом: он зачисляет людей в группы
+    # любого отдела, своих групп у отдела кадров нет.
+    if _is_global_admin_requester(role, requester_id) or _is_employee_accounting_manager(requester_id):
         return None
     headed_dept = db.headed_department_id_for_user(requester_id)
     grp = db.get_group(group_id)
@@ -21483,6 +21555,16 @@ def _scoped_groups_for_requester(
 
     Возвращает (groups, error): error — уже готовый (response, code) для 403.
     """
+    # Кадровик переводит операторов между группами по всей компании: ветка стоит
+    # ПЕРВОЙ, иначе глава отдела кадров получил бы группы своего отдела, которых
+    # у отдела без линии не бывает, — пустой селект в карточке.
+    if _is_employee_accounting_manager(requester_id):
+        department_id = (
+            int(department_id_arg)
+            if department_id_arg and str(department_id_arg).isdigit()
+            else None
+        )
+        return db.list_groups(include_archived=include_archived, department_id=department_id), None
     if headed_dept_id is not None and not _is_super_admin_role(role):
         return db.list_groups(include_archived=include_archived, department_id=headed_dept_id), None
     if _is_global_admin_requester(role, requester_id):
@@ -26294,9 +26376,9 @@ def get_users_report():
         # экране (решение владельца 22.09.2026: выгрузка ничего не меняет, это то
         # же чтение, только файлом). Правки в выгрузке нет вовсе, поэтому
         # рядового кадровика она не отличает от главы отдела кадров.
-        employee_accounting_observer = _is_employee_accounting_observer(requester_id)
+        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
         if (not is_global_admin and not headed_department_ids and not is_supervisor
-                and not employee_accounting_observer):
+                and not employee_accounting_manager):
             return jsonify({"error": "Only admins, department heads and supervisors can generate users report"}), 403
 
         report_department_ids = None
@@ -26305,7 +26387,7 @@ def get_users_report():
         # Ветка кадровика идёт ВМЕСТЕ с админской и ДО ветки главы отдела: у
         # главы отдела кадров headed_department_ids не пуст, и без этого он
         # выгружал бы три человека своего отдела вместо компании, которую видит.
-        if is_global_admin or employee_accounting_observer:
+        if is_global_admin or employee_accounting_manager:
             if requested_department_id not in (None, ''):
                 try:
                     requested_department_id = int(requested_department_id)

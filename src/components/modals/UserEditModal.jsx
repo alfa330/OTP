@@ -3,7 +3,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle } from '../../utils/departmentViews';
+import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
@@ -225,7 +225,7 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
 
 // onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
 // Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, readOnly = false }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -244,12 +244,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
     const [avatarCropState, setAvatarCropState] = useState(null);
 
-    /* Карточка на просмотр. Поля не прячем и не подменяем текстом: человек
-       должен видеть те же подписи и тот же порядок, что и правящий, иначе
-       карточка кадровика и карточка главы — два разных экрана, которые
-       разойдутся при первой правке. Запираем ввод тем же способом, каким он
-       уже заперт на время сохранения, — одним disabled на поле. */
-    const fieldsLocked = isLoading || !!createdCredentials || readOnly;
+    /* Один запор на все поля обеих веток формы (создание и правка). До него
+       ветки запирались по-разному — `isLoading || createdCredentials` в одной и
+       голый `isLoading` в другой, — и расходились при каждой новой строке. */
+    const fieldsLocked = isLoading || !!createdCredentials;
 
     const isMobileShell = useIsMobileShell();
     /* Системное «назад» закрывает окно — на телефоне это главный способ его
@@ -293,16 +291,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const requesterHeadedDeptId = user?.headed_department_id ?? user?.headedDepartmentId ?? null;
     const isScopedDepartmentHeadRequester = requesterHeadedDeptId != null && requesterHeadedDeptId !== '' && requesterRole !== 'super_admin';
     const isAdminLikeRequester = isAdminLikeRoleFn(user?.role) && !isScopedDepartmentHeadRequester;
+    /* Кадровик ведёт учёт всей компании и заводит людей в ЛЮБОЙ отдел. Без этой
+       строки его скоупом становился бы собственный отдел (у роли hr_manager нет
+       admin-уровня), поле «Отдел» запиралось бы на «HR», и завести человека на
+       линию он не смог бы вовсе. Глава отдела кадров — здесь же: скоуп по
+       возглавляемому отделу дал бы ему ту же клетку. */
+    const managesEmployeeAccountingRequester = managesEmployeeAccounting(user);
+    const isUnscopedRequester = isAdminLikeRequester || managesEmployeeAccountingRequester;
     const isSupervisorRequester = requesterRole === 'sv';
     const isPureSupervisorRequester = isSupervisorRequester && !isScopedDepartmentHeadRequester;
     // Отдел по умолчанию (СЗоВ) — когда отдел у пользователя не выбран явно.
     const szovDeptId = (departments || []).find((d) => String(d.code || '').toLowerCase() === 'szov')?.id ?? null;
     // Скоуп отдела создающего: супервайзер/глава видят и могут назначать только свой отдел.
     const requesterOwnDeptId = user?.department_id ?? null;
-    const requesterScopeDeptId = isAdminLikeRequester
+    const requesterScopeDeptId = isUnscopedRequester
         ? null
         : ((requesterHeadedDeptId != null ? requesterHeadedDeptId : requesterOwnDeptId) ?? null);
-    const isDeptScoped = !isAdminLikeRequester && requesterScopeDeptId != null;
+    const isDeptScoped = !isUnscopedRequester && requesterScopeDeptId != null;
     // Эффективный отдел сотрудника: выбранный в модалке, иначе — отдел создающего (для скоупа) или СЗоВ.
     const effectiveDeptId = (() => {
         const d = editedUser?.department_id;
@@ -355,7 +360,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // который выбирает отдел в модалке.
     const groupsForSelectedDept = (effectiveDeptId) => {
         const active = (groups || []).filter((g) => g?.status !== 'archived');
-        if (!isAdminLikeRequester || effectiveDeptId == null) return active;
+        if (!isUnscopedRequester || effectiveDeptId == null) return active;
         return active.filter((g) => Number(g?.department_id ?? g?.departmentId) === Number(effectiveDeptId));
     };
     const selectedGroup = (groups || []).find((g) => String(g?.id) === String(editedUser?.group_id));
@@ -789,10 +794,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
 
     const handleSave = async () => {
-        // Карточка на просмотр. Кнопки сохранения в этом режиме нет вовсе, но
-        // запор ставим и здесь: onSave уходит на сервер, и цена ошибки в
-        // разметке — чужая правка, а не лишний рендер.
-        if (readOnly) return;
         const isCreateMode = !editedUser?.id;
         const isTrainerUser = isTrainerDraft(editedUser);
         const isOperatorUser = isOperatorDraft(editedUser);
@@ -1001,14 +1002,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         { id: "data", label: "Данные" },
         { id: "contacts", label: "Контакты" },
         { id: "corporate", label: "Корпоративное" },
-        // «Аккаунт» — это ввод нового логина и пароля, смотреть там нечего:
-        // текущие значения вкладка не показывает. В режиме просмотра она была бы
-        // замком, за которым два пустых запертых поля.
-        ...(readOnly ? [] : [{
+        {
             id: "account",
             label: <FaIcon className="fa-solid fa-lock" aria-hidden="true" />,
             title: "Аккаунт"
-        }])
+        }
     ];
     const avatarInitial = String(editedUser?.name || 'U').charAt(0).toUpperCase();
     const avatarDisabled = fieldsLocked || isAvatarProcessing || !!avatarCropState;
@@ -1127,7 +1125,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             className="otp-modal-card pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
             onClick={(e) => e.stopPropagation()}
             >
-            <div className={`px-6 py-5 max-h-[88vh] overflow-y-auto${readOnly ? ' uem-view' : ''}`}>
+            <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
                 {/* Header */}
                 {isMobileShell ? (
                 /* Телефон: шапка экрана — стрелка слева и заголовок по центру,
@@ -1148,7 +1146,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
                     </button>
                     <div className="uem-heading">
-                    <h2 id="edit-user-title" className="uem-title">{isCreateMode ? "Новый сотрудник" : (readOnly ? "Карточка сотрудника" : "Изменить данные")}</h2>
+                    <h2 id="edit-user-title" className="uem-title">{isCreateMode ? "Новый сотрудник" : "Изменить данные"}</h2>
                     {editedUser?.name && !isCreateMode && <div className="uem-sub">{editedUser.name}</div>}
                     </div>
                 </div>
@@ -1156,12 +1154,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-col gap-0.5">
                     <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                    {/* На просмотре ни карандаша, ни слова «Редактировать»: карточка
-                        ничего не сохранит, и обещать правку в заголовке — обман. */}
-                    {isCreateMode
-                        ? <FaIcon className="fas fa-user-edit text-blue-600"></FaIcon>
-                        : <FaIcon className={`fas ${readOnly ? 'fa-id-card' : 'fa-pen'} text-blue-600`}></FaIcon>}
-                    {isCreateMode ? "Добавить сотрудника" : (readOnly ? "Карточка сотрудника" : "Редактировать сотрудника")}
+                    {isCreateMode ?  <FaIcon className="fas fa-user-edit text-blue-600"></FaIcon> : <FaIcon className="fas fa-pen text-blue-600"></FaIcon>}
+                    {isCreateMode ? "Добавить сотрудника" : "Редактировать сотрудника"}
                     </h2>
                     {editedUser?.name && !isCreateMode && (
                     <div className="mt-1 text-lg font-semibold text-blue-700 pl-9">{editedUser.name}</div>
@@ -1743,11 +1737,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             ]
                         }
                         />
-                        {!readOnly && (
                         <p className="mt-1 text-xs text-slate-500">
                             {isDeptScoped ? 'Сотрудник создаётся в вашем отделе.' : 'Отдел определяет доступные сотруднику разделы.'}
                         </p>
-                        )}
                     </div>
                     )}
 
@@ -2457,14 +2449,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     ]
                                 }
                                 />
-                                {/* На просмотре подпись молчит: она объясняет ГРАНИЦУ ПРАВКИ
-                                    («ваш отдел»), а кадровик открывает карточку человека из
-                                    любого отдела — там она просто неправда. */}
-                                {!readOnly && (
                                 <p className="mt-1 text-xs text-slate-500">
                                     {isDeptScoped ? 'Отдел сотрудника закреплён за вашим отделом.' : 'Отдел определяет доступные сотруднику разделы.'}
                                 </p>
-                                )}
                             </div>
                             )}
 
@@ -2759,12 +2746,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {/* Actions */}
                 {/* Телефон: одна кнопка во всю ширину у нижнего края. «Отмена»
                     там лишняя — уход с экрана уже сделан стрелкой в шапке. */}
-                {!createdCredentials && readOnly && (
-                    <p className="pt-2 text-xs text-gray-500">
-                    Карточка открыта на просмотр — изменения не сохраняются.
-                    </p>
-                )}
-                {!createdCredentials && !readOnly && isMobileShell && (
+                {!createdCredentials && isMobileShell && (
                     <div className="uem-foot">
                     <button
                         type="button"
@@ -2776,7 +2758,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </button>
                     </div>
                 )}
-                {!createdCredentials && !readOnly && !isMobileShell && (
+                {!createdCredentials && !isMobileShell && (
                     <div className="flex justify-end items-center gap-3 pt-2">
                     <button
                         onClick={() => {

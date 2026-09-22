@@ -198,10 +198,8 @@ class ConfirmationTests(unittest.TestCase):
 class WindowTests(unittest.TestCase):
     def test_edit_form_on_a_phone_has_a_back_arrow_and_one_button(self):
         self.assertIn('className="otp-modal-back uem-back"', EDIT)
-        # Признак «только просмотр» стоит в условии обеих кнопок: карточка
-        # кадровика открывается без них вовсе (см. HrEmployeeAccountingTests).
-        footer = EDIT[EDIT.index('{!createdCredentials && !readOnly && isMobileShell && ('):]
-        footer = footer[:footer.index('{!createdCredentials && !readOnly && !isMobileShell && (')]
+        footer = EDIT[EDIT.index('{!createdCredentials && isMobileShell && ('):]
+        footer = footer[:footer.index('{!createdCredentials && !isMobileShell && (')]
         self.assertIn('className="uem-save"', footer)
         self.assertNotIn('Отмена', footer)
         self.assertIn('{!createdCredentials && !isMobileShell && <p className="mt-2 text-xs text-gray-400">Нажмите Esc', EDIT)
