@@ -662,7 +662,13 @@ class ExistingUserGroupEditTests(unittest.TestCase):
         # направление сервер отклонит уже после перевода в группу — половина карточки
         # осталась бы сохранённой. Список фильтруется, как и в форме создания.
         self.assertNotIn("{directions.map((dir) => (", USER_MODAL)
-        self.assertEqual(USER_MODAL.count("directionsForSelectedDept(effectiveDeptId).map((dir) => ("), 2)
+        # Оба селекта (создание и правка) берут направления ОТДЕЛА сотрудника.
+        # Считаем сам отбор, а не `.map` следом: в ветке правки список сперва
+        # кладётся в переменную — чужое направление там подмешивается отдельной
+        # опцией по имени из строки списка (кадровик открывает карточку человека
+        # из любого отдела, а справочник приходит по отделу смотрящего).
+        self.assertEqual(USER_MODAL.count("directionsForSelectedDept(effectiveDeptId)"), 2)
+        self.assertIn("const options = directionsForSelectedDept(effectiveDeptId);", USER_MODAL)
 
     def test_bulk_panel_uses_groups(self):
         self.assertIn("Группа: не менять", APP)
@@ -736,7 +742,9 @@ class SupervisorGroupChangeTests(unittest.TestCase):
         )
 
     def test_supervisor_section_prefetches_groups(self):
-        self.assertIn("|| (view === 'manage_operators' && isDepartmentManager)) {", APP)
+        # Скобка лишняя против прежнего: всё условие обёрнуто проверкой отдела
+        # кадров — ему группы не выдаются (tests/test_hr_employee_accounting_scope.py).
+        self.assertIn("|| (view === 'manage_operators' && isDepartmentManager))) {", APP)
 
 
 if __name__ == "__main__":

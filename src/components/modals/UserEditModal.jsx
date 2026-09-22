@@ -225,7 +225,7 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
 
 // onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
 // Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, readOnly = false }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -243,6 +243,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const [avatarError, setAvatarError] = useState("");
     const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
     const [avatarCropState, setAvatarCropState] = useState(null);
+
+    /* Карточка на просмотр. Поля не прячем и не подменяем текстом: человек
+       должен видеть те же подписи и тот же порядок, что и правящий, иначе
+       карточка кадровика и карточка главы — два разных экрана, которые
+       разойдутся при первой правке. Запираем ввод тем же способом, каким он
+       уже заперт на время сохранения, — одним disabled на поле. */
+    const fieldsLocked = isLoading || !!createdCredentials || readOnly;
 
     const isMobileShell = useIsMobileShell();
     /* Системное «назад» закрывает окно — на телефоне это главный способ его
@@ -782,6 +789,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
 
     const handleSave = async () => {
+        // Карточка на просмотр. Кнопки сохранения в этом режиме нет вовсе, но
+        // запор ставим и здесь: onSave уходит на сервер, и цена ошибки в
+        // разметке — чужая правка, а не лишний рендер.
+        if (readOnly) return;
         const isCreateMode = !editedUser?.id;
         const isTrainerUser = isTrainerDraft(editedUser);
         const isOperatorUser = isOperatorDraft(editedUser);
@@ -990,14 +1001,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         { id: "data", label: "Данные" },
         { id: "contacts", label: "Контакты" },
         { id: "corporate", label: "Корпоративное" },
-        {
+        // «Аккаунт» — это ввод нового логина и пароля, смотреть там нечего:
+        // текущие значения вкладка не показывает. В режиме просмотра она была бы
+        // замком, за которым два пустых запертых поля.
+        ...(readOnly ? [] : [{
             id: "account",
             label: <FaIcon className="fa-solid fa-lock" aria-hidden="true" />,
             title: "Аккаунт"
-        }
+        }])
     ];
     const avatarInitial = String(editedUser?.name || 'U').charAt(0).toUpperCase();
-    const avatarDisabled = isLoading || !!createdCredentials || isAvatarProcessing || !!avatarCropState;
+    const avatarDisabled = fieldsLocked || isAvatarProcessing || !!avatarCropState;
     const avatarCropViewStyle = React.useMemo(() => {
         if (!avatarCropState) return null;
         const { minSide } = getAvatarCropMetrics(
@@ -1113,7 +1127,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             className="otp-modal-card pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
             onClick={(e) => e.stopPropagation()}
             >
-            <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
+            <div className={`px-6 py-5 max-h-[88vh] overflow-y-auto${readOnly ? ' uem-view' : ''}`}>
                 {/* Header */}
                 {isMobileShell ? (
                 /* Телефон: шапка экрана — стрелка слева и заголовок по центру,
@@ -1134,7 +1148,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
                     </button>
                     <div className="uem-heading">
-                    <h2 id="edit-user-title" className="uem-title">{isCreateMode ? "Новый сотрудник" : "Изменить данные"}</h2>
+                    <h2 id="edit-user-title" className="uem-title">{isCreateMode ? "Новый сотрудник" : (readOnly ? "Карточка сотрудника" : "Изменить данные")}</h2>
                     {editedUser?.name && !isCreateMode && <div className="uem-sub">{editedUser.name}</div>}
                     </div>
                 </div>
@@ -1142,8 +1156,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-col gap-0.5">
                     <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                    {isCreateMode ?  <FaIcon className="fas fa-user-edit text-blue-600"></FaIcon> : <FaIcon className="fas fa-pen text-blue-600"></FaIcon>}
-                    {isCreateMode ? "Добавить сотрудника" : "Редактировать сотрудника"}
+                    {/* На просмотре ни карандаша, ни слова «Редактировать»: карточка
+                        ничего не сохранит, и обещать правку в заголовке — обман. */}
+                    {isCreateMode
+                        ? <FaIcon className="fas fa-user-edit text-blue-600"></FaIcon>
+                        : <FaIcon className={`fas ${readOnly ? 'fa-id-card' : 'fa-pen'} text-blue-600`}></FaIcon>}
+                    {isCreateMode ? "Добавить сотрудника" : (readOnly ? "Карточка сотрудника" : "Редактировать сотрудника")}
                     </h2>
                     {editedUser?.name && !isCreateMode && (
                     <div className="mt-1 text-lg font-semibold text-blue-700 pl-9">{editedUser.name}</div>
@@ -1201,7 +1219,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.name || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1210,7 +1228,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.gender || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, gender: v })}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="Не указан"
                         options={[
                             { value: "", label: "Не указан" },
@@ -1228,7 +1246,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         max={todayInputDate()}
                         onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1244,7 +1262,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             study_specialty: e.target.value.trim() ? (editedUser?.study_specialty || "") : ""
                         })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1256,7 +1274,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.study_specialty || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_specialty: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     )}
@@ -1268,7 +1286,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.study_course || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1279,7 +1297,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             checked={!!editedUser?.study_completed}
                             onChange={(e) => setEditedUser({ ...editedUser, study_completed: e.target.checked })}
                             className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
+                            disabled={fieldsLocked}
                         />
                         <span>Завершил учебу</span>
                         </label>
@@ -1295,7 +1313,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.study_completion_year ?? ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_completion_year: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1306,7 +1324,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.card_number || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, card_number: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     </>
@@ -1321,7 +1339,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.phone || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder={KZ_PHONE_PLACEHOLDER}
                         maxLength={12}
                         inputMode="tel"
@@ -1335,7 +1353,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.email || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1346,7 +1364,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.personal_email || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, personal_email: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1357,7 +1375,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.instagram || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, instagram: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1368,7 +1386,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.telegram_nick || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, telegram_nick: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="@username"
                         />
                     </div>
@@ -1383,7 +1401,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.close_contact_1_relation || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading || !!createdCredentials}
+                                disabled={fieldsLocked}
                                 />
                             </div>
                             <div>
@@ -1393,7 +1411,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.close_contact_1_full_name || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading || !!createdCredentials}
+                                disabled={fieldsLocked}
                                 />
                             </div>
                             <div>
@@ -1403,7 +1421,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.close_contact_1_phone || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading || !!createdCredentials}
+                                disabled={fieldsLocked}
                                 placeholder={KZ_PHONE_PLACEHOLDER}
                                 maxLength={12}
                                 inputMode="tel"
@@ -1422,7 +1440,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.close_contact_2_relation || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading || !!createdCredentials}
+                                disabled={fieldsLocked}
                                 />
                             </div>
                             <div>
@@ -1432,7 +1450,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.close_contact_2_full_name || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading || !!createdCredentials}
+                                disabled={fieldsLocked}
                                 />
                             </div>
                             <div>
@@ -1442,7 +1460,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.close_contact_2_phone || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading || !!createdCredentials}
+                                disabled={fieldsLocked}
                                 placeholder={KZ_PHONE_PLACEHOLDER}
                                 maxLength={12}
                                 inputMode="tel"
@@ -1462,7 +1480,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={toDateInputValue(editedUser?.hire_date)}
                         onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                     />
                     </div>
 
@@ -1475,7 +1493,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
                         placeholder="Например, бухгалтер по расчётам"
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     )}
@@ -1486,7 +1504,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.city || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, city: v })}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="Не указано"
                         searchable
                         searchPlaceholder="Поиск по городам…"
@@ -1503,7 +1521,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.company_name || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
 
@@ -1512,7 +1530,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.employment_type || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, employment_type: v })}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="Не указано"
                         options={[
                             { value: "", label: "Не указано" },
@@ -1530,7 +1548,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             checked={!!editedUser?.internship_in_company}
                             onChange={(e) => setEditedUser({ ...editedUser, internship_in_company: e.target.checked })}
                             className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
+                            disabled={fieldsLocked}
                         />
                         <span>Проходил практику в компании</span>
                         </label>
@@ -1549,7 +1567,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 front_office_training_date: e.target.checked ? (editedUser?.front_office_training_date || "") : ""
                             })}
                             className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
+                            disabled={fieldsLocked}
                         />
                         <span>Был во фронт офисе на обучении</span>
                         </label>
@@ -1563,7 +1581,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={toDateInputValue(editedUser?.front_office_training_date)}
                         onChange={(e) => setEditedUser({ ...editedUser, front_office_training_date: e.target.value || "" })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     )}
@@ -1577,7 +1595,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.taxipro_id || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, taxipro_id: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     </>
@@ -1600,7 +1618,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                             });
                         }}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         options={[
                             { value: "working", label: "Работает" },
                             { value: "fired", label: "Уволен" },
@@ -1631,7 +1649,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             : editedUser?.status_period_end_date
                                     })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading || !!createdCredentials}
+                                    disabled={fieldsLocked}
                                 />
                             </div>
                             {shouldShowStatusPeriodEndDate(editedUser) && (
@@ -1645,7 +1663,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     min={editedUser?.status_period_start_date || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, status_period_end_date: e.target.value, use_schedule_status_period: true })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading || !!createdCredentials}
+                                    disabled={fieldsLocked}
                                 />
                             </div>
                             )}
@@ -1666,7 +1684,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                                 : ''
                                         }));
                                     }}
-                                    disabled={isLoading || !!createdCredentials}
+                                    disabled={fieldsLocked}
                                     placeholder="Выберите причину"
                                     options={[
                                         { value: "", label: "Выберите причину" },
@@ -1686,7 +1704,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             status_period_end_date: e.target.checked ? '' : prev?.status_period_end_date
                                         }))}
                                         className="rounded border-gray-300"
-                                        disabled={isLoading || !!createdCredentials}
+                                        disabled={fieldsLocked}
                                     />
                                     <span>ЧС (без возможности восстановления)</span>
                                 </label>
@@ -1698,7 +1716,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     onChange={(e) => setEditedUser({ ...editedUser, status_period_comment: e.target.value, use_schedule_status_period: true })}
                                     rows={3}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading || !!createdCredentials}
+                                    disabled={fieldsLocked}
                                 />
                             </div>
                             <div className="text-xs text-slate-500">
@@ -1715,7 +1733,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
                         onChange={handleDepartmentChange}
-                        disabled={isLoading || !!createdCredentials || isDeptScoped}
+                        disabled={fieldsLocked || isDeptScoped}
                         placeholder="По умолчанию (СЗоВ)"
                         options={isDeptScoped
                             ? (departments || []).filter((dep) => dep?.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name }))
@@ -1725,9 +1743,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             ]
                         }
                         />
+                        {!readOnly && (
                         <p className="mt-1 text-xs text-slate-500">
                             {isDeptScoped ? 'Сотрудник создаётся в вашем отделе.' : 'Отдел определяет доступные сотруднику разделы.'}
                         </p>
+                        )}
                     </div>
                     )}
 
@@ -1737,7 +1757,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.group_id || ""}
                         onChange={handleGroupChange}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="Выберите группу"
                         options={[
                             { value: "", label: "Выберите группу" },
@@ -1765,7 +1785,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.rate ?? 1.0}
                         onChange={(v) => setEditedUser({ ...editedUser, rate: Number(v) })}
-                        disabled={isLoading || !!createdCredentials || isSupervisorRateLocked}
+                        disabled={fieldsLocked || isSupervisorRateLocked}
                         options={[
                             { value: 1.0, label: "1.00" },
                             { value: 0.75, label: "0.75" },
@@ -1786,7 +1806,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={editedUser?.direction_id || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, direction_id: v, direction_picked_by_hand: true })}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="Выберите направление"
                         options={[
                             { value: "", label: "Выберите направление" },
@@ -1805,7 +1825,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             checked={!!editedUser?.has_proxy}
                             onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
                             className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
+                            disabled={fieldsLocked}
                         />
                         <span>Наличие прокси</span>
                         </label>
@@ -1819,7 +1839,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         onChange={(e) => setEditedUser({ ...editedUser, proxy_card_number: e.target.value })}
                         placeholder="Можно указать не полностью"
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     )}
@@ -1830,7 +1850,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <CustomSelect
                         value={normalizeProxyStatus(editedUser?.proxy_status)}
                         onChange={(v) => setEditedUser({ ...editedUser, proxy_status: v })}
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         placeholder="Не указан"
                         options={[
                             { value: "", label: "Не указан" },
@@ -1847,7 +1867,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             checked={!!editedUser?.has_driver_license}
                             onChange={(e) => setEditedUser({ ...editedUser, has_driver_license: e.target.checked })}
                             className="rounded border-gray-300"
-                            disabled={isLoading || !!createdCredentials}
+                            disabled={fieldsLocked}
                         />
                         <span>Наличие водительских прав</span>
                         </label>
@@ -1860,7 +1880,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.sip_number || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                        disabled={isLoading || !!createdCredentials}
+                        disabled={fieldsLocked}
                         />
                     </div>
                     )}
@@ -1892,7 +1912,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.name || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -1902,7 +1922,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.gender || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             >
                             <option value="">Не указан</option>
                             <option value="male">Мужской</option>
@@ -1922,7 +1942,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 max={todayInputDate()}
                                 onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
                                 className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                             />
                             {editedUser?.birth_date && (
                                 <span className="text-gray-600 text-xs whitespace-nowrap">
@@ -1944,7 +1964,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 study_specialty: e.target.value.trim() ? (editedUser?.study_specialty || "") : ""
                             })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -1956,7 +1976,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.study_specialty || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_specialty: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
                         )}
@@ -1968,7 +1988,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.study_course || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -1979,7 +1999,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 checked={!!editedUser?.study_completed}
                                 onChange={(e) => setEditedUser({ ...editedUser, study_completed: e.target.checked })}
                                 className="rounded border-gray-300"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                             />
                             <span>Завершил учебу</span>
                             </label>
@@ -1995,7 +2015,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.study_completion_year ?? ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_completion_year: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -2006,7 +2026,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.card_number || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, card_number: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
                         </>
@@ -2021,7 +2041,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.phone || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             placeholder={KZ_PHONE_PLACEHOLDER}
                             maxLength={12}
                             inputMode="tel"
@@ -2035,7 +2055,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.email || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -2046,7 +2066,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.personal_email || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, personal_email: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -2057,7 +2077,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.instagram || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, instagram: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -2068,7 +2088,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.telegram_nick || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, telegram_nick: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             placeholder="@username"
                             />
                         </div>
@@ -2083,7 +2103,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.close_contact_1_relation || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     />
                                 </div>
                                 <div>
@@ -2093,7 +2113,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.close_contact_1_full_name || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     />
                                 </div>
                                 <div>
@@ -2103,7 +2123,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.close_contact_1_phone || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     placeholder={KZ_PHONE_PLACEHOLDER}
                                     maxLength={12}
                                     inputMode="tel"
@@ -2122,7 +2142,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.close_contact_2_relation || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     />
                                 </div>
                                 <div>
@@ -2132,7 +2152,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.close_contact_2_full_name || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     />
                                 </div>
                                 <div>
@@ -2142,7 +2162,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.close_contact_2_phone || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     placeholder={KZ_PHONE_PLACEHOLDER}
                                     maxLength={12}
                                     inputMode="tel"
@@ -2166,7 +2186,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={toDateInputValue(editedUser?.hire_date)}
                                 onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
                                 className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                             />
                             {editedUser?.hire_date && (
                                 <span className="text-gray-600 text-xs whitespace-nowrap">
@@ -2185,7 +2205,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
                             placeholder="Например, бухгалтер по расчётам"
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
                         )}
@@ -2196,7 +2216,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <CustomSelect
                             value={editedUser?.city || ""}
                             onChange={(v) => setEditedUser({ ...editedUser, city: v })}
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             placeholder="Не указано"
                             searchable
                             searchPlaceholder="Поиск по городам…"
@@ -2213,7 +2233,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.company_name || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -2223,7 +2243,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.employment_type || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             >
                             <option value="">Не указано</option>
                             <option value="gph">ГПХ</option>
@@ -2239,7 +2259,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 checked={!!editedUser?.internship_in_company}
                                 onChange={(e) => setEditedUser({ ...editedUser, internship_in_company: e.target.checked })}
                                 className="rounded border-gray-300"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                             />
                             <span>Проходил практику в компании</span>
                             </label>
@@ -2258,7 +2278,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     front_office_training_date: e.target.checked ? (editedUser?.front_office_training_date || "") : ""
                                 })}
                                 className="rounded border-gray-300"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                             />
                             <span>Был во фронт офисе на обучении</span>
                             </label>
@@ -2272,7 +2292,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={toDateInputValue(editedUser?.front_office_training_date)}
                             onChange={(e) => setEditedUser({ ...editedUser, front_office_training_date: e.target.value || "" })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
                         )}
@@ -2286,7 +2306,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.taxipro_id || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, taxipro_id: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
                         </>
@@ -2311,7 +2331,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 });
                             }}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             >
                             <option value="working">Работает</option>
                             <option value="fired">Уволен</option>
@@ -2341,7 +2361,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                                 : editedUser?.status_period_end_date
                                         })}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                        disabled={isLoading}
+                                        disabled={fieldsLocked}
                                     />
                                 </div>
                                 {shouldShowStatusPeriodEndDate(editedUser) && (
@@ -2355,7 +2375,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         min={editedUser?.status_period_start_date || ""}
                                         onChange={(e) => setEditedUser({ ...editedUser, status_period_end_date: e.target.value, use_schedule_status_period: true })}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                        disabled={isLoading}
+                                        disabled={fieldsLocked}
                                     />
                                 </div>
                                 )}
@@ -2378,7 +2398,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             }));
                                         }}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                        disabled={isLoading}
+                                        disabled={fieldsLocked}
                                     >
                                         <option value="">Выберите причину</option>
                                         {DISMISSAL_REASON_OPTIONS.map(reason => (
@@ -2398,7 +2418,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                                 status_period_end_date: e.target.checked ? '' : prev?.status_period_end_date
                                             }))}
                                             className="rounded border-gray-300"
-                                            disabled={isLoading}
+                                            disabled={fieldsLocked}
                                         />
                                         <span>ЧС (без возможности восстановления)</span>
                                     </label>
@@ -2410,7 +2430,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         onChange={(e) => setEditedUser({ ...editedUser, status_period_comment: e.target.value, use_schedule_status_period: true })}
                                         rows={3}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                        disabled={isLoading}
+                                        disabled={fieldsLocked}
                                     />
                                 </div>
                                 <div className="text-xs text-slate-500">
@@ -2427,7 +2447,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <CustomSelect
                                 value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
                                 onChange={handleDepartmentChange}
-                                disabled={isLoading || isDeptScoped}
+                                disabled={fieldsLocked || isDeptScoped}
                                 placeholder="По умолчанию (СЗоВ)"
                                 options={isDeptScoped
                                     ? (departments || []).filter((dep) => dep?.is_active !== false).map((dep) => ({ value: dep.id, label: dep.name }))
@@ -2437,9 +2457,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     ]
                                 }
                                 />
+                                {/* На просмотре подпись молчит: она объясняет ГРАНИЦУ ПРАВКИ
+                                    («ваш отдел»), а кадровик открывает карточку человека из
+                                    любого отдела — там она просто неправда. */}
+                                {!readOnly && (
                                 <p className="mt-1 text-xs text-slate-500">
                                     {isDeptScoped ? 'Отдел сотрудника закреплён за вашим отделом.' : 'Отдел определяет доступные сотруднику разделы.'}
                                 </p>
+                                )}
                             </div>
                             )}
 
@@ -2454,7 +2479,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.group_id || ""}
                                     onChange={(e) => handleGroupChange(e.target.value)}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                     >
                                     {/* «Без группы» — только админу и главе отдела: СВ переводит
                                         оператора между группами, но не оставляет без группы
@@ -2501,7 +2526,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
                                             : 'border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900'
                                     }`}
-                                    disabled={isLoading || isSupervisorRateLocked}
+                                    disabled={fieldsLocked || isSupervisorRateLocked}
                                     >
                                     <option value={1.0}>1.00</option>
                                     <option value={0.75}>0.75</option>
@@ -2525,18 +2550,39 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.direction_id || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value, direction_picked_by_hand: true })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                                 >
                                 <option value="">Выберите направление</option>
                                 {/* Только направления отдела сотрудника — как в форме создания.
                                     Глава нескольких отделов получает их списком по всем своим
                                     отделам, а чужое направление сервер отклонит уже после
                                     перевода в группу. */}
-                                {directionsForSelectedDept(effectiveDeptId).map((dir) => (
-                                    <option key={dir.id} value={dir.id}>
-                                    {dir.name}
-                                    </option>
-                                ))}
+                                {(() => {
+                                    const options = directionsForSelectedDept(effectiveDeptId);
+                                    /* Направление сотрудника, которого нет в справочнике,
+                                       подмешиваем отдельной опцией — тем же приёмом, что у
+                                       «Группы» выше и у «Города». Иначе поле показывает
+                                       пустоту там, где значение есть: справочник направлений
+                                       приходит по отделу смотрящего, а карточку открывают и
+                                       на сотрудника чужого отдела (кадровик видит всю
+                                       компанию). Имя берём из строки списка. */
+                                    const currentInOptions = !editedUser?.direction_id
+                                        || options.some((dir) => String(dir.id) === String(editedUser.direction_id));
+                                    return (
+                                        <>
+                                            {!currentInOptions && (
+                                            <option value={editedUser.direction_id}>
+                                                {userToEdit?.direction || `Направление #${editedUser.direction_id}`}
+                                            </option>
+                                            )}
+                                            {options.map((dir) => (
+                                            <option key={dir.id} value={dir.id}>
+                                            {dir.name}
+                                            </option>
+                                            ))}
+                                        </>
+                                    );
+                                })()}
                                 </select>
                             </div>
                             )}
@@ -2550,7 +2596,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     checked={!!editedUser?.has_proxy}
                                     onChange={(e) => setEditedUser({ ...editedUser, has_proxy: e.target.checked })}
                                     className="rounded border-gray-300"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                 />
                                 <span>Наличие прокси</span>
                                 </label>
@@ -2564,7 +2610,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 onChange={(e) => setEditedUser({ ...editedUser, proxy_card_number: e.target.value })}
                                 placeholder="Можно указать не полностью"
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                                 />
                             </div>
                             )}
@@ -2576,7 +2622,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={normalizeProxyStatus(editedUser?.proxy_status)}
                                 onChange={(e) => setEditedUser({ ...editedUser, proxy_status: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                                 >
                                 <option value="">Не указан</option>
                                 {PROXY_STATUS_OPTIONS.map((option) => (
@@ -2593,7 +2639,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     checked={!!editedUser?.has_driver_license}
                                     onChange={(e) => setEditedUser({ ...editedUser, has_driver_license: e.target.checked })}
                                     className="rounded border-gray-300"
-                                    disabled={isLoading}
+                                    disabled={fieldsLocked}
                                 />
                                 <span>Наличие водительских прав</span>
                                 </label>
@@ -2623,7 +2669,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={editedUser?.sip_number || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                                disabled={isLoading}
+                                disabled={fieldsLocked}
                                 />
                             </div>
                             )}
@@ -2645,7 +2691,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.new_login || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
 
@@ -2656,7 +2702,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             value={editedUser?.new_password || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, new_password: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
-                            disabled={isLoading}
+                            disabled={fieldsLocked}
                             />
                         </div>
                     </>
@@ -2713,7 +2759,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {/* Actions */}
                 {/* Телефон: одна кнопка во всю ширину у нижнего края. «Отмена»
                     там лишняя — уход с экрана уже сделан стрелкой в шапке. */}
-                {!createdCredentials && isMobileShell && (
+                {!createdCredentials && readOnly && (
+                    <p className="pt-2 text-xs text-gray-500">
+                    Карточка открыта на просмотр — изменения не сохраняются.
+                    </p>
+                )}
+                {!createdCredentials && !readOnly && isMobileShell && (
                     <div className="uem-foot">
                     <button
                         type="button"
@@ -2725,7 +2776,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </button>
                     </div>
                 )}
-                {!createdCredentials && !isMobileShell && (
+                {!createdCredentials && !readOnly && !isMobileShell && (
                     <div className="flex justify-end items-center gap-3 pt-2">
                     <button
                         onClick={() => {

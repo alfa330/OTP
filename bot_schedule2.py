@@ -1901,6 +1901,64 @@ def _is_marketing_observer(requester_id, role=None):
     return verdict
 
 
+# ─────────────────── «Учет сотрудников» у отдела кадров ───────────────────
+# Отдел, которому раздел открыт НА ПРОСМОТР, и притом по всей компании:
+# кадровый учёт ведётся не по своему отделу, а по всей фирме — то же решение
+# владельца, что у «Отметок» (GROUP_LATE_BOT_FULL_DEPARTMENT_CODE ниже).
+# Сверяем по КОДУ, а не по id: id засеян миграцией и в разных окружениях разный.
+# Зеркало на фронте — EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODES в src/App.jsx.
+EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODE = 'hr'
+
+
+def _is_employee_accounting_observer(requester_id):
+    """Сотрудник отдела кадров: «Учет сотрудников» ему открыт по всей компании.
+
+    Роль НЕ проверяется — признак доступа это членство в отделе: у кадровика
+    роль hr_manager с уровнем как у оператора, а проверка по роли открыла бы
+    раздел человеку, которого из отдела уже перевели.
+
+    Глава отдела кадров сюда попадает НАМЕРЕННО, в отличие от
+    _is_marketing_observer: ему расширяется только ОХВАТ списка (вся компания
+    вместо своего отдела), а право правки осталось прежним — свой отдел, и
+    держит его _requester_can_access_target_user на каждой пишущей ручке.
+    Отдельного «наблюдателя-без-главы» здесь не нужно: ни одна пишущая ручка
+    этой функции не спрашивает.
+
+    Ответ запоминается на время запроса (flask.g): отдел за один запрос не
+    меняется, а функция стоит на ручках, которые зовут её по нескольку раз.
+    """
+    if requester_id is None:
+        return False
+
+    try:
+        cached = getattr(g, '_employee_accounting_observer_cache', None)
+    except Exception:
+        cached = None
+    try:
+        key = int(requester_id)
+    except (TypeError, ValueError):
+        return False
+    if isinstance(cached, dict) and key in cached:
+        return cached[key]
+
+    try:
+        department_id = db.get_user_department_id(key)
+        department = (db.get_department_by_id(int(department_id)) or {}) if department_id is not None else {}
+    except Exception:
+        department = {}
+    verdict = (str(department.get('code') or '').strip().lower()
+               == EMPLOYEE_ACCOUNTING_OBSERVER_DEPARTMENT_CODE)
+
+    try:
+        if not isinstance(cached, dict):
+            cached = {}
+            g._employee_accounting_observer_cache = cached
+        cached[key] = verdict
+    except Exception:
+        pass
+    return verdict
+
+
 def _is_super_admin_role(role) -> bool:
     return _normalize_user_role(role) == 'super_admin'
 
@@ -14307,8 +14365,13 @@ def get_admin_users():
 
         requester_role = _normalize_user_role(requester[3])
         headed_dept_ids = _headed_department_ids(requester_id)
+        # Кадровик читает раздел целиком и по всей компании (решение владельца
+        # 22.09.2026). Проверка стоит ДО операторской ветки ниже: человека с
+        # ролью 'operator', переведённого в отдел кадров, та ветка увела бы на
+        # урезанную проекцию из семи полей — без телефонов, статусов и отдела.
+        employee_accounting_observer = _is_employee_accounting_observer(requester_id)
 
-        if requester_role == 'operator' and not headed_dept_ids:
+        if requester_role == 'operator' and not headed_dept_ids and not employee_accounting_observer:
             # Operator can only read a limited user projection.
             visible_roles = ['operator', 'trainee', 'trainer']
             with db._get_cursor() as cursor:
@@ -14347,11 +14410,12 @@ def get_admin_users():
 
             return jsonify({"status": "success", "users": users}), 200
 
-        if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer') or headed_dept_ids):
+        if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer')
+                or headed_dept_ids or employee_accounting_observer):
             return jsonify({"error": "Forbidden"}), 403
 
         visible_roles = ['operator', 'trainee', 'trainer', *sorted(BACK_OFFICE_EMPLOYEE_ROLES)]
-        if headed_dept_ids:
+        if headed_dept_ids or employee_accounting_observer:
             visible_roles.extend(['sv', 'supervisor'])
         if requester_role == 'super_admin':
             visible_roles.append('admin')
@@ -14519,7 +14583,15 @@ def get_admin_users():
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
-        if (requester_role == 'sv' or headed_dept_ids) and not _is_super_admin_role(requester_role):
+        #
+        # Кадровик — тоже все: у отдела кадров учёт ведётся по всей фирме, и
+        # граница отдела здесь не применяется даже к ГЛАВЕ отдела кадров. Право
+        # правки это не расширяет ни на строку: пишущие ручки спрашивают
+        # _requester_can_access_target_user, и он у главы по-прежнему упирается
+        # в headed_dept_ids, а рядового кадровика не пускает вовсе.
+        if ((requester_role == 'sv' or headed_dept_ids)
+                and not _is_super_admin_role(requester_role)
+                and not employee_accounting_observer):
             if headed_dept_ids:
                 users = [
                     item for item in users
@@ -15159,6 +15231,14 @@ def api_admin_departments():
         headed_dept_ids = _headed_department_ids(requester_id)
 
         if request.method == 'GET':
+            # Кадровик фильтрует список сотрудников по отделу, поэтому справочник
+            # ему нужен целиком. Проверка стоит ДО ветки главы отдела намеренно:
+            # глава отдела кадров смотрит всю компанию, и отдав ему один свой
+            # отдел, мы бы оставили фильтр с единственным пунктом над списком из
+            # всех отделов. Справочник — это имена отделов, данных сотрудников
+            # в нём нет.
+            if _is_employee_accounting_observer(requester_id):
+                return jsonify({"status": "success", "departments": db.get_departments()}), 200
             if headed_dept_ids and not _is_super_admin_role(requester_role):
                 departments = [
                     department
@@ -15314,7 +15394,14 @@ def get_user_history():
         # keeps the legacy direct-report access.
         requester_role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
-        if headed_dept_id is not None and not _is_super_admin_role(requester_role):
+        # Кадровик читает историю любого сотрудника: раздел «Учет сотрудников»
+        # открыт ему по всей компании, а история — то же чтение, только по
+        # одному человеку. Ветка стоит первой и для ГЛАВЫ отдела кадров тоже:
+        # иначе он видел бы в списке всю фирму, а «Историю» открывал лишь своим.
+        if _is_employee_accounting_observer(requester_id):
+            if _is_admin_role(_normalize_user_role(target_user[3])) and not _is_admin_role(requester_role):
+                return jsonify({"error": "Unauthorized to view this user's history"}), 403
+        elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
             if not _requester_can_access_target_user(
                 requester,
                 requester_id,
@@ -25645,13 +25732,22 @@ def get_users_report():
 
         # Супервайзер выгружает свой отдел целиком — все группы, а не только собственных операторов.
         is_supervisor = requester_role == 'sv'
-        if not is_global_admin and not headed_department_ids and not is_supervisor:
+        # Кадровик выгружает всю компанию — тем же охватом, каким он её видит на
+        # экране (решение владельца 22.09.2026: выгрузка ничего не меняет, это то
+        # же чтение, только файлом). Правки в выгрузке нет вовсе, поэтому
+        # рядового кадровика она не отличает от главы отдела кадров.
+        employee_accounting_observer = _is_employee_accounting_observer(requester_id)
+        if (not is_global_admin and not headed_department_ids and not is_supervisor
+                and not employee_accounting_observer):
             return jsonify({"error": "Only admins, department heads and supervisors can generate users report"}), 403
 
         report_department_ids = None
         report_supervisor_ids = None
         requested_department_id = request.args.get('department_id')
-        if is_global_admin:
+        # Ветка кадровика идёт ВМЕСТЕ с админской и ДО ветки главы отдела: у
+        # главы отдела кадров headed_department_ids не пуст, и без этого он
+        # выгружал бы три человека своего отдела вместо компании, которую видит.
+        if is_global_admin or employee_accounting_observer:
             if requested_department_id not in (None, ''):
                 try:
                     requested_department_id = int(requested_department_id)

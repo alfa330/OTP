@@ -90,7 +90,8 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
     def test_department_manager_employee_accounting_keeps_supervisors(self):
         source = _read(APP_PATH)
 
-        self.assertIn("const manageOperatorRoles = isDepartmentManager", source)
+        # Кадровик идёт по тому же широкому набору: список у него — вся компания.
+        self.assertIn("const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingObserver)", source)
         # Множество выросло вместе с бэк-офисом: тот же фильтр режет и его
         # сотрудников, см. test_back_office_department_scope.
         self.assertIn(
@@ -121,7 +122,9 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
             "const isPlainTrainer = currentUserRole === 'trainer' && !isDepartmentHeadUser;",
             source,
         )
-        self.assertIn("const canFilterByDepartment = isAdminLikeRole || isPlainTrainer;", source)
+        # Фильтр по отделу есть и у кадровика — иначе список всей компании
+        # нечем сузить (см. test_hr_employee_accounting_scope).
+        self.assertIn("const canFilterByDepartment = isAdminLikeRole || isPlainTrainer || isEmployeeAccountingObserver;", source)
         # Хвост про рядового сотрудника бэк-офиса появился вместе с выдачей ему
         # раздела «Задачи»; смысл проверки прежний — глава-тренер идёт по
         # правилам главы, а не «чистого тренера».
@@ -556,8 +559,11 @@ class SupervisorOperatorListCompletenessTests(unittest.TestCase):
 
     def test_get_admin_users_includes_supervised_operators_for_sv(self):
         users = _function_source(BOT_PATH, "get_admin_users")
+        # Условие переносом: третьим слагаемым к нему добавился кадровик,
+        # которого граница отдела не касается (см. test_hr_employee_accounting_scope).
         self.assertIn(
-            "if (requester_role == 'sv' or headed_dept_ids) and not _is_super_admin_role(requester_role):",
+            "if ((requester_role == 'sv' or headed_dept_ids)\n"
+            "                and not _is_super_admin_role(requester_role)",
             users,
         )
         self.assertIn("if headed_dept_ids:", users)
