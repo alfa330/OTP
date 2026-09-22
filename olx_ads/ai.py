@@ -189,30 +189,78 @@ def _complaints(problems):
     return '; '.join(p['message'] for p in problems)
 
 
+class AiUnavailable(RuntimeError):
+    """Цепочка ИИ не ответила ни одним звеном — это не про объявление, а про ИИ.
+
+    Отдельный класс, чтобы сервис отличал «модель не поняла задачу» (текст есть,
+    но с замечаниями) от «ИИ лежит»: во втором случае гнать по цепочке остальные
+    тридцать объявлений пачки бессмысленно — каждое будет ждать отказа всех
+    звеньев, и человек получит тридцать одинаковых ошибок через десять минут
+    вместо одной сразу.
+    """
+
+
+def as_result(raw):
+    """Привести ответ модели к словарю {text, model, provider}, какой бы формы он ни был.
+
+    Цепочка вики (`wiki.ai.providers.generate`) возвращает КОРТЕЖ
+    (текст, метаданные), а тестовые заглушки и старый код раздела — словарь или
+    строку. Из-за этого расхождения раздел на проде не написал ни одного текста
+    с 14.09 по 22.09.2026: кортеж уходил в `parse_answer`, тот звал `.strip()`,
+    и каждое объявление падало с «'tuple' object has no attribute 'strip'»,
+    хотя модель отвечала. Юнит-тесты этого не ловили — заглушки отдавали словарь.
+    Поэтому форма ответа приводится к одной ЗДЕСЬ, до всякого разбора.
+    """
+    if raw is None:
+        return {'text': '', 'model': None, 'provider': None}
+    if isinstance(raw, dict):
+        return {'text': raw.get('text') or '', 'model': raw.get('model'),
+                'provider': raw.get('provider')}
+    if isinstance(raw, (tuple, list)):
+        text = raw[0] if raw else ''
+        meta = raw[1] if len(raw) > 1 and isinstance(raw[1], dict) else {}
+        return {'text': text or '', 'model': meta.get('model'),
+                'provider': meta.get('provider')}
+    return {'text': str(raw), 'model': None, 'provider': None}
+
+
+def _wiki_generate_fn(chain):
+    """Настоящая цепочка вики, обёрнутая под форму ответа этого модуля."""
+    from wiki.ai import providers as wiki_providers
+
+    def generate_fn(system, user, **kwargs):
+        try:
+            text, meta = wiki_providers.generate(system, user, chain=chain, **kwargs)
+        except wiki_providers.ProviderError as exc:
+            raise AiUnavailable(str(exc)) from exc
+        return {'text': text, 'model': meta.get('model'),
+                'provider': meta.get('provider')}
+
+    return generate_fn
+
+
 def generate_for_advert(advert, brief=None, instruction=None, generate_fn=None,
                         chain=None):
     """Сочинить текст для одного объявления.
 
     `generate_fn` вынесен параметром ради тестов: настоящая цепочка ходит в сеть,
-    а проверять разбор ответа и самопроверку надо без неё.
+    а проверять разбор ответа и самопроверку надо без неё. Что бы `generate_fn`
+    ни вернул — словарь, кортеж вики или строку, — ответ проходит через
+    `as_result`, так что разбор дальше видит всегда одну форму.
 
     Возвращает словарь с текстом и с замечаниями, которые остались ПОСЛЕ попытки
     исправления. Замечания не прячем: черновик всё равно смотрит человек, и
     честнее показать «модель не уложилась в 70 символов», чем молча обрезать
-    смысл.
+    смысл. Если ИИ не ответил вовсе — `AiUnavailable`, без черновика.
     """
     if generate_fn is None:
-        from wiki.ai import providers as wiki_providers
-
-        def generate_fn(system, user, **kwargs):
-            return wiki_providers.generate(system, user, chain=chain, **kwargs)
+        generate_fn = _wiki_generate_fn(chain)
 
     category_id = advert.get('category_id')
     user_prompt = build_user_prompt(advert, brief=brief, instruction=instruction)
 
-    result = generate_fn(SYSTEM_PROMPT, user_prompt) or {}
-    text = result.get('text') if isinstance(result, dict) else result
-    title, description = parse_answer(text)
+    result = as_result(generate_fn(SYSTEM_PROMPT, user_prompt))
+    title, description = parse_answer(result['text'])
 
     problems = validate.check(title, description, category_id)
     if validate.blocking(problems):
@@ -224,9 +272,8 @@ def generate_for_advert(advert, brief=None, instruction=None, generate_fn=None,
                           'Исправь ровно это и пришли текст заново в том же формате.'
                         % (_complaints(validate.blocking(problems)),))
         try:
-            retry = generate_fn(SYSTEM_PROMPT, retry_prompt) or {}
-            retry_text = retry.get('text') if isinstance(retry, dict) else retry
-            retry_title, retry_description = parse_answer(retry_text)
+            retry = as_result(generate_fn(SYSTEM_PROMPT, retry_prompt))
+            retry_title, retry_description = parse_answer(retry['text'])
             if retry_title and retry_description:
                 retry_problems = validate.check(retry_title, retry_description,
                                                 category_id)
@@ -235,6 +282,8 @@ def generate_for_advert(advert, brief=None, instruction=None, generate_fn=None,
                     problems = retry_problems
                     result = retry
         except Exception:                                    # noqa: BLE001
+            # Первый ответ уже есть — отказ на повторе (в том числе AiUnavailable)
+            # не отменяет черновик, а оставляет его с замечаниями.
             log.exception('Объявления OLX: повторная попытка ИИ не удалась')
 
     # Механическая правка напоследок: длину заголовка чиним сами, по границе
@@ -246,8 +295,8 @@ def generate_for_advert(advert, brief=None, instruction=None, generate_fn=None,
     return {
         'title': title,
         'description': description,
-        'model': (result.get('model') if isinstance(result, dict) else None),
-        'provider': (result.get('provider') if isinstance(result, dict) else None),
+        'model': result['model'],
+        'provider': result['provider'],
         'problems': problems,
         'ok': bool(title and description and not validate.blocking(problems)),
     }

@@ -481,7 +481,7 @@ def generate_drafts(db, targets, *, instruction=None, actor_id=None,
                        'задайте его во вкладке «Бриф месяца»', code='no_brief')
 
     made, failed, used = [], [], {}
-    for advert in adverts:
+    for index, advert in enumerate(adverts):
         brief = briefs.get(advert['cabinet_code'])
         if not brief:
             # Не роняем пачку из-за одного кабинета без брифа: остальные
@@ -495,6 +495,23 @@ def generate_drafts(db, targets, *, instruction=None, actor_id=None,
             result = ai.generate_for_advert(advert, brief=brief,
                                             instruction=instruction,
                                             generate_fn=generate_fn)
+        except ai.AiUnavailable as exc:
+            # ИИ лёг целиком — это не про объявление. Дальше по пачке не идём:
+            # каждое следующее ждало бы отказа всех звеньев цепочки заново.
+            # Ничего ещё не написано — отказ словами; часть уже написана —
+            # отдаём её, а остаток помечаем пропущенным.
+            log.warning('Объявления OLX: ИИ недоступен на %s/%s — %s',
+                        advert['cabinet_code'], advert['advert_id'], exc)
+            reason = 'ИИ сейчас недоступен: %s' % (str(exc)[:200],)
+            if not made:
+                raise AdsError(reason, code='ai_unavailable')
+            failed.append({'cabinet': advert['cabinet_code'],
+                           'advert_id': advert['advert_id'], 'error': reason})
+            failed.extend({'cabinet': rest['cabinet_code'],
+                           'advert_id': rest['advert_id'],
+                           'error': 'пропущено: ИИ перестал отвечать'}
+                          for rest in adverts[index + 1:])
+            break
         except Exception as exc:                             # noqa: BLE001
             log.exception('Объявления OLX: ИИ не справился с %s/%s',
                           advert['cabinet_code'], advert['advert_id'])

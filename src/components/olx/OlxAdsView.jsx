@@ -450,16 +450,32 @@ const AdvertsPanel = ({
                     return next;
                 });
                 const made = madeItems.length;
-                const failed = response.data?.failed?.length || 0;
-                if (failed) {
-                    toast(`Готово ${made}, не получилось ${failed}`, 'warning');
+                const failedItems = response.data?.failed || [];
+                const failed = failedItems.length;
+                /* Причину показываем, а не только счёт: «не получилось 32» без
+                   слов — это то, с чем человек 22.09.2026 пришёл в IT, хотя
+                   сервер причину каждый раз отдавал. */
+                const reason = failedItems.find((item) => item.error)?.error;
+                if (failed && !made) {
+                    toast(`ИИ не справился ни с одним из ${failed}${reason ? `: ${reason}` : ''}`, 'error');
+                } else if (failed) {
+                    toast(`Готово ${made}, не получилось ${failed}${reason ? ` (${reason})` : ''}`, 'warning');
                 } else {
                     toast(`ИИ написал ${made} ${plural(made, 'текст', 'текста', 'текстов')} — проверьте и опубликуйте`, 'success');
                 }
                 setShowInstruction(false);
                 onChanged();
             })
-            .catch((error) => toast(error.response?.data?.error || 'ИИ сейчас недоступен', 'error'))
+            .catch((error) => {
+                if (!error.response) {
+                    /* Связь оборвалась, а сервер, возможно, дописал пачку:
+                       черновики он сохраняет по одному, по ходу дела. */
+                    toast('Сервер не ответил — обновите список: часть черновиков могла сохраниться', 'error');
+                    onChanged();
+                    return;
+                }
+                toast(error.response.data?.error || 'ИИ сейчас недоступен', 'error');
+            })
             .finally(() => setGenerating(false));
     };
 
@@ -851,7 +867,12 @@ const AdvertEditor = ({
                 onChanged();
                 loadCard();
             })
-            .catch((error) => toast(error.response?.data?.error || 'ИИ сейчас недоступен', 'error'))
+            .catch((error) => toast(
+                error.response
+                    ? (error.response.data?.error || 'ИИ сейчас недоступен')
+                    : 'Сервер не ответил — попробуйте ещё раз',
+                'error',
+            ))
             .finally(() => setBusy(''));
     };
 

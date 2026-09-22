@@ -205,6 +205,79 @@ class AiTests(unittest.TestCase):
     def test_provider_chain_is_reused_from_wiki(self):
         self.assertIn('from wiki.ai import providers', _read('olx_ads', 'ai.py'))
 
+    # ── Форма ответа НАСТОЯЩЕЙ цепочки ────────────────────────────────────
+    #
+    # 14–22.09.2026 раздел на проде не написал ни одного текста: цепочка вики
+    # возвращает кортеж (текст, метаданные), а разбор ждал словарь и падал на
+    # `.strip()` у кортежа. Заглушки в тестах отдавали словарь и этого не видели.
+    # Поэтому здесь путь БЕЗ generate_fn — тот, что идёт на проде.
+
+    def _with_wiki_generate(self, fake):
+        from wiki.ai import providers
+
+        original = providers.generate
+        providers.generate = fake
+        self.addCleanup(setattr, providers, 'generate', original)
+        return providers
+
+    def test_real_wiki_chain_tuple_is_understood(self):
+        calls = []
+
+        def fake(system, user, **kwargs):
+            calls.append(kwargs)
+            return ('ЗАГОЛОВОК: Работа в такси Алматы, без ИП\nОПИСАНИЕ:\n<p>%s</p>'
+                    % _LONG_BODY,
+                    {'provider': 'vertex', 'model': 'gemini-3-flash-preview',
+                     'elapsed': 1.2, 'usage': {}, 'finish': 'stop', 'attempts': []})
+
+        self._with_wiki_generate(fake)
+        result = ai.generate_for_advert({'category_id': 1812, 'city_name': 'Алматы'},
+                                        brief={'offer': 'x'})
+        self.assertTrue(result['ok'], result['problems'])
+        self.assertEqual('Работа в такси Алматы, без ИП', result['title'])
+        self.assertEqual('gemini-3-flash-preview', result['model'])
+        self.assertEqual('vertex', result['provider'])
+        self.assertEqual([{'chain': None}], calls)
+
+    def test_as_result_accepts_every_shape(self):
+        self.assertEqual({'text': 'a', 'model': 'm', 'provider': 'p'},
+                         ai.as_result(('a', {'model': 'm', 'provider': 'p'})))
+        self.assertEqual({'text': 'a', 'model': 'm', 'provider': None},
+                         ai.as_result({'text': 'a', 'model': 'm'}))
+        self.assertEqual({'text': 'a', 'model': None, 'provider': None},
+                         ai.as_result('a'))
+        self.assertEqual({'text': '', 'model': None, 'provider': None},
+                         ai.as_result(None))
+        self.assertEqual('', ai.as_result(())['text'])
+
+    def test_chain_exhaustion_becomes_ai_unavailable(self):
+        providers = self._with_wiki_generate(None)
+
+        def fake(system, user, **kwargs):
+            raise providers.ProviderError('все провайдеры цепочки отказали: [...]')
+
+        providers.generate = fake
+        with self.assertRaises(ai.AiUnavailable) as ctx:
+            ai.generate_for_advert({'category_id': 1812}, brief={'offer': 'x'})
+        self.assertIn('все провайдеры цепочки отказали', str(ctx.exception))
+
+    def test_ai_failure_on_retry_keeps_the_first_draft(self):
+        calls = []
+
+        def fake(system, user, **kwargs):
+            calls.append(user)
+            if len(calls) == 1:
+                return ('ЗАГОЛОВОК: %s\nОПИСАНИЕ:\n<p>%s</p>' % ('Работа ' * 15, _LONG_BODY),
+                        {'provider': 'vertex', 'model': 'm'})
+            raise ai.AiUnavailable('vertex: 429')
+
+        result = ai.generate_for_advert({'category_id': 1812}, brief={'offer': 'x'},
+                                        generate_fn=fake)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(result['title'])
+        self.assertLessEqual(len(result['title']), validate.TITLE_MAX)
+        self.assertEqual('vertex', result['provider'])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Запись в OLX
@@ -556,6 +629,40 @@ class BriefPerCabinetGenerationTests(unittest.TestCase):
         self.assertEqual('no_brief', ctx.exception.code)
         self.assertEqual([], self.drafts)
 
+    def test_ai_down_before_any_draft_is_a_clear_refusal(self):
+        def down(system, user, **kwargs):
+            raise ai.AiUnavailable('все провайдеры цепочки отказали: [{"provider": "vertex"}]')
+
+        with self.assertRaises(service.AdsError) as ctx:
+            service.generate_drafts(self.db, self._targets(('tenge', '1'), ('adal', '2')),
+                                    generate_fn=down)
+        self.assertEqual('ai_unavailable', ctx.exception.code)
+        self.assertIn('ИИ сейчас недоступен', str(ctx.exception))
+        self.assertEqual([], self.drafts)
+
+    def test_ai_down_mid_batch_keeps_made_and_skips_the_rest(self):
+        self.adverts[('adal', '4')] = {'cabinet_code': 'adal', 'advert_id': '4',
+                                       'category_id': 1812, 'city_name': 'Актау'}
+        calls = []
+
+        def flaky(system, user, **kwargs):
+            calls.append(user)
+            if len(calls) == 1:
+                return self._fake_ai(system, user, **kwargs)
+            raise ai.AiUnavailable('vertex: 429')
+
+        result = service.generate_drafts(
+            self.db, self._targets(('tenge', '1'), ('adal', '2'), ('adal', '4')),
+            generate_fn=flaky)
+        # Второе объявление ждало цепочку, третье — уже нет: два вызова, не три.
+        self.assertEqual(2, len(calls))
+        self.assertEqual(['tenge'], [m['cabinet'] for m in result['made']])
+        self.assertEqual([('adal', '2'), ('adal', '4')],
+                         [(f['cabinet'], f['advert_id']) for f in result['failed']])
+        self.assertIn('ИИ сейчас недоступен', result['failed'][0]['error'])
+        self.assertIn('пропущено', result['failed'][1]['error'])
+        self.assertEqual(1, len(self.drafts))
+
 
 class BriefQueriesInvariantsTests(unittest.TestCase):
     """Порядок операций, без которого уникальный индекс по кабинету отвергнет запись."""
@@ -654,6 +761,13 @@ class FrontendWiringTests(unittest.TestCase):
     def test_view_hides_publish_without_the_right(self):
         self.assertIn('caps.can_apply &&', self.view)
         self.assertIn('caps.can_write_content &&', self.view)
+
+    def test_generation_failures_show_the_reason(self):
+        # Сервер отдаёт причину по каждому объявлению; экран обязан её показать,
+        # а не только счёт «не получилось N» (с ним и пришли в IT 22.09.2026).
+        self.assertIn('ИИ не справился ни с одним из', self.view)
+        self.assertIn("find((item) => item.error)?.error", self.view)
+        self.assertIn('Сервер не ответил', self.view)
 
 
 class BriefFrontendTests(unittest.TestCase):
