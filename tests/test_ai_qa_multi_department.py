@@ -703,6 +703,8 @@ class RoutesTests(unittest.TestCase):
             # Справочник фильтров тоже показывает людей отдела: забыв здесь
             # department, он предложил бы главе СЗоВ выбрать сотрудника Тез КЦ.
             "api_ai_qa_filter_options",
+            # Точечный подбор ищет по данным отдела: журнал, пул АТС, переписка.
+            "api_ai_qa_find",
         }
         functions = {
             node.name: ast.get_source_segment(self.api_source, node)

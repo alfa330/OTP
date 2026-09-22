@@ -5691,9 +5691,12 @@ def api_ai_qa_call(call_id):
         # Докачиваем по требованию тем же путём, что аудио-ручка журнала.
         if subject == _qa_config.SUBJECT_IMPORTED_CALL:
             _ensure_imported_call_audio(call_id)
+        # reviewer_id — чтобы карточка принесла «Мою оценку» именно этого
+        # человека (панель «Моя оценка» в карточке) рядом с оценкой из журнала.
         return jsonify({"status": "success",
                         "call": review_payload(call_id, refresh=refresh,
-                                               subject_kind=subject)}), 200
+                                               subject_kind=subject,
+                                               reviewer_id=requester_id)}), 200
     except _qa_subjects.SubjectNotEvaluable as error:
         # Оценить нельзя по существу (в эпизоде отвечали несколько операторов и т.п.):
         # это не ошибка сервера, а причина, которую надо показать проверяющему.
@@ -6064,14 +6067,28 @@ def api_ai_qa_pull_call():
         department, dept_err = _ai_qa_requested_department(requester_id, body.get('department'))
         if dept_err:
             return dept_err
-        if department == call_qa_config.OP_DEPARTMENT_CODE:
-            return jsonify({"error": "У отдела продаж записи загружаются вручную — "
-                                     "подтяжка из АТС доступна СЗоВ и Тез КЦ"}), 400
+        # Отдел продаж подтягивается из СВОИХ касаний CDR (запись приносит мост по
+        # заказу) — тем же путём, что кнопка «Случайный звонок» в журнале.
         if department not in (OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE,
-                              TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE):
+                              TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+                              CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE):
             return jsonify({"error": f"Для отдела «{department}» подтяжка из АТС не настроена"}), 400
 
         requester = db.get_user(id=requester_id)
+        # Точечная подтяжка: конкретное касание CDR (linkedid) из поиска по
+        # номеру — без случайности и без фильтров длительности: звонок выбрал
+        # человек. Только у отдела продаж: у СЗоВ и Тез КЦ касаний нет.
+        linkedid = str(body.get('linkedid') or '').strip()
+        if linkedid:
+            if department != CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+                return jsonify({"error": "Подтяжка по идентификатору звонка есть только у отдела продаж"}), 400
+            return _cdr_import_touch(linkedid, requester_id, requester)
+        # Номер клиента сужает выборку АТС до звонков с этим номером — «найти
+        # звонок по телефону» в разделе; сравнивается хвост цифр.
+        from call_qa.api import phone_suffix as _qa_phone_suffix
+        phone = _qa_phone_suffix(body.get('phone'))
+        if body.get('phone') and len(phone) < 4:
+            return jsonify({"error": "Укажите не меньше четырёх цифр номера"}), 400
         incoming = bool(body.get('incoming', True))
         outgoing = bool(body.get('outgoing', True))
         if not incoming and not outgoing:
@@ -6093,6 +6110,18 @@ def api_ai_qa_pull_call():
                 candidates = [int(requested_operator)]
             except (TypeError, ValueError):
                 return jsonify({"error": "operator_id должен быть числом"}), 400
+        elif phone and department == CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+            # Номер без сотрудника у отдела продаж: кого искать, говорят сами
+            # касания — внутренний номер звонка ведёт к учётной записи.
+            candidates = _ai_qa_cdr_operators_by_phone(
+                requester_id, phone, body.get('date_from'), body.get('date_to'))
+            if not candidates:
+                return jsonify({"error": "В касаниях за период нет записанных звонков с этим номером",
+                                "code": "empty_window"}), 404
+        elif phone:
+            # Обе АТС отдают звонки ОТ СОТРУДНИКА: перебирать весь отдел ради
+            # одного номера — это запрос в АТС на каждого человека.
+            return jsonify({"error": "Чтобы найти звонок по номеру в АТС, укажите сотрудника"}), 400
         else:
             # Отбор панели сужает круг людей: выбранные направление и группа
             # обязаны действовать и здесь, иначе «Из АТС» при выбранной группе
@@ -6195,7 +6224,7 @@ def api_ai_qa_pull_call():
             kwargs = dict(operator_id=operator_id, operator_name=operator[2],
                           requester_id=requester_id, incoming=incoming, outgoing=outgoing,
                           date_from=date_from, date_to=date_to, count=count,
-                          source=AI_QA_PULL_CALL_SOURCE)
+                          source=AI_QA_PULL_CALL_SOURCE, phone=phone or None)
             if department == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE:
                 # У Oktell окно длительности берётся из общих настроек «Деления
                 # звонков»; у Binotel такого источника нет, и без умолчания в пул
@@ -6267,6 +6296,127 @@ def api_ai_qa_pull_call():
     except Exception:
         logging.exception("ai-qa pull-call failed")
         return jsonify({"error": "не удалось подтянуть звонок из АТС (детали в логах)"}), 500
+
+
+def _ai_qa_cdr_operators_by_phone(requester_id, phone_suffix, date_from=None, date_to=None,
+                                  limit=None):
+    """Операторы отдела продаж, у которых в касаниях CDR есть записанный разговор с
+    этим номером за период (в пределах скоупа зрителя). Порядок — свежие сначала."""
+    scope = _ai_qa_direction_scope(requester_id)
+    if scope is not None and not scope:
+        return []
+    digits = re.sub(r'\D', '', str(phone_suffix or ''))[-10:]
+    if not digits:
+        return []
+    from cdr import touches as cdr_touches
+    params = ['%' + digits, cdr_touches.TYPE_IN, cdr_touches.TYPE_OUT]
+    sql = """SELECT u.id, MAX(t.started_at) AS last_call
+               FROM cdr_touches t
+               JOIN users u ON btrim(COALESCE(u.sip_number, '')) = t.ext
+               LEFT JOIN directions d ON d.id = u.direction_id
+              WHERE t.phone LIKE %s AND t.call_type IN (%s, %s)
+                AND t.talk_seconds > 0 AND COALESCE(t.recording_url, '') <> ''
+                AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')"""
+    if scope is not None:
+        sql += " AND COALESCE(d.canonical_id, d.id) = ANY(%s)"
+        params.append([int(x) for x in scope])
+    if date_from:
+        sql += " AND t.call_day >= %s"
+        params.append(str(date_from))
+    if date_to:
+        sql += " AND t.call_day <= %s"
+        params.append(str(date_to))
+    sql += " GROUP BY u.id ORDER BY last_call DESC LIMIT %s"
+    params.append(int(limit or AI_QA_PULL_CALL_MAX_OPERATORS))
+    conn = call_qa_config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET client_encoding TO 'UTF8'")
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+        cur.close()
+        return [int(row[0]) for row in rows]
+    finally:
+        conn.close()
+
+
+def _cdr_import_touch(linkedid, requester_id, requester):
+    """Точечная подтяжка ОДНОГО касания CDR (отдел продаж) в пул звонков раздела.
+
+    Человек нашёл звонок по номеру и выбрал его сам, поэтому ни случайности, ни
+    фильтров длительности здесь нет. Остальное — как у «Случайного звонка»:
+    оператор по внутреннему номеру касания, запись обязана достоверно
+    принадлежать этому звонку и этому оператору (иначе супервайзер слушал бы
+    чужой разговор), файл приносит мост по заказу (cdr_audio_jobs).
+    Возвращает Flask-ответ в форме pull-call: {calls:[…], call:{…}}."""
+    from cdr import queries as cdr_queries, touches as cdr_touches
+    with db._get_cursor() as cursor:
+        touch = cdr_queries.touch_by_linkedid(cursor, linkedid)
+    if not touch:
+        return jsonify({"error": "Звонок не найден в касаниях CDR", "code": "not_found"}), 404
+    if touch['talk_seconds'] <= 0 or not touch['recording_url']:
+        return jsonify({"error": "У этого звонка нет разговора или записи", "code": "no_recording"}), 404
+    conn = call_qa_config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET client_encoding TO 'UTF8'")
+        cur.execute("""SELECT id, name, direction_id FROM users
+                        WHERE btrim(COALESCE(sip_number, '')) = %s
+                          AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
+                        ORDER BY id LIMIT 1""", (str(touch['ext']),))
+        operator_row = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    if not operator_row:
+        return jsonify({"error": f"Внутренний номер {touch['ext']} не привязан ни к одному сотруднику",
+                        "code": "no_operator"}), 404
+    operator_id, operator_name, direction_id = int(operator_row[0]), operator_row[1], operator_row[2]
+    scope = _ai_qa_direction_scope(requester_id)
+    if scope is not None:
+        from call_qa.api import direction_in_scope
+        if direction_id is None or not direction_in_scope(direction_id, scope):
+            return jsonify({"error": "Этот оператор вне ваших направлений"}), 403
+    if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+        return jsonify({"error": "Нет доступа к этому оператору"}), 403
+    if not cdr_touches.recording_belongs_to(touch['recording_url'], touch['ext'],
+                                            touch['phone'], touch['linkedid']):
+        return jsonify({"error": "Запись этого звонка не подтверждена как запись этого оператора "
+                                 "(станция подставила файл другого агента) — оценить нельзя",
+                        "code": "foreign_recording"}), 409
+    started = touch['started_at']
+    month = started.strftime('%Y-%m')
+    dt_raw = started.strftime('%d.%m.%Y %H:%M:%S')
+    phone = str(touch['phone'] or '')
+    phone = '7%s' % phone if len(phone) == 10 else phone
+    new_id = db.import_single_random_call(
+        operator_id=operator_id, operator_name=operator_name,
+        external_id=str(touch['linkedid']), month=month, datetime_raw=dt_raw,
+        phone=phone, duration_sec=touch['talk_seconds'],
+        notes=f"{AI_QA_PULL_CALL_SOURCE}:{requester_id}:cdr", call_end_party='unknown')
+    if new_id:
+        with db._get_cursor() as cursor:
+            cdr_queries.enqueue_audio_job(cursor, str(touch['linkedid']), touch['recording_url'],
+                                          new_id, requester_id)
+        audio_pending = True
+    else:
+        # Уже в пуле (ON CONFLICT по external_id+month) — открываем существующую строку.
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT id, audio_path FROM imported_calls WHERE external_id = %s "
+                           "ORDER BY id DESC LIMIT 1", (str(touch['linkedid']),))
+            existing = cursor.fetchone()
+        if not existing:
+            return jsonify({"error": "Не удалось положить звонок в пул", "code": "import_failed"}), 500
+        new_id, audio_pending = int(existing[0]), not existing[1]
+    created = {
+        "id": new_id, "operator_id": operator_id, "operator_name": operator_name,
+        "month": month, "datetime": dt_raw, "phone": phone,
+        "duration_sec": touch['talk_seconds'],
+        "direction": "in" if touch['call_type'] == cdr_touches.TYPE_IN else "out",
+        "call_end_party": 'unknown', "audio_pending": audio_pending,
+    }
+    return jsonify({"status": "success", "calls": [created], "created": 1 if new_id else 0,
+                    "call": created, "month": month}), 200
 
 
 def _ai_qa_pull_response_code(response):
@@ -6511,6 +6661,369 @@ def api_ai_qa_evaluations():
     except Exception as error:
         logging.exception("ai-qa evaluations failed")
         return jsonify({"error": str(error)}), 500
+
+
+# ── «Моя оценка» в карточке ИИ-оценки ─────────────────────────────────────────
+#
+# Человек оценивает субъект по мониторинговой шкале прямо в карточке, рядом с
+# вердиктами ИИ (панель «Моя оценка» в CallReviewCard). Запись хранится в
+# ai_human_reviews (call_qa.human_review) — это калибровочный эталон для
+# согласия ИИ↔человек — и по флагу «учитывать в качестве» уходит в «Журнал
+# оценок» обычной строкой calls тем же db.add_call_evaluation, что и форма
+# журнала: с оператором, номером, месяцем, датой обращения и записью субъекта.
+
+def _ai_qa_can_correct_journal(requester_id, requester):
+    """Кто вправе переоценить уже существующую строку журнала из карточки.
+
+    Та же граница, что у переоценки в самом журнале: админ и глава отдела —
+    всегда; супервайзер — только по одобренному запросу, которого из карточки
+    не подать. Поэтому у СВ оценка, уже ушедшая в журнал, в карточке
+    закрывается на чтение."""
+    role = _normalize_user_role(requester[3]) if requester else None
+    return bool(_is_admin_role(role) or _headed_department_id(requester_id) is not None)
+
+
+def _ai_qa_local_iso(value):
+    """Момент с зоной → наивное локальное ISO по Алматы (формат appeal_date журнала)."""
+    if value is None:
+        return None
+    if getattr(value, 'tzinfo', None) is not None:
+        value = value.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+    return value.isoformat(timespec='seconds')
+
+
+def _ai_qa_chat_snapshot_id(subject, requester_id):
+    """Снапшот переписки для строки журнала: у заявки Chat2Desk — сам субъект, у
+    эпизодов Wazzup/ChatApp — существующий снапшот, иначе снимаем его теми же
+    функциями, что «Случайный чат» журнала. Существующий переиспользуем, а не
+    перезатираем: на него может ссылаться прошлая оценка с цитатами."""
+    kind = subject['kind']
+    if kind == call_qa_config.SUBJECT_C2D_SNAPSHOT:
+        return int(subject['id'])
+    episode = {
+        'episode_id': subject['id'], 'chat_id': subject.get('chat_id'),
+        'episode_start': subject.get('started_at'), 'episode_end': subject.get('ended_at'),
+        'operator_id': subject.get('operator_user_id'), 'operator_name': subject.get('operator'),
+        'client_name': subject.get('contact_name'), 'client_phone': subject.get('contact_phone'),
+        'inbound_count': subject.get('inbound_count'),
+    }
+    if kind == call_qa_config.SUBJECT_WZ_EPISODE:
+        episode.update({'channel_id': subject.get('channel_id'),
+                        'chat_type': subject.get('chat_type')})
+        existing = db.get_wz_snapshot_id(episode['channel_id'], episode['chat_id'],
+                                         episode['episode_start'])
+        if existing:
+            return int(existing)
+        raw = db.fetch_wazzup_episode_messages(episode['channel_id'], episode['chat_id'],
+                                               episode['episode_start'], episode['episode_end'])
+        messages = [_wz_normalize_snapshot_message(m) for m in raw]
+        if not messages:
+            raise ValueError("переписка эпизода уже удалена ретеншном — в журнал её не положить")
+        try:
+            channel_names = {ch.get('channelId'): ch.get('name') for ch in _wazzup_channels_from_api()}
+        except Exception:
+            channel_names = {}
+        return int(db.save_wz_snapshot(episode, messages, created_by=requester_id,
+                                       channel_name=channel_names.get(episode['channel_id'])))
+    if kind == call_qa_config.SUBJECT_CA_EPISODE:
+        episode.update({'license_id': subject.get('license_id'),
+                        'messenger_type': subject.get('messenger_type')})
+        existing = db.get_ca_snapshot_id(episode['license_id'], episode['messenger_type'],
+                                         episode['chat_id'], episode['episode_start'])
+        if existing:
+            return int(existing)
+        raw = db.fetch_chatapp_episode_messages(episode['license_id'], episode['messenger_type'],
+                                                episode['chat_id'], episode['episode_start'],
+                                                episode['episode_end'])
+        messages = [_chatapp_normalize_snapshot_message(m) for m in raw]
+        if not messages:
+            raise ValueError("переписка эпизода уже удалена ретеншном — в журнал её не положить")
+        return int(db.save_ca_snapshot(episode, messages, created_by=requester_id))
+    raise ValueError("у этого субъекта нет переписки")
+
+
+def _ai_qa_journal_target(subject, journal_row, requester_id):
+    """Реквизиты строки журнала для «Моей оценки» — у каждого субъекта своё место,
+    откуда берутся оператор, номер, месяц, дата обращения и запись.
+
+    Есть строка журнала → пишем ПЕРЕОЦЕНКУ её последней версии (журнал сам
+    наследует запись, связь с АТС и снапшот из прежней версии). Нет — собираем
+    реквизиты из субъекта: звонок из АТС даёт их своей строкой imported_calls
+    (дата обращения — ровно то значение, по которому add_call_evaluation находит
+    строку АТС: datetime_raw в UTC без зоны), переписка — снапшотом."""
+    kind = subject['kind']
+    if journal_row:
+        return {
+            'operator_id': journal_row['operator_id'], 'phone_number': journal_row['phone_number'],
+            'month': journal_row['month'], 'appeal_date': journal_row['appeal_date'],
+            'audio_path': journal_row['audio_path'], 'is_correction': True,
+            'previous_version_id': journal_row['id'],
+            'imported_call_id': None, 'c2d_snapshot_id': None,
+        }
+    if kind == call_qa_config.SUBJECT_CALL:
+        # Звонок журнала без «человеческой» строки — это черновик-якорь (см.
+        # разовые оценки из CDR): реквизиты берём у него самого.
+        conn = call_qa_config.connect_ro()
+        try:
+            cur = conn.cursor()
+            cur.execute("SET client_encoding TO 'UTF8'")
+            cur.execute("""SELECT operator_id, phone_number, month,
+                                  TO_CHAR(appeal_date, 'YYYY-MM-DD"T"HH24:MI:SS'), audio_path
+                             FROM calls WHERE id = %s""", (int(subject['id']),))
+            row = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+        if not row:
+            raise ValueError("звонок не найден")
+        return {'operator_id': row[0], 'phone_number': row[1], 'month': row[2],
+                'appeal_date': row[3], 'audio_path': row[4], 'is_correction': False,
+                'previous_version_id': None, 'imported_call_id': None, 'c2d_snapshot_id': None}
+    if kind == call_qa_config.SUBJECT_IMPORTED_CALL:
+        if subject.get('operator_user_id') is None:
+            raise ValueError("звонок из АТС не привязан к сотруднику портала — в журнал его не положить")
+        conn = call_qa_config.connect_ro()
+        try:
+            cur = conn.cursor()
+            cur.execute("SET client_encoding TO 'UTF8'")
+            cur.execute("""SELECT ic.month,
+                                  TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS'),
+                                  ic.phone_number, ic.audio_path
+                             FROM imported_calls ic WHERE ic.id = %s""", (int(subject['id']),))
+            row = cur.fetchone()
+            cur.close()
+        finally:
+            conn.close()
+        if not row:
+            raise ValueError("звонок из АТС не найден")
+        return {'operator_id': int(subject['operator_user_id']), 'phone_number': row[2] or '—',
+                'month': row[0], 'appeal_date': row[1], 'audio_path': row[3],
+                'is_correction': False, 'previous_version_id': None,
+                'imported_call_id': int(subject['id']), 'c2d_snapshot_id': None}
+    # Переписка: Wazzup / Chat2Desk / ChatApp.
+    if subject.get('operator_user_id') is None:
+        raise ValueError("переписка не привязана к сотруднику портала — в журнал её не положить")
+    snapshot_id = _ai_qa_chat_snapshot_id(subject, requester_id)
+    if kind == call_qa_config.SUBJECT_C2D_SNAPSHOT:
+        appeal = None
+        if subject.get('request_id'):
+            try:
+                request_row = db.get_c2d_request(subject['request_id']) or {}
+                appeal = _ai_qa_local_iso(request_row.get('request_start'))
+            except Exception:
+                logging.exception("ai-qa: не удалось прочитать заявку Chat2Desk %s", subject.get('request_id'))
+        if not appeal and subject.get('day') is not None:
+            appeal = f"{subject['day'].isoformat()}T00:00:00"
+        key = subject.get('request_id') or subject['id']
+    else:
+        appeal = _ai_qa_local_iso(subject.get('started_at'))
+        key = subject.get('chat_id') or subject['id']
+    if not appeal:
+        raise ValueError("у переписки нет даты начала")
+    phone_number = (str(subject.get('contact_phone') or '').strip()
+                    or str(subject.get('contact_name') or '').strip()
+                    or f"chat_{key}")
+    return {'operator_id': int(subject['operator_user_id']), 'phone_number': phone_number,
+            'month': appeal[:7], 'appeal_date': appeal, 'audio_path': None,
+            'is_correction': False, 'previous_version_id': None,
+            'imported_call_id': None, 'c2d_snapshot_id': snapshot_id}
+
+
+def _ai_qa_write_journal(target, *, requester, requester_id, direction_id, scores, comments,
+                         score, comment, comment_visible, question_resolved,
+                         resolved_first_contact):
+    """Строка журнала из «Моей оценки» — тем же путём, что форма журнала
+    (db.add_call_evaluation + уведомление в Telegram). Возвращает id строки."""
+    evaluation_id = db.add_call_evaluation(
+        evaluator_id=int(requester_id), operator_id=int(target['operator_id']),
+        phone_number=target['phone_number'], score=float(score), comment=comment or '',
+        comment_visible_to_operator=bool(comment_visible), month=target['month'],
+        audio_path=target.get('audio_path'), is_draft=False, scores=scores,
+        criterion_comments=comments, direction_id=int(direction_id),
+        is_correction=bool(target['is_correction']),
+        previous_version_id=target.get('previous_version_id'),
+        appeal_date=target.get('appeal_date'), question_resolved=bool(question_resolved),
+        resolved_first_contact=resolved_first_contact,
+        imported_call_id=target.get('imported_call_id'),
+        c2d_snapshot_id=target.get('c2d_snapshot_id'), chat_quotes=None)
+    try:
+        operator = db.get_user(id=int(target['operator_id']))
+        threading.Thread(
+            target=background_upload_and_notify,
+            args=(None, None, None, evaluation_id, False, requester[2],
+                  operator[2] if operator else '—', target['month'], target['phone_number'],
+                  float(score), comment or '', bool(target['is_correction']),
+                  target.get('previous_version_id'), target.get('audio_path'),
+                  target.get('appeal_date') or '', int(target['operator_id'])),
+            daemon=True).start()
+    except Exception:
+        logging.exception("ai-qa: уведомление об оценке %s не отправлено", evaluation_id)
+    return int(evaluation_id)
+
+
+@app.route('/api/ai-qa/human-review', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_human_review():
+    """Сохранить «Мою оценку» проверяющего по субъекту карточки.
+
+    Тело: {call_id, subject_kind, direction_id, evaluation_run_id, scores[],
+    criterion_comments[], comment, comment_visible_to_operator, question_resolved,
+    resolved_first_contact, count_in_quality}. Без count_in_quality оценка может
+    быть неполной (калибровка ИИ); с ним — полная и уходит в журнал.
+
+    Ответ — то же состояние, что карточка получает при открытии: human_score,
+    human_review, my_review и пер-критерийные оценки человека."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    from call_qa import subjects as _qa_subjects
+    try:
+        from call_qa import api as _qa_api
+        from call_qa import human_review as _qa_human_review
+        from call_qa.evaluation import criteria as _qa_criteria
+        body = request.get_json(silent=True) or {}
+        try:
+            call_id = int(body.get('call_id'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "call_id обязателен"}), 400
+        subject_kind = _ai_qa_subject_kind(body.get('subject_kind') or body.get('subject'),
+                                           default=call_qa_config.SUBJECT_CALL)
+        scope = _ai_qa_direction_scope(requester_id)
+        if not _qa_api.call_in_scope(call_id, scope, subject_kind):
+            return jsonify({"error": "субъект вне ваших направлений"}), 403
+        if not _ai_qa_direction_department_allowed(
+                requester_id, _qa_api.subject_direction_id(call_id, subject_kind)):
+            return jsonify({"error": "субъект вне вашего отдела"}), 403
+
+        subject = _qa_subjects.load(subject_kind, call_id)
+        direction_id = subject.get('direction_id')
+        if direction_id is None:
+            return jsonify({"error": "у субъекта нет направления — нет мониторинговой шкалы"}), 400
+        if subject_kind in call_qa_config.CHAT_SUBJECT_KINDS:
+            direction_id = _qa_subjects.criteria_direction_id(direction_id)
+        direction = _qa_criteria.load_direction(int(direction_id))
+        criteria = direction['criteria']
+        if body.get('direction_id') not in (None, '') and int(body['direction_id']) != int(direction['id']):
+            return jsonify({"error": "Шкала карточки не совпадает с действующей — переоцените карточку "
+                                     "и заполните оценку заново", "code": "scale_changed"}), 409
+        # Карточка прислала имена критериев — сверяем позиции: оценка ложится в
+        # журнал позиционным массивом, и смещение на один критерий молча
+        # переписало бы баллы.
+        names = body.get('criteria_names')
+        if isinstance(names, list) and names:
+            if len(names) != len(criteria) or any(
+                    str(n or '') != str(c.get('name') or '') for n, c in zip(names, criteria)):
+                return jsonify({"error": "Критерии карточки не совпадают со шкалой — переоцените "
+                                         "карточку и заполните оценку заново",
+                                "code": "scale_changed"}), 409
+
+        scores = _qa_human_review.normalise_scores(criteria, body.get('scores'))
+        comments = _qa_human_review.normalise_comments(criteria, body.get('criterion_comments'))
+        comment = str(body.get('comment') or '').strip()
+        count_in_quality = bool(body.get('count_in_quality'))
+        comment_visible = body.get('comment_visible_to_operator', True)
+        comment_visible = comment_visible if isinstance(comment_visible, bool) \
+            else str(comment_visible).strip().lower() in ('1', 'true', 'yes', 'on')
+        question_resolved = bool(body.get('question_resolved'))
+        resolved_first_contact = bool(body.get('resolved_first_contact')) if question_resolved else None
+
+        problems = _qa_human_review.validate(criteria, scores, comments,
+                                             complete_required=count_in_quality)
+        message = _qa_human_review.validation_message(problems)
+        if message:
+            return jsonify({"error": f"Оценка не сохранена: {message}", "problems": problems}), 400
+        if not count_in_quality and _qa_human_review.is_empty(scores, comments, comment):
+            return jsonify({"error": "Нечего сохранять: ни один критерий не проставлен"}), 400
+        score = _qa_human_review.score_of(criteria, scores)
+
+        requester = db.get_user(id=requester_id)
+        journal_row = _qa_api.journal_review_for_subject(subject_kind, call_id)
+        target = None
+        if count_in_quality:
+            if journal_row and not _ai_qa_can_correct_journal(requester_id, requester):
+                return jsonify({"error": "В журнале уже есть оценка этого разговора; переоценить её из "
+                                         "карточки может админ или глава отдела — супервайзеру нужен "
+                                         "запрос на переоценку в «Журнале оценок»",
+                                "code": "journal_locked"}), 403
+            target = _ai_qa_journal_target(subject, journal_row, requester_id)
+            if not _ensure_call_access_for_requester(int(target['operator_id']), requester, requester_id):
+                return jsonify({"error": "Нет доступа к оценкам этого сотрудника"}), 403
+
+        review = _qa_human_review.upsert_review(
+            subject_kind=subject_kind, call_id=call_id, reviewer_id=requester_id,
+            direction_id=int(direction['id']), evaluation_run_id=body.get('evaluation_run_id'),
+            scores=scores, criterion_comments=comments, score=score, comment=comment,
+            comment_visible_to_operator=comment_visible, question_resolved=question_resolved,
+            resolved_first_contact=resolved_first_contact)
+        journal_call_id = review.get('journal_call_id')
+        if count_in_quality:
+            # Переоценка без единого изменения — не переоценка: журнал отверг бы
+            # её уникальным ключом, а Telegram получил бы пустое уведомление.
+            unchanged = bool(journal_row) and target['is_correction'] and (
+                list(journal_row.get('scores') or []) == list(scores)
+                and [str(x or '').strip() for x in (journal_row.get('criterion_comments') or [''] * len(comments))] == comments
+                and journal_row.get('score') is not None and float(journal_row['score']) == float(score)
+                and str(journal_row.get('comment') or '').strip() == comment)
+            if unchanged:
+                journal_call_id = int(journal_row['id'])
+            else:
+                journal_call_id = _ai_qa_write_journal(
+                    target, requester=requester, requester_id=requester_id,
+                    direction_id=int(direction['id']), scores=scores, comments=comments,
+                    score=score, comment=comment, comment_visible=comment_visible,
+                    question_resolved=question_resolved,
+                    resolved_first_contact=resolved_first_contact)
+                logging.info("ai-qa: «Моя оценка» %s %s ушла в журнал строкой %s (проверяющий %s)",
+                             subject_kind, call_id, journal_call_id, requester_id)
+            _qa_human_review.mark_counted(review['id'], journal_call_id)
+        state = _qa_api.human_review_state(subject_kind, call_id, int(direction['id']),
+                                           len(criteria), requester_id)
+        return jsonify({"status": "success", "journal_call_id": journal_call_id, **state}), 200
+    except _qa_subjects.SubjectNotFound as error:
+        return jsonify({"error": str(error)}), 404
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa human-review failed")
+        return jsonify({"error": "не удалось сохранить оценку (детали в логах сервера)"}), 500
+
+
+@app.route('/api/ai-qa/find', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_find():
+    """Точечный подбор: конкретный звонок или переписка по номеру телефона,
+    сотруднику и периоду — в своих данных отдела (журнал, пул АТС, эпизоды
+    переписки; у отдела продаж ещё касания CDR). См. call_qa.api.find_subjects."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import find_subjects, normalise_list_filters
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        scope = _ai_qa_direction_scope(requester_id)
+        try:
+            period = normalise_list_filters({key: request.args.get(key)
+                                             for key in ('date_from', 'date_to', 'operator_id')})
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        result = find_subjects(
+            family=request.args.get('kind') or request.args.get('family') or 'calls',
+            department=department, allowed_direction_ids=scope,
+            phone=request.args.get('phone'), operator_id=period.get('operator_id'),
+            date_from=period.get('date_from'), date_to=period.get('date_to'),
+            limit=request.args.get('limit') or 40)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa find failed")
+        return jsonify({"error": "не удалось выполнить поиск (детали в логах сервера)"}), 500
 
 
 @app.route('/api/ai-qa/stats', methods=['GET', 'OPTIONS'])
@@ -26640,7 +27153,7 @@ def _binotel_store_record_async(imported_id, general_call_id):
 
 def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
                          date_from, date_to, min_duration_sec=None, max_duration_sec=None,
-                         count=1, source='random', fetch_end_parties=True):
+                         count=1, source='random', fetch_end_parties=True, phone=None):
     """«Случайный звонок» для TEZ через Binotel API 4.0. Возвращает Flask-ответ.
 
     Список звонков берём по sip (internalNumber — это параметр API), но каждый
@@ -26731,10 +27244,15 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             return False
         return True
 
+    # Точечный подбор по номеру клиента: хвост цифр (код страны у Binotel и у
+    # человека записан по-разному).
+    phone_suffix = re.sub(r'\D', '', str(phone or ''))[-10:]
     candidates = []
     skipped_other_operator = 0
     for c in calls:
         if c['call_type'] not in allowed_types:
+            continue
+        if phone_suffix and not re.sub(r'\D', '', str(c.get('external_number') or '')).endswith(phone_suffix):
             continue
         if not _call_belongs_to_operator(c):
             skipped_other_operator += 1
@@ -26770,7 +27288,9 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             operator_id, operator_name,
         )
     if not candidates:
-        return jsonify({"error": "За выбранный период у оператора нет подходящих звонков по этим критериям",
+        return jsonify({"error": ("За период у оператора нет записанных звонков с этим номером"
+                                  if phone_suffix else
+                                  "За выбранный период у оператора нет подходящих звонков по этим критериям"),
                         "code": "empty_window",
                         # Видно в ответе, а не только в логе: «звонки есть, но все
                         # чужие по имени» — совсем не то же самое, что «звонков нет».
@@ -26848,7 +27368,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
 def _cdr_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
                      date_from, date_to, min_duration_sec=None, max_duration_sec=None,
-                     count=1, source='random'):
+                     count=1, source='random', phone=None):
     """«Случайный звонок» для отдела продаж из касаний CDR (мост FreePBX). Возвращает Flask-ответ.
 
     Кандидаты — из СВОЕЙ базы (cdr_touches): к станции ни одного запроса, выборка
@@ -26900,8 +27420,11 @@ def _cdr_random_call(*, operator_id, operator_name, requester_id, incoming, outg
     with db._get_cursor() as cursor:
         rows = cdr_queries.sample_operator_calls(
             cursor, sip, day_from, day_to, call_types, min_d, max_d,
-            limit=CDR_RANDOM_CALL_SAMPLE_CAP)
+            limit=CDR_RANDOM_CALL_SAMPLE_CAP, phone_suffix=phone)
     if not rows:
+        if phone:
+            return jsonify({"error": "За период у оператора нет записанных звонков с этим номером",
+                            "code": "empty_window", "fetched": 0}), 404
         return jsonify({"error": "За выбранный период у оператора нет подходящих звонков по этим критериям",
                         "code": "empty_window", "fetched": 0}), 404
     trusted = [row for row in rows
@@ -27035,7 +27558,7 @@ def fetch_random_evaluation_call():
 
 
 def _oktell_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
-                        date_from, date_to, count=1, source='random'):
+                        date_from, date_to, count=1, source='random', phone=None):
     """«Случайный звонок» для СЗоВ через Oktell. Возвращает Flask-ответ.
 
     Вынесено из ручки журнала без изменений логики: ту же подтяжку вызывает
@@ -27076,10 +27599,14 @@ def _oktell_random_call(*, operator_id, operator_name, requester_id, incoming, o
         #    берём с запасом под запрошенное количество.
         sample_limit = max(60, count * 5)
         try:
-            sample = _oktell_query(_oktell_eval_sample_sql(mstart, mnext, auserids, sample_limit, min_d, max_d, conn_types=conn_types))
+            sample = _oktell_query(_oktell_eval_sample_sql(mstart, mnext, auserids, sample_limit, min_d, max_d,
+                                                           conn_types=conn_types, phone_digits=phone))
         except Exception:
             logging.exception("random_call: oktell sample query failed")
             return jsonify({"error": "Не удалось обратиться к Oktell, попробуйте ещё раз"}), 502
+        if phone and not sample:
+            return jsonify({"error": "За период у оператора нет записанных звонков с этим номером",
+                            "code": "empty_window"}), 404
 
         # 3) исключаем то, что уже в оценках/пуле, и кладём до `count` новых звонков
         existing = db.get_imported_call_external_ids_for_operator(operator_id)
@@ -44844,8 +45371,15 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
     )
 
 
-def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES):
+def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES,
+                            phone_digits=None):
     ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
+    # Точечный подбор по номеру клиента («ИИ-оценка» → найти звонок по телефону):
+    # хвост цифр сравнивается прямо в SQL, иначе случайная выборка в 60 строк
+    # могла бы просто не содержать нужный звонок. Только цифры — подстановка
+    # безопасна, форматов номера у станции несколько, поэтому сравниваем хвост.
+    digits = re.sub(r'\D', '', str(phone_digits or ''))[-10:]
+    phone_clause = f"AND ({_OKTELL_EVAL_PHONE_EXPR}) LIKE '%{digits}' " if digits else ""
     return (
         "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec, q.ct, "
         "q.stop_side, q.reason_stop FROM ("
@@ -44859,7 +45393,7 @@ def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_typ
         f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
         f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
         f"AND {_OKTELL_EVAL_OPERATOR_UID_EXPR} IN ({ids}) "
-        + _oktell_eval_duration_clause(min_d, max_d) +
+        + _oktell_eval_duration_clause(min_d, max_d) + phone_clause +
         f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"
     )
 

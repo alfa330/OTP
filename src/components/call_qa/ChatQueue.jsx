@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { MessageSquare, Loader2, AlertCircle, Users, Sparkles } from 'lucide-react';
-import { iosCard, iosBtnPrimary, IosBadge } from '../ui/ios';
+import { MessageSquare, Loader2, AlertCircle, Users, Sparkles, Search } from 'lucide-react';
+import { iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
 import EvaluationsList from './EvaluationsList';
 import { chatSubjectOf, SUBJECT_C2D_SNAPSHOT, SOURCE_LABEL } from './subjects';
 import { filtersToParams } from './filters';
@@ -34,7 +34,7 @@ const OverviewTile = ({ label, value, tone = 'slate', hint }) => (
 );
 
 export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast, onOpen, department,
-                                    filters = null, onResetFilters = null }) {
+                                    filters = null, onResetFilters = null, onFind = null }) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [overview, setOverview] = useState(null);
     const [randomBusy, setRandomBusy] = useState(false);
@@ -141,7 +141,15 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
                 </div>
             ) : null}
 
-            <div className="flex justify-end">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+                {/* Точечный подбор: конкретная переписка по номеру клиента, сотруднику и периоду. */}
+                {onFind && (
+                    <button type="button" onClick={onFind} disabled={randomBusy || !apiBaseUrl}
+                            className={`${iosBtnSecondary} disabled:cursor-not-allowed disabled:opacity-50`}
+                            title="Найти конкретную переписку по номеру телефона, сотруднику и периоду">
+                        <Search size={14} />{isRequests ? 'Найти заявку' : 'Найти чат'}
+                    </button>
+                )}
                 <button type="button" onClick={openRandom} disabled={randomBusy || !apiBaseUrl}
                         className={`${iosBtnPrimary} disabled:cursor-not-allowed disabled:opacity-50`}>
                     {randomBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}

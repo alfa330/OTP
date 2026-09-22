@@ -16,6 +16,7 @@ import AdjudicationsRag from './AdjudicationsRag';
 import ChatQueue from './ChatQueue';
 import QueueList, { isChat } from './QueueList';
 import QaFilters from './QaFilters';
+import FindSubjectModal from './FindSubjectModal';
 import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './filters';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
@@ -103,6 +104,12 @@ export default function CallQaView(props) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     // Правка/удаление разборов — только супер-админ (бэкенд проверяет то же в _ai_qa_admin_guard).
     const canManageRag = normalizeRole(user?.role) === 'super_admin';
+    // Переоценить из карточки строку, которая уже есть в журнале, может админ или
+    // глава отдела — та же граница, что у переоценки в самом журнале (бэкенд
+    // проверяет то же в _ai_qa_can_correct_journal). Здесь флаг нужен только для
+    // подсказки и блокировки переключателя до отправки.
+    const canCorrectJournal = ['admin', 'super_admin'].includes(normalizeRole(user?.role))
+        || isDepartmentHead(user);
     // СВ ОП оценивает только свои направления: конфигурация критериев и база разборов
     // ему не показываются (бэкенд их тоже ограничивает/запрещает).
     const isScopedSupervisor = normalizeRole(user?.role) === 'sv' && !isDepartmentHead(user);
@@ -143,6 +150,9 @@ export default function CallQaView(props) {
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
     const [callErr, setCallErr] = useState(null);
+    // Диалог точечного подбора «Найти звонок / переписку» — один на обе вкладки,
+    // семейство берёт у открытой вкладки.
+    const [findOpen, setFindOpen] = useState(false);
     const callRequest = useRef({ id: 0, controller: null });
     const queueRequest = useRef({ id: 0, controller: null });
     const returnFocus = useRef(null);
@@ -353,6 +363,52 @@ export default function CallQaView(props) {
         }
     };
 
+    /* «Моя оценка» из карточки: пер-критерийная оценка проверяющего по шкале
+     * сотрудника. Ответ сервера — то же состояние, что карточка получает при
+     * открытии (балл человека, кто оценил, моя оценка, вердикты человека по
+     * критериям), и оно вливается в открытую карточку без повторного прогона.
+     * Имена критериев уходят вместе с оценкой: сервер сверяет их со шкалой, чтобы
+     * устаревшая карточка не положила баллы в журнал со смещением. */
+    const saveMyReview = async (body) => {
+        const call = callData;
+        if (!call) return null;
+        if (!apiBaseUrl) {
+            showToast?.('Бэкенд недоступен — оценка не сохранена', 'error');
+            return null;
+        }
+        try {
+            const r = await axios.post(`${apiBaseUrl}/api/ai-qa/human-review`, {
+                call_id: call.id, subject_kind: call.subject_kind || 'call',
+                direction_id: call.direction_id, evaluation_run_id: call._evaluation_run_id,
+                criteria_names: (call.criteria || []).map((c) => c.name),
+                ...body,
+            }, { headers: headers() });
+            const state = r.data || {};
+            setCallData((current) => {
+                if (!current || current.id !== call.id || (current.subject_kind || 'call') !== (call.subject_kind || 'call')) return current;
+                const humanByIdx = new Map((state.criteria || []).map((h) => [h.idx, h]));
+                return {
+                    ...current,
+                    human_score: state.human_score ?? null,
+                    has_human_review: Boolean(state.has_human_review),
+                    human_review: state.human_review || null,
+                    my_review: state.my_review || null,
+                    criteria: (current.criteria || []).map((c) => {
+                        const h = humanByIdx.get(c.idx);
+                        return h ? { ...c, human: h.human ?? null, human_comment: h.human_comment ?? null } : c;
+                    }),
+                };
+            });
+            showToast?.(body.count_in_quality
+                ? (state.journal_call_id ? `Оценка учтена в журнале (№${state.journal_call_id})` : 'Оценка учтена в журнале')
+                : 'Моя оценка сохранена', 'success');
+            return state;
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось сохранить оценку', 'error');
+            return null;
+        }
+    };
+
     // Отправляется ВСЕГДА (даже без исправлений): «Подтвердить» — тоже результат ревью,
     // он убирает звонок из очереди и остаётся сигналом качества модели. Карточка
     // закрывается только после успешного ответа — при сбое введённый разбор не теряется.
@@ -488,6 +544,7 @@ export default function CallQaView(props) {
                     ) : (
                         <CallReviewCard key={callData?._evaluation_run_id || callData?.id} call={callData || undefined} onSkip={requestCloseCall}
                                         onSave={saveAdjud} onRefine={refineAdjud}
+                                        onSaveMine={saveMyReview} canCorrectJournal={canCorrectJournal}
                                         onInteractionChange={setReviewInteraction} />
                     )}
                 </div>
@@ -545,7 +602,8 @@ export default function CallQaView(props) {
             ) : tab === 'chats' ? (
                 <ChatQueue apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                            showToast={showToast} onOpen={openCall} department={department}
-                           filters={filters} onResetFilters={() => setFilters(EMPTY_FILTERS)} />
+                           filters={filters} onResetFilters={() => setFilters(EMPTY_FILTERS)}
+                           onFind={() => setFindOpen(true)} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              department={department} />
@@ -558,7 +616,8 @@ export default function CallQaView(props) {
                                  subject={SUBJECT_FAMILY_CALLS}
                                  department={department} canPull={canPullCalls(department)}
                                  filters={filters}
-                                 onResetFilters={() => setFilters(EMPTY_FILTERS)} />
+                                 onResetFilters={() => setFilters(EMPTY_FILTERS)}
+                                 onFind={() => setFindOpen(true)} />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl}
                                         withAccessTokenHeader={withAccessTokenHeader} directions={props.directions}
@@ -572,6 +631,14 @@ export default function CallQaView(props) {
             )}
                 </div>
             )}
+            {/* Точечный подбор: номер, сотрудник, период → конкретный звонок или
+                переписка → карточка. Сотрудник и период предзаполняются из панели. */}
+            <FindSubjectModal open={findOpen} onClose={() => setFindOpen(false)}
+                              apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                              department={department}
+                              family={tab === 'chats' ? SUBJECT_FAMILY_CHATS : SUBJECT_FAMILY_CALLS}
+                              initialFilters={filters} showToast={showToast}
+                              onOpen={(item) => { setFindOpen(false); openCall(item); }} />
             </>
             )}
         </div>

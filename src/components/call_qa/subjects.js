@@ -63,8 +63,9 @@ export const SOURCE_LABEL = {
     [SUBJECT_CA_EPISODE]: 'ChatApp',
 };
 
-/** Отделы, куда звонок можно подтянуть прямо из АТС (у ОП записи грузят руками). */
-export const PULL_CALL_DEPARTMENTS = ['szov', 'tez'];
+/** Отделы, куда звонок можно подтянуть прямо из АТС: СЗоВ — Oktell, Тез КЦ —
+ * Binotel, отдел продаж — свои касания CDR (запись приносит мост по заказу). */
+export const PULL_CALL_DEPARTMENTS = ['op', 'szov', 'tez'];
 export const canPullCalls = (department) => (
     PULL_CALL_DEPARTMENTS.includes(String(department || '').toLowerCase())
 );

@@ -1261,3 +1261,40 @@ $qa$;
 DROP TRIGGER IF EXISTS qa_rule_embedding_change_guard ON qa_policy_rule_embeddings;
 CREATE TRIGGER qa_rule_embedding_change_guard BEFORE UPDATE OR DELETE ON qa_policy_rule_embeddings
     FOR EACH ROW EXECUTE FUNCTION qa_guard_rule_embedding_change();
+
+-- ---------------------------------------------------------------------------
+-- «Моя оценка» проверяющего в карточке ИИ-оценки
+-- ---------------------------------------------------------------------------
+-- Человек оценивает субъект по мониторинговой шкале прямо в карточке, рядом с
+-- вердиктами ИИ. Запись здесь — калибровочный эталон (сравнивается с ИИ в
+-- метриках согласия) и ПРИ ЖЕЛАНИИ уходит в «Журнал оценок» (calls) обычной
+-- оценкой, влияющей на качество сотрудника; тогда заполняется journal_call_id.
+-- Пока оценка не отправлена в журнал, она может быть неполной: scores содержит
+-- NULL у непроставленных критериев, а score пуст. Одна запись на проверяющего
+-- и субъект — повторное сохранение перезаписывает её.
+CREATE TABLE IF NOT EXISTS ai_human_reviews (
+    id                          bigserial PRIMARY KEY,
+    subject_kind                text NOT NULL DEFAULT 'call'
+        CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode')),
+    call_id                     bigint NOT NULL,
+    reviewer_id                 integer NOT NULL,
+    direction_id                integer NOT NULL,
+    evaluation_run_id           text,
+    scores                      jsonb NOT NULL DEFAULT '[]'::jsonb,
+    criterion_comments          jsonb NOT NULL DEFAULT '[]'::jsonb,
+    score                       real,
+    comment                     text,
+    comment_visible_to_operator boolean NOT NULL DEFAULT true,
+    question_resolved           boolean NOT NULL DEFAULT false,
+    resolved_first_contact      boolean,
+    counted_in_quality          boolean NOT NULL DEFAULT false,
+    journal_call_id             integer,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (subject_kind, call_id, reviewer_id),
+    CHECK (score IS NULL OR (score >= 0 AND score <= 100))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_human_reviews_subject
+    ON ai_human_reviews (subject_kind, call_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_human_reviews_reviewer
+    ON ai_human_reviews (reviewer_id, updated_at DESC);

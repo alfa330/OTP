@@ -10,6 +10,7 @@ import {
     APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, IosHint, IosSegmented, scoreTone,
 } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
+import MyReviewPanel from './MyReviewPanel';
 import { CHAT_SUBJECTS } from './subjects';
 
 /* Карточка ревью одного субъекта оценки — центральный экран взаимодействия с ИИ.
@@ -87,7 +88,7 @@ const VERDICT = {
     Incorrect:  { tone: 'red',   label: 'Неверно', Icon: X },
     'N/A':      { tone: 'slate', label: 'N/A',     Icon: Minus },
     Pending:    { tone: 'amber', label: 'Ожидает', Icon: Clock },
-    // «Критич. ошибка» ставит только супервайзер (панель «Супервайзер»).
+    // «Критич. ошибка» ставит только человек (журнал / панель «Моя оценка»).
     Error:      { tone: 'red',   label: 'Критич. ошибка', Icon: ShieldAlert },
 };
 
@@ -105,10 +106,11 @@ const HUMAN_OPTS = [
 // «Недочёт» доступен только критериям, у которых он предусмотрен шкалой (c.deficiency).
 const DEFICIENCY_OPT = { v: 'Deficiency', label: 'Недочёт', Icon: AlertTriangle };
 
-// Закреплённые переключатели под «Оценка по критериям»: чью оценку показываем.
+// Закреплённые переключатели под «Оценка по критериям»: вердикты ИИ (и разбор
+// расхождений) либо собственная оценка проверяющего по той же шкале.
 const PANELS = [
-    { key: 'ai', label: 'ИИ',          Icon: Sparkles },
-    { key: 'sv', label: 'Супервайзер', Icon: User2 },
+    { key: 'ai',   label: 'ИИ',         Icon: Sparkles },
+    { key: 'mine', label: 'Моя оценка', Icon: User2 },
 ];
 
 function ConfidenceBar({ value }) {
@@ -131,6 +133,19 @@ function VerdictChip({ verdict }) {
     }
     const v = VERDICT[verdict] || VERDICT['N/A'];
     return <IosBadge tone={v.tone}><v.Icon size={12} strokeWidth={2.5} />{v.label}</IosBadge>;
+}
+
+/* Вердикт человека из журнала — рядом с вердиктом ИИ по тому же критерию, чтобы
+ * расхождение было видно на месте, без переключения панели. Серый: это справка,
+ * решение по критерию принимают кнопками ниже. */
+function HumanChip({ verdict, comment }) {
+    if (verdict == null) return null;
+    const v = VERDICT[verdict] || VERDICT['N/A'];
+    return (
+        <IosBadge tone="slate" className="!py-0.5" title={comment ? `Человек: ${comment}` : 'Оценка человека в журнале'}>
+            <User2 size={11} />Человек: {v.label}
+        </IosBadge>
+    );
 }
 
 // Кто говорит: у звонка две стороны, у чата к ним добавляются чужой сотрудник
@@ -374,7 +389,7 @@ function EvidenceReview({ c, decision, onEdit, disabled, transcriptText }) {
     );
 }
 
-const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine, disabled = false, transcriptText, panel = 'ai' }) {
+const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine, disabled = false, transcriptText }) {
     const [open, setOpen] = useState(false);
     const [refining, setRefining] = useState(false);
     const [aiNote, setAiNote] = useState(null);
@@ -384,8 +399,7 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
     const [showBounds, setShowBounds] = useState(false);
     const refineRequest = useRef(0);
     const src = SOURCE[c.source] || SOURCE.transcript;
-    const svPanel = panel === 'sv';
-    const editable = !svPanel && c.source === 'transcript';
+    const editable = c.source === 'transcript';
     const chosen = decision?.verdict ?? c.ai;
     const chosenRef = useRef(chosen);
     chosenRef.current = chosen;
@@ -444,36 +458,6 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
         }
     };
 
-    if (svPanel) {
-        // Панель «Супервайзер»: что по этому критерию поставил и написал человек
-        // (calls.scores / criterion_comments) — только просмотр, без правок.
-        return (
-            <div className={`${iosCard} p-3`}>
-                <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                            {c.is_critical && <ShieldAlert size={13} className="shrink-0 text-rose-500" title="Критический критерий" />}
-                            <span className="text-[13.5px] font-medium leading-snug text-slate-800">{c.name}</span>
-                        </div>
-                        <div className="mt-1 flex items-center gap-1.5">
-                            <IosBadge tone="slate" className="!px-2 !py-0.5"><User2 size={11} />Супервайзер</IosBadge>
-                        </div>
-                    </div>
-                    <VerdictChip verdict={c.human ?? null} />
-                </div>
-                {c.human != null || c.human_comment ? (
-                    c.human_comment ? (
-                        <p className="mt-2 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[12.5px] text-slate-600 ring-1 ring-slate-100">{c.human_comment}</p>
-                    ) : (
-                        <p className="mt-2 text-[12px] text-slate-400">Без комментария супервайзера.</p>
-                    )
-                ) : (
-                    <p className="mt-2 text-[12px] text-slate-400">Супервайзер не оценивал этот критерий.</p>
-                )}
-            </div>
-        );
-    }
-
     return (
         <div className={`${iosCard} p-3 ${corrected ? 'ring-2 ring-blue-400/60' : ''}`}>
             <div className="flex items-start justify-between gap-2">
@@ -487,7 +471,12 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
                         {editable && <ConfidenceBar value={c.conf} />}
                     </div>
                 </div>
-                <VerdictChip verdict={chosen} />
+                {/* Вердикт ИИ и под ним — вердикт человека из журнала, если разговор
+                    уже оценивали: расхождение видно сразу, на одном критерии. */}
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                    <VerdictChip verdict={chosen} />
+                    <HumanChip verdict={c.human} comment={c.human_comment} />
+                </div>
             </div>
 
             {editable ? (
@@ -607,10 +596,14 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
     );
 });
 
-export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInteractionChange }) {
+export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInteractionChange,
+                                         onSaveMine, canCorrectJournal = false }) {
     const [decisions, setDecisions] = useState({});
     const [saving, setSaving] = useState(false);
     const [panel, setPanel] = useState('ai');
+    // Несохранённые правки панели «Моя оценка» — часть «грязного» состояния карточки.
+    const [mine, setMine] = useState({ dirty: false, busy: false });
+    const onMineDirty = useCallback((dirty, busy) => setMine({ dirty: Boolean(dirty), busy: Boolean(busy) }), []);
     const audioRef = useRef(null);
 
     const seekAudio = useCallback((startMs) => {
@@ -658,15 +651,9 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
             ? chatLinesToSnapshot(call.transcript, call.operator) : null),
         [call],
     );
-    // Есть ли у звонка оценка супервайзера (calls.scores) — иначе панель «Супервайзер» пуста.
-    const hasHumanReview = useMemo(
-        () => call?.has_human_review === true || (call?.criteria || []).some((c) => c.human != null),
-        [call],
-    );
-
     useEffect(() => {
-        onInteractionChange?.({ dirty: corrections.length > 0, busy: saving });
-    }, [corrections.length, saving, onInteractionChange]);
+        onInteractionChange?.({ dirty: corrections.length > 0 || mine.dirty, busy: saving || mine.busy });
+    }, [corrections.length, saving, mine.dirty, mine.busy, onInteractionChange]);
 
     useEffect(() => () => onInteractionChange?.({ dirty: false, busy: false }), [onInteractionChange]);
 
@@ -683,6 +670,11 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
 
     const pendingCount = (call.criteria || []).filter((c) => c.source !== 'transcript').length;
     const isChat = isChatSubject(call.subject_kind);
+    const journal = call.human_review || null;
+    const myReview = call.my_review || null;
+    // «Моя» показывается отдельно от «Человек» только когда это разные оценки:
+    // если строку журнала сделал сам проверяющий, второй бейдж дублировал бы первый.
+    const showMyBadge = myReview?.score != null && !(journal && journal.is_mine);
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:grid-cols-[1.05fr_1fr]">
@@ -716,7 +708,16 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                                 </IosBadge>
                             )}
                             {call.human_score != null && (
-                                <IosBadge tone={scoreTone(call.human_score)}><User2 size={11} />Человек: {Math.round(call.human_score)}</IosBadge>
+                                <IosBadge tone={scoreTone(call.human_score)}
+                                          title={journal ? `Оценка в журнале: ${journal.evaluator || '—'}${journal.datetime ? `, ${journal.datetime}` : ''}` : 'Оценка человека в журнале'}>
+                                    <User2 size={11} />Человек: {Math.round(call.human_score)}
+                                </IosBadge>
+                            )}
+                            {showMyBadge && (
+                                <IosBadge tone={scoreTone(myReview.score)}
+                                          title={myReview.counted_in_quality ? 'Моя оценка — учтена в журнале' : 'Моя оценка — калибровочная, в качество не идёт'}>
+                                    <User2 size={11} />Моя: {Math.round(myReview.score)}
+                                </IosBadge>
                             )}
                         </div>
                     </div>
@@ -781,32 +782,42 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                         <div className="flex rounded-xl bg-slate-100 p-0.5" role="group" aria-label="Чья оценка показана по критериям">
                             {PANELS.map((p) => {
                                 const active = panel === p.key;
-                                const svDisabled = p.key === 'sv' && !hasHumanReview;
                                 return (
-                                    <button key={p.key} type="button" onClick={() => setPanel(p.key)}
-                                            disabled={svDisabled} aria-pressed={active}
-                                            title={svDisabled ? 'Супервайзер ещё не оценил этот звонок' : undefined}
-                                            className={`flex min-h-8 items-center gap-1 rounded-lg px-2.5 py-1 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-50 ${
+                                    <button key={p.key} type="button" onClick={() => setPanel(p.key)} aria-pressed={active}
+                                            className={`flex min-h-8 items-center gap-1 rounded-lg px-2.5 py-1 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
                                                 active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
                                         <p.Icon size={12} strokeWidth={2.5} />{p.label}
+                                        {/* Точка — есть несохранённое или уже сохранённое своё. */}
+                                        {p.key === 'mine' && (mine.dirty || myReview) && (
+                                            <span className={`ml-0.5 inline-block h-1.5 w-1.5 rounded-full ${mine.dirty ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                                  aria-label={mine.dirty ? 'есть несохранённые изменения' : 'оценка сохранена'} />
+                                        )}
                                     </button>
                                 );
                             })}
                         </div>
-                        {panel === 'sv' && call.human_score != null && (
-                            <IosBadge tone={scoreTone(call.human_score)}><User2 size={11} />Итог супервайзера: {Math.round(call.human_score)}</IosBadge>
-                        )}
-                        {!hasHumanReview && (
-                            <span className="text-[11px] text-slate-400">оценки супервайзера пока нет</span>
+                        {panel === 'mine' && (
+                            <span className="text-[11px] text-slate-400">по шкале сотрудника, как в журнале</span>
                         )}
                     </div>
                 </div>
 
+                {panel === 'mine' ? (
+                    hasCriteria ? (
+                        <MyReviewPanel call={call} canCorrectJournal={canCorrectJournal}
+                                       onSave={onSaveMine} onDirtyChange={onMineDirty} disabled={saving} />
+                    ) : (
+                        <div className={`${iosCard} flex min-h-32 items-center justify-center px-5 text-center text-[13px] text-rose-600`} role="alert">
+                            Критерии оценки не загрузились. Своя оценка по этой карточке недоступна.
+                        </div>
+                    )
+                ) : (
+                <>
                 <div className="space-y-2.5">
                     {hasCriteria ? call.criteria.map((c) => (
-                            <CriterionRow key={`${panel}:${c.idx}`} c={c} decision={decisions[c.idx]}
+                            <CriterionRow key={c.idx} c={c} decision={decisions[c.idx]}
                                           onEdit={onEdit} onRefine={onRefine} disabled={saving}
-                                          transcriptText={transcriptText} panel={panel} />
+                                          transcriptText={transcriptText} />
                         )) : (
                             <div className={`${iosCard} flex min-h-32 items-center justify-center px-5 text-center text-[13px] text-rose-600`} role="alert">
                                 Критерии оценки не загрузились. Подтверждение этой карточки недоступно.
@@ -814,7 +825,6 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                         )}
                 </div>
 
-                {panel === 'ai' && (
                 <div className="sticky bottom-0 mt-3 flex flex-col gap-2 rounded-2xl bg-white/95 px-3 py-2.5 ring-1 ring-slate-200/70 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between" aria-live="polite">
                     <span className={`text-[12.5px] ${incompleteCorrections.length ? 'font-medium text-amber-700' : 'text-slate-500'}`}>
                         {!canSubmit
@@ -838,6 +848,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                         </button>
                     </div>
                 </div>
+                </>
                 )}
             </div>
         </div>

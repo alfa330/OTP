@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import logging
+import re
 import tempfile
 import threading
 import uuid
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
 
 from . import config
+from . import human_review as human_review_mod
 from . import subjects as subjects_mod
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
@@ -245,7 +247,15 @@ _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
                     AND s.wz_channel_id = ce.license_id::text || ':' || ce.messenger_type
                     AND s.wz_chat_id = ce.chat_id AND s.episode_start = ce.started_at
                     AND COALESCE(hc.is_draft, FALSE) = FALSE
-                  ORDER BY hc.created_at DESC LIMIT 1))"""
+                  ORDER BY hc.created_at DESC LIMIT 1),
+                 (SELECT hr.score FROM ai_human_reviews hr
+                   WHERE hr.subject_kind = rc.subject_kind AND hr.call_id = rc.call_id
+                     AND hr.score IS NOT NULL
+                   ORDER BY hr.updated_at DESC LIMIT 1))"""
+# Последняя ветка COALESCE — «Моя оценка» из карточки (ai_human_reviews), полная,
+# но не отправленная в журнал: человек оценил разговор целиком, и в списках это
+# такая же оценка человека рядом с баллом ИИ. Строка журнала, если она есть,
+# старше по приоритету — она и есть качество сотрудника.
 
 
 # ── Время на экране: всегда Алматы ────────────────────────────────────────────
@@ -1121,46 +1131,162 @@ def _human_display_verdict(v):
 #   imported_call — calls.imported_call_id (звонок оценили после подтяжки);
 #   wz_episode / ca_episode — через снапшот переписки по ключу эпизода;
 #   c2d_snapshot  — calls.c2d_snapshot_id прямо на этот снапшот.
+#
+# Строка журнала читается целиком — не только баллы: «Моя оценка» в карточке
+# уходит в журнал переоценкой этой строки, и ей нужны те же реквизиты (оператор,
+# номер, месяц, дата обращения, запись), что журнал пишет сам.
+_JOURNAL_ROW_KEYS = ("scores", "criterion_comments", "score", "id", "evaluator_id",
+                     "datetime", "evaluator", "operator_id", "phone_number", "month",
+                     "appeal_date", "audio_path", "comment", "comment_visible_to_operator",
+                     "question_resolved", "resolved_first_contact", "direction_id")
+_JOURNAL_ROW_COLUMNS = f"""c.scores, c.criterion_comments, c.score, c.id, c.evaluator_id,
+                      TO_CHAR({_local_from_utc('c.created_at')}, 'DD.MM.YYYY HH24:MI'), ju.name,
+                      c.operator_id, c.phone_number, c.month,
+                      TO_CHAR(c.appeal_date, 'YYYY-MM-DD"T"HH24:MI:SS'), c.audio_path,
+                      c.comment, COALESCE(c.comment_visible_to_operator, TRUE),
+                      COALESCE(c.question_resolved, FALSE), c.resolved_first_contact,
+                      c.direction_id"""
 _HUMAN_REVIEW_SQL = {
+    # У звонка журнала «человеческая оценка» — ПОСЛЕДНЯЯ ВЕРСИЯ: переоценка
+    # кладётся новой строкой с previous_version_id на прежнюю, и читать надо
+    # хвост цепочки, иначе после переоценки из карточки в ней оставалась бы
+    # старая оценка. Глубина ограничена — цикл в данных не должен вешать запрос.
     config.SUBJECT_CALL:
-        "SELECT scores, criterion_comments, score FROM calls WHERE id = %s",
+        f"""WITH RECURSIVE chain AS (
+                SELECT c0.id, 0 AS depth FROM calls c0 WHERE c0.id = %s
+                UNION ALL
+                SELECT n.id, chain.depth + 1
+                  FROM calls n JOIN chain ON n.previous_version_id = chain.id
+                 WHERE chain.depth < 32
+            )
+            SELECT {_JOURNAL_ROW_COLUMNS}
+              FROM chain JOIN calls c ON c.id = chain.id
+              LEFT JOIN users ju ON ju.id = c.evaluator_id
+             WHERE COALESCE(c.is_draft, FALSE) = FALSE
+             ORDER BY c.created_at DESC, c.id DESC LIMIT 1""",
     config.SUBJECT_IMPORTED_CALL:
-        """SELECT c.scores, c.criterion_comments, c.score
+        f"""SELECT {_JOURNAL_ROW_COLUMNS}
              FROM calls c
+             LEFT JOIN users ju ON ju.id = c.evaluator_id
             WHERE c.imported_call_id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
             ORDER BY c.created_at DESC LIMIT 1""",
     config.SUBJECT_WZ_EPISODE:
-        """SELECT c.scores, c.criterion_comments, c.score
+        f"""SELECT {_JOURNAL_ROW_COLUMNS}
              FROM wazzup_episodes e
              JOIN c2d_chat_snapshots s
                ON s.source = 'wazzup' AND s.wz_channel_id = e.channel_id
                   AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
              JOIN calls c ON c.c2d_snapshot_id = s.id
+             LEFT JOIN users ju ON ju.id = c.evaluator_id
             WHERE e.id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
             ORDER BY c.created_at DESC LIMIT 1""",
     config.SUBJECT_CA_EPISODE:
-        """SELECT c.scores, c.criterion_comments, c.score
+        f"""SELECT {_JOURNAL_ROW_COLUMNS}
              FROM chatapp_episodes e
              JOIN c2d_chat_snapshots s
                ON s.source = 'chatapp'
                   AND s.wz_channel_id = e.license_id::text || ':' || e.messenger_type
                   AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
              JOIN calls c ON c.c2d_snapshot_id = s.id
+             LEFT JOIN users ju ON ju.id = c.evaluator_id
             WHERE e.id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
             ORDER BY c.created_at DESC LIMIT 1""",
     config.SUBJECT_C2D_SNAPSHOT:
-        """SELECT c.scores, c.criterion_comments, c.score
+        f"""SELECT {_JOURNAL_ROW_COLUMNS}
              FROM calls c
+             LEFT JOIN users ju ON ju.id = c.evaluator_id
             WHERE c.c2d_snapshot_id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
             ORDER BY c.created_at DESC LIMIT 1""",
 }
 
 
-def _attach_human_review(payload: dict) -> dict:
-    """Дописывает в карточку пер-критерийную оценку супервайзера (calls.scores /
-    calls.criterion_comments) и свежий итоговый балл. Всегда читается из БД на момент
-    запроса и НЕ попадает в immutable-кэш: человеческая оценка живёт независимо от
-    прогонов ИИ (супервайзер мог оценить звонок позже). Ошибки не роняют карточку.
+def journal_review_for_subject(subject_kind: str, call_id: int) -> dict | None:
+    """Строка журнала, которая считается оценкой человека у этого субъекта
+    (см. _HUMAN_REVIEW_SQL), или None, если человек его в журнале не оценивал."""
+    sql = _HUMAN_REVIEW_SQL.get(subject_kind)
+    if sql is None:
+        raise ValueError(f"нет запроса человеческой оценки для субъекта {subject_kind!r}")
+    conn = config.connect_ro()
+    try:
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        cur.execute(sql, (int(call_id),))
+        row = cur.fetchone(); cur.close()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    out = dict(zip(_JOURNAL_ROW_KEYS, row))
+    if not isinstance(out.get("scores"), list):
+        out["scores"] = None
+    if not isinstance(out.get("criterion_comments"), list):
+        out["criterion_comments"] = None
+    return out
+
+
+def _attach_scale(payload: dict) -> None:
+    """Вес и описание критериев из ЖИВОЙ шкалы — для панели «Моя оценка».
+
+    В immutable-карточке их нет (там только вердикты ИИ), а человеку, который
+    оценивает сам, нужны и вес («12 pts», как в журнале), и текст критерия под
+    «i». Размер шкалы отдаём отдельно: если критериев в карточке и в шкале
+    разное число, карточка устарела относительно шкалы, и «Моя оценка» по ней
+    легла бы в журнал со смещёнными баллами — фронт это блокирует."""
+    criteria = payload.get("criteria") or []
+    try:
+        direction = criteria_mod.load_direction(int(payload["direction_id"]))
+    except Exception:
+        logging.exception("ai-qa: не удалось прочитать шкалу направления %s",
+                          payload.get("direction_id"))
+        return
+    by_idx = {c["idx"]: c for c in direction["criteria"]}
+    for c in criteria:
+        meta = by_idx.get(c.get("idx"))
+        if not meta:
+            continue
+        c["weight"] = meta.get("weight")
+        c["description"] = meta.get("description") or ""
+    payload["scale_size"] = len(direction["criteria"])
+    payload["scale_changed"] = (
+        len(direction["criteria"]) != len(criteria)
+        or any(by_idx.get(c.get("idx"), {}).get("name") not in (None, c.get("name"))
+               for c in criteria))
+
+
+def _my_review(subject_kind: str, call_id: int, reviewer_id: int, journal: dict | None):
+    """«Моя оценка» этого проверяющего: своя строка ai_human_reviews, а без неё —
+    строка журнала, если её сделал он же (тогда карточка показывает её как свою и
+    правит переоценкой)."""
+    try:
+        row = human_review_mod.get_review(subject_kind, call_id, reviewer_id)
+    except Exception:
+        logging.exception("ai-qa: не удалось прочитать «Мою оценку» %s %s", subject_kind, call_id)
+        row = None
+    if row:
+        return human_review_mod.serialise(row)
+    if journal and journal.get("evaluator_id") is not None \
+            and int(journal["evaluator_id"]) == int(reviewer_id):
+        out = human_review_mod.serialise({
+            "id": None, "scores": journal.get("scores") or [],
+            "criterion_comments": journal.get("criterion_comments") or [],
+            "score": journal.get("score"), "comment": journal.get("comment"),
+            "comment_visible_to_operator": journal.get("comment_visible_to_operator", True),
+            "question_resolved": journal.get("question_resolved"),
+            "resolved_first_contact": journal.get("resolved_first_contact"),
+            "counted_in_quality": True, "journal_call_id": journal.get("id"),
+            "updated_at": None,
+        }, source="journal")
+        out["updated_at"] = journal.get("datetime")
+        return out
+    return None
+
+
+def _attach_human_review(payload: dict, reviewer_id=None) -> dict:
+    """Дописывает в карточку пер-критерийную оценку человека из журнала
+    (calls.scores / calls.criterion_comments), свежий итоговый балл, кто и когда
+    оценил, а также «Мою оценку» проверяющего (reviewer_id) и вес/описание
+    критериев шкалы. Всегда читается из БД на момент запроса и НЕ попадает в
+    immutable-кэш: человеческая оценка живёт независимо от прогонов ИИ
+    (супервайзер мог оценить звонок позже). Ошибки не роняют карточку.
 
     У эпизода чата id субъекта — это НЕ calls.id: человеческая оценка эпизода —
     обычная строка calls, привязанная через снапшот переписки
@@ -1171,36 +1297,53 @@ def _attach_human_review(payload: dict) -> dict:
     subject_kind = payload.get("subject_kind") or config.SUBJECT_CALL
     if not call_id or not criteria:
         return payload
-    scores, comments, human_score = None, None, payload.get("human_score")
-    sql = _HUMAN_REVIEW_SQL.get(subject_kind)
-    if sql is None:
+    try:
+        journal = journal_review_for_subject(subject_kind, call_id)
+    except ValueError:
         logging.warning("ai-qa: нет запроса человеческой оценки для субъекта %s", subject_kind)
         return payload
-    try:
-        conn = config.connect_ro()
-        try:
-            cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-            cur.execute(sql, (int(call_id),))
-            row = cur.fetchone(); cur.close()
-        finally:
-            conn.close()
-        if row:
-            scores = row[0] if isinstance(row[0], list) else None
-            comments = row[1] if isinstance(row[1], list) else None
-            human_score = row[2]
     except Exception:
         logging.exception("ai-qa: не удалось загрузить оценку супервайзера для %s %s",
                           subject_kind, call_id)
         return payload
+    scores = journal.get("scores") if journal else None
+    comments = journal.get("criterion_comments") if journal else None
     for c in criteria:
         idx = c.get("idx")
         raw = scores[idx] if scores is not None and isinstance(idx, int) and 0 <= idx < len(scores) else None
         comment = comments[idx] if comments is not None and isinstance(idx, int) and 0 <= idx < len(comments) else None
         c["human"] = _human_display_verdict(raw)
         c["human_comment"] = (str(comment).strip() or None) if comment is not None else None
-    payload["human_score"] = human_score
+    payload["human_score"] = journal["score"] if journal else payload.get("human_score")
     payload["has_human_review"] = scores is not None
+    payload["human_review"] = ({
+        "call_id": journal.get("id"), "evaluator_id": journal.get("evaluator_id"),
+        "evaluator": journal.get("evaluator") or "—", "datetime": journal.get("datetime"),
+        "score": journal.get("score"),
+        "is_mine": (reviewer_id is not None and journal.get("evaluator_id") is not None
+                    and int(journal["evaluator_id"]) == int(reviewer_id)),
+    } if journal else None)
+    _attach_scale(payload)
+    if reviewer_id is not None:
+        payload["my_review"] = _my_review(subject_kind, int(call_id), int(reviewer_id), journal)
     return payload
+
+
+def human_review_state(subject_kind: str, call_id: int, direction_id: int,
+                       criteria_count: int, reviewer_id) -> dict:
+    """То же, что карточка получает при открытии, — после сохранения «Моей оценки»,
+    чтобы фронт обновил бейджи и панель без повторного прогона карточки."""
+    payload = {"id": int(call_id), "subject_kind": subject_kind, "direction_id": int(direction_id),
+               "criteria": [{"idx": i} for i in range(int(criteria_count))]}
+    _attach_human_review(payload, reviewer_id=reviewer_id)
+    return {
+        "human_score": payload.get("human_score"),
+        "has_human_review": payload.get("has_human_review", False),
+        "human_review": payload.get("human_review"),
+        "my_review": payload.get("my_review"),
+        "criteria": [{"idx": c["idx"], "human": c.get("human"),
+                      "human_comment": c.get("human_comment")} for c in payload["criteria"]],
+    }
 
 
 def _ai_score(direction: dict, result: dict):
@@ -1473,7 +1616,7 @@ def _schedule_shadow_variant(**kwargs):
 
 
 def review_payload(call_id: int, refresh: bool = False,
-                   subject_kind: str = config.SUBJECT_CALL) -> dict:
+                   subject_kind: str = config.SUBJECT_CALL, reviewer_id=None) -> dict:
     """Return a reproducible evaluation, independently caching the transcript and LLM/RAG.
 
     The immutable cache key includes prompt, scale, criterion configuration,
@@ -1498,8 +1641,9 @@ def review_payload(call_id: int, refresh: bool = False,
                 raise RuntimeError("не удалось заблокировать субъект для безопасной оценки")
             payload = _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh,
                                          subject_kind=subject_kind)
-    # Пер-критерийная оценка супервайзера — поверх результата, вне immutable-кэша.
-    return _attach_human_review(payload)
+    # Пер-критерийная оценка человека и «Моя оценка» проверяющего — поверх
+    # результата, вне immutable-кэша.
+    return _attach_human_review(payload, reviewer_id=reviewer_id)
 
 
 def _resolve_call_source(subject: dict, model: str) -> dict:
@@ -3685,6 +3829,316 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
         cur.close(); conn.close()
 
 
+# ── Точечный подбор: по номеру телефона, сотруднику и периоду ─────────────────
+#
+# «Случайный звонок» отвечает на вопрос «дай что-нибудь оценить», а здесь
+# человек ищет КОНКРЕТНЫЙ разговор: клиент пожаловался, назвал номер — надо
+# найти этот звонок или чат и оценить его. Ищем в СВОИХ данных: журнал,
+# подтянутые из АТС звонки, эпизоды переписки; у отдела продаж ещё и касания
+# CDR (звонки, которых в портале пока нет — запись принесёт мост по заказу).
+# В сами АТС СЗоВ/Тез КЦ по номеру не ходим: их выборка идёт от сотрудника,
+# это делает подтяжка «Из АТС» с параметром phone (маршрут pull-call).
+
+FIND_LIMIT_MAX = 100
+
+
+def phone_digits(value) -> str:
+    """Цифры номера; «8XXXXXXXXXX» → «7XXXXXXXXXX» (казахстанская запись)."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    return digits
+
+
+def phone_suffix(value) -> str:
+    """Хвост номера для сравнения: последние 10 цифр — без кода страны, потому
+    что в разных источниках он записан по-разному («+7», «7», «8», без кода)."""
+    digits = phone_digits(value)
+    return digits[-10:] if len(digits) > 10 else digits
+
+
+# regexp_replace прямо в SQL: в calls.phone_number лежат и «+7 (777) …», и
+# «chat_12345» у чатов, и голые цифры; сравнивать можно только цифры с цифрами.
+_DIGITS_SQL = "regexp_replace(COALESCE({col}, ''), '\\D', '', 'g')"
+
+
+def _find_ai_lateral(kind: str, id_expr: str) -> str:
+    return f"""LEFT JOIN LATERAL (
+                     SELECT rc.payload->>'ai_score' AS ai
+                       FROM ai_review_cache rc
+                      WHERE rc.subject_kind = '{kind}' AND rc.call_id = {id_expr}
+                      ORDER BY rc.created_at DESC LIMIT 1
+                 ) ai ON TRUE"""
+
+
+def _score_int(value):
+    try:
+        return round(float(value)) if value is not None and str(value) != "null" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_predicates(*, phone_col, operator_col, day_expr, suffix, operator_id,
+                     date_from, date_to) -> tuple[str, list]:
+    sql, params = "", []
+    if suffix:
+        sql += f" AND {phone_col} LIKE %s"
+        params.append("%" + suffix)
+    if operator_id is not None:
+        sql += f" AND {operator_col} = %s"
+        params.append(int(operator_id))
+    if date_from:
+        sql += f" AND {day_expr} >= %s"
+        params.append(date_from)
+    if date_to:
+        sql += f" AND {day_expr} <= %s"
+        params.append(date_to)
+    return sql, params
+
+
+def _find_journal_calls(cur, family, suffix, operator_id, date_from, date_to, limit):
+    # Дата разговора — appeal_date (её вводит журнал), а не момент оценки:
+    # человек ищет по дню звонка. У старых строк appeal_date пуст — тогда
+    # берём дату оценки, она обычно того же дня.
+    when = f"COALESCE(c.appeal_date, {_local_from_utc('c.created_at')})"
+    where, params = _find_predicates(
+        phone_col=_DIGITS_SQL.format(col="c.phone_number"), operator_col="c.operator_id",
+        day_expr=f"{when}::date", suffix=suffix, operator_id=operator_id,
+        date_from=date_from, date_to=date_to)
+    cur.execute(
+        f"""SELECT c.id, u.name, c.operator_id, d.name,
+                   TO_CHAR({when}, 'DD.MM.YYYY HH24:MI'), {when} AS ts,
+                   c.phone_number, c.score, ai.ai, c.audio_path
+              FROM calls c
+              LEFT JOIN users u ON u.id = c.operator_id
+              LEFT JOIN directions d ON d.id = c.direction_id
+              {_find_ai_lateral(config.SUBJECT_CALL, 'c.id')}
+             WHERE c.direction_id = ANY(%s)
+               AND c.audio_path IS NOT NULL AND c.audio_path <> ''
+               AND COALESCE(c.is_draft, FALSE) = FALSE
+               -- Звонок, оценённый ИИ ещё как строка АТС (imported_call), в
+               -- разделе живёт под тем видом — покажем его оттуда, не дважды.
+               AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc2
+                                WHERE rc2.subject_kind = 'imported_call'
+                                  AND rc2.call_id = c.imported_call_id)"""
+        + where + " ORDER BY ts DESC NULLS LAST LIMIT %s",
+        (family, *params, limit))
+    return [{"subject": config.SUBJECT_CALL, "id": r[0], "operator": r[1] or "—",
+             "operator_id": r[2], "direction": r[3] or "—", "datetime": r[4], "_ts": r[5],
+             "phone": r[6], "human_score": r[7], "ai_score": _score_int(r[8]),
+             "audio": "ready" if r[9] else "none", "in_journal": True}
+            for r in cur.fetchall()]
+
+
+def _find_imported_calls(cur, family, suffix, operator_id, date_from, date_to, limit):
+    when = "(ic.datetime_raw AT TIME ZONE 'Asia/Almaty')"
+    where, params = _find_predicates(
+        phone_col=f"COALESCE(ic.phone_normalized, {_DIGITS_SQL.format(col='ic.phone_number')})",
+        operator_col="ic.operator_id", day_expr=f"{when}::date", suffix=suffix,
+        operator_id=operator_id, date_from=date_from, date_to=date_to)
+    cur.execute(
+        f"""SELECT ic.id, COALESCE(u.name, ic.operator_name), ic.operator_id, d.name,
+                   TO_CHAR({when}, 'DD.MM.YYYY HH24:MI'), {when} AS ts,
+                   ic.phone_number, hc.score, ai.ai, ic.audio_path, ic.duration_sec
+              FROM imported_calls ic
+              JOIN users u ON u.id = ic.operator_id
+              LEFT JOIN directions d ON d.id = u.direction_id
+              LEFT JOIN LATERAL (
+                  SELECT c.score FROM calls c
+                   WHERE c.imported_call_id = ic.id AND COALESCE(c.is_draft, FALSE) = FALSE
+                   ORDER BY c.created_at DESC LIMIT 1
+              ) hc ON TRUE
+              {_find_ai_lateral(config.SUBJECT_IMPORTED_CALL, 'ic.id')}
+             WHERE u.direction_id = ANY(%s)
+               -- Оценённый в журнале звонок показывает строка журнала — кроме
+               -- случая, когда ИИ уже оценил его как звонок из АТС: тогда его
+               -- карточка живёт здесь, а оценка человека подтянется через связь.
+               AND (hc.score IS NULL OR ai.ai IS NOT NULL)"""
+        + where + " ORDER BY ts DESC NULLS LAST LIMIT %s",
+        (family, *params, limit))
+    return [{"subject": config.SUBJECT_IMPORTED_CALL, "id": r[0], "operator": r[1] or "—",
+             "operator_id": r[2], "direction": r[3] or "—", "datetime": r[4], "_ts": r[5],
+             "phone": r[6], "human_score": r[7], "ai_score": _score_int(r[8]),
+             "audio": "ready" if r[9] else "pending",
+             "talk_seconds": int(r[10]) if r[10] is not None else None,
+             "in_journal": r[7] is not None}
+            for r in cur.fetchall()]
+
+
+def _find_cdr_touches(cur, family, suffix, operator_id, date_from, date_to, limit):
+    """Звонки отдела продаж, которых в портале ещё нет: касания CDR с разговором
+    и записью. Оператор — по внутреннему номеру касания (users.sip_number), как на
+    табло ОП; принадлежность записи проверяется правилом моста, чтобы не открыть
+    супервайзеру чужой разговор."""
+    from cdr import touches as cdr_touches
+    where, params = _find_predicates(
+        phone_col="t.phone", operator_col="u.id", day_expr="t.call_day", suffix=suffix,
+        operator_id=operator_id, date_from=date_from, date_to=date_to)
+    cur.execute(
+        f"""SELECT t.linkedid, t.phone, t.ext, t.started_at, t.call_type, t.talk_seconds,
+                   t.recording_url, u.id, u.name, d.name,
+                   TO_CHAR(t.started_at, 'DD.MM.YYYY HH24:MI')
+              FROM cdr_touches t
+              JOIN LATERAL (
+                  SELECT us.id, us.name, us.direction_id FROM users us
+                   WHERE btrim(COALESCE(us.sip_number, '')) = t.ext
+                     AND COALESCE(us.status, '') NOT IN ('fired', 'dismissal')
+                   ORDER BY us.id LIMIT 1
+              ) u ON TRUE
+              LEFT JOIN directions d ON d.id = u.direction_id
+             WHERE t.talk_seconds > 0 AND COALESCE(t.recording_url, '') <> ''
+               AND t.call_type IN (%s, %s)
+               AND u.direction_id = ANY(%s)
+               AND NOT EXISTS (SELECT 1 FROM imported_calls ic WHERE ic.external_id = t.linkedid)"""
+        + where + " ORDER BY t.started_at DESC LIMIT %s",
+        (cdr_touches.TYPE_IN, cdr_touches.TYPE_OUT, family, *params, limit))
+    items = []
+    for r in cur.fetchall():
+        phone = str(r[1] or "")
+        items.append({
+            "subject": "cdr_touch", "id": r[0], "linkedid": r[0], "ext": r[2],
+            "operator": r[8] or "—", "operator_id": r[7], "direction": r[9] or "—",
+            "datetime": r[10], "_ts": r[3],
+            "phone": ("7" + phone) if len(phone) == 10 else phone,
+            "call_type": "in" if r[4] == cdr_touches.TYPE_IN else "out",
+            "talk_seconds": int(r[5] or 0), "human_score": None, "ai_score": None,
+            "audio": "remote", "in_journal": False,
+            "recording_trusted": bool(cdr_touches.recording_belongs_to(r[6], r[2], phone, r[0])),
+        })
+    return items
+
+
+def _find_episodes(cur, kind, family, suffix, operator_id, date_from, date_to, limit):
+    """Эпизоды Wazzup (ОП) и ChatApp (Тез КЦ): таблицы построены одним билдером."""
+    if kind == config.SUBJECT_WZ_EPISODE:
+        table, source, channel = "wazzup_episodes", "wazzup", "e.channel_id"
+    else:
+        table, source = "chatapp_episodes", "chatapp"
+        channel = "e.license_id::text || ':' || e.messenger_type"
+    when = "(e.ended_at AT TIME ZONE 'Asia/Almaty')"
+    where, params = _find_predicates(
+        phone_col=_DIGITS_SQL.format(col="e.contact_phone"), operator_col="e.operator_user_id",
+        day_expr=f"{when}::date", suffix=suffix, operator_id=operator_id,
+        date_from=date_from, date_to=date_to)
+    cur.execute(
+        f"""SELECT e.id, u.name, e.operator_user_id, d.name,
+                   TO_CHAR({when}, 'DD.MM.YYYY HH24:MI'), {when} AS ts,
+                   e.contact_phone, e.contact_name, e.messages_count, e.operator_share,
+                   hs.score, ai.ai
+              FROM {table} e
+              JOIN users u ON u.id = e.operator_user_id
+              LEFT JOIN directions d ON d.id = u.direction_id
+              LEFT JOIN LATERAL (
+                  SELECT hc.score FROM c2d_chat_snapshots s
+                    JOIN calls hc ON hc.c2d_snapshot_id = s.id
+                   WHERE s.source = '{source}' AND s.wz_channel_id = {channel}
+                     AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
+                     AND COALESCE(hc.is_draft, FALSE) = FALSE
+                   ORDER BY hc.created_at DESC LIMIT 1
+              ) hs ON TRUE
+              {_find_ai_lateral(kind, 'e.id')}
+             WHERE u.direction_id = ANY(%s) AND e.kind = 'dialog'"""
+        + where + " ORDER BY e.ended_at DESC LIMIT %s",
+        (family, *params, limit))
+    return [{"subject": kind, "id": r[0], "operator": r[1] or "—", "operator_id": r[2],
+             "direction": r[3] or "—", "datetime": r[4], "_ts": r[5],
+             "phone": r[6], "contact": r[7], "messages_count": r[8],
+             "operator_share": round(float(r[9]) * 100) if r[9] is not None else None,
+             "human_score": r[10], "ai_score": _score_int(r[11]),
+             "in_journal": r[10] is not None}
+            for r in cur.fetchall()]
+
+
+def _find_c2d_snapshots(cur, family, suffix, operator_id, date_from, date_to, limit):
+    """Заявки Chat2Desk (СЗоВ): сырых сообщений локально нет, субъект — снапшот."""
+    where, params = _find_predicates(
+        phone_col=_DIGITS_SQL.format(col="cs.client_phone"), operator_col="cs.operator_id",
+        day_expr="cs.day", suffix=suffix, operator_id=operator_id,
+        date_from=date_from, date_to=date_to)
+    cur.execute(
+        f"""SELECT cs.id, COALESCE(u.name, cs.c2d_operator_name), cs.operator_id, d.name,
+                   TO_CHAR(cs.day, 'DD.MM.YYYY'), cs.day::timestamp AS ts,
+                   cs.client_phone, cs.client_name, cs.messages_count, hs.score, ai.ai,
+                   cs.request_id
+              FROM c2d_chat_snapshots cs
+              LEFT JOIN users u ON u.id = cs.operator_id
+              LEFT JOIN directions d ON d.id = u.direction_id
+              LEFT JOIN LATERAL (
+                  SELECT hc.score FROM calls hc
+                   WHERE hc.c2d_snapshot_id = cs.id AND COALESCE(hc.is_draft, FALSE) = FALSE
+                   ORDER BY hc.created_at DESC LIMIT 1
+              ) hs ON TRUE
+              {_find_ai_lateral(config.SUBJECT_C2D_SNAPSHOT, 'cs.id')}
+             WHERE cs.source = 'chat2desk' AND u.direction_id = ANY(%s)"""
+        + where + " ORDER BY cs.day DESC, cs.id DESC LIMIT %s",
+        (family, *params, limit))
+    return [{"subject": config.SUBJECT_C2D_SNAPSHOT, "id": r[0], "operator": r[1] or "—",
+             "operator_id": r[2], "direction": r[3] or "—", "datetime": r[4], "_ts": r[5],
+             "phone": r[6], "contact": r[7], "messages_count": r[8],
+             "human_score": r[9], "ai_score": _score_int(r[10]), "request_id": r[11],
+             "in_journal": r[9] is not None}
+            for r in cur.fetchall()]
+
+
+def find_subjects(*, family, department=None, allowed_direction_ids=None, phone=None,
+                  operator_id=None, date_from=None, date_to=None, limit=40) -> dict:
+    """Конкретный звонок или переписка по номеру телефона, сотруднику и периоду.
+
+    `family` — 'calls' или 'chats' (что ищем — вкладка). Хотя бы одно из
+    «номер»/«сотрудник» обязательно: период сам по себе вернул бы весь отдел.
+    Номер сравнивается по последним десяти цифрам (код страны в источниках
+    пишут по-разному), четырёх цифр хватает для поиска по хвосту.
+
+    Возвращает {items, truncated}: строки разных источников слиты и отсортированы
+    по времени разговора; `subject` каждой говорит, как её открывать
+    ('cdr_touch' — сначала подтянуть звонок из CDR маршрутом pull-call)."""
+    family = str(family or "calls").strip().lower()
+    if family not in config.SUBJECT_FAMILIES:
+        raise ValueError("укажите, что ищем: calls или chats")
+    suffix = phone_suffix(phone)
+    if phone and len(suffix) < 4:
+        raise ValueError("укажите не меньше четырёх цифр номера")
+    if not suffix and operator_id is None:
+        raise ValueError("укажите номер телефона или сотрудника")
+    limit = max(1, min(int(limit or 40), FIND_LIMIT_MAX))
+    code = config.normalise_department_code(department) or config.OP_DEPARTMENT_CODE
+    conn = config.connect_ro()
+    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+    try:
+        id_family = _scoped_qa_family(cur, allowed_direction_ids, department=code)
+        if not id_family:
+            return {"items": [], "truncated": False, "family": family, "department": code}
+        args = (cur, id_family, suffix, operator_id, date_from, date_to, limit)
+        items: list[dict] = []
+        if family == "calls":
+            items += _find_journal_calls(*args)
+            items += _find_imported_calls(*args)
+            if code == config.OP_DEPARTMENT_CODE:
+                items += _find_cdr_touches(*args)
+        else:
+            kind = config.chat_subject_kind(code)
+            if kind == config.SUBJECT_C2D_SNAPSHOT:
+                items += _find_c2d_snapshots(*args)
+            elif kind:
+                items += _find_episodes(cur, kind, *args[1:])
+    finally:
+        cur.close(); conn.close()
+
+    def sort_key(item):
+        ts = item.get("_ts")
+        if ts is None:
+            return 0.0
+        if getattr(ts, "tzinfo", None) is None:
+            return ts.timestamp() if hasattr(ts, "timestamp") else 0.0
+        return ts.timestamp()
+    items.sort(key=sort_key, reverse=True)
+    truncated = len(items) > limit
+    for item in items:
+        item.pop("_ts", None)
+    return {"items": items[:limit], "truncated": truncated, "family": family,
+            "department": code}
+
+
 def random_chat_episode(allowed_direction_ids=None, department=None, filters=None) -> dict:
     """Случайная переписка, пригодная для оценки, из источника выбранного отдела.
 
@@ -4496,7 +4950,7 @@ def stats(allowed_direction_ids=None, department=None) -> dict:
         # не входила никогда.
         cur.execute(
             """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.scores,
-                                           hc2d.scores, hca.scores), t.direction
+                                           hc2d.scores, hca.scores, hrv.scores), t.direction
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                               rc.subject_kind, rc.call_id,
                               rc.payload->'criteria' AS criteria,
@@ -4549,8 +5003,17 @@ def stats(allowed_direction_ids=None, department=None) -> dict:
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
                       ORDER BY hcalls.created_at DESC LIMIT 1
                  ) hca ON true
+                 -- «Моя оценка» из карточки (ai_human_reviews): полная оценка
+                 -- человека, не отправленная в журнал, — такой же эталон для
+                 -- согласия ИИ↔человек. Строка журнала, если она есть, старше.
+                 LEFT JOIN LATERAL (
+                     SELECT hr.scores FROM ai_human_reviews hr
+                      WHERE hr.subject_kind = t.subject_kind AND hr.call_id = t.call_id
+                        AND hr.score IS NOT NULL
+                      ORDER BY hr.updated_at DESC LIMIT 1
+                 ) hrv ON true
                 WHERE COALESCE(c.scores, hwz.scores, himp.scores,
-                               hc2d.scores, hca.scores) IS NOT NULL"""
+                               hc2d.scores, hca.scores, hrv.scores) IS NOT NULL"""
             + (" AND COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
                " us.direction_id, ua.direction_id) = ANY(%s)"
                if scope_family is not None else ""),

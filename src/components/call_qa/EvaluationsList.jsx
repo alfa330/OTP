@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, ChevronDown, PhoneIncoming } from 'lucide-react';
-import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, ChevronDown, PhoneIncoming, Search } from 'lucide-react';
+import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge, scoreTone } from '../ui/ios';
 import { isChat, subjectTitle, SOURCE_LABEL, SUBJECT_IMPORTED_CALL } from './subjects';
 import { filtersToParams, filtersKey, hasActiveFilters, pullParamsFromFilters } from './filters';
 
@@ -14,7 +14,7 @@ const PAGE = 50;
 
 export default function EvaluationsList(props) {
     const { apiBaseUrl, withAccessTokenHeader, onOpen, showToast, subject = 'call',
-            department, canPull = false, filters = null, onResetFilters } = props;
+            department, canPull = false, filters = null, onResetFilters, onFind = null } = props;
     const chats = isChat(subject);
     const filtersActive = hasActiveFilters(filters);
     /* Ключ-строка, а не объект фильтров: объект пересоздаётся на каждом рендере
@@ -98,10 +98,10 @@ export default function EvaluationsList(props) {
 
     /* «Подтянуть из АТС» — сверх пула портала. Пул (звонки, подтянутые в журнал
      * кнопкой «Случайный звонок», но так и не оценённые) конечен; эта кнопка
-     * идёт в саму АТС за новым звонком: СЗоВ — Oktell, Тез КЦ — Binotel. Запись
-     * уходит в наше хранилище, строка ложится как «не оценён», и оценки в
-     * журнале от этого не появляется. У отдела продаж кнопки нет: там записи
-     * загружают руками, подтягивать неоткуда. */
+     * идёт за новым звонком: СЗоВ — в Oktell, Тез КЦ — в Binotel, отдел продаж —
+     * в свои касания CDR (запись приносит мост по заказу). Запись уходит в наше
+     * хранилище, строка ложится как «не оценён», и оценки в журнале от этого не
+     * появляется. */
     const pullCall = () => {
         if (!apiBaseUrl) { showToast?.('Бэкенд недоступен', 'error'); return; }
         // Запрос идёт в АТС и качает запись — это секунды, за которые человек
@@ -160,6 +160,16 @@ export default function EvaluationsList(props) {
                         className={iosBtnSecondary} title="Обновить список">
                         <RefreshCw size={14} className={items === null ? 'animate-spin' : ''} />
                     </button>
+                    {/* Точечный подбор — рядом со случайным: конкретный звонок по
+                        номеру телефона, сотруднику и периоду. У чатов кнопка стоит
+                        в шапке вкладки «Чаты», здесь её не дублируем. */}
+                    {!chats && onFind && (
+                        <button type="button" onClick={onFind} disabled={busy || pullBusy}
+                                className={`${iosBtnSecondary} disabled:cursor-not-allowed disabled:opacity-50`}
+                                title="Найти конкретный звонок по номеру телефона, сотруднику и периоду">
+                            <Search size={14} />Найти звонок
+                        </button>
+                    )}
                     {!chats && canPull && (
                         <button type="button" onClick={pullCall} disabled={pullBusy || busy}
                                 className={`${iosBtnSecondary} disabled:cursor-not-allowed disabled:opacity-50`}
@@ -223,7 +233,6 @@ export default function EvaluationsList(props) {
                                         {subjectTitle(m.subject, m.id)}
                                     </span>
                                     <IosBadge tone="slate">{m.direction}</IosBadge>
-                                    <IosBadge tone="green"><Bot size={11} />оценено ИИ</IosBadge>
                                     {/* Откуда субъект: у СЗоВ и Тез КЦ в одном списке
                                         встречаются звонки из журнала и звонки, подтянутые
                                         из АТС без человеческой оценки, — по пустой колонке
@@ -244,18 +253,20 @@ export default function EvaluationsList(props) {
                                     <span className="text-slate-300"> · оценено {m.datetime}</span>
                                 </p>
                             </div>
-                            <div className="flex items-center gap-3 sm:shrink-0">
+                            {/* Оценка ИИ и оценка человека — рядом и подписаны: по
+                                двум числам без подписи не понять, где чья, а их
+                                расхождение — главное, ради чего открывают строку. */}
+                            <div className="flex items-center gap-2 sm:shrink-0">
                                 {m.ai != null && (
-                                    <div className="flex items-center gap-1 text-[12.5px]" title="Оценка ИИ">
-                                        <Bot size={13} className="text-blue-300" />
-                                        <span className="font-semibold tabular-nums text-slate-700">{m.ai}</span>
-                                    </div>
+                                    <IosBadge tone={scoreTone(m.ai)} className="tabular-nums" title="Оценка ИИ">
+                                        <Bot size={11} />ИИ {m.ai}
+                                    </IosBadge>
                                 )}
                                 {m.human != null && (
-                                    <div className="flex items-center gap-1 text-[12.5px]" title="Оценка человека">
-                                        <User2 size={13} className="text-slate-300" />
-                                        <span className="font-semibold tabular-nums text-slate-700">{m.human}</span>
-                                    </div>
+                                    <IosBadge tone="slate" className="tabular-nums"
+                                              title="Оценка человека: из журнала или «Моя оценка» из карточки">
+                                        <User2 size={11} />Человек {Math.round(m.human)}
+                                    </IosBadge>
                                 )}
                                 <ChevronRight size={16} className="text-slate-300" />
                             </div>
