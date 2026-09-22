@@ -76,6 +76,76 @@ class NumberNeverReachesOperatorTests(unittest.TestCase):
         self.assertNotIn('db.', operator_part)
 
 
+class LinesTests(unittest.TestCase):
+    """Линии Binotel: учётка линии уходит только в SIP-настройки сотрудника, не наружу."""
+
+    EMPLOYEES = {
+        "listOfEmployees": {
+            "a@x": {"employeeID": "1", "name": "Анна", "email": "a@x", "presenceState": "active",
+                    "endpointData": {"internalNumber": "902", "login": "lg902", "password": "pw902",
+                                     "encryptedWithTls": "0", "wasOnlineAt": "1",
+                                     "status": {"preparedStatus": "offline"}}},
+            "notLinkedToUser_5": {"employeeID": 0, "name": "", "email": "",
+                                  "endpointData": {"internalNumber": "907", "login": "lg907", "password": "pw907",
+                                                   "encryptedWithTls": "1", "status": {"preparedStatus": "online"}}},
+        }
+    }
+
+    def _service(self):
+        saved = {}
+
+        class _DB:
+            def get_sip_operator(self, uid):
+                return {"id": uid, "department_id": 7, "department_provider": "binotel"} if uid in (10, 11) else None
+
+            def save_user_sip_settings(self, uid, payload, changed_by=None):
+                saved[uid] = payload
+                return {}
+
+        svc = dial_service.DialListService(_DB())
+        svc._binotel_employees = lambda dep: list(self.EMPLOYEES["listOfEmployees"].values())
+        svc.department_users = lambda dep: [
+            {"id": 10, "name": "Иван", "login": "ivan", "role": "operator", "sip_number": "", "status": ""},
+            {"id": 11, "name": "Пётр", "login": "petr", "role": "operator", "sip_number": "902", "status": ""},
+        ]
+        svc.department_sip_server = lambda dep: "sip52.binotel.com"
+        return svc, saved
+
+    def test_list_lines_hides_credentials(self):
+        svc, _ = self._service()
+        lines = svc.list_lines(7)
+        self.assertEqual([l["internal_number"] for l in lines], ["902", "907"])
+        text = str(lines)
+        self.assertNotIn("lg9", text)
+        self.assertNotIn("pw9", text)
+        self.assertEqual(lines[0]["icore_user"]["name"], "Пётр")
+        self.assertTrue(lines[1]["online"] and lines[1]["tls"])
+        self.assertIsNone(lines[1]["icore_user"])
+
+    def test_assign_writes_line_credentials_to_user(self):
+        svc, saved = self._service()
+        result = svc.assign_line(7, 10, "907", changed_by=1)
+        self.assertEqual(saved[10], {"sip_number": "907", "sip_login": "lg907", "sip_password": "pw907"})
+        self.assertEqual(result["sip_server"], "sip52.binotel.com")
+        self.assertNotIn("password", str(result))
+
+    def test_assign_refuses_taken_or_unknown_line(self):
+        svc, saved = self._service()
+        with self.assertRaises(dial_service.DialListError):
+            svc.assign_line(7, 10, "902")   # занята Петром
+        with self.assertRaises(dial_service.DialListError):
+            svc.assign_line(7, 10, "999")   # такой линии нет
+        with self.assertRaises(dial_service.DialListError):
+            svc.assign_line(7, 42, "907")   # сотрудника нет
+        self.assertEqual(saved, {})
+
+    def test_lines_route_never_returns_secrets(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        lines_part = src[src.index("def lines(department_id)"):src.index("def lines_assign")]
+        self.assertNotIn("password", lines_part)
+        self.assertNotIn("login", lines_part.replace("users", ""))  # только svc.department_users
+
+
 class SchemaTests(unittest.TestCase):
     def test_tables_created_before_indexes(self):
         # Порядок закреплён: 17.08.2026 обратный порядок в другом разделе положил прод.

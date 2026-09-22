@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnSecondary, IosBadge, IosHint, IosSegmented } from '../ui/ios';
 import { DialListLeadsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
+import DialListLinesPanel from './DialListLinesPanel';
 
 /*
  * Раздел «Обзвон из телефона» — экран руководителя удалённого колл-центра.
@@ -18,6 +19,7 @@ import { DialListLeadsPanel, DialListSettingsPanel, useDialListDepartment } from
 
 const TABS = [
     { value: 'operators', label: 'Операторы', icon: <FaIcon className="fas fa-users" /> },
+    { value: 'lines', label: 'Линии', icon: <FaIcon className="fas fa-phone" /> },
     { value: 'leads', label: 'База водителей', icon: <FaIcon className="fas fa-address-book" /> },
     { value: 'settings', label: 'Настройки', icon: <FaIcon className="fas fa-sliders" /> },
 ];
@@ -283,6 +285,16 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                 ))}
                             </div>
                         </section>
+                    )}
+
+                    {tab === 'lines' && (
+                        <DialListLinesPanel
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
+                            canEdit={canEdit}
+                            showToast={showToast}
+                        />
                     )}
 
                     {tab === 'leads' && (

@@ -175,6 +175,44 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         saved["effective"] = enabled if enabled is not None else department_enabled
         return jsonify({"status": "success", **saved}), 200
 
+    @bp.route('/api/dial_list/departments/<int:department_id>/lines', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lines(department_id):
+        """Линии Binotel компании отдела и сотрудники отдела — для назначения. Без секретов."""
+        _manager(department_id)
+        return jsonify({
+            "status": "success",
+            "sip_server": svc.department_sip_server(department_id),
+            "lines": svc.list_lines(department_id),
+            "users": svc.department_users(department_id),
+        }), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/lines/assign', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lines_assign(department_id):
+        requester_id, _scope = _manager(department_id)
+        payload = request.get_json(silent=True) or {}
+        try:
+            user_id = int(payload.get('user_id'))
+        except (TypeError, ValueError):
+            raise DialListError("user_id: число")
+        result = svc.assign_line(department_id, user_id, payload.get('internal_number'), changed_by=requester_id)
+        return jsonify({"status": "success", **result}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/lines/release', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lines_release(department_id):
+        requester_id, _scope = _manager(department_id)
+        payload = request.get_json(silent=True) or {}
+        try:
+            user_id = int(payload.get('user_id'))
+        except (TypeError, ValueError):
+            raise DialListError("user_id: число")
+        return jsonify({"status": "success", **svc.release_line(department_id, user_id, changed_by=requester_id)}), 200
+
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/upload', methods=['POST', 'OPTIONS'])
     @require_api_key
     @_guard

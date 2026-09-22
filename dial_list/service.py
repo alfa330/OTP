@@ -212,6 +212,130 @@ class DialListService:
             return []
         return [d["department_id"] for d in self.list_departments(headed)]
 
+    # ------------------------------------------------------------ линии Binotel
+    # Официальный API компании отдаёт по каждой внутренней линии SIP-логин и
+    # SIP-пароль (settings/list-of-employees → endpointData). Поэтому «назначить
+    # линию сотруднику» — одна кнопка: сервер сам кладёт учётку линии в его
+    # SIP-настройки, и телефон регистрируется по логину/паролю iCORE. Наружу
+    # (в ответы ручек) ни логин, ни пароль линии не уходят — только номер и статус.
+
+    def _binotel_employees(self, department_id):
+        payload = self._client(department_id)._post("settings/list-of-employees", {})
+        emps = payload.get("listOfEmployees") or {}
+        return list(emps.values()) if isinstance(emps, dict) else list(emps or [])
+
+    @staticmethod
+    def _endpoint_of(record):
+        ep = record.get("endpointData") if isinstance(record, dict) else None
+        return ep if isinstance(ep, dict) and str(ep.get("internalNumber") or "").strip() else None
+
+    def department_users(self, department_id):
+        """Сотрудники отдела (все роли: тест ведёт и сам владелец) с их SIP-номером."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT u.id, u.name, COALESCE(u.login, ''), COALESCE(u.role, ''),
+                       COALESCE(u.sip_number, ''), COALESCE(u.status, '')
+                FROM users u
+                WHERE u.department_id = %s AND COALESCE(u.is_active, TRUE)
+                ORDER BY u.name
+            """, (int(department_id),))
+            return [{"id": r[0], "name": r[1] or "", "login": r[2], "role": r[3],
+                     "sip_number": (r[4] or "").strip(), "status": r[5]} for r in cur.fetchall()]
+
+    def list_lines(self, department_id):
+        """Линии компании Binotel + кто из iCORE на них сидит. Без логинов и паролей."""
+        department_id = int(department_id)
+        users = self.department_users(department_id)
+        by_number = {}
+        for u in users:
+            if u["sip_number"]:
+                by_number.setdefault(u["sip_number"], u)
+        lines = []
+        for rec in self._binotel_employees(department_id):
+            ep = self._endpoint_of(rec)
+            if not ep:
+                continue
+            number = str(ep.get("internalNumber")).strip()
+            status = ep.get("status") if isinstance(ep.get("status"), dict) else {}
+            prepared = str(status.get("preparedStatus") or (status.get("sip") or {}).get("status") or "").lower()
+            emp_id = str(rec.get("employeeID") or "").strip()
+            linked = bool(emp_id and emp_id != "0" and (rec.get("name") or rec.get("email")))
+            holder = by_number.get(number)
+            lines.append({
+                "internal_number": number,
+                "online": prepared == "online",
+                "status": prepared or "unknown",
+                "tls": str(ep.get("encryptedWithTls") or "0") == "1",
+                "was_online_at": _to_int(ep.get("wasOnlineAt")) or None,
+                "binotel_employee": {"employee_id": emp_id, "name": rec.get("name") or "",
+                                     "email": rec.get("email") or "",
+                                     "presence": rec.get("presenceState") or ""} if linked else None,
+                "icore_user": {"id": holder["id"], "name": holder["name"], "login": holder["login"]} if holder else None,
+            })
+        lines.sort(key=lambda x: (len(x["internal_number"]), x["internal_number"]))
+        return lines
+
+    def department_sip_server(self, department_id):
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT COALESCE(sip_server, '') FROM sip_department_config WHERE department_id = %s",
+                        (int(department_id),))
+            row = cur.fetchone()
+        return (row[0] or "").strip() if row else ""
+
+    def assign_line(self, department_id, user_id, internal_number, changed_by=None):
+        """Посадить сотрудника отдела на линию: SIP-логин/пароль линии → его SIP-настройки."""
+        department_id = int(department_id)
+        internal_number = str(internal_number or "").strip()
+        if not internal_number:
+            raise DialListError("Укажите внутренний номер линии")
+        operator = self.db.get_sip_operator(int(user_id))
+        if not operator:
+            raise DialListError("Сотрудник не найден", 404)
+        if operator.get("department_id") != department_id:
+            raise DialListError("Сотрудник из другого отдела", 400)
+        if (operator.get("department_provider") or "asterisk") != "binotel":
+            raise DialListError("Телефония отдела не Binotel: переключите провайдера отдела в «Настройках SIP»", 409)
+        endpoint = None
+        for rec in self._binotel_employees(department_id):
+            ep = self._endpoint_of(rec)
+            if ep and str(ep.get("internalNumber")).strip() == internal_number:
+                endpoint = ep
+                break
+        if not endpoint:
+            raise DialListError(f"Линии {internal_number} у компании Binotel нет", 404)
+        login = str(endpoint.get("login") or "").strip()
+        password = str(endpoint.get("password") or "")
+        if not login or not password:
+            raise DialListError(f"Binotel не отдал SIP-учётку линии {internal_number}", 502)
+        for u in self.department_users(department_id):
+            if u["sip_number"] == internal_number and u["id"] != int(user_id):
+                raise DialListError(f"Линия {internal_number} уже у сотрудника {u['name']}", 409)
+        try:
+            self.db.save_user_sip_settings(int(user_id), {
+                "sip_number": internal_number,
+                "sip_login": login,
+                "sip_password": password,
+            }, changed_by=changed_by)
+        except ValueError as exc:
+            raise DialListError(str(exc), 400)
+        log.info("dial_list: сотруднику %s назначена линия Binotel %s (отдел %s)", user_id, internal_number, department_id)
+        return {
+            "user_id": int(user_id), "internal_number": internal_number,
+            "sip_server": self.department_sip_server(department_id),
+        }
+
+    def release_line(self, department_id, user_id, changed_by=None):
+        """Снять сотрудника с линии: очистить его SIP-настройки."""
+        operator = self.db.get_sip_operator(int(user_id))
+        if not operator or operator.get("department_id") != int(department_id):
+            raise DialListError("Сотрудник не найден в этом отделе", 404)
+        try:
+            self.db.save_user_sip_settings(int(user_id), {"sip_number": "", "sip_login": "", "sip_password": ""},
+                                           changed_by=changed_by)
+        except ValueError as exc:
+            raise DialListError(str(exc), 400)
+        return {"user_id": int(user_id), "internal_number": ""}
+
     # ------------------------------------------------------------ настройки
     def department_settings(self, department_id, with_secrets=False):
         with self.db._get_cursor() as cur:
