@@ -34,11 +34,44 @@ def row(queued_at=QUEUED_AT, answered_at=ANSWERED_AT, wait=1, talk_measured=9,
             linkedid, 1, queued_at, wait, talk_measured, hangup)
 
 
+def select_columns(sql):
+    """Колонки выборки. Запятые внутри скобок (`COALESCE(a, b)`) — не разделители:
+    наивный split(',') насчитал бы лишнюю колонку и тест врал бы про рассинхрон."""
+    depth, current, out = 0, '', []
+    for char in sql:
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+        if char == ',' and depth == 0:
+            out.append(current.strip())
+            current = ''
+        else:
+            current += char
+    if current.strip():
+        out.append(current.strip())
+    return out
+
+
 class RowToTouchTests(unittest.TestCase):
     def test_columns_and_values_line_up(self):
         touch = queries._row_to_touch(row())
-        self.assertEqual(len(queries._COLUMNS.split(',')), len(row()))
+        self.assertEqual(len(select_columns(queries._COLUMNS)), len(row()))
         self.assertEqual(touch['linkedid'], LINKEDID)
+
+    def test_talk_column_prefers_the_exact_value(self):
+        """Разговор берётся со станции, а не из строки очереди: у звонка 16.09 01:02:14
+        в строке очереди 49 секунд (приход + приветствие + ожидание + разговор), а
+        разговора было 31 — ровно столько же, сколько длится файл записи."""
+        self.assertIn('COALESCE(t.talk_measured_seconds, t.talk_seconds)', queries._COLUMNS)
+        self.assertEqual(queries.TALK_SQL, 'COALESCE(t.talk_measured_seconds, t.talk_seconds)')
+
+    def test_aggregates_count_the_same_talk_as_the_table(self):
+        """Иначе строка покажет 31 секунду, а карточка «Разговор, ч» над ней — 49."""
+        import inspect
+        for name in ('summary', 'operator_stats', 'daily_stats'):
+            source = inspect.getsource(getattr(queries, name))
+            self.assertIn('TALK_SQL', source, '%s считает разговор по-своему' % name)
 
     def test_ivr_is_the_greeting_before_the_queue(self):
         self.assertEqual(queries._row_to_touch(row())['ivr_seconds'], 26)

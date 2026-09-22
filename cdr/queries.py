@@ -487,8 +487,15 @@ def _params(day_from, day_to, filters):
     }
 
 
+# Разговор: точное значение со станции (плечо агента), а без него — billsec строки,
+# которую отдала надстройка. У входящего эта строка идёт от ПРИХОДА звонка, поэтому
+# включает и приветствие, и ожидание: у звонка 16.09 01:02:14 там 49 секунд против
+# 31 секунды настоящего разговора — ровно столько же, сколько длится файл записи.
+TALK_SQL = "COALESCE(t.talk_measured_seconds, t.talk_seconds)"
+
+
 _COLUMNS = ("t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result, "
-            "t.talk_seconds, t.dial_seconds, t.queue, t.recording_url, "
+            + TALK_SQL + ", t.dial_seconds, t.queue, t.recording_url, "
             "t.linkedid, t.legs, t.queued_at, t.wait_seconds, t.talk_measured_seconds, "
             "t.hangup_side")
 
@@ -565,7 +572,7 @@ def summary(cursor, day_from, day_to, filters=None):
                COUNT(*) FILTER (WHERE t.call_type = 'Исходящий'),
                COUNT(*) FILTER (WHERE t.call_type = 'Входящий'),
                COUNT(*) FILTER (WHERE t.call_type = 'Входящий (не приняли)'),
-               COALESCE(SUM(t.talk_seconds), 0),
+               COALESCE(SUM(""" + TALK_SQL + """), 0),
                COUNT(DISTINCT t.ext) FILTER (WHERE t.ext <> ''),
                COUNT(DISTINCT t.phone),
                COUNT(*) FILTER (WHERE t.recording_url IS NOT NULL)
@@ -594,7 +601,7 @@ def operator_stats(cursor, day_from, day_to, filters=None):
                t.call_day,
                COUNT(*),
                COUNT(*) FILTER (WHERE t.talk_seconds > 0),
-               COALESCE(SUM(t.talk_seconds), 0),
+               COALESCE(SUM(""" + TALK_SQL + """), 0),
                COUNT(DISTINCT t.phone)
     """ + _FILTER_SQL + """
          GROUP BY t.ext, t.call_day
@@ -627,7 +634,7 @@ def daily_stats(cursor, day_from, day_to, filters=None):
         SELECT t.call_day,
                COUNT(*),
                COUNT(*) FILTER (WHERE t.talk_seconds > 0),
-               COALESCE(SUM(t.talk_seconds), 0)
+               COALESCE(SUM(""" + TALK_SQL + """), 0)
     """ + _FILTER_SQL + """
          GROUP BY t.call_day
          ORDER BY t.call_day
@@ -696,9 +703,13 @@ AUDIO_RETRY_MINUTES = 5
 
 
 def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0, max_talk=0,
-                          limit=500):
+                          limit=500, phone_suffix=None):
     """Кандидаты «Случайного звонка»: звонки оператора (по внутреннему номеру) за
     период, с разговором и со ссылкой на запись, в случайном порядке.
+
+    `phone_suffix` — хвост номера клиента (цифры): точечный подбор «найти звонок
+    по телефону» в «ИИ-оценке». Сравниваем хвост, потому что в касаниях номер
+    лежит десятью цифрами без кода страны, а человек вводит его как привык.
 
     Принадлежность записи здесь не проверяется — это правило склейки
     (cdr.touches.recording_belongs_to), и вызывающий применяет его к выборке."""
@@ -719,11 +730,33 @@ def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0,
     if max_talk:
         params['max_talk'] = int(max_talk)
         sql += " AND talk_seconds <= %(max_talk)s"
+    digits = ''.join(ch for ch in str(phone_suffix or '') if ch.isdigit())[-10:]
+    if digits:
+        params['phone_suffix'] = '%' + digits
+        sql += " AND phone LIKE %(phone_suffix)s"
     sql += " ORDER BY random() LIMIT %(limit)s"
     cursor.execute(sql, params)
     return [{'linkedid': row[0], 'phone': row[1], 'started_at': row[2], 'call_type': row[3],
              'talk_seconds': int(row[4] or 0), 'recording_url': row[5] or ''}
             for row in cursor.fetchall()]
+
+
+def touch_by_linkedid(cursor, linkedid):
+    """Одно касание по идентификатору звонка станции — для точечной подтяжки
+    выбранного звонка в «ИИ-оценке». У одного linkedid бывает несколько строк
+    (по телефонам участников); берём ту, где есть разговор и запись."""
+    cursor.execute("""
+        SELECT linkedid, phone, ext, started_at, call_type, talk_seconds, recording_url
+          FROM cdr_touches
+         WHERE linkedid = %s
+         ORDER BY (coalesce(recording_url, '') <> '') DESC, talk_seconds DESC, phone
+         LIMIT 1
+    """, (str(linkedid),))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'linkedid': row[0], 'phone': row[1], 'ext': row[2], 'started_at': row[3],
+            'call_type': row[4], 'talk_seconds': int(row[5] or 0), 'recording_url': row[6] or ''}
 
 
 def operator_sip_and_model(cursor, operator_ids):
