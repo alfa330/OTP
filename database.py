@@ -28713,7 +28713,7 @@ class Database:
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
-        LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
+        LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
         LEFT JOIN binotel_user_accounts b ON b.user_id = u.id
         LEFT JOIN oktell_user_accounts ok ON ok.user_id = u.id
         -- Только LEFT: у стажёра направления нет вовсе, и INNER выкинул бы его
@@ -28873,7 +28873,7 @@ class Database:
                            u.id, u.name, 'main'::text AS kind
                     FROM users u
                     LEFT JOIN user_sip_settings s ON s.user_id = u.id
-                    LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
+                    LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                     WHERE NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
                       -- Уволенный номер за собой не держит: иначе освободившийся
                       -- добавочный не выдать новому сотруднику, а список раздела
@@ -28891,7 +28891,7 @@ class Database:
                            u.id, u.name, 'autodial'::text
                     FROM user_sip_settings s
                     JOIN users u ON u.id = s.user_id
-                    LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
+                    LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                     WHERE NULLIF(TRIM(COALESCE(s.autodial_number, '')), '') IS NOT NULL
                       AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
                 )
@@ -29255,7 +29255,7 @@ class Database:
                        s.auto_answer_delay
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
-                LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
+                LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                 WHERE u.id = ANY(%s)
             """, (ids,))
             current, names, numbers, dept_domain, dept_autodial = {}, {}, {}, {}, {}
@@ -29418,7 +29418,7 @@ class Database:
                        COALESCE(dc.binotel_cabinet_url, '')
                 FROM binotel_user_accounts b
                 JOIN users u ON u.id = b.user_id
-                LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
+                LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                 WHERE b.user_id = %s
             """, (int(user_id),))
             row = cur.fetchone()
