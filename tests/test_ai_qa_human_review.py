@@ -188,6 +188,23 @@ class ApiWiringTests(unittest.TestCase):
         body = self._function("api_ai_qa_call")
         self.assertIn("reviewer_id=requester_id", body)
 
+    def test_card_route_reports_pending_audio_instead_of_404(self):
+        """Звонок из АТС без записи в облаке — это этап «запись скачивается»
+        (202 audio_pending с опросом), а не «у звонка нет записи»: сразу после
+        «Из АТС» 404 читался как сломанная оценка."""
+        body = self._function("api_ai_qa_call")
+        self.assertIn("_ai_qa_audio_pending(call_id)", body)
+        self.assertIn('"audio_pending"', body)
+        self.assertIn("202", body)
+        helper = self._function("_ai_qa_audio_pending")
+        for stage in ("'downloading'", "'missing'", "'error'"):
+            self.assertIn(stage, helper)
+        self.assertIn("_cdr_pending_recording(", helper)
+        view = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("r.data?.status === 'audio_pending'", view)
+        self.assertIn("openCall(c, false, { poll: true })", view)
+        self.assertIn("info.stage !== 'missing'", view)
+
     def test_human_review_route_checks_scope_department_and_scale(self):
         body = self._function("api_ai_qa_human_review")
         self.assertIn("_ai_qa_guard()", body)

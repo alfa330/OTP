@@ -29,10 +29,12 @@ const shiftDays = (days) => {
     d.setDate(d.getDate() + days);
     return isoDate(d);
 };
+// Форма пресета — как у календаря: { label, range: () => ({ from, to }) }.
 const PRESETS = [
-    { label: 'Сегодня', from: () => isoDate(new Date()), to: () => isoDate(new Date()) },
-    { label: '7 дней', from: () => shiftDays(-6), to: () => isoDate(new Date()) },
-    { label: '30 дней', from: () => shiftDays(-29), to: () => isoDate(new Date()) },
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: '7 дней', range: () => ({ from: shiftDays(-6), to: isoDate(new Date()) }) },
+    { label: '30 дней', range: () => ({ from: shiftDays(-29), to: isoDate(new Date()) }) },
+    { label: 'Весь период', range: () => ({ from: '', to: '' }) },
 ];
 
 const digitsOf = (value) => String(value || '').replace(/\D/g, '');
@@ -212,7 +214,9 @@ export default function FindSubjectModal({
     const unit = chats ? (department === 'szov' ? 'заявку' : 'чат') : 'звонок';
 
     return (
-        <IosModal open={open} onClose={onClose} maxWidth="max-w-2xl"
+        /* Окно шире обычной формы: под полосой полей лежит список найденных
+           разговоров с датой, сотрудником, номером и двумя баллами в строке. */
+        <IosModal open={open} onClose={onClose} maxWidth="max-w-4xl"
                   title={chats ? 'Найти переписку' : 'Найти звонок'}
                   subtitle={`По номеру телефона, сотруднику и периоду · ${chats ? 'откроется на оценку' : 'откроется на оценку ИИ'}`}
                   footer={(
@@ -231,7 +235,12 @@ export default function FindSubjectModal({
                           </button>
                       </>
                   )}>
-            <form className="grid gap-3 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); search(); }}>
+            {/* Три поля в один ряд: номер, сотрудник, период. Календарь периода
+                уходит в портал — тело модалки прокручивается и absolute-поповер
+                режет, календарь не помещался. Чип периода в габаритах поля
+                (`[&>span]:flex-1`, как в фильтрах «Посылок»), чтобы ряд читался
+                как три равных поля, а не два поля и кнопка. */}
+            <form className="grid gap-3 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); search(); }}>
                 <label className="block space-y-1.5">
                     <span className={iosGroupLabel}>Номер телефона</span>
                     <input ref={phoneRef} type="tel" inputMode="tel" className={iosInput} value={phone}
@@ -244,15 +253,20 @@ export default function FindSubjectModal({
                                   options={operatorOptions} placeholder="Любой сотрудник"
                                   variant="ios" searchable ariaLabel="Сотрудник" />
                 </label>
-                <div className="block space-y-1.5 sm:col-span-2">
+                <div className="block space-y-1.5">
                     <span className={iosGroupLabel}>Период</span>
-                    <div className="flex flex-wrap items-center gap-2">
-                        <IosDateRangePicker from={period.from} to={period.to} max={isoDate(new Date())}
-                                            presets={PRESETS} onChange={({ from, to }) => setPeriod({ from: from || '', to: to || '' })} />
+                    <div className="flex items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                            <IosDateRangePicker from={period.from} to={period.to} max={isoDate(new Date())}
+                                                presets={PRESETS} portal
+                                                triggerClassName={`${iosInput} flex items-center gap-2 text-left [&>span]:flex-1 [&>span]:truncate`}
+                                                onChange={({ from, to }) => setPeriod({ from: from || '', to: to || '' })} />
+                        </div>
                         {(period.from || period.to) && (
                             <button type="button" onClick={() => setPeriod({ from: '', to: '' })}
-                                    className="text-[12.5px] font-medium text-slate-500 hover:text-slate-800">
-                                весь период
+                                    className="shrink-0 text-[12.5px] font-medium text-slate-500 hover:text-slate-800"
+                                    title="Снять период">
+                                весь
                             </button>
                         )}
                     </div>
@@ -261,7 +275,9 @@ export default function FindSubjectModal({
                 <button type="submit" className="hidden" aria-hidden="true" tabIndex={-1} />
             </form>
 
-            <div className="mt-4">
+            {/* Список не ниже нескольких строк даже пустой: окно не должно
+                менять высоту от поиска к поиску. */}
+            <div className="mt-4 min-h-[300px]">
                 {items === null && !busy ? (
                     <p className="px-1 text-[12.5px] text-slate-400">
                         Укажите номер телефона или сотрудника — найдём {unit} в журнале, среди подтянутых

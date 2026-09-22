@@ -17,6 +17,7 @@ import ChatQueue from './ChatQueue';
 import QueueList, { isChat } from './QueueList';
 import QaFilters from './QaFilters';
 import FindSubjectModal from './FindSubjectModal';
+import AudioPendingCard from './AudioPendingCard';
 import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './filters';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
@@ -150,6 +151,12 @@ export default function CallQaView(props) {
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
     const [callErr, setCallErr] = useState(null);
+    /* Запись звонка из АТС ещё едет (сервер ответил 202 audio_pending): держим
+       этапы на экране и опрашиваем карточку, пока файл не появится. Таймеры в
+       ref — их надо гасить при закрытии карточки и смене субъекта. */
+    const [callPending, setCallPending] = useState(null);
+    const pendingTimer = useRef(null);
+    const evaluatingTimer = useRef(null);
     // Диалог точечного подбора «Найти звонок / переписку» — один на обе вкладки,
     // семейство берёт у открытой вкладки.
     const [findOpen, setFindOpen] = useState(false);
@@ -275,9 +282,20 @@ export default function CallQaView(props) {
         // eslint-disable-next-line
     }, [filtersSignature, tab, department]);
 
-    const openCall = (c, refresh = false) => {
+    const clearPendingTimers = () => {
+        if (pendingTimer.current) { window.clearTimeout(pendingTimer.current); pendingTimer.current = null; }
+        if (evaluatingTimer.current) { window.clearTimeout(evaluatingTimer.current); evaluatingTimer.current = null; }
+    };
+
+    /* `poll` — повторный запрос той же карточки, пока сервер отвечает 202
+       «запись скачивается»: этапы на экране не сбрасываем. Если такой запрос
+       не вернулся за несколько секунд, значит запись уже нашлась и сервер
+       распознаёт и оценивает разговор (это и есть долгая часть) — переводим
+       этапы на «оценка идёт», не дожидаясь ответа. */
+    const openCall = (c, refresh = false, { poll = false } = {}) => {
         if (!selected && typeof document !== 'undefined') returnFocus.current = document.activeElement;
         callRequest.current.controller?.abort();
+        clearPendingTimers();
         const controller = new AbortController();
         const requestId = callRequest.current.id + 1;
         callRequest.current = { id: requestId, controller };
@@ -286,19 +304,41 @@ export default function CallQaView(props) {
             setCallData(null);
             setReviewInteraction({ dirty: false, busy: false });
         }
+        if (!poll) setCallPending(null);
         setCallErr(null);
         if (!apiBaseUrl) { setCallErr('Бэкенд недоступен'); setCallLoading(false); return; }
         setCallLoading(true);
+        if (poll) {
+            evaluatingTimer.current = window.setTimeout(() => {
+                if (requestId !== callRequest.current.id) return;
+                setCallPending((current) => (current ? { ...current, stage: 'evaluating' } : current));
+            }, 3000);
+        }
         const subject = c.subject || 'call';
         axios.get(`${apiBaseUrl}/api/ai-qa/call/${c.id}`, {
             params: { ...(refresh ? { refresh: 1 } : {}), subject },
             headers: headers(), signal: controller.signal,
         })
             .then((r) => {
-                if (requestId === callRequest.current.id) setCallData(r.data.call);
+                if (requestId !== callRequest.current.id) return;
+                if (r.status === 202 || r.data?.status === 'audio_pending') {
+                    const info = r.data || {};
+                    setCallPending((current) => ({ ...info, polls: (current?.polls || 0) + 1 }));
+                    // «Файла нет» — финал: опрашивать дальше бессмысленно.
+                    if (info.stage !== 'missing') {
+                        const delay = Math.max(5, Number(info.retry_after) || 10) * 1000;
+                        pendingTimer.current = window.setTimeout(() => {
+                            if (requestId === callRequest.current.id) openCall(c, false, { poll: true });
+                        }, delay);
+                    }
+                    return;
+                }
+                setCallPending(null);
+                setCallData(r.data.call);
             })
             .catch((e) => {
                 if (!axios.isCancel(e) && requestId === callRequest.current.id) {
+                    setCallPending(null);
                     // 409 — оценить нельзя по существу (в эпизоде отвечали несколько
                     // операторов и т.п.): показываем причину, а не «ошибку загрузки».
                     setCallErr(e?.response?.data?.error
@@ -306,15 +346,22 @@ export default function CallQaView(props) {
                 }
             })
             .finally(() => {
-                if (requestId === callRequest.current.id) setCallLoading(false);
+                if (requestId === callRequest.current.id) {
+                    if (evaluatingTimer.current) { window.clearTimeout(evaluatingTimer.current); evaluatingTimer.current = null; }
+                    setCallLoading(false);
+                }
             });
     };
+
+    useEffect(() => () => clearPendingTimers(), []);
 
     const resetCall = () => {
         const focusTarget = returnFocus.current;
         callRequest.current.controller?.abort();
+        clearPendingTimers();
         callRequest.current = { id: callRequest.current.id + 1, controller: null };
         setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
+        setCallPending(null);
         setReviewInteraction({ dirty: false, busy: false });
         returnFocus.current = null;
         window.setTimeout(() => {
@@ -535,7 +582,11 @@ export default function CallQaView(props) {
                             </div>
                         )}
                     </div>
-                    {callLoading ? (
+                    {callPending ? (
+                        <AudioPendingCard pending={callPending} subject={selected} polling={callLoading}
+                                          onRetry={() => openCall(selected, false, { poll: true })}
+                                          onClose={requestCloseCall} />
+                    ) : callLoading ? (
                         <Spinner text={isChat(selected.subject)
                             ? `Оцениваю чат #${selected.id} — читаю вложения и анализирую…`
                             : `Оцениваю звонок #${selected.id} — распознавание и анализ…`} />

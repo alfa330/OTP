@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Calendar, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 
 /* Пикер диапазона дат в стиле сайта: поповер с одним месяцем, выбор в два
@@ -196,17 +197,91 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
  * поле-чип по своей ширине выбивалось из строки трёх селекторов. Кнопка внутри
  * — иконка, подпись и шеврон, поэтому своему классу обычно нужен
  * `[&>span]:flex-1`, иначе подпись не растягивается и шеврон уезжает к тексту. */
+/* Размеры календаря для портала: ширина фиксирована классом карточки, высота —
+ * прикидка на шестинедельный месяц с пресетами и подсказкой. */
+const PANEL_WIDTH = 268;
+const PANEL_HEIGHT = 392;
+const TRIGGER_GAP = 8;
+const EDGE_GAP = 8;
+
+/* `portal` — календарь уходит в портал с fixed-координатами, как у одиночного
+ * IosDatePicker и у CustomSelect. Нужен внутри модалок: их тело прокручивается
+ * (`overflow-y-auto`), и absolute-поповер под чипом оно РЕЖЕТ — в окне «Найти
+ * звонок» календарь не помещался целиком, видна была верхняя треть. Снаружи
+ * модалок остаётся прежний absolute-поповер: там резать нечем, а портал —
+ * лишние слушатели прокрутки. */
 export function IosDateRangePicker({ from, to, max, min, onChange, presets = null,
-                                    triggerClassName = '' }) {
+                                    triggerClassName = '', portal = false }) {
     const [open, setOpen] = useState(false);
+    const [coords, setCoords] = useState(null);
     const ref = useRef(null);
+    const popRef = useRef(null);
 
     useEffect(() => {
         if (!open) return undefined;
-        const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+        // Клик внутри портала — это выбор дня, а не «клик снаружи».
+        const h = (e) => {
+            if (ref.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
+            setOpen(false);
+        };
         document.addEventListener('mousedown', h);
         return () => document.removeEventListener('mousedown', h);
     }, [open]);
+
+    const recompute = () => {
+        const el = ref.current;
+        if (!el) return;
+        const view = el.ownerDocument?.defaultView || window;
+        const r = el.getBoundingClientRect();
+        const measured = popRef.current?.firstElementChild?.offsetHeight || PANEL_HEIGHT;
+        const height = Math.min(measured, view.innerHeight - EDGE_GAP * 2);
+        const spaceBelow = view.innerHeight - r.bottom - TRIGGER_GAP - EDGE_GAP;
+        const spaceAbove = r.top - TRIGGER_GAP - EDGE_GAP;
+        const openUp = spaceBelow < height && spaceAbove > spaceBelow;
+        // Календарь шире чипа: у правого края экрана прижимаем его к правому краю чипа.
+        let left = r.left;
+        if (left + PANEL_WIDTH > view.innerWidth - EDGE_GAP) left = r.right - PANEL_WIDTH;
+        let top = openUp ? r.top - TRIGGER_GAP - height : r.bottom + TRIGGER_GAP;
+        // Fixed-панель за краем окна не прокрутить ничем — сдвигаем внутрь,
+        // пусть даже наедет на чип: закрытый чип лучше обрубленного календаря.
+        top = Math.max(EDGE_GAP, Math.min(top, view.innerHeight - EDGE_GAP - height));
+        const next = {
+            left: Math.round(Math.max(EDGE_GAP, left)), top: Math.round(top),
+            maxHeight: Math.round(view.innerHeight - EDGE_GAP - top),
+        };
+        setCoords((prev) => (prev && prev.left === next.left && prev.top === next.top
+            && prev.maxHeight === next.maxHeight ? prev : next));
+    };
+
+    useLayoutEffect(() => {
+        if (!portal) return undefined;
+        if (!open) { setCoords(null); return undefined; }
+        recompute();
+        // Второй расчёт — уже по настоящей высоте карточки (первый шёл по прикидке).
+        const raf = requestAnimationFrame(recompute);
+        const view = ref.current?.ownerDocument?.defaultView || window;
+        // Прокрутка снаружи (тело модалки, страница) двигает чип — календарь
+        // едет за ним; прокрутка внутри самого календаря позицию не трогает.
+        const onScroll = (e) => {
+            if (popRef.current && (popRef.current === e.target || popRef.current.contains(e.target))) return;
+            recompute();
+        };
+        view.addEventListener('scroll', onScroll, true);
+        view.addEventListener('resize', recompute);
+        return () => {
+            cancelAnimationFrame(raf);
+            view.removeEventListener('scroll', onScroll, true);
+            view.removeEventListener('resize', recompute);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, portal]);
+
+    const calendar = (
+        <IosDateRangeCalendar
+            from={from} to={to} max={max} min={min} presets={presets}
+            onChange={(next) => { onChange(next); setOpen(false); }}
+        />
+    );
 
     return (
         <div ref={ref} className="relative">
@@ -219,13 +294,16 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
                 <span>{rangeLabel(from, to)}</span>
                 <ChevronUp size={13} className={`text-slate-400 transition-transform ${open ? '' : 'rotate-180'}`} />
             </button>
-            {open && (
-                <div className="absolute left-0 top-full z-50 mt-2">
-                    <IosDateRangeCalendar
-                        from={from} to={to} max={max} min={min} presets={presets}
-                        onChange={(next) => { onChange(next); setOpen(false); }}
-                    />
-                </div>
+            {open && !portal && (
+                <div className="absolute left-0 top-full z-50 mt-2">{calendar}</div>
+            )}
+            {open && portal && coords && createPortal(
+                <div ref={popRef} role="dialog"
+                     style={{ position: 'fixed', left: coords.left, top: coords.top,
+                              maxHeight: coords.maxHeight, zIndex: 99999 }}>
+                    {calendar}
+                </div>,
+                (ref.current?.ownerDocument || document).body,
             )}
         </div>
     );

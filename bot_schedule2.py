@@ -5659,6 +5659,27 @@ def api_ai_qa_review_queue():
         return jsonify({"error": str(error)}), 500
 
 
+def _ai_qa_audio_pending(imported_id):
+    """Состояние записи звонка из АТС, которой ещё нет в облаке, — для карточки
+    «ИИ-оценки»: {stage, source, job, job_error, retry_after} или None, если запись
+    уже есть либо строки нет (тогда карточка идёт обычным путём и честно падает).
+
+    stage: 'downloading' — файл в пути (заказ мосту в очереди/в работе, Binotel ещё
+    не отдал ссылку); 'missing' — сервер записей ответил, что файла нет (финал,
+    ждать нечего); 'error' — заказ сгорел на отказах и ждёт повтора."""
+    rec = db.get_imported_call_audio(imported_id)
+    if not rec or rec.get('audio_path'):
+        return None
+    notes = str(rec.get('notes') or '')
+    source = ('cdr' if notes.endswith(':cdr') else 'binotel' if notes.endswith(':binotel')
+              else 'oktell' if notes.endswith(':oktell') else 'pbx')
+    job = _cdr_pending_recording(imported_id, rec) or {}
+    status = str(job.get('cloud') or '')
+    stage = 'missing' if status == 'missing' else 'error' if status == 'error' else 'downloading'
+    return {"stage": stage, "source": source, "job": status or None,
+            "job_error": job.get('cloud_error'), "retry_after": 10}
+
+
 @app.route('/api/ai-qa/call/<int:call_id>', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_call(call_id):
@@ -5690,7 +5711,16 @@ def api_ai_qa_call(call_id):
         # после кнопки «Из АТС», то есть ровно тогда, когда человек ждёт оценку.
         # Докачиваем по требованию тем же путём, что аудио-ручка журнала.
         if subject == _qa_config.SUBJECT_IMPORTED_CALL:
-            _ensure_imported_call_audio(call_id)
+            if not _ensure_imported_call_audio(call_id):
+                # Записи ещё нет: у отдела продаж её приносит мост по заказу
+                # (cdr_audio_jobs, обычно в пределах минуты), у Тез КЦ Binotel
+                # отдаёт ссылку не сразу. Раньше карточка отвечала 404 «у звонка
+                # нет записи» — сразу после кнопки «Из АТС» это читалось как
+                # сломанная оценка. Теперь — 202 с этапом: фронт показывает
+                # «запись скачивается» и опрашивает карточку, пока файл не доедет.
+                pending = _ai_qa_audio_pending(call_id)
+                if pending is not None:
+                    return jsonify({"status": "audio_pending", **pending}), 202
         # reviewer_id — чтобы карточка принесла «Мою оценку» именно этого
         # человека (панель «Моя оценка» в карточке) рядом с оценкой из журнала.
         return jsonify({"status": "success",
