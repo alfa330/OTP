@@ -265,18 +265,27 @@ class TezBreakEpisodeQueryTests(unittest.TestCase):
 class TezBreakWiringTests(unittest.TestCase):
     """Проводка: расписание, ручка журнала, получатели и кнопки на экране."""
 
-    def test_scheduler_runs_the_job(self):
+    def test_scan_runs_every_hour_around_the_clock(self):
+        """Смена отдела начинается затемно, а окно захода — три часа: гоняй разбор только
+        по часам отбивки, и перерыв в 05:22 не разобрал бы никто."""
+        self.assertIn('tez_break_scan_job,', SOURCE)
+        self.assertIn("id='tez_break_scan'", SOURCE)
+        self.assertIn("CronTrigger(hour='*', minute=TEZ_BREAK_SCAN_MINUTE,", SOURCE)
+        # А сообщения — по своему расписанию, в рабочие часы.
         self.assertIn('tez_break_broadcast_job,', SOURCE)
         self.assertIn("id=f'tez_break_broadcast_{_hour:02d}{_minute:02d}'", SOURCE)
         self.assertIn('def _tez_break_broadcast_send_times():', SOURCE)
 
-    def test_scan_runs_even_without_recipients(self):
+    def test_journal_fills_even_without_recipients(self):
         """Журнал в iCore обязан наполняться и тогда, когда отбивку никто не получает."""
+        scan = SOURCE[SOURCE.index('async def tez_break_scan_job():'):]
+        scan = scan[:scan.index('\nasync def ', 10)]
+        self.assertIn('_tez_break_violations_scan', scan)
+        self.assertNotIn('get_szov_broadcast_chats', scan)
         job = SOURCE[SOURCE.index('async def tez_break_broadcast_job():'):]
         job = job[:job.index('\n@app.route')]
-        scan = job.index('_tez_break_violations_scan')
-        recipients = job.index('get_szov_broadcast_chats')
-        self.assertLess(scan, recipients, 'разбор обязан идти ДО проверки получателей')
+        # Отправка разбор НЕ повторяет: он идёт своей почасовой джобой.
+        self.assertNotIn('_tez_break_violations_scan', job)
         self.assertIn('if not recipients:', job)
         # Помечаем прочитанными только после удачной доставки: разом упавшая отправка
         # иначе проглотила бы предупреждения.

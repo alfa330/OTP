@@ -445,9 +445,11 @@ class WiringTests(unittest.TestCase):
 
     def test_direction_is_registered(self):
         self.assertIn("SZOV_BROADCAST_DIRECTION_OP = 'op'", self.source)
-        self.assertIn("SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, "
-                      "SZOV_BROADCAST_DIRECTION_CHAT,\n                             "
-                      "SZOV_BROADCAST_DIRECTION_OP)", self.source)
+        # Направления прибывают («Тез КЦ» — четвёртое, 22.09.2026): сторожим наличие
+        # СВОЕГО в кортеже, а не длину списка — иначе каждое новое ломает чужой тест.
+        directions = self.source[self.source.index("SZOV_BROADCAST_DIRECTIONS = ("):]
+        directions = directions[:directions.index(")\n")]
+        self.assertIn("SZOV_BROADCAST_DIRECTION_OP", directions)
 
     def test_job_is_scheduled_on_its_own_times(self):
         self.assertIn("for _hour, _minute in _op_broadcast_send_times():", self.source)
@@ -489,16 +491,21 @@ class WiringTests(unittest.TestCase):
 class SchemaTests(unittest.TestCase):
     def test_direction_constraint_knows_op_and_migrates_the_old_one(self):
         source = DB_PATH.read_text(encoding="utf-8-sig")
-        self.assertEqual(source.count("CHECK (direction IN ('osnova', 'chat', 'op'))"), 2)
+        # Ограничение заводится в двух местах (CREATE TABLE и миграция живой таблицы), и в
+        # обоих 'op' обязан быть. Сверяем вхождение, а не строку целиком: список направлений
+        # растёт, а миграция ищет старое ограничение по САМОМУ СВЕЖЕМУ ключу.
+        self.assertEqual(source.count("IN ('osnova', 'chat', 'op'"), 2)
         self.assertNotIn("CHECK (direction IN ('osnova', 'chat'))", source)
-        self.assertIn("position('''op''' IN pg_get_constraintdef(oid)) = 0", source)
+        self.assertIn("IN pg_get_constraintdef(oid)) = 0", source)
         self.assertIn("DROP CONSTRAINT szov_wallboard_broadcast_chats_direction", source)
 
     def test_db_layer_accepts_op_direction(self):
         """Кнопка «Отбивка» на табло ОП отвечала 500: ручка и CHECK знали 'op', а список
         направлений в database.py — нет, и get_szov_broadcast_chats('op') бросал ValueError."""
         source = DB_PATH.read_text(encoding="utf-8-sig")
-        self.assertIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op')", source)
+        directions = source[source.index("SZOV_BROADCAST_DIRECTIONS = ("):]
+        directions = directions[:directions.index(")\n")]
+        self.assertIn("'op'", directions)
         self.assertNotIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')\n", source)
 
 
