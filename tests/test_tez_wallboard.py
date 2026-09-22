@@ -396,8 +396,9 @@ def _call(*, line=TP_LINE, number='901', answered=True, waitsec=0, call_type=0):
 def _journal_calls(empty=False):
     """Журнал дня: 12 принятых на линии ТП, четыре брошенных и чужая линия рядом.
 
-    Брошенные подобраны так, чтобы порог было видно: 30 и 45 секунд — потеря, 5 секунд в
-    очереди и секунда на приветствии — короткий сброс, которого на стене нет вовсе.
+    Брошенные подобраны так, чтобы правило было видно: три сброса в очереди (30, 45 и 5
+    секунд) — потери, сколько бы человек ни ждал, а секунда на приветствии до очереди не
+    дошла и на стене её нет вовсе.
     """
     if empty:
         return []
@@ -702,8 +703,8 @@ class _SnapshotHarness:
             'TezWallboardDirectionUnavailable',
             '_tez_wallboard_department_id',
             '_tez_wallboard_session',
-            # Журнал звонков линии: порог короткого сброса, свой кэш и фоновое обновление.
-            'TEZ_WALLBOARD_ABANDON_MIN_SECONDS',
+            # Журнал звонков линии: правило потери, свой кэш и фоновое обновление.
+            'TEZ_WALLBOARD_ABANDON_FROM_SECONDS',
             'TEZ_WALLBOARD_JOURNAL_TTL_SECONDS',
             'TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS',
             '_tez_wallboard_journal_cache',
@@ -724,6 +725,8 @@ class _SnapshotHarness:
             '_tez_wallboard_line_is_down',
             '_tez_wallboard_line_offline_seconds',
             '_tez_wallboard_roster',
+            '_TEZ_WALLBOARD_RECALL_TONE_KEY',
+            '_tez_wallboard_recall_list',
             '_tez_wallboard_fetch_snapshot',
             '_tez_wallboard_snapshot',
             '_tez_wallboard_direction_payload',
@@ -825,9 +828,10 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
             snapshot = ns['_tez_wallboard_fetch_snapshot']()
         tp_today, op_today = snapshot['tp']['today'], snapshot['op']['today']
         # ТП: приём и потери считает журнал линии, а не счётчик очереди (300/12 на странице).
-        # 12 принятых, потеряны двое из четырёх брошенных — те, кто ждал дольше порога.
+        # 12 принятых, потеряны трое из четырёх брошенных — все, кто дошёл до очереди;
+        # четвёртый бросил трубку на приветствии, и его в очереди не было.
         self.assertEqual((tp_today['served'], tp_today['lost'], tp_today['arrived']),
-                         (12, 2, 14))
+                         (12, 3, 15))
         # SL остаётся кабинетным: это готовый процент вендора, свой пересчёт уже пробовали.
         self.assertEqual(tp_today['sl_ratio'], 0.93)
         # Среднее время разговора считаем сами и УСЕКАЕМ: 1700 / 20 = 85
@@ -889,9 +893,15 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         with _patched_source(ns['_state']):
             snapshot = ns['_tez_wallboard_fetch_snapshot']()
         diagnostics = snapshot['diagnostics']
-        self.assertEqual(diagnostics['abandons_below_threshold'], 2)
+        # Вычеркнут ровно один звонок, и вычеркнула его СТАДИЯ: сброс на приветствии.
+        self.assertEqual(diagnostics['abandons_before_queue'], 1)
+        # Порог по умолчанию нулевой, поэтому коротких сбросов в очереди нет вовсе.
+        self.assertEqual(diagnostics['abandons_below_threshold'], 0)
         self.assertEqual(diagnostics['tp_line_number'], TP_LINE)
-        self.assertEqual(diagnostics['abandon_stages']['Очередь'], {'long': 2, 'short': 1})
+        self.assertEqual(diagnostics['abandon_stages']['Очередь'],
+                         {'long': 3, 'short': 0, 'before_queue': 0})
+        self.assertEqual(diagnostics['abandon_stages']['Приветствие в рабочее время New'],
+                         {'long': 0, 'short': 0, 'before_queue': 1})
 
     def test_empty_day_yields_none_not_zero(self):
         """Правило нуля: посчитать не из чего — прочерк. Ноль на стене читается как «всё хорошо»."""
@@ -1050,10 +1060,10 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         self.assertEqual(tp['sl_threshold_seconds'], 20)
         self.assertEqual(tp['ar_target_percent'], ns['TEZ_AR_TARGET_PERCENT'])
         self.assertEqual(tp['ar_bad_percent'], ns['TEZ_AR_BAD_PERCENT'])
-        # Порог короткого сброса — тоже про очередь: у продаж входящих нет вовсе.
-        self.assertEqual(tp['abandon_min_seconds'], ns['TEZ_WALLBOARD_ABANDON_MIN_SECONDS'])
+        # Правило потери — тоже про очередь: у продаж входящих нет вовсе.
+        self.assertEqual(tp['abandon_from_seconds'], ns['TEZ_WALLBOARD_ABANDON_FROM_SECONDS'])
         for key in ('sl_threshold_seconds', 'ar_target_percent', 'ar_bad_percent',
-                    'abandon_min_seconds'):
+                    'abandon_from_seconds'):
             self.assertNotIn(key, op)
         # Порог берём со страницы кабинета, а не из своей константы
         self.assertEqual(tp['sl_threshold_seconds'], ns['_state']['raw']['sl_threshold_seconds'])
@@ -1328,6 +1338,32 @@ class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
         row = self._roster_row(snapshot, 'op', 201)
         self.assertEqual((row['status_key'], row['status_seconds']), ('talking', 600))
         self.assertEqual(snapshot['diagnostics']['operators_line_offline'], [])
+
+    def test_recall_list_is_built_from_the_roster(self):
+        """Настоящей сборкой: в «Перезвоне» ровно те, у кого статус телефона «Исход»."""
+        ns = self._namespace()
+        roster = [
+            {'operator_id': 1, 'name': 'Тлеу Аскар', 'status_key': 'outgoing',
+             'status_label': 'Исход', 'status_seconds': 300},
+            {'operator_id': 2, 'name': 'Ким Дана', 'status_key': 'free',
+             'status_label': 'Активный', 'status_seconds': 60},
+            {'operator_id': 3, 'name': 'Абай Нурлан', 'status_key': 'outgoing',
+             'status_label': 'Исход', 'status_seconds': 30},
+        ]
+        recall = ns['_tez_wallboard_recall_list'](roster)
+        self.assertEqual([item['name'] for item in recall], ['Тлеу Аскар', 'Абай Нурлан'])
+        self.assertEqual(recall[0]['seconds'], 300)
+        self.assertEqual(recall[0]['reason_key'], 'outgoing')
+
+    def test_recall_list_reaches_both_directions(self):
+        """Снимок отдаёт блок обоим направлениям: колонка на экранах одна и та же."""
+        ns = self._namespace()
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        for direction in ('tp', 'op'):
+            self.assertIn('recall_list', snapshot[direction]['now'], direction)
+            for item in snapshot[direction]['now']['recall_list']:
+                self.assertEqual(item['reason_key'], 'outgoing')
 
 
 # --- ВЫГРУЗКА ЗА ПЕРИОД ---------------------------------------------------------------------
@@ -1813,18 +1849,19 @@ class TezWallboardWiringTests(unittest.TestCase):
         Настоящий порог приезжает в снимке, но подпись под плитками читает и локальную
         константу — на старом кэше она осталась бы единственной. Разъедься эти два числа, и
         стена объясняла бы правило не тем порогом, по которому считает сервер."""
-        found = re.search(r'TEZ_ABANDON_MIN_SECONDS\s*=\s*(\d+)', self.shared)
-        self.assertIsNotNone(found, 'TEZ_ABANDON_MIN_SECONDS пропал из tezWallboardShared.js')
-        server = re.search(r"TEZ_WALLBOARD_ABANDON_MIN_SECONDS = _env_int\([^,]+,\s*(\d+)",
+        found = re.search(r'TEZ_ABANDON_FROM_SECONDS\s*=\s*(\d+)', self.shared)
+        self.assertIsNotNone(found, 'TEZ_ABANDON_FROM_SECONDS пропал из tezWallboardShared.js')
+        server = re.search(r"TEZ_WALLBOARD_ABANDON_FROM_SECONDS = _env_int\([^,]+,\s*(\d+)",
                            BOT_SOURCE)
-        self.assertIsNotNone(server, 'порог пропал из bot_schedule2.py')
+        self.assertIsNotNone(server, 'правило потери пропало из bot_schedule2.py')
         self.assertEqual(int(found.group(1)), int(server.group(1)))
 
-    def test_wall_names_the_short_abandon_rule(self):
+    def test_wall_names_the_abandon_rule(self):
         """Правило названо словами на самой стене: иначе «Входящих» у нас и в кабинете
         расходятся без всякого объяснения, и это читается как брак табло."""
-        self.assertIn('потерей не считается', self.tp)
-        self.assertIn('abandon_min_seconds', self.tp)
+        self.assertIn('tezAbandonRuleHint', self.tp)
+        self.assertIn('abandon_from_seconds', self.tp)
+        self.assertIn('на приветствии не считаем', self.shared)
 
     def test_backend_routes_are_registered_and_guarded(self):
         for direction in ('tp', 'op'):
@@ -1928,12 +1965,24 @@ class TezWallboardWiringTests(unittest.TestCase):
         for key in re.findall(r"^    '(\w+)',$", self.shared, flags=re.MULTILINE):
             self.assertIn(key, keys, f"набор по умолчанию ссылается на несуществующий {key}")
 
-    def test_recall_is_absent_from_both_screens(self):
-        """«Перезвона» в Binotel нет вовсе: плитка или колонка с ним врали бы каждую минуту."""
-        for name, source in self.new_files.items():
-            code = _strip_js_comments(source)
-            self.assertNotIn('Перезвон', code, name)
-            self.assertNotIn('recall', code.lower(), name)
+    def test_recall_block_is_on_both_screens_and_comes_from_the_phone(self):
+        """«Перезвон» — просьба постановщика при возврате #292.
+
+        У Binotel такого состояния нет вовсе, поэтому блок строится из событий телефона
+        iCORE Phone, и собирает его сервер из уже готового поимённого списка: второй обход
+        кабинета ради тех же людей был бы лишним походом за одной и той же правдой.
+        Колонка одна на оба направления, значит и блок виден на обоих."""
+        code = _strip_js_comments(self.tp)
+        self.assertIn('Перезвон', code)
+        self.assertIn('now.recall_list', code)
+        # Экран ОП рисует ту же колонку, а не свою копию.
+        self.assertIn('TezStatusColumn', _strip_js_comments(self.op))
+        builder = BOT_SOURCE[BOT_SOURCE.index('def _tez_wallboard_recall_list('):]
+        builder = builder[:builder.index('\ndef ', 10)]
+        self.assertIn("_TEZ_WALLBOARD_RECALL_TONE_KEY", builder)
+        # Ключ оформления берётся из каталога статусов, а не вписан строкой рядом.
+        self.assertIn("_TEZ_WALLBOARD_RECALL_TONE_KEY = _TEZ_WALLBOARD_STATUS_CATALOG['перезвон'][1]",
+                      BOT_SOURCE)
 
     def test_op_has_no_queue_metrics_at_all(self):
         """У ОП входящих нет: «Принято», «Потеряно», AR, SL и ожидание — не прочерк, а отсутствие."""

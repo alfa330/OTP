@@ -213,7 +213,8 @@ const breakViolationDetail = (item) => {
 };
 
 const BreakViolationsModal = ({ open, onClose, direction, directionLabel,
-                               apiBaseUrl, withAccessTokenHeader, showToast }) => {
+                               apiBaseUrl, withAccessTokenHeader, showToast,
+                               endpoint = '/api/szov_wallboard/break_violations' }) => {
     const [period, setPeriod] = useState('today');
     const [state, setState] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -233,7 +234,10 @@ const BreakViolationsModal = ({ open, onClose, direction, directionLabel,
         setLoading(true);
         const build = headersRef.current;
         const headers = build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' };
-        fetch(`${apiBaseUrl}/api/szov_wallboard/break_violations`
+        // Адрес ручки — снаружи: у Тез КЦ она своя, потому что и права там свои (журнал
+        // отдела смотрит его руководитель, а не глава СЗоВ). Правило сверки при этом одно
+        // на всех, поэтому форма списка общая.
+        fetch(`${apiBaseUrl}${endpoint}`
             + `?date_from=${from}&date_to=${to}&direction=${direction}`, {
             headers, credentials: 'include',
         })
@@ -248,7 +252,7 @@ const BreakViolationsModal = ({ open, onClose, direction, directionLabel,
             })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, [open, period, direction, apiBaseUrl]);
+    }, [open, period, direction, apiBaseUrl, endpoint]);
 
     const violations = state?.violations || [];
 
@@ -353,7 +357,14 @@ const BreakViolationsModal = ({ open, onClose, direction, directionLabel,
  * Кнопка «Перерывы» вместе со своей модалкой — по образцу «Отбивки»: направление получает
  * готовый узел и не держит у себя ни состояния, ни портала.
  */
-const BreakViolationsControls = ({ direction, apiBaseUrl, withAccessTokenHeader, showToast }) => {
+/*
+ * Кнопка «Перерывы» со своим журналом. Экспортируется: «Табло Тез КЦ» ставит её в свою шапку
+ * с direction="tez" и своим адресом ручки. Правило сверки одно на компанию, поэтому и список
+ * обязан выглядеть и читаться одинаково — копия этой разметки разошлась бы с оригиналом ровно
+ * там, где однажды починили одно.
+ */
+export const BreakViolationsControls = ({ direction, apiBaseUrl, withAccessTokenHeader, showToast,
+                                         directionLabel = null, endpoint = undefined }) => {
     const [open, setOpen] = useState(false);
     return (
         <>
@@ -366,10 +377,12 @@ const BreakViolationsControls = ({ direction, apiBaseUrl, withAccessTokenHeader,
                     open={open}
                     onClose={() => setOpen(false)}
                     direction={direction}
-                    directionLabel={wallboardDirection(direction === 'chat' ? 'chat' : 'osnova').label}
+                    directionLabel={directionLabel
+                        || wallboardDirection(direction === 'chat' ? 'chat' : 'osnova').label}
                     apiBaseUrl={apiBaseUrl}
                     withAccessTokenHeader={withAccessTokenHeader}
                     showToast={showToast}
+                    endpoint={endpoint}
                 />,
                 document.body,
             )}
@@ -382,7 +395,8 @@ const BreakViolationsControls = ({ direction, apiBaseUrl, withAccessTokenHeader,
  * табло смотрят, а не настраивают, и форма поверх экрана, который висит на стене, — лишний шум.
  */
 const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHint,
-                         apiBaseUrl, withAccessTokenHeader, showToast }) => {
+                         apiBaseUrl, withAccessTokenHeader, showToast,
+                         title = 'Отбивка показателей', withModes = true }) => {
     const [state, setState] = useState(null);
     const [busy, setBusy] = useState(false);
     const [draftChat, setDraftChat] = useState('');
@@ -478,7 +492,9 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
         save('POST', {
             chat_id: picked.chat_id,
             chat_title: picked.title || picked.username || String(picked.chat_id),
-            mode: draftMode,
+            // Направление без режимов («Тез КЦ» пишет только когда есть нарушения) всё равно
+            // обязано положить в базу допустимое значение: режим там NOT NULL с CHECK.
+            mode: withModes ? draftMode : 'always',
             is_enabled: true,
         }, 'Группа добавлена');
     };
@@ -487,7 +503,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
         <IosModal
             open={open}
             onClose={onClose}
-            title="Отбивка показателей"
+            title={title}
             subtitle={`${directionLabel} · расписание ${sendTimes.join(', ') || '—'} · Алматы`}
             maxWidth="max-w-3xl"
             footer={<button type="button" className={iosBtnSecondary} onClick={onClose}>Готово</button>}
@@ -515,11 +531,16 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                                             .filter(Boolean).join(' · ')}
                                     </div>
                                 </div>
-                                <ModeSwitch
-                                    value={item.mode}
-                                    disabled={busy}
-                                    onChange={(mode) => save('POST', { chat_id: item.chat_id, mode }, 'Режим изменён')}
-                                />
+                                {/* Направление без режимов переключатель не показывает вовсе:
+                                    выбор, который ни на что не влияет, — обещание без
+                                    содержания. */}
+                                {withModes ? (
+                                    <ModeSwitch
+                                        value={item.mode}
+                                        disabled={busy}
+                                        onChange={(mode) => save('POST', { chat_id: item.chat_id, mode }, 'Режим изменён')}
+                                    />
+                                ) : null}
                                 <IosToggle
                                     checked={Boolean(item.is_enabled)}
                                     disabled={busy}
@@ -570,10 +591,12 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                                     ))}
                                 </select>
                             </label>
-                            <div>
-                                <div className="mb-1.5 text-[12.5px] text-slate-500">Когда отправлять</div>
-                                <ModeSwitch value={draftMode} disabled={busy} onChange={setDraftMode} />
-                            </div>
+                            {withModes ? (
+                                <div>
+                                    <div className="mb-1.5 text-[12.5px] text-slate-500">Когда отправлять</div>
+                                    <ModeSwitch value={draftMode} disabled={busy} onChange={setDraftMode} />
+                                </div>
+                            ) : null}
                             <button type="button" className={iosBtnPrimary} disabled={busy || !draftChat} onClick={addRecipient}>
                                 <FaIcon className="fas fa-plus"></FaIcon>
                                 Добавить
@@ -641,7 +664,8 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
  * направлений СЗоВ его нет намеренно — иначе он появился бы третьим в переключателе.
  */
 export const BroadcastControls = ({ direction, targetSeconds, apiBaseUrl, withAccessTokenHeader,
-                                   showToast, directionLabel = null, deviationHint = null }) => {
+                                   showToast, directionLabel = null, deviationHint = null,
+                                   modalTitle = undefined, withModes = true }) => {
     const [broadcastOpen, setBroadcastOpen] = useState(false);
     const label = directionLabel || wallboardDirection(direction).label;
     const defaultHint = BROADCAST_DEVIATION_HINT[direction] || BROADCAST_DEVIATION_HINT.osnova;
@@ -662,6 +686,8 @@ export const BroadcastControls = ({ direction, targetSeconds, apiBaseUrl, withAc
                     apiBaseUrl={apiBaseUrl}
                     withAccessTokenHeader={withAccessTokenHeader}
                     showToast={showToast}
+                    title={modalTitle}
+                    withModes={withModes}
                 />,
                 document.body,
             )}

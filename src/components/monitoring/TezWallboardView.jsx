@@ -6,10 +6,12 @@ import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnPrimary } from '../ui/ios';
 import { IosDateRangeCalendar, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import { canOpenWallboardWidget, formatClock, wallboardStaleNotice } from './szovWallboardShared';
 import { SegmentedSwitch } from './SzovWallboardTiles';
+import { BreakViolationsControls, BroadcastControls } from './SzovWallboardView';
 import {
     TEZ_EXPORT_MAX_DAYS,
     TEZ_WALLBOARD_DIRECTIONS,
     TEZ_WALLBOARD_DIRECTION_LIST,
+    TEZ_BREAK_VIOLATIONS_PATH,
     TEZ_WALLBOARD_EXPORT_PATH,
     useTezOpWallboardSnapshot,
     useTezTpWallboardSnapshot,
@@ -28,9 +30,10 @@ import TezOpWallboardBody from './TezOpWallboard';
  *   - цветом помечаем только то, что несёт смысл: AR выше нормы, SL ниже порога и статусы людей;
  *   - когда кабинет молчит, цифры на стене НЕ гасим — вешаем янтарный чип с возрастом данных.
  *
- * Кнопок «Отбивка» и «Перерывы не по графику» здесь нет: и то и другое у Тез не заведено.
- * Кнопки «Виджет» тоже нет — окно «поверх окон» у документа одно, и оно сейчас намертво
- * привязано к направлениям СЗоВ; отдать его Тез — отдельная работа.
+ * Кнопки «Перерывы» и «Отбивка» появились по возврату #292 (18.09.2026) и взяты у СЗоВ
+ * импортом, а не копией: правило сверки перерывов с графиком одно на компанию, и разойтись
+ * эти два экрана не должны. Отбивка у Тез при этом не про показатели — она пишет только о
+ * перерывах вне графика и только когда они есть.
  */
 
 /*
@@ -47,6 +50,16 @@ const clockLabel = (snapshot) => {
 const FULLSCREEN_Z = 150;
 
 const DIRECTIONS = TEZ_WALLBOARD_DIRECTION_LIST;
+
+/*
+ * Перерывы вне графика у Тез КЦ. Ключ направления один на весь отдел (ТП и ОП вместе) —
+ * и у журнала нарушений, и у получателей отбивки: сверяется перерыв ЧЕЛОВЕКА с его же
+ * графиком, а руководитель у обоих направлений один.
+ */
+const TEZ_BREAK_DIRECTION = 'tez';
+const TEZ_BROADCAST_HINT = 'Сообщение уходит, только когда есть новые перерывы вне графика: '
+    + 'в спокойный час бот молчит. Проверить связь с группой можно кнопкой отправки в строке '
+    + 'получателя — она напишет даже тогда, когда нарушений нет.';
 
 /*
  * Кнопка виджета. Окно «поверх других» у документа ОДНО на всё приложение, поэтому кнопка
@@ -228,6 +241,7 @@ const writeStoredDirection = (userId, direction) => {
 const TezWallboardHeader = ({
     subtitle, direction, onDirectionChange, staleNotice, loading, onRefresh, onFullscreen,
     apiBaseUrl, withAccessTokenHeader, showToast, widgetOpen, onToggleWidget,
+    canManageBroadcast = false,
 }) => (
     <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -245,6 +259,31 @@ const TezWallboardHeader = ({
                 <FaIcon className="fas fa-rotate"></FaIcon>
                 Обновить
             </button>
+            {/* Журнал перерывов вне графика: одно направление на весь отдел — перерыв стоит
+                в графике у человека, а не у линии, и переключатель ТП/ОП его не делит.
+                Кнопка стоит у всех, кто видит табло: сверку смотрят те же СВ. */}
+            <BreakViolationsControls
+                direction={TEZ_BREAK_DIRECTION}
+                directionLabel="Тез КЦ"
+                endpoint={TEZ_BREAK_VIOLATIONS_PATH}
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                showToast={showToast}
+            />
+            {/* А вот кому уходят предупреждения в Telegram, решает только руководитель
+                отдела — ту же границу держит _szov_broadcast_guard с направлением «tez». */}
+            {canManageBroadcast ? (
+                <BroadcastControls
+                    direction={TEZ_BREAK_DIRECTION}
+                    directionLabel="Тез КЦ"
+                    modalTitle="Отбивка перерывов"
+                    withModes={false}
+                    deviationHint={TEZ_BROADCAST_HINT}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />
+            ) : null}
             <TezExportControls
                 apiBaseUrl={apiBaseUrl}
                 withAccessTokenHeader={withAccessTokenHeader}
@@ -276,7 +315,7 @@ const TezWallboardPlaceholder = ({ header, message, tone = 'muted' }) => (
 
 /** Направление ТП: очередь техподдержки в кабинете Binotel. */
 const TpWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, onDirectionChange,
-                        widgetOpen, onToggleWidget }) => {
+                        widgetOpen, onToggleWidget, canManageBroadcast }) => {
     const config = TEZ_WALLBOARD_DIRECTIONS.tez_tp;
     const { snapshot, error, loading, refresh } = useTezTpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -298,6 +337,7 @@ const TpWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, 
             showToast={showToast}
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
+            canManageBroadcast={canManageBroadcast}
         />
     );
 
@@ -335,7 +375,7 @@ const TpWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, 
 
 /** Направление ОП: продавцы того же кабинета, но без очереди. */
 const OpWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, onDirectionChange,
-                        widgetOpen, onToggleWidget }) => {
+                        widgetOpen, onToggleWidget, canManageBroadcast }) => {
     const config = TEZ_WALLBOARD_DIRECTIONS.tez_op;
     const { snapshot, error, loading, refresh } = useTezOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -357,6 +397,7 @@ const OpWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, 
             showToast={showToast}
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
+            canManageBroadcast={canManageBroadcast}
         />
     );
 
@@ -393,7 +434,8 @@ const OpWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, 
 };
 
 export default function TezWallboardView(props) {
-    const { user, apiBaseUrl, withAccessTokenHeader, showToast, widgetOpen, onToggleWidget } = props;
+    const { user, apiBaseUrl, withAccessTokenHeader, showToast, widgetOpen, onToggleWidget,
+            canManageBroadcast } = props;
     const userId = user?.id;
     // Выбор направления запоминаем: тому, кто следит за продажами, незачем каждый раз
     // переключаться с ТП — раздел открывается на том направлении, где его закрыли.
@@ -419,6 +461,7 @@ export default function TezWallboardView(props) {
                 onDirectionChange={changeDirection}
                 widgetOpen={widgetOpen}
                 onToggleWidget={onToggleWidget}
+                canManageBroadcast={canManageBroadcast}
             />
         );
     }
@@ -431,6 +474,7 @@ export default function TezWallboardView(props) {
             onDirectionChange={changeDirection}
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
+            canManageBroadcast={canManageBroadcast}
         />
     );
 }

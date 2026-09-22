@@ -4877,7 +4877,7 @@ class Database:
                     CONSTRAINT szov_wallboard_broadcast_chats_mode
                         CHECK (mode IN ('always', 'deviations')),
                     CONSTRAINT szov_wallboard_broadcast_chats_direction
-                        CHECK (direction IN ('osnova', 'chat', 'op'))
+                        CHECK (direction IN ('osnova', 'chat', 'op', 'tez'))
                 );
             """)
             # Таблица старше направлений: там ключом был один chat_id. Досыпаем колонку и
@@ -4918,15 +4918,17 @@ class Database:
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD PRIMARY KEY (direction, chat_id);
                         END IF;
-                        -- Список направлений растёт («Табло ОП» — третье, 16.09.2026).
-                        -- Ограничение, заведённое старым кодом со списком из двух, снимаем
-                        -- и заводим заново; ищем старое по отсутствию нового ключа в его
-                        -- определении, а не по имени версии.
+                        -- Список направлений растёт («Табло ОП» — третье, 16.09.2026;
+                        -- «Тез КЦ» — четвёртое, 22.09.2026). Ограничение, заведённое старым
+                        -- кодом с коротким списком, снимаем и заводим заново; ищем старое по
+                        -- отсутствию САМОГО СВЕЖЕГО ключа в его определении, а не по имени
+                        -- версии. Добавляешь направление — меняй и ключ поиска здесь, иначе
+                        -- прежний CHECK переживёт деплой и отвергнет новое значение.
                         IF EXISTS (
                             SELECT 1 FROM pg_constraint
                             WHERE conrelid = 'szov_wallboard_broadcast_chats'::regclass
                               AND conname = 'szov_wallboard_broadcast_chats_direction'
-                              AND position('''op''' IN pg_get_constraintdef(oid)) = 0
+                              AND position('''tez''' IN pg_get_constraintdef(oid)) = 0
                         ) THEN
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 DROP CONSTRAINT szov_wallboard_broadcast_chats_direction;
@@ -4938,7 +4940,7 @@ class Database:
                         ) THEN
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD CONSTRAINT szov_wallboard_broadcast_chats_direction
-                                CHECK (direction IN ('osnova', 'chat', 'op'));
+                                CHECK (direction IN ('osnova', 'chat', 'op', 'tez'));
                         END IF;
                     END $$;
                 """)
@@ -5072,7 +5074,8 @@ class Database:
             """)
             # Направление нарушения. Появилось, когда ту же сверку включили чат-менеджерам:
             # у «Линии» факт берётся из статусов Oktell, у «Чата» — из событий Chat2Desk,
-            # а правило и журнал общие. Прежние строки — все с «Линии», отсюда DEFAULT.
+            # у «Тез КЦ» — из событий телефона iCORE Phone, а правило и журнал общие.
+            # Прежние строки — все с «Линии», отсюда DEFAULT.
             cursor.execute("""
                 ALTER TABLE szov_break_violations
                 ADD COLUMN IF NOT EXISTS direction VARCHAR(8) NOT NULL DEFAULT 'line';
@@ -5084,7 +5087,7 @@ class Database:
             cursor.execute("""
                 ALTER TABLE szov_break_violations
                 ADD CONSTRAINT szov_break_violations_direction
-                CHECK (direction IN ('line', 'chat'));
+                CHECK (direction IN ('line', 'chat', 'tez'));
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_szov_break_violations_direction_day
@@ -27789,11 +27792,13 @@ class Database:
     SZOV_BROADCAST_MODES = ('always', 'deviations')
     # Направления табло: у каждого свой список получателей, свои показатели и своё
     # расписание. 'osnova' — историческое имя направления «Линия» (на экране подпись
-    # сменили, ключ остался: по нему лежат строки на проде). 'op' — «Табло ОП».
+    # сменили, ключ остался: по нему лежат строки на проде). 'op' — «Табло ОП»,
+    # 'tez' — «Табло Тез КЦ» (там отбивка одна на оба направления отдела и пишет
+    # только о перерывах вне графика).
     # Список ОБЯЗАН совпадать с SZOV_BROADCAST_DIRECTIONS в bot_schedule2 и с CHECK
     # на szov_wallboard_broadcast_chats: 16.09.2026 'op' добавили в ручку и в CHECK, а
     # здесь забыли — кнопка «Отбивка» на табло ОП отвечала 500 из этого ValueError.
-    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op')
+    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op', 'tez')
     SZOV_BROADCAST_DIRECTION_DEFAULT = 'osnova'
 
     def _szov_broadcast_direction(self, value) -> str:
@@ -27996,6 +28001,56 @@ class Database:
         for value in shifts.values():
             value.sort()
         return breaks, shifts
+
+    def get_phone_break_episodes(self, operator_ids, window_from, window_to,
+                                 status_keys=None) -> list:
+        """Эпизоды перерыва по событиям телефона: [{operator_id, started_at, ended_at}].
+
+        Второй источник той же сверки «перерывы вне графика»: у «Линии» СЗоВ факт берётся
+        из истории статусов Oktell, у «Чата» — из событий Chat2Desk, у Тез КЦ — отсюда, из
+        событий iCORE Phone, которые телефон присылает нам сам.
+
+        Конец эпизода — время СЛЕДУЮЩЕГО события того же оператора (LEAD), поэтому фильтр
+        по статусу навешивается СНАРУЖИ подзапроса: изнутри «следующим» оказался бы
+        следующий перерыв, а не возврат на линию. Открытый эпизод (человек всё ещё на
+        перерыве) приезжает с пустым ended_at — это нормально, длительность уточнит
+        следующий заход разбора.
+
+        Берём ТОЛЬКО живые события телефона (client_event_id IS NOT NULL). В той же
+        таблице лежит ночная выгрузка кабинета Binotel, и она размечает ПРОШЕДШИЕ сутки
+        целиком: её «break in work» приехал бы сюда эпизодом в полсмены и сделал бы
+        нарушением каждый обед. Служебные события ('action') в ленту статусов не входят по
+        той же причине, что и в пересборку сегментов.
+        """
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        keys = sorted({self._normalize_import_status_key(key)
+                       for key in (status_keys or SCHEDULE_AUTO_BREAK_STATUS_KEYS)
+                       if self._normalize_import_status_key(key)})
+        if not op_ids or not keys or window_from is None or window_to is None:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT x.operator_id, x.event_at, x.next_at
+                FROM (
+                    SELECT e.operator_id, e.status_key, e.event_at,
+                           LEAD(e.event_at) OVER (PARTITION BY e.operator_id
+                                                  ORDER BY e.event_at, e.id) AS next_at
+                    FROM operator_status_events e
+                    WHERE e.operator_id = ANY(%s)
+                      AND e.event_at >= %s
+                      AND e.event_at < %s
+                      AND e.client_event_id IS NOT NULL
+                      AND e.event_kind = 'status'
+                ) x
+                WHERE regexp_replace(lower(btrim(x.status_key)), '\\s+', ' ', 'g') = ANY(%s)
+                ORDER BY x.operator_id, x.event_at
+                """,
+                (op_ids, window_from, window_to, keys)
+            )
+            rows = cursor.fetchall() or []
+        return [{'operator_id': int(row[0]), 'started_at': row[1], 'ended_at': row[2]}
+                for row in rows]
 
     def save_szov_break_violations(self, rows) -> int:
         """Записать найденные нарушения. Возвращает число НОВЫХ строк.

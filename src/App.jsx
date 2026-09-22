@@ -2588,6 +2588,15 @@ const canManageOpBroadcastForUser = (userLike) => {
     return isOpWallboardDepartmentHead(userLike);
 };
 
+// Отбивка «Табло Тез КЦ» — то же правило, хозяин третий: глава Тез КЦ. Отбивка там одна на
+// оба направления отдела и пишет только о перерывах вне графика (возврат #292).
+const canManageTezBroadcastForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    return isTezWallboardDepartmentHead(userLike);
+};
+
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
 const normalizeDevLetterAccessName = (value) =>
     String(value || '')
@@ -53820,6 +53829,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <TezWallboardView
                                     user={user}
                                     showToast={showToast}
+                                    canManageBroadcast={canManageTezBroadcastForUser(user)}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     widgetOpen={szovWallboardWidget}

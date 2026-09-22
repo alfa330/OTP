@@ -6,10 +6,11 @@ import { readWallboardMetric } from './szovWallboardShared';
 import TezOperatorsTable from './TezOperatorsTable';
 import {
     TEZ_SL_THRESHOLD_SECONDS,
-    TEZ_ABANDON_MIN_SECONDS,
+    TEZ_ABANDON_FROM_SECONDS,
     TEZ_TP_METRIC_MAP,
     formatCount,
     formatSeconds,
+    tezAbandonRuleHint,
     tezBreakChip,
 } from './tezWallboardShared';
 
@@ -19,9 +20,8 @@ import {
  * переучиваться, переходя с одного табло на другое.
  *
  * Чего здесь нет и почему:
- *   - «Перезвона»: такого статуса в Binotel не существует вовсе (пространство статусов —
- *     активен / работа в CRM / перерыв / неактивен). Заглушка на стене врала бы каждую минуту;
  *   - «Сброса на приветствии»: отвал на IVR виден только в тающей рабочей очереди кабинета.
+ *     В показателях дня его тоже нет — в очередь такой звонок не попал, и в её AR ему не место.
  *
  * Кирпичи (секция, сетка, плитки) — общие с табло СЗоВ: свои размеры цифр и своя палитра
  * означали бы, что два экрана на одной стене выглядят как два разных продукта.
@@ -42,40 +42,32 @@ const MetricStatTile = ({ metricKey, snapshot, scale = 1 }) => {
 };
 
 /*
- * Правая колонка табло: имя сверху, время в статусе под ним.
+ * Один блок колонки: подпись с иконкой и список «имя, под ним время в статусе».
  *
- * Написана здесь, а не взята у СЗоВ: `StatusBlock`/`StatusColumn` прибиты к SzovWallboardView
+ * Написан здесь, а не взят у СЗоВ: `StatusBlock`/`StatusColumn` прибиты к SzovWallboardView
  * регексами стражей, и вынос разметки из того файла уронил бы тесты чужого раздела. Форма
- * элемента списка та же (`reason_key`, `seconds`), поэтому и выглядит колонка так же.
+ * элемента списка та же (`reason_key`, `seconds`), поэтому и выглядит блок так же.
  *
- * Блок один — «На перерыве»: второго («Перезвон») у Binotel нет. Снизу отделён состав
- * направления: счётчики «онлайн», «перерыв» и «прочие» в сумме дают его целиком, но со стены
- * складывать неудобно, а без знаменателя не понять, много «двое на перерыве» или мало.
- * Колонка одна на оба направления Тез — у ОП тот же список и тот же смысл.
+ * Чип причины рисуем только в «На перерыве»: там под одной подписью живут перерыв, тренинг и
+ * тех.причина, и без чипа они молча смешались бы. У «Перезвона» причина одна и названа в
+ * заголовке — чип у каждой строки был бы ровно тем шумом, которого быть не должно.
  */
-export const TezStatusColumn = ({ now, scale = 1 }) => {
-    const items = Array.isArray(now.break_list) ? now.break_list : [];
+const TezStatusBlock = ({ title, icon, hint, entries, scale = 1, withChips = false }) => {
+    const items = Array.isArray(entries) ? entries : [];
     const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
     return (
-        /*
-         * Высота ограничена экраном, а список внутри скроллится. Без этого в обед, когда на
-         * перерыве человек десять, хвост списка и строка «Всего сотрудников» просто уезжают
-         * за нижний край стены — причём молча: колонка растёт вместе с содержимым, и никакой
-         * полосы прокрутки не появляется. Замерено на 1920×1080: при десяти длинных ФИО
-         * видно семь. То же поведение есть и у табло СЗоВ, но чинить его там — отдельная
-         * правка чужого раздела.
-         */
-        <div className={`${iosCard} flex max-h-[calc(100vh-7rem)] flex-col p-5`}>
-            <div className="mb-2 flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
-                <FaIcon className="fas fa-list-ul"></FaIcon>
-                <span>На перерыве</span>
+        <div className="flex min-h-0 flex-col">
+            <div className="mb-2 flex items-baseline gap-2.5 text-[15px] font-semibold text-slate-500">
+                <FaIcon className={`fas ${icon}`}></FaIcon>
+                <span>{title}</span>
+                {hint ? <span className="text-[12px] font-normal text-slate-400">{hint}</span> : null}
             </div>
             {items.length === 0 ? (
                 <div className="py-1.5 text-[15px] text-slate-400">Никого</div>
             ) : (
                 <ul className="min-h-0 divide-y divide-slate-100 overflow-y-auto">
                     {items.map((item) => {
-                        const chip = tezBreakChip(item);
+                        const chip = withChips ? tezBreakChip(item) : null;
                         return (
                             <li key={`${item.operator_id ?? item.name}-${item.since ?? ''}`} className="py-3">
                                 <div className="flex items-start gap-2">
@@ -98,7 +90,54 @@ export const TezStatusColumn = ({ now, scale = 1 }) => {
                     })}
                 </ul>
             )}
-            <div className="mt-auto border-t border-slate-200/70 pt-4 text-[14px] text-slate-400">
+        </div>
+    );
+};
+
+/*
+ * Правая колонка табло: «На перерыве» сверху, «Перезвон» под ним, состав направления внизу.
+ *
+ * «Перезвон» добавлен по возврату #292 (18.09.2026). Источники у двух блоков РАЗНЫЕ, и это
+ * названо подписью самого блока: перерывы считает кабинет Binotel, а состояния «Исход» у него
+ * нет вовсе — его знает только телефон iCORE Phone. Значит в «Перезвоне» не будет того, чей
+ * телефон ещё не обновился до версии со статусами; врать про это на стене нельзя.
+ *
+ * Состав направления внизу: счётчики «онлайн», «перерыв» и «прочие» в сумме дают его целиком,
+ * но со стены складывать неудобно, а без знаменателя не понять, много «двое на перерыве» или
+ * мало. Колонка одна на оба направления Тез — у ОП те же списки и тот же смысл.
+ */
+export const TezStatusColumn = ({ now, scale = 1 }) => {
+    return (
+        /*
+         * Высота ограничена экраном, а списки внутри скроллятся. Без этого в обед, когда на
+         * перерыве человек десять, хвост списка и строка «Всего сотрудников» просто уезжают
+         * за нижний край стены — причём молча: колонка растёт вместе с содержимым, и никакой
+         * полосы прокрутки не появляется. Замерено на 1920×1080: при десяти длинных ФИО
+         * видно семь. То же поведение есть и у табло СЗоВ, но чинить его там — отдельная
+         * правка чужого раздела.
+         */
+        <div className={`${iosCard} flex max-h-[calc(100vh-7rem)] flex-col gap-4 p-5`}>
+            <TezStatusBlock
+                title="На перерыве"
+                icon="fa-list-ul"
+                entries={now.break_list}
+                scale={scale}
+                withChips
+            />
+            {/* Прижат к низу, как у табло СЗоВ: перерывы — главный список колонки, и расти вниз
+                должен он, а не блок под ним. */}
+            <div className="mt-auto border-t border-slate-200/70 pt-4">
+                <TezStatusBlock
+                    title="Перезвон"
+                    icon="fa-phone-volume"
+                    hint="по телефону"
+                    entries={now.recall_list}
+                    scale={scale}
+                />
+            </div>
+            {/* Без mt-auto: свободное место в колонке забирает блок «Перезвон» выше, а два
+                mt-auto подряд поделили бы его пополам и оторвали состав от нижнего края. */}
+            <div className="border-t border-slate-200/70 pt-4 text-[14px] text-slate-400">
                 Всего сотрудников: {formatCount(now.operators_total)}
             </div>
         </div>
@@ -110,8 +149,12 @@ export default function TezTpWallboardBody({ snapshot, scale = 1 }) {
     const now = snapshot?.now || {};
     // Порог берём из снимка: его пишет сам кабинет в подписи колонки, и меняют его там же.
     const slSeconds = Number(snapshot?.sl_threshold_seconds) || TEZ_SL_THRESHOLD_SECONDS;
-    // Порог короткого сброса тоже из снимка: правило живёт на сервере, а стена его называет.
-    const abandonSeconds = Number(snapshot?.abandon_min_seconds) || TEZ_ABANDON_MIN_SECONDS;
+    // Правило потери тоже из снимка: оно живёт на сервере, а стена его называет. Через `??`,
+    // а не `||`: у этого правила ноль — рабочее значение («потеряны все в очереди»), и `||`
+    // молча подменил бы его запасным числом.
+    const abandonFrom = Number.isFinite(Number(snapshot?.abandon_from_seconds))
+        ? Number(snapshot.abandon_from_seconds)
+        : TEZ_ABANDON_FROM_SECONDS;
 
     // «Работа в CRM» и «не на линии» своей плитки не имеют — чтобы люди в этих статусах не
     // пропадали из виду, показываем их приглушённой строкой, и только когда они есть.
@@ -152,7 +195,7 @@ export default function TezTpWallboardBody({ snapshot, scale = 1 }) {
                             <span className="hidden text-right text-[12.5px] leading-tight text-slate-400 sm:block">
                                 SL — доля принятых, отвеченных за {slSeconds} с
                                 <br />
-                                Сброс до {abandonSeconds} с потерей не считается
+                                {tezAbandonRuleHint(abandonFrom)}
                             </span>
                         )}
                     >

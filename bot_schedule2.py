@@ -38577,6 +38577,9 @@ def _szov_broadcast_guard():
     if direction == SZOV_BROADCAST_DIRECTION_OP:
         resolver = globals().get('_op_wallboard_department_id')
         department_id = resolver() if resolver else None
+    elif direction == SZOV_BROADCAST_DIRECTION_TEZ:
+        resolver = globals().get('_tez_wallboard_department_id')
+        department_id = resolver() if resolver else None
     else:
         department_id = _szov_wallboard_department_id()
     if department_id is not None and _headed_department_id(requester_id) == department_id:
@@ -39080,8 +39083,12 @@ SZOV_BROADCAST_DIRECTION_CHAT = 'chat'
 # «Табло ОП» — третье направление той же отбивки: свои получатели, показатели и расписание,
 # но тот же обход получателей, те же ручки настройки и та же таблица в БД.
 SZOV_BROADCAST_DIRECTION_OP = 'op'
+# «Табло Тез КЦ» — четвёртое. У него отбивка НЕ про показатели: отдел попросил только
+# предупреждения о перерывах вне графика (возврат #292 18.09.2026), и сообщение уходит,
+# только когда такие перерывы есть. Получатели, ручки настройки и таблица — общие.
+SZOV_BROADCAST_DIRECTION_TEZ = 'tez'
 SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT,
-                             SZOV_BROADCAST_DIRECTION_OP)
+                             SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ)
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
@@ -39265,6 +39272,9 @@ SZOV_BREAK_NOTE_LIMIT = _env_int('SZOV_BREAK_NOTE_LIMIT', 6, minimum=1, maximum=
 # базе подписок, а здесь — как направление называется сейчас на экране.
 SZOV_BREAK_DIRECTION_LINE = 'line'
 SZOV_BREAK_DIRECTION_CHAT = 'chat'
+# Тез КЦ: оба направления отдела (ТП и ОП) в одном ключе. Делить их незачем — перерыв
+# стоит в графике у человека, а не у линии, и руководитель у обоих один.
+SZOV_BREAK_DIRECTION_TEZ = 'tez'
 
 SZOV_BREAK_KIND_OFF_SCHEDULE = 'off_schedule'   # перерыв в графике есть, но в другое время
 SZOV_BREAK_KIND_NOT_PLANNED = 'not_planned'     # смена есть, перерывов в ней не запланировано
@@ -42268,13 +42278,18 @@ TEZ_WALLBOARD_LINE_GRACE_SECONDS = _env_int('TEZ_WALLBOARD_LINE_GRACE_SECONDS', 
 TEZ_AR_TARGET_PERCENT = 5
 TEZ_AR_BAD_PERCENT = 7
 
-# Порог «потерянного» звонка: сброс за 21 секунду и раньше потерей НЕ считается и не
-# попадает ни в «Потеряно», ни во «Входящих», ни в AR (решение владельца 11.09.2026).
-# Число подобрано под SL очереди (20 с): потерян тот, кто прождал дольше нормы ответа и
-# не дождался. Почему это нельзя взять со страницы очереди и как считается — большой
-# комментарий у tez_wallboard_source.line_day_totals.
-TEZ_WALLBOARD_ABANDON_MIN_SECONDS = _env_int('TEZ_WALLBOARD_ABANDON_MIN_SECONDS', 21,
-                                             minimum=0, maximum=600)
+# С какой секунды ОЖИДАНИЯ В ОЧЕРЕДИ сброс считается потерей. Ноль — любой: в AR идёт
+# каждый, кто до очереди дошёл и не дождался (постановка Алчинбаевой Анель при возврате
+# #292 18.09.2026). До 22.09.2026 здесь стояла 21 секунда, и это был двойной вычет
+# приветствия: в журнале Binotel ожидание и так считается от входа в очередь, а
+# «22-я секунда» в словах постановщика — конец автоинформатора, а не 22 секунды в
+# очереди. Замер за 08–22.09.2026: прежний порог прятал 14 потерянных из 60 и занижал
+# AR с 6,4 % до 5,0 %. Имя переменной сменилось вместе со смыслом (было
+# TEZ_WALLBOARD_ABANDON_MIN_SECONDS, «строго дольше»): оставь прежнее — и заданные
+# кем-то 21 тихо значили бы уже другое. Правило целиком — большой комментарий у
+# tez_wallboard_source.line_day_totals.
+TEZ_WALLBOARD_ABANDON_FROM_SECONDS = _env_int('TEZ_WALLBOARD_ABANDON_FROM_SECONDS', 0,
+                                              minimum=0, maximum=600)
 # Журнал звонков живёт СВОИМ сроком и качается ОТДЕЛЬНЫМ потоком, а не в шаге табло.
 # Причина в лимите Binotel API 4.0: 5 «нагружаемых» запросов в минуту, и на «too frequent»
 # клиент честно спит по подсказке сервера — до ~37 с с ретраями. Сделай это в шаге стены,
@@ -42626,6 +42641,41 @@ def _tez_wallboard_roster(people, direction, employees, live_statuses, endpoints
     return rows
 
 
+# Ключ статуса «перезвон» в оформлении списка людей — им же помечен блок «Перезвон».
+# Берём из каталога, а не строкой: подпись телефона («Исход») и ключ оформления обязаны
+# остаться одним решением в одном месте.
+_TEZ_WALLBOARD_RECALL_TONE_KEY = _TEZ_WALLBOARD_STATUS_CATALOG['перезвон'][1]
+
+
+def _tez_wallboard_recall_list(roster):
+    """Блок «Перезвон» — кто сейчас в исходящем обзвоне, по статусу телефона iCORE Phone.
+
+    Просьба Алчинбаевой Анель при возврате #292: «Блок перезвон (по статусу Исход в
+    iCore phone) прошу добавить». У Binotel такого состояния нет вовсе — кабинет знает
+    четыре слова (активен / работа в CRM / перерыв / неактивен), — поэтому список
+    строится из НАШИХ событий телефона, из уже собранного поимённого списка, а не
+    вторым обходом кабинета.
+
+    Плата за разные источники в одной колонке названа на самом экране подписью: людей
+    без обновлённого телефона в блоке нет, потому что событий от них не приходит вовсе.
+    """
+    out = []
+    for row in roster or []:
+        if row.get('status_key') != _TEZ_WALLBOARD_RECALL_TONE_KEY:
+            continue
+        out.append({
+            'operator_id': row.get('operator_id'),
+            'name': row.get('name') or '—',
+            # Форма элемента — как у «На перерыве»: колонка на стене одна, и разбирать
+            # два разных словаря ради одинаковых строк ей незачем.
+            'reason': row.get('status_label'),
+            'reason_key': row.get('status_key'),
+            'since': None,
+            'seconds': row.get('status_seconds'),
+        })
+    return out
+
+
 def _tez_wallboard_journal_worker(day_key):
     """Один поход в Binotel API за журналом дня. Крутится в СВОЁМ потоке."""
     from tez import binotel_calls as tez_binotel_calls
@@ -42747,35 +42797,39 @@ def _tez_wallboard_fetch_snapshot():
                 unmatched.append(row.get('name') or row.get('number'))
         summary = tez_source.summarize_queue_operators(queue)
         # Приём и потери дня считаются по журналу звонков линии ТП, а не по счётчику
-        # очереди: счётчик не знает времени ожидания (а порог владельца — 21 секунда) и не
-        # видит звонков, пришедших оператору мимо очереди. Линию журнал не называет — её
-        # находим по своему же составу: линия ТП та, на которой эти номера приняли больше
-        # всего входящих.
+        # очереди: счётчик не видит ни стадии обрыва, ни звонков, пришедших оператору мимо
+        # очереди. Линию журнал не называет — её находим по своему же составу: линия ТП та,
+        # на которой эти номера приняли больше всего входящих.
         journal_calls, journal_age, journal_error = _tez_wallboard_journal(raw.get('day'))
         tp_line = tez_source.pick_line_number(journal_calls, tp_numbers)
         line_totals = tez_source.line_day_totals(
-            journal_calls, tp_line, TEZ_WALLBOARD_ABANDON_MIN_SECONDS)
-        snapshot['abandon_min_seconds'] = TEZ_WALLBOARD_ABANDON_MIN_SECONDS
+            journal_calls, tp_line, TEZ_WALLBOARD_ABANDON_FROM_SECONDS)
+        snapshot['abandon_from_seconds'] = TEZ_WALLBOARD_ABANDON_FROM_SECONDS
+        tp_roster = _tez_wallboard_roster(people, 'tp', raw.get('employees'), live_statuses,
+                                          **roster_lines)
         snapshot['tp'] = {
             'now': dict(
                 summary,
                 queue=queue.get('queue'),
                 queue_max_wait_seconds=None,
                 break_list=_tez_wallboard_name_list(people, summary.get('break_list')),
-                recall_list=[],
+                recall_list=_tez_wallboard_recall_list(tp_roster),
             ),
             'today': tez_source.day_totals(raw.get('employees'), tp_numbers, queue=queue,
                                            line_totals=line_totals),
-            'roster': _tez_wallboard_roster(people, 'tp', raw.get('employees'), live_statuses,
-                                            **roster_lines),
+            'roster': tp_roster,
         }
         journal_diagnostics = {
             'journal_age_seconds': None if journal_age is None else int(journal_age),
             'journal_error': journal_error,
             'tp_line_number': tp_line,
-            # Сколько звонков правило вычеркнуло из дня и где они обрывались: без этих двух
-            # чисел на вопрос «почему входящих меньше, чем в кабинете» ответить нечем, а
+            # Сколько звонков правило вычеркнуло из дня и где они обрывались: без этих чисел
+            # на вопрос «почему входящих меньше, чем в кабинете» ответить нечем, а
             # переименованная вендором стадия видна тут раньше, чем перекос на стене.
+            # Вычеркнутых два вида, и путать их нельзя: «до очереди» — бросил трубку на
+            # автоинформаторе (в AR не идёт никогда), «ниже порога» — не дотерпел заданных
+            # секунд уже в очереди (при пороге 0 таких нет вовсе).
+            'abandons_before_queue': line_totals.get('dropped_before_queue'),
             'abandons_below_threshold': line_totals.get('dropped_short'),
             'abandon_stages': line_totals.get('stages') or {},
         }
@@ -42790,6 +42844,8 @@ def _tez_wallboard_fetch_snapshot():
         raw.get('employees'), op_numbers,
         live_calls=live_calls, endpoints=raw.get('endpoints'), now_ts=now_ts)
     op_today = tez_source.day_totals(raw.get('employees'), op_numbers)
+    op_roster = _tez_wallboard_roster(people, 'op', raw.get('employees'), live_statuses,
+                                      **roster_lines)
     snapshot['op'] = {
         # Отдельного счётчика «разговоров» ни у одного направления нет намеренно. На живом
         # прогоне 08.09.2026 у ТП он разошёлся с «в разговоре» (1 против 0): кабинет считает
@@ -42799,13 +42855,12 @@ def _tez_wallboard_fetch_snapshot():
         'now': dict(
             op_summary,
             break_list=_tez_wallboard_name_list(people, op_summary.get('break_list')),
-            recall_list=[],
+            recall_list=_tez_wallboard_recall_list(op_roster),
         ),
         # Средняя длительность разговора у отдела продаж — по ИСХОДЯЩИМ: входящих у них нет
         # вовсе, и общая плитка показывала бы прочерк круглые сутки.
         'today': dict(op_today, avg_talk_seconds=op_today.get('avg_outgoing_talk_seconds')),
-        'roster': _tez_wallboard_roster(people, 'op', raw.get('employees'), live_statuses,
-                                        **roster_lines),
+        'roster': op_roster,
     }
 
     snapshot['diagnostics'] = dict(
@@ -42874,9 +42929,10 @@ def _tez_wallboard_direction_payload(direction):
         payload['sl_threshold_seconds'] = snapshot.get('sl_threshold_seconds')
         payload['ar_target_percent'] = snapshot.get('ar_target_percent')
         payload['ar_bad_percent'] = snapshot.get('ar_bad_percent')
-        # Порог короткого сброса — на стену: подпись под плитками называет правило словами,
-        # иначе «Входящих» на табло и в кабинете расходятся без всякого объяснения.
-        payload['abandon_min_seconds'] = snapshot.get('abandon_min_seconds')
+        # Правило потери — на стену: подпись под плитками называет его словами, иначе
+        # «Входящих» на табло и в кабинете расходятся без всякого объяснения. Ноль значит
+        # «потеря — любой сброс в очереди», и подпись говорит именно это.
+        payload['abandon_from_seconds'] = snapshot.get('abandon_from_seconds')
     return payload
 
 
@@ -42914,6 +42970,215 @@ def api_tez_wallboard_tp_snapshot():
 def api_tez_wallboard_op_snapshot():
     """Табло Тез КЦ, направление «ОП»: люди отдела продаж и исходящие за день."""
     return _api_tez_wallboard_direction('op')
+
+
+# --- Тез КЦ: перерывы вне графика и отбивка о них в Telegram --------------------------------
+# Просьба Алчинбаевой Анель при возврате #292 (18.09.2026): «Отбивку в ТГ по перерывам вне
+# графика прошу добавить, я даже не знала что такой функционал есть».
+#
+# Правило сверки — ОДНО на все отделы (_szov_break_classify): в момент, когда человек вышел
+# на перерыв, график обязан показывать перерыв именно у него. Разъехавшиеся правила значили
+# бы, что за одно и то же нарушение оператора Тез и оператора СЗоВ судят по-разному.
+# Отличается только источник факта: у «Линии» это история статусов Oktell, у «Чата» —
+# события Chat2Desk, здесь — события телефона iCORE Phone, которые он шлёт нам сам.
+#
+# Отбивка у Тез своя и НЕ про показатели: сообщение уходит, только когда есть новые
+# нарушения. Режимы получателя («каждую отбивку» / «только при отклонениях») тут
+# бессмысленны — ежечасное «нарушений нет» было бы ровно тем шумом, которого в этом проекте
+# быть не должно, поэтому оба режима ведут себя одинаково и форма их не показывает.
+TEZ_BREAK_BROADCAST_SEND_TIMES = (os.getenv('TEZ_BREAK_BROADCAST_SEND_TIMES')
+                                  or '09:00,10:00,11:00,12:00,13:00,14:00,15:00,16:00,17:00,'
+                                     '18:00,19:00,20:00,21:00').strip()
+# Сколько нарушений выписываем поимённо в одно сообщение. Замер по боевым данным
+# 11–22.09.2026: у отдела 31 нарушение за 12 дней, то есть 2-3 в сутки — в час их почти
+# всегда одно-два, и шесть строк покрывают даже редкий всплеск. Остальные — счётчиком.
+TEZ_BREAK_NOTE_LIMIT = _env_int('TEZ_BREAK_NOTE_LIMIT', 6, minimum=1, maximum=30)
+
+
+def _tez_break_broadcast_send_times():
+    """[(час, минута), ...] расписания проверки перерывов Тез КЦ."""
+    return _szov_broadcast_parse_times(TEZ_BREAK_BROADCAST_SEND_TIMES, "Перерывы Тез КЦ")
+
+
+def _tez_break_status_keys():
+    """Ключи статуса «перерыв» у моделей Тез — те же, по которым считаются рабочие часы.
+
+    Берём из профиля моделей, а не списком здесь: разъехавшись, учёт часов и журнал
+    нарушений считали бы перерывом разное, и человек попадал бы в нарушители за минуты,
+    которых в его же часах нет. Модель одна из двух — профиль у tez_line и tez_op общий."""
+    model = _TEZ_WALLBOARD_MODEL_BY_DIRECTION['tp']
+    return set(db._status_profile_for_calculation_model(model)['break'])
+
+
+def _tez_break_violations_scan(now=None):
+    """Разобрать перерывы Тез КЦ за последние часы и записать несовпавшие с графиком.
+
+    Окно и пороги — общие с СЗоВ (перекрытие окон, минимум 3 минуты, допуск ±10 минут):
+    правило одно на компанию, и «часть» его переносить нельзя. Запись идемпотентна, так
+    что перекрытие не плодит дублей, а перерыв, который в прошлый заход ещё шёл, доедет
+    с настоящей длительностью.
+
+    Состав берём ровно тот, что стоит на табло, — обе модели отдела (ТП и ОП): глава и
+    СВ моделей не имеют, и в сверке дисциплины линии им не место.
+    """
+    now = now or _szov_break_now()
+    window_from = now - timedelta(hours=SZOV_BREAK_SCAN_LOOKBACK_HOURS)
+    people = _tez_wallboard_people()
+    operator_ids = {row['id'] for row in (people['tp'] + people['op']) if row.get('id')}
+    if not operator_ids:
+        logging.warning("Перерывы Тез КЦ: состав отдела пуст, разбор пропущен")
+        return 0
+    raw = db.get_phone_break_episodes(operator_ids, window_from, now + timedelta(minutes=1),
+                                      status_keys=_tez_break_status_keys())
+    names = {row['id']: row.get('name') for row in (people['tp'] + people['op'])}
+    episodes = [{
+        'operator_id': int(item['operator_id']),
+        'name': names.get(int(item['operator_id'])) or '—',
+        'started_at': item['started_at'],
+        'ended_at': item['ended_at'],
+    } for item in raw if item.get('started_at') is not None]
+    if not episodes:
+        return 0
+    merged = _szov_break_merge_episodes(episodes)
+    days = set()
+    for episode in merged:
+        day = episode['started_at'].date()
+        days.add(day)
+        days.add(day - timedelta(days=1))   # ночной хвост вчерашней смены
+    planned_breaks, shifts = db.get_planned_breaks_for_days(
+        {episode['operator_id'] for episode in merged}, days)
+    violations = _szov_break_classify(merged, planned_breaks, shifts, now,
+                                      direction=SZOV_BREAK_DIRECTION_TEZ)
+    if not violations:
+        return 0
+    inserted = db.save_szov_break_violations(violations)
+    if inserted:
+        logging.info("Перерывы Тез КЦ: найдено %d новых нарушений из %d перерывов",
+                     inserted, len(merged))
+    return inserted
+
+
+def _tez_break_broadcast_text(violations):
+    """Текст сообщения о перерывах вне графика. Пусто — значит писать не о чем.
+
+    Формулировки те же, что у отбивки СЗоВ (_szov_break_violation_detail): одно нарушение
+    обязано читаться одинаково, в какой бы отдел про него ни написали."""
+    rows = list(violations or [])
+    if not rows:
+        return ''
+    lines = ['<b>Тез КЦ · перерывы не по графику</b>']
+    for item in rows[:TEZ_BREAK_NOTE_LIMIT]:
+        started = str(item.get('started_at') or '')[11:16]
+        day = str(item.get('violation_date') or item.get('started_at') or '')[:10]
+        day_label = '.'.join(reversed(day.split('-'))) if day else ''
+        name = html.escape(str(item.get('operator_name') or '—'))
+        lines.append(f"• {name} — {day_label} в {started}, "
+                     f"{html.escape(_szov_break_violation_detail(item))}")
+    if len(rows) > TEZ_BREAK_NOTE_LIMIT:
+        lines.append(f"…и ещё {len(rows) - TEZ_BREAK_NOTE_LIMIT}. "
+                     f"Полный список — в разделе «Табло Тез КЦ», кнопка «Перерывы».")
+    return '\n'.join(lines)
+
+
+async def _tez_break_broadcast_send(chat_id):
+    """Отправить сообщение о перерывах Тез КЦ в один чат прямо сейчас (кнопка проверки).
+
+    В отличие от плановой джобы молчать здесь нельзя: человек нажал кнопку и ждёт ответа,
+    поэтому в спокойный час уходит честное «нарушений нет». Прочитанными нарушения при
+    этом НЕ помечаем — проверка связи не должна отменять плановое предупреждение."""
+    loop = asyncio.get_event_loop()
+    violations = await loop.run_in_executor(
+        executor_pool, functools.partial(
+            db.get_unreported_szov_break_violations,
+            SZOV_BREAK_REPORT_MAX_AGE_HOURS,
+            direction=SZOV_BREAK_DIRECTION_TEZ))
+    text = _tez_break_broadcast_text(violations) or (
+        '<b>Тез КЦ · перерывы не по графику</b>\n'
+        'За последние сутки новых нарушений нет — сообщение проверочное.')
+    await bot.send_message(int(chat_id), text, parse_mode='HTML')
+
+
+async def tez_break_broadcast_job():
+    """Плановая проверка перерывов Тез КЦ и сообщение о новых нарушениях.
+
+    Разбор идёт ВСЕГДА, отправка — только когда есть о чём писать: журнал в iCore обязан
+    наполняться и тогда, когда получателей нет вовсе (та же развязка, что у задачи #114).
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(executor_pool, _tez_break_violations_scan)
+    except Exception as exc:
+        logging.error("Перерывы Тез КЦ: разбор не удался: %s", exc, exc_info=True)
+    try:
+        chats = await loop.run_in_executor(
+            executor_pool, functools.partial(db.get_szov_broadcast_chats,
+                                             SZOV_BROADCAST_DIRECTION_TEZ))
+        recipients = [chat for chat in chats if chat.get('is_enabled') and chat.get('chat_id')]
+        if not recipients:
+            return
+        violations = await loop.run_in_executor(
+            executor_pool, functools.partial(
+                db.get_unreported_szov_break_violations,
+                SZOV_BREAK_REPORT_MAX_AGE_HOURS,
+                direction=SZOV_BREAK_DIRECTION_TEZ))
+        text = _tez_break_broadcast_text(violations)
+        if not text:
+            return
+        delivered = False
+        for chat in recipients:
+            # Один недоступный чат (бота выгнали из группы) не должен лишать остальных.
+            try:
+                await bot.send_message(int(chat['chat_id']), text, parse_mode='HTML')
+                delivered = True
+                logging.info("Перерывы Тез КЦ: отправлено в чат %s", chat['chat_id'])
+            except Exception as exc:
+                logging.error("Перерывы Тез КЦ: чат %s не получил сообщение: %s",
+                              chat['chat_id'], exc)
+        if delivered:
+            # Помечаем только после удачной доставки: разом упавшая отправка иначе
+            # проглотила бы предупреждения, и о них не написали бы никогда.
+            await loop.run_in_executor(
+                executor_pool, db.mark_szov_break_violations_reported,
+                [item.get('id') for item in violations])
+    except Exception as exc:
+        logging.error("Перерывы Тез КЦ: плановая отправка не удалась: %s", exc, exc_info=True)
+
+
+@app.route('/api/tez_wallboard/break_violations', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_tez_wallboard_break_violations():
+    """Журнал выходов на перерыв мимо графика у Тез КЦ за период.
+
+    Только чтение: строки пишет почасовой разбор. Доступ тот же, что у самого табло —
+    нарушения смотрят те же СВ и руководитель отдела."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _tez_wallboard_guard()
+    if err:
+        return err
+    today = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
+    date_from = (request.args.get('date_from') or '').strip() or today
+    date_to = (request.args.get('date_to') or '').strip() or date_from
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    try:
+        violations = db.get_szov_break_violations(date_from, date_to,
+                                                  direction=SZOV_BREAK_DIRECTION_TEZ)
+    except Exception as exc:
+        logging.error("Перерывы Тез КЦ: журнал не прочитан: %s", exc)
+        return jsonify({"error": "Не удалось получить журнал", "detail": str(exc)[:300]}), 500
+    return jsonify({
+        "date_from": date_from,
+        "date_to": date_to,
+        "direction": SZOV_BREAK_DIRECTION_TEZ,
+        "violations": violations,
+        # Порог и допуск показываем рядом со списком: без них непонятно, почему перерыв
+        # в 10 минут от плана в журнал не попал.
+        "rules": {
+            "min_minutes": SZOV_BREAK_MIN_MINUTES,
+            "tolerance_minutes": SZOV_BREAK_TOLERANCE_MINUTES,
+        },
+    })
 
 
 # --- Табло Тез КЦ: выгрузка показателей за период ------------------------------------------------
@@ -44970,6 +45235,8 @@ def _szov_broadcast_direction_times(direction):
         times = _szov_chat_broadcast_send_times()
     elif direction == SZOV_BROADCAST_DIRECTION_OP:
         times = _op_broadcast_send_times()
+    elif direction == SZOV_BROADCAST_DIRECTION_TEZ:
+        times = _tez_break_broadcast_send_times()
     else:
         times = _szov_broadcast_send_times()
     return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
@@ -45139,6 +45406,7 @@ def api_szov_wallboard_broadcast_test():
     send = {
         SZOV_BROADCAST_DIRECTION_CHAT: _szov_chat_broadcast_send,
         SZOV_BROADCAST_DIRECTION_OP: _op_broadcast_send,
+        SZOV_BROADCAST_DIRECTION_TEZ: _tez_break_broadcast_send,
     }.get(direction, _szov_broadcast_send)
     try:
         loop = _bot_event_loop()
@@ -65577,6 +65845,21 @@ if __name__ == '__main__':
             max_instances=1,
             coalesce=True
         )
+
+    # Тез КЦ: сверка перерывов с графиком и сообщение о новых нарушениях. Джоба своя, а не
+    # ветка в отбивке СЗоВ, потому что у неё другой повод существовать: показателей в
+    # сообщении нет вовсе, и молчит она сама, когда нарушений нет. Разбор внутри идёт и без
+    # получателей — журнал в iCore обязан наполняться в любом случае.
+    for _hour, _minute in _tez_break_broadcast_send_times():
+        scheduler.add_job(
+            tez_break_broadcast_job,
+            CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
+            id=f'tez_break_broadcast_{_hour:02d}{_minute:02d}',
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+    logging.info("⏰ Перерывы Тез КЦ: проверка в %s", TEZ_BREAK_BROADCAST_SEND_TIMES)
 
     # Отчёт по чатам: каждый час подписанным чатам. Если подписок нет, джоба выходит
     # сразу и Chat2Desk не дёргает — квота там общая на компанию.

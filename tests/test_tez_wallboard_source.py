@@ -769,31 +769,59 @@ def _call(line=TP_LINE, number="901", answered=True, waitsec=0, call_type=0):
 
 
 class LineDayTotalsTests(unittest.TestCase):
-    """Тройка дня по журналу линии: порог короткого сброса и что он вычёркивает."""
+    """Тройка дня по журналу линии: что попадает в AR, а что вычёркивается.
 
-    def _totals(self, calls, threshold=21):
+    Правило постановщика (возврат #292 18.09.2026): AR считается с момента поступления
+    звонка в очередь, и всё, что было до неё, в него не входит."""
+
+    def _totals(self, calls, threshold=0):
         return source.line_day_totals(calls, TP_LINE, threshold)
 
-    def test_short_abandon_is_absent_everywhere(self):
-        """Решение владельца: сброс до порога не попадает НИ в потери, НИ во входящие.
+    def test_greeting_drop_is_absent_everywhere(self):
+        """Бросивший трубку на автоинформаторе не попадает НИ в потери, НИ во входящие.
 
-        Оставить его в знаменателе значило бы механически занижать AR — так в колл-центрах
-        и поступают с short abandon."""
+        Очереди он не видел — в её показателе ему не место. И вычёркивает его СТАДИЯ, а не
+        время: сколько бы он ни слушал приветствие, звонок до очереди не дошёл."""
         totals = self._totals([
             _call(), _call(), _call(),
-            _call(answered=False, waitsec=1),
-            _call(answered=False, waitsec=40),
+            _call(number="Приветствие в рабочее время New", answered=False, waitsec=1),
+            _call(number="Приветствие в рабочее время New", answered=False, waitsec=95),
+            _call(number="Очередь", answered=False, waitsec=40),
         ])
         self.assertEqual((totals["served"], totals["lost"], totals["arrived"]), (3, 1, 4))
-        self.assertEqual(totals["dropped_short"], 1)
+        self.assertEqual(totals["dropped_before_queue"], 2)
         self.assertEqual(totals["ar_ratio"], 0.25)
 
-    def test_threshold_is_strict(self):
-        """«Свыше 21 секунды» — строго больше: ровно порог ещё не потеря."""
-        edge = self._totals([_call(), _call(answered=False, waitsec=21)])
+    def test_any_queue_abandon_counts(self):
+        """Порог по умолчанию — ноль: дошёл до очереди и не дождался, значит потерян.
+
+        Прежние 21 секунда были двойным вычетом приветствия: время ожидания в журнале
+        Binotel и так считается от входа в очередь."""
+        totals = self._totals([_call(), _call(number="Очередь", answered=False, waitsec=1)])
+        self.assertEqual((totals["lost"], totals["dropped_short"]), (1, 0))
+
+    def test_threshold_counts_from_the_named_second(self):
+        """Заданный порог означает «с этой секунды»: 21 при пороге 22 — ещё не потеря."""
+        edge = self._totals([_call(), _call(number="Очередь", answered=False, waitsec=21)],
+                            threshold=22)
         self.assertEqual((edge["lost"], edge["dropped_short"]), (0, 1))
-        over = self._totals([_call(), _call(answered=False, waitsec=22)])
+        over = self._totals([_call(), _call(number="Очередь", answered=False, waitsec=22)],
+                            threshold=22)
         self.assertEqual((over["lost"], over["dropped_short"]), (1, 0))
+
+    def test_drop_on_an_operator_is_a_queue_loss(self):
+        """Оборвался на номере оператора — очередь его уже отдала человеку. Это потеря."""
+        totals = self._totals([_call(), _call(number="915", answered=False, waitsec=120)])
+        self.assertEqual((totals["lost"], totals["dropped_before_queue"]), (1, 0))
+
+    def test_unknown_stage_counts_as_a_loss(self):
+        """Незнакомую стадию считаем дошедшей до очереди.
+
+        Переименуй вендор свои подписи — и белый список молча обнулил бы потери. Здесь
+        худшее, что случится, — AR вырастет, а новая стадия появится в диагностике."""
+        totals = self._totals([_call(), _call(number="Новый сценарий", answered=False, waitsec=5)])
+        self.assertEqual((totals["lost"], totals["dropped_before_queue"]), (1, 0))
+        self.assertIn("Новый сценарий", totals["stages"])
 
     def test_other_lines_and_outgoing_are_not_counted(self):
         """Считаем только входящие своей линии: чужая линия и исходящие в день не идут."""
@@ -810,14 +838,14 @@ class LineDayTotalsTests(unittest.TestCase):
             _call(number="Очередь", answered=False, waitsec=77),
             _call(number="Очередь", answered=False, waitsec=9),
             _call(number="Приветствие в рабочее время New", answered=False, waitsec=1),
-        ])
-        self.assertEqual(totals["stages"]["Очередь"], {"long": 1, "short": 1})
+        ], threshold=22)
+        self.assertEqual(totals["stages"]["Очередь"], {"long": 1, "short": 1, "before_queue": 0})
         self.assertEqual(totals["stages"]["Приветствие в рабочее время New"],
-                         {"long": 0, "short": 1})
+                         {"long": 0, "short": 0, "before_queue": 1})
 
     def test_no_line_means_dashes_not_zeros(self):
         """Линию не нашли — считать не из чего. Ноль на стене читается как «всё хорошо»."""
-        totals = source.line_day_totals([_call()], None, 21)
+        totals = source.line_day_totals([_call()], None, 0)
         self.assertEqual([totals[key] for key in ("served", "lost", "arrived", "ar_ratio")],
                          [None, None, None, None])
 
