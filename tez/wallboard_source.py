@@ -713,6 +713,17 @@ def day_totals(employees, numbers, queue=None, line_totals=None):
 
 ANSWERED_DISPOSITION = "ANSWER"
 
+# Звонок, который ИДЁТ ПРЯМО СЕЙЧАС. Журнал отдаёт его наравне с закончившимися, и
+# «не ANSWER» он только потому, что ещё не кончился: через минуту та же строка станет
+# ANSWER. Ловится на живом проде 22.09.2026 — строка со стадией «913» и waitsec 0.
+# Прежний порог «дольше 21 секунды» прятал такие строки случайно, правило по стадии
+# зачло бы КАЖДЫЙ идущий разговор в потери, и «Потеряно» на стене мигало бы весь день.
+# Разбор всех входящих линии ТП за 08–22.09.2026: ANSWER 873, CANCEL 74, NOANSWER 18,
+# BUSY 2, ONLINE 1 — то есть терминальных слов несколько, а «идёт» ровно одно, и
+# перечислять безопаснее именно его: незнакомое слово тогда попадёт в потери и будет
+# видно, а не пропадёт молча.
+IN_PROGRESS_DISPOSITIONS = {"ONLINE"}
+
 # Подписи автоинформатора у Binotel. Список открытый: у вендора это обычный текст
 # сценария, и «Приветствие в нерабочее время», «IVR» или «Меню» значат то же самое.
 GREETING_STAGE_MARKERS = ("приветств", "ivr", "автоинформатор", "меню", "автоответчик")
@@ -776,19 +787,27 @@ def line_day_totals(calls, line_number, abandon_from_seconds=0):
     threshold = max(0, _to_int(abandon_from_seconds, 0))
     if not line:
         return {"served": None, "lost": None, "arrived": None, "ar_ratio": None,
-                "dropped_short": None, "dropped_before_queue": None, "stages": {}}
+                "dropped_short": None, "dropped_before_queue": None, "in_progress": None,
+                "stages": {}}
     served = 0
     lost = 0
     dropped_short = 0
     dropped_before_queue = 0
+    in_progress = 0
     stages = {}
     for call in calls or []:
         if _to_int(call.get("call_type"), -1) != 0:
             continue
         if str(call.get("line_number") or "").strip() != line:
             continue
-        if str(call.get("disposition") or "").upper() == ANSWERED_DISPOSITION:
+        disposition = str(call.get("disposition") or "").upper()
+        if disposition == ANSWERED_DISPOSITION:
             served += 1
+            continue
+        if disposition in IN_PROGRESS_DISPOSITIONS:
+            # Разговор идёт прямо сейчас: он ещё ничем не кончился, и записать его в
+            # потери — соврать про человека, который как раз разговаривает с клиентом.
+            in_progress += 1
             continue
         waited = _to_int(call.get("waitsec"), 0)
         stage = str(call.get("internal_number") or "").strip() or "—"
@@ -813,6 +832,10 @@ def line_day_totals(calls, line_number, abandon_from_seconds=0):
         # на автоинформаторе, второй не дотерпел заданных секунд уже в очереди.
         "dropped_short": dropped_short,
         "dropped_before_queue": dropped_before_queue,
+        # Сколько звонков линии идут прямо сейчас. На стене их нет ни в одной плитке —
+        # это число нужно, чтобы «принято + потеряно» не сходилось с журналом кабинета
+        # и было понятно, почему.
+        "in_progress": in_progress,
         "stages": stages,
     }
 

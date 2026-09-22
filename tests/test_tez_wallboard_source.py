@@ -809,6 +809,20 @@ class LineDayTotalsTests(unittest.TestCase):
                             threshold=22)
         self.assertEqual((over["lost"], over["dropped_short"]), (1, 0))
 
+    def test_call_in_progress_is_neither_served_nor_lost(self):
+        """Идущий прямо сейчас разговор журнал отдаёт как ONLINE.
+
+        Он «не ANSWER» только потому, что ещё не кончился: через минуту та же строка
+        станет принятой. Запиши его в потери — и «Потеряно» мигало бы на стене весь
+        день, а AR врал бы ровно на число идущих разговоров."""
+        live = dict(_call(number='913', answered=False, waitsec=0))
+        live['disposition'] = 'ONLINE'
+        totals = self._totals([_call(), live])
+        self.assertEqual((totals['served'], totals['lost'], totals['arrived']), (1, 0, 1))
+        self.assertEqual(totals['in_progress'], 1)
+        # И в стадии он тоже не идёт: стадия — это ГДЕ звонок оборвался, а он не обрывался.
+        self.assertEqual(totals['stages'], {})
+
     def test_drop_on_an_operator_is_a_queue_loss(self):
         """Оборвался на номере оператора — очередь его уже отдала человеку. Это потеря."""
         totals = self._totals([_call(), _call(number="915", answered=False, waitsec=120)])

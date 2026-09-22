@@ -42913,6 +42913,9 @@ def _tez_wallboard_fetch_snapshot():
             # секунд уже в очереди (при пороге 0 таких нет вовсе).
             'abandons_before_queue': line_totals.get('dropped_before_queue'),
             'abandons_below_threshold': line_totals.get('dropped_short'),
+            # Звонки, которые идут прямо сейчас: они не в «принято» и не в «потеряно»,
+            # и без этого числа разница со счётчиком кабинета выглядит как ошибка табло.
+            'calls_in_progress': line_totals.get('in_progress'),
             'abandon_stages': line_totals.get('stages') or {},
         }
     else:

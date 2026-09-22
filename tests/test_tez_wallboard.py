@@ -409,6 +409,11 @@ def _journal_calls(empty=False):
     calls.append(_call(number='Очередь', answered=False, waitsec=45))
     calls.append(_call(number='Очередь', answered=False, waitsec=5))
     calls.append(_call(number='Приветствие в рабочее время New', answered=False, waitsec=1))
+    # Разговор, идущий прямо сейчас: журнал отдаёт его наравне с законченными, и «не
+    # ANSWER» он только потому, что ещё не кончился. В плитки дня ему нельзя ни в одну.
+    live = _call(number='913', answered=False, waitsec=0)
+    live['disposition'] = 'ONLINE'
+    calls.append(live)
     # Линия отдела продаж: на ней приняли меньше, и в счёт ТП она попасть не должна.
     calls.extend(_call(line=OP_LINE, number='950') for _ in range(5))
     calls.append(_call(line=OP_LINE, number='Приветствие в рабочее время New',
@@ -895,6 +900,9 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         diagnostics = snapshot['diagnostics']
         # Вычеркнут ровно один звонок, и вычеркнула его СТАДИЯ: сброс на приветствии.
         self.assertEqual(diagnostics['abandons_before_queue'], 1)
+        # И ещё один — идущий разговор: он не в потерях и не в принятых, но назван числом,
+        # иначе расхождение со счётчиком кабинета выглядит как ошибка табло.
+        self.assertEqual(diagnostics['calls_in_progress'], 1)
         # Порог по умолчанию нулевой, поэтому коротких сбросов в очереди нет вовсе.
         self.assertEqual(diagnostics['abandons_below_threshold'], 0)
         self.assertEqual(diagnostics['tp_line_number'], TP_LINE)
