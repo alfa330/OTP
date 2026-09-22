@@ -450,13 +450,13 @@ def rollback(db, history_id, *, actor_id=None, actor_name=None):
 # ИИ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_drafts(db, targets, *, instruction=None, actor_id=None,
-                    actor_name=None, generate_fn=None):
-    """Сочинить черновики для выбранных объявлений.
+def plan_generation(db, targets):
+    """Что писать: объявления из списка и бриф каждого кабинета.
 
-    В OLX при этом НИЧЕГО не уходит: черновик живёт в портале, пока человек не
-    нажмёт «Применить». Это и есть смысл разделения прав — готовить текст может
-    маркетолог, отправлять его в OLX может не каждый.
+    Отказы («ничего не выбрано», «нет брифа») — отсюда, сразу и словами. Это
+    важно для фонового прогона (`jobs.py`): проверить пачку надо ДО того, как
+    отдать её потоку, иначе человек узнаёт об отсутствии брифа через опрос хода,
+    а не в ответ на нажатие.
     """
     targets = list(targets or [])
     if not targets:
@@ -479,9 +479,49 @@ def generate_drafts(db, targets, *, instruction=None, actor_id=None,
     if not briefs:
         raise AdsError('У кабинетов выбранных объявлений нет действующего брифа — '
                        'задайте его во вкладке «Бриф месяца»', code='no_brief')
+    return {'adverts': adverts, 'briefs': briefs}
 
-    made, failed, used = [], [], {}
+
+def _ref(advert):
+    return {'cabinet': advert['cabinet_code'], 'advert_id': advert['advert_id']}
+
+
+def _report(progress, **state):
+    if progress is not None:
+        progress(state)
+
+
+def generate_drafts(db, targets, **kwargs):
+    """Сочинить черновики для выбранных объявлений — одним вызовом, в текущем потоке.
+
+    В OLX при этом НИЧЕГО не уходит: черновик живёт в портале, пока человек не
+    нажмёт «Применить». Это и есть смысл разделения прав — готовить текст может
+    маркетолог, отправлять его в OLX может не каждый.
+    """
+    return run_generation(db, plan_generation(db, targets), **kwargs)
+
+
+def run_generation(db, plan, *, instruction=None, actor_id=None, actor_name=None,
+                   generate_fn=None, progress=None, should_stop=None):
+    """Пройти по плану и записать черновики. Ход и остановка — через колбэки.
+
+    `progress(state)` зовётся ПЕРЕД каждым объявлением и один раз в конце:
+    `state` = {done, total, current, made, failed}. `should_stop()` читается
+    перед каждым объявлением: остановка между объявлениями, а не посреди
+    запроса к модели — уже написанное остаётся, недописанное уходит в `skipped`.
+    Оба колбэка необязательны: синхронный вызов из карточки их не передаёт.
+    """
+    adverts, briefs = plan['adverts'], plan['briefs']
+    total = len(adverts)
+    made, failed, skipped, used = [], [], [], {}
+    stopped = False
     for index, advert in enumerate(adverts):
+        if should_stop is not None and should_stop():
+            stopped = True
+            skipped.extend(_ref(rest) for rest in adverts[index:])
+            break
+        _report(progress, done=index, total=total, current=advert,
+                made=len(made), failed=len(failed))
         brief = briefs.get(advert['cabinet_code'])
         if not brief:
             # Не роняем пачку из-за одного кабинета без брифа: остальные
@@ -537,6 +577,8 @@ def generate_drafts(db, targets, *, instruction=None, actor_id=None,
                      'title': result['title'], 'description': result['description'],
                      'model': result.get('model'), 'problems': result.get('problems')})
 
-    return {'made': made, 'failed': failed,
+    _report(progress, done=len(made) + len(failed), total=total, current=None,
+            made=len(made), failed=len(failed))
+    return {'made': made, 'failed': failed, 'skipped': skipped, 'stopped': stopped,
             'briefs': [{'id': brief_id, 'title': title}
                        for brief_id, title in used.items()]}

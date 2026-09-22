@@ -51,7 +51,7 @@ from flask import Blueprint, jsonify as _flask_jsonify, request
 from olx_amo import cabinets as olx_cabinets
 from olx_amo import queries as leads_queries
 
-from . import access, queries, schema, service, validate
+from . import access, jobs, queries, schema, service, validate
 
 log = logging.getLogger(__name__)
 
@@ -363,13 +363,59 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     @section_route('/generate', methods=('POST',), content=True)
     def olx_ads_generate(ctx):
-        """ИИ сочиняет черновики. В OLX при этом ничего не уходит."""
+        """ИИ сочиняет черновики здесь и сейчас — путь карточки, одно объявление.
+
+        В OLX при этом ничего не уходит. Пачки ходят через `/generate/start`.
+        """
         payload = _body()
         targets = _targets(payload.get('targets'))
         result = service.generate_drafts(
             db, targets, instruction=payload.get('instruction'),
             actor_id=ctx.get('user_id'), actor_name=ctx.get('name'))
         return jsonify(result)
+
+    @section_route('/generate/start', methods=('POST',), content=True)
+    def olx_ads_generate_start(ctx):
+        """Поставить фоновый прогон по пачке. Ответ сразу — номер и ход.
+
+        План собирается ДО запуска потока: «нет брифа» и «ничего не выбрано»
+        человек получает в ответ на нажатие, а не через опрос хода. Пока идёт
+        один прогон, второй не ставится: 409 и тот же прогон, к которому экран
+        подключается — так обновление страницы не удваивает пачку.
+        """
+        payload = _body()
+        plan = service.plan_generation(db, _targets(payload.get('targets')))
+        try:
+            job = jobs.start(db, plan, instruction=payload.get('instruction'),
+                             actor_id=ctx.get('user_id'), actor_name=ctx.get('name'))
+        except jobs.JobBusy as exc:
+            return jsonify({'error': 'ИИ уже пишет пачку — дождитесь её или остановите',
+                            'code': 'busy', 'job': exc.job.snapshot()}), 409
+        return jsonify({'job': job.snapshot()}), 202
+
+    @section_route('/generate/active')
+    def olx_ads_generate_active(ctx):
+        """Идущий прогон, если есть: экран подключается к нему при открытии."""
+        job = jobs.active()
+        return jsonify({'job': job.snapshot() if job else None})
+
+    @section_route('/generate/jobs/<job_id>')
+    def olx_ads_generate_job(ctx, job_id):
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({'error': 'Прогон не найден — возможно, сервер перезапускался. '
+                                     'Обновите список: написанные черновики целы',
+                            'code': 'job_not_found'}), 404
+        return jsonify({'job': job.snapshot(full=True)})
+
+    @section_route('/generate/jobs/<job_id>/stop', methods=('POST',), content=True)
+    def olx_ads_generate_stop(ctx, job_id):
+        """Остановить после текущего объявления. Написанное остаётся."""
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({'error': 'Прогон не найден', 'code': 'job_not_found'}), 404
+        job.request_stop()
+        return jsonify({'job': job.snapshot()})
 
     @section_route('/drafts')
     def olx_ads_drafts(ctx):

@@ -494,14 +494,16 @@ class RoutesTests(unittest.TestCase):
             self.assertIn('apply=True', self._decorator_of(handler), handler)
 
     def test_content_work_requires_content_right(self):
-        for handler in ('olx_ads_generate', 'olx_ads_brief_create',
+        for handler in ('olx_ads_generate', 'olx_ads_generate_start',
+                        'olx_ads_generate_stop', 'olx_ads_brief_create',
                         'olx_ads_brief_update', 'olx_ads_brief_activate',
                         'olx_ads_draft_save', 'olx_ads_draft_discard'):
             self.assertIn('content=True', self._decorator_of(handler), handler)
 
     def test_reading_needs_no_extra_right(self):
         for handler in ('olx_ads_ping', 'olx_ads_list', 'olx_ads_card',
-                        'olx_ads_history', 'olx_ads_check'):
+                        'olx_ads_history', 'olx_ads_check',
+                        'olx_ads_generate_active', 'olx_ads_generate_job'):
             decorator = self._decorator_of(handler)
             self.assertNotIn('apply=True', decorator, handler)
 
@@ -663,6 +665,162 @@ class BriefPerCabinetGenerationTests(unittest.TestCase):
         self.assertIn('пропущено', result['failed'][1]['error'])
         self.assertEqual(1, len(self.drafts))
 
+    # ── ход и остановка (под фоновый прогон) ──────────────────────────────
+
+    def test_progress_is_reported_before_each_advert_and_at_the_end(self):
+        seen = []
+        service.generate_drafts(
+            self.db, self._targets(('tenge', '1'), ('adal', '2')),
+            generate_fn=self._fake_ai, progress=lambda state: seen.append(dict(state)))
+        self.assertEqual([0, 1, 2], [s['done'] for s in seen])
+        self.assertEqual([2, 2, 2], [s['total'] for s in seen])
+        self.assertEqual(['1', '2', None],
+                         [s['current']['advert_id'] if s['current'] else None for s in seen])
+        self.assertEqual((2, 0), (seen[-1]['made'], seen[-1]['failed']))
+
+    def test_stop_between_adverts_keeps_what_is_written(self):
+        calls = []
+
+        def fake(system, user, **kwargs):
+            calls.append(user)
+            return self._fake_ai(system, user, **kwargs)
+
+        result = service.generate_drafts(
+            self.db, self._targets(('tenge', '1'), ('adal', '2')),
+            generate_fn=fake, should_stop=lambda: len(calls) >= 1)
+        self.assertEqual(1, len(calls))
+        self.assertTrue(result['stopped'])
+        self.assertEqual(['tenge'], [m['cabinet'] for m in result['made']])
+        self.assertEqual([], result['failed'])
+        self.assertEqual([('adal', '2')],
+                         [(s['cabinet'], s['advert_id']) for s in result['skipped']])
+        self.assertEqual(1, len(self.drafts))
+
+    def test_plan_refuses_before_any_thread_would_start(self):
+        with self.assertRaises(service.AdsError) as ctx:
+            service.plan_generation(self.db, self._targets(('jana', '3')))
+        self.assertEqual('no_brief', ctx.exception.code)
+        plan = service.plan_generation(self.db, self._targets(('tenge', '1'), ('jana', '3')))
+        self.assertEqual(['1', '3'], [a['advert_id'] for a in plan['adverts']])
+        self.assertEqual({'tenge'}, set(plan['briefs']))
+
+
+class GenerationJobsTests(unittest.TestCase):
+    """Фоновый прогон: один за раз, ход виден, остановка между объявлениями,
+    любой сбой закрывает прогон, а не оставляет его «идущим» навсегда."""
+
+    def setUp(self):
+        from olx_ads import jobs
+
+        self.jobs = jobs
+        jobs._jobs.clear()
+        self.addCleanup(jobs._jobs.clear)
+        self.plan = {
+            'adverts': [
+                {'cabinet_code': 'cr', 'advert_id': '1', 'title': 'Первое', 'city_name': 'Алматы'},
+                {'cabinet_code': 'cr', 'advert_id': '2', 'title': 'Второе', 'city_name': 'Астана'},
+            ],
+            'briefs': {'cr': {'id': 1}},
+        }
+
+    def _wait_finished(self, job):
+        import time
+
+        for _ in range(200):
+            if job.status != 'running':
+                return
+            time.sleep(0.02)
+        self.fail('прогон не завершился')
+
+    @staticmethod
+    def _quick_runner(db, plan, **kwargs):
+        return {'made': [], 'failed': [], 'skipped': [], 'stopped': False, 'briefs': []}
+
+    def test_one_job_at_a_time_progress_and_stop(self):
+        import threading
+
+        gate = threading.Event()
+        at_first = threading.Event()
+
+        def runner(db, plan, *, progress, should_stop, **kwargs):
+            adverts = plan['adverts']
+            made, skipped = [], []
+            for index, advert in enumerate(adverts):
+                if should_stop():
+                    skipped.extend({'cabinet': a['cabinet_code'], 'advert_id': a['advert_id']}
+                                   for a in adverts[index:])
+                    break
+                progress({'done': index, 'total': len(adverts), 'current': advert,
+                          'made': len(made), 'failed': 0})
+                if index == 0:
+                    at_first.set()
+                    gate.wait(5)
+                made.append({'cabinet': advert['cabinet_code'], 'advert_id': advert['advert_id'],
+                             'title': 'т', 'description': '<p>о</p>'})
+            progress({'done': len(made), 'total': len(adverts), 'current': None,
+                      'made': len(made), 'failed': 0})
+            return {'made': made, 'failed': [], 'skipped': skipped,
+                    'stopped': bool(skipped), 'briefs': []}
+
+        job = self.jobs.start(None, self.plan, actor_name='Тест', runner=runner)
+        self.assertTrue(at_first.wait(5))
+        snap = job.snapshot()
+        self.assertEqual(('running', 0, 2, '1', 'Тест'),
+                         (snap['status'], snap['done'], snap['total'],
+                          snap['current']['advert_id'], snap['actor_name']))
+        self.assertNotIn('result', snap)
+        self.assertIs(job, self.jobs.active())
+
+        # Второе нажатие, пока идёт первое: не второй прогон, а тот же самый.
+        with self.assertRaises(self.jobs.JobBusy) as ctx:
+            self.jobs.start(None, self.plan, runner=runner)
+        self.assertIs(job, ctx.exception.job)
+
+        job.request_stop()
+        self.assertTrue(job.snapshot()['stop_requested'])
+        gate.set()
+        self._wait_finished(job)
+        snap = job.snapshot(full=True)
+        self.assertEqual('stopped', snap['status'])
+        self.assertEqual((1, 0, 1, 1), (snap['made'], snap['failed'], snap['skipped'], snap['done']))
+        self.assertEqual('1', snap['result']['made'][0]['advert_id'])
+        self.assertIsNone(self.jobs.active())
+        self.assertIs(job, self.jobs.get(job.id))
+
+    def test_service_refusal_inside_the_thread_becomes_a_job_error(self):
+        def runner(db, plan, **kwargs):
+            raise service.AdsError('ИИ сейчас недоступен: vertex 429', code='ai_unavailable')
+
+        job = self.jobs.start(None, self.plan, runner=runner)
+        self._wait_finished(job)
+        snap = job.snapshot()
+        self.assertEqual(('error', 'ai_unavailable'), (snap['status'], snap['code']))
+        self.assertIn('ИИ сейчас недоступен', snap['error'])
+        self.assertIsNone(self.jobs.active())
+
+    def test_unexpected_crash_does_not_leave_the_job_running_forever(self):
+        def runner(db, plan, **kwargs):
+            raise KeyError('boom')
+
+        job = self.jobs.start(None, self.plan, runner=runner)
+        self._wait_finished(job)
+        self.assertEqual('error', job.snapshot()['status'])
+        self.assertIsNone(self.jobs.active())
+        # Следующая пачка не заблокирована навсегда.
+        job2 = self.jobs.start(None, self.plan, runner=self._quick_runner)
+        self._wait_finished(job2)
+        self.assertEqual('done', job2.snapshot()['status'])
+
+    def test_finished_jobs_are_forgotten_after_an_hour(self):
+        job = self.jobs.start(None, self.plan, runner=self._quick_runner)
+        self._wait_finished(job)
+        self.assertIs(job, self.jobs.get(job.id))
+        job.finished_at -= self.jobs.KEEP_FINISHED_SECONDS + 1
+        job2 = self.jobs.start(None, self.plan, runner=self._quick_runner)
+        self._wait_finished(job2)
+        self.assertIsNone(self.jobs.get(job.id))
+        self.assertIs(job2, self.jobs.get(job2.id))
+
 
 class BriefQueriesInvariantsTests(unittest.TestCase):
     """Порядок операций, без которого уникальный индекс по кабинету отвергнет запись."""
@@ -768,6 +926,19 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn('ИИ не справился ни с одним из', self.view)
         self.assertIn("find((item) => item.error)?.error", self.view)
         self.assertIn('Сервер не ответил', self.view)
+
+    def test_batch_generation_runs_in_background_with_progress(self):
+        self.assertIn('/api/olx_ads/generate/start', self.view)
+        self.assertIn('/api/olx_ads/generate/active', self.view)
+        self.assertIn('/api/olx_ads/generate/jobs/${', self.view)
+        self.assertIn('data-ai-progress', self.view)
+        # 409 = пачка уже идёт: подключаемся к ней, а не ставим вторую.
+        self.assertIn('status === 409', self.view)
+        # Карточка одного объявления по-прежнему ходит синхронно.
+        self.assertIn('/api/olx_ads/generate`', self.view)
+
+    def test_hidden_instruction_is_not_sent_silently(self):
+        self.assertIn("if (showInstruction) setInstruction('')", self.view)
 
 
 class BriefFrontendTests(unittest.TestCase):

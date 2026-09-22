@@ -281,7 +281,12 @@ const AdvertsPanel = ({
 
     const [selected, setSelected] = useState(() => new Map());
     const [editing, setEditing] = useState(null);
-    const [generating, setGenerating] = useState(false);
+    /* Пачку пишет фоновый прогон на сервере: экран лишь ставит его и опрашивает
+       ход. Так обновление страницы не запускает вторую пачку (22.09.2026 две
+       пачки по 32 шли параллельно), а прогресс виден любому, кто открыл раздел. */
+    const [job, setJob] = useState(null);
+    const [starting, setStarting] = useState(false);
+    const generating = starting || Boolean(job && job.status === 'running');
     const [confirmApply, setConfirmApply] = useState(false);
     const [applying, setApplying] = useState(false);
     const [instruction, setInstruction] = useState('');
@@ -320,6 +325,109 @@ const AdvertsPanel = ({
     }, [apiBaseUrl, headers, toast, page, cabinet, cityId, categoryId, status, search, onlyDrafts]);
 
     useEffect(() => { load(); }, [load, version]);
+
+    /* При открытии раздела подключаемся к идущему прогону, если он есть. */
+    useEffect(() => {
+        axios.get(`${apiBaseUrl}/api/olx_ads/generate/active`, { headers: headers() })
+            .then((response) => {
+                const active = response.data?.job;
+                if (active && active.status === 'running') setJob(active);
+            })
+            .catch(() => {});
+    }, [apiBaseUrl, headers]);
+
+    /* Итог прогона: приклеить черновики к выбору (отмеченные на ДРУГИХ страницах
+       списка перечитывание не обновит), сказать словами, перечитать список. */
+    const finishJob = (snapshot) => {
+        if (snapshot.status === 'lost') {
+            /* Сервер перезапустился и прогон потерял: сказано тостом выше,
+               остаётся перечитать список — написанное до перезапуска в базе. */
+            onChanged();
+            return;
+        }
+        const result = snapshot.result || {};
+        const madeItems = result.made || [];
+        const failedItems = result.failed || [];
+        setSelected((prev) => {
+            const next = new Map(prev);
+            madeItems.forEach((draft) => {
+                const key = `${draft.cabinet}:${draft.advert_id}`;
+                const current = next.get(key);
+                if (current) {
+                    next.set(key, {
+                        ...current,
+                        draft_id: draft.draft_id,
+                        draft_title: draft.title,
+                        draft_description: draft.description,
+                    });
+                }
+            });
+            return next;
+        });
+        const made = madeItems.length;
+        const failed = failedItems.length;
+        const skipped = (result.skipped || []).length;
+        /* Причину показываем, а не только счёт: «не получилось 32» без слов —
+           это то, с чем человек 22.09.2026 пришёл в IT, хотя сервер причину
+           каждый раз отдавал. */
+        const reason = failedItems.find((item) => item.error)?.error;
+        if (snapshot.status === 'error') {
+            toast(snapshot.error || 'ИИ сейчас недоступен', 'error');
+        } else if (snapshot.status === 'stopped') {
+            toast(`Остановлено: написано ${made}, не дошло до ${skipped}`, 'warning');
+        } else if (failed && !made) {
+            toast(`ИИ не справился ни с одним из ${failed}${reason ? `: ${reason}` : ''}`, 'error');
+        } else if (failed) {
+            toast(`Готово ${made}, не получилось ${failed}${reason ? ` (${reason})` : ''}`, 'warning');
+        } else {
+            toast(`ИИ написал ${made} ${plural(made, 'текст', 'текста', 'текстов')} — проверьте и опубликуйте`, 'success');
+        }
+        setShowInstruction(false);
+        setInstruction('');
+        onChanged();
+    };
+    const finishRef = useRef(finishJob);
+    finishRef.current = finishJob;
+    const finishedIdRef = useRef(null);
+
+    /* Опрос хода раз в полторы секунды, пока прогон идёт. toast стабилен,
+       onChanged читается через finishRef — в зависимости их не кладём, иначе
+       опрос перезапускался бы на каждый рендер родителя. */
+    const jobId = job?.id;
+    const jobRunning = Boolean(job && job.status === 'running');
+    useEffect(() => {
+        if (!jobId || !jobRunning) return undefined;
+        let cancelled = false;
+        const tick = () => {
+            axios.get(`${apiBaseUrl}/api/olx_ads/generate/jobs/${jobId}`, { headers: headers() })
+                .then((response) => {
+                    if (cancelled) return;
+                    const next = response.data?.job;
+                    if (!next) return;
+                    if (next.status !== 'running') {
+                        if (finishedIdRef.current === next.id) return;
+                        finishedIdRef.current = next.id;
+                        setJob(null);
+                        finishRef.current(next);
+                        return;
+                    }
+                    setJob(next);
+                })
+                .catch((error) => {
+                    /* Сеть моргнула — следующий тик повторит. 404 — сервер
+                       перезапустился и прогон потерял; написанное в базе цело. */
+                    if (cancelled || !error.response) return;
+                    if (error.response.status === 404) {
+                        setJob(null);
+                        toast(error.response.data?.error || 'Прогон прерван — обновите список', 'error');
+                        finishRef.current({ status: 'lost', result: {} });
+                    }
+                });
+        };
+        tick();
+        const timer = setInterval(tick, 1500);
+        return () => { cancelled = true; clearInterval(timer); };
+    }, [apiBaseUrl, headers, jobId, jobRunning]);
 
     const resetPage = (setter) => (value) => { setter(value); setPage(1); };
 
@@ -424,59 +532,34 @@ const AdvertsPanel = ({
             onOpenBrief();
             return;
         }
-        setGenerating(true);
-        axios.post(`${apiBaseUrl}/api/olx_ads/generate`, {
+        setStarting(true);
+        axios.post(`${apiBaseUrl}/api/olx_ads/generate/start`, {
             targets: targets(selectedList),
             instruction: instruction.trim() || undefined,
-        }, { headers: headers(), timeout: 0 })
-            .then((response) => {
-                /* Отмеченные на ДРУГИХ страницах списка перечитывание не обновит,
-                   поэтому черновик приклеиваем к выбору прямо из ответа. */
-                const madeItems = response.data?.made || [];
-                setSelected((prev) => {
-                    const next = new Map(prev);
-                    madeItems.forEach((draft) => {
-                        const key = `${draft.cabinet}:${draft.advert_id}`;
-                        const current = next.get(key);
-                        if (current) {
-                            next.set(key, {
-                                ...current,
-                                draft_id: draft.draft_id,
-                                draft_title: draft.title,
-                                draft_description: draft.description,
-                            });
-                        }
-                    });
-                    return next;
-                });
-                const made = madeItems.length;
-                const failedItems = response.data?.failed || [];
-                const failed = failedItems.length;
-                /* Причину показываем, а не только счёт: «не получилось 32» без
-                   слов — это то, с чем человек 22.09.2026 пришёл в IT, хотя
-                   сервер причину каждый раз отдавал. */
-                const reason = failedItems.find((item) => item.error)?.error;
-                if (failed && !made) {
-                    toast(`ИИ не справился ни с одним из ${failed}${reason ? `: ${reason}` : ''}`, 'error');
-                } else if (failed) {
-                    toast(`Готово ${made}, не получилось ${failed}${reason ? ` (${reason})` : ''}`, 'warning');
-                } else {
-                    toast(`ИИ написал ${made} ${plural(made, 'текст', 'текста', 'текстов')} — проверьте и опубликуйте`, 'success');
-                }
-                setShowInstruction(false);
-                onChanged();
-            })
+        }, { headers: headers() })
+            .then((response) => { setJob(response.data?.job || null); })
             .catch((error) => {
-                if (!error.response) {
-                    /* Связь оборвалась, а сервер, возможно, дописал пачку:
-                       черновики он сохраняет по одному, по ходу дела. */
-                    toast('Сервер не ответил — обновите список: часть черновиков могла сохраниться', 'error');
-                    onChanged();
+                const data = error.response?.data;
+                if (error.response?.status === 409 && data?.job) {
+                    /* Пачку уже пишут (или это мы сами до обновления страницы):
+                       не вторая пачка, а подключение к идущей. */
+                    setJob(data.job);
+                    toast('ИИ уже пишет пачку — показываю её ход', 'warning');
                     return;
                 }
-                toast(error.response.data?.error || 'ИИ сейчас недоступен', 'error');
+                toast(data?.error || (error.response ? 'ИИ сейчас недоступен' : 'Сервер не ответил — попробуйте ещё раз'), 'error');
             })
-            .finally(() => setGenerating(false));
+            .finally(() => setStarting(false));
+    };
+
+    const stopJob = () => {
+        if (!job) return;
+        axios.post(`${apiBaseUrl}/api/olx_ads/generate/jobs/${job.id}/stop`, {}, { headers: headers() })
+            .then((response) => {
+                if (response.data?.job) setJob(response.data.job);
+                toast('Остановлю после текущего объявления — написанное останется', 'warning');
+            })
+            .catch((error) => toast(error.response?.data?.error || 'Не удалось остановить', 'error'));
     };
 
     const discard = () => {
@@ -564,6 +647,36 @@ const AdvertsPanel = ({
                 </label>
             </div>
 
+            {job && job.status === 'running' && (
+                <div data-ai-progress className={`${iosCard} space-y-2.5 p-3 sm:p-4`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2 text-[13.5px] text-slate-700 tabular-nums">
+                            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-600" />
+                            <span className="shrink-0">ИИ пишет <b>{job.done}</b> из <b>{job.total}</b></span>
+                            {job.current && (
+                                <span className="truncate text-slate-500">
+                                    · {job.current.city_name ? `${job.current.city_name} · ` : ''}{job.current.title}
+                                </span>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {job.actor_name && <span className="text-[12.5px] text-slate-400">{job.actor_name}</span>}
+                            {caps.can_write_content && (
+                                <button type="button" className={iosBtnGhost} onClick={stopJob} disabled={job.stop_requested}>
+                                    <X className="h-4 w-4" /> {job.stop_requested ? 'Останавливаю…' : 'Остановить'}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+                        <div
+                            className="h-full rounded-full bg-blue-500 transition-[width] duration-500"
+                            style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}
+                        />
+                    </div>
+                </div>
+            )}
+
             {selected.size > 0 && (
                 <div className={`${iosCard} mobile-sticky-top sticky top-2 z-20 space-y-3 p-3 sm:p-4`}>
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -585,7 +698,17 @@ const AdvertsPanel = ({
                             </button>
                         )}
                         {caps.can_write_content && (
-                            <button type="button" className={iosBtnSecondary} onClick={() => setShowInstruction((v) => !v)}>
+                            <button
+                                type="button"
+                                className={iosBtnSecondary}
+                                onClick={() => {
+                                    /* «Без указания» должно значить без указания: прячем
+                                       поле — стираем текст, иначе он молча уйдёт со
+                                       следующей пачкой. */
+                                    if (showInstruction) setInstruction('');
+                                    setShowInstruction(!showInstruction);
+                                }}
+                            >
                                 {showInstruction ? 'Без указания' : 'С указанием для ИИ'}
                             </button>
                         )}
