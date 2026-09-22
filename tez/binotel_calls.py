@@ -111,19 +111,35 @@ def _parse_env_file(path):
     return data
 
 
-def get_config(env_file=".env.codex.local"):
-    """Конфиг из окружения; чего нет — добираем из .env.codex.local."""
+# Компаний в Binotel у нас две, и у каждой СВОЙ ключ API: ключ выдаётся на
+# аккаунт компании и линии другой компании не видит. Имя компании → префикс
+# переменных окружения (<PREFIX>_API_KEY / _API_SECRET / _API_URL / _TZ).
+COMPANY_TEZ = "tez"                # отдел Тез КЦ (историческая, по умолчанию)
+COMPANY_REMOTE_CC = "remote_cc"    # удалённый колл-центр (обзвон водителей из iCORE Phone)
+COMPANY_ENV_PREFIX = {
+    COMPANY_TEZ: "TEZ_BINOTEL",
+    COMPANY_REMOTE_CC: "REMOTE_CC_BINOTEL",
+}
+
+
+def get_config(env_file=".env.codex.local", company=COMPANY_TEZ):
+    """Конфиг из окружения; чего нет — добираем из .env.codex.local.
+
+    `company` — имя из COMPANY_ENV_PREFIX либо сразу префикс переменных."""
     file_env = _parse_env_file(env_file)
+    prefix = COMPANY_ENV_PREFIX.get(company, company)
 
     def pick(name, default=None):
         return os.getenv(name) or file_env.get(name) or default
 
-    base_url = (pick("TEZ_BINOTEL_API_URL", DEFAULT_API_URL) or DEFAULT_API_URL).rstrip("/")
+    base_url = (pick(f"{prefix}_API_URL", DEFAULT_API_URL) or DEFAULT_API_URL).rstrip("/")
     return {
+        "company": company,
+        "env_prefix": prefix,
         "base_url": base_url,
-        "api_key": pick("TEZ_BINOTEL_API_KEY"),
-        "api_secret": pick("TEZ_BINOTEL_API_SECRET"),
-        "tz": pick("TEZ_BINOTEL_TZ", DEFAULT_TZ),
+        "api_key": pick(f"{prefix}_API_KEY"),
+        "api_secret": pick(f"{prefix}_API_SECRET"),
+        "tz": pick(f"{prefix}_TZ", DEFAULT_TZ),
     }
 
 
@@ -199,7 +215,7 @@ class BinotelApiClient:
 
     def __init__(self, api_key, api_secret, base_url=DEFAULT_API_URL, tz=DEFAULT_TZ, timeout=HTTP_TIMEOUT):
         if not api_key or not api_secret:
-            raise ValueError("TEZ_BINOTEL_API_KEY/TEZ_BINOTEL_API_SECRET не заданы")
+            raise ValueError("Ключ и секрет Binotel API не заданы (<PREFIX>_API_KEY/<PREFIX>_API_SECRET)")
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = (base_url or DEFAULT_API_URL).rstrip("/")
@@ -255,8 +271,13 @@ class BinotelApiClient:
                 time.sleep(sleep_s)
                 continue
 
+            # Код ошибки нужен в тексте: у click-to-call, например, 104 означает
+            # «дозвон по API не включён на линии», и это вопрос к поддержке
+            # Binotel, а не к нашему коду.
+            code = payload.get('code')
             raise RuntimeError(
-                f"Binotel {endpoint} status={payload.get('status')!r}: "
+                f"Binotel {endpoint} status={payload.get('status')!r}"
+                f"{f' code={code}' if code not in (None, '') else ''}: "
                 f"{payload.get('message') or payload.get('error') or ''}"[:300]
             )
 
@@ -425,6 +446,58 @@ class BinotelApiClient:
             if isinstance(first, dict):
                 url = first.get("url") or first.get("recordUrl")
         return url or None
+
+    # ------------------------------------------------------------ звонки (calls/*)
+    # Методы группы calls подтверждены официальным архивом примеров Binotel API
+    # 4.0 (binotel-api-4.0.0-samples: samples-api-rest-calls.php).
+
+    def originate_internal_to_external(self, internal_number, external_number, **extra):
+        """Двусторонний звонок: АТС звонит на внутреннюю линию сотрудника, а после
+        ответа — на внешний номер. Возвращает generalCallID (str).
+
+        Это click-to-call для обзвона из iCORE Phone: номер водителя в телефон не
+        передаётся вовсе, оператор получает от АТС входящее плечо. `extra` уходит
+        в запрос как есть (например callerIdForEmployee, playbackWaiting,
+        callTimeToExt, limitCallTime — их поддержка проверяется живым звонком,
+        в официальных примерах этих параметров нет)."""
+        params = {
+            "internalNumber": str(internal_number or "").strip(),
+            "externalNumber": str(external_number or "").strip(),
+        }
+        if not params["internalNumber"] or not params["externalNumber"]:
+            raise ValueError("internal_number и external_number обязательны")
+        for key, value in extra.items():
+            if value is not None:
+                params[key] = value
+        payload = self._post("calls/internal-number-to-external-number", params)
+        gid = payload.get("generalCallID") or payload.get("generalCallId")
+        if gid in (None, ""):
+            raise RuntimeError(f"Binotel: звонок принят, но generalCallID не вернулся: {str(payload)[:300]}")
+        return str(gid)
+
+    def call_details(self, general_call_ids):
+        """{generalCallID: нормализованный звонок} по одному или списку id.
+
+        Пока разговор идёт, Binotel отдаёт disposition 'ONLINE'; пока звонок ещё
+        не начался или уже не найден — элемент пуст и в ответ не попадает.
+        Официальный пример опрашивает этот метод раз в 10 секунд."""
+        if isinstance(general_call_ids, (list, tuple, set)):
+            ids = [str(x).strip() for x in general_call_ids if str(x or "").strip()]
+        else:
+            ids = [str(general_call_ids or "").strip()] if str(general_call_ids or "").strip() else []
+        if not ids:
+            return {}
+        payload = self._post("stats/call-details", {"generalCallID": ids if len(ids) > 1 else ids[0]})
+        out = {}
+        for raw in self._extract_call_details(payload):
+            call = self._normalize_call(raw)
+            if call:
+                out[call["general_call_id"]] = call
+        return out
+
+    def hangup_call(self, general_call_id):
+        """Завершить звонок по generalCallID (calls/hangup-call)."""
+        return self._post("calls/hangup-call", {"generalCallID": str(general_call_id).strip()})
 
     def format_dt(self, unix_ts):
         """unix -> 'dd.mm.YYYY HH:MM:SS' в TZ панели (совместимо с _parse_datetime_raw)."""

@@ -28937,6 +28937,11 @@ def operator_sip_settings_endpoint():
                 "auto_answer": bool(account.get("auto_answer", False)),
                 "auto_answer_delay": int(account.get(
                     "auto_answer_delay", SIP_AUTO_ANSWER_DELAY_DEFAULT)),
+                # Обзвон из телефона (раздел dial_list): вкладка со списком ФИО и
+                # звонок через Binotel API. Только у Binotel и только тем, кому
+                # включили (персонально → отдела → выключено). Сбой раздела не
+                # должен оставить оператора без регистрации — отсюда fallback.
+                "dial_list": _dial_list_phone_settings(requester_id),
             }
         }), 200
     except Exception as e:
@@ -62192,6 +62197,41 @@ try:
     logging.info("Раздел «Ограничитель Перезвона»: Blueprint подключён на /api/oktell_guard")
 except Exception:
     logging.exception("Раздел «Ограничитель Перезвона»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Обзвон из телефона» (удалённый колл-центр на Binotel) ───────────
+# Оператор видит в iCORE Phone только ФИО и кнопку; звонок инициирует сервер
+# через Binotel API, номер водителя телефону не передаётся. См. dial_list/.
+_dial_list_service = None
+try:
+    from dial_list.routes import build_dial_list_blueprint  # noqa: E402
+
+    _dial_list_bp = build_dial_list_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        # Круг раздела свой: админ и глава отдела удалённого КЦ. Периметр отделов
+        # считает сам раздел (dial_list.service.manager_scope), не «Настройки SIP».
+        is_admin_role=_is_admin_role,
+        headed_department_ids=_headed_department_ids,
+    )
+    app.register_blueprint(_dial_list_bp)
+    _dial_list_service = _dial_list_bp.service
+    logging.info("Раздел «Обзвон из телефона»: Blueprint подключён на /api/operator/dial_list")
+except Exception:
+    logging.exception("Раздел «Обзвон из телефона»: Blueprint НЕ подключён")
+
+
+def _dial_list_phone_settings(user_id):
+    """Блок dial_list для /api/operator/sip_settings; при любом сбое — выключено."""
+    if _dial_list_service is None:
+        return {"enabled": False}
+    try:
+        return _dial_list_service.phone_settings(int(user_id))
+    except Exception:
+        logging.exception("dial_list: не удалось собрать настройки для телефона %s", user_id)
+        return {"enabled": False}
 
 
 # ── Раздел «Провайдер ЭДО» (выгрузка из диспетчерских Яндекс.Fleet) ──────────

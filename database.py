@@ -6703,6 +6703,7 @@ class Database:
             self._init_olx_amo_schema_tx(cursor)
             self._init_olx_ads_schema_tx(cursor)
             self._init_op_funnel_schema_tx(cursor)
+            self._init_dial_list_schema_tx(cursor)
             self._init_payments_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -7908,6 +7909,28 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT cdr_schema")
+
+    def _init_dial_list_schema_tx(self, cursor):
+        """Схема раздела «Обзвон из телефона» (таблицы dial_list_*).
+
+        Под SAVEPOINT, как соседи: весь _init_db идёт одной транзакцией, и
+        упавший раздел не должен уронить старт приложения. Раздел без схемы
+        отвечает 500 на своих ручках, остальное приложение работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT dial_list_schema")
+        try:
+            from dial_list.schema import init_dial_list_schema
+            init_dial_list_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT dial_list_schema")
+            logging.exception(
+                "Схема раздела «Обзвон из телефона» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT dial_list_schema")
 
     def _init_op_funnel_schema_tx(self, cursor):
         """Схема раздела «Воронка ОП» (таблицы op_funnel_*) и сид норм.

@@ -8,6 +8,7 @@ import {
 } from '../ui/ios';
 import { departmentCodeUsesOktellCabinet } from '../../utils/departmentViews';
 import { startFileDownload } from '../../utils/fileDownload';
+import { DialListDepartmentCard, DialListOperatorToggle } from './DialListSettings';
 
 /*
  * Раздел «Настройки SIP» (iCORE Phone).
@@ -1968,6 +1969,20 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     </div>
                     )}
 
+                    {/* Обзвон из телефона — только у Binotel: звонок инициирует
+                        сервер через Binotel API, у локальной АТС такого API нет.
+                        Карточка живёт своими ручками (/api/dial_list/…) и не входит
+                        в saveDepartment. */}
+                    {deptForm.provider === 'binotel' && deptEditing?.department_id && (
+                        <DialListDepartmentCard
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={deptEditing.department_id}
+                            canEdit={canEdit}
+                            showToast={(msg, kind) => showToastRef.current?.(msg, kind)}
+                        />
+                    )}
+
                     {/* Общий автоприём. Секция своя, а не переиспользованная из
                         карточки сотрудника: там третье положение значит «как у
                         отдела», здесь — «отдел настройкой не пользуется», и одна
@@ -2403,6 +2418,18 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     />
                                 </div>
                             </section>
+                        )}
+
+                        {/* Обзвон из телефона: персональное включение поверх отдела.
+                            Сохраняется сразу своей ручкой, в форму сотрудника не входит. */}
+                        {editing?.id && (
+                            <DialListOperatorToggle
+                                apiBaseUrl={apiBaseUrl}
+                                authHeaders={authHeaders}
+                                operatorId={editing.id}
+                                canEdit={canEdit}
+                                showToast={(msg, kind) => showToastRef.current?.(msg, kind)}
+                            />
                         )}
 
                         {editing?.updated_at && (

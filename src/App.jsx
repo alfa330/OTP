@@ -232,6 +232,7 @@ const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/Shif
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
 const SipSettingsView = lazyWithRetry(() => import('./components/sip/SipSettingsView'));
+const DialListView = lazyWithRetry(() => import('./components/dial_list/DialListView'));
 const OktellGuardView = lazyWithRetry(() => import('./components/oktell_guard/OktellGuardView'));
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
@@ -374,6 +375,18 @@ const SIP_SETTINGS_DEPARTMENT_CODES = new Set(['szov', 'op', 'tez']);
 // держится доступ к разделу в целом.
 const SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES = new Set(['szov', 'op']);
 const SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES = new Set(['tez']);
+// Отдел удалённого колл-центра — раздел «Обзвон из телефона». Код тот же, что в
+// dial_list/service.py (DIAL_LIST_DEPARTMENT_CODES); отдел заводится отдельно и
+// к ТЭЗ КЦ не относится.
+const DIAL_LIST_DEPARTMENT_CODES = new Set(['remote_cc']);
+// Пилот раздела: пока список не пуст, пункт меню видят только эти логины (даже
+// админы не видят). Тот же список — на бэкенде (dial_list.service.DIAL_LIST_PILOT_LOGINS),
+// и решающий он: без логина из списка сервер отвечает 403.
+const DIAL_LIST_PILOT_LOGINS = new Set(['alfa330']);
+const dialListPilotAllows = (userLike) => (
+    DIAL_LIST_PILOT_LOGINS.size === 0
+    || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
+);
 // Отдел ТЭЗ КЦ — тот же, что у «Чатов ChatApp». Код 'tez' в карточке отдела
 // проставлен не у всех записей, поэтому главу проверяем и по id (как там же).
 const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
@@ -41535,6 +41548,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 || isSipSettingsFleetSupervisor(user);
             const canAccessSipSettingsTez = isAdminLikeRole
                 || isSipSettingsTezDepartmentHead(user);
+            // «Обзвон из телефона» — раздел удалённого колл-центра (отдельный отдел,
+            // к Тез не относится): админы и глава отдела с кодом из
+            // DIAL_LIST_DEPARTMENT_CODES. Периметр отделов и права на бэкенде
+            // считает сам раздел (dial_list.service.manager_scope).
+            const canAccessDialListSection = dialListPilotAllows(user) && (isAdminLikeRole
+                || (isDepartmentHead(user)
+                    && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_DEPARTMENT_CODES.has(code))));
             // Раздел один, провайдер выбирается внутри. Порядок важен: первым
             // открывается первый доступный, и главе ТЭЗ это должен быть Binotel.
             const sipSettingsProviders = [
@@ -50586,6 +50606,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings'
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
+                // «Обзвон из телефона» — раздел отделов на Binotel, вне allowlist отдела.
+                if (view === 'dial_list' && canAccessDialListSection) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
                 // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
@@ -52829,6 +52851,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </li>
                                                 </SidebarDeptScope>
                                             )}
+                                            {canAccessDialListSection && (
+                                                <SidebarDeptScope section="dial_list" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'dial_list')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Обзвон из телефона</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
                                             {canAccessFleetEdm && (
                                                 <SidebarDeptScope section="fleet_edm" activeCode={activeDeptCode}>
                                                     <li>
@@ -52900,6 +52934,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessDialListSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'dial_list')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Обзвон из телефона</span>
                                                 </button>
                                             </li>
                                             )}
@@ -55429,6 +55473,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     allowedProviders={sipSettingsProviders}
                                     initialProvider={sipSettingsProvider}
                                     canSwitchProvider={isAdminLikeRoleFn(user?.role)}
+                                />
+                            </Suspense>
+                        ))}
+                        {/* Обзвон из телефона: раздел удалённого колл-центра — сводка по
+                            операторам, база водителей и настройки отдела. Свой круг доступа. */}
+                        {( view === "dial_list" && canAccessDialListSection && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <DialListView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    canEdit={canAccessDialListSection}
                                 />
                             </Suspense>
                         ))}
