@@ -12463,6 +12463,19 @@ def list_admin_sessions():
         elif device_filter not in db.ACTIVE_SESSION_DEVICE_FILTERS:
             return jsonify({"error": "Invalid device filter"}), 400
 
+        # Отдел белым списком не задать — отделы заводят в портале, — поэтому
+        # ручка пропускает дальше только число (id отдела) или «none» (без
+        # отдела). В SQL id уходит значением параметра.
+        department_filter = (request.args.get('department') or '').strip().lower()
+        if department_filter in ('', 'all'):
+            department_filter = None
+        elif department_filter == db.ACTIVE_SESSION_DEPARTMENT_NONE:
+            pass
+        elif department_filter.isdigit():
+            department_filter = int(department_filter)
+        else:
+            return jsonify({"error": "Invalid department filter"}), 400
+
         sort_key = (request.args.get('sort') or '').strip()
         if sort_key and sort_key not in db.ACTIVE_SESSION_SORT_KEYS:
             return jsonify({"error": "Invalid sort key"}), 400
@@ -12476,6 +12489,7 @@ def list_admin_sessions():
             search=query_text,
             role=role_filter,
             device=device_filter,
+            department=department_filter,
             sort_key=sort_key or None,
             sort_dir=sort_dir or None
         )
@@ -12496,6 +12510,7 @@ def list_admin_sessions():
             "filters": {
                 "role": role_filter or 'all',
                 "device": device_filter or 'all',
+                "department": department_filter if department_filter is not None else 'all',
                 "sort": sort_key or 'last_seen_at',
                 "dir": sort_dir or 'desc'
             }

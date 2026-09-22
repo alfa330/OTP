@@ -253,6 +253,28 @@ body.mobile-shell .ses-m-chip.is-on .ses-m-chip-count {
     color: rgba(255, 255, 255, 0.85);
 }
 
+/* Метка отдела. Она не переключатель, а вход в список: справа шеврон, как у
+   строки настроек. Названия отделов длинные («СЗоВ — Служба заботы о
+   водителях»), поэтому метка обрезается — иначе она вытесняет из полосы
+   метки устройств. */
+body.mobile-shell .ses-m-chip-pick .ses-m-chip-text {
+    max-width: 46vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+body.mobile-shell .ses-m-chip-pick svg {
+    flex: none;
+    width: 11px;
+    height: 11px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-chip-pick.is-on svg {
+    color: rgba(255, 255, 255, 0.85);
+}
+
 /* ── Группа: подпись со счётом и сортировка ── */
 
 body.mobile-shell .ses-m-group-head {

@@ -154,10 +154,25 @@ class ListDecisionTests(unittest.TestCase):
         self.assertNotIn('Прервать все', VIEW_CODE)
         self.assertNotIn('onRevokeAll', VIEW_CODE)
 
-    def test_confirmation_and_sort_are_sheets(self):
-        self.assertEqual(VIEW.count('<MobileActionSheet'), 2)
+    def test_confirmation_sort_and_department_are_sheets(self):
+        """Подтверждение, порядок и отдел — листами снизу, а не окнами."""
+        self.assertEqual(VIEW.count('<MobileActionSheet'), 3)
         self.assertNotIn('fixed inset-0', VIEW_CODE)
         self.assertNotIn('window.confirm', VIEW_CODE)
+
+    def test_department_is_a_chip_that_opens_the_sheet(self):
+        """Названия отделов длинные, полосой меток их не выбрать: в полосе
+        стоит одна метка с текущим отделом, список открывается листом."""
+        self.assertIn('ses-m-chip-pick', VIEW)
+        self.assertIn('setDepartmentOpen(true)', VIEW)
+        self.assertIn('open={departmentOpen}', VIEW)
+
+    def test_department_chip_hides_when_there_is_nothing_to_choose(self):
+        """Решает панель: правило «отделов больше одного ИЛИ отдел выбран»
+        живёт в одном месте на обе раскладки."""
+        self.assertIn('canPickDepartment', VIEW)
+        self.assertRegex(panel_source(),
+                         r"const canPickDepartment = departmentOptions\.length > 2\s*\|\|")
 
     def test_roles_are_one_control(self):
         """На компьютере роли дважды — плитками и вкладками. Здесь один переключатель."""

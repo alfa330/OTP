@@ -28713,7 +28713,7 @@ class Database:
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
-        LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+        LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
         LEFT JOIN binotel_user_accounts b ON b.user_id = u.id
         LEFT JOIN oktell_user_accounts ok ON ok.user_id = u.id
         -- Только LEFT: у стажёра направления нет вовсе, и INNER выкинул бы его
@@ -28873,7 +28873,7 @@ class Database:
                            u.id, u.name, 'main'::text AS kind
                     FROM users u
                     LEFT JOIN user_sip_settings s ON s.user_id = u.id
-                    LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+                    LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
                     WHERE NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
                       -- Уволенный номер за собой не держит: иначе освободившийся
                       -- добавочный не выдать новому сотруднику, а список раздела
@@ -28891,7 +28891,7 @@ class Database:
                            u.id, u.name, 'autodial'::text
                     FROM user_sip_settings s
                     JOIN users u ON u.id = s.user_id
-                    LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+                    LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
                     WHERE NULLIF(TRIM(COALESCE(s.autodial_number, '')), '') IS NOT NULL
                       AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
                 )
@@ -29255,7 +29255,7 @@ class Database:
                        s.auto_answer_delay
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
-                LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+                LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
                 WHERE u.id = ANY(%s)
             """, (ids,))
             current, names, numbers, dept_domain, dept_autodial = {}, {}, {}, {}, {}
@@ -29418,7 +29418,7 @@ class Database:
                        COALESCE(dc.binotel_cabinet_url, '')
                 FROM binotel_user_accounts b
                 JOIN users u ON u.id = b.user_id
-                LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+                LEFT JOIN sip_department_config dc ON dl.department_id = u.department_id
                 WHERE b.user_id = %s
             """, (int(user_id),))
             row = cur.fetchone()
@@ -31524,6 +31524,10 @@ class Database:
 
     ACTIVE_SESSION_ROLE_FILTERS = ('admin', 'sv', 'operator')
     ACTIVE_SESSION_DEVICE_FILTERS = ('desktop', 'mobile', 'tablet', 'bot', 'unknown')
+    # Отдел, в отличие от роли и устройства, белым списком не задать: отделы
+    # заводят в портале. Поэтому id уходит в SQL ЗНАЧЕНИЕМ параметра, а строку
+    # с клиента разбирает один разборщик на все места — `_department_filter`.
+    ACTIVE_SESSION_DEPARTMENT_NONE = 'none'
     # Сортировка людей, а не сессий: список раздела — по одной строке на человека.
     ACTIVE_SESSION_SORT_KEYS = {
         'user_name': 'p.user_name',
@@ -31692,8 +31696,32 @@ class Database:
         }
         return item
 
+    @classmethod
+    def _department_filter(cls, department):
+        """Разбор фильтра отдела: id числом, 'none' (без отдела) или None (все).
+
+        Разборщик один на все места намеренно. Фильтр и список отделов для
+        пикера обязаны понимать значение ОДИНАКОВО: разъехавшись, они дали бы
+        пустой пикер ровно тогда, когда отдел выбран, и снять фильтр стало бы
+        нечем. Чужое значение здесь игнорируется, как незнакомая роль или
+        устройство, — отбивает его ручка, до базы оно не доезжает.
+        """
+        if department is None or isinstance(department, bool):
+            return None
+        if isinstance(department, int):
+            return department
+        text = str(department).strip().lower()
+        if text in ('', 'all'):
+            return None
+        if text == cls.ACTIVE_SESSION_DEPARTMENT_NONE:
+            return cls.ACTIVE_SESSION_DEPARTMENT_NONE
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
     def _people_filter_sql(self, role: Optional[str] = None, device: Optional[str] = None,
-                           alias: str = 'p'):
+                           department=None, alias: str = 'p'):
         """Фильтры применяются к ЧЕЛОВЕКУ, а не к отдельной сессии.
 
         «Телефон» означает «у человека есть живая сессия с телефона»: список
@@ -31712,6 +31740,13 @@ class Database:
         if device_key in self.ACTIVE_SESSION_DEVICE_FILTERS:
             clauses.append(f'{prefix}{device_key}_count > 0')
 
+        department_key = self._department_filter(department)
+        if department_key == self.ACTIVE_SESSION_DEPARTMENT_NONE:
+            clauses.append(f'{prefix}department_id IS NULL')
+        elif department_key is not None:
+            clauses.append(f'{prefix}department_id = %s')
+            params.append(department_key)
+
         return (' AND '.join(clauses) if clauses else 'TRUE'), params
 
     def _people_order_by(self, sort_key: Optional[str] = None, sort_dir: Optional[str] = None,
@@ -31728,6 +31763,38 @@ class Database:
         # одинаковым значением прыгают между пачками при догрузке.
         return f'ORDER BY {column} {direction} {nulls}, {prefix}user_id ASC'
 
+    # Отделы для пикера считаются по тому же `people`, что и плашки: по поиску,
+    # но БЕЗ выбранного фильтра. Иначе, выбрав отдел, пользователь увидел бы в
+    # пикере один этот отдел и не смог бы переключиться обратно.
+    #
+    # Второй половиной UNION в список возвращается ВЫБРАННЫЙ отдел, даже когда
+    # поиск не оставил в нём ни одного человека: без неё пикер показывал бы
+    # «Все отделы», хотя фильтр включён.
+    _DEPARTMENTS_CTE = """
+        dept_list AS (
+            SELECT p.department_id,
+                   MIN(p.department_name) AS department_name
+            FROM people p
+            GROUP BY p.department_id
+            UNION ALL
+            SELECT d.id, d.name
+            FROM departments d
+            WHERE d.id = %s::int
+              AND NOT EXISTS (SELECT 1 FROM people p WHERE p.department_id = d.id)
+        )
+    """
+
+    # Порядок — по названию, а не по числу людей: список у пикера должен
+    # стоять на месте между открытиями, а число людей меняется от каждой буквы
+    # в поиске. «Без отдела» (department_id IS NULL) — в конце.
+    _DEPARTMENTS_JSON_SQL = """
+        (SELECT COALESCE(JSON_AGG(JSON_BUILD_OBJECT(
+                    'department_id', dl.department_id,
+                    'department_name', dl.department_name
+                ) ORDER BY (dl.department_id IS NULL), dl.department_name), '[]'::json)
+           FROM dept_list dl)
+    """
+
     _SUMMARY_COLUMNS_SQL = """
         COUNT(*) AS total_people,
         COALESCE(SUM(sessions_count), 0) AS total_sessions,
@@ -31743,10 +31810,24 @@ class Database:
         COALESCE(SUM(sensitive_open_count), 0) AS sensitive_sessions
     """
     _SUMMARY_COLUMN_COUNT = 12
+    # Плюс matched_people, matched_sessions и список отделов: столько колонок
+    # идёт в строке ответа ДО колонок человека.
+    _SUMMARY_HEAD_COLUMNS = _SUMMARY_COLUMN_COUNT + 3
+
+    @staticmethod
+    def _departments_from_json(value):
+        """Список отделов пикера из JSON_AGG. Чужого в нём быть не может, но
+        пустая выборка приезжает не списком, а нулём из строки-заглушки."""
+        rows = value if isinstance(value, list) else []
+        return [
+            {'department_id': row.get('department_id'),
+             'department_name': row.get('department_name')}
+            for row in rows if isinstance(row, dict)
+        ]
 
     @classmethod
     def _summary_from_row(cls, row):
-        row = row or (0,) * (cls._SUMMARY_COLUMN_COUNT + 2)
+        row = row or (0,) * cls._SUMMARY_HEAD_COLUMNS
         return {
             'total_people': int(row[0] or 0),
             'total_sessions': int(row[1] or 0),
@@ -31765,12 +31846,14 @@ class Database:
             'sensitive_people': int(row[10] or 0),
             'sensitive_sessions': int(row[11] or 0),
             'matched_people': int(row[12] or 0),
-            'matched_sessions': int(row[13] or 0)
+            'matched_sessions': int(row[13] or 0),
+            'departments': cls._departments_from_json(row[14] if len(row) > 14 else None)
         }
 
     def get_active_session_people_page(self, limit: int = 50, offset: int = 0,
                                        search: Optional[str] = None, role: Optional[str] = None,
-                                       device: Optional[str] = None, sort_key: Optional[str] = None,
+                                       device: Optional[str] = None, department=None,
+                                       sort_key: Optional[str] = None,
                                        sort_dir: Optional[str] = None):
         """Страница списка людей и сводка — ОДНИМ запросом.
 
@@ -31790,7 +31873,8 @@ class Database:
 
         Плашки считаются по поисковому запросу, но БЕЗ выбранного фильтра:
         иначе, нажав «Админы», пользователь увидел бы нули у остальных плашек и
-        не смог бы переключиться обратно.
+        не смог бы переключиться обратно. По тому же правилу считается и список
+        отделов для пикера — `summary['departments']`.
         """
         limit = max(1, int(limit))
         offset = max(0, int(offset))
@@ -31814,13 +31898,19 @@ class Database:
             """
         )
 
-        filter_sql, filter_params = self._people_filter_sql(role=role, device=device, alias='p')
+        filter_sql, filter_params = self._people_filter_sql(
+            role=role, device=device, department=department, alias='p')
         window_order = self._people_order_by(sort_key, sort_dir, alias='p')
+        # Выбранный отдел нужен списку отделов, а не фильтру: по нему вторая
+        # половина UNION возвращает его в пикер даже без людей в выборке.
+        department_key = self._department_filter(department)
+        selected_department_id = department_key if isinstance(department_key, int) else None
 
         query = f"""
             WITH {self._live_sessions_cte()},
             {searched_cte},
             {self._PEOPLE_CTE},
+            {self._DEPARTMENTS_CTE},
             summary AS (SELECT {self._SUMMARY_COLUMNS_SQL} FROM people),
             filtered AS (
                 SELECT p.*, ROW_NUMBER() OVER ({window_order}) AS rn
@@ -31839,6 +31929,7 @@ class Database:
                 s.bot_people, s.unknown_people,
                 s.sensitive_people, s.sensitive_sessions,
                 m.matched_people, m.matched_sessions,
+                {self._DEPARTMENTS_JSON_SQL} AS departments,
                 {', '.join('f.' + name for name in self._PEOPLE_COLUMNS)}
             FROM summary s
             CROSS JOIN matched m
@@ -31846,13 +31937,14 @@ class Database:
             ORDER BY f.rn
         """
 
-        params = tuple(search_params) + tuple(filter_params) + (offset, offset + limit)
+        params = (tuple(search_params) + (selected_department_id,)
+                  + tuple(filter_params) + (offset, offset + limit))
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
         summary = self._summary_from_row(rows[0] if rows else None)
-        head = self._SUMMARY_COLUMN_COUNT + 2
+        head = self._SUMMARY_HEAD_COLUMNS
         people = [
             self._people_row(row[head:])
             for row in rows

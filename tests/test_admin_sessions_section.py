@@ -12,6 +12,10 @@
     «Админы», пользователь увидит нули у остальных и не сможет выйти обратно;
   * фильтр устройства применяется к ЧЕЛОВЕКУ («есть живая сессия с телефона»),
     а не к отдельной сессии: строка списка не может исчезнуть наполовину;
+  * отдел белым списком не задать — отделы заводят в портале, — поэтому его id
+    уходит в SQL ЗНАЧЕНИЕМ параметра, а чужую строку отбивает ручка; выбранный
+    отдел обязан оставаться в пикере, даже когда поиск не оставил в нём людей,
+    иначе снять фильтр будет нечем;
   * поиск по IP или ID сессии обязан возвращать человека ЦЕЛИКОМ, со всеми его
     сессиями, иначе счётчик в строке врёт;
   * белые списки. `sort`, `role` и `device` попадают в SQL как имя колонки и
@@ -41,11 +45,13 @@ BOT_PATH = ROOT / 'bot_schedule2.py'
 _DB_METHODS = {
     '_active_session_device_sql', '_live_sessions_cte', '_live_search_predicate',
     '_people_row', '_people_filter_sql', '_people_order_by', '_summary_from_row',
+    '_department_filter', '_departments_from_json',
     'get_active_session_people_page', 'get_active_session_user_detail',
     'list_active_session_ids_for_user', 'list_active_session_ids_for_users', 'set_session_sensitive_access',
     'list_session_access_events',
 }
-_DB_CONSTANT_PREFIXES = ('_UA_', 'ACTIVE_SESSION', '_PEOPLE', '_ROLE_FILTER', '_SESSION_COLUMNS', '_SUMMARY')
+_DB_CONSTANT_PREFIXES = ('_UA_', 'ACTIVE_SESSION', '_PEOPLE', '_ROLE_FILTER', '_SESSION_COLUMNS',
+                         '_SUMMARY', '_DEPARTMENT')
 
 
 def _sessions_api():
@@ -159,6 +165,41 @@ class PeopleFilterTests(unittest.TestCase):
         self.assertIn('p.desktop_count > 0', sql)
         self.assertEqual(params, [['operator']])
 
+    def test_department_goes_to_sql_as_a_value(self):
+        sql, params = self.api._people_filter_sql(department=367)
+        self.assertEqual(sql, 'p.department_id = %s')
+        self.assertEqual(params, [367], 'id отдела — параметр, а не текст запроса')
+
+    def test_department_arrives_from_the_client_as_a_string(self):
+        sql, params = self.api._people_filter_sql(department=' 367 ')
+        self.assertEqual((sql, params), ('p.department_id = %s', [367]))
+
+    def test_people_without_a_department_are_a_choice_of_their_own(self):
+        sql, params = self.api._people_filter_sql(department='none')
+        self.assertEqual((sql, params), ('p.department_id IS NULL', []))
+
+    def test_all_and_empty_mean_no_department_filter(self):
+        for value in ('all', '', '   ', None):
+            self.assertEqual(self.api._people_filter_sql(department=value), ('TRUE', []), value)
+
+    def test_garbage_department_is_ignored_not_injected(self):
+        sql, params = self.api._people_filter_sql(department='1 OR TRUE; DROP TABLE users--')
+        self.assertEqual((sql, params), ('TRUE', []))
+        self.assertNotIn('DROP TABLE', sql)
+
+    def test_department_stacks_with_role_and_device(self):
+        sql, params = self.api._people_filter_sql(role='operator', device='mobile', department=2)
+        self.assertIn('p.user_role = ANY(%s)', sql)
+        self.assertIn('p.mobile_count > 0', sql)
+        self.assertIn('p.department_id = %s', sql)
+        self.assertEqual(params, [['operator'], 2], 'порядок значений — порядок %s в запросе')
+
+    def test_the_filter_and_the_picker_read_the_value_the_same_way(self):
+        """Разъехавшись, они дали бы пустой пикер ровно на выбранном отделе."""
+        for value, expected in (('367', 367), (367, 367), ('none', 'none'),
+                                ('all', None), ('', None), ('да', None), (None, None)):
+            self.assertEqual(self.api._department_filter(value), expected, value)
+
 
 class OrderByTests(unittest.TestCase):
     """Сортировка — имя колонки в тексте запроса, поэтому только из словаря."""
@@ -231,11 +272,11 @@ def _lit(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _stub_cte():
+def _stub_cte(user_rows=None, session_rows=None):
     """Синтетические таблицы поверх боевых: реальные данные не читаются."""
     users = ', '.join(
         '({}, {}, {}, {}, {}, {})'.format(uid, _lit(name), _lit(login), _lit(role), _lit(sv), _lit(dep))
-        for uid, name, login, role, sv, dep in USER_FIXTURES
+        for uid, name, login, role, sv, dep in (user_rows or USER_FIXTURES)
     )
     sessions = ', '.join(
         "({}::uuid, {}, {}, {}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - make_interval(mins => {}),"
@@ -246,7 +287,7 @@ def _stub_cte():
             _lit(unlocked),
             "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')" if unlocked else 'NULL::timestamp',
             _lit(by))
-        for sid, uid, ua, ip, minutes, days, revoked, unlocked, by in SESSION_FIXTURES
+        for sid, uid, ua, ip, minutes, days, revoked, unlocked, by in (session_rows or SESSION_FIXTURES)
     )
     return textwrap.dedent(f"""
         WITH users AS (
@@ -280,9 +321,9 @@ def _stub_cte():
 class _StubCursor:
     """Курсор, подменяющий боевые таблицы синтетическими данными."""
 
-    def __init__(self, cursor):
+    def __init__(self, cursor, stub=None):
         self._cursor = cursor
-        self._stub = _stub_cte()
+        self._stub = stub or _stub_cte()
 
     def execute(self, sql, params=None):
         text = sql.lstrip()
@@ -467,6 +508,103 @@ class PeoplePageSqlTests(unittest.TestCase):
         self.assertEqual(page['summary']['sensitive_sessions'], 1)
 
 
+# Отделу нужен свой стенд: человек БЕЗ отдела в базовом наборе не нужен, а
+# добавленный в него сдвинул бы счётчики во всех тестах выше.
+DEPARTMENT_USER_FIXTURES = USER_FIXTURES + [
+    (7, 'Новичок Дана', 'dana', 'operator', None, None),   # отдел ещё не выбран
+]
+DEPARTMENT_SESSION_FIXTURES = SESSION_FIXTURES + [
+    ('bbbbbbbb-0000-0000-0000-00000000000b', 7,
+     'Mozilla/5.0 (Windows NT 10.0) Chrome/126', '10.0.0.11', 12, 10, False, False, None),
+]
+
+
+class DepartmentFilterSqlTests(unittest.TestCase):
+    """Пикер отдела: боевой SQL на синтетических данных.
+
+    Отдел — единственный фильтр раздела, значения которого нельзя перечислить
+    в коде: отделы заводят в портале. Поэтому сторожится и сам отбор, и список
+    отделов, из которого выбирают.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        reason = prod_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.raw = prod_db.connection().cursor()
+        cls.api = _api_on(_StubCursor(
+            cls.raw, stub=_stub_cte(DEPARTMENT_USER_FIXTURES, DEPARTMENT_SESSION_FIXTURES)))
+
+    def tearDown(self):
+        prod_db.rollback()
+
+    def _ids(self, page):
+        return {person['user_id'] for person in page['people']}
+
+    def test_department_filter_narrows_the_list(self):
+        self.assertEqual(self._ids(self.api.get_active_session_people_page(limit=50, department=1)),
+                         {1, 2, 3, 4})
+        self.assertEqual(self._ids(self.api.get_active_session_people_page(limit=50, department=2)),
+                         {5})
+
+    def test_people_without_a_department_are_reachable(self):
+        """Иначе новичок, которому отдел ещё не выбрали, доступен только поиском."""
+        page = self.api.get_active_session_people_page(limit=50, department='none')
+        self.assertEqual(self._ids(page), {7})
+        self.assertEqual(page['matched_people'], 1)
+
+    def test_department_narrows_the_list_but_not_the_tiles(self):
+        """То же правило, что у роли: из фильтра должно быть чем выйти."""
+        page = self.api.get_active_session_people_page(limit=50, department=2)
+        self.assertEqual(page['matched_people'], 1)
+        self.assertEqual(page['summary']['total_people'], 6)
+        self.assertEqual(page['summary']['role_counts'], {'admin': 2, 'sv': 1, 'operator': 3})
+
+    def test_department_stacks_with_role_and_search(self):
+        page = self.api.get_active_session_people_page(limit=50, department=1, role='admin')
+        self.assertEqual(self._ids(page), {1, 2})
+        page = self.api.get_active_session_people_page(limit=50, department=1, search='Айгуль')
+        self.assertEqual(self._ids(page), {3, 4})
+
+    def test_picker_lists_every_department_in_sight(self):
+        departments = self.api.get_active_session_people_page(limit=50)['summary']['departments']
+        self.assertEqual([item['department_id'] for item in departments], [2, 1, None],
+                         'по названию, «без отдела» — в конце')
+        self.assertEqual([item['department_name'] for item in departments], ['ОП', 'СЗоВ', None])
+
+    def test_picker_follows_the_search(self):
+        """Список отделов — по поиску: в выборке из одного человека их не три."""
+        page = self.api.get_active_session_people_page(limit=50, search='Ядигаров')
+        self.assertEqual(page['summary']['departments'],
+                         [{'department_id': 1, 'department_name': 'СЗоВ'}])
+
+    def test_selected_department_stays_in_the_picker_without_people(self):
+        """Иначе пикер пишет «Все отделы», хотя фильтр включён, и снять его нечем."""
+        page = self.api.get_active_session_people_page(limit=50, search='Ядигаров', department=2)
+        self.assertEqual(page['people'], [])
+        self.assertEqual(page['matched_people'], 0)
+        self.assertIn({'department_id': 2, 'department_name': 'ОП'}, page['summary']['departments'])
+        self.assertEqual(page['summary']['total_people'], 1, 'плашки по-прежнему по поиску')
+
+    def test_selected_department_is_not_listed_twice(self):
+        page = self.api.get_active_session_people_page(limit=50, department=1)
+        ids = [item['department_id'] for item in page['summary']['departments']]
+        self.assertEqual(ids.count(1), 1)
+
+    def test_picker_survives_a_page_past_the_end(self):
+        """Строка-заглушка от LEFT JOIN не должна оставлять пикер пустым."""
+        page = self.api.get_active_session_people_page(limit=2, offset=100)
+        self.assertEqual(page['people'], [])
+        self.assertEqual([item['department_id'] for item in page['summary']['departments']],
+                         [2, 1, None])
+
+    def test_departments_arrive_as_rows_not_as_text(self):
+        departments = self.api.get_active_session_people_page(limit=1)['summary']['departments']
+        self.assertTrue(all(isinstance(item, dict) for item in departments))
+        self.assertEqual(set(departments[0]), {'department_id', 'department_name'})
+
+
 class UserDetailSqlTests(unittest.TestCase):
     """Карточка человека: все его живые сессии и общий журнал."""
 
@@ -597,6 +735,7 @@ def _route(name, namespace):
 class _RouteDB:
     ACTIVE_SESSION_ROLE_FILTERS = SessionsApi.ACTIVE_SESSION_ROLE_FILTERS
     ACTIVE_SESSION_DEVICE_FILTERS = SessionsApi.ACTIVE_SESSION_DEVICE_FILTERS
+    ACTIVE_SESSION_DEPARTMENT_NONE = SessionsApi.ACTIVE_SESSION_DEPARTMENT_NONE
     ACTIVE_SESSION_SORT_KEYS = SessionsApi.ACTIVE_SESSION_SORT_KEYS
 
     def __init__(self):
@@ -610,7 +749,7 @@ class _RouteDB:
         return {
             'people': [],
             'summary': {'total_people': 0, 'total_sessions': 0,
-                        'role_counts': {}, 'device_counts': {}},
+                        'role_counts': {}, 'device_counts': {}, 'departments': []},
             'matched_people': 0,
             'matched_sessions': 0,
             'has_more': False,
@@ -650,6 +789,27 @@ class ListRouteFilterValidationTests(unittest.TestCase):
         _, fake_db = self._call({'role': 'all', 'device': 'all'})
         self.assertIsNone(fake_db.calls[0]['role'])
         self.assertIsNone(fake_db.calls[0]['device'])
+
+    def test_department_reaches_the_query_as_a_number(self):
+        """Отдел — единственный фильтр без белого списка: отделы заводят в портале."""
+        result, fake_db = self._call({'department': '367'})
+        self.assertEqual(_status(result), 200)
+        self.assertEqual(fake_db.calls[0]['department'], 367)
+
+    def test_department_none_means_people_without_one(self):
+        _, fake_db = self._call({'department': 'none'})
+        self.assertEqual(fake_db.calls[0]['department'], 'none')
+
+    def test_department_all_means_no_filter(self):
+        for value in ('all', ''):
+            _, fake_db = self._call({'department': value})
+            self.assertIsNone(fake_db.calls[0]['department'], value)
+
+    def test_department_that_is_not_a_number_is_rejected(self):
+        for value in ('1 OR TRUE', 'szov', '-5', '3.5'):
+            result, fake_db = self._call({'department': value})
+            self.assertEqual(_status(result), 400, value)
+            self.assertEqual(fake_db.calls, [], value)
 
     def test_unknown_role_is_rejected(self):
         result, fake_db = self._call({'role': 'trainer'})
@@ -1314,6 +1474,58 @@ class GrantAccessButtonTests(unittest.TestCase):
         handler = self.app[self.app.index('const handleGrantAdminSessionAccess'):]
         handler = handler[:handler.index('}, [user?.id, refreshAdminSessions]);')]
         self.assertNotIn('showToast]', handler)
+
+
+class DepartmentPickerTests(unittest.TestCase):
+    """Пикер отдела на компьютере. Интерфейсные решения ломают молча."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        start = cls.app.index('const SessionsPanel = ({')
+        cls.panel = cls.app[start:cls.app.index('// ─── OPERATOR SKELETON COMPONENTS', start)]
+
+    def test_picker_is_the_shared_ios_select(self):
+        """Своего выпадающего списка в разделе быть не должно: эталон формы —
+        CustomSelect с variant="ios", системный <select> рисует ОС."""
+        picker = self.panel[self.panel.index('ariaLabel="Отдел"') - 900:]
+        picker = picker[:picker.index('ariaLabel="Отдел"') + 40]
+        self.assertIn('<CustomSelect', picker)
+        self.assertIn('variant="ios"', picker)
+        self.assertNotIn('<select', self.panel)
+
+    def test_the_filter_reaches_the_server(self):
+        """Фильтр серверный, как роль и устройство: клиент не режет страницу."""
+        self.assertIn("params.set('department', String(nextView.department))", self.app)
+        self.assertIn('department=department_filter', BOT_PATH.read_text(encoding='utf-8-sig'))
+
+    def test_client_does_not_keep_its_own_list_of_departments(self):
+        """Список отделов — только из сводки ответа. Свой набор включал бы
+        отделы, где сейчас нет ни одной живой сессии."""
+        self.assertIn('adminSessionsSummary?.departments', self.panel)
+        self.assertNotIn('AI_QA_OP_DEPARTMENT_ID', self.panel)
+        self.assertNotIn('departmentOptions.filter', self.panel)
+
+    def test_choosing_a_department_drops_the_selection(self):
+        """Иначе панель обещает прервать сессии тех, кого на экране уже нет."""
+        handler = self.panel[self.panel.index('const setDepartmentFilter'):]
+        handler = handler[:handler.index('}, [onApplyAdminSessionsView]);')]
+        self.assertIn('setSelected(new Map())', handler)
+
+    def test_reset_clears_the_department_too(self):
+        reset = self.panel[self.panel.index('const resetFilters'):]
+        reset = reset[:reset.index('}, [onApplyAdminSessionsView]);')]
+        self.assertIn('department: SESSION_DEPARTMENT_ALL', reset)
+        self.assertIn('departmentFilter !== SESSION_DEPARTMENT_ALL', self.panel,
+                      'без этого «Сбросить фильтры» не появится при выбранном отделе')
+
+    def test_picker_survives_its_own_narrowing(self):
+        """Выбрали отдел — в выборке остался один: пикер обязан остаться на
+        экране, иначе снять фильтр нечем."""
+        rule = self.panel[self.panel.index('const canPickDepartment'):]
+        rule = rule[:rule.index(';')]
+        self.assertIn('departmentOptions.length > 2', rule)
+        self.assertIn("departmentFilter !== SESSION_DEPARTMENT_ALL", rule)
 
 
 if __name__ == '__main__':

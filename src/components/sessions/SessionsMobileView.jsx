@@ -120,6 +120,10 @@ export default function SessionsMobileView({
     onRole,
     deviceFilter,
     onDevice,
+    departmentFilter,
+    departmentOptions,
+    canPickDepartment,
+    onDepartment,
     sortKey,
     sortDir,
     onSort,
@@ -142,6 +146,7 @@ export default function SessionsMobileView({
 }) {
     const [selecting, setSelecting] = React.useState(false);
     const [sortOpen, setSortOpen] = React.useState(false);
+    const [departmentOpen, setDepartmentOpen] = React.useState(false);
     const [confirmOpen, setConfirmOpen] = React.useState(false);
     const sentinelRef = React.useRef(null);
     const revokeAskedRef = React.useRef(false);
@@ -159,6 +164,13 @@ export default function SessionsMobileView({
     const shownDevices = deviceOrder.filter((key) => (deviceCounts[key] || 0) > 0 || key === deviceFilter);
     const showDevices = deviceFilter !== 'all'
         || deviceOrder.filter((key) => (deviceCounts[key] || 0) > 0).length > 1;
+
+    /* Отдел выбирают листом снизу, как порядок сортировки: названия отделов
+       длинные («СЗоВ — Служба заботы о водителях»), и в полосу меток они не
+       помещаются. В самой полосе стоит только метка с текущим отделом. */
+    const options = Array.isArray(departmentOptions) ? departmentOptions : [];
+    const currentDepartment = options.find((option) => option.value === departmentFilter) || options[0];
+    const departmentPicked = departmentFilter && departmentFilter !== 'all';
 
     const toggleSelecting = () => {
         if (selecting) onClearSelection();
@@ -280,9 +292,22 @@ export default function SessionsMobileView({
                 })}
             </div>
 
-            {showDevices && (
-                <div className="ses-m-chips" role="group" aria-label="Устройства">
-                    {shownDevices.map((key) => {
+            {(canPickDepartment || showDevices) && (
+                <div className="ses-m-chips" role="group" aria-label="Фильтры">
+                    {canPickDepartment && (
+                        <button
+                            type="button"
+                            className={`ses-m-chip ses-m-chip-pick${departmentPicked ? ' is-on' : ''}`}
+                            onClick={() => setDepartmentOpen(true)}
+                            aria-haspopup="dialog"
+                        >
+                            <span className="ses-m-chip-text">{currentDepartment?.label || 'Все отделы'}</span>
+                            <svg viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                                <path d="M2.5 4.5L6 8l3.5-3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                        </button>
+                    )}
+                    {showDevices && shownDevices.map((key) => {
                         const active = deviceFilter === key;
                         return (
                             <button
@@ -396,6 +421,30 @@ export default function SessionsMobileView({
                         onClick: confirmRevoke,
                     },
                 ]}
+            />
+
+            <MobileActionSheet
+                open={departmentOpen}
+                onClose={() => setDepartmentOpen(false)}
+                actions={options.map((option) => {
+                    const current = option.value === departmentFilter;
+                    return {
+                        key: option.value,
+                        render: (
+                            <button
+                                type="button"
+                                className={`mobile-actions__row ses-m-sheet-choice${current ? ' is-current' : ''}`}
+                                onClick={() => {
+                                    setDepartmentOpen(false);
+                                    if (!current) onDepartment(option.value);
+                                }}
+                            >
+                                {option.label}
+                                {current && <CheckGlyph className="ses-m-sheet-check" />}
+                            </button>
+                        ),
+                    };
+                })}
             />
 
             <MobileActionSheet
