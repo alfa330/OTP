@@ -580,6 +580,11 @@ export default function CallQaView(props) {
                     subject={tab === 'chats' ? SUBJECT_FAMILY_CHATS : SUBJECT_FAMILY_CALLS}
                     showScoreFilters={tab !== 'queue'}
                     showReviewedFilter={tab !== 'queue'}
+                    /* Выгрузка — по списку оценённых (та же выборка, что у
+                       «Звонков» и «Чатов»); очередь ревью живёт другим списком,
+                       и кнопка на ней обещала бы не то, что лежит на экране. */
+                    canExport={tab !== 'queue'}
+                    showToast={showToast}
                 />
             )}
 

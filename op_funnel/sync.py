@@ -506,6 +506,13 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
                         }
                 queries.upsert_reason_dict(cursor, list(dictionary.values()))
 
+                # Журнал этапов — ДО отбора «какие сутки вправе переписать»:
+                # история сделки меняется и у зафиксированных суток, а запрет
+                # переписывать ИТОГ не значит, что не надо запоминать, куда
+                # уехала сама сделка. Без этой строки ФТ-08 «этап на момент
+                # разговора» отвечать нечем (op_funnel_lead_stages).
+                summary['stage_rows'] = queries.log_lead_stages(cursor, lead_rows)
+
                 # Лиды и разбивку причин переписываем ТОЛЬКО у тех суток, чей итог
                 # мы вправе переписать.
                 #
@@ -564,6 +571,102 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
                                    **_counters(summary))
         except Exception:  # noqa: BLE001 — журнал не должен маскировать причину
             log.exception('op_funnel: не удалось записать отказ в журнал прогонов')
+    return summary
+
+
+# Насколько назад смотрит инкрементальная выгрузка при первом запуске или после
+# долгого простоя. Больше суток догонять инкрементом нет смысла — ночной прогон
+# перечитает всё сам.
+INCREMENTAL_MAX_LAG = timedelta(hours=24)
+INCREMENTAL_OVERLAP = timedelta(minutes=5)
+
+
+def sync_amo_changes(db, since=None, started_by=None):
+    """Догнать изменения сделок amoCRM с последнего инкремента (раз в 15 минут).
+
+    Что делает и чего не делает — важно оба:
+
+    * Пишет журнал этапов (`op_funnel_lead_stages`) для ВСЕХ изменившихся сделок.
+      Это и есть история, которой в amoCRM нет; ради неё инкремент и существует.
+    * В снимке `op_funnel_leads` обновляет только сутки, которые воронка вправе
+      переписать (те же `_writable_days`, что у ночного прогона), и заводит
+      сделки, которых в снимке ещё нет. Зафиксированные сутки НЕ трогает: их
+      суточный итог уже назван на планёрке, и список за причиной обязан с ним
+      сходиться. «Текущий этап» маркетингу поэтому отдаёт журнал, а не снимок
+      (call_qa.marketing.filters.STAGE_CURRENT).
+    * Суточные итоги и разбивку причин не пересчитывает вовсе — это дело
+      ночного прогона.
+
+    Возвращает словарь-итог; в `op_funnel_sync_runs` остаётся строка с
+    пометкой `incremental`, чтобы «почему этап не обновился» отвечалось без
+    логов Render.
+    """
+    import time as _time
+
+    direction_code = 'op_osnova'
+    source = SOURCE_AMO
+    now = datetime.now()
+    if since is None:
+        # Лаг спрашиваем у БАЗЫ (NOW() - started_at), а не вычитаем её метку из
+        # своих часов: у процесса UTC+5, у базы UTC, и разность «своё минус
+        # чужое» промахивалась бы ровно на пять часов.
+        with db._get_cursor() as cursor:
+            cursor.execute(
+                """SELECT EXTRACT(EPOCH FROM (NOW() - MAX(started_at))) AS lag
+                     FROM op_funnel_sync_runs
+                    WHERE direction_code = %s AND source = %s AND status = 'ok'""",
+                (direction_code, source))
+            row = queries._one(cursor) or {}
+        lag = row.get('lag')
+        lag_seconds = float(lag) if lag is not None else INCREMENTAL_MAX_LAG.total_seconds()
+        lag_seconds = min(lag_seconds, INCREMENTAL_MAX_LAG.total_seconds())
+        since_epoch = int(_time.time() - lag_seconds - INCREMENTAL_OVERLAP.total_seconds())
+    else:
+        since_epoch = int(since.timestamp() if isinstance(since, datetime) else since)
+
+    summary = {'direction_code': direction_code, 'source': source,
+               'since': datetime.fromtimestamp(since_epoch).isoformat(timespec='minutes'),
+               'leads_seen': 0, 'leads_written': 0, 'stage_rows': 0, 'status': 'ok',
+               'error': None}
+    with db._get_cursor() as cursor:
+        run_id = queries.start_run(cursor, direction_code, source, now.date(), now.date(),
+                                   started_by, 'incremental')
+        summary['run_id'] = run_id
+    try:
+        with db._get_cursor() as cursor:
+            leads, stage_names, _users, loss_reasons, contact_phones = (
+                sources.fetch_amo_changed_leads(since_epoch))
+            summary['leads_seen'] = len(leads)
+            if leads:
+                owner_map = queries.resolve_operator_map(cursor, source)
+                rows, seen = sources.amo_rows(leads, stage_names, direction_code, owner_map,
+                                              loss_reasons, contact_phones)
+                if seen:
+                    queries.touch_operator_map(cursor, source, seen, direction_code)
+                summary['stage_rows'] = queries.log_lead_stages(cursor, rows)
+
+                # Снимок: новые сделки — всегда, существующие — только в
+                # незафиксированных сутках.
+                days = sorted({row['work_day'] for row in rows})
+                writable = set(_writable_days(cursor, direction_code, days[0], days[-1],
+                                              False)) if days else set()
+                cursor.execute(
+                    """SELECT lead_key FROM op_funnel_leads
+                        WHERE direction_code = %s AND source = %s AND lead_key = ANY(%s)""",
+                    (direction_code, source, [str(row['lead_key']) for row in rows]))
+                known = {str(r['lead_key']) for r in queries._rows(cursor)}
+                fresh = [row for row in rows
+                         if row['work_day'] in writable or str(row['lead_key']) not in known]
+                summary['leads_written'] = queries.upsert_leads(cursor, fresh)
+            queries.finish_run(cursor, run_id, status='ok',
+                               leads_seen=summary['leads_seen'],
+                               leads_written=summary['leads_written'])
+    except Exception as exc:
+        summary['status'] = 'error'
+        summary['error'] = str(exc)[:500]
+        log.exception('op_funnel: инкрементальная выгрузка amoCRM не удалась')
+        with db._get_cursor() as cursor:
+            queries.finish_run(cursor, run_id, status='error', error=summary['error'])
     return summary
 
 

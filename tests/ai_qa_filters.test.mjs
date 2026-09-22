@@ -171,8 +171,14 @@ test('фронт и бэкенд знают ОДИН набор фильтров
     // Ось, которую фронт отправляет, а сервер не разбирает, просто не работает —
     // и виновата в этом на глаз панель, а не пропущенное имя в списке.
     const api = readLf('call_qa/api.py');
+    // Маркетинговые оси (ТЗ #317) normalise_list_filters отдаёт своему модулю,
+    // поэтому «объявлено на сервере» — это разбор раздела ПЛЮС разбор модуля.
+    // Проверка, что делегирование действительно стоит, — ниже отдельно: без неё
+    // модуль мог бы знать ось, которую никто не зовёт.
+    assert.ok(api.includes('mkt.normalise('), 'normalise_list_filters не зовёт маркетинговый разбор');
     const declared = api.slice(api.indexOf('def normalise_list_filters'),
-                              api.indexOf('def _like_pattern'));
+                              api.indexOf('def _like_pattern'))
+        + readLf('call_qa/marketing/filters.py');
     for (const key of Object.keys(EMPTY_FILTERS)) {
         assert.ok(declared.includes(`'${key}'`), `сервер не разбирает фильтр ${key}`);
     }

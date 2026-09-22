@@ -280,6 +280,83 @@ def _local(expr: str) -> str:
     return f"({expr} AT TIME ZONE 'Asia/Almaty')"
 
 
+# Маркетинговый отбор (ТЗ #317) живёт отдельным модулем: шесть его осей — это
+# другая предметная область (сделка, а не сотрудник), и держать их правила здесь
+# значило бы смешать «кто говорил» с «откуда пришёл лид» в одном файле на пять
+# тысяч строк.
+from .marketing import filters as mkt
+
+# Готова ли схема модуля. Спрашиваем ОДИН раз на процесс: information_schema на
+# каждый показ списка — это лишний round-trip ради ответа, который за время
+# жизни процесса не меняется (таблицы разворачиваются на старте приложения).
+_MARKETING_READY = None
+
+
+def _marketing_ready(cur) -> bool:
+    """Есть ли таблицы «Маркетингового мониторинга».
+
+    Проверка нужна, потому что схема разворачивается под SAVEPOINT и имеет право
+    не развернуться. Без неё первый же список раздела падал бы UndefinedTable —
+    то есть отказ маркетингового модуля уносил бы всю «ИИ-оценку», а обещано
+    обратное: раздел работает как раньше, просто без маркетингового отбора.
+    """
+    global _MARKETING_READY
+    if _MARKETING_READY is None:
+        try:
+            from .marketing.schema import schema_is_ready
+            _MARKETING_READY = bool(schema_is_ready(cur))
+        except Exception:
+            _MARKETING_READY = False
+    return _MARKETING_READY
+
+
+def _marketing_join(cur, filters=None, *, need_columns=False) -> str:
+    """JOIN модуля — только когда он действительно нужен.
+
+    Семь LEFT JOIN'ов в каждом запросе раздела (включая счётчики дашборда, где
+    сделка не показывается и не фильтруется) — это плата ни за что. Поэтому
+    связка прицепляется, если отбор её спрашивает или список показывает колонки
+    сделки.
+    """
+    if not (need_columns or (filters or {}).get('marketing')):
+        return ""
+    return mkt.JOIN_SQL if _marketing_ready(cur) else ""
+
+
+def _deal_row(values, offset):
+    """Хвост строки списка → блок сделки для фронта. None — сделки нет.
+
+    Отдельной функцией, потому что колонки одни и те же в двух списках, и
+    разъехаться им нельзя: канал в очереди ревью обязан означать то же, что во
+    вкладке «Звонки».
+    """
+    deal_id, park, park_title, channel, channel_title, campaign, stage, reason, dup = (
+        values[offset:offset + 9])
+    if not deal_id:
+        return None
+    return {
+        "id": deal_id,
+        "park": park or "", "park_title": park_title or "",
+        "channel": channel or "", "channel_title": channel_title or "",
+        "campaign": campaign or "",
+        "stage": stage or "", "reason": reason or "",
+        # Сколько заявок делят этот номер. Связь по телефону у повторной заявки
+        # всегда спорна, и человек должен видеть это, а не верить ей вслепую.
+        "shared_phone": int(dup or 1),
+    }
+
+
+# Колонки сделки в списках. Порядок совпадает с разбором в _deal_row.
+_DEAL_COLUMNS = (f", {mkt.DEAL_ID}, {mkt.PARK_CODE}, {mkt.PARK_TITLE},"
+                 f" {mkt.CHANNEL_CODE}, {mkt.CHANNEL_TITLE}, {mkt.CAMPAIGN},"
+                 f" {mkt.STAGE_CURRENT}, {mkt.REASON_CURRENT},"
+                 " COALESCE(sd.dup_total, 1)")
+
+# Пустой хвост тех же девяти колонок — когда схемы модуля нет. Так запрос и
+# разбор строки остаются одной формы, а не двумя ветками на каждый список.
+_DEAL_COLUMNS_EMPTY = ", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+
+
 def _local_from_utc(expr: str) -> str:
     """naive timestamp, записанный сервером по UTC → местное время."""
     return f"({expr} AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Almaty')"
@@ -432,6 +509,15 @@ def normalise_list_filters(raw: dict | None) -> dict:
     query = str(raw.get('q') or '').strip()
     if query:
         out['q'] = query[:120]
+
+    # Маркетинговые оси (ТЗ #317) разбирает свой модуль и кладёт их ОТДЕЛЬНЫМ
+    # ключом, а не вперемешку с остальными. Причина не в аккуратности: по
+    # наличию этого ключа запрос решает, цеплять ли связку со сделкой, и
+    # смешанный словарь пришлось бы просеивать по списку имён на каждом вызове.
+    marketing = mkt.normalise(raw.get('marketing') if isinstance(raw.get('marketing'), dict)
+                              else raw)
+    if marketing:
+        out['marketing'] = marketing
     return out
 
 
@@ -506,6 +592,24 @@ def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department
         sql += f" AND ({_SUBJECT_OPERATOR} ILIKE %s OR rc.call_id::text = %s)"
         params.extend([_like_pattern(query), query])
 
+    marketing = filters.get('marketing')
+    if marketing:
+        if not _marketing_ready(cur):
+            # Схема модуля не развернулась, а отбор по каналу пришёл. Молча
+            # показать всё — худшее из возможного: человек прочтёт список как
+            # «по этому каналу разобрано вот столько». Честнее пустой результат,
+            # тем же соглашением (None, ()), что и у остальных невыполнимых
+            # условий раздела.
+            return None, ()
+        mkt_sql, mkt_params = mkt.predicate(
+            marketing,
+            operator_id_sql=_SUBJECT_OPERATOR_ID,
+            group_of_person=lambda person: _SUBJECT_GROUP_ID.format(
+                op=person, day=_SUBJECT_DAY),
+        )
+        sql += mkt_sql
+        params.extend(mkt_params)
+
     return sql, tuple(params)
 
 
@@ -535,13 +639,18 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
         if filter_sql is None:
             cur.close(); conn.close()
             return []
+        # Сделка показывается в строке очереди, а не только фильтрует: маркетолог
+        # выбирает, что смотреть, именно по каналу и парку, и открывать карточку
+        # ради этих двух слов — лишний шаг на каждой строке.
+        deal_join = _marketing_join(cur, filters, need_columns=True)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
                       {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
                       run.fingerprint_components, rc.subject_kind, rc.payload->'media',
-                      rc.payload->'ai_score', rc.payload->'score_breakdown'
-                 FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
+                      rc.payload->'ai_score', rc.payload->'score_breakdown'"""
+            + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
+                 FROM ai_review_cache rc""" + _SUBJECT_JOIN + deal_join + """
                  LEFT JOIN ai_evaluation_meta m
                         ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
                            AND m.model = rc.model
@@ -574,6 +683,7 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
                           # совсем не то же самое, что 90 проверенных.
                           "ai_score": r[13],
                           "unchecked_weight": breakdown.get("unchecked_weight") or 0,
+                          "deal": _deal_row(r, 15),
                           "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
                           "_ts": r[7], "_direction_id": r[8],
                           "_run_fp": r[9], "_run_components": r[10]})
@@ -624,7 +734,8 @@ def review_queue_count(allowed_direction_ids=None, subject_kind=None, department
             cur.close(); conn.close()
             return 0
         cur.execute(
-            """SELECT COUNT(*) FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
+            """SELECT COUNT(*) FROM ai_review_cache rc""" + _SUBJECT_JOIN
+            + _marketing_join(cur, filters) + """
                  LEFT JOIN ai_evaluation_meta m
                         ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
                            AND m.model = rc.model
@@ -4623,7 +4734,7 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=
                                   rc.subject_kind, rc.call_id, rc.created_at, rc.payload
                              FROM ai_review_cache rc
                             ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
-            + _SUBJECT_JOIN
+            + _SUBJECT_JOIN + _marketing_join(cur, filters)
             + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + ") t",
             (*scope_params, *kind_params, *filter_params))
         n = cur.fetchone()[0]; cur.close(); conn.close()
@@ -4662,16 +4773,18 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
         if filter_sql is None:
             cur.close(); conn.close()
             return []
+        deal_join = _marketing_join(cur, filters, need_columns=True)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
                       TO_CHAR({_local('rc.created_at')},'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},
                       rc.payload->>'ai_score' AS ai, rc.subject_kind,
-                      {_SUBJECT_DATETIME}
+                      {_SUBJECT_DATETIME}"""
+            + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                               rc.subject_kind, rc.call_id, rc.created_at, rc.payload
                          FROM ai_review_cache rc
                         ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
-            + _SUBJECT_JOIN + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql
+            + _SUBJECT_JOIN + deal_join + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql
             + filter_sql + """
                 ORDER BY rc.created_at DESC LIMIT %s OFFSET %s""",
             (*scope_params, *kind_params, *filter_params, limit, offset))
@@ -4684,7 +4797,7 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
                  "datetime": r[3], "human": r[4],
                  "ai": round(float(r[5])) if r[5] is not None else None,
                  "subject": r[6] or config.SUBJECT_CALL,
-                 "subject_datetime": r[7]} for r in rows]
+                 "subject_datetime": r[7], "deal": _deal_row(r, 8)} for r in rows]
     except Exception:
         logging.exception("ai-qa evaluations failed")
         raise
@@ -5050,3 +5163,180 @@ def stats(allowed_direction_ids=None, department=None) -> dict:
             except Exception:
                 pass
     return out
+
+
+# ── Маркетинговый мониторинг: справочник осей и сделка карточки ──────────────
+
+def marketing_options(allowed_direction_ids=None, department=None,
+                      subject_kind=None) -> dict:
+    """Что предложить в маркетинговых фильтрах: парки, каналы, этапы, причины, люди.
+
+    Рядом с каждым значением стоит ЧИСЛО разборов — по той же причине, по
+    которой оно стоит рядом с фамилией в соседнем справочнике: список из
+    двадцати девяти парков, у двадцати из которых ноль разговоров, — это не
+    фильтр, а угадайка. Значение с нулём здесь вообще не появляется.
+
+    Скоуп тот же, что у списков: направления зрителя ∩ выбранный отдел.
+    Предложить фильтр, который покажет чужие строки, ручка физически не может.
+
+    Пустой ответ (`available: false`) — законное состояние: схема модуля могла
+    не развернуться, а связей могло ещё не быть. Панель тогда не рисует
+    маркетинговый блок вовсе, вместо того чтобы показывать пять пустых
+    селекторов.
+    """
+    conn = None
+    empty = {"available": False, "parks": [], "channels": [], "stages": [],
+             "reasons": [], "handlers": [], "stage_history_since": None}
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        if not _marketing_ready(cur):
+            cur.close(); conn.close()
+            return empty
+        family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
+        if not family:
+            cur.close(); conn.close()
+            return empty
+        kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+
+        # Основание для всех пяти выборок — последняя оценка субъекта, ровно та,
+        # что показывает список. Считать по всем строкам кэша нельзя: звонок,
+        # переоценённый трижды, прибавил бы к своему каналу три разбора.
+        base = ("""FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                               rc.subject_kind, rc.call_id, rc.created_at, rc.payload
+                          FROM ai_review_cache rc
+                         ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
+                + _SUBJECT_JOIN + mkt.JOIN_SQL
+                + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)"
+                + kind_sql)
+        base_params = (family, *kind_params)
+
+        def grouped(expression, title_expression):
+            cur.execute(
+                f"SELECT {expression}, {title_expression}, COUNT(*) {base}"
+                f" AND {mkt.DEAL_LINKED} GROUP BY 1, 2 ORDER BY 3 DESC", base_params)
+            return cur.fetchall()
+
+        parks = [{"code": code or mkt.NONE_BUCKET,
+                  "title": title or "Не определено", "calls": int(count)}
+                 for code, title, count in grouped(mkt.PARK_CODE, mkt.PARK_TITLE)]
+
+        channels = [{"code": code or mkt.NONE_BUCKET,
+                     "title": title or "Не определено", "calls": int(count),
+                     "campaigns": []}
+                    for code, title, count in grouped(mkt.CHANNEL_CODE, mkt.CHANNEL_TITLE)]
+
+        # Кампания — ВТОРОЙ уровень канала, а не самостоятельный список: одно и
+        # то же имя кампании встречается у разных каналов, и плоский перечень
+        # «utm_campaign» ничего не отвечает на вопрос «что дал TikTok».
+        cur.execute(
+            f"SELECT {mkt.CHANNEL_CODE}, {mkt.CAMPAIGN}, COUNT(*) {base}"
+            f" AND {mkt.CAMPAIGN} <> '' GROUP BY 1, 2 ORDER BY 3 DESC", base_params)
+        by_channel = {item["code"]: item for item in channels}
+        for channel_code, campaign, count in cur.fetchall():
+            owner = by_channel.get(channel_code or mkt.NONE_BUCKET)
+            if owner is not None:
+                owner["campaigns"].append({"value": campaign, "calls": int(count)})
+
+        # Этапы: и текущий, и «на момент разговора» — из одного справочника.
+        # Отдельных списков быть не должно: переключатель режима не меняет
+        # перечень этапов воронки, он меняет только то, откуда берётся ответ.
+        cur.execute(
+            f"SELECT {mkt.STAGE_CURRENT}, COUNT(*) {base}"
+            f" AND {mkt.STAGE_CURRENT} <> '' GROUP BY 1 ORDER BY 2 DESC", base_params)
+        stages = [{"value": value, "calls": int(count), "lost": mkt.is_lost_stage(value)}
+                  for value, count in cur.fetchall()]
+
+        cur.execute(
+            f"SELECT {mkt.REASON_CURRENT}, COUNT(*) {base}"
+            f" AND {mkt.DEAL_LINKED} GROUP BY 1 ORDER BY 2 DESC", base_params)
+        reasons = [{"value": value or mkt.NONE_BUCKET,
+                    "title": value or "Причина не указана", "calls": int(count)}
+                   for value, count in cur.fetchall()]
+
+        # «Ответственный» в CRM: человек портала, если сопоставление уже сделано,
+        # иначе имя строкой из amoCRM. Несопоставленных показываем отдельно —
+        # это не мусор, а подсказка «кого ещё не связали», и без них сумма по
+        # людям не сходилась бы с общим числом разборов.
+        cur.execute(
+            f"SELECT {mkt.RESPONSIBLE_ID}, {mkt.RESPONSIBLE_RAW}, COUNT(*) {base}"
+            f" AND {mkt.DEAL_LINKED} AND {mkt.RESPONSIBLE_RAW} <> ''"
+            " GROUP BY 1, 2 ORDER BY 3 DESC", base_params)
+        handlers = [{"id": int(user_id) if user_id is not None else None,
+                     "name": name, "calls": int(count),
+                     "matched": user_id is not None}
+                    for user_id, name, count in cur.fetchall()]
+
+        # С какого момента вообще есть история этапов. Нужно показать словами:
+        # до этой даты «этап на момент разговора» физически пуст, и пустой
+        # список в панели человек иначе прочтёт как поломку.
+        cur.execute("SELECT MIN(seen_at) FROM op_funnel_lead_stages")
+        row = cur.fetchone()
+        history_since = row[0].isoformat(sep=' ', timespec='minutes') if row and row[0] else None
+
+        cur.close(); conn.close()
+        return {"available": bool(parks or channels or stages),
+                "parks": parks, "channels": channels, "stages": stages,
+                "reasons": reasons, "handlers": handlers,
+                "stage_history_since": history_since}
+    except Exception:
+        logging.exception("ai-qa marketing options failed")
+        return empty
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def deal_for_subject(subject_kind: str, call_id: int) -> dict | None:
+    """Сделка этого разговора для карточки ревью. None — связи нет.
+
+    Отдельным запросом, а не ещё одним куском в и без того огромной выборке
+    карточки: карточка открывается по одной, и семь JOIN'ов ради девяти полей
+    дешевле прицепить здесь, чем тащить через весь путь оценки.
+    """
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        if not _marketing_ready(cur):
+            cur.close(); conn.close()
+            return None
+        cur.execute(
+            f"""SELECT {mkt.DEAL_ID}, {mkt.PARK_CODE}, {mkt.PARK_TITLE},
+                       {mkt.CHANNEL_CODE}, {mkt.CHANNEL_TITLE}, {mkt.CAMPAIGN},
+                       {mkt.STAGE_CURRENT}, {mkt.STAGE_AT_CALL}, {mkt.REASON_CURRENT},
+                       {mkt.RESPONSIBLE_RAW}, {mkt.RESPONSIBLE_ID},
+                       sd.matched_phone, sd.dup_total, sd.dup_index, l.city
+                  FROM ai_review_cache rc"""
+            + mkt.JOIN_SQL
+            + """ WHERE rc.subject_kind = %s AND rc.call_id = %s AND sd.call_id IS NOT NULL
+                  LIMIT 1""",
+            (subject_kind, int(call_id)))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row:
+            return None
+        return {
+            "id": row[0], "park": row[1], "park_title": row[2],
+            "channel": row[3], "channel_title": row[4], "campaign": row[5],
+            "stage": row[6],
+            # Пустой «этап на момент разговора» — это не ошибка, а честный ответ
+            # «журнала на тот момент ещё не было». Фронт так и подписывает.
+            "stage_at_call": row[7] or "",
+            "reason": row[8], "responsible": row[9],
+            "responsible_id": int(row[10]) if row[10] is not None else None,
+            "matched_phone": row[11], "shared_phone": int(row[12] or 1),
+            "shared_index": int(row[13] or 1), "city": row[14] or "",
+        }
+    except Exception:
+        logging.exception("ai-qa deal for subject failed")
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass

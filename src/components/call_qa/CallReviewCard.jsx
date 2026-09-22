@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import DealBadge from './DealBadge';
 import { motion } from 'framer-motion';
 import {
     Check, X, Minus, Clock, Sparkles, Server, User2, Headphones,
@@ -699,6 +700,11 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                                 <IosBadge tone="slate">{call.direction}</IosBadge>
                             </div>
                             <p className="mt-0.5 text-[12.5px] text-slate-500">{call.operator} · {call.datetime}</p>
+                            {/* Сделка amoCRM этого разговора (ТЗ #317). Только когда
+                                связь есть: пустой блок «сделка не найдена» на
+                                каждой карточке СЗоВ — это шум для отдела, у
+                                которого сделок нет вовсе. */}
+                            {call.deal && <DealBadge deal={call.deal} full className="mt-2" />}
                         </div>
                         <div className="flex flex-col items-end gap-1.5">
                             {call.ai_score != null && (

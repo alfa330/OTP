@@ -6704,6 +6704,7 @@ class Database:
             self._init_olx_ads_schema_tx(cursor)
             self._init_op_funnel_schema_tx(cursor)
             self._init_dial_list_schema_tx(cursor)
+            self._init_qa_marketing_schema_tx(cursor)
             self._init_payments_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -7959,6 +7960,32 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT op_funnel_schema")
+
+    def _init_qa_marketing_schema_tx(self, cursor):
+        """Схема модуля «Маркетинговый мониторинг» (ТЗ #317): таблицы qa_marketing_*.
+
+        Идёт ПОСЛЕ «Воронки ОП»: связь разговора со сделкой смотрит в
+        `op_funnel_leads`, и разворачивать её раньше самих лидов незачем.
+
+        Под SAVEPOINT по той же причине, что и соседи. Цена отката здесь
+        мягкая и это сделано намеренно: без этих таблиц «ИИ-оценка» работает
+        ровно как до модуля — просто без маркетингового отбора. Панель фильтров
+        узнаёт об этом по пустому справочнику и не показывает мёртвых полей.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT qa_marketing_schema")
+        try:
+            from call_qa.marketing.schema import init_qa_marketing_schema
+            init_qa_marketing_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT qa_marketing_schema")
+            logging.exception(
+                "Схема «Маркетингового мониторинга» не применилась — раздел «ИИ-оценка» "
+                "работает без маркетингового отбора, остальное приложение штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT qa_marketing_schema")
 
     def _init_trainings_schema_tx(self, cursor):
         """Схема раздела «Тренинги»: справочник корпоративных тем (training_topics)

@@ -5602,9 +5602,32 @@ def _ai_qa_list_filters():
     см. call_qa.api._list_filters_predicate."""
     from call_qa.api import normalise_list_filters
     try:
-        return normalise_list_filters({key: request.args.get(key) for key in (
+        raw = {key: request.args.get(key) for key in (
             'direction_id', 'group_id', 'operator_id', 'date_from', 'date_to',
-            'reviewed', 'score_min', 'score_max', 'q')}), None
+            'reviewed', 'score_min', 'score_max', 'q')}
+        # Маркетинговые оси (ТЗ #317). Списковые значения приходят повторённым
+        # параметром (?parks=itaxi&parks=jana) — так их шлёт axios для массива,
+        # и так их не надо ни склеивать, ни разбирать по запятой на фронте.
+        # Этапы и причины — СЫРЫЕ строки с запятыми внутри («Нет авто (не цел),
+        # аренда»), поэтому запятая разделителем здесь быть не может.
+        # axios 1.x шлёт массив как `parks[]=a&parks[]=b` (со скобками), а
+        # URLSearchParams и curl — как `parks=a&parks=b`. Читаем обе формы:
+        # иначе панель на одном клиенте работала бы, а на другом — молча нет.
+        def many(key):
+            return request.args.getlist(key) + request.args.getlist(key + '[]')
+        raw['marketing'] = {
+            'parks': many('parks'),
+            'channels': many('channels'),
+            'campaigns': many('campaigns'),
+            'stages': many('stages'),
+            'stage_mode': request.args.get('stage_mode'),
+            'reasons': many('reasons'),
+            'handler_ids': many('handler_ids'),
+            'handler_group_ids': many('handler_group_ids'),
+            'handler_mode': request.args.get('handler_mode'),
+            'deal_id': request.args.get('deal_id'),
+        }
+        return normalise_list_filters(raw), None
     except ValueError as error:
         # Молча снятый фильтр страшнее отказа: список выглядел бы рабочим, только
         # показывал бы чужие строки.
@@ -5639,6 +5662,246 @@ def api_ai_qa_filter_options():
     except Exception as error:
         logging.exception("ai-qa filter-options failed")
         return jsonify({"error": str(error)}), 500
+
+
+# ── Маркетинговый мониторинг (ТЗ #317) ───────────────────────────────────────
+
+def _ai_qa_can_share_presets(requester_id) -> bool:
+    """Кто вправе заводить ОБЩИЕ пресеты отдела: руководитель маркетинга и админы.
+
+    Раздел 3 ТЗ: аналитик сохраняет отбор себе, руководитель — «для отдела».
+    Руководитель здесь — глава отдела «Маркетинг» по назначению в портале, а не
+    по должности в профиле: должность не назначает и не снимает глав."""
+    if requester_id is None:
+        return False
+    user = db.get_user(id=requester_id)
+    role = _normalize_user_role(user[3]) if user else None
+    if _is_global_admin_requester(role, requester_id):
+        return True
+    return 'marketing' in set(_headed_department_codes(requester_id))
+
+
+def _ai_qa_presets_guard():
+    """Гард пресетов: как у раздела, но наблюдателю «Маркетинга» открыта запись.
+
+    Общий гард режет наблюдателю всё, кроме чтения, — и правильно: разбор
+    влияет на все будущие оценки. Пресет же — его личная настройка панели, и
+    запретить аналитику сохранить свой отбор значило бы вычеркнуть первую
+    строку раздела 3 ТЗ. Общие пресеты при этом по-прежнему решает
+    _ai_qa_can_share_presets."""
+    requester_id, err = _ai_qa_guard()
+    if not err:
+        return requester_id, None
+    candidate = getattr(g, 'user_id', None)
+    if candidate is not None and _is_marketing_observer(candidate):
+        return candidate, None
+    return None, err
+
+
+@app.route('/api/ai-qa/marketing-options', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_marketing_options():
+    """Справочник маркетинговых фильтров: парки, каналы с кампаниями, этапы,
+    причины отказа, ответственные. Рядом с каждым — число разборов в скоупе."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import marketing_options
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
+        scope = _ai_qa_direction_scope(requester_id)
+        return jsonify({"status": "success", "department": department,
+                        **marketing_options(allowed_direction_ids=scope,
+                                            department=department,
+                                            subject_kind=subject)}), 200
+    except Exception as error:
+        logging.exception("ai-qa marketing-options failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/presets', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_presets():
+    """Пресеты фильтров: свои и общие для отдела.
+
+    POST ← {name, filters, shared?} → {preset}. Имя с тем же названием
+    ПЕРЕЗАПИСЫВАЕТ пресет. `filters` проходит ту же проверку, что у списков:
+    кривой пресет иначе падал бы 400 при восстановлении, уже без объяснений."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_presets_guard()
+    if err:
+        return err
+    from call_qa import config as _qa_config
+    from call_qa.marketing import presets as _presets
+    department, dept_err = _ai_qa_requested_department(
+        requester_id, (request.get_json(silent=True) or {}).get('department')
+        if request.method == 'POST' else None)
+    if dept_err:
+        return dept_err
+    can_share = _ai_qa_can_share_presets(requester_id)
+    conn = None
+    try:
+        if request.method == 'GET':
+            conn = _qa_config.connect_ro()
+            cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+            items = _presets.list_presets(cur, user_id=requester_id, department=department)
+            cur.close()
+            return jsonify({"status": "success", "items": items,
+                            "can_share": can_share, "department": department}), 200
+
+        body = request.get_json(force=True) or {}
+        if not isinstance(body, dict):
+            raise ValueError("тело запроса должно быть JSON-объектом")
+        from call_qa.api import normalise_list_filters
+        raw = dict(body.get('filters') or {})
+        # Проверяем ТЕМ ЖЕ разбором, что у списков, но храним то, что прислал
+        # фронт: списки в пресете живут массивами, как в панели.
+        normalise_list_filters(raw)
+        conn = _qa_config.connect_rw()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        preset = _presets.save_preset(
+            cur, user_id=requester_id, department=department,
+            name=body.get('name'), filters=raw,
+            shared=bool(body.get('shared')), can_share=can_share)
+        conn.commit(); cur.close()
+        return jsonify({"status": "success", "preset": preset}), 200
+    except PermissionError as error:
+        return jsonify({"error": str(error)}), 403
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa presets failed")
+        return jsonify({"error": "не удалось сохранить пресет (детали в логах сервера)"}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.route('/api/ai-qa/presets/<int:preset_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_preset_delete(preset_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_presets_guard()
+    if err:
+        return err
+    from call_qa import config as _qa_config
+    from call_qa.marketing import presets as _presets
+    conn = None
+    try:
+        conn = _qa_config.connect_rw()
+        cur = conn.cursor()
+        removed = _presets.delete_preset(cur, preset_id=preset_id, user_id=requester_id,
+                                         can_share=_ai_qa_can_share_presets(requester_id))
+        conn.commit(); cur.close()
+        if not removed:
+            return jsonify({"error": "пресет не найден"}), 404
+        return jsonify({"status": "success"}), 200
+    except PermissionError as error:
+        return jsonify({"error": str(error)}), 403
+    except Exception:
+        logging.exception("ai-qa preset delete failed")
+        return jsonify({"error": "не удалось удалить пресет"}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.route('/api/ai-qa/export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_export():
+    """Выгрузка разборов с атрибутами сделки: ?format=xlsx|csv + те же фильтры,
+    что у списка «Звонки». Выгрузка, игнорирующая выставленный рядом фильтр,
+    читается как сломанная — поэтому разбор параметров общий."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import evaluations_list
+        from call_qa.marketing import export as _export
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        scope = _ai_qa_direction_scope(requester_id)
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
+        fmt = (request.args.get('format') or 'xlsx').strip().lower()
+        if fmt not in ('xlsx', 'csv'):
+            return jsonify({"error": "format: xlsx или csv"}), 400
+        items = evaluations_list(limit=_export.MAX_ROWS, offset=0,
+                                 allowed_direction_ids=scope, subject_kind=subject,
+                                 department=department, filters=filters)
+        if fmt == 'csv':
+            payload, mime = _export.build_csv(items), 'text/csv; charset=utf-8'
+        else:
+            payload = _export.build_xlsx(items)
+            mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        name = _export.file_name(fmt, department)
+        response = Response(payload, mimetype=mime)
+        response.headers['Content-Disposition'] = (
+            "attachment; filename=export.%s; filename*=UTF-8''%s"
+            % (fmt, quote(name)))
+        response.headers['X-Rows'] = str(len(items))
+        return response
+    except Exception as error:
+        logging.exception("ai-qa export failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/marketing/relink', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_marketing_relink():
+    """Пересчитать связи разговоров со сделками руками (админ).
+
+    ← {full: bool} — full перелинковывает ВСЁ, иначе только субъекты без связи.
+    Зовётся после бэкфилла сделок за прошлое или после правки правил окон;
+    ночью то же делает планировщик."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    if not _ai_qa_can_share_presets(requester_id):
+        return jsonify({"error": "пересчёт связей — для руководителя или админа"}), 403
+    body = request.get_json(silent=True) or {}
+    try:
+        summary = _ai_qa_marketing_link_now(full=bool(body.get('full')))
+        return jsonify({"status": "success", **summary}), 200
+    except Exception as error:
+        logging.exception("ai-qa marketing relink failed")
+        return jsonify({"error": str(error)}), 500
+
+
+def _ai_qa_marketing_link_now(full=False):
+    """Связать разборы со сделками и пополнить словарь. Синхронно, на пишущем коннекте."""
+    from call_qa import config as _qa_config
+    from call_qa.marketing import linker as _linker
+    conn = _qa_config.connect_rw()
+    try:
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        learned = _linker.learn_dictionary(cur)
+        summary = _linker.link(cur, only_new=not full)
+        conn.commit(); cur.close()
+        summary['dictionary_learned'] = learned
+        return summary
+    finally:
+        conn.close()
 
 
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
@@ -5738,10 +6001,18 @@ def api_ai_qa_call(call_id):
                     return jsonify({"status": "audio_pending", **pending}), 202
         # reviewer_id — чтобы карточка принесла «Мою оценку» именно этого
         # человека (панель «Моя оценка» в карточке) рядом с оценкой из журнала.
-        return jsonify({"status": "success",
-                        "call": review_payload(call_id, refresh=refresh,
-                                               subject_kind=subject,
-                                               reviewer_id=requester_id)}), 200
+        payload = review_payload(call_id, refresh=refresh, subject_kind=subject,
+                                 reviewer_id=requester_id)
+        # Сделка amoCRM этого разговора (ТЗ #317, п. 2.1 «обогащение записи
+        # атрибутами сделки»). Отдельный запрос, а не часть review_payload:
+        # оценка и без того тяжёлая, а сделка ей не нужна ни для чего.
+        try:
+            from call_qa.api import deal_for_subject
+            payload["deal"] = deal_for_subject(subject, call_id)
+        except Exception:
+            logging.exception("ai-qa: сделка для карточки не загрузилась")
+            payload["deal"] = None
+        return jsonify({"status": "success", "call": payload}), 200
     except _qa_subjects.SubjectNotEvaluable as error:
         # Оценить нельзя по существу (в эпизоде отвечали несколько операторов и т.п.):
         # это не ошибка сервера, а причина, которую надо показать проверяющему.
@@ -44832,6 +45103,45 @@ async def olx_amo_retry_job():
                      summary.get('recovered'), summary.get('retried'))
 
 
+async def op_funnel_amo_incremental_job():
+    """Догон изменений сделок amoCRM раз в 15 минут + связывание разборов со сделками.
+
+    Требование ТЗ #317 (раздел 4): «не реже 1 раза в 15 мин». Инкремент по
+    `updated_at` — десятки сделок за четверть часа, а не 86 страниц воронки.
+    Следом — связывание НОВЫХ разборов со сделками (только тех, у кого связи
+    ещё нет): свежий разбор получает свой канал и парк, не дожидаясь ночи.
+
+    Тот же пул op_funnel_pool (один поток), что у ночной выгрузки: два прогона
+    по одним таблицам одновременно — это гонка за одни и те же строки.
+    """
+    try:
+        from op_funnel import sync as op_funnel_sync
+    except Exception:
+        logging.exception("Воронка ОП: модуль не импортировался, инкремент пропущен")
+        return
+    loop = asyncio.get_event_loop()
+    try:
+        summary = await loop.run_in_executor(
+            op_funnel_pool, lambda: op_funnel_sync.sync_amo_changes(db))
+        if summary.get('status') != 'ok':
+            logging.warning("Воронка ОП: инкремент amoCRM не удался: %s", summary.get('error'))
+        elif summary.get('leads_seen'):
+            logging.info("Воронка ОП: инкремент amoCRM — сделок %s, в снимок %s, в журнал этапов %s",
+                         summary.get('leads_seen'), summary.get('leads_written'),
+                         summary.get('stage_rows'))
+    except Exception as exc:
+        logging.error("Воронка ОП: инкремент amoCRM упал: %s", exc, exc_info=True)
+    try:
+        linked = await loop.run_in_executor(
+            op_funnel_pool, lambda: _ai_qa_marketing_link_now(full=False))
+        if linked.get('subjects'):
+            logging.info("Маркетинговый мониторинг: разборов без связи %s, связано %s, "
+                         "сделок в окне %s", linked.get('subjects'), linked.get('linked'),
+                         linked.get('leads'))
+    except Exception as exc:
+        logging.error("Маркетинговый мониторинг: связывание упало: %s", exc, exc_info=True)
+
+
 async def op_funnel_sync_job():
     """Ночная выгрузка «Воронки ОП» — раз в сутки.
 
@@ -66132,6 +66442,23 @@ if __name__ == '__main__':
         logging.info("⏰ Воронка ОП: ночная выгрузка в 05:20 (последние двое суток)")
     except Exception:
         logging.exception("Воронка ОП: планировщик НЕ подключён")
+
+    # ── Маркетинговый мониторинг: инкремент amoCRM и связывание раз в 15 минут ──
+    # Минуты 3/18/33/48, а не 0/15/30/45: на «круглых» минутах уже стоят
+    # выгрузка лидов по источникам (x:10) и другие джобы, и толпиться с ними на
+    # одном коннекте к amoCRM незачем.
+    try:
+        scheduler.add_job(
+            op_funnel_amo_incremental_job,
+            CronTrigger(minute='3,18,33,48', timezone=ZoneInfo('Asia/Almaty')),
+            id='op_funnel_amo_incremental',
+            misfire_grace_time=300,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Маркетинговый мониторинг: инкремент amoCRM и связывание каждые 15 минут")
+    except Exception:
+        logging.exception("Маркетинговый мониторинг: планировщик НЕ подключён")
 
     # Обзвон фронт-офиса: отчёт за прошедшие сутки утром (задача #159).
     # Данные тянем только если кто-то подписан — см. саму джобу.

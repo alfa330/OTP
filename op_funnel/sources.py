@@ -562,6 +562,58 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
     return leads, stage_names, users, loss_reasons, contact_phones
 
 
+def fetch_amo_changed_leads(since_epoch, client=None):
+    """Сделки воронки «Отдел продаж», ИЗМЕНИВШИЕСЯ с момента `since_epoch` (unix-время).
+
+    Момент — числом секунд, а не datetime: у процесса часы UTC+5, у базы UTC, у
+    amoCRM unix — и naive datetime на этой границе уже промахивался на пять
+    часов. Unix-время одинаково у всех троих.
+
+    Основа выгрузки раз в 15 минут (ТЗ #317, раздел 4: «не реже 1 раза в
+    15 мин»). Фильтр по `updated_at` даёт ровно то, что поменялось, а не 86
+    страниц всей воронки: полный проход идёт 85–130 секунд и в 13% прогонов
+    amoCRM рвёт его на середине — гонять такое каждые четверть часа нельзя.
+
+    Возвращает то же, что fetch_amo_sales_leads: (сделки, этапы, пользователи,
+    причины, телефоны контактов). Телефоны нужны — новая сделка без них не
+    свяжется ни с одним разговором.
+    """
+    from amocrm import leads as amo_leads  # локально: модуль читает окружение на импорте
+
+    client = client or amo_leads.AmoClient()
+    stage_names = load_amo_stage_names(client)
+    users = load_amo_users(client)
+    loss_reasons = load_amo_loss_reasons(client)
+
+    url = '/api/v4/leads'
+    params = {
+        'limit': _AMO_PAGE_LIMIT,
+        'page': 1,
+        'with': 'loss_reason,contacts',
+        'filter[pipeline_id]': AMO_SALES_PIPELINE_ID,
+        'filter[updated_at][from]': int(since_epoch),
+        'order[updated_at]': 'asc',
+    }
+    leads = []
+    while True:
+        data = client.get(url, params)
+        if not data:
+            break
+        page = ((data or {}).get('_embedded') or {}).get('leads') or []
+        if not page:
+            break
+        leads.extend(page)
+        next_url = ((data.get('_links') or {}).get('next') or {}).get('href')
+        if not next_url:
+            break
+        url, params = next_url, None
+    contact_ids = {cid for lead in leads for cid in _amo_contact_ids(lead)}
+    contact_phones = load_amo_contact_phones(client, contact_ids)
+    log.info('op_funnel: amoCRM отдал %d изменившихся сделок с %s',
+             len(leads), datetime.fromtimestamp(int(since_epoch)).strftime('%d.%m %H:%M'))
+    return leads, stage_names, users, loss_reasons, contact_phones
+
+
 # ── «Верификатор» / Wazzup ───────────────────────────────────────────────────
 
 # Больше этого разрыв между входящим и ответом считаем новым обращением, а не

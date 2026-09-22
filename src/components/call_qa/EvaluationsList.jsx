@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import DealBadge from './DealBadge';
 import axios from 'axios';
 import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, ChevronDown, PhoneIncoming, Search } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge, scoreTone } from '../ui/ios';
@@ -242,6 +243,7 @@ export default function EvaluationsList(props) {
                                             из АТС
                                         </IosBadge>
                                     )}
+                                    <DealBadge deal={m.deal} />
                                 </div>
                                 {/* Две даты — разные: когда состоялся разговор и
                                     когда его оценил ИИ. Фильтр по периоду считает

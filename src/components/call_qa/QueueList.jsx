@@ -1,4 +1,5 @@
 import React from 'react';
+import DealBadge from './DealBadge';
 import {
     ShieldAlert, Clock, Server, Volume1, ImageOff, CheckCircle2, Sparkles,
     RotateCcw, MessageSquare, PhoneCall, Users,
@@ -94,6 +95,7 @@ export default function QueueList({ items, onOpen }) {
                                         <RotateCcw size={11} aria-hidden="true" />устарела
                                     </IosBadge>
                                 )}
+                                <DealBadge deal={c.deal} />
                             </div>
                             {/* Направление ушло в подпись: в строке остаются только метки,
                                 по которым выбирают, что смотреть. */}

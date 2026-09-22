@@ -12,6 +12,8 @@
  * значение здесь и там значит «фильтра нет», а не «показать пусто».
  */
 
+const isSet = (value) => value !== null && value !== undefined && value !== '';
+
 /** Ничего не отобрано. Именно этот объект — «чистое» состояние панели. */
 export const EMPTY_FILTERS = {
     date_from: '',
@@ -23,6 +25,52 @@ export const EMPTY_FILTERS = {
     score_min: '',
     score_max: '',
     q: '',
+    /* Маркетинговые оси (ТЗ #317, ФТ-05…ФТ-10). Зеркало call_qa/marketing/filters.py.
+       Списки — массивами кодов/значений; «Не определено» — код NONE_BUCKET. */
+    parks: [],
+    channels: [],
+    campaigns: [],
+    stages: [],
+    stage_mode: '',     // '' (текущий) | 'at_call' — этап на момент разговора
+    reasons: [],
+    handler_ids: [],
+    handler_group_ids: [],
+    handler_mode: '',   // '' (говорил) | 'crm' — ответственный в amoCRM
+    deal_id: '',
+};
+
+/* «Не определено» / «Причина не указана» — отдельная корзина, не пустой фильтр:
+   у 60% сделок парк пуст, и без корзины самая большая группа лидов исчезала бы
+   из любого разреза. Значение то же, что у сервера (mkt.NONE_BUCKET). */
+export const NONE_BUCKET = 'none';
+
+/* Оси, которые считает маркетинговый модуль. По этому списку и панель, и
+   параметры, и чипы понимают, что относится к маркетингу, — а не по
+   перечислению имён в трёх местах. */
+export const MARKETING_LIST_KEYS = ['parks', 'channels', 'campaigns', 'stages', 'reasons',
+                                    'handler_ids', 'handler_group_ids'];
+
+/* Этап группы «Закрыто-нереализовано» — по нему ФТ-09 включает причину отказа.
+   Маркеры те же, что в call_qa/marketing/filters.py (LOST_STAGE_MARKERS): гашение
+   контрола на клиенте и отказ сервера обязаны совпадать, иначе панель разрешала
+   бы отбор, который сервер отвергает. */
+const LOST_STAGE_MARKERS = ['закрыто и не реализовано', 'закрыто-нереализовано',
+                            'закрыто не реализовано'];
+export const isLostStage = (value) => {
+    const text = String(value || '').trim().toLowerCase();
+    return LOST_STAGE_MARKERS.some((marker) => text.includes(marker));
+};
+
+/** Причина отказа доступна, только когда среди этапов есть «Закрыто-нереализовано». */
+export const reasonsAllowed = (filters) => ((filters || EMPTY_FILTERS).stages || []).some(isLostStage);
+
+const listOf = (value) => (Array.isArray(value) ? value.filter((item) => item !== null
+    && item !== undefined && String(item) !== '') : []);
+
+/** Есть ли хоть одна маркетинговая ось в отборе. */
+export const hasMarketingFilters = (filters) => {
+    const f = filters || EMPTY_FILTERS;
+    return MARKETING_LIST_KEYS.some((key) => listOf(f[key]).length > 0) || isSet(f.deal_id);
 };
 
 /* Группа «без группы» — не пустой фильтр, а отдельная корзина: у части звонков
@@ -30,8 +78,6 @@ export const EMPTY_FILTERS = {
  * пункта такие строки просто пропадали бы из любого разреза по группам. Значение
  * строковое, потому что id у корзины быть не может. */
 export const NO_GROUP = 'none';
-
-const isSet = (value) => value !== null && value !== undefined && value !== '';
 
 /** Сколько фильтров отобрано — число на кнопке «Фильтры». Период считается ОДНИМ. */
 export const countActiveFilters = (filters) => {
@@ -44,6 +90,14 @@ export const countActiveFilters = (filters) => {
     if (isSet(f.reviewed)) count += 1;
     if (isSet(f.score_min) || isSet(f.score_max)) count += 1;
     if (isSet(f.q)) count += 1;
+    /* Маркетинг: канал с кампаниями — ОДИН фильтр (кампания — второй уровень
+       канала), «кто обрабатывал» с группами — один, этап с режимом — один. */
+    if (listOf(f.parks).length) count += 1;
+    if (listOf(f.channels).length || listOf(f.campaigns).length) count += 1;
+    if (listOf(f.stages).length) count += 1;
+    if (listOf(f.reasons).length) count += 1;
+    if (listOf(f.handler_ids).length || listOf(f.handler_group_ids).length) count += 1;
+    if (isSet(f.deal_id)) count += 1;
     return count;
 };
 
@@ -62,6 +116,18 @@ export const filtersToParams = (filters) => {
     if (isSet(f.score_min)) params.score_min = f.score_min;
     if (isSet(f.score_max)) params.score_max = f.score_max;
     if (isSet(f.q)) params.q = String(f.q).trim();
+    /* Списки уходят МАССИВАМИ: axios сериализует их повторённым параметром, и
+       сервер читает getlist. Склеивать через запятую нельзя — имена этапов и
+       причин сами содержат запятые («Нет авто (не цел), аренда»). */
+    MARKETING_LIST_KEYS.forEach((key) => {
+        const values = listOf(f[key]).map(String);
+        if (values.length) params[key] = values;
+    });
+    // Режимы имеют смысл только при выбранных значениях — как и на сервере.
+    if (listOf(f.stages).length && f.stage_mode === 'at_call') params.stage_mode = 'at_call';
+    if ((listOf(f.handler_ids).length || listOf(f.handler_group_ids).length)
+        && f.handler_mode === 'crm') params.handler_mode = 'crm';
+    if (isSet(f.deal_id)) params.deal_id = String(f.deal_id).trim();
     return params;
 };
 
@@ -137,6 +203,54 @@ export const activeFilterChips = (filters, options = {}) => {
     }
     if (isSet(f.q)) {
         add('q', 'Поиск', f.q, patch({ q: '' }));
+    }
+
+    /* Маркетинг. Подписи — из справочника модуля (options.marketing); без него
+       чип показывает код, и это лучше, чем пустой чип. Несколько значений одной
+       оси — ОДИН чип «TikTok, OLX»: по чипу на значение панель превращалась бы в
+       облако тегов, а снимается ось всё равно целиком. */
+    const marketing = options.marketing || {};
+    const titleOf = (list, code, fallback) => {
+        const found = (list || []).find((item) => String(item.code ?? item.value ?? item.id) === String(code));
+        return found ? (found.title || found.name || found.value) : (code === NONE_BUCKET ? fallback : code);
+    };
+    const joined = (values) => values.join(', ');
+    const parks = listOf(f.parks);
+    if (parks.length) {
+        add('parks', 'Таксопарк', joined(parks.map((code) => titleOf(marketing.parks, code, 'не определён'))),
+            patch({ parks: [] }));
+    }
+    const channels = listOf(f.channels);
+    const campaigns = listOf(f.campaigns);
+    if (channels.length || campaigns.length) {
+        const parts = channels.map((code) => titleOf(marketing.channels, code, 'не определён'));
+        if (campaigns.length) parts.push(...campaigns);
+        add('channels', 'Канал', joined(parts), patch({ channels: [], campaigns: [] }));
+    }
+    const stages = listOf(f.stages);
+    if (stages.length) {
+        const name = f.stage_mode === 'at_call' ? 'Этап на момент разговора' : 'Этап';
+        // Снятие этапов снимает и причину: без этапа «Закрыто-нереализовано»
+        // причина недопустима (ФТ-09), и сервер отверг бы такой отбор.
+        add('stages', name, joined(stages), patch({ stages: [], stage_mode: '', reasons: [] }));
+    }
+    const reasons = listOf(f.reasons);
+    if (reasons.length) {
+        add('reasons', 'Причина', joined(reasons.map((code) => (code === NONE_BUCKET ? 'не указана' : code))),
+            patch({ reasons: [] }));
+    }
+    const handlers = listOf(f.handler_ids);
+    const handlerGroups = listOf(f.handler_group_ids);
+    if (handlers.length || handlerGroups.length) {
+        const people = handlers.map((id) => titleOf(marketing.handlers, id, '')
+            || nameOf(operators, id) || `#${id}`);
+        const groupNames = handlerGroups.map((id) => nameOf(groups, id) || `#${id}`);
+        add('handlers', f.handler_mode === 'crm' ? 'Ответственный' : 'Говорил',
+            joined([...people, ...groupNames]),
+            patch({ handler_ids: [], handler_group_ids: [], handler_mode: '' }));
+    }
+    if (isSet(f.deal_id)) {
+        add('deal', 'Сделка', `№ ${f.deal_id}`, patch({ deal_id: '' }));
     }
     return chips;
 };

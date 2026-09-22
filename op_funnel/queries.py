@@ -537,6 +537,65 @@ def upsert_leads(cursor, rows, page=1000):
     return written
 
 
+def log_lead_stages(cursor, rows, page=500):
+    """Дописать в журнал этапов только ИЗМЕНИВШИЕСЯ сделки.
+
+    Журнал (`op_funnel_lead_stages`) — единственный источник ответа на вопрос
+    «на каком этапе была сделка в момент разговора»: в amoCRM истории нет вовсе.
+    Его читает «Маркетинговый мониторинг» (ТЗ #317, ФТ-08).
+
+    Пишем не всё подряд, а разницу с последней записанной строкой сделки:
+    выгрузка раз в 15 минут по 16 тысячам сделок иначе дала бы полтора миллиона
+    строк в сутки, из которых 99% — копии предыдущей. Сравнение делает сам
+    Postgres (LATERAL на последнюю строку + IS DISTINCT FROM), одним оператором
+    на пачку: построчный INSERT на полном ночном прогоне — это 16 тысяч
+    round-trip'ов подряд.
+
+    Возвращает число дописанных строк. Считаем по страницам и складываем:
+    `execute_values` отдаёт rowcount только последней страницы, и на пачке
+    больше page строк итог был бы занижен.
+    """
+    if not rows:
+        return 0
+    # Дубли внутри пачки: одна сделка приезжает и на своей странице, и на
+    # следующей (см. upsert_leads). Оставляем последнюю версию — она свежее.
+    unique = {}
+    for row in rows:
+        key = (row.get('source'), str(row.get('lead_key') or ''))
+        if key[1]:
+            unique[key] = row
+    items = [
+        (row.get('source'), str(row.get('lead_key')),
+         row.get('stage_raw') or '', row.get('reason_raw') or '')
+        for row in unique.values()
+    ]
+    written = 0
+    for start in range(0, len(items), page):
+        chunk = items[start:start + page]
+        values = ', '.join(['(%s, %s, %s, %s)'] * len(chunk))
+        args = [field for item in chunk for field in item]
+        cursor.execute(
+            """
+            INSERT INTO op_funnel_lead_stages (source, lead_key, stage_raw, reason_raw)
+            SELECT v.source, v.lead_key, v.stage_raw, v.reason_raw
+              FROM (VALUES %s) AS v(source, lead_key, stage_raw, reason_raw)
+              LEFT JOIN LATERAL (
+                  SELECT s.stage_raw, s.reason_raw
+                    FROM op_funnel_lead_stages s
+                   WHERE s.source = v.source AND s.lead_key = v.lead_key
+                   ORDER BY s.seen_at DESC
+                   LIMIT 1
+              ) prev ON TRUE
+             WHERE prev.stage_raw IS DISTINCT FROM v.stage_raw
+                OR prev.reason_raw IS DISTINCT FROM v.reason_raw
+            ON CONFLICT (source, lead_key, seen_at) DO NOTHING
+            """ % values,
+            args,
+        )
+        written += max(0, cursor.rowcount or 0)
+    return written
+
+
 _LEAD_CONTACT_COLUMNS = ('phone', 'phones', 'tags', 'utm_source', 'lead_type', 'registered')
 
 
@@ -1135,11 +1194,18 @@ def finish_run(cursor, run_id, status='ok', error=None, **counters):
     )
 
 
-def read_runs(cursor, direction_code=None, limit=20):
-    where, args = '', {'limit': int(limit)}
+def read_runs(cursor, direction_code=None, limit=20, include_incremental=False):
+    """Журнал прогонов. Инкременты amoCRM (раз в 15 минут, note='incremental')
+    по умолчанию скрыты: 96 строк в сутки вытеснили бы ночные прогоны из окна
+    на двадцать записей, и «почему цифры не обновились» снова отвечалось бы
+    логами Render."""
+    clauses, args = [], {'limit': int(limit)}
     if direction_code:
-        where = ' WHERE direction_code = %(direction)s'
+        clauses.append('direction_code = %(direction)s')
         args['direction'] = direction_code
+    if not include_incremental:
+        clauses.append("COALESCE(note, '') <> 'incremental'")
+    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
     cursor.execute(
         """
         SELECT r.*, u.name AS started_by_name
