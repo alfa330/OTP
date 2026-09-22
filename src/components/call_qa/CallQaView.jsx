@@ -7,6 +7,9 @@ import {
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
+/* Высота открытой карточки — счётом до низа видимой области, а не константой
+   `calc(100vh-N)`: арифметика общая с «Обращениями» и «Лидами OLX». */
+import { fitHeight, measureShell } from '../crm/layout';
 import { canPullCalls, SUBJECT_FAMILY_CALLS, SUBJECT_FAMILY_CHATS } from './subjects';
 import CallReviewCard from './CallReviewCard';
 import QaDashboard from './QaDashboard';
@@ -163,6 +166,34 @@ export default function CallQaView(props) {
     const callRequest = useRef({ id: 0, controller: null });
     const queueRequest = useRef({ id: 0, controller: null });
     const returnFocus = useRef(null);
+
+    /* Открытая карточка занимает экран до низа: две её колонки (запись с
+       транскриптом и оценка) прокручиваются независимо, а страница — нет.
+       Высота считается от прокрутчика портала (.main-content) и пересчитывается
+       при изменении размеров; на телефоне (уже lg) высоту не навязываем —
+       там одна колонка, и страница едет как прежде. */
+    const reviewShellRef = useRef(null);
+    const [shellHeight, setShellHeight] = useState(null);
+    useEffect(() => {
+        const node = reviewShellRef.current;
+        if (!selected || !node || typeof window === 'undefined') { setShellHeight(null); return undefined; }
+        const wide = window.matchMedia('(min-width: 1024px)');
+        const recompute = () => {
+            if (!wide.matches) { setShellHeight(null); return; }
+            setShellHeight(fitHeight(measureShell(node)));
+        };
+        recompute();
+        const scroller = node.closest('.main-content');
+        const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(recompute) : null;
+        if (observer && scroller) observer.observe(scroller);
+        window.addEventListener('resize', recompute);
+        wide.addEventListener?.('change', recompute);
+        return () => {
+            observer?.disconnect();
+            window.removeEventListener('resize', recompute);
+            wide.removeEventListener?.('change', recompute);
+        };
+    }, [selected]);
 
     const changeTab = (nextTab) => {
         if (nextTab === tab) return;
@@ -553,8 +584,9 @@ export default function CallQaView(props) {
             )}
 
             {selected ? (
-                <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-2">
+                <div ref={reviewShellRef} className="flex flex-col gap-3"
+                     style={shellHeight ? { height: shellHeight } : undefined}>
+                    <div className="flex shrink-0 items-center justify-between gap-2">
                         <button type="button" onClick={requestCloseCall} disabled={reviewInteraction.busy}
                             className={`${iosBtnGhost} disabled:cursor-not-allowed disabled:opacity-50`}>
                             <ChevronLeft size={16} />Назад
@@ -582,6 +614,7 @@ export default function CallQaView(props) {
                             </div>
                         )}
                     </div>
+                    <div className="min-h-0 lg:flex-1">
                     {callPending ? (
                         <AudioPendingCard pending={callPending} subject={selected} polling={callLoading}
                                           onRetry={() => openCall(selected, false, { poll: true })}
@@ -598,6 +631,7 @@ export default function CallQaView(props) {
                                         onSaveMine={saveMyReview} canCorrectJournal={canCorrectJournal}
                                         onInteractionChange={setReviewInteraction} />
                     )}
+                    </div>
                 </div>
             ) : (
                 <div role="tabpanel" id={`qa-panel-${tab}`} aria-labelledby={`qa-tab-${tab}`}>

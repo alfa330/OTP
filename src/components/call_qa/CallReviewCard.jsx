@@ -677,9 +677,18 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
     const showMyBadge = myReview?.score != null && !(journal && journal.is_mine);
 
     return (
-        <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:grid-cols-[1.05fr_1fr]">
-            <div className="min-w-0 space-y-3">
-                <div className={`${iosCard} p-4`}>
+        /* На широком экране карточка занимает всю высоту, отданную контейнером
+           (CallQaView меряет её до низа видимой области), и две колонки
+           прокручиваются НЕЗАВИСИМО: слева запись с транскриптом, справа —
+           оценка. Раньше скроллилась вся страница, и, дойдя до последних
+           критериев, человек терял и плеер, и начало транскрипта. Скролл у
+           колонок свой, тонкий (thin-scroll) и без рамок: рамки есть у
+           карточек внутри, вторая вокруг области прокрутки была бы шумом. На
+           телефоне колонка одна, и страница едет как прежде — там `lg:`-классы
+           не действуют, а sticky-панели держатся за прокрутчик страницы. */
+        <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[1.05fr_1fr]">
+            <div className="flex min-w-0 flex-col gap-3 lg:min-h-0">
+                <div className={`${iosCard} shrink-0 p-4`}>
                     <div className="flex items-start justify-between gap-3">
                         <div>
                             <div className="flex items-center gap-2">
@@ -744,14 +753,19 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                     <EvaluationMeta evaluation={call.evaluation} />
                 </div>
 
-                <div className={`${iosCard} flex max-h-[60vh] flex-col p-0`}>
-                    <div className="border-b border-slate-100 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                {/* Транскрипт без карточки-рамки: реплики лежат прямо на фоне, как в
+                    мессенджере, а прокручивается только их область. На широком
+                    экране она добирает всю оставшуюся высоту колонки, на телефоне
+                    ограничена 60vh, чтобы страница не превращалась в один транскрипт. */}
+                <div className="flex min-h-0 flex-1 flex-col">
+                    <div className="px-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                         {isChat ? 'Переписка · эпизод' : 'Транскрипт · диаризация'}
                     </div>
                     {chatSnapshot ? (
-                        <ChatThread snapshot={chatSnapshot} quotes={[]} className="rounded-b-2xl" />
+                        <ChatThread snapshot={chatSnapshot} quotes={[]}
+                                    className="thin-scroll max-h-[60vh] rounded-2xl lg:max-h-none" />
                     ) : (
-                        <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3" tabIndex={0}
+                        <div className="thin-scroll max-h-[60vh] min-h-0 flex-1 space-y-2 overflow-y-auto px-1 py-1 lg:max-h-none lg:pr-2" tabIndex={0}
                              aria-label={isChat ? 'Переписка эпизода' : 'Транскрипт звонка'}>
                             {(call.transcript || []).length > 0
                                 ? call.transcript.map((l, i) => <TranscriptLine key={i} line={l} onSeek={call.audio_url ? seekAudio : undefined} />)
@@ -762,7 +776,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                                   </div>}
                         </div>
                     )}
-                    <div className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-500">
+                    <div className="shrink-0 px-1 pt-2 text-[11px] text-slate-500">
                         {isChat
                             ? 'Фото открываются в лайтбоксе, голосовые — плеером; под ними серым — транскрипт/описание, которые видела модель.'
                             : (<><mark className="rounded bg-amber-100 px-1 text-amber-800">жёлтым</mark> — где ИИ не уверен в распознавании (не учитывается против оператора)</>)}
@@ -770,7 +784,11 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                 </div>
             </div>
 
-            <div className="flex min-w-0 flex-col">
+            {/* Правая колонка — свой прокрутчик на широком экране: липкие панели
+                (переключатель ИИ/Моя оценка сверху, действия снизу) держатся за
+                него, а не за страницу. overflow-x спрятан: подсказки «i» у правого
+                края иначе дали бы горизонтальную полосу. */}
+            <div className="thin-scroll flex min-w-0 flex-col lg:min-h-0 lg:overflow-y-auto lg:overflow-x-hidden lg:pr-1.5">
                 <div className="mobile-sticky-top sticky top-0 z-10 mb-2 rounded-2xl bg-white/95 px-2.5 py-2 ring-1 ring-slate-200/70 backdrop-blur-xl">
                     <div className="flex items-center justify-between gap-2">
                         <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
