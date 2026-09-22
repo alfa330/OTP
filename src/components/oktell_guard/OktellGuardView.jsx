@@ -6,6 +6,7 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosBadge, IosHint, IosModal, IosSection, IosToggle,
 } from '../ui/ios';
+import { startFileDownload } from '../../utils/fileDownload';
 
 /*
  * Раздел «Ограничитель Перезвона».
@@ -251,10 +252,12 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
         }
     }, [request, selected, bulkThreshold, bulkEnabled, loadAll]);
 
+    // Ссылку берём свежей по нажатию (подписана на час) и отдаём браузеру в этом
+    // же окне — почему не новая вкладка, см. шапку utils/fileDownload.js.
     const downloadAgent = useCallback(async () => {
         try {
             const data = await request('/download');
-            window.open(data.url, '_blank', 'noopener');
+            startFileDownload(data?.url);
         } catch (error) {
             toast(error.message, 'error');
         }

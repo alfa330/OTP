@@ -48,6 +48,7 @@
     "test:assistant-orb": "node --test tests/assistant_orb_position.test.mjs",
     "test:assistant-scroll": "node --test tests/assistant_thread_scroll.test.mjs",
     "test:pip-window": "node --test tests/pip_window.test.mjs",
+    "test:file-download": "node --test tests/file_download.test.mjs",
     "test:wiki-office-schedule": "node --test tests/wiki_office_schedule.test.mjs",
     "test:wiki-office-day": "node --test tests/wiki_office_day_status.test.mjs",
     "test:wiki-park-points": "node --test tests/wiki_park_points.test.mjs",

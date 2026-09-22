@@ -110,6 +110,7 @@ import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh, watchAuthTokensFromOtherTabs } from './utils/authRefresh';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
+import { startFileDownload } from './utils/fileDownload';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 import {
     WIKI_SPACE_QUERY_PARAM, WIKI_TAB_QUERY_PARAM,
@@ -457,7 +458,6 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     fleet_edm: [],
     driver_mailings: [],
     download_icore_phone: ['op', 'tez'],
-    download_oktell: ['szov'],
     // Обучение
     trainings: ['szov', 'op'],
     voice_trainer: ['szov'],
@@ -1160,8 +1160,10 @@ const emitAppToast = (message, type = 'info') => {
 };
 
 // Скачать программу телефона. Ссылка на файл в GCS подписана на час, поэтому её
-// нельзя держать в разметке — берём свежую в момент нажатия. Состояния компонента
-// намеренно не завожу: пункт есть у всех ролей и живёт в общем хвосте меню.
+// нельзя держать в разметке — берём свежую в момент нажатия и отдаём браузеру
+// в этом же окне (почему не новая вкладка — в шапке utils/fileDownload.js).
+// Состояния компонента намеренно не завожу: пункт объявлен один раз в общем
+// хвосте меню, вне ролевых ветвей.
 const downloadIcorePhone = async () => {
     try {
         const resp = await fetch(`${API_BASE_URL}/api/phone/download`, {
@@ -1170,30 +1172,9 @@ const downloadIcorePhone = async () => {
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-        if (!data?.url) throw new Error('Сервер не вернул ссылку');
-        window.open(data.url, '_blank', 'noopener');
+        startFileDownload(data?.url);
     } catch (error) {
         emitAppToast(`Не удалось скачать iCORE Phone: ${error.message}`, 'error');
-    }
-};
-
-// Скачать программу Oktell (тот самый агент-ограничитель). Ссылку берём свежей
-// по нажатию не только из-за часа жизни подписи: в ИМЯ файла сервер вкладывает
-// личный токен сотрудника, и держать её в разметке нельзя тем более. Сотрудник
-// запускает файл двойным кликом — программа ставит себя сама и создаёт ярлык
-// «Oktell», больше от него ничего не требуется.
-const downloadOktellAgent = async () => {
-    try {
-        const resp = await fetch(`${API_BASE_URL}/api/oktell_guard/download`, {
-            credentials: 'include',
-            headers: withAccessTokenHeader(),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-        if (!data?.url) throw new Error('Сервер не вернул ссылку');
-        window.open(data.url, '_blank', 'noopener');
-    } catch (error) {
-        emitAppToast(`Не удалось скачать Oktell: ${error.message}`, 'error');
     }
 };
 
@@ -2291,25 +2272,6 @@ const canAccessOktellGuardForUser = (userLike) => {
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isOktellGuardDepartmentHead(userLike)) return true;
     return isSupervisorRole(role)
-        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
-            === OKTELL_GUARD_DEPARTMENT_CODE;
-};
-
-/* «Скачать Oktell» — программа-ограничитель на машину оператора СЗоВ. Решение
-   владельца 07.09.2026: пункт стоит у КАЖДОГО оператора отдела, ровно как
-   «Скачать iCore Phone» у ОП и Тез КЦ. Поэтому круг здесь ШИРЕ, чем у самого
-   раздела: настройки и отчёт оператору не нужны, а программа нужна.
-
-   Роли — те же, что показывает вкладка «Сотрудники» ограничителя (AGENT_USER_ROLES
-   в oktell_guard/access.py). Решающая проверка живёт там же, в can_download_agent:
-   спрятанный пункт меню доступом не является. Оба правила сверяет тест
-   tests/test_oktell_guard_wiring.py — половинчатая правка здесь ломается молча,
-   как уже было со СВ (кнопка есть, ручка отвечает 403). */
-const OKTELL_AGENT_USER_ROLES = new Set(['operator', 'trainee']);
-
-const canDownloadOktellAgentForUser = (userLike) => {
-    if (canAccessOktellGuardForUser(userLike)) return true;
-    return OKTELL_AGENT_USER_ROLES.has(normalizeRole(userLike?.role))
         && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
             === OKTELL_GUARD_DEPARTMENT_CODE;
 };
@@ -41604,9 +41566,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // роль и режет периметр отделом, ровно как у табло СЗоВ. СВ раздел
             // ЧИТАЕТ, но не правит: правку гасит can_manage с бэкенда.
             const canAccessOktellGuard = canAccessOktellGuardForUser(user);
-            // «Скачать Oktell»: каждый оператор СЗоВ плюс круг самого раздела.
-            // Решающая проверка — can_download_agent в oktell_guard/access.py.
-            const canDownloadOktellAgent = canDownloadOktellAgentForUser(user);
             // «Провайдер ЭДО»: админы и глава СЗоВ (см. canAccessFleetEdmForUser).
             const canAccessFleetEdm = canAccessFleetEdmForUser(user);
             // «Рассылки»: супер-админы и поимённый список (см. canAccessDriverMailingsForUser).
@@ -53005,11 +52964,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderDividerIfInner(
                                         isSuperAdmin && deptAllowsInner('voice_trainer'),
                                         canDownloadIcorePhone && deptAllowsInner('download_icore_phone'),
-                                        /* canDownloadOktellAgent здесь НЕТ намеренно: «Скачать Oktell»
-                                           стоит самым последним пунктом меню, в нижнем блоке. Пока
-                                           условие висело тут, у каждого оператора СЗоВ (а им программа
-                                           выдана поимённо всем) черта рисовалась над ПУСТЫМ блоком —
-                                           две линии подряд перед «Ивентами». */
                                     )}
 
                                     {/* Тренажёр и программы на машину сотрудника. */}
@@ -53037,12 +52991,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {/* «Скачать iCore Phone» — программа телефона сотруднику.
                                         Только отделы продаж и Тез КЦ, а также админы: раздаётся он там.
                                         Названо именем самой программы, а не «телефон»: у СЗоВ
-                                        рядом стоит «Скачать Oktell», и два безымянных «телефона»
-                                        в одном меню человек различить не сможет.
+                                        телефон — веб-клиент Oktell, и безымянный «телефон» в меню
+                                        читался бы как общий для всех отделов.
                                         Объявлен ОДИН раз в общей части меню, а не по ролевым
                                         ветвям. Это не переход в раздел, а действие: ссылка на
                                         файл в GCS подписана на час, поэтому берётся свежей по
-                                        нажатию. Само ограничение проверяет бэкенд. */}
+                                        нажатию и отдаётся браузеру в этом же окне. Само
+                                        ограничение проверяет бэкенд. */}
                                     {canDownloadIcorePhone && (
                                     <SidebarDeptScope section="download_icore_phone" activeCode={activeDeptCode}>
                                         <li>
@@ -53083,7 +53038,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
 
                                     {/* Нижний блок — то, что открывают от случая к случаю: общая лента
-                                        компании, личное и установка телефона. Черта безусловная: «Ивенты»
+                                        компании и личное. Черта безусловная: «Ивенты»
                                         открыты всем ролям, поэтому блок не бывает пустым. */}
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
@@ -53128,25 +53083,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-envelope-open-text"></FaIcon> <span className="sidebar-text">{'Письмо от модера'}</span>
                                             </button>
                                         </li>
-                                    )}
-
-                                    {/* «Скачать Oktell» — то же действие для СЗоВ: их телефон
-                                        это веб-клиент Oktell, а вместе с ним ставится и
-                                        ограничитель «Перезвона». Круг шире раздела —
-                                        каждый оператор отдела (can_download_agent на бэкенде). */}
-                                    {canDownloadOktellAgent && (
-                                    <SidebarDeptScope section="download_oktell" activeCode={activeDeptCode}>
-                                        <li>
-                                            <button
-                                                type="button"
-                                                onClick={downloadOktellAgent}
-                                                className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
-                                            >
-                                                <FaIcon className="fas fa-download"></FaIcon>
-                                                <span className="sidebar-text">Скачать Oktell</span>
-                                            </button>
-                                        </li>
-                                    </SidebarDeptScope>
                                     )}
 
                                 </ul>

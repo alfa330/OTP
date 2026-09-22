@@ -7,6 +7,7 @@ import {
     IosBadge, IosModal, IosToggle, IosSegmented,
 } from '../ui/ios';
 import { departmentCodeUsesOktellCabinet } from '../../utils/departmentViews';
+import { startFileDownload } from '../../utils/fileDownload';
 
 /*
  * Раздел «Настройки SIP» (iCORE Phone).
@@ -1153,7 +1154,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     };
 
     // Ссылка на файл подписана на час, поэтому в разметке её держать нельзя:
-    // берём свежую в момент нажатия и сразу открываем.
+    // берём свежую в момент нажатия и отдаём браузеру в этом же окне (почему
+    // не новая вкладка — в шапке utils/fileDownload.js).
     const downloadPhone = async () => {
         setDownloading(true);
         try {
@@ -1163,7 +1165,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-            window.open(data.url, '_blank', 'noopener');
+            startFileDownload(data?.url);
         } catch (e) {
             showToastRef.current?.(`Не удалось скачать: ${e.message}`, 'error');
         } finally {

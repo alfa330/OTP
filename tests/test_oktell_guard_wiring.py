@@ -99,53 +99,49 @@ class OktellGuardWiringTests(unittest.TestCase):
         checkbox = re.search(r'\{canManage && \(\s*<input\s*type="checkbox"', self.view)
         self.assertIsNotNone(checkbox, 'галочка строки должна быть под canManage')
 
-    # --- «Скачать Oktell»: круг шире раздела -------------------------------
+    # --- «Скачать Oktell»: пункта в меню больше нет ------------------------
     #
-    # Ровно тот класс правки, который здесь уже ломался молча: гейт живёт в двух
-    # местах, и без бэкенда кнопка есть, а ручка отвечает 403 (а тоста в основном
-    # бандле не будет вовсе — window.showToast там никто не задаёт).
+    # С 07.09 по 22.09.2026 пункт стоял у каждого оператора СЗоВ, и его гейт жил
+    # в двух местах — во фронте и в access.can_download_agent. 22.09.2026
+    # владелец пункт убрал: им не пользуются, агент ставится на машины
+    # централизованно (MSI через групповую политику), а не скачиванием из меню.
+    # Ручка /download осталась: в неё ходит кнопка «Скачать агента» в самом
+    # разделе. Проверяем обе половины: в меню нет ни пункта, ни его обвязки, а
+    # ручка и её круг — на месте.
 
-    def download_gate(self):
-        return self.app.split('const canDownloadOktellAgentForUser')[1].split('};')[0]
+    def test_oktell_download_item_is_gone_from_the_menu(self):
+        """Убрано целиком, а не спрятано: без гейта, обработчика и строки в
+        карте отделов. Мёртвый гейт читался бы как действующее правило, а
+        строка карты без пункта валит sidebar_department_filter.test.mjs."""
+        self.assertNotIn('Скачать Oktell', self.app)
+        for token in ('downloadOktellAgent', 'canDownloadOktellAgent',
+                      'OKTELL_AGENT_USER_ROLES', 'download_oktell',
+                      '/api/oktell_guard/download'):
+            self.assertNotIn(token, self.app, token)
 
-    def test_download_roles_match_the_backend(self):
-        """Список ролей обязан совпасть буквально: разойдутся — у части
-        операторов пункт есть, а ручка отказывает."""
-        roles = ", ".join("'%s'" % role for role in access.AGENT_USER_ROLES)
-        self.assertIn('const OKTELL_AGENT_USER_ROLES = new Set([%s]);' % roles, self.app)
-
-    def test_download_circle_is_wider_than_the_section(self):
-        """Оператор скачивает, но раздела не видит — на обеих половинах."""
-        gate = self.download_gate()
-        self.assertIn('canAccessOktellGuardForUser(userLike)', gate)
-        self.assertIn('OKTELL_AGENT_USER_ROLES.has(normalizeRole(userLike?.role))', gate)
-        self.assertIn('=== OKTELL_GUARD_DEPARTMENT_CODE', gate)
+    def test_download_handle_keeps_its_own_predicate(self):
+        """Ручка /download и после снятия пункта стоит на can_download_agent:
+        круг не сужали (почему — в access.py), оператор СЗоВ по прямому
+        запросу файл получает, раздела при этом не видит."""
+        routes = (ROOT / 'oktell_guard' / 'routes.py').read_text(encoding='utf-8')
+        self.assertIn("@section_route('/download', gate=access.can_download_agent)", routes)
         operator = {'role': 'operator', 'department_code': 'szov'}
         self.assertTrue(access.can_download_agent(operator))
         self.assertFalse(access.can_view_section(operator))
 
-    def test_download_handle_is_gated_by_its_own_predicate(self):
-        """Ручка /download должна стоять на can_download_agent, иначе оператор
-        видит пункт и получает «Раздел вам не открыт»."""
-        routes = (ROOT / 'oktell_guard' / 'routes.py').read_text(encoding='utf-8')
-        self.assertIn("@section_route('/download', gate=access.can_download_agent)", routes)
+    def test_section_keeps_its_own_download_button(self):
+        """Файл по-прежнему качают из раздела — СВ и глава ставят агента себе и
+        раздают его. Качается в этом же окне (startFileDownload), а не новой
+        вкладкой — см. tests/test_file_download_same_window.py."""
+        self.assertIn("const data = await request('/download');", self.view)
+        self.assertIn('startFileDownload(data?.url)', self.view)
 
-    def test_both_download_items_are_named_by_the_program(self):
-        """Два безымянных «телефона» в одном меню человек не различит: у СЗоВ
-        это Oktell, у ОП и Тез КЦ — iCore Phone."""
-        self.assertEqual(
-            self.app.count('<span className="sidebar-text">Скачать Oktell</span>'), 1)
+    def test_icore_phone_item_is_named_by_the_program(self):
+        """Пункт один и назван именем программы: безымянный «Скачать телефон»
+        читался бы как общий для всех отделов, а у СЗоВ телефон — Oktell."""
         self.assertEqual(
             self.app.count('<span className="sidebar-text">Скачать iCore Phone</span>'), 1)
         self.assertNotIn('<span className="sidebar-text">Скачать телефон</span>', self.app)
-
-    def test_download_item_is_wired_to_its_own_action(self):
-        """Пункт — действие, а не переход: ссылка подписана на час, и в ИМЕНИ
-        файла уезжает личный токен сотрудника."""
-        self.assertIn('onClick={downloadOktellAgent}', self.app)
-        self.assertIn('/api/oktell_guard/download', self.app)
-        self.assertIn('const canDownloadOktellAgent = canDownloadOktellAgentForUser(user);',
-                      self.app)
 
     def test_read_only_screen_explains_itself(self):
         """Погашенное поле без объяснения читается как поломка."""
