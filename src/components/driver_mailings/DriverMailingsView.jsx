@@ -373,6 +373,7 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
     };
 
     const audience = useMemo(() => describeAudience(filters, refs), [filters, refs]);
+    const allParksChosen = parks.length > 12 && (draft.park_ids || []).length === parks.length;
     const draftEmpty = !draft.title && !message && !(draft.park_ids || []).length;
 
     // ── разметка ─────────────────────────────────────────────────────────────
@@ -544,7 +545,15 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
 
                     <div>
                         <div className={iosGroupLabel}>Диспетчерские</div>
-                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {/* «Все» одной плашкой, а не девяносто плашек: в стене
+                            названий глаз не заметит, что выбрано всё, — а это и
+                            есть главное, что надо подтвердить. */}
+                        {allParksChosen ? (
+                            <div className="mt-1.5">
+                                <IosBadge tone="blue">Все диспетчерские аккаунта · {parks.length}</IosBadge>
+                            </div>
+                        ) : (
+                        <div className="thin-scroll mt-1.5 flex max-h-44 flex-wrap gap-1.5 overflow-y-auto">
                             {(draft.park_ids || []).map((id) => {
                                 const park = parks.find((item) => item.id === id);
                                 const row = (count?.by_park || []).find((item) => item.park_id === id);
@@ -556,6 +565,7 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
                                 );
                             })}
                         </div>
+                        )}
                     </div>
 
                     <div>
@@ -568,6 +578,12 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
                     <p className="rounded-xl bg-slate-100 px-3 py-2.5 text-[12px] leading-snug text-slate-600">
                         Сообщение придёт водителям в приложение Pro сразу. Отозвать его можно будет
                         в течение пяти минут — те, кто успел открыть уведомление, его уже увидят.
+                        {/* Отправки идут по одной на диспетчерскую: при десятках
+                            это около минуты, и молчащая кнопка без пояснения
+                            толкает закрыть окно и нажать ещё раз. */}
+                        {(draft.park_ids || []).length > 10 && (
+                            ' Рассылка уходит в диспетчерские по очереди — при таком выборе это около минуты, дождитесь ответа.'
+                        )}
                     </p>
                 </div>
             </IosModal>

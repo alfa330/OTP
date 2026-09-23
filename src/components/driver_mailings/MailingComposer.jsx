@@ -339,6 +339,7 @@ export default function MailingComposer({
         value: park.id,
         label: park.city ? `${park.name} · ${park.city}` : park.name,
     }));
+    const allParksSelected = parks.length > 0 && selectedParks.length === parks.length;
 
     return (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
@@ -410,10 +411,24 @@ export default function MailingComposer({
                     hint={selectedParks.length > 1
                         ? 'Рассылка уйдёт водителям всех выбранных диспетчерских, охват считается суммарно.'
                         : null}
+                    /* С аккаунтом рассылок диспетчерских не пять, а десятки:
+                       щёлкать каждую по одной — это «рассылка по всем» в
+                       девяносто кликов. */
+                    right={parks.length > 1 ? (
+                        <button
+                            type="button"
+                            onClick={() => patch({ park_ids: allParksSelected ? [] : parks.map((park) => park.id) })}
+                            className="rounded-lg px-1.5 py-0.5 text-[11.5px] font-medium text-blue-600 transition hover:bg-blue-50"
+                        >
+                            {allParksSelected ? 'Снять выбор' : `Выбрать все · ${parks.length}`}
+                        </button>
+                    ) : null}
                 >
                     <CustomSelect
                         multiple
                         variant="ios"
+                        searchable={parks.length > 8}
+                        searchPlaceholder="Диспетчерская или город"
                         ariaLabel="Диспетчерские"
                         placeholder="Выберите диспетчерские"
                         value={selectedParks}
@@ -593,11 +608,22 @@ export default function MailingComposer({
                         <div className="mt-2 text-[11.5px] text-rose-600">{countError}</div>
                     )}
 
+                    {/* Кабинет считает охват каждой диспетчерской отдельно, и по
+                        десяткам это до полуминуты. Без пояснения крутящийся
+                        значок выглядит зависшим. */}
+                    {counting && selectedParks.length > 10 && (
+                        <div className="mt-2 text-[11.5px] text-slate-500">
+                            Считаем по {selectedParks.length} {plural(selectedParks.length, 'диспетчерской', 'диспетчерским', 'диспетчерским')} — это до полуминуты.
+                        </div>
+                    )}
+
                     {/* Разбивку прячем на время пересчёта: цифры от ПРЕЖНЕГО
                         набора фильтров рядом с крутящимся итогом читаются как
                         свежие, и человек сверяет охват не с тем, что уйдёт. */}
+                    {/* Высота ограничена: при «Выбрать все» строк десятки, и без
+                        потолка кнопка «Отправить» уезжала бы за край экрана. */}
                     {!countError && !counting && (count?.by_park || []).length > 1 && (
-                        <ul className="mt-2.5 space-y-1 border-t border-slate-100 pt-2.5">
+                        <ul className="thin-scroll mt-2.5 max-h-56 space-y-1 overflow-y-auto border-t border-slate-100 pt-2.5 pr-1">
                             {count.by_park.map((row) => (
                                 <li key={row.park_id} className="flex items-baseline justify-between gap-2 text-[12px]">
                                     <span className="min-w-0 truncate text-slate-500">{row.park_name}</span>

@@ -423,6 +423,24 @@ def mark_target_sent(cursor, mailing_id, park_id, *, fleet_mailing_id=None):
     )
 
 
+def link_target(cursor, mailing_id, park_id, fleet_mailing_id):
+    """Привязать id кабинета к цели, уже отмеченной отправленной.
+
+    Отдельно от mark_target_sent, потому что тот ставит sent_at = NOW(), а от
+    sent_at отсчитывается окно отзыва: повторный вызов после поиска id сдвинул
+    бы окно на время всех остальных отправок, и кнопка «Отозвать» жила бы
+    дольше, чем разрешает кабинет. Уже связанную цель не перезаписываем.
+    """
+    cursor.execute(
+        """
+        UPDATE driver_mailing_targets
+           SET fleet_mailing_id = %s
+         WHERE mailing_id = %s AND park_id = %s AND fleet_mailing_id IS NULL
+        """,
+        (_text(fleet_mailing_id), int(mailing_id), str(park_id or '')),
+    )
+
+
 def mark_target_failed(cursor, mailing_id, park_id, *, error=None, error_code=None):
     """Кабинет отказал. error_code храним отдельно от текста: человеку показывается
     русская фраза, а машинный код (limit_drivers, limit_time, no_permissions)

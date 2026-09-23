@@ -552,7 +552,7 @@ class _FakeCabinet:
     def check(self):
         if _FakeCabinet.check_error:
             raise _FakeCabinet.check_error
-        return {'account': 'mailings@yandextaxi.kz', 'parks_count': len(self.parks_list)}
+        return {'account': 'mailings@example.com', 'parks_count': len(self.parks_list)}
 
     def parks(self):
         if _FakeCabinet.parks_error:
@@ -568,9 +568,38 @@ class _FakeCabinet:
 
     pro_limits = staticmethod(MailingsClient.pro_limits)
 
+    # ── отправка: всё пишется в общий журнал событий по порядку ─────────────
+    events = []
+    expire_on = None        # ('count' | 'send', park_id) — где «протухнуть»
 
-class SessionRouteTests(unittest.TestCase):
-    """Подключение аккаунта рассылок и честные ошибки про его сессию."""
+    def _maybe_expire(self, stage, park_id):
+        if _FakeCabinet.expire_on == (stage, park_id):
+            from fleet_edm.client import FleetSessionExpired
+            raise FleetSessionExpired('протухла')
+
+    def recipients_count(self, park_id, filters):
+        _FakeCabinet.events.append('count:' + park_id)
+        self._maybe_expire('count', park_id)
+        return 100
+
+    def journal_ids(self, park_id):
+        _FakeCabinet.events.append('snap:' + park_id)
+        return {'old-' + park_id}
+
+    def send_mailing(self, park_id, **kwargs):
+        _FakeCabinet.events.append('send:' + park_id)
+        self._maybe_expire('send', park_id)
+
+    def resolve_mailing_id(self, park_id, title, since_iso=None, skip_ids=None,
+                           before_ids=None):
+        _FakeCabinet.events.append('resolve:' + park_id)
+        # Снимок, снятый до отправок, обязан дойти до поиска id.
+        assert before_ids == {'old-' + park_id}, before_ids
+        return 'f-' + park_id
+
+
+class _RouteHarness(unittest.TestCase):
+    """Blueprint раздела на подменённых базе и кабинете."""
 
     def setUp(self):
         from unittest import mock
@@ -593,6 +622,8 @@ class SessionRouteTests(unittest.TestCase):
         _FakeCabinet.check_error = None
         _FakeCabinet.parks_error = None
         _FakeCabinet.created = []
+        _FakeCabinet.events = []
+        _FakeCabinet.expire_on = None
 
         def record(name, result=None):
             def inner(*args, **kwargs):
@@ -600,12 +631,25 @@ class SessionRouteTests(unittest.TestCase):
                 return result() if callable(result) else result
             return inner
 
+        def db_event(name, result=None):
+            # Запись в базу — в тот же журнал, что и кабинет: важен порядок.
+            def inner(cursor, *args, **kwargs):
+                park = kwargs.get('park_id') or (args[1] if len(args) > 1 else '')
+                _FakeCabinet.events.append('db:{}:{}'.format(name, park).rstrip(':'))
+                self.calls.append((name, args, kwargs))
+                return result
+            return inner
+
+        park_rows = [dict(park_id=p['id'], name=p['name'], city=p['city'], is_enabled=True,
+                          max_title=120, max_message=1500, revoke_seconds=300, per_day=30)
+                     for p in _FakeCabinet.parks_list]
+
         patches = [
             mock.patch.object(routes, 'MailingsClient', _FakeCabinet),
             mock.patch.object(queries, 'access_context', lambda cursor, uid: self.requester),
             mock.patch.object(queries, 'load_session', lambda cursor: self.own_row),
             mock.patch.object(queries, 'session_status', lambda cursor: (
-                {'configured': True, 'account': 'mailings@yandextaxi.kz'}
+                {'configured': True, 'account': 'mailings@example.com'}
                 if self.own_row else {'configured': False})),
             mock.patch.object(queries, 'save_session', record('save_session')),
             mock.patch.object(queries, 'mark_session_ok', record('mark_session_ok')),
@@ -614,9 +658,23 @@ class SessionRouteTests(unittest.TestCase):
             mock.patch.object(queries, 'clear_parks_cache', record('clear_parks_cache')),
             mock.patch.object(fleet_queries, 'load_session', lambda cursor: self.shared_row),
             mock.patch.object(fleet_queries, 'session_status', lambda cursor: {
-                'configured': True, 'account': 'edm@yandextaxi.kz'}),
+                'configured': True, 'account': 'edm@example.com'}),
             mock.patch.object(fleet_queries, 'mark_session_error', record('shared_mark_error')),
             mock.patch.object(fleet_queries, 'save_session', record('shared_save')),
+            # отправка
+            mock.patch.object(queries, 'parks_cache', lambda cursor: park_rows),
+            mock.patch.object(queries, 'parks_cache_age', lambda cursor: 10.0),
+            mock.patch.object(queries, 'find_mailing_by_key', lambda cursor, key: None),
+            mock.patch.object(queries, 'create_mailing', db_event('create', 77)),
+            mock.patch.object(queries, 'add_target', record('add_target')),
+            mock.patch.object(queries, 'mark_target_sent', db_event('sent')),
+            mock.patch.object(queries, 'mark_target_failed', db_event('failed')),
+            mock.patch.object(queries, 'link_target', db_event('link')),
+            mock.patch.object(queries, 'claimed_fleet_ids', lambda cursor, park_id, since=None: set()),
+            mock.patch.object(queries, 'abandon_pending_targets', db_event('abandon')),
+            mock.patch.object(queries, 'finish_mailing', lambda cursor, mailing_id: 'sent'),
+            mock.patch.object(queries, 'mailing_detail', lambda cursor, mailing_id: {
+                'id': mailing_id, 'status': 'sent', 'targets': []}),
         ]
         for patch in patches:
             patch.start()
@@ -634,6 +692,10 @@ class SessionRouteTests(unittest.TestCase):
     def names(self):
         return [name for name, _args, _kwargs in self.calls]
 
+
+class SessionRouteTests(_RouteHarness):
+    """Подключение аккаунта рассылок и честные ошибки про его сессию."""
+
     def push(self):
         return self.http.post('/api/driver_mailings/session', json={
             'cookies': [{'name': 'Session_id', 'value': 'new'}], 'user_agent': 'UA'})
@@ -646,7 +708,7 @@ class SessionRouteTests(unittest.TestCase):
         self.assertEqual(body['parks_enabled'], 3)
         self.assertIsNone(body['scan_error'])
         saved = [kwargs for name, _a, kwargs in self.calls if name == 'save_session'][0]
-        self.assertEqual(saved['account'], 'mailings@yandextaxi.kz')
+        self.assertEqual(saved['account'], 'mailings@example.com')
         self.assertEqual(saved['updated_by'], 1)
         # Кэш парков переписан опросом ПОД НОВЫМИ куками, а не старыми.
         self.assertIn('save_parks_cache', self.names())
@@ -707,11 +769,139 @@ class SessionRouteTests(unittest.TestCase):
     def test_session_status_tells_whose_account_is_in_use(self):
         body = self.http.get('/api/driver_mailings/session').get_json()
         self.assertEqual(body['session']['source'], self.routes.SESSION_SHARED)
-        self.assertEqual(body['session']['account'], 'edm@yandextaxi.kz')
+        self.assertEqual(body['session']['account'], 'edm@example.com')
         self.own_row = {'cookies': [{'name': 'Session_id', 'value': 'own'}]}
         body = self.http.get('/api/driver_mailings/session').get_json()
         self.assertEqual(body['session']['source'], self.routes.SESSION_OWN)
-        self.assertEqual(body['session']['account'], 'mailings@yandextaxi.kz')
+        self.assertEqual(body['session']['account'], 'mailings@example.com')
+
+
+class SendRouteTests(_RouteHarness):
+    """Отправка по многим диспетчерским: подготовка параллельно ДО первой
+    отправки, отправки строго по очереди, поиск id — после, и даже при обрыве."""
+
+    def send(self, park_ids=('a', 'b', 'c')):
+        return self.http.post('/api/driver_mailings/send', json={
+            'idempotency_key': 'tok-1', 'title': 'Акция', 'message': 'Текст',
+            'park_ids': list(park_ids), 'filters': {}})
+
+    def events(self, prefix):
+        return [event for event in _FakeCabinet.events if event.startswith(prefix)]
+
+    def test_prepare_all_then_send_in_order_then_link(self):
+        response = self.send()
+        self.assertEqual(response.status_code, 200, response.get_json())
+        events = _FakeCabinet.events
+        first_send = events.index('send:a')
+        # Охват и снимки всех парков — до первой отправки и до карточки.
+        for park in 'abc':
+            self.assertLess(events.index('count:' + park), first_send)
+            self.assertLess(events.index('snap:' + park), first_send)
+            self.assertLess(events.index('count:' + park), events.index('db:create'))
+        # Отправки — строго в порядке выбора, по одной.
+        self.assertEqual(self.events('send:'), ['send:a', 'send:b', 'send:c'])
+        # Отправленной цель отмечается сразу после своей отправки: от этой
+        # минуты кабинет отсчитывает окно отзыва.
+        self.assertLess(events.index('db:sent:a'), events.index('send:b'))
+        self.assertLess(events.index('db:sent:b'), events.index('send:c'))
+        # id ищется после всех отправок и привязывается отдельной записью, не
+        # трогая время отправки.
+        last_send = events.index('send:c')
+        for park in 'abc':
+            self.assertGreater(events.index('resolve:' + park), last_send)
+        linked = {args[1]: args[2] for name, args, _kw in self.calls if name == 'link'}
+        self.assertEqual(linked, {'a': 'f-a', 'b': 'f-b', 'c': 'f-c'})
+        sent_with_id = [kw for name, _a, kw in self.calls
+                        if name == 'sent' and kw.get('fleet_mailing_id')]
+        self.assertEqual(sent_with_id, [])
+
+    def test_expired_session_before_sending_leaves_no_card(self):
+        # «Неудачной рассылки», которую никто не начинал, в журнале быть не должно.
+        _FakeCabinet.expire_on = ('count', 'b')
+        response = self.send()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.events('send:'), [])
+        self.assertNotIn('create', self.names())
+
+    def test_already_sent_parks_get_their_id_when_sending_breaks(self):
+        # Обрыв на втором парке: первый уже у водителей и обязан остаться
+        # отзываемым — значит его id ищется и в этом случае.
+        _FakeCabinet.expire_on = ('send', 'b')
+        response = self.send()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.events('send:'), ['send:a', 'send:b'])
+        linked = {args[1]: args[2] for name, args, _kw in self.calls if name == 'link'}
+        self.assertEqual(linked, {'a': 'f-a'})
+        failed = [kw for name, _a, kw in self.calls if name == 'failed']
+        self.assertEqual([kw.get('error_code') for kw in failed], ['session_expired'])
+        self.assertIn('abandon', self.names())
+
+
+class RefsCacheTests(_RouteHarness):
+    """Справочники кэшируются по парку: меняется набор — спрашиваем только новые."""
+
+    def setUp(self):
+        super().setUp()
+        self.asked = []
+        harness = self
+
+        def _available_filters(cabinet, park_id):
+            harness.asked.append(('filters', park_id))
+            return {'segments_and_subsegments': {'active': {'subsegments': []}}}
+
+        def _working_cities(cabinet, park_id, segment):
+            harness.asked.append(('cities', park_id, segment))
+            return [{'id': park_id + '-city', 'name': 'Город ' + park_id}]
+
+        _FakeCabinet.available_filters = _available_filters
+        _FakeCabinet.available_groups = lambda cabinet, park_id: []
+        _FakeCabinet.professions = lambda cabinet, park_id: [
+            {'id': 'taxi/driver', 'name': 'Водитель такси'}]
+        _FakeCabinet.references = lambda cabinet, park_id: {}
+        _FakeCabinet.working_cities = _working_cities
+        for name in ('available_filters', 'available_groups', 'professions',
+                     'references', 'working_cities'):
+            self.addCleanup(delattr, _FakeCabinet, name)
+
+    def filters(self, park_ids, segment=''):
+        return self.http.get('/api/driver_mailings/filters', query_string={
+            'park_ids': ','.join(park_ids), 'segment': segment})
+
+    def test_changing_the_set_asks_only_the_new_parks(self):
+        self.assertEqual(self.filters(['a', 'b']).status_code, 200)
+        self.assertEqual(sorted(self.asked), [('filters', 'a'), ('filters', 'b')])
+        self.asked.clear()
+        body = self.filters(['a', 'b', 'c']).get_json()
+        self.assertEqual(self.asked, [('filters', 'c')])
+        self.assertEqual([s['id'] for s in body['segments']], ['active'])
+        self.asked.clear()
+        self.filters(['b'])
+        self.assertEqual(self.asked, [])
+
+    def test_cities_are_cached_per_segment_and_merged(self):
+        body = self.filters(['a', 'b'], segment='active').get_json()
+        self.assertEqual(sorted(c['name'] for c in body['cities']), ['Город a', 'Город b'])
+        self.asked.clear()
+        self.filters(['a', 'b'], segment='churn')
+        # Общие справочники уже есть, города для другого сегмента — новые.
+        self.assertEqual(sorted(self.asked), [('cities', 'a', 'churn'), ('cities', 'b', 'churn')])
+
+    def test_failed_park_is_not_cached(self):
+        from fleet_edm.client import FleetError
+        calls = {'n': 0}
+        original = _FakeCabinet.available_filters
+
+        def flaky(cabinet, park_id):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise FleetError('500')
+            return original(cabinet, park_id)
+
+        _FakeCabinet.available_filters = flaky
+        self.assertEqual(self.filters(['a']).status_code, 200)
+        self.filters(['a'])
+        # Первый ответ был неполным и в кэш не лёг — второй раз спросили снова.
+        self.assertEqual(calls['n'], 2)
 
 
 class FrontendWiringTests(unittest.TestCase):

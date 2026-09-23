@@ -6,11 +6,12 @@ Blueprint собирается фабрикой, зависимости прих
 
 ПОЧЕМУ ОТПРАВКА СИНХРОННАЯ, БЕЗ МАШИНЕРИИ ФОНОВЫХ ЗАДАНИЙ.
 «Провайдер ЭДО» отвечает 202-м и живёт минутами, потому что обходит 86 парков
-по десятку раз. Здесь работы на пять запросов: рассылка разрешена в пяти
-диспетчерских из девяноста, и каждая отправка — один POST на 0,3–0,5 секунды.
-Заводить ради этого карточку задания, пульс, подхват после деплоя и опрос
-прогресса значило бы построить механизм сложнее самой задачи. Синхронный ответ
-укладывается в таймаут waitress (120 с) с запасом в два порядка.
+по десятку раз. Здесь на парк один POST (0,3–0,5 с) плюс подготовка и поиск id,
+которые идут параллельно. Пока рассылка была разрешена в пяти диспетчерских,
+это были секунды; с аккаунтом рассылок (23.09.2026) их 89, и отправка «всем»
+занимает около минуты — всё ещё без карточки задания, пульса и подхвата после
+деплоя. waitress такой ответ не обрывает: channel_timeout закрывает только
+соединения БЕЗ запроса в работе (BaseWSGIServer.maintenance, waitress 3.0).
 
 ЧТО ЗДЕСЬ ДЕЙСТВИТЕЛЬНО СЛОЖНО — три вещи, и все три про кабинет:
 
@@ -24,7 +25,8 @@ Blueprint собирается фабрикой, зависимости прих
 
 2. **Опрос девяноста парков дорог.** Узнать, где рассылка разрешена, можно
    только спросив каждый парк. Это 90 запросов, поэтому ответ кэшируется в
-   driver_mailing_parks и обновляется раз в сутки либо кнопкой.
+   driver_mailing_parks и обновляется раз в сутки, кнопкой либо при
+   подключении нового аккаунта (POST /session).
 
 3. **Прочтения считает кабинет, и по одной рассылке за раз спрашивать их
    нельзя**: страница журнала на 20 рассылок в пяти парках стоила бы сотню
@@ -63,11 +65,24 @@ PARKS_TTL_SECONDS = 24 * 60 * 60
 # при неизменной медиане ответа), выше начинается очередь на их стороне.
 SCAN_WORKERS = 4
 
-# Справочники отбора живут в памяти процесса недолго: человек в форме щёлкает
-# фильтрами десятки раз, и каждый щелчок стоил бы пяти запросов в кабинет.
-# Десять минут — заведомо меньше, чем срок жизни процесса между деплоями, так
-# что «протухший навсегда» кэш здесь невозможен.
-REFS_TTL_SECONDS = 600
+# Подсчёт получателей — отдельный, более широкий пул. Замерено 23.09.2026 под
+# аккаунтом рассылок: 89 парков в четыре потока считались 29,6 секунды, то есть
+# ~1,3 с на парк — это счёт на стороне кабинета, а не очередь (у быстрых ручек
+# медиана 0,35 с). Такой запрос упирается в их вычисление, и больше потоков
+# сокращают ожидание, не нагружая одну и ту же очередь. На 429 клиент всё равно
+# притормаживает все потоки разом (FleetClient._note_throttled).
+COUNT_WORKERS = 8
+
+# Справочники отбора кэшируются в памяти процесса ПО КАЖДОМУ ПАРКУ, а не по
+# набору парков. Пока диспетчерских было пять, ключом был весь набор; с
+# аккаунтом рассылок их 89, и любое изменение набора («все» минус одна)
+# означало бы заново ~400 запросов и 15 секунд ожидания (замерено 23.09.2026).
+# По парку — меняется набор, а запрашиваются только новые парки.
+#
+# Час, а не десять минут: это настройки парка (сегменты, группы, тарифы, опции,
+# города работы), они меняются днями, а не минутами. Процесс между деплоями
+# живёт меньше суток, так что «протухший навсегда» кэш невозможен и здесь.
+REFS_TTL_SECONDS = 60 * 60
 
 # Сколько страниц журнала кабинета готовы пролистать в одном парке, добирая
 # прочтения. Страница — 50 рассылок; четыре страницы это две сотни, глубже
@@ -167,8 +182,9 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                                     resolve_requester):
     bp = Blueprint('driver_mailings', __name__, url_prefix='/api/driver_mailings')
 
-    # Кэш справочников: (парки, сегмент) → (когда, что). Живёт в процессе, а не
-    # в базе: он производный от кабинета и восстанавливается одним запросом.
+    # Кэш справочников: (парк, '') → общие справочники парка, (парк, сегмент) →
+    # его города работы; значение — (когда, что). Живёт в процессе, а не в базе:
+    # он производный от кабинета и восстанавливается запросом.
     _refs_cache = {}
     _refs_lock = threading.Lock()
 
@@ -338,7 +354,34 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
 
     # ── справочники отбора ───────────────────────────────────────────────────
 
-    def collect_refs(client, park_ids, segment):
+    def fetch_park_refs(client, park_id, segment):
+        """Справочники ОДНОГО парка: (что собрали, собрали ли всё).
+
+        Общие справочники не зависят от сегмента и кэшируются под (парк, ''),
+        города работы — свои на каждый сегмент, под (парк, сегмент). Неполный
+        ответ (парк отказал посередине) не кэшируется: иначе человек час видел
+        бы урезанный список значений из-за одной сетевой ошибки.
+        """
+        out = {}
+        complete = True
+        try:
+            if segment is None:
+                out['filters'] = client.available_filters(park_id)
+                out['groups'] = client.available_groups(park_id)
+                out['professions'] = client.professions(park_id)
+                out['references'] = client.references(park_id)
+            else:
+                out['cities'] = client.working_cities(park_id, segment)
+        except FleetSessionExpired:
+            raise
+        except FleetError as error:
+            # Один недоступный парк не должен лишать человека справочников
+            # остальных: он увидит меньше значений, но форма будет рабочей.
+            logging.warning('Рассылки: справочники парка %s недоступны (%s)', park_id, error)
+            complete = False
+        return out, complete
+
+    def merge_refs(collected):
         """Справочники отбора, объединённые по выбранным диспетчерским.
 
         Объединение, а не пересечение: рассылка уходит в каждый парк со своим
@@ -353,27 +396,6 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         categories = {}
         amenities = {}
         statuses = {}
-
-        def gather(park_id):
-            out = {}
-            try:
-                out['filters'] = client.available_filters(park_id)
-                out['groups'] = client.available_groups(park_id)
-                out['professions'] = client.professions(park_id)
-                out['references'] = client.references(park_id)
-                if segment in catalog.SEGMENTS_WITH_CITY:
-                    out['cities'] = client.working_cities(park_id, segment)
-            except FleetSessionExpired:
-                raise
-            except FleetError as error:
-                # Один недоступный парк не должен лишать человека справочников
-                # остальных: он увидит меньше значений, но форма будет рабочей.
-                logging.warning('Рассылки: справочники парка %s недоступны (%s)', park_id, error)
-            return out
-
-        with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
-                                thread_name_prefix='mailings-refs') as pool:
-            collected = list(pool.map(gather, park_ids))
 
         for out in collected:
             tree = ((out.get('filters') or {}).get('segments_and_subsegments')) or {}
@@ -426,22 +448,43 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         }
 
     def refs_for(park_ids, segment):
-        key = (','.join(sorted(park_ids)), segment or '')
+        """Справочники по набору парков: из кэша по парку, недостающее — из
+        кабинета параллельно. В кабинет идём только если чего-то нет."""
+        city_segment = segment if segment in catalog.SEGMENTS_WITH_CITY else None
+        wanted = [(park_id, None) for park_id in park_ids]
+        if city_segment:
+            wanted += [(park_id, city_segment) for park_id in park_ids]
+
         now = time.time()
+        found = {}
+        missing = []
         with _refs_lock:
-            cached = _refs_cache.get(key)
-            if cached and now - cached[0] < REFS_TTL_SECONDS:
-                return cached[1]
-        value = collect_refs(make_client(), park_ids, segment)
-        with _refs_lock:
-            _refs_cache[key] = (now, value)
-            # Ключей мало (наборы парков наперечёт), но чистим, чтобы кэш не рос
-            # бесконечно при переборе комбинаций.
-            if len(_refs_cache) > 64:
-                oldest = sorted(_refs_cache.items(), key=lambda pair: pair[1][0])[:32]
-                for stale_key, _ in oldest:
-                    _refs_cache.pop(stale_key, None)
-        return value
+            for park_id, part in wanted:
+                cached = _refs_cache.get((park_id, part or ''))
+                if cached and now - cached[0] < REFS_TTL_SECONDS:
+                    found[(park_id, part)] = cached[1]
+                else:
+                    missing.append((park_id, part))
+
+        if missing:
+            client = make_client()
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
+                                    thread_name_prefix='mailings-refs') as pool:
+                fetched = list(pool.map(
+                    lambda pair: (pair, fetch_park_refs(client, pair[0], pair[1])), missing))
+            with _refs_lock:
+                for (park_id, part), (out, complete) in fetched:
+                    found[(park_id, part)] = out
+                    if complete:
+                        _refs_cache[(park_id, part or '')] = (now, out)
+                # Ключей — по парку на сегмент, то есть сотни, а не тысячи; но
+                # чистим, чтобы кэш не рос без края.
+                if len(_refs_cache) > 1024:
+                    oldest = sorted(_refs_cache.items(), key=lambda pair: pair[1][0])[:512]
+                    for stale_key, _ in oldest:
+                        _refs_cache.pop(stale_key, None)
+
+        return merge_refs([found[pair] for pair in wanted if pair in found])
 
     # ── прочтения из кабинета ────────────────────────────────────────────────
 
@@ -751,7 +794,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                 row['error'] = 'не удалось посчитать'
             return row
 
-        with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
+        with ThreadPoolExecutor(max_workers=COUNT_WORKERS,
                                 thread_name_prefix='mailings-count') as pool:
             by_park = list(pool.map(one, park_ids))
         return jsonify({
@@ -824,14 +867,32 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
 
         client = make_client()
 
-        # Охват на момент отправки: он попадёт в журнал и в отчёт. Считаем ДО
-        # отправки, потому что после неё состав получателей уже изменится.
-        estimates = {}
-        for park_id in park_ids:
+        # Охват на момент отправки (он попадёт в журнал и в отчёт) и снимок
+        # журнала каждого парка (по нему потом узнаём свою рассылку) — ДО первой
+        # отправки и параллельно. Пока диспетчерских было пять, это шло по
+        # очереди внутри цикла отправки; с аккаунтом рассылок их до девяноста, и
+        # четыре запроса подряд на парк растягивали отправку на две с лишним
+        # минуты. Здесь нет ничего, что меняло бы кабинет, поэтому параллелить
+        # безопасно — в отличие от самих отправок.
+        #
+        # Протухшую сессию пропускаем наверх отсюда, ДО карточки рассылки: иначе
+        # в журнале осталась бы «неудачная рассылка», которую никто не начинал.
+        def prepare(park_id):
             try:
-                estimates[park_id] = client.recipients_count(park_id, filters)
+                estimate = client.recipients_count(park_id, filters)
+            except FleetSessionExpired:
+                raise
             except FleetError:
-                estimates[park_id] = None
+                estimate = None
+            return park_id, estimate, client.journal_ids(park_id)
+
+        estimates = {}
+        snapshots = {}
+        with ThreadPoolExecutor(max_workers=COUNT_WORKERS,
+                                thread_name_prefix='mailings-prepare') as pool:
+            for park_id, estimate, before_ids in pool.map(prepare, park_ids):
+                estimates[park_id] = estimate
+                snapshots[park_id] = before_ids
 
         with db._get_cursor() as cursor:
             mailing_id = queries.create_mailing(
@@ -875,20 +936,54 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             return client.resolve_mailing_id(park_id, title, since_iso=started_iso,
                                              skip_ids=claimed, before_ids=before_ids)
 
+        def link_sent(park_ids_sent):
+            """Разыскать id уже ушедших рассылок — параллельно, после всех
+            отправок. Ничего не кидает: рассылка ушла, и неудачный поиск id не
+            имеет права сделать вид, что нет (resolve_mailing_id и так глушит
+            ошибки кабинета, здесь страховка от всего остального)."""
+            def one(park_id):
+                try:
+                    return park_id, claim_fleet_id(park_id, snapshots.get(park_id))
+                except Exception:
+                    logging.exception('Рассылки: поиск id в парке %s сорвался', park_id)
+                    return park_id, None
+
+            if not park_ids_sent:
+                return
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
+                                    thread_name_prefix='mailings-link') as pool:
+                found = list(pool.map(one, park_ids_sent))
+            for park_id, fleet_id in found:
+                if not fleet_id:
+                    continue
+                try:
+                    with db._get_cursor() as cursor:
+                        queries.link_target(cursor, mailing_id, park_id, fleet_id)
+                except Exception:
+                    logging.exception('Рассылки: не записали id рассылки в парке %s', park_id)
+
         # Отправляем по одной диспетчерской и после КАЖДОЙ пишем результат в базу.
-        # Последовательно, а не пачкой: кабинет считает лимиты на аккаунт, и пять
-        # одновременных отправок — верный способ получить отказ по темпу на
-        # ровном месте. Пять запросов подряд стоят пары секунд.
+        # Последовательно, а не пачкой: кабинет считает лимиты на аккаунт, и
+        # одновременные отправки — верный способ получить отказ по темпу на
+        # ровном месте. Один POST на парк — около полусекунды.
+        #
+        # id рассылки ищем уже ПОСЛЕ всех отправок и параллельно (link_sent):
+        # пока ищем, следующие парки ждали бы зря. Отправленной цель отмечаем
+        # сразу — от этой минуты кабинет отсчитывает окно отзыва.
         #
         # try/finally на весь цикл: без него исключение посреди отправки оставляло
         # бы карточку навсегда в статусе «Отправляется», а не дошедшие парки — в
         # «В очереди». Человек видел бы вечно идущую рассылку и отправил заново.
+        # В finally же и поиск id: оборвись отправка на середине, уже ушедшие
+        # рассылки всё равно должны получить id — иначе их не отозвать.
+        sent_unlinked = []
         try:
             for park_id in park_ids:
                 token = '{}-{}'.format(idempotency_key, park_id)
-                # Снимок журнала ДО отправки — по нему потом узнаём свою рассылку.
-                # Один запрос на парк; без него id найти нечем.
-                before_ids = client.journal_ids(park_id)
+                # Снимок журнала, снятый до всех отправок, — по нему узнаём свою
+                # рассылку. Не сняли — пустой набор, сопоставление пойдёт запасным
+                # путём (по заголовку и времени).
+                before_ids = snapshots.get(park_id) or set()
                 try:
                     client.send_mailing(park_id, title=title, message=message,
                                         filters=filters, idempotency_token=token)
@@ -928,13 +1023,14 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                                                        error_code='fleet_error')
                     continue
 
-                # Ушло. Ищем id в журнале кабинета — он нужен для прочтений и
-                # отзыва. Не нашли — всё равно отмечаем отправку: рассылка у людей.
-                fleet_id = claim_fleet_id(park_id, before_ids)
+                # Ушло. Отмечаем сразу; id для прочтений и отзыва разыщет
+                # link_sent. Не найдёт — отправка всё равно записана: рассылка
+                # у людей.
                 with db._get_cursor() as cursor:
-                    queries.mark_target_sent(cursor, mailing_id, park_id,
-                                             fleet_mailing_id=fleet_id)
+                    queries.mark_target_sent(cursor, mailing_id, park_id)
+                sent_unlinked.append(park_id)
         finally:
+            link_sent(sent_unlinked)
             with db._get_cursor() as cursor:
                 # Сначала закрываем недошедшие цели, потом считаем сводный
                 # статус: иначе прерванная отправка оставила бы половину строк
