@@ -30,7 +30,8 @@ HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
            "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
            "_op_broadcast_attach_period", "_op_broadcast_caption", "_op_broadcast_period_notes",
            "_op_broadcast_bridge_note", "_wallboard_format_asa",
-           "_op_broadcast_key_tiles", "_op_render_wallboard_png", "_op_render_hour_png"}
+           "_op_broadcast_key_tiles", "_op_render_wallboard_png", "_op_render_hour_png",
+           "_op_broadcast_scope", "_op_broadcast_group_view"}
 CONSTANTS = {"_OP_BROADCAST_TABLE_ROWS"}
 
 
@@ -507,6 +508,131 @@ class SchemaTests(unittest.TestCase):
         directions = directions[:directions.index(")\n")]
         self.assertIn("'op'", directions)
         self.assertNotIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')\n", source)
+
+
+class GroupBroadcastTests(unittest.TestCase):
+    """Отбивка по группе (владелец 23.09.2026): чату «Основы» — показатели «Основы»,
+    руководству — всего отдела. Цифры группы обязаны совпадать с фильтром группы на стене."""
+
+    def setUp(self):
+        self.ns = _namespace()
+        self.ns['date'] = date
+
+    def _snapshot(self):
+        data = with_hour()
+        data.update(day='2026-09-23',
+                    groups=[{'id': 36, 'label': 'Основа', 'now': {'operators_online': 3}},
+                            {'id': 15, 'label': 'ЯР', 'now': {'operators_online': 1}}],
+                    operators=[{'id': 1, 'group_id': 36}, {'id': 2, 'group_id': 15},
+                               {'id': 3, 'group_id': None}])
+        return data
+
+    def test_group_view_takes_the_groups_totals_people_and_label(self):
+        calls = []
+
+        def day_parts(day):
+            calls.append(day)
+            return {'totals': {'arrived': 7, 'missed': 1}, 'hourly': [{'hour': 9, 'arrived': 7}]}
+
+        out = self.ns['_op_broadcast_group_view'](self._snapshot(), 36, day_parts)
+        self.assertEqual(out['totals'], {'arrived': 7, 'missed': 1})
+        self.assertEqual(out['hourly'], [{'hour': 9, 'arrived': 7}])
+        self.assertEqual(out['now'], {'operators_online': 3}, 'люди «на сейчас» — только группы')
+        self.assertEqual([row['id'] for row in out['operators']], [1])
+        self.assertEqual(out['group_label'], 'Основа')
+        self.assertEqual(calls, [date(2026, 9, 23)], 'итоги группы — расчётом тех же суток')
+
+    def test_disbanded_group_is_named_by_its_number_not_the_whole_department(self):
+        """Группу расформировали, а чат остался настроен на неё: честнее прислать «группа 99»
+        с её (нулевыми) цифрами, чем молча подменить её всем отделом."""
+        out = self.ns['_op_broadcast_group_view'](
+            self._snapshot(), 99, lambda day: {'totals': {'arrived': 0}, 'hourly': []})
+        self.assertEqual(out['group_label'], 'группа 99')
+        self.assertEqual(out['operators'], [])
+
+    def test_group_is_named_in_the_pictures_and_the_text(self):
+        scope = self.ns['_op_broadcast_scope']
+        self.assertEqual(scope({}), 'Отдел продаж')
+        self.assertEqual(scope({'group_label': 'Основа'}), 'Отдел продаж · Основа')
+        data = self._snapshot()
+        data['group_label'] = 'Основа'
+        self.assertIn('<b>Табло ОП · Основа</b>', self.ns['_op_broadcast_text'](data))
+        self.assertIn('<b>Табло ОП</b>', self.ns['_op_broadcast_text'](self._snapshot()))
+
+
+class GroupRunJobTests(unittest.TestCase):
+    """Плановая отбивка собирает данные по разу на каждую группу получателей, а не по разу на
+    чат, и каждый чат получает сообщение своей группы."""
+
+    def _run(self, chats):
+        node = next(n for n in _module().body
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "_szov_broadcast_run_job")
+        delivered, prepared = [], []
+
+        async def deliver(chat_id, text, media):
+            delivered.append((chat_id, text))
+
+        async def prepare(group_id=None):
+            prepared.append(group_id)
+            return {'group': group_id}, 'цифры группы %s' % group_id, []
+
+        quiet = type('log', (), {'info': staticmethod(lambda *a, **k: None),
+                                 'error': staticmethod(lambda *a, **k: None)})
+        import functools
+        namespace = {"asyncio": asyncio, "functools": functools, "logging": quiet,
+                     "executor_pool": None, "SZOV_BROADCAST_MODE_DEVIATIONS": 'deviations',
+                     "_szov_broadcast_deliver": deliver,
+                     "db": type('db', (), {'get_szov_broadcast_chats': staticmethod(lambda d: chats)})}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
+        asyncio.run(namespace["_szov_broadcast_run_job"](
+            direction='op', label='тест', prepare=prepare, deviations=lambda data: [],
+            group_of=lambda chat: chat.get('group_id')))
+        return delivered, prepared
+
+    def test_each_chat_gets_its_groups_numbers_and_each_group_is_collected_once(self):
+        delivered, prepared = self._run([
+            {'chat_id': 1, 'is_enabled': True, 'mode': 'always', 'group_id': 36},
+            {'chat_id': 2, 'is_enabled': True, 'mode': 'always', 'group_id': 36},
+            {'chat_id': 3, 'is_enabled': True, 'mode': 'always', 'group_id': None},
+        ])
+        self.assertEqual(sorted(prepared, key=str), [36, None], 'по разу на группу, не на чат')
+        self.assertEqual(sorted(delivered), [(1, 'цифры группы 36'), (2, 'цифры группы 36'),
+                                             (3, 'цифры группы None')])
+
+    def test_disabled_chat_costs_nothing(self):
+        delivered, prepared = self._run([
+            {'chat_id': 1, 'is_enabled': False, 'mode': 'always', 'group_id': 36},
+        ])
+        self.assertEqual((delivered, prepared), ([], []))
+
+
+class GroupStorageTests(unittest.TestCase):
+    """Группа получателя в базе: только у табло ОП, «не прислали» — оставить как было."""
+
+    def _group(self):
+        cls = next(node for node in source_cache.parse(DB_PATH.read_text(encoding="utf-8-sig")).body
+                   if isinstance(node, ast.ClassDef) and node.name == 'Database')
+        method = next(node for node in cls.body
+                      if isinstance(node, ast.FunctionDef) and node.name == '_szov_broadcast_group')
+        sentinel = object()
+        namespace = {'_UNSET_GROUP': sentinel}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(DB_PATH), "exec"), namespace)
+        fake_self = type('S', (), {'SZOV_BROADCAST_GROUP_DIRECTIONS': ('op',)})()
+        return (lambda value, direction='op', existing=None:
+                namespace['_szov_broadcast_group'](fake_self, value, direction, existing)), sentinel
+
+    def test_values(self):
+        group, unset = self._group()
+        self.assertEqual(group(36), 36)
+        self.assertEqual(group('36'), 36)
+        for whole_department in (None, '', 'null', 'all', 0, '0'):
+            self.assertIsNone(group(whole_department))
+        self.assertEqual(group(unset, existing={'group_id': 15}), 15, 'не прислали — не трогаем')
+        self.assertIsNone(group(36, direction='osnova'), 'у других табло групп нет')
+        with self.assertRaises(ValueError):
+            group('Основа')
+        with self.assertRaises(ValueError):
+            group(-3)
 
 
 if __name__ == '__main__':

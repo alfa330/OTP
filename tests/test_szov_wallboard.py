@@ -1869,7 +1869,10 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         """Сбор данных один на всех, отправка — по чатам: прокси Oktell низкоконкурентный, а
         квота Chat2Desk общая на компанию. Обход у направлений ОДИН — копии быть не должно."""
         block = re.search(self.RUN_JOB_RE, self.api, flags=re.DOTALL).group(0)
-        self.assertEqual(block.count("await prepare()"), 1)
+        # Сбор — один на срез получателей (у табло ОП срез — группа), а не на каждый чат;
+        # у направлений без групп срез один, и сбор по-прежнему один на всех.
+        self.assertEqual(block.count("prepare(group_id=group_id)"), 1)
+        self.assertEqual(block.count("else prepare())"), 1)
         self.assertIn("for chat in targets:", block)
         self.assertIn("await _szov_broadcast_deliver(int(chat['chat_id']), text, media)", block)
         self.assertEqual(self.api.count("for chat in targets:"), 1)
@@ -2041,7 +2044,8 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
         db_class = next(node for node in tree.body
                         if isinstance(node, ast.ClassDef) and node.name == "Database")
         wanted = {'save_szov_broadcast_chat', 'delete_szov_broadcast_chat',
-                  '_log_szov_broadcast_change', '_szov_broadcast_direction'}
+                  '_log_szov_broadcast_change', '_szov_broadcast_direction',
+                  '_szov_broadcast_group'}
         nodes = [ast.FunctionDef(name=item.name, args=item.args, body=item.body,
                                  decorator_list=[], returns=None, type_comment=None,
                                  type_params=[])
@@ -2049,7 +2053,8 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
                  if isinstance(item, ast.FunctionDef) and item.name in wanted]
         module = ast.Module(body=nodes, type_ignores=[])
         ast.fix_missing_locations(module)
-        ns = {'json': json}
+        # Маркер «группу не прислали» — один объект на оба метода, как в модуле.
+        ns = {'json': json, '_UNSET_GROUP': object()}
         exec(compile(module, "<broadcast>", "exec"), ns)
         cls.methods = {name: ns[name] for name in wanted}
 
@@ -2067,8 +2072,9 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
 
         class FakeDb:
             SZOV_BROADCAST_MODES = ('always', 'deviations')
-            SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')
+            SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op')
             SZOV_BROADCAST_DIRECTION_DEFAULT = 'osnova'
+            SZOV_BROADCAST_GROUP_DIRECTIONS = ('op',)
 
             @contextlib.contextmanager
             def _get_cursor(self):
@@ -2099,7 +2105,7 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
         db.save_szov_broadcast_chat({'chat_id': '-100123', 'chat_title': 'Руководство',
                                      'mode': 'deviations'}, user_id=7)
         self.assertEqual(self._insert(recorded),
-                         ('osnova', -100123, 'Руководство', 'deviations', True, 7))
+                         ('osnova', -100123, 'Руководство', 'deviations', True, None, 7))
         self.assertIn('"action": "added"', self._audit(recorded)[1])
 
     def test_mode_switch_keeps_title_and_toggle(self):
@@ -2107,14 +2113,14 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
         db, recorded = self._fake_db(rows=[self.EXISTING])
         db.save_szov_broadcast_chat({'chat_id': -100123, 'mode': 'always'}, user_id=9)
         self.assertEqual(self._insert(recorded),
-                         ('osnova', -100123, 'Руководство', 'always', True, 9))
+                         ('osnova', -100123, 'Руководство', 'always', True, None, 9))
         self.assertIn('"action": "changed"', self._audit(recorded)[1])
 
     def test_toggle_keeps_the_mode(self):
         db, recorded = self._fake_db(rows=[self.EXISTING])
         db.save_szov_broadcast_chat({'chat_id': -100123, 'is_enabled': False}, user_id=9)
         self.assertEqual(self._insert(recorded),
-                         ('osnova', -100123, 'Руководство', 'deviations', False, 9))
+                         ('osnova', -100123, 'Руководство', 'deviations', False, None, 9))
 
     # --- направления ---
 
@@ -2166,6 +2172,26 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
         db, recorded = self._fake_db(deleted_row=None)
         db.delete_szov_broadcast_chat(-999, user_id=9)
         self.assertEqual([sql for sql, _ in recorded if 'broadcast_history' in sql], [])
+
+    def test_op_recipient_stores_its_group(self):
+        """Табло ОП: чату можно выбрать группу — «Основа» получает показатели «Основы»."""
+        db, recorded = self._fake_db()
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'chat_title': 'Основа',
+                                     'mode': 'always', 'group_id': 36}, user_id=7, direction='op')
+        self.assertEqual(self._insert(recorded), ('op', -100123, 'Основа', 'always', True, 36, 7))
+
+    def test_group_is_kept_when_only_the_toggle_is_sent(self):
+        existing = dict(self.EXISTING, group_id=36)
+        db, recorded = self._fake_db(rows=[existing])
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'is_enabled': False}, user_id=9,
+                                    direction='op')
+        self.assertEqual(self._insert(recorded)[5], 36, 'тумблер не сбрасывает группу')
+
+    def test_line_ignores_a_group(self):
+        """У «Линии» групп нет: прилетевшая группа не должна оседать в базе."""
+        db, recorded = self._fake_db()
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'mode': 'always', 'group_id': 36}, user_id=7)
+        self.assertIsNone(self._insert(recorded)[5])
 
     def test_audit_keeps_the_whole_recipient_list(self):
         """Снимок целиком: по истории видно, кому уходила отбивка на момент правки."""

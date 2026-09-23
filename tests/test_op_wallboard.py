@@ -507,6 +507,22 @@ class GroupTests(unittest.TestCase):
                 ('3030', '6999', 10)]                          # чужой номер не голосует
         self.assertEqual(S.queue_owner_groups(rows, ext_group), {'3010': 36, '3001': 36})
 
+    def test_missed_call_belongs_to_the_queue_owner_not_to_the_last_rung_agent(self):
+        """23.09.2026: в очередях сидела сотрудница без группы (вн. 6661), очередь звонила ей
+        1943 раза и ни разу не дозвонилась. Потерянный звонок несёт номер последнего, кому
+        звонили, и уходил к ней — то есть ни в одну группу. Потерянный — забота хозяина
+        очереди, а не того, чей телефон молчал."""
+        ext_group = {'6650': 36}
+        owners = {'3010': 36}
+        lost_on_stranger = {'call_type': 'Входящий (не приняли)', 'ext': '6661', 'queue': '3010'}
+        self.assertEqual(S.touch_group(lost_on_stranger, ext_group, owners), 36)
+        # Принятый звонок по-прежнему считается за тем, кто разговаривал.
+        answered = {'call_type': 'Входящий', 'ext': '6650', 'queue': '3010'}
+        self.assertEqual(S.touch_group(answered, {'6650': 15}, owners), 15)
+        # У очереди без хозяина потерянный идёт по номеру, как раньше.
+        self.assertEqual(S.touch_group({'call_type': 'Входящий (не приняли)', 'ext': '6650',
+                                        'queue': '3099'}, ext_group, owners), 36)
+
     def test_groups_sum_to_the_department_and_queue_drops_go_to_the_queue_owner(self):
         touches = [
             touch(ext='6650', queue='3010'),                                        # Основа приняла

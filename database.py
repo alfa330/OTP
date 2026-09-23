@@ -45,6 +45,9 @@ time.tzset()
 # `x is not _UNSET` в телах методов уйдут к модульному (область класса в разрешении имён
 # внутри функций не участвует), и «поле не пришло» перестанет отличаться от «пришло».
 _UNSET = object()
+# Своё имя у маркера «группа отбивки не передана»: общий _UNSET выше уже однажды оказался
+# затенён одноимённым атрибутом класса, и путать «не прислали» с «весь отдел» тут нельзя.
+_UNSET_GROUP = object()
 
 def _env_int(name, default, minimum=None):
     try:
@@ -4904,6 +4907,14 @@ class Database:
                     CONSTRAINT szov_wallboard_broadcast_chats_direction
                         CHECK (direction IN ('osnova', 'chat', 'op', 'tez'))
                 );
+            """)
+            # Группа, по которой чат получает отбивку «Табло ОП» (владелец 23.09.2026): чату
+            # «Основы» — показатели «Основы», руководству — всего отдела. NULL — весь отдел,
+            # как было. Внешнего ключа на groups нет намеренно: группу расформируют, а строка
+            # получателя должна остаться и просто начать получать весь отдел.
+            cursor.execute("""
+                ALTER TABLE szov_wallboard_broadcast_chats
+                ADD COLUMN IF NOT EXISTS group_id INTEGER;
             """)
             # Таблица старше направлений: там ключом был один chat_id. Досыпаем колонку и
             # переводим ключ на составной — иначе второе направление не смогло бы писать в
@@ -27962,7 +27973,7 @@ class Database:
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT c.chat_id, c.chat_title, c.mode, c.is_enabled,
-                       c.updated_by, c.updated_at, u.name
+                       c.updated_by, c.updated_at, u.name, c.group_id
                 FROM szov_wallboard_broadcast_chats c
                 LEFT JOIN users u ON u.id = c.updated_by
                 WHERE c.direction = %s
@@ -27977,7 +27988,29 @@ class Database:
             "updated_by": r[4],
             "updated_by_name": r[6],
             "updated_at": r[5].isoformat() if r[5] else None,
+            # Группа отбивки «Табло ОП»; None — весь отдел (и всегда None у других табло).
+            "group_id": r[7],
         } for r in rows]
+
+    # Направления, у которых отбивку можно ограничить группой: у табло ОП есть фильтр
+    # групп, у остальных табло групп нет, и хранить там что-то кроме NULL незачем.
+    SZOV_BROADCAST_GROUP_DIRECTIONS = ('op',)
+
+    def _szov_broadcast_group(self, value, direction, existing=None):
+        """Группа получателя: «не передано» — оставить как было, пусто — весь отдел."""
+        if direction not in self.SZOV_BROADCAST_GROUP_DIRECTIONS:
+            return None
+        if value is _UNSET_GROUP:
+            return (existing or {}).get('group_id')
+        if value in (None, '', 'null', 'all', 0, '0'):
+            return None
+        try:
+            group_id = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("Неизвестная группа для отбивки")
+        if group_id <= 0:
+            raise ValueError("Неизвестная группа для отбивки")
+        return group_id
 
     def save_szov_broadcast_chat(self, payload: dict, user_id=None, direction=None) -> list:
         """Добавить получателя или изменить его режим / включённость.
@@ -28009,24 +28042,29 @@ class Database:
         chat_title = str(title).strip()[:255] if title is not None else (existing or {}).get('chat_title', '')
         is_enabled = payload.get('is_enabled')
         is_enabled = bool(is_enabled) if is_enabled is not None else bool((existing or {}).get('is_enabled', True))
+        # Группа отбивки: форма шлёт точечные патчи, поэтому отсутствие ключа — «не трогать».
+        group_id = self._szov_broadcast_group(
+            payload['group_id'] if 'group_id' in payload else _UNSET_GROUP, direction, existing)
 
         with self._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO szov_wallboard_broadcast_chats
-                    (direction, chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                    (direction, chat_id, chat_title, mode, is_enabled, group_id, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                 ON CONFLICT (direction, chat_id) DO UPDATE SET
                     chat_title = EXCLUDED.chat_title,
                     mode = EXCLUDED.mode,
                     is_enabled = EXCLUDED.is_enabled,
+                    group_id = EXCLUDED.group_id,
                     updated_by = EXCLUDED.updated_by,
                     updated_at = EXCLUDED.updated_at
-            """, (direction, chat_id, chat_title, mode, is_enabled, user_id))
+            """, (direction, chat_id, chat_title, mode, is_enabled, group_id, user_id))
         chats = self.get_szov_broadcast_chats(direction)
         self._log_szov_broadcast_change(
             user_id,
             'added' if existing is None else 'changed',
-            {"chat_id": chat_id, "chat_title": chat_title, "mode": mode, "is_enabled": is_enabled},
+            {"chat_id": chat_id, "chat_title": chat_title, "mode": mode, "is_enabled": is_enabled,
+             "group_id": group_id},
             chats,
             direction,
         )
@@ -28067,7 +28105,8 @@ class Database:
             "action": action,
             **target,
             "chats": [{"chat_id": c["chat_id"], "chat_title": c["chat_title"],
-                       "mode": c["mode"], "is_enabled": c["is_enabled"]} for c in chats],
+                       "mode": c["mode"], "is_enabled": c["is_enabled"],
+                       "group_id": c.get("group_id")} for c in chats],
         })
         with self._get_cursor() as cur:
             cur.execute("""

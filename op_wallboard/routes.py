@@ -249,12 +249,15 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         return snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
                                                   _is_talking)
 
-    def _day_parts(day):
+    def _day_parts(day, group_id=None):
         """Итоги и разрез по часам за ЛЮБЫЕ сутки, мимо кэша снимка.
 
         Нужны отбивке в полночь: в 00:00 последний полный час (23:00–24:00) и итог дня
         относятся к закончившимся суткам, а снимок табло уже живёт новыми. Длины
-        автоинформаторов считаются на те сутки заново и в часовой кэш снимка не пишутся."""
+        автоинформаторов считаются на те сутки заново и в часовой кэш снимка не пишутся.
+
+        group_id — итоги одной группы (отбивка «по группе»): касания отбираются тем же
+        правилом, что фильтр группы на табло (`snapshot.touches_of_group`)."""
         dept = department_id()
         people = load_people(dept, day) if dept is not None else []
         with db._get_cursor() as cursor:
@@ -265,6 +268,10 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 log.exception('%s: длины автоинформаторов за %s не посчитались', label, day)
                 announce_seconds = {}
             touches = _measured_touches(cursor, day, people, announce_seconds)
+            if group_id is not None:
+                memberships = _memberships(cursor, people, day)
+                touches = snapshot_mod.touches_of_group(
+                    touches, people, memberships, load_queue_answers(cursor, day), int(group_id))
         parts = snapshot_mod.aggregate(touches, sl_seconds)
         return {'day': day.isoformat(), 'totals': parts['totals'], 'hourly': parts['hourly']}
 

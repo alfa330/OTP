@@ -40642,7 +40642,7 @@ def _szov_broadcast_send_times():
 
 
 async def _szov_broadcast_run_job(*, direction, label, prepare, deviations, on_delivered=None,
-                                  personal=None):
+                                  personal=None, group_of=None):
     """Плановая отбивка одного направления. Молчит, если получателей нет.
 
     Общая на «Линию» и «Чат»: различаются только сбор данных и правило отклонений, а
@@ -40669,25 +40669,36 @@ async def _szov_broadcast_run_job(*, direction, label, prepare, deviations, on_d
                            for person in (people or []) if person.get('telegram_id')]
         if not recipients:
             return
-        data, text, media = await prepare()
-        notes = deviations(data)
-        targets = [chat for chat in recipients
-                   if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or notes]
-        if not targets:
-            logging.info("%s: отклонений нет, %d получателям с режимом «только при "
-                         "отклонениях» не пишем", label, len(recipients))
-            return
+        # group_of — у получателей разные срезы (у табло ОП — группа или весь отдел). Данные
+        # собираются по разу на КАЖДЫЙ срез, а не на каждый чат: двум чатам «Основы» — одно
+        # сообщение. Без group_of срез один на всех, ровно как было.
+        buckets = {}
+        for chat in recipients:
+            buckets.setdefault(group_of(chat) if group_of is not None else None, []).append(chat)
         delivered = False
-        for chat in targets:
-            # Один недоступный чат (бота выгнали из группы) не должен лишать отбивки остальных.
-            try:
-                await _szov_broadcast_deliver(int(chat['chat_id']), text, media)
-                delivered = True
-                logging.info("%s отправлена — %s (%s)", label,
-                             chat.get('label') or 'чат %s' % chat['chat_id'], chat.get('mode'))
-            except Exception as exc:
-                logging.error("%s: %s не получил сообщение: %s", label,
-                              chat.get('label') or 'чат %s' % chat['chat_id'], exc)
+        data = None
+        for group_id, members in buckets.items():
+            data, text, media = await (prepare(group_id=group_id) if group_of is not None
+                                       else prepare())
+            notes = deviations(data)
+            targets = [chat for chat in members
+                       if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or notes]
+            if not targets:
+                logging.info("%s%s: отклонений нет, %d получателям с режимом «только при "
+                             "отклонениях» не пишем", label,
+                             ' (группа %s)' % group_id if group_id is not None else '', len(members))
+                continue
+            for chat in targets:
+                # Один недоступный чат (бота выгнали из группы) не должен лишать отбивки остальных.
+                try:
+                    await _szov_broadcast_deliver(int(chat['chat_id']), text, media)
+                    delivered = True
+                    logging.info("%s отправлена — %s (%s)%s", label,
+                                 chat.get('label') or 'чат %s' % chat['chat_id'], chat.get('mode'),
+                                 ', группа %s' % group_id if group_id is not None else '')
+                except Exception as exc:
+                    logging.error("%s: %s не получил сообщение: %s", label,
+                                  chat.get('label') or 'чат %s' % chat['chat_id'], exc)
         if delivered and on_delivered is not None:
             await on_delivered(data)
     except Exception as exc:
@@ -45209,9 +45220,51 @@ def _op_broadcast_attach_period(data, now, day_parts):
     return out
 
 
-def _op_broadcast_collect(scheduled=False, now=None):
+def _op_broadcast_group_view(data, group_id, day_parts):
+    """Снимок табло, суженный до одной группы — отбивка «по группе» (владелец 23.09.2026).
+
+    Итоги и почасовка берутся расчётом группы (`day_parts(день, группа)`): в разрезе группы
+    внутри снимка час хранится только полями графика, без AR и SL. Люди «на сейчас» и их
+    счётчики — из того же разреза снимка, что видит фильтр группы на стене. Группу могли
+    расформировать — тогда отбивка честно пишет её номер, а не молча шлёт весь отдел."""
+    out = dict(data)
+    group = next((item for item in (data.get('groups') or []) if item.get('id') == group_id), None)
+    parts = day_parts(date.fromisoformat(str(data.get('day'))))
+    out['totals'] = parts['totals']
+    out['hourly'] = parts['hourly']
+    if group is not None:
+        out['now'] = group.get('now') or {}
+    out['operators'] = [row for row in (data.get('operators') or []) if row.get('group_id') == group_id]
+    out['group_id'] = group_id
+    out['group_label'] = (group or {}).get('label') or 'группа %s' % group_id
+    return out
+
+
+def _op_broadcast_group_options():
+    """[{id, label}] групп табло ОП для выбора в настройках отбивки. Табло недоступно — пусто:
+    настройки получателей от этого не ломаются, просто выбрать можно только весь отдел."""
+    provider = globals().get('_op_wallboard_snapshot')
+    if provider is None:
+        return []
+    try:
+        return [{'id': group['id'], 'label': group['label']}
+                for group in (provider().get('groups') or [])]
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Отбивка табло ОП: группы для настроек не собрались: %s", exc)
+        return []
+
+
+def _op_broadcast_scope(data):
+    """Чьи это цифры: «Отдел продаж» или «Отдел продаж · Основа» — в подписи картинок и тексте."""
+    label = data.get('group_label')
+    return 'Отдел продаж · %s' % label if label else 'Отдел продаж'
+
+
+def _op_broadcast_collect(scheduled=False, now=None, group_id=None):
     """Снимок табло ОП из общего кэша раздела: ровно то, что видят на стене, плюс период
-    отбивки — итоги дня и последний полный час (`_op_broadcast_attach_period`)."""
+    отбивки — итоги дня и последний полный час (`_op_broadcast_attach_period`).
+
+    group_id — отбивка одной группы: те же правила, что фильтр группы на табло."""
     provider = globals().get('_op_wallboard_snapshot')
     if provider is None:
         raise RuntimeError('Табло ОП не подключено — отбивке нечего собирать')
@@ -45224,8 +45277,10 @@ def _op_broadcast_collect(scheduled=False, now=None):
         loader = globals().get('_op_wallboard_day_parts')
         if loader is None:
             raise RuntimeError('Табло ОП не подключено — итогов прошлых суток взять негде')
-        return loader(day)
+        return loader(day, group_id) if group_id is not None else loader(day)
 
+    if group_id is not None:
+        data = _op_broadcast_group_view(data, int(group_id), day_parts)
     return _op_broadcast_attach_period(data, now, day_parts)
 
 
@@ -45361,7 +45416,8 @@ def _op_broadcast_text(data):
     Разреза по линиям (очередям станции) нет нигде — ни на экране, ни здесь: решение
     владельца 16.09.2026, номера очередей вида 3010 читались как шум."""
     now = data.get('now') or {}
-    lines = ['<b>Табло ОП</b> (%s):' % (data.get('stamp') or ''), '']
+    title = 'Табло ОП · %s' % data['group_label'] if data.get('group_label') else 'Табло ОП'
+    lines = ['<b>%s</b> (%s):' % (title, data.get('stamp') or ''), '']
     lines.extend(_op_broadcast_table(data))
     notes = _op_broadcast_deviations(data)
     if notes:
@@ -45417,7 +45473,8 @@ def _op_render_wallboard_png(data):
         ],
     ]
     period = (data.get('day_label') or 'За день').lower()
-    return _szov_render_tiles_png('Табло ОП', 'Отдел продаж · %s · %s' % (period, data.get('stamp') or ''),
+    return _szov_render_tiles_png('Табло ОП', '%s · %s · %s' % (_op_broadcast_scope(data), period,
+                                                                 data.get('stamp') or ''),
                                   _op_broadcast_key_tiles(totals, data), stat_tiles)
 
 
@@ -45432,8 +45489,8 @@ def _op_render_hour_png(data):
         ('Исходящих', str(_szov_wallboard_int(hour.get('outgoing')))),
     ]
     return _szov_render_tiles_png('Табло ОП · за час',
-                                  'Отдел продаж · %s · %s' % (data.get('hour_label') or '',
-                                                              data.get('hour_day') or ''),
+                                  '%s · %s · %s' % (_op_broadcast_scope(data), data.get('hour_label') or '',
+                                                    data.get('hour_day') or ''),
                                   _op_broadcast_key_tiles(hour, data), stat_tiles)
 
 
@@ -45441,7 +45498,9 @@ def _op_broadcast_preview():
     """Предпросмотр отбивки ОП: текст и картинка, ничего не отправляя. Снимок — из кэша
     табло, так что предпросмотр не стоит ни одного запроса к мосту или станции."""
     try:
-        data = _op_broadcast_collect()
+        # ?group_id= — предпросмотр отбивки одной группы, ровно как её получит чат группы.
+        raw_group = str(request.args.get('group_id') or '').strip()
+        data = _op_broadcast_collect(group_id=int(raw_group) if raw_group.isdigit() else None)
     except Exception as exc:
         logging.error("Предпросмотр отбивки (ОП): данные не собрались: %s", exc)
         return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
@@ -45466,11 +45525,12 @@ def _op_broadcast_preview():
     })
 
 
-async def _op_broadcast_prepare(scheduled=False):
+async def _op_broadcast_prepare(scheduled=False, group_id=None):
     """Собрать отбивку ОП целиком: данные, картинки и подпись. Снимок читается из базы
-    синхронно — в пуле потоков, а не на event loop бота."""
+    синхронно — в пуле потоков, а не на event loop бота. group_id — отбивка одной группы."""
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(executor_pool, _op_broadcast_collect, scheduled)
+    data = await loop.run_in_executor(
+        executor_pool, functools.partial(_op_broadcast_collect, scheduled, None, group_id))
     media = []
     # Картинка дня первой (под ней подпись альбома), часа — второй. Каждая рисуется отдельно:
     # сбой одной не отнимает другую.
@@ -45487,23 +45547,31 @@ async def _op_broadcast_prepare(scheduled=False):
 
 
 async def _op_broadcast_send(chat_id):
-    """Собрать и отправить отбивку ОП в один чат — кнопка «Отправить сейчас»."""
-    data, text, media = await _op_broadcast_prepare()
+    """Собрать и отправить отбивку ОП в один чат — кнопка «Отправить сейчас». Группа — из
+    настроек этого чата: «Отправить сейчас» обязана прислать то же, что придёт по расписанию."""
+    loop = asyncio.get_event_loop()
+    chats = await loop.run_in_executor(
+        executor_pool, functools.partial(db.get_szov_broadcast_chats, SZOV_BROADCAST_DIRECTION_OP))
+    group_id = next((chat.get('group_id') for chat in chats
+                     if str(chat.get('chat_id')) == str(chat_id)), None)
+    data, text, media = await _op_broadcast_prepare(group_id=group_id)
     await _szov_broadcast_deliver(chat_id, text, media)
     return data
 
 
-async def _op_broadcast_prepare_scheduled():
-    return await _op_broadcast_prepare(scheduled=True)
+async def _op_broadcast_prepare_scheduled(group_id=None):
+    return await _op_broadcast_prepare(scheduled=True, group_id=group_id)
 
 
 async def op_broadcast_job():
-    """Плановая отбивка направления «Табло ОП»."""
+    """Плановая отбивка направления «Табло ОП». Чаты с разными группами получают разные
+    сообщения: у каждого — показатели своей группы или всего отдела."""
     await _szov_broadcast_run_job(
         direction=SZOV_BROADCAST_DIRECTION_OP,
         label="Отбивка табло ОП",
         prepare=_op_broadcast_prepare_scheduled,
-        deviations=_op_broadcast_deviations)
+        deviations=_op_broadcast_deviations,
+        group_of=lambda chat: chat.get('group_id'))
 
 
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
@@ -46256,6 +46324,9 @@ def api_szov_wallboard_broadcast():
         "chats": db.list_bot_group_chats(),
         "send_times": _szov_broadcast_direction_times(direction),
         "personal": _szov_broadcast_personal_state(direction),
+        # Группы, по которым можно получать отбивку (только у табло ОП): те же подписи и
+        # тот же порядок, что у фильтра групп на стене.
+        "groups": _op_broadcast_group_options() if direction == SZOV_BROADCAST_DIRECTION_OP else [],
     })
 
 

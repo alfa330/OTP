@@ -669,14 +669,39 @@ def queue_owner_groups(rows, ext_group):
 def touch_group(touch, ext_group, queue_owners):
     """Группа касания: по внутреннему номеру, а без номера — входящий по хозяину очереди.
 
+    Потерянный входящий относится к хозяину очереди ВСЕГДА, даже если номер в касании есть.
+    Номер у потерянного — это последний, кому очередь звонила, а не тот, кто за звонок
+    отвечает: 23.09.2026 в очередях ОП сидела Перизат Нуржан (вн. 6661) без группы, очередь
+    звонила ей 1943 раза за сутки и ни разу не дозвонилась, и шесть потерянных звонков
+    «Основы» уходили к ней — то есть ни в одну группу. В фильтре «Основа» потерянных
+    становилось меньше, чем во «Все», хотя вход принимает только «Основа».
+
     Номер есть, но в составе табло не найден — касание ничьё: сотрудника в списке группы нет,
     и его звонки в её итогах читались бы как чужие."""
     ext = str(touch.get('ext') or '')
+    if touch.get('call_type') == touches_mod.TYPE_IN_MISSED:
+        owner = (queue_owners or {}).get(_touch_queue(touch.get('queue')))
+        if owner is not None:
+            return owner
     if ext:
         return (ext_group or {}).get(ext)
     if touch.get('call_type') in _INCOMING_TYPES:
         return (queue_owners or {}).get(_touch_queue(touch.get('queue')))
     return None
+
+
+def touches_of_group(touches, people, memberships, queue_answer_rows, group_id):
+    """Касания одной группы — ровно по тем же правилам, что разрез группы на табло.
+
+    Нужна отбивке «по группе»: там нужны итоги И почасовка с AR и SL, а разрез в снимке
+    отдаёт час только полями графика. Считать группу вторым путём нельзя — цифра в
+    Telegram разошлась бы с цифрой того же фильтра на стене, поэтому состав табло,
+    хозяева очередей и отнесение касания берутся теми же функциями."""
+    board = on_board(people, memberships)
+    catalog = group_catalog(memberships)
+    ext_group = group_ext_map(board, memberships, catalog)
+    owners = queue_owner_groups(queue_answer_rows, ext_group)
+    return [touch for touch in touches or [] if touch_group(touch, ext_group, owners) == group_id]
 
 
 def group_breakdown(touches, rows, people, memberships, catalog, queue_owners,

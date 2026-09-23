@@ -162,6 +162,24 @@ const BROADCAST_DEVIATION_HINT = {
 
 const ModeSwitch = (props) => <SegmentedSwitch options={BROADCAST_MODES} {...props} />;
 
+/* Чьи показатели получает чат: весь отдел или одна группа («Табло ОП», 23.09.2026).
+   Значение — id группы или null. Подписи и порядок присылает сервер — те же, что у фильтра
+   групп на стене, чтобы здесь не завелась вторая копия каталога групп. */
+const BroadcastGroupSelect = ({ groups, value, disabled, onChange }) => (
+    <select
+        className={`${iosInput} w-auto min-w-[9rem]`}
+        disabled={disabled}
+        value={value ? String(value) : ''}
+        onChange={(event) => onChange(event.target.value ? Number(event.target.value) : null)}
+        title="Чьи показатели получает этот чат"
+    >
+        <option value="">Весь отдел</option>
+        {groups.map((group) => (
+            <option key={group.id} value={group.id}>{group.label}</option>
+        ))}
+    </select>
+);
+
 /** Строка истории «кто менял» человеческим языком. */
 const historyLine = (settings) => {
     const title = settings?.chat_title || settings?.chat_id || 'чат';
@@ -401,6 +419,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
     const [busy, setBusy] = useState(false);
     const [draftChat, setDraftChat] = useState('');
     const [draftMode, setDraftMode] = useState('always');
+    const [draftGroup, setDraftGroup] = useState('');
     const [historyOpen, setHistoryOpen] = useState(false);
     const headersRef = useRef(withAccessTokenHeader);
     headersRef.current = withAccessTokenHeader;
@@ -479,6 +498,8 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
     const chats = state?.chats || [];
     const sendTimes = state?.send_times || [];
     const personal = state?.personal || null;
+    // Группы присылает только табло ОП: у остальных табло групп нет, и выбора тоже нет.
+    const groups = state?.groups || [];
 
     // Чат, который уже получает отбивку, второй раз не предлагаем: дублей быть не должно.
     const available = useMemo(() => {
@@ -491,6 +512,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
         if (!picked) return;
         setDraftChat('');
         setDraftMode('always');
+        setDraftGroup('');
         save('POST', {
             chat_id: picked.chat_id,
             chat_title: picked.title || picked.username || String(picked.chat_id),
@@ -498,6 +520,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
             // обязано положить в базу допустимое значение: режим там NOT NULL с CHECK.
             mode: withModes ? draftMode : 'always',
             is_enabled: true,
+            ...(groups.length ? { group_id: draftGroup || null } : {}),
         }, 'Группа добавлена');
     };
 
@@ -587,6 +610,18 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                                             .filter(Boolean).join(' · ')}
                                     </div>
                                 </div>
+                                {groups.length ? (
+                                    <BroadcastGroupSelect
+                                        groups={groups}
+                                        value={item.group_id}
+                                        disabled={busy}
+                                        onChange={(groupId) => save(
+                                            'POST',
+                                            { chat_id: item.chat_id, group_id: groupId },
+                                            groupId ? 'Чат будет получать показатели группы' : 'Чат будет получать весь отдел',
+                                        )}
+                                    />
+                                ) : null}
                                 {/* Направление без режимов переключатель не показывает вовсе:
                                     выбор, который ни на что не влияет, — обещание без
                                     содержания. */}
@@ -647,6 +682,13 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                                     ))}
                                 </select>
                             </label>
+                            {groups.length ? (
+                                <div>
+                                    <div className="mb-1.5 text-[12.5px] text-slate-500">Показатели</div>
+                                    <BroadcastGroupSelect groups={groups} value={draftGroup || null} disabled={busy}
+                                        onChange={(groupId) => setDraftGroup(groupId ? String(groupId) : '')} />
+                                </div>
+                            ) : null}
                             {withModes ? (
                                 <div>
                                     <div className="mb-1.5 text-[12.5px] text-slate-500">Когда отправлять</div>
