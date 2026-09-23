@@ -9,6 +9,7 @@ import inspect
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,10 +48,59 @@ class SettingsResolutionTests(unittest.TestCase):
     def test_default_is_off(self):
         self.assertFalse(dial_service.resolve_enabled(None, None))
 
-    def test_secret_mask_keeps_only_tail(self):
-        self.assertEqual(dial_service.mask_secret(''), '')
-        self.assertEqual(dial_service.mask_secret('abcd'), '…')
-        self.assertEqual(dial_service.mask_secret('secret-1234'), '…1234')
+
+class SecretsLiveInEnvironmentTests(unittest.TestCase):
+    """Решение владельца 23.09.2026: ключи и токены — только в окружении Render."""
+
+    def test_schema_has_no_secret_columns(self):
+        ddl = ' '.join(dial_schema.DDL)
+        create = ddl[ddl.index('CREATE TABLE IF NOT EXISTS dial_list_department_settings'):ddl.index('CREATE TABLE IF NOT EXISTS dial_list_user_settings')]
+        for column in ('binotel_api_key', 'binotel_api_secret', 'webhook_token'):
+            self.assertNotIn(column, create)
+            self.assertIn(f'DROP COLUMN IF EXISTS {column}', ddl)
+        self.assertIn('binotel_company', create)
+
+    def test_save_rejects_secrets_in_payload(self):
+        class _DB:
+            pass
+        svc = dial_service.DialListService(_DB())
+        svc.department_settings = lambda dep: {
+            "enabled": False, "portion_size": 20, "max_attempts": 3, "retry_after_hours": 24,
+            "caller_id_for_employee": "", "binotel_company": "remote_cc",
+        }
+        for key in ('binotel_api_key', 'binotel_api_secret', 'webhook_token'):
+            with self.assertRaises(dial_service.DialListError):
+                svc.save_department_settings(1, {key: 'value'})
+
+    def test_env_prefix_per_company(self):
+        from binotel import client
+        self.assertEqual(client.env_prefix_for('remote_cc'), 'REMOTE_CC_BINOTEL')
+        self.assertEqual(client.env_prefix_for('tez'), 'TEZ_BINOTEL')
+        self.assertEqual(client.env_prefix_for('new_cc'), 'NEW_CC_BINOTEL')
+        self.assertEqual(client.env_prefix_for('NEW_CC_BINOTEL'), 'NEW_CC_BINOTEL')
+
+    def test_webhook_requires_env_token_and_binotel_ip(self):
+        class _DB:
+            pass
+        svc = dial_service.DialListService(_DB())
+        token = 'x' * 24
+        binotel_ip = next(iter(dial_service.BINOTEL_SERVER_IPS))
+        with unittest.mock.patch.dict(os.environ, {dial_service.WEBHOOK_TOKEN_ENV: '', dial_service.WEBHOOK_REQUIRE_BINOTEL_IP_ENV: '1'}):
+            self.assertFalse(svc.webhook_allowed(token, binotel_ip))         # токен не задан — вебхук выключен
+        with unittest.mock.patch.dict(os.environ, {dial_service.WEBHOOK_TOKEN_ENV: 'short', dial_service.WEBHOOK_REQUIRE_BINOTEL_IP_ENV: '1'}):
+            self.assertFalse(svc.webhook_allowed('short', binotel_ip))       # слишком короткий
+        with unittest.mock.patch.dict(os.environ, {dial_service.WEBHOOK_TOKEN_ENV: token, dial_service.WEBHOOK_REQUIRE_BINOTEL_IP_ENV: '1'}):
+            self.assertTrue(svc.webhook_allowed(token, binotel_ip))
+            self.assertFalse(svc.webhook_allowed(token, '8.8.8.8'))          # чужой адрес
+            self.assertFalse(svc.webhook_allowed('y' * 24, binotel_ip))      # чужой токен
+            self.assertFalse(svc.webhook_allowed('', binotel_ip))
+        with unittest.mock.patch.dict(os.environ, {dial_service.WEBHOOK_TOKEN_ENV: token, dial_service.WEBHOOK_REQUIRE_BINOTEL_IP_ENV: '0'}):
+            self.assertTrue(svc.webhook_allowed(token, '8.8.8.8'))           # проверку адреса сняли явно
+
+    def test_settings_source_never_reads_secret_columns(self):
+        src = inspect.getsource(dial_service.DialListService.department_settings)
+        for column in ('binotel_api_key', 'binotel_api_secret', 'webhook_token'):
+            self.assertNotIn(column, src)
 
 
 class NumberNeverReachesOperatorTests(unittest.TestCase):
@@ -218,11 +268,20 @@ class WiringTests(unittest.TestCase):
         self.assertIn('dialListPilotAllows(user) &&', app_src)
 
     def test_binotel_client_has_call_methods(self):
-        from tez import binotel_calls
+        from binotel import client as binotel_client
+        from tez import binotel_calls  # прослойка совместимости — те же объекты
         for name in ('originate_internal_to_external', 'call_details', 'hangup_call'):
-            self.assertTrue(callable(getattr(binotel_calls.BinotelApiClient, name)))
-        cfg = binotel_calls.get_config(env_file='/nonexistent', company='remote_cc')
+            self.assertTrue(callable(getattr(binotel_client.BinotelApiClient, name)))
+        self.assertIs(binotel_calls.BinotelApiClient, binotel_client.BinotelApiClient)
+        self.assertIs(binotel_calls._day_bounds_unix, binotel_client._day_bounds_unix)
+        cfg = binotel_client.get_config(env_file='/nonexistent', company='remote_cc')
         self.assertEqual(cfg['env_prefix'], 'REMOTE_CC_BINOTEL')
+
+    def test_dial_list_does_not_import_from_tez_package(self):
+        for module in (dial_service, dial_routes, dial_schema):
+            src = inspect.getsource(module)
+            self.assertNotIn('from tez', src)
+            self.assertNotIn('import tez', src)
 
 
 if __name__ == '__main__':

@@ -13,7 +13,8 @@ op_funnel/ и parcels/.
 
 Состав пакета
 -------------
-    binotel_calls.py     клиент Binotel API 4.0: звонки, «Случайный звонок»
+    binotel_calls.py     прослойка совместимости: клиент Binotel API переехал в
+                         binotel/client.py (Binotel теперь не только у ТЭЗ)
     status_sync.py       скрейп панели my.binotel.kz ради истории статусов
     op_productivity.py   дневные телефонные метрики ОП поверх binotel_calls
     wallboard_source.py  снимок кабинета Binotel «на сейчас» для табло Тез КЦ

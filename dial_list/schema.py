@@ -8,10 +8,10 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
 Модель:
 
     dial_list_department_settings  на отдел: включён ли режим, размер порции,
-                                   правила повтора, ключ Binotel API компании
-                                   (у каждой компании Binotel свой ключ), токен
-                                   вебхука, что показывать линии оператора как
-                                   номер звонящего.
+                                   правила повтора, имя компании Binotel (по нему
+                                   сервер находит ключ API в своём окружении),
+                                   что показывать линии оператора как номер
+                                   звонящего. Секретов в таблице нет.
     dial_list_user_settings        персональное включение (NULL = как у отдела):
                                    нужно для пилота на одном-двух операторах,
                                    потому что телефон раскатывается всем сразу.
@@ -19,9 +19,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
                                    отделом-обзвонщиком.
     dial_list_leads                база водителей ОТДЕЛА: ФИО, номер, сколько раз
                                    звонили, дозвонились ли. Номер уникален в
-                                   пределах отдела. Это не база лидов Тез:
-                                   удалённый колл-центр — отдельный отдел со
-                                   своими списками (решение владельца 22.09.2026).
+                                   пределах отдела: у каждого отдела-обзвонщика
+                                   свои списки (решение владельца 22.09.2026).
     dial_list_portions             выдача: кому, когда, сколько строк, когда
                                    закрыта (все строки обработаны).
     dial_list_assignments          строка выдачи: лид → оператор; состояние
@@ -48,9 +47,7 @@ DDL = [
         portion_size SMALLINT NOT NULL DEFAULT 20,
         max_attempts SMALLINT NOT NULL DEFAULT 3,
         retry_after_hours SMALLINT NOT NULL DEFAULT 24,
-        binotel_api_key VARCHAR(255) NOT NULL DEFAULT '',
-        binotel_api_secret VARCHAR(255) NOT NULL DEFAULT '',
-        webhook_token VARCHAR(64) NOT NULL DEFAULT '',
+        binotel_company VARCHAR(32) NOT NULL DEFAULT 'remote_cc',
         caller_id_for_employee VARCHAR(32) NOT NULL DEFAULT '',
         updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
         updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
@@ -153,6 +150,13 @@ DDL = [
         payload JSONB NOT NULL DEFAULT '{}'::jsonb
     )
     """,
+    # Секреты в базе не хранятся (решение владельца 23.09.2026: ключи и токены —
+    # только в окружении Render). Колонки первой версии удаляем вместе со всем,
+    # что в них могли успеть записать; имя компании добавляем.
+    "ALTER TABLE dial_list_department_settings DROP COLUMN IF EXISTS binotel_api_key",
+    "ALTER TABLE dial_list_department_settings DROP COLUMN IF EXISTS binotel_api_secret",
+    "ALTER TABLE dial_list_department_settings DROP COLUMN IF EXISTS webhook_token",
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS binotel_company VARCHAR(32) NOT NULL DEFAULT 'remote_cc'",
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """

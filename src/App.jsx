@@ -2004,7 +2004,7 @@ const isSipSettingsFleetSupervisor = (userLike) => {
     return SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES.has(code);
 };
 
-// «Настройки SIP — Tez»: только глава ТЭЗ. Проверяем и id отдела, и код —
+// «Настройки SIP — Binotel»: глава ТЭЗ (отдел на Binotel). Проверяем и id отдела, и код —
 // ровно как в isChatAppDepartmentHead: код в базе заполнен не везде, а по
 // одному id глава, назначенный через справочник кодов, не прошёл бы.
 const isSipSettingsTezDepartmentHead = (userLike) => (

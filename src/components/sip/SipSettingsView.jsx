@@ -54,8 +54,8 @@ const PROVIDER_CHOICES = [
 const PROVIDER_SECTIONS = [
     { id: 'asterisk', label: 'Таксопарки', icon: 'fas fa-headset',
       hint: 'Отделы на локальной АТС: общий сервер и база пароля' },
-    { id: 'binotel', label: 'Тез', icon: 'fas fa-phone-volume',
-      hint: 'Отдел на Binotel: у каждого свой сервер, логин и пароль' },
+    { id: 'binotel', label: 'Binotel', icon: 'fas fa-phone-volume',
+      hint: 'Отделы на Binotel: сервер общий у отдела, логин и пароль у каждого свои' },
 ];
 
 const TABS_BY_PROVIDER = {
@@ -75,7 +75,7 @@ const TABS_BY_PROVIDER = {
 // и без разной шапки непонятно, где ты находишься.
 const SECTION_TITLE = {
     asterisk: 'Настройки SIP — Таксопарки',
-    binotel: 'Настройки SIP — Tez',
+    binotel: 'Настройки SIP — Binotel',
 };
 
 // Адрес кабинета по умолчанию — тот же, что в database.py
@@ -1879,7 +1879,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </div>
                             <div className="text-[12px] leading-snug text-slate-500">
                                 {deptForm.provider === 'binotel'
-                                    ? 'У Binotel общие только сервер и адрес кабинета: логин и пароль выданы каждому свои, FOP2 и автодозвона нет. После сохранения отдел уйдёт в раздел «Настройки SIP — Tez», и поля локальной АТС перестанут применяться.'
+                                    ? 'У Binotel общие только сервер и адрес кабинета: логин и пароль выданы каждому свои, FOP2 и автодозвона нет. После сохранения отдел уйдёт в раздел «Настройки SIP — Binotel», и поля локальной АТС перестанут применяться.'
                                     : 'Локальная АТС: сервер и база пароля общие для отдела, логин равен внутреннему номеру, пароль собирается из базы и номера.'}
                             </div>
                         </div>

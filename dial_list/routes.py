@@ -230,9 +230,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             raise DialListError("Файл пустой")
         if len(raw_bytes) > LEADS_MAX_FILE_SIZE_BYTES:
             raise DialListError(f"Файл слишком большой. Лимит: {LEADS_MAX_FILE_SIZE_MB} MB", 413)
-        # Разбор файла общий с базой лидов Тез: формат «fio + phone» тот же,
-        # а нормализация номера — единственная точка правды для всей телефонии.
-        from tez.lead_service import parse_leads_file
+        # Общий разбор файла «fio + phone» и общая нормализация номера — одна
+        # точка правды для всей телефонии проекта.
+        from common.leads_file import parse_leads_file
         try:
             rows = parse_leads_file(raw_bytes, file_ext)
         except ValueError as exc:

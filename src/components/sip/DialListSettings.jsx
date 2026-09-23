@@ -9,8 +9,8 @@ import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBt
  *
  * Как работает режим: оператор видит в iCORE Phone только ФИО водителей и кнопку
  * «Позвонить»; номер в телефон не уходит — звонок инициирует сервер через Binotel
- * API, а телефон принимает входящее плечо от АТС. Поэтому у отдела здесь свой ключ
- * Binotel API (у каждой компании Binotel он свой) и свой список водителей.
+ * API, а телефон принимает входящее плечо от АТС. У отдела свой список водителей.
+ * Подключение к Binotel настраивается на сервере, в интерфейсе его нет.
  *
  * Компоненты самостоятельные: сами ходят в /api/dial_list/… и не зависят от
  * состояния «Настроек SIP».
@@ -53,36 +53,6 @@ const Row = ({ label, hint, children, wrap = false }) => (
     </div>
 );
 
-/** Секрет: показывается только признак «задан»; новое значение — заменой. */
-const SecretRow = ({ label, hint, has, value, onChange, disabled, placeholder }) => {
-    const [replacing, setReplacing] = useState(false);
-    const showInput = !has || replacing;
-    return (
-        <Row label={label} hint={hint} wrap={showInput}>
-            {showInput ? (
-                <input
-                    type="text"
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                    placeholder={has ? 'пусто — оставить прежний' : placeholder}
-                    autoComplete="off"
-                    disabled={disabled}
-                    className={`${iosInput} font-mono`}
-                />
-            ) : (
-                <div className="flex items-center gap-2">
-                    <IosBadge tone="green"><FaIcon className="fas fa-check" /> Задан</IosBadge>
-                    {!disabled && (
-                        <button type="button" onClick={() => setReplacing(true)} className={iosBtnGhost}>
-                            Заменить
-                        </button>
-                    )}
-                </div>
-            )}
-        </Row>
-    );
-};
-
 /* Загрузка состояния отдела: настройки + сводка базы. Один хук на обе панели. */
 export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId }) => {
     const [settings, setSettings] = useState(null);
@@ -119,7 +89,7 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId })
     return { settings, summary, loading, error, forbidden, reload: load };
 };
 
-/** Панель настроек отдела: режим, порция, повторы, ключ Binotel API, вебхук. */
+/** Панель настроек отдела: режим, порция, повторы, номер для линии оператора. */
 export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, settings, onSaved, canEdit = true, showToast }) => {
     const [form, setForm] = useState(null);
     const [saving, setSaving] = useState(false);
@@ -135,9 +105,6 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             portion_size: String(settings.portion_size ?? 20),
             max_attempts: String(settings.max_attempts ?? 3),
             retry_after_hours: String(settings.retry_after_hours ?? 24),
-            binotel_api_key: '',
-            binotel_api_secret: '',
-            webhook_token: '',
             caller_id_for_employee: settings.caller_id_for_employee || '',
         });
     }, [settings]);
@@ -153,10 +120,6 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                 retry_after_hours: numOr(form.retry_after_hours, 24),
                 caller_id_for_employee: form.caller_id_for_employee.trim(),
             };
-            // Секреты уходят только если ввели новое значение: пустое — «не менять».
-            if (form.binotel_api_key.trim()) payload.binotel_api_key = form.binotel_api_key.trim();
-            if (form.binotel_api_secret.trim()) payload.binotel_api_secret = form.binotel_api_secret.trim();
-            if (form.webhook_token.trim()) payload.webhook_token = form.webhook_token.trim();
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/settings`, {
                 method: 'PUT',
                 credentials: 'include',
@@ -170,16 +133,6 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             toast(e.message || 'Не удалось сохранить', 'error');
         } finally {
             setSaving(false);
-        }
-    };
-
-    const webhookUrl = `${apiBaseUrl}/api/dial_list/webhook/binotel?token=ВАШ_ТОКЕН`;
-    const copyWebhook = async () => {
-        try {
-            await navigator.clipboard.writeText(webhookUrl);
-            toast('Адрес вебхука скопирован', 'success');
-        } catch {
-            toast('Не удалось скопировать — выделите адрес вручную', 'error');
         }
     };
 
@@ -217,28 +170,11 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             </section>
 
             <section className="space-y-1.5">
-                <div className={iosGroupLabel}>Binotel API</div>
+                <div className={iosGroupLabel}>Звонок</div>
                 <div className={`${iosCard} divide-y divide-slate-100`}>
-                    <SecretRow
-                        label="Ключ API компании"
-                        hint="Выдаётся на компанию Binotel в разделе API кабинета или поддержкой"
-                        has={!!settings?.has_binotel_api_key}
-                        value={form.binotel_api_key}
-                        onChange={(v) => setForm((f) => ({ ...f, binotel_api_key: v }))}
-                        disabled={!canEdit}
-                        placeholder="key"
-                    />
-                    <SecretRow
-                        label="Секрет API"
-                        has={!!settings?.has_binotel_api_secret}
-                        value={form.binotel_api_secret}
-                        onChange={(v) => setForm((f) => ({ ...f, binotel_api_secret: v }))}
-                        disabled={!canEdit}
-                        placeholder="secret"
-                    />
                     <Row
                         label="Номер, который видит линия оператора"
-                        hint="Подмена номера во входящем плече (callerIdForEmployee). Пусто — как решит АТС."
+                        hint="Что АТС показывает оператору как звонящего, когда соединяет его с водителем. Пусто — как решит АТС."
                         wrap
                     >
                         <input
@@ -251,37 +187,6 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                         />
                     </Row>
                 </div>
-                <p className="px-1 text-[11.5px] leading-relaxed text-slate-500">
-                    Ключ должен быть допущен к дозвону по API. Если АТС отвечает кодом 104 — попросите
-                    поддержку Binotel включить дозвон для линий отдела.
-                </p>
-            </section>
-
-            <section className="space-y-1.5">
-                <div className={iosGroupLabel}>Исход звонка от Binotel</div>
-                <div className={`${iosCard} divide-y divide-slate-100`}>
-                    <SecretRow
-                        label="Токен вебхука"
-                        hint="Любая длинная случайная строка — защищает адрес от посторонних"
-                        has={!!settings?.has_webhook_token}
-                        value={form.webhook_token}
-                        onChange={(v) => setForm((f) => ({ ...f, webhook_token: v }))}
-                        disabled={!canEdit}
-                        placeholder="придумайте токен"
-                    />
-                    <Row label="Адрес для кабинета Binotel" hint="Вставьте в настройку «API Call Completed», подставив токен" wrap>
-                        <div className="flex items-center gap-2">
-                            <code className="min-w-0 flex-1 truncate rounded-xl bg-slate-100 px-3 py-2 text-[12px] text-slate-700">{webhookUrl}</code>
-                            <button type="button" onClick={copyWebhook} className={iosBtnSecondary} title="Скопировать">
-                                <FaIcon className="fas fa-copy" />
-                            </button>
-                        </div>
-                    </Row>
-                </div>
-                <p className="px-1 text-[11.5px] leading-relaxed text-slate-500">
-                    Без вебхука исход всё равно придёт: сервер сам опрашивает Binotel по каждому звонку,
-                    просто на несколько секунд позже.
-                </p>
             </section>
 
             {canEdit && (

@@ -36,7 +36,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tez import binotel_calls as binotel  # noqa: E402
+from binotel import client as binotel  # noqa: E402
 
 POLL_INTERVAL_SEC = 3
 FINAL_DISPOSITIONS_HINT = "ANSWER/ANSWERED — ответил; BUSY — занято; NOANSWER/CANCEL — не дозвонились"
@@ -106,7 +106,7 @@ def watch(client, general_call_id, wait_sec):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--company", default=binotel.COMPANY_REMOTE_CC,
-                        help="tez | remote_cc | префикс переменных окружения")
+                        help="имя компании Binotel (remote_cc, …) либо префикс переменных окружения")
     parser.add_argument("--internal", help="внутренний номер сотрудника (линия, на которую позвонит АТС)")
     parser.add_argument("--external", help="внешний номер, куда звоним после ответа сотрудника")
     parser.add_argument("--extra", action="append", default=[],

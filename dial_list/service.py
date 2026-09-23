@@ -23,11 +23,14 @@
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 
-from tez import binotel_calls as binotel
-from tez.op_leads import normalize_kz_phone
+import hmac
+
+from binotel import client as binotel
+from common.kz_phone import normalize_kz_phone  # noqa: F401 — нормализация номеров списка
 
 log = logging.getLogger(__name__)
 
@@ -69,9 +72,20 @@ BINOTEL_SERVER_IPS = frozenset({
     "194.88.219.92", "194.88.218.119", "194.88.218.120",
     "185.100.66.145", "185.100.66.146", "185.100.66.147",
 })
+# Секреты раздела живут ТОЛЬКО в окружении сервера (панель Render), в базе и в
+# интерфейсе их нет: ключ API компании Binotel — <PREFIX>_API_KEY/_API_SECRET по
+# имени компании отдела (binotel_company → binotel.client.env_prefix_for), токен
+# вебхука — одна переменная на сервер. Интерфейс показывает только «задан/не задан».
 WEBHOOK_TOKEN_ENV = "DIAL_LIST_WEBHOOK_TOKEN"
+# Вебхук принимается только с адресов серверов Binotel (список выше); выключить
+# проверку можно переменной =0, если Binotel начнёт слать с новых адресов —
+# отклонённые адреса при этом видны в журнале сервера.
+WEBHOOK_REQUIRE_BINOTEL_IP_ENV = "DIAL_LIST_WEBHOOK_REQUIRE_BINOTEL_IP"
+WEBHOOK_TOKEN_MIN_LEN = 16
 WEBHOOK_LOG_KEEP_DAYS = 30
 WEBHOOK_PAYLOAD_MAX_CHARS = 20000
+DEFAULT_BINOTEL_COMPANY = binotel.COMPANY_REMOTE_CC
+COMPANY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg")
 
@@ -126,12 +140,12 @@ def resolve_enabled(personal, department):
     return False
 
 
-def mask_secret(value):
-    """Ключ/секрет наружу не отдаём: только хвост, чтобы отличить один от другого."""
-    text = str(value or "")
-    if not text:
-        return ""
-    return "…" + text[-4:] if len(text) > 4 else "…"
+def webhook_env_token():
+    return (os.getenv(WEBHOOK_TOKEN_ENV) or "").strip()
+
+
+def webhook_requires_binotel_ip():
+    return (os.getenv(WEBHOOK_REQUIRE_BINOTEL_IP_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def _utcnow():
@@ -337,15 +351,17 @@ class DialListService:
         return {"user_id": int(user_id), "internal_number": ""}
 
     # ------------------------------------------------------------ настройки
-    def department_settings(self, department_id, with_secrets=False):
+    def department_settings(self, department_id):
+        """Настройки отдела. Секретов здесь нет: ключ API и токен вебхука живут в
+        окружении сервера, наружу уходит только признак «задан»."""
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT enabled, portion_size, max_attempts, retry_after_hours,
-                       binotel_api_key, binotel_api_secret, webhook_token,
-                       caller_id_for_employee, updated_at
+                       caller_id_for_employee, updated_at, binotel_company
                 FROM dial_list_department_settings WHERE department_id = %s
             """, (int(department_id),))
             row = cur.fetchone()
+        company = ((row[6] or "").strip() if row else "") or DEFAULT_BINOTEL_COMPANY
         settings = {
             "department_id": int(department_id),
             "configured": bool(row),
@@ -353,36 +369,22 @@ class DialListService:
             "portion_size": int(row[1]) if row else DEFAULT_PORTION_SIZE,
             "max_attempts": int(row[2]) if row else DEFAULT_MAX_ATTEMPTS,
             "retry_after_hours": int(row[3]) if row else DEFAULT_RETRY_AFTER_HOURS,
-            "binotel_api_key": (row[4] or "") if row else "",
-            "binotel_api_secret": (row[5] or "") if row else "",
-            "webhook_token": (row[6] or "") if row else "",
-            "caller_id_for_employee": (row[7] or "") if row else "",
-            "updated_at": _iso(row[8]) if row else None,
+            "caller_id_for_employee": (row[4] or "") if row else "",
+            "updated_at": _iso(row[5]) if row else None,
+            "binotel_company": company,
         }
-        if not with_secrets:
-            settings["has_binotel_api_key"] = bool(settings["binotel_api_key"])
-            settings["has_binotel_api_secret"] = bool(settings["binotel_api_secret"])
-            settings["binotel_api_key"] = mask_secret(settings["binotel_api_key"])
-            settings["binotel_api_secret"] = mask_secret(settings["binotel_api_secret"])
-            settings["has_webhook_token"] = bool(settings["webhook_token"])
-            settings["webhook_token"] = mask_secret(settings["webhook_token"])
         return settings
 
     def save_department_settings(self, department_id, payload, changed_by=None):
-        """Ключа нет в payload — не менять; секреты: пусто = не менять."""
+        """Ключа нет в payload — не менять. Секреты сюда не принимаются вовсе:
+        ключ API и токен вебхука задаются в окружении сервера."""
         payload = payload or {}
-        current = self.department_settings(department_id, with_secrets=True)
+        current = self.department_settings(department_id)
 
         def _text(key, current_value, limit):
             if payload.get(key) is None:
                 return current_value
             return str(payload[key]).strip()[:limit]
-
-        def _secret(key, current_value, limit):
-            value = payload.get(key)
-            if value is None or str(value).strip() == "":
-                return current_value
-            return str(value).strip()[:limit]
 
         def _int(key, current_value, lo, hi):
             if payload.get(key) is None:
@@ -399,34 +401,32 @@ class DialListService:
         portion_size = _int("portion_size", current["portion_size"], 1, PORTION_SIZE_MAX)
         max_attempts = _int("max_attempts", current["max_attempts"], 1, 20)
         retry_after_hours = _int("retry_after_hours", current["retry_after_hours"], 0, 24 * 30)
-        api_key = _secret("binotel_api_key", current["binotel_api_key"], 255)
-        api_secret = _secret("binotel_api_secret", current["binotel_api_secret"], 255)
-        if payload.get("clear_binotel_api") is True:
-            api_key, api_secret = "", ""
-        webhook_token = _secret("webhook_token", current["webhook_token"], 64)
         caller_id = _text("caller_id_for_employee", current["caller_id_for_employee"], 32)
+        company = _text("binotel_company", current["binotel_company"], 32).lower() or DEFAULT_BINOTEL_COMPANY
+        if not COMPANY_RE.match(company):
+            raise DialListError("Компания Binotel: латиница, цифры и подчёркивание, от 2 до 32 символов")
+        for key in ("binotel_api_key", "binotel_api_secret", "webhook_token"):
+            if str(payload.get(key) or "").strip():
+                raise DialListError("Это поле не настраивается в iCORE", 400)
 
         with self.db._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO dial_list_department_settings (
                     department_id, enabled, portion_size, max_attempts, retry_after_hours,
-                    binotel_api_key, binotel_api_secret, webhook_token, caller_id_for_employee,
-                    updated_by, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    caller_id_for_employee, binotel_company, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                 ON CONFLICT (department_id) DO UPDATE SET
                     enabled = EXCLUDED.enabled,
                     portion_size = EXCLUDED.portion_size,
                     max_attempts = EXCLUDED.max_attempts,
                     retry_after_hours = EXCLUDED.retry_after_hours,
-                    binotel_api_key = EXCLUDED.binotel_api_key,
-                    binotel_api_secret = EXCLUDED.binotel_api_secret,
-                    webhook_token = EXCLUDED.webhook_token,
                     caller_id_for_employee = EXCLUDED.caller_id_for_employee,
+                    binotel_company = EXCLUDED.binotel_company,
                     updated_by = EXCLUDED.updated_by,
                     updated_at = EXCLUDED.updated_at
             """, (int(department_id), enabled, portion_size, max_attempts, retry_after_hours,
-                  api_key, api_secret, webhook_token, caller_id, changed_by))
+                  caller_id, company, changed_by))
         with self._clients_lock:
             self._clients.pop(int(department_id), None)
         return self.department_settings(department_id)
@@ -477,15 +477,16 @@ class DialListService:
 
     # ------------------------------------------------------------ Binotel
     def _default_client(self, department_id):
-        settings = self.department_settings(department_id, with_secrets=True)
-        key, secret = settings["binotel_api_key"], settings["binotel_api_secret"]
-        if not key or not secret:
-            cfg = binotel.get_config(company=binotel.COMPANY_REMOTE_CC)
-            key, secret = cfg.get("api_key"), cfg.get("api_secret")
-        if not key or not secret:
-            raise DialListError(
-                "Ключ Binotel API для отдела не задан: укажите его в настройках обзвона отдела", 503)
-        return binotel.BinotelApiClient(key, secret)
+        """Клиент API компании отдела. Ключ — только из окружения сервера."""
+        settings = self.department_settings(department_id)
+        cfg = binotel.get_config(company=settings["binotel_company"])
+        if not binotel.api_ready(cfg):
+            # Имена переменных — в журнал сервера (их читает администратор), а
+            # пользователю — нейтральный текст без упоминания ключей.
+            log.error("dial_list: отдел %s — на сервере не заданы %s_API_KEY / %s_API_SECRET",
+                      department_id, cfg["env_prefix"], cfg["env_prefix"])
+            raise DialListError("Подключение к Binotel для отдела не настроено на сервере", 503)
+        return binotel.BinotelApiClient.from_config(cfg)
 
     def _client(self, department_id):
         department_id = int(department_id)
@@ -499,7 +500,7 @@ class DialListService:
 
     # ------------------------------------------------------------ лиды отдела
     def import_leads(self, department_id, uploaded_by, file_name, rows):
-        """rows — из tez.lead_service.parse_leads_file: (row_number, fio, phone_raw, phone_norm)."""
+        """rows — из common.leads_file.parse_leads_file: (row_number, fio, phone_raw, phone_norm)."""
         department_id = int(department_id)
         counts = {"rows_total": len(rows), "rows_new": 0, "rows_duplicate": 0, "rows_invalid": 0}
         with self.db._get_cursor() as cur:
@@ -767,7 +768,7 @@ class DialListService:
             general_call_id = client.originate_internal_to_external(
                 ctx["internal_number"], phone_norm, **extra)
         except DialListError:
-            self._fail_attempt(attempt_id, assignment_id, lead_id, "ключ Binotel API не настроен",
+            self._fail_attempt(attempt_id, assignment_id, lead_id, "подключение к Binotel не настроено",
                                attempts_now, settings["max_attempts"])
             raise
         except Exception as exc:  # отказ АТС или сеть
@@ -968,21 +969,23 @@ class DialListService:
 
     # ------------------------------------------------------------ вебхук
     def webhook_allowed(self, token, remote_addr):
-        """Токен из адреса вебхука (настройка отдела или переменная окружения)
-        либо адрес сервера Binotel — без того и другого POST не принимаем."""
-        token = str(token or "").strip()
-        if token:
-            env_token = (os.getenv(WEBHOOK_TOKEN_ENV) or "").strip()
-            if env_token and token == env_token:
-                return True
-            with self.db._get_cursor() as cur:
-                cur.execute("""
-                    SELECT 1 FROM dial_list_department_settings
-                    WHERE webhook_token <> '' AND webhook_token = %s LIMIT 1
-                """, (token[:64],))
-                if cur.fetchone():
-                    return True
-        return str(remote_addr or "").strip() in BINOTEL_SERVER_IPS
+        """Вебхук принимаем только с правильным токеном из окружения сервера
+        (DIAL_LIST_WEBHOOK_TOKEN, не короче 16 символов, сравнение постоянного
+        времени) И — по умолчанию — только с адресов серверов Binotel. Токен не
+        задан → вебхук выключен целиком: исходы доберёт опрос call-details."""
+        expected = webhook_env_token()
+        if len(expected) < WEBHOOK_TOKEN_MIN_LEN:
+            log.warning("dial_list: вебхук отключён — %s не задан или короче %d символов",
+                        WEBHOOK_TOKEN_ENV, WEBHOOK_TOKEN_MIN_LEN)
+            return False
+        presented = str(token or "").strip()
+        if not presented or not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
+            return False
+        if webhook_requires_binotel_ip() and str(remote_addr or "").strip() not in BINOTEL_SERVER_IPS:
+            log.warning("dial_list: вебхук с правильным токеном, но с чужого адреса %s — отклонён "
+                        "(снять проверку: %s=0)", remote_addr, WEBHOOK_REQUIRE_BINOTEL_IP_ENV)
+            return False
+        return True
 
     def handle_webhook(self, form, remote_addr=""):
         """POST «API Call Completed»: ключевые поля плоские (generalCallID, disposition,

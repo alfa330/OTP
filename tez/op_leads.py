@@ -101,32 +101,9 @@ LEGACY_RULE_PREV_MONTH_FIRST_WEEK = "prev_month_week1"
 LEGACY_REASON_TRIP_TOO_LATE = "trip_after_day7"
 
 
-def normalize_kz_phone(raw):
-    """Приводит телефон к каноническому виду: 11 цифр, '77XXXXXXXXX'.
-
-    Это единственный ключ, которым связываются три системы: база лидов (грузит
-    СВ в произвольном формате), Binotel (`externalNumber` = '77476657568') и
-    TEZ APP (нормализует к '+7747...'). Ошибка здесь означает молча потерянные
-    успешки, поэтому формат проверяется строго, а всё непонятное отбрасывается.
-
-    Возвращает строку из 11 цифр либо None, если номер невалиден.
-    """
-    if raw is None:
-        return None
-    digits = re.sub(r"\D", "", str(raw))
-    if not digits:
-        return None
-
-    if len(digits) == 11 and digits[0] == "8":
-        digits = "7" + digits[1:]          # 8 701 ... -> 7 701 ...
-    elif len(digits) == 10 and digits[0] == "7":
-        digits = "7" + digits              # 701 234 5678 -> 7 701 234 5678
-
-    # У всех казахстанских номеров код страны 7, дальше код оператора/города,
-    # который тоже начинается с 7 (мобильные 7XX, Астана 7172 и т.д.).
-    if len(digits) != 11 or not digits.startswith("77"):
-        return None
-    return digits
+# Нормализация номера — общая на проект (common/kz_phone.py): тем же ключом
+# связываются база лидов, Binotel и TEZ APP. Имя здесь оставлено для совместимости.
+from common.kz_phone import normalize_kz_phone  # noqa: E402,F401
 
 
 def to_e164(phone_norm):

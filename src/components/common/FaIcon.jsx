@@ -174,6 +174,10 @@ import {
     Database,
     Headphones,
     WandSparkles,
+    BookUser,
+    FolderOpen,
+    PhoneOff,
+    Unlink,
     Zap
 } from 'lucide-react';
 
@@ -340,6 +344,10 @@ const TOKEN_TO_ICON = {
     'fa-phone': 'Phone',
     'fa-phone-alt': 'PhoneCall',
     'fa-phone-volume': 'PhoneCall',
+    'fa-phone-slash': 'PhoneOff',
+    'fa-folder-open': 'FolderOpen',
+    'fa-address-book': 'BookUser',
+    'fa-link-slash': 'Unlink',
     'fa-picture-in-picture': 'PictureInPicture2',
     'fa-play': 'Play',
     'fa-play-circle': 'PlayCircle',
@@ -614,6 +622,10 @@ const ICON_COMPONENTS = {
     Database,
     Headphones,
     WandSparkles,
+    BookUser,
+    FolderOpen,
+    PhoneOff,
+    Unlink,
     Zap
 };
 
