@@ -2256,13 +2256,17 @@ def get_chat_billing_grouping_by_park(db, day_from: date, day_to: date, minute_f
 # сотрудники по часам. В ручных файлах сотрудники вбивались шаблоном (одинаковые во всех
 # днях), здесь они берутся из данных раздела:
 #   план чатов — формулы ручного файла, см. CHAT_BILLING_PARK_SHARES;
-#   план сотрудников — выбранные смены аукциона чата (как «Запланировано смен» у линии);
+#   план сотрудников — смены графика работы чатников, без смен на телефонах;
 #   факт сотрудников — онлайн-статусы чатников. Головой часа считается тот, кто был онлайн
 #     хотя бы минуту: то же правило, что у табло СЗоВ по чату.
 # Квоту Chat2Desk ничего из этого не тратит: всё уже лежит в базе.
 
 CHAT_BILLING_STAFF_MIN_SECONDS = 60
 CHAT_BILLING_PHONE_SHIFT_KIND = "phone"
+# В план идут только обычные смены графика: «смена на телефонах» — работа на линии,
+# «практика в офисе» — не на чате вовсе.
+CHAT_BILLING_PLAN_SHIFT_TYPE = "regular"
+CHAT_BILLING_AUCTION_MODE = "chat"
 
 # План чатов — формулы файла «Ежедневный отчет Техподдержка чат», как просил владелец
 # 17.09.2026. В колонке «Нужно удалить» у парка стоит постоянная доля, в итоге дня — чаты
@@ -2344,50 +2348,190 @@ def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date) -> List[Tu
     return cursor.fetchall()
 
 
-def _chat_billing_planned_staff(db, day: date) -> Optional[Dict[str, List[Any]]]:
-    """Головы и часы по сменам аукциона чата на день; None — графика на день нет."""
-    day_key = day.isoformat()
-    auction = db.get_shift_auction_lots_for_planner_date(day, direction_mode="chat") or {}
-    # {час: {чатник: [(начало, конец) в минутах]}} — часы считаются объединением отрезков
-    # человека: в опубликованном графике у одного чатника бывают наложенные смены
-    # (12.09.2026: три смены на сутки у одного человека), и сумма дала бы 27 часов за день.
-    parts_by_hour: List[Dict[int, List[Tuple[int, int]]]] = [dict() for _ in range(24)]
-    for lot in auction.get("lots") or []:
-        if str(lot.get("status") or "").strip().lower() != "claimed":
-            continue
-        # Телефонные смены чатников (#304) стоят в графике чата, но это работа на линии:
-        # в расчёт ресурсов чата они не входят, значит и в план сотрудников чата тоже.
-        if str(lot.get("shift_kind") or "").strip().lower() == CHAT_BILLING_PHONE_SHIFT_KIND:
-            continue
-        try:
-            operator_id = int(lot.get("claimed_by") or 0)
-        except (TypeError, ValueError):
-            continue
-        if operator_id <= 0:
-            continue
-        for start, end in db._hourly_lot_parts_for_date(lot, day_key):
-            for hour in range(24):
-                part_start, part_end = max(start, hour * 60), min(end, hour * 60 + 60)
-                if part_end > part_start:
-                    parts_by_hour[hour].setdefault(operator_id, []).append((part_start, part_end))
-    if not any(parts_by_hour):
+def _chat_billing_planned_shifts_tx(cursor, day_from: date,
+                                    day_to: date) -> List[Tuple[Any, ...]]:
+    """(чатник, день смены, начало, конец) — смены графика работы чатников.
+
+    План — это график, а не лоты аукциона: в графике и куски смен, взятые по частям,
+    и то, что СВ поправили после публикации, и недели, которые аукцион не проходили.
+    Сутками раньше — ради ночной смены, чей хвост приходится на утро первого дня."""
+    cursor.execute(
+        """
+        SELECT ws.operator_id, ws.shift_date, ws.start_time, ws.end_time
+        FROM work_shifts ws
+        JOIN users u ON u.id = ws.operator_id
+        JOIN directions d ON d.id = u.direction_id
+        WHERE d.name ILIKE %s
+          AND ws.shift_type = %s
+          AND ws.shift_date BETWEEN %s AND %s
+        """,
+        (CHAT_DIRECTION_NAME_PATTERN, CHAT_BILLING_PLAN_SHIFT_TYPE,
+         day_from - timedelta(days=1), day_to),
+    )
+    return cursor.fetchall()
+
+
+def _chat_billing_phone_claims_tx(cursor, day_from: date,
+                                  day_to: date) -> List[Tuple[Any, ...]]:
+    """(чатник, день смены, начало и конец смены, начало и конец взятого) — смены на
+    телефонах из аукциона чата (#304).
+
+    Публикация аукциона пишет их в график обычными сменами, поэтому телефонное время
+    вычитается из графика по лотам. Источники те же, что у публикации: целый взятый лот
+    и куски в shift_auction_historical_claims (там же целые взятия прошлых периодов —
+    с пустым окном). Целый лот, у которого есть куски, не берётся: его claimed_by —
+    лишь последний, кто дозабрал смену."""
+    cursor.execute(
+        """
+        SELECT l.claimed_by, l.shift_date, l.start_time, l.end_time,
+               COALESCE(l.post_claim_start_time, l.start_time),
+               COALESCE(l.post_claim_end_time, l.end_time)
+        FROM shift_auction_test_lots l
+        JOIN resource_saved_schedule_shifts sh ON sh.id = l.source_schedule_shift_id
+        WHERE COALESCE(l.direction_mode, 'line') = %s
+          AND l.status = 'claimed'
+          AND l.claimed_by IS NOT NULL
+          AND sh.meta->>'shiftKind' = %s
+          AND l.shift_date BETWEEN %s AND %s
+          AND NOT EXISTS (
+              SELECT 1 FROM shift_auction_historical_claims hc
+              WHERE hc.plan_id = l.source_schedule_plan_id
+                AND hc.source_schedule_shift_id = l.source_schedule_shift_id
+                AND hc.claimed_start_time IS NOT NULL
+                AND hc.claimed_end_time IS NOT NULL
+          )
+        UNION ALL
+        SELECT hc.claimed_by, sh.shift_date, sh.start_time, sh.end_time,
+               COALESCE(hc.claimed_start_time, sh.start_time),
+               COALESCE(hc.claimed_end_time, sh.end_time)
+        FROM shift_auction_historical_claims hc
+        JOIN resource_saved_schedule_shifts sh
+          ON sh.id = hc.source_schedule_shift_id
+         AND sh.plan_id = hc.plan_id
+        JOIN resource_saved_schedule_plans p ON p.id = hc.plan_id
+        WHERE COALESCE(p.direction_mode, 'line') = %s
+          AND sh.meta->>'shiftKind' = %s
+          AND sh.shift_date BETWEEN %s AND %s
+        """,
+        (CHAT_BILLING_AUCTION_MODE, CHAT_BILLING_PHONE_SHIFT_KIND,
+         day_from - timedelta(days=1), day_to,
+         CHAT_BILLING_AUCTION_MODE, CHAT_BILLING_PHONE_SHIFT_KIND,
+         day_from - timedelta(days=1), day_to),
+    )
+    return cursor.fetchall()
+
+
+def _chat_billing_clock_minutes(value: Any) -> Optional[int]:
+    """Время суток (time или «ЧЧ:ММ») -> минуты от полуночи."""
+    if value is None:
         return None
+    if hasattr(value, "hour"):
+        return int(value.hour) * 60 + int(value.minute)
+    try:
+        hours, minutes = (int(part) for part in str(value).split(":")[:2])
+    except ValueError:
+        return None
+    return hours * 60 + minutes
 
-    def _union_minutes(parts: List[Tuple[int, int]]) -> int:
-        total, reached = 0, None
-        for start, end in sorted(parts):
-            if reached is not None and start < reached:
-                start = reached
-            if end > start:
-                total += end - start
-                reached = end
-        return total
 
-    return {
-        "heads": [len(slot) for slot in parts_by_hour],
-        "hours": [round(sum(_union_minutes(parts) for parts in slot.values()) / 60.0, 4)
-                  for slot in parts_by_hour],
-    }
+def _chat_billing_shift_span(base_day: date, shift_day: date, start: Any,
+                             end: Any) -> Optional[Tuple[int, int]]:
+    """Смена в минутах от полуночи base_day. Конец не позже начала — смена за полночь."""
+    start_minute = _chat_billing_clock_minutes(start)
+    end_minute = _chat_billing_clock_minutes(end)
+    if shift_day is None or start_minute is None or end_minute is None:
+        return None
+    if end_minute <= start_minute:
+        end_minute += 1440
+    offset = (shift_day - base_day).days * 1440
+    return offset + start_minute, offset + end_minute
+
+
+def _chat_billing_piece_span(base_day: date, shift_day: date, shift_start: Any, shift_end: Any,
+                             piece_start: Any, piece_end: Any) -> Optional[Tuple[int, int]]:
+    """Взятый кусок смены в минутах от полуночи base_day.
+
+    Кусок, который начинается раньше самой смены, лежит уже за полночью — то же правило,
+    что SHIFT_AUCTION_CLAIM_DATE_SQL у аукциона."""
+    shift = _chat_billing_shift_span(base_day, shift_day, shift_start, shift_end)
+    start_minute = _chat_billing_clock_minutes(piece_start)
+    end_minute = _chat_billing_clock_minutes(piece_end)
+    if shift is None or start_minute is None or end_minute is None:
+        return None
+    offset = (shift_day - base_day).days * 1440
+    start = offset + start_minute + (1440 if offset + start_minute < shift[0] else 0)
+    length = (end_minute - start_minute) % 1440
+    return (start, start + length) if length else None
+
+
+def _chat_billing_subtract_spans(spans: List[Tuple[int, int]],
+                                 cuts: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    result = []
+    for span in spans:
+        pieces = [span]
+        for cut_start, cut_end in cuts:
+            pieces = [piece for start, end in pieces
+                      for piece in ((start, min(end, cut_start)), (max(start, cut_end), end))
+                      if piece[1] > piece[0]]
+        result.extend(pieces)
+    return result
+
+
+def _chat_billing_union_minutes(parts: List[Tuple[int, int]]) -> int:
+    total, reached = 0, None
+    for start, end in sorted(parts):
+        if reached is not None and start < reached:
+            start = reached
+        if end > start:
+            total += end - start
+            reached = end
+    return total
+
+
+def build_chat_billing_planned_staff(day_from: date, day_to: date,
+                                     shift_rows: List[Tuple[Any, ...]],
+                                     phone_rows: List[Tuple[Any, ...]]
+                                     ) -> Dict[str, Optional[Dict[str, List[Any]]]]:
+    """{день: {heads, hours} по 24 часам или None — в графике на день никого}.
+
+    Часы человека считаются объединением его отрезков: в графике у одного чатника бывают
+    наложенные смены (12.09.2026: три смены на сутки у одного человека), и сумма дала бы
+    27 часов за день. Телефонное время вычитается из смен того, кто взял телефонный лот."""
+    base_day = day_from - timedelta(days=1)
+    shifts: Dict[int, List[Tuple[int, int]]] = {}
+    for operator_id, shift_day, start, end in shift_rows:
+        span = _chat_billing_shift_span(base_day, shift_day, start, end)
+        if span is not None and operator_id is not None:
+            shifts.setdefault(int(operator_id), []).append(span)
+    phones: Dict[int, List[Tuple[int, int]]] = {}
+    for operator_id, shift_day, shift_start, shift_end, piece_start, piece_end in phone_rows:
+        span = _chat_billing_piece_span(base_day, shift_day, shift_start, shift_end,
+                                        piece_start, piece_end)
+        if span is not None and operator_id is not None:
+            phones.setdefault(int(operator_id), []).append(span)
+
+    # {час от полуночи base_day: {чатник: [(начало, конец)]}}
+    slots: Dict[int, Dict[int, List[Tuple[int, int]]]] = {}
+    for operator_id, spans in shifts.items():
+        for start, end in _chat_billing_subtract_spans(spans, phones.get(operator_id, [])):
+            slot = start // 60
+            while slot * 60 < end:
+                part = (max(start, slot * 60), min(end, slot * 60 + 60))
+                slots.setdefault(slot, {}).setdefault(operator_id, []).append(part)
+                slot += 1
+
+    planned: Dict[str, Optional[Dict[str, List[Any]]]] = {}
+    current = day_from
+    while current <= day_to:
+        first_slot = (current - base_day).days * 24
+        day_slots = [slots.get(first_slot + hour, {}) for hour in range(24)]
+        planned[current.isoformat()] = {
+            "heads": [len(slot) for slot in day_slots],
+            "hours": [round(sum(_chat_billing_union_minutes(parts) for parts in slot.values()) / 60.0, 4)
+                      for slot in day_slots],
+        } if any(day_slots) else None
+        current += timedelta(days=1)
+    return planned
 
 
 def build_chat_billing_staff(day_from: date, day_to: date, fact_rows: List[Tuple[Any, ...]],
@@ -2426,11 +2570,9 @@ def build_chat_billing_staff(day_from: date, day_to: date, fact_rows: List[Tuple
 def get_chat_billing_staff(db, day_from: date, day_to: date) -> Dict[str, Dict[str, Any]]:
     with db._get_cursor() as cursor:
         fact_rows = _chat_billing_fact_staff_tx(cursor, day_from, day_to)
-    planned = {}
-    current = day_from
-    while current <= day_to:
-        planned[current.isoformat()] = _chat_billing_planned_staff(db, current)
-        current += timedelta(days=1)
+        shift_rows = _chat_billing_planned_shifts_tx(cursor, day_from, day_to)
+        phone_rows = _chat_billing_phone_claims_tx(cursor, day_from, day_to)
+    planned = build_chat_billing_planned_staff(day_from, day_to, shift_rows, phone_rows)
     return build_chat_billing_staff(day_from, day_to, fact_rows, planned)
 
 

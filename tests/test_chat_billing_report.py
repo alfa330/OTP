@@ -3,12 +3,11 @@
 план чатов и сотрудники, выгрузки в формате отчётов СЗоВ — «Ежедневный отчёт по чатам»
 и «Отчёт с группировкой по часам»."""
 import ast
-import copy
 import math
 import re
 import unittest
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, time
 from io import BytesIO
 from pathlib import Path
 
@@ -21,23 +20,25 @@ from resource_fte.chat import (
     CHAT_BILLING_DETAIL_EXPORT_LIMIT,
     CHAT_BILLING_METRICS,
     CHAT_BILLING_PARK_SHARES,
+    _chat_billing_phone_claims_tx,
     _chat_billing_plan_base_tx,
-    _chat_billing_planned_staff,
+    _chat_billing_planned_shifts_tx,
     attach_chat_billing_grouping_staff,
     attach_chat_billing_plan,
     build_chat_billing_grouping,
+    build_chat_billing_planned_staff,
     build_chat_billing_staff,
     get_chat_billing_details,
     get_chat_billing_grouping,
     get_chat_billing_grouping_by_park,
     get_chat_billing_operators,
     get_chat_billing_report,
+    get_chat_billing_staff,
 )
 from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
 VIEW_PATH = ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx"
 METRICS_JS_PATH = ROOT / "src" / "components" / "resources" / "chatBillingMetrics.js"
 
@@ -91,22 +92,6 @@ def _namespace():
     }
     exec(compile(ast.Module(body=consts + selected, type_ignores=[]), str(BOT_PATH), "exec"), ns)
     return ns
-
-
-def _lot_parts_method():
-    """Настоящий Database._hourly_lot_parts_for_date: план сотрудников режет смены им."""
-    module = source_cache.parse(DATABASE_PATH.read_text(encoding="utf-8"))
-    database = next(node for node in module.body
-                    if isinstance(node, ast.ClassDef) and node.name == "Database")
-    method = next(node for node in database.body
-                  if isinstance(node, ast.FunctionDef) and node.name == "_hourly_lot_parts_for_date")
-    # Копия: source_cache отдаёт общий разобранный модуль, и снятый прямо с него
-    # @staticmethod ломал соседние тесты, которые исполняют класс Database целиком.
-    method = copy.deepcopy(method)
-    method.decorator_list = []
-    ns = {"date": date}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), str(DATABASE_PATH), "exec"), ns)
-    return ns["_hourly_lot_parts_for_date"]
 
 
 def _aggregates(chats, answered, answered_sl, reply_sum, inner_sum, inner_replied,
@@ -245,43 +230,102 @@ class ChatBillingGroupingTests(unittest.TestCase):
         self.assertIn("EXTRACT(HOUR FROM r.request_start)", db.cursor.calls[0][0])
 
 
-class _PlannerDb:
-    """План сотрудников: лоты аукциона чата и настоящий разбор смены по часам."""
-
-    def __init__(self, lots):
-        self.lots = lots
-        self.requested = []
-        self._hourly_lot_parts_for_date = _lot_parts_method()
-
-    def get_shift_auction_lots_for_planner_date(self, day, direction_mode="line"):
-        self.requested.append((day, direction_mode))
-        return {"lots": self.lots}
+def _shift(operator_id, day, start, end):
+    """Строка графика так, как её отдаёт psycopg2: дата и время объектами."""
+    return (operator_id, date.fromisoformat(day), time.fromisoformat(start), time.fromisoformat(end))
 
 
-def _lot(operator_id, shift_date, start, end, status="claimed", kind=""):
-    return {"claimed_by": operator_id, "shift_date": shift_date, "start_time": start,
-            "end_time": end, "status": status, "shift_kind": kind}
+def _phone(operator_id, day, start, end, piece_start=None, piece_end=None):
+    return (*_shift(operator_id, day, start, end),
+            time.fromisoformat(piece_start or start), time.fromisoformat(piece_end or end))
+
+
+class _SequenceCursor(_RowsCursor):
+    """Каждый запрос получает свою пачку строк — по порядку вызовов."""
+
+    def __init__(self, batches):
+        super().__init__([])
+        self.batches = list(batches)
+
+    def fetchall(self):
+        return list(self.batches.pop(0))
 
 
 class ChatBillingStaffTests(unittest.TestCase):
-    def test_planned_staff_skips_phone_and_unclaimed_and_unions_overlaps(self):
-        db = _PlannerDb([
-            _lot(1, "2026-09-12", "09:00", "18:00"),
+    def test_planned_staff_is_the_schedule_without_phone_time(self):
+        plan = build_chat_billing_planned_staff(date(2026, 9, 12), date(2026, 9, 13), [
+            _shift(1, "2026-09-12", "09:00", "18:00"),
             # Наложенная смена того же человека — часы не задваиваются, голова одна.
-            _lot(1, "2026-09-12", "15:00", "21:30"),
-            _lot(2, "2026-09-12", "10:00", "11:00", kind="phone"),
-            _lot(3, "2026-09-12", "10:00", "11:00", status="available"),
-            # Хвост ночной смены прошлых суток.
-            _lot(4, "2026-09-11", "20:00", "02:00"),
+            _shift(1, "2026-09-12", "15:00", "21:30"),
+            # Хвост ночной смены прошлых суток — утро первого дня периода.
+            _shift(4, "2026-09-11", "20:00", "02:00"),
+            # Смена, слитая публикацией из телефонной 08–17 и чатовой 17–01.
+            _shift(5, "2026-09-12", "08:00", "01:00"),
+            # Кусок телефонной смены после полуночи вычитается из следующих суток.
+            _shift(6, "2026-09-12", "17:00", "02:00"),
+        ], [
+            _phone(5, "2026-09-12", "08:00", "17:00"),
+            _phone(6, "2026-09-12", "17:00", "01:00", "00:00", "01:00"),
+            # Телефон взял человек, которого в графике нет, — чужие смены не трогает.
+            _phone(9, "2026-09-12", "09:00", "18:00"),
         ])
-        plan = _chat_billing_planned_staff(db, date(2026, 9, 12))
-        self.assertEqual(db.requested, [(date(2026, 9, 12), "chat")])
-        self.assertEqual(plan["heads"][:3], [1, 1, 0])
-        self.assertEqual(plan["heads"][10], 1)
-        self.assertEqual(plan["heads"][16], 1)
-        self.assertEqual(plan["heads"][21], 1)
-        self.assertEqual(sum(plan["hours"]), 2 + 12.5)
-        self.assertIsNone(_chat_billing_planned_staff(_PlannerDb([]), date(2026, 9, 12)))
+        day = plan["2026-09-12"]
+        self.assertEqual(day["heads"][:3], [1, 1, 0])
+        self.assertEqual(day["heads"][8:10], [0, 1])
+        self.assertEqual(day["heads"][16:18], [1, 3])
+        # В 21:00 первый ещё на смене (до 21:30), дальше — пятый и шестой.
+        self.assertEqual(day["heads"][21:], [3, 2, 2])
+        # 2 ч ночного хвоста, 12,5 ч наложенных смен, 7 ч чата у пятого, 7 ч у шестого.
+        self.assertEqual(sum(day["hours"]), 2 + 12.5 + 7 + 7)
+        next_day = plan["2026-09-13"]
+        self.assertEqual(next_day["heads"][:3], [1, 1, 0])
+        self.assertEqual(sum(next_day["hours"]), 2)
+        self.assertEqual(sum(next_day["heads"]), 2)
+        # В графике никого — прочерк, а не ноль людей.
+        empty = build_chat_billing_planned_staff(date(2026, 9, 12), date(2026, 9, 12), [], [])
+        self.assertEqual(empty, {"2026-09-12": None})
+
+    def test_plan_reads_regular_shifts_of_chat_people_from_the_day_before(self):
+        db = _RowsDb([])
+        with db._get_cursor() as cursor:
+            _chat_billing_planned_shifts_tx(cursor, date(2026, 9, 21), date(2026, 9, 27))
+        sql, params = db.cursor.calls[0]
+        self.assertIn("FROM work_shifts ws", sql)
+        self.assertIn("d.name ILIKE %s", sql)
+        self.assertIn("ws.shift_type = %s", sql)
+        # Сутки раньше периода — ради ночной смены; телефоны и практика в план не идут.
+        self.assertEqual(params, ["%чат%", "regular", date(2026, 9, 20), date(2026, 9, 27)])
+
+    def test_phone_time_comes_from_whole_lots_and_pieces_of_the_chat_auction(self):
+        db = _RowsDb([])
+        with db._get_cursor() as cursor:
+            _chat_billing_phone_claims_tx(cursor, date(2026, 9, 21), date(2026, 9, 27))
+        sql, params = db.cursor.calls[0]
+        self.assertIn("FROM shift_auction_test_lots l", sql)
+        self.assertIn("FROM shift_auction_historical_claims hc", sql)
+        self.assertIn("sh.meta->>'shiftKind' = %s", sql)
+        # Целый лот с кусками не берётся: его claimed_by — лишь последний дозабравший.
+        self.assertIn("NOT EXISTS", sql)
+        self.assertEqual(params, ["chat", "phone", date(2026, 9, 20), date(2026, 9, 27)] * 2)
+
+    def test_staff_is_three_queries_on_one_cursor(self):
+        cursor = _SequenceCursor([
+            [(date(2026, 9, 21), 9, 1, 3600.0)],
+            [_shift(1, "2026-09-21", "08:00", "17:00"), _shift(2, "2026-09-21", "08:00", "17:00")],
+            [_phone(2, "2026-09-21", "08:00", "17:00")],
+        ])
+
+        class _Db:
+            @contextmanager
+            def _get_cursor(self):
+                yield cursor
+
+        staff = get_chat_billing_staff(_Db(), date(2026, 9, 21), date(2026, 9, 21))
+        self.assertEqual(len(cursor.calls), 3)
+        day = staff["2026-09-21"]
+        self.assertEqual(day["planned_heads"][9], 1)
+        self.assertEqual(sum(day["planned_hours"]), 9)
+        self.assertEqual(day["fact_heads"][9], 1)
 
     def test_fact_heads_need_a_minute_online(self):
         rows = [
