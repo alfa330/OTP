@@ -336,6 +336,9 @@ class WiringSourceTests(unittest.TestCase):
         self.assertIn("@app.route('/api/wazzup/accounts'", API_SOURCE)
         self.assertIn("@app.route('/api/wazzup/potok/sync'", API_SOURCE)
         self.assertIn("id='wazzup_potok_sync_10min'", API_SOURCE)
+        # джоба проходит полное окно (с пропуском загруженного): так оборванная
+        # деплоем загрузка истории доводится сама, без ручного перезапуска
+        self.assertIn("db, account='potok', days=wazzup_potok_sync.DEFAULT_HISTORY_DAYS))", API_SOURCE)
         self.assertIn("account = wazzup_accounts.account_by_webhook_token(token)", API_SOURCE)
         self.assertIn("db.store_wazzup_messages(payload.get('messages'), account=account)", API_SOURCE)
         # каждая читающая ручка валидирует аккаунт и отвечает 400 на чужой

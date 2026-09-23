@@ -65404,17 +65404,22 @@ async def run_wazzup_retention_async():
 
 
 async def run_wazzup_potok_sync_async():
-    # Дотягивание переписки «Потока» (см. wazzup/potok_sync.py): с последнего
-    # сохранённого сообщения минус перекрытие. Без ключа — тихий no-op: локальные
-    # стенды и тесты аккаунта не знают. Отдельный поток, а не executor_pool:
-    # прогон сетевой и может занять минуты, а пул из четырёх мест общий с
-    # ботом ([[shared-executor-pool-budget]] — цикл держит четыре места).
+    # Переписка «Потока» (см. wazzup/potok_sync.py). Джоба всегда проходит ПОЛНОЕ
+    # окно хранения, а не «с последнего сообщения»: чаты, чьё последнее сообщение
+    # уже у нас, пропускаются без запроса, поэтому обычный проход — это ~65
+    # страниц списка плюс только изменившиеся чаты. Зато если многочасовую
+    # загрузку истории оборвал деплой (фоновый поток умирает вместе с
+    # процессом), следующая же джоба её доводит сама — без ручного перезапуска.
+    # Без ключа — тихий no-op: локальные стенды и тесты аккаунта не знают.
+    # Отдельный поток, а не executor_pool: прогон сетевой и может занять
+    # минуты, а пул из четырёх мест общий с ботом ([[shared-executor-pool-budget]]).
     if not wazzup_accounts.api_key('potok'):
         return None
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
-            None, lambda: wazzup_potok_sync.run_sync(db, account='potok'))
+            None, lambda: wazzup_potok_sync.run_sync(
+                db, account='potok', days=wazzup_potok_sync.DEFAULT_HISTORY_DAYS))
     except Exception:
         logging.exception("wazzup potok sync failed")
 
