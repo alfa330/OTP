@@ -1860,7 +1860,9 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         form = code[code.index('function NewsForm('):code.index('function NewsReport(')]
         self.assertIn('function PickerRow(', code)
         # Обе короткие настройки — листалки, и своих экранов у них больше нет.
-        self.assertEqual(form.count('<PickerRow'), 2)
+        # Ещё две — время на чтение и на тест в окне Oktell (23.09.2026): они
+        # тоже короткий выбор из нескольких значений.
+        self.assertEqual(form.count('<PickerRow'), 4)
         for gone in ("push('kind')", "push('channel')", "screen === 'kind'",
                      "screen === 'channel'"):
             self.assertNotIn(gone, form, gone)

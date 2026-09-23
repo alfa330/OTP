@@ -374,6 +374,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     from . import routes_trainers
     routes_trainers.register(bp, wiki_route, db, _ip)
 
+    # «Опубликовать статью и как новость» (23.09.2026): черновик новости из
+    # статьи — периметр статьи и её файлы знает только вика.
+    from . import routes_news
+    routes_news.register(bp, wiki_route, db, _ip, gcs or {})
+
     # Перенос из внешней вики — после routes_edit: берёт у него помощники.
     from . import routes_migration
     routes_migration.register(bp, wiki_route, db, _ip, session_id_provider,

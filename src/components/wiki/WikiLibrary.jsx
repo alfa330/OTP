@@ -129,7 +129,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                       onAskAssistant = null,
                                       /* Вернуть человека на вкладку, с которой он
                                          открыл статью (каталог, журнал, отчёт). */
-                                      onReturnTo = null }) {
+                                      onReturnTo = null,
+                                      /* «Опубликовать статью и как новость»
+                                         (23.09.2026): из статьи и из редактора.
+                                         null — нельзя. */
+                                      onPublishAsNews = null }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
        onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
        статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
@@ -202,6 +206,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
      * а не режим витрины. */
 
     const isEditor = !!(canCreate || canEdit);
+
+    /* «Опубликовать статью и как новость»: вместе со статьёй уходит и ДВЕРЬ, с
+       которой в неё вошли. Форма новости живёт на другой вкладке, и, вернувшись
+       из неё, человек обязан получить статью с тем же «назад», что был до
+       формы, — а не выход в список, которого он не просил. */
+    const publishAsNews = useMemo(
+        () => (onPublishAsNews ? (article) => onPublishAsNews(article, door) : null),
+        [onPublishAsNews, door]);
 
     /* Статья из уведомления открывается один раз: значение сразу гасится в
        App, иначе следующий заход в раздел снова открывал бы её поверх того,
@@ -535,6 +547,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                        уже сужено по пространству — своего запроса пикер не
                        делает. */
                     articles={index}
+                    onPublishAsNews={publishAsNews}
                     pendingUpdateFile={pendingUpdateFile}
                     onPendingUsed={() => setPendingUpdateFile(null)}
                     /* Документ оказался новой версией другой статьи: открываем
@@ -615,6 +628,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                    поэтому редактору не нужен второй запрос — открываем прямо
                    на том объекте, который человек сейчас читает. */
                 onEdit={(article) => setEditing(article)}
+                onPublishAsNews={publishAsNews}
                 onArchived={() => {
                     // Уходим с закрытой статьи: она только что ушла из витрины,
                     // и оставлять её на экране значит показывать то, чего в

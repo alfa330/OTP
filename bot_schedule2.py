@@ -62873,6 +62873,9 @@ try:
             'signed_url': _lms_signed_url,
             'bucket_name': _wiki_bucket_name,
             'client': get_gcs_client,
+            # «Статья как новость»: картинки статьи переезжают в кадры новости,
+            # а те живут в бакете «Новостей» (wiki/routes_news.py).
+            'news_bucket_name': _news_bucket_name,
         },
         session_id_provider=_current_session_id_from_access_token,
     ))

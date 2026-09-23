@@ -154,6 +154,10 @@ export default function WikiEditor({
        загруженным и уже суженным по пространству; своего запроса пикер не
        делает (см. ArticlePicker.jsx). */
     articles = [],
+    /* «Опубликовать статью и как новость» (просьба владельца 23.09.2026).
+       null — вкладка «Новости» выключена в пространстве или человек не
+       вправе публиковать новости: тогда и переключателя нет. */
+    onPublishAsNews = null,
 }) {
     const isNew = !article?.id;
     // Статус берём из статьи, а не из «новизны»: существующий черновик тоже
@@ -205,6 +209,9 @@ export default function WikiEditor({
        поэтому «Архивные акции TEZ» и опубликовали как обычную статью, из-за
        чего помощник 27.08.2026 выдал закончившуюся акцию как действующую. */
     const [historical, setHistorical] = useState(!!article?.historical);
+    /* «Разослать новостью» — не свойство статьи, а просьба к этому нажатию
+       «Опубликовать»/«Сохранить»: в статью не пишется и правкой не считается. */
+    const [alsoNews, setAlsoNews] = useState(false);
 
     /* Название общего раздела — для подсказки под выбором раздела. Слаг тот же,
        что знает сервер (wiki/edit.py: _FALLBACK_SECTION_SLUG); совпадение
@@ -413,19 +420,42 @@ export default function WikiEditor({
                 // Говорим о том, ЧТО получилось, а не о том, что просили: у
                 // создания статус может не примениться, если нет права
                 // публикации в выбранном разделе.
-                const applied = r.data?.status || status;
+                //
+                // Правка отвечает {"status": "ok"} — это статус ЗАПРОСА, не
+                // статьи, и читать его как статус статьи значило сказать
+                // «сохранено черновиком» про только что опубликованный
+                // черновик (так и было до 23.09.2026). У правки статус — тот,
+                // что просили (без права публиковать сервер отвечает 403),
+                // а без просьбы — прежний.
+                const applied = isNew ? (r.data?.status || 'draft')
+                    : (status || article?.status);
                 showToast?.(
-                    applied === 'published' ? 'Статья опубликована'
-                        : status === 'published'
-                            ? 'Сохранено черновиком: нет права публиковать в этом разделе'
-                            : 'Сохранено',
+                    status !== 'published' ? 'Сохранено'
+                        : applied === 'published' ? 'Статья опубликована'
+                            : 'Сохранено черновиком: нет права публиковать в этом разделе',
                     applied !== 'published' && status === 'published' ? 'info' : 'success');
-                onSaved?.(r.data?.slug || article?.slug);
+                const slug = r.data?.slug || article?.slug;
+                onSaved?.(slug);
+                /* «Разослать новостью»: форма «Новостей» с текстом статьи.
+                   Только у ВЫШЕДШЕЙ статьи — новость о черновике разослала бы
+                   то, чего в вике ещё нет. Черновик готовит сервер (картинки
+                   переезжают в кадры новости), это пара секунд — о них и
+                   говорит тост. */
+                if (alsoNews && onPublishAsNews) {
+                    if (applied === 'published') {
+                        showToast?.('Готовим новость из статьи…', 'info');
+                        onPublishAsNews({ id: r.data?.id || article?.id, slug });
+                    } else {
+                        showToast?.('Новостью рассылается опубликованная статья — '
+                                    + 'сначала опубликуйте её', 'info');
+                    }
+                }
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
     }, [editor, title, summary, articleType, sectionIds, aiSupport, copyProtected,
-        historical, isNew, base, headers, article, showToast, onSaved]);
+        historical, isNew, base, headers, article, showToast, onSaved, alsoNews,
+        onPublishAsNews]);
 
     const importDocument = (file) => {
         if (!file) return;
@@ -785,6 +815,26 @@ export default function WikiEditor({
                             onChange={(value) => { setHistorical(value); setDirty(true); }}
                         />
                     </div>
+
+                    {/* «Разослать новостью» (просьба владельца 23.09.2026) — у
+                        того, кто вправе и выпустить статью, и опубликовать
+                        новость. Правкой не считается: это просьба к нажатию,
+                        а не свойство документа. */}
+                    {onPublishAsNews && (isPublished || mayPublish) && (
+                        <div className="flex items-start justify-between gap-3 border-t border-slate-100 pt-3">
+                            <div className="min-w-0">
+                                <div className="text-[14px] font-medium text-slate-900">
+                                    Разослать новостью
+                                </div>
+                                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+                                    После {isPublished ? 'сохранения' : 'публикации'} откроется
+                                    форма новости с текстом и картинками статьи — останется
+                                    выбрать, кому и как её показать.
+                                </p>
+                            </div>
+                            <IosToggle checked={alsoNews} onChange={setAlsoNews} />
+                        </div>
+                    )}
                 </div>
             </section>
 

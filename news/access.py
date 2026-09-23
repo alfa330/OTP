@@ -36,8 +36,9 @@ from oktell_guard.access import SECTION_DEPARTMENT_CODE as OKTELL_DEPARTMENT_COD
 
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, DEFAULT_NEWS_KIND,
                      DEFAULT_PASS_SCORE_PERCENT, DEFAULT_PUBLISH_MODE,
-                     MAX_CONFIRM_DELAY_SECONDS, MAX_SPREAD_MINUTES, MAX_WAVES,
-                     MIN_PASS_SCORE_PERCENT, MIN_SPREAD_MINUTES,
+                     MAX_CONFIRM_DELAY_SECONDS, MAX_SPENT_SECONDS,
+                     MAX_SPREAD_MINUTES, MAX_TIME_LIMIT_SECONDS, MAX_WAVES,
+                     MIN_PASS_SCORE_PERCENT, MIN_SPREAD_MINUTES, MIN_TIME_LIMIT_SECONDS,
                      MIN_WAVE_INTERVAL_MINUTES, NEWS_KINDS, PUBLISH_MODES,
                      QUIZ_MAX_OPTION_LENGTH, QUIZ_MAX_OPTIONS, QUIZ_MAX_PROMPT_LENGTH,
                      QUIZ_MAX_QUESTIONS, QUIZ_MIN_OPTIONS, QUIZ_MIN_QUESTIONS,
@@ -671,6 +672,93 @@ def channels_for_departments(department_codes):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ВРЕМЯ НА ЧТЕНИЕ И НА ТЕСТ В ОКНЕ OKTELL (решение владельца 23.09.2026)
+#
+# Окно поверх клиента АТС держит оператора в «Тренинге», вне линии, и лимит
+# отвечает на вопрос «сколько на это отведено». Три решения владельца, и все
+# три держатся здесь, а не в форме:
+#
+#   * настройка есть ТОЛЬКО у объявления в Oktell — в портале человек на линии,
+#     и засиживаться в окне ему незачем;
+#   * это ПОТОЛОК, а не задержка кнопки: задержка остаётся своей настройкой;
+#   * время вышло — НИЧЕГО не прерывается: окно показывает перерасход, журнал
+#     отмечает, на сколько человек превысил время.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_time_limit(raw):
+    """Лимит из формы, в секундах. None — «без ограничения».
+
+    Не отказ, а ближайшее допустимое — как у задержки кнопки: число приезжает
+    из листалки, и придираться к нему ценой отказа в публикации незачем.
+    Ноль и мусор — «без ограничения»: лимит в ноль секунд означал бы, что
+    каждый оператор превысил время ещё до того, как открыл окно.
+    """
+    if raw is None or raw is False or raw == '':
+        return None
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return max(MIN_TIME_LIMIT_SECONDS, min(MAX_TIME_LIMIT_SECONDS, seconds))
+
+
+def time_limits(*, channel, is_mandatory, has_quiz, read_limit, quiz_limit):
+    """Какие лимиты у новости останутся после сохранения: (чтение, тест).
+
+    Только у объявления в Oktell и только у обязательного: необязательное в
+    клиент АТС не уходит вовсе (oktell_guard/routes.py: /news), и лимит у него
+    был бы настройкой окна, которого не будет. Время на тест — только когда
+    тест есть. Лишнее не отвергаем, а снимаем: автор, переключивший канал на
+    портал, не должен получать отказ за строку, которую форма уже спрятала.
+    """
+    if channel != 'oktell' or not is_mandatory:
+        return None, None
+    return read_limit, (quiz_limit if has_quiz else None)
+
+
+def time_limit_refusal(*, read_limit, confirm_delay_seconds):
+    """Текст отказа или None. Время на чтение не короче задержки кнопки.
+
+    Иначе превышение было бы у каждого, кто прочитал бы объявление мгновенно:
+    кнопка «Ознакомлен» загорается позже, чем кончается отведённое время.
+    """
+    delay = int(confirm_delay_seconds or 0)
+    if read_limit and delay and int(read_limit) < delay:
+        return ('Время на чтение короче задержки кнопки «Прочитал» — '
+                'оператор не уложится, даже если прочтёт сразу')
+    return None
+
+
+def clean_spent(raw):
+    """Потраченные секунды от агента. None — агент не прислал замер.
+
+    Старые сборки агента поля не шлют, и «ноль секунд» вместо «не знаем»
+    записал бы им, что они прочитали объявление мгновенно.
+    """
+    if raw is None or raw == '':
+        return None
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(MAX_SPENT_SECONDS, seconds))
+
+
+def overtime(spent, limit):
+    """На сколько секунд человек превысил отведённое время.
+
+    None — сравнивать не с чем: лимита у новости нет или замера нет (старый
+    агент, окно ещё не открывали). Ноль — уложился. Одна функция на журнал,
+    сводку и выгрузку в Excel: «превысил» не может значить в них разное.
+    """
+    if not limit or spent is None:
+        return None
+    return max(0, int(spent) - int(limit))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # СОСТОЯНИЕ СОТРУДНИКА В ЖУРНАЛЕ (ТЗ #300, п.11.2 и п.13)
 #
 # «Рекомендуемые статусы: не выходил на смену после публикации; ожидает
@@ -785,6 +873,11 @@ def report_summary(rows, *, has_quiz=False, has_trainer=False):
         'avg_attempts': round(sum(tries) / len(tries), 1) if tries else 0,
         'needs_attention': sum(1 for row in addressed
                                if row.get('status') not in ('passed', 'done')),
+        # Превысили отведённое время в окне Oktell — на чтении или на тесте.
+        # Перерасход у строки считает overtime(); без лимитов здесь ноль.
+        'overtime': sum(1 for row in addressed
+                        if (row.get('read_over_seconds') or 0) > 0
+                        or (row.get('quiz_over_seconds') or 0) > 0),
     }
 
 

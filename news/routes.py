@@ -39,6 +39,7 @@ from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
                      attempts_ready as schema_attempts_ready,
                      takedown_ready as schema_takedown_ready,
                      channel_ready as schema_channel_ready,
+                     limits_ready as schema_limits_ready,
                      pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
                      plan_ready as schema_plan_ready,
@@ -152,6 +153,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             _attempts_table['ready'] = schema_attempts_ready(cursor)
         return _attempts_table['ready']
 
+    # Время на чтение и на тест в окне Oktell (23.09.2026) — тем же кэшем: колонки
+    # читает карточка на каждом сохранении и журнал.
+    _limit_columns = {'ready': False}
+
+    def _limits_ready(cursor):
+        if not _limit_columns['ready']:
+            _limit_columns['ready'] = schema_limits_ready(cursor)
+        return _limit_columns['ready']
+
     # Граница пространства (решение владельца 18.09.2026). Тем же приёмом и по
     # той же причине, что кадры и тест, но с одной особенностью: половина
     # ответа тут ЧУЖАЯ — таблицу wiki_space_departments приносит пакет вики.
@@ -244,7 +254,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                 with_space=_space_ready(cursor),
                                 with_channel=_channel_ready(cursor),
                                 with_plan=_plan_ready(cursor),
-                                with_takedown=_takedown_ready(cursor))
+                                with_takedown=_takedown_ready(cursor),
+                                with_limits=_limits_ready(cursor))
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -529,6 +540,45 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                             "сохраните без них или загляните позже",
                                    "code": "NEWS_PASS_NOT_READY"}), 503)
         return {'pass_required': required, 'trainer_key': key}, None
+
+    def _limits_from_request(cursor, payload, *, post=None, channel, mandatory,
+                             has_quiz, confirm_delay_seconds):
+        """({'read_limit_seconds', 'quiz_limit_seconds'}, отказ) из тела запроса.
+
+        Зовётся, когда канал, обязательность и тест уже посчитаны: лимит есть
+        только у обязательного объявления в Oktell (access.time_limits), и
+        решать это до них было бы не по чему. Ключа нет — прежнее значение
+        карточки: правка заголовка не снимает таймеров.
+
+        У ВЫПУСКАВШЕЙСЯ новости лимиты не меняются — под тем же замком и по той
+        же причине, что канал: объявление уже показано людям с этими таймерами,
+        и журнал «кто превысил» стал бы журналом другой новости.
+        """
+        current = post or {}
+        read = (news_access.normalize_time_limit(payload.get('read_limit_seconds'))
+                if 'read_limit_seconds' in payload else current.get('read_limit_seconds'))
+        quiz = (news_access.normalize_time_limit(payload.get('quiz_limit_seconds'))
+                if 'quiz_limit_seconds' in payload else current.get('quiz_limit_seconds'))
+        read, quiz = news_access.time_limits(channel=channel, is_mandatory=mandatory,
+                                             has_quiz=has_quiz, read_limit=read, quiz_limit=quiz)
+        if (read or quiz) and not _limits_ready(cursor):
+            # Прислали таймеры, а колонок нет: молча проглотить нельзя — автор
+            # выпустил бы объявление без ограничения, которое сам поставил.
+            return None, (jsonify({"error": "Время на чтение и тест ещё разворачивается — "
+                                            "сохраните без него или загляните позже",
+                                   "code": "NEWS_LIMITS_NOT_READY"}), 503)
+        problem = news_access.time_limit_refusal(
+            read_limit=read, confirm_delay_seconds=confirm_delay_seconds)
+        if problem:
+            return None, (jsonify({"error": problem, "code": "NEWS_READ_LIMIT_SHORT"}), 400)
+        if current.get('published_at') and (
+                read != current.get('read_limit_seconds')
+                or quiz != current.get('quiz_limit_seconds')):
+            return None, (jsonify({
+                "error": "Время на чтение и тест опубликованной новости не меняется — "
+                         "опубликуйте новую новость",
+                "code": "NEWS_LIMITS_LOCKED"}), 409)
+        return {'read_limit_seconds': read, 'quiz_limit_seconds': quiz}, None
 
     def _moment_or_none(value):
         """Время запуска из формы. Не разобрали — запуск не взводим.
@@ -1081,6 +1131,21 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return plan_refusal
         mandatory, passes['pass_required'] = news_access.kind_flags(
             plan['kind'], pass_required=passes['pass_required'])
+        # С ОБЯЗАТЕЛЬНЫМ прохождением — всегда обязательна: у необязательной
+        # крестик подтверждал бы прочтение без единого ответа. Необязательный
+        # тест или тренажёр (#342) обязательность не навязывают.
+        mandatory = mandatory or news_access.must_pass(
+            pass_required=passes['pass_required'], has_quiz=bool(quiz),
+            has_trainer=bool(passes['trainer_key']))
+        delay = news_access.normalize_delay(
+            payload.get('confirm_delay_seconds', DEFAULT_CONFIRM_DELAY_SECONDS))
+        # Таймеры окна Oktell — тоже ДО первой записи: они зависят от канала,
+        # обязательности и теста, и все три здесь уже известны.
+        limits, limits_refusal = _limits_from_request(
+            cursor, payload, channel=channel, mandatory=mandatory,
+            has_quiz=bool(quiz), confirm_delay_seconds=delay)
+        if limits_refusal:
+            return limits_refusal
 
         post_id = queries.create_post(
             cursor, title=title, body=body, author_id=ctx['user_id'],
@@ -1088,14 +1153,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             space_id=space_id, with_space=_space_ready(cursor),
             channel=channel, with_channel=_channel_ready(cursor),
             plan=plan, with_plan=_plan_ready(cursor),
-            # С ОБЯЗАТЕЛЬНЫМ прохождением — всегда обязательна: у необязательной
-            # крестик подтверждал бы прочтение без единого ответа. Необязательный
-            # тест или тренажёр (#342) обязательность не навязывают.
-            is_mandatory=mandatory or news_access.must_pass(
-                pass_required=passes['pass_required'], has_quiz=bool(quiz),
-                has_trainer=bool(passes['trainer_key'])),
-            confirm_delay_seconds=news_access.normalize_delay(
-                payload.get('confirm_delay_seconds', DEFAULT_CONFIRM_DELAY_SECONDS)),
+            is_mandatory=mandatory,
+            confirm_delay_seconds=delay,
             expires_at=_timestamp_or_none(payload.get('expires_at')),
             created_by=ctx['user_id'])
         queries.set_audience(cursor, post_id=post_id, rules=rules,
@@ -1114,6 +1173,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # Тренажёр и обязательность — тоже до публикации и по той же причине.
         if _pass_ready(cursor):
             queries.set_passes(cursor, post_id=post_id, **passes)
+        if _limits_ready(cursor):
+            queries.set_time_limits(cursor, post_id=post_id, **limits)
         # ЖУРНАЛ — одна строка на одно нажатие. «Опубликовать» у новой новости
         # это и создание, и выпуск, и две записи в одну секунду («создана»,
         # «опубликована») были бы шумом: пишем то, чем кончилось. Черновик —
@@ -1277,12 +1338,20 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                          "обязательность не снимается",
                 "code": "NEWS_QUIZ_MANDATORY",
             }), 409
+        delay = news_access.normalize_delay(
+            payload.get('confirm_delay_seconds', post['confirm_delay_seconds']))
+        # Таймеры окна Oktell — последним из отказов: они зависят от канала,
+        # обязательности и теста, а те посчитаны выше.
+        limits, limits_refusal = _limits_from_request(
+            cursor, payload, post=post, channel=channel, mandatory=wants_mandatory,
+            has_quiz=keeps_quiz, confirm_delay_seconds=delay)
+        if limits_refusal:
+            return limits_refusal
 
         queries.update_post(
             cursor, post_id=post_id, title=title, body=body,
             is_mandatory=wants_mandatory,
-            confirm_delay_seconds=news_access.normalize_delay(
-                payload.get('confirm_delay_seconds', post['confirm_delay_seconds'])),
+            confirm_delay_seconds=delay,
             expires_at=_timestamp_or_none(
                 payload.get('expires_at', post['expires_at'])),
             channel=channel, with_channel=_channel_ready(cursor),
@@ -1295,6 +1364,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.set_quiz(cursor, post_id=post_id, quiz=quiz)
         if _pass_ready(cursor):
             queries.set_passes(cursor, post_id=post_id, **passes)
+        if _limits_ready(cursor):
+            queries.set_time_limits(cursor, post_id=post_id, **limits)
         photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
         if photo_refusal:
             return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
@@ -1559,7 +1630,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         rows = queries.read_report(cursor, post['id'], with_pass=_pass_ready(cursor),
                                    with_space=_space_ready(cursor),
                                    with_plan=_plan_ready(cursor),
-                                   with_attempts=_attempts_ready(cursor))
+                                   with_attempts=_attempts_ready(cursor),
+                                   with_limits=_limits_ready(cursor))
         has_quiz = bool(_quiz_ready(cursor)
                         and queries.quiz_answer_key(cursor, post['id']))
         # «Нет смен после публикации» говорим только про того, чьи часы ведут
@@ -1572,6 +1644,12 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 confirmed_at=row['confirmed_at'], quiz_passed_at=row['quiz_passed_at'],
                 attempts=row['attempts'], worked_after=row['worked_after'],
                 attendance_known=row['attendance_tracked'])
+            # Перерасход времени в окне Oktell (решение владельца 23.09.2026:
+            # «ничего не прерывать, отметить»). None — сравнивать не с чем.
+            row['read_over_seconds'] = news_access.overtime(
+                row['read_spent_seconds'], post.get('read_limit_seconds'))
+            row['quiz_over_seconds'] = news_access.overtime(
+                row['quiz_spent_seconds'], post.get('quiz_limit_seconds'))
         summary = news_access.report_summary(
             rows, has_quiz=has_quiz, has_trainer=bool(post.get('trainer_key')))
         questions = (queries.question_stats(cursor, post['id'])
@@ -1661,6 +1739,11 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # ТЗ #300, п.8.5: режим публикации, плановое и фактическое время
             # начала, период и интервал. Номер волны каждого сотрудника уже в
             # строках — считается там же, где и всё остальное про человека.
+            # Сколько отводилось в окне Oktell — подпись к отметке «+1:12».
+            "limits": {
+                "read_limit_seconds": post.get('read_limit_seconds'),
+                "quiz_limit_seconds": post.get('quiz_limit_seconds'),
+            },
             "plan": {
                 "kind": post.get('kind'),
                 "pass_score_percent": post.get('pass_score_percent'),

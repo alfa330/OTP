@@ -5,6 +5,7 @@ import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
+import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
 import {
     AlertTriangle, Bold, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Image as ImageIcon,
     Italic, Link2, List, ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus,
@@ -225,6 +226,38 @@ const hasJournal = (post) => !!post?.is_mandatory || (post?.quiz_count || 0) > 0
 /* Заготовки задержки. Числом в поле её тоже задают, но человек, ставящий
    объявление на смену, думает не в секундах, а «быстро / нормально / вдумчиво». */
 const DELAY_PRESETS = [0, 10, 30, 60];
+
+/* ВРЕМЯ НА ЧТЕНИЕ И НА ТЕСТ В ОКНЕ OKTELL (решение владельца 23.09.2026).
+   Окно поверх клиента АТС держит оператора вне линии, и автор решает, сколько
+   на это отводится. Это потолок, а не задержка кнопки, и время вышло — ничего
+   не прерывается: окно показывает перерасход, журнал его отмечает. Первым в
+   листалке — «Не ограничено»: так ведут себя все объявления до этой правки.
+   Пределы те же, что у сервера (news/schema.py: MIN/MAX_TIME_LIMIT_SECONDS). */
+const READ_LIMIT_OPTIONS = [
+    { value: null, label: 'Не ограничено' },
+    { value: 60, label: '1 мин' },
+    { value: 120, label: '2 мин' },
+    { value: 180, label: '3 мин' },
+    { value: 300, label: '5 мин' },
+    { value: 600, label: '10 мин' },
+    { value: 900, label: '15 мин' },
+];
+const QUIZ_LIMIT_OPTIONS = [
+    { value: null, label: 'Не ограничено' },
+    { value: 60, label: '1 мин' },
+    { value: 120, label: '2 мин' },
+    { value: 180, label: '3 мин' },
+    { value: 300, label: '5 мин' },
+    { value: 600, label: '10 мин' },
+];
+
+/* «4:12» — время в окне Oktell и перерасход в журнале, как их видит оператор
+   на таймере окна. */
+const clockLabel = (seconds) => {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const rest = total % 60;
+    return `${Math.floor(total / 60)}:${rest < 10 ? '0' : ''}${rest}`;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Выбор адресатов
@@ -587,6 +620,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
        (news/routes.py: _channels_for_space) — в «Тез» программы нет, и выбора
        там не показываем: единственный вариант это не выбор, а лишний вопрос. */
     const [channel, setChannel] = useState(NEWS_CHANNELS[0].value);
+    /* Сколько отведено на чтение и на тест в окне Oktell. null — без
+       ограничения. Строки видны только у объявления в Oktell. */
+    const [readLimit, setReadLimit] = useState(null);
+    const [quizLimit, setQuizLimit] = useState(null);
     const channels = access?.channels || [NEWS_CHANNELS[0].value];
     const channelOptions = NEWS_CHANNELS.filter((item) => channels.includes(item.value));
     /* Кто из отмеченных не увидит объявление в Oktell: в АТС без SIP-номера не
@@ -619,6 +656,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     /* Держит ли прохождение подтверждение — то же правило, что на сервере
        (news/access.py: must_pass). Держит — новость обязательна всегда. */
     const mustPass = passEffective && (quiz.length > 0 || !!trainerKey);
+    /* Таймеры — у ОБЯЗАТЕЛЬНОГО объявления в Oktell: необязательное в клиент АТС
+       не уходит вовсе, и строка настраивала бы окно, которого не будет. То же
+       правило у сервера (news/access.py: time_limits). */
+    const limitsShown = channel === 'oktell' && (mandatory || mustPass);
     /* Планировщик рисуется, только когда он развёрнут: предлагать отложенный
        запуск, который сервер отвергнет, — обещание, которое он не выполнит. */
     const planReady = access?.plan_ready !== false;
@@ -661,6 +702,15 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
             Underline,
             Link.configure({ openOnClick: false, autolink: true }),
             Highlight,
+            /* Таблица — только чтобы ПЕРЕЖИТЬ текст статьи («опубликовать статью
+               и как новость»): справки вики держатся на таблицах, и без узла в
+               схеме редактор рассыпал бы её на абзацы из ячеек. Кнопки вставки
+               нет — новость пишут текстом, а окно (news-modal.css) и Oktell
+               таблицу рисуют. */
+            Table.configure({ resizable: false }),
+            TableRow,
+            TableHeader,
+            TableCell,
         ],
         content: '',
         editorProps: {
@@ -699,6 +749,8 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setWaveInterval(post?.wave_interval_minutes || DEFAULT_WAVE_INTERVAL_MINUTES);
         setSpreadPreview(null);
         setChannel(post?.channel || NEWS_CHANNELS[0].value);
+        setReadLimit(post?.read_limit_seconds || null);
+        setQuizLimit(post?.quiz_limit_seconds || null);
         setSipCheck(null);
         setSipOpen(false);
         // Открываем всегда с главного: форма, начатая на третьем экране, —
@@ -918,6 +970,13 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         if (publish && publishMode === 'later' && !scheduledAt) {
             setError('Укажите дату и время запуска'); return;
         }
+        /* Тот же отказ, что у сервера (NEWS_READ_LIMIT_SHORT): иначе превышение
+           было бы у каждого — кнопка загорается позже, чем кончается время. */
+        if (limitsShown && readLimit && Number(delay) > readLimit) {
+            setError('Время на чтение короче задержки кнопки «Прочитал» — '
+                     + 'увеличьте время или уменьшите задержку');
+            return;
+        }
         if (publish && publishMode !== 'now' && scheduledAt
             && new Date(scheduledAt).getTime() <= Date.now()) {
             setError('Время запуска уже прошло — укажите будущее время'); return;
@@ -947,6 +1006,10 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                но прислать его надо и тогда: он у неё тот же, и отказ будет
                только у настоящей попытки перенести объявление. */
             channel,
+            /* Лишнее сервер снимет сам (access.time_limits), но форма шлёт ровно
+               то, что показывает: строки нет — таймера нет. */
+            read_limit_seconds: limitsShown ? readLimit : null,
+            quiz_limit_seconds: limitsShown && quiz.length > 0 ? quizLimit : null,
             audience: audience.map((rule) => ({
                 subject_type: rule.subject_type,
                 subject_id: rule.subject_id,
@@ -1351,6 +1414,40 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                                         </div>
                                     </div>
                                     </PickerRow>
+                                )}
+                                {/* Таймеры окна Oktell — сразу под каналом, к
+                                    которому относятся, и только когда он выбран
+                                    (решение владельца: «настройка должна
+                                    появляться только при отправке в Oktell»).
+                                    Заперты вместе с каналом: объявление уже
+                                    показано людям с этими таймерами. */}
+                                {limitsShown && (
+                                    <PickerRow
+                                        label={(
+                                            <span className="flex items-center gap-1.5">
+                                                Время на чтение
+                                                <IosHint
+                                                    label="Что будет, когда время выйдет"
+                                                    text="Сколько отведено на чтение объявления в окне Oktell — оператор видит обратный отсчёт, пока он вне линии. Время вышло — окно не закрывается и работу не прерывает, а в результатах новости у сотрудника появится отметка, на сколько он превысил время. Отсчёт не начинается заново, если окно закрыли или перезапустили программу."
+                                                />
+                                            </span>
+                                        )}
+                                        value={readLimit}
+                                        options={READ_LIMIT_OPTIONS}
+                                        onChange={setReadLimit}
+                                        disabled={channelLocked}
+                                        ariaLabel="Время на чтение"
+                                    />
+                                )}
+                                {limitsShown && quiz.length > 0 && (
+                                    <PickerRow
+                                        label="Время на тест"
+                                        value={quizLimit}
+                                        options={QUIZ_LIMIT_OPTIONS}
+                                        onChange={setQuizLimit}
+                                        disabled={channelLocked}
+                                        ariaLabel="Время на тест"
+                                    />
                                 )}
                                 <SettingRow label="Тест и тренажёр" value={passesSummary}
                                             muted={!quiz.length && !trainerKey}
@@ -2100,12 +2197,28 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                     {/* Обстоятельства выпуска — мелкой строкой под плитками и только
                         когда они есть: растяжка, запуск по плану, снятие. */}
                     {(state.confirmed_outside > 0 || hasTrainer || state.plan?.publish_mode === 'spread'
-                      || state.plan?.scheduled_at || post?.archived_at) && (
+                      || state.plan?.scheduled_at || post?.archived_at || state.overtime > 0) && (
                         <div className="space-y-0.5 px-1 text-[12px] tabular-nums text-slate-500">
                             {state.confirmed_outside > 0 && (
                                 <p>и ещё {state.confirmed_outside} подтвердили из тех, кто больше не в адресатах</p>
                             )}
                             {hasTrainer && <p>тренажёр прошли {state.trainer_passed || 0}</p>}
+                            {/* Время в окне Oktell (решение владельца 23.09.2026:
+                                «ничего не прерывать, отметить»). Сколько было
+                                отведено — здесь же: «+1:12» без него не с чем
+                                сравнить. */}
+                            {state.overtime > 0 && (
+                                <p className="text-amber-700">
+                                    превысили отведённое время — {state.overtime}
+                                    {' (отведено: '}
+                                    {[state.limits?.read_limit_seconds
+                                        ? `чтение ${clockLabel(state.limits.read_limit_seconds)}` : '',
+                                      state.limits?.quiz_limit_seconds
+                                        ? `тест ${clockLabel(state.limits.quiz_limit_seconds)}` : '']
+                                        .filter(Boolean).join(', ')}
+                                    )
+                                </p>
+                            )}
                             {state.plan?.publish_mode === 'spread' && (
                                 <p>
                                     волнами: {state.plan.waves} по {minutesLabel(state.plan.wave_interval_minutes)}
@@ -2230,6 +2343,19 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                                     )}
                                                     {hasTrainer && row.trainer_passed_at && (
                                                         <Badge color="green">тренажёр</Badge>
+                                                    )}
+                                                    {/* Перерасход — янтарём, как «застрял на
+                                                        тесте»: это то, о чём с человеком
+                                                        будут говорить. Уложился — ничего. */}
+                                                    {row.read_over_seconds > 0 && (
+                                                        <span title={`На чтении ${clockLabel(row.read_spent_seconds)}`}>
+                                                            <Badge color="amber">чтение +{clockLabel(row.read_over_seconds)}</Badge>
+                                                        </span>
+                                                    )}
+                                                    {row.quiz_over_seconds > 0 && (
+                                                        <span title={`На тесте ${clockLabel(row.quiz_spent_seconds)}`}>
+                                                            <Badge color="amber">тест +{clockLabel(row.quiz_over_seconds)}</Badge>
+                                                        </span>
                                                     )}
                                                 </div>
                                                 {hasQuiz && score !== null && (
@@ -2356,7 +2482,11 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
             is_mandatory: true,
             confirm_delay_seconds: access.default_confirm_delay_seconds ?? 10,
             expires_at: null,
-            photos: [],
+            /* «Статья как новость»: картинки статьи уже переложены сервером в
+               кадры новости (wiki/routes_news.py), тренажёр статьи — в тренажёр
+               новости. У вопроса операторов их нет. */
+            photos: compose.draft?.photos || [],
+            trainer_key: compose.draft?.trainer_key || null,
         });
     }, [compose, access]);
     const closeCompose = useCallback((newsId) => {

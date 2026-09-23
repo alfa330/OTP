@@ -210,7 +210,8 @@ const FIELD_TITLE = {
     confirm_delay_seconds: 'задержка кнопки', expires_at: 'показывать до',
     channel: 'куда отправить', trainer_key: 'тренажёр',
     pass_required: 'обязательность теста', quiz: 'тест', photos: 'фотографии',
-    schedule: 'запуск',
+    schedule: 'запуск', read_limit_seconds: 'время на чтение',
+    quiz_limit_seconds: 'время на тест',
 };
 
 const VALUE_TITLE = {

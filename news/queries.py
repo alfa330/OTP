@@ -294,6 +294,17 @@ def _takedown_fields(row, offset):
     }
 
 
+def _limits_sql(with_limits):
+    """Время на чтение и на тест в окне Oktell — для выборок с `p`.
+
+    Без колонок (schema.limits_ready) — литералы: форма строки одна при любой
+    готовности схемы, как у _takedown_sql.
+    """
+    if not with_limits:
+        return "NULL::int AS read_limit_seconds, NULL::int AS quiz_limit_seconds"
+    return "p.read_limit_seconds, p.quiz_limit_seconds"
+
+
 def _wave_gate(with_plan):
     """Условие «волна этого человека уже наступила» для выборок с `p` = news_posts.
 
@@ -1342,7 +1353,7 @@ def audience_stats(cursor, post_ids, with_space=False):
 
 
 def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=False,
-             with_plan=False, with_takedown=False):
+             with_plan=False, with_takedown=False, with_limits=False):
     """Карточка новости с адресатами. None — нет такой.
 
     with_pass — развёрнуты ли колонки тренажёра и обязательности прохождения
@@ -1362,7 +1373,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
                u.name, d.name, p.created_at, p.updated_at, u.role,
                {pass_required}, {trainer_key}, {space_id}, {channel},
                {plan},
-               {takedown}
+               {takedown},
+               {limits}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -1373,7 +1385,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
                    channel=('p.channel' if with_channel
                             else "'%s'::varchar" % news_access.DEFAULT_CHANNEL),
                    plan=_plan_columns_sql(with_plan),
-                   takedown=_takedown_sql(with_takedown)),
+                   takedown=_takedown_sql(with_takedown),
+                   limits=_limits_sql(with_limits)),
         (post_id,),
     )
     row = cursor.fetchone()
@@ -1426,6 +1439,10 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
         # ТЗ #300, п.16: кто и когда снял с показа. Хранится и после повторного
         # выпуска — «сейчас снята» говорит статус, а эти поля — историю.
         **_takedown_fields(row, 27),
+        # Сколько отведено на чтение и на тест в окне Oktell. None — без
+        # ограничения (и у всех объявлений в портал).
+        'read_limit_seconds': row[30],
+        'quiz_limit_seconds': row[31],
         'audience': audience_rules(cursor, post_id),
     }
 
@@ -1580,6 +1597,80 @@ def set_passes(cursor, *, post_id, pass_required, trainer_key):
          WHERE id = %(id)s
         """,
         {'id': post_id, 'required': bool(pass_required), 'trainer': trainer_key},
+    )
+
+
+def set_time_limits(cursor, *, post_id, read_limit_seconds, quiz_limit_seconds):
+    """Время на чтение и на тест в окне Oktell. Отдельно от update_post — по
+    той же причине, что set_passes: колонок могло ещё не быть, и роут зовёт
+    эту функцию только под защёлкой schema.limits_ready."""
+    cursor.execute(
+        """
+        UPDATE news_posts
+           SET read_limit_seconds = %(read)s, quiz_limit_seconds = %(quiz)s
+         WHERE id = %(id)s
+        """,
+        {'id': post_id, 'read': read_limit_seconds, 'quiz': quiz_limit_seconds},
+    )
+
+
+def agent_time_state(cursor, *, news_id, user_id):
+    """Лимиты объявления и сколько человек уже потратил — для окна Oktell.
+
+    Потраченное приходит в окно, а не считается там с нуля: окно — отдельная
+    страница, она пересоздаётся при каждом показе, и счёт с нуля дарил бы
+    оператору новые три минуты за каждый перезапуск агента. Отдельным
+    запросом, а не колонками pending_for_user: тот зовёт каждый вошедший в
+    портал, а лимиты нужны только окну поверх клиента АТС.
+    """
+    cursor.execute(
+        """
+        SELECT p.read_limit_seconds, p.quiz_limit_seconds,
+               r.read_spent_seconds, r.quiz_spent_seconds
+          FROM news_posts p
+          LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
+         WHERE p.id = %(news_id)s
+        """,
+        {'news_id': news_id, 'user_id': user_id},
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return {'read_limit_seconds': None, 'quiz_limit_seconds': None,
+                'read_spent_seconds': 0, 'quiz_spent_seconds': 0}
+    return {
+        'read_limit_seconds': row[0],
+        'quiz_limit_seconds': row[1],
+        'read_spent_seconds': int(row[2] or 0),
+        'quiz_spent_seconds': int(row[3] or 0),
+    }
+
+
+def record_time_spent(cursor, *, news_id, user_id, read_seconds, quiz_seconds):
+    """Записать, сколько человек провёл в окне на чтении и на тесте.
+
+    Окно присылает НАРАСТАЮЩИЙ итог (с учётом прошлых открытий — они приходят
+    ему в agent_time_state), поэтому GREATEST, а не сложение: повтор того же
+    замера и замер, опоздавший из-за сети, итог не раздувают и назад не
+    отматывают. None — замера по этой части нет, прежнее значение остаётся.
+
+    Только своей строке и только существующей: отметку «показали» ставит
+    выдача, и замер без показа — не то, что стоит записывать в журнал.
+    """
+    if read_seconds is None and quiz_seconds is None:
+        return
+    cursor.execute(
+        """
+        UPDATE news_reads
+           SET read_spent_seconds = CASE WHEN %(read)s::int IS NULL THEN read_spent_seconds
+                                         ELSE GREATEST(COALESCE(read_spent_seconds, 0), %(read)s::int)
+                                    END,
+               quiz_spent_seconds = CASE WHEN %(quiz)s::int IS NULL THEN quiz_spent_seconds
+                                         ELSE GREATEST(COALESCE(quiz_spent_seconds, 0), %(quiz)s::int)
+                                    END
+         WHERE news_id = %(news_id)s AND user_id = %(user_id)s
+        """,
+        {'news_id': news_id, 'user_id': user_id,
+         'read': read_seconds, 'quiz': quiz_seconds},
     )
 
 
@@ -1908,7 +1999,7 @@ def poke_bell(cursor):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=False,
-                with_attempts=False):
+                with_attempts=False, with_limits=False):
     """Адресаты новости с отметками показа и подтверждения.
 
     Круг адресатов считается ТЕМИ ЖЕ правилами, что и выдача окна
@@ -1943,7 +2034,10 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
         reads AS (
             SELECT user_id, shown_at, confirmed_at, """ + (
                 "quiz_passed_at, trainer_passed_at" if with_pass else
-                "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at") + """
+                "NULL::timestamp AS quiz_passed_at, NULL::timestamp AS trainer_passed_at") + """,
+                   """ + (
+                "read_spent_seconds, quiz_spent_seconds" if with_limits else
+                "NULL::int AS read_spent_seconds, NULL::int AS quiz_spent_seconds") + """
               FROM news_reads
              WHERE news_id = %(post_id)s
         ),
@@ -1998,7 +2092,8 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
                {wave_no}, {wave_planned}, {wave_activated},
                COALESCE(t.tries, 0), t.last_correct, t.last_total, t.last_at,
                COALESCE(hh.worked_after, FALSE),
-               (hh.user_id IS NOT NULL)
+               (hh.user_id IS NOT NULL),
+               r.read_spent_seconds, r.quiz_spent_seconds
           FROM addressed a
           FULL JOIN reads r ON r.user_id = a.id
           LEFT JOIN users u ON u.id = r.user_id
@@ -2058,6 +2153,10 @@ def read_report(cursor, post_id, with_pass=False, with_space=False, with_plan=Fa
         # Ведут ли этому человеку часы вообще. Без этого «не выходил на смену»
         # превращается в обвинение по отсутствию данных.
         'attendance_tracked': bool(row[17]),
+        # Сколько провёл в окне Oktell на чтении и на тесте (нарастающим
+        # итогом). None — замера нет: объявление в портал или старый агент.
+        'read_spent_seconds': int(row[18]) if row[18] is not None else None,
+        'quiz_spent_seconds': int(row[19]) if row[19] is not None else None,
     } for row in cursor.fetchall()]
 
 

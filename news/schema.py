@@ -115,6 +115,29 @@ MAX_SPREAD_MINUTES = 24 * 60
 MIN_WAVE_INTERVAL_MINUTES = 5
 MAX_WAVES = MAX_SPREAD_MINUTES // MIN_WAVE_INTERVAL_MINUTES
 
+# ── ВРЕМЯ НА ЧТЕНИЕ И НА ТЕСТ В ОКНЕ OKTELL (решение владельца 23.09.2026) ────
+#
+# Пока окно объявления открыто поверх клиента АТС, агент держит оператора в
+# «Тренинге», то есть вне линии. Лимит — сколько времени ОТВОДИТСЯ на чтение и
+# на тест, чтобы окном не пользовались как перерывом. Владелец дословно:
+# «после открытия новости идёт таймер… если имеется тест, то для него тоже
+# ставится время, чтобы оператор не злоупотреблял им».
+#
+# Это ПОТОЛОК, а не задержка кнопки: задержка (confirm_delay_seconds) не даёт
+# закрыть окно, не читая, лимит — не даёт в нём засиживаться. И это ОТМЕТКА, а
+# не отсечка: по решению владельца время вышло — ничего не прерывается, окно
+# показывает перерасход, а журнал — на сколько человек превысил время.
+#
+# Полминуты снизу — меньше не прочитать и объявление в две строки. Час сверху —
+# защита от опечатки в секундах, как у задержки: объявление, на которое
+# отведено больше часа, уже не объявление, а обучение.
+MIN_TIME_LIMIT_SECONDS = 30
+MAX_TIME_LIMIT_SECONDS = 3600
+
+# Сколько времени в окне принимаем от агента за раз. Сутки — больше смены не
+# бывает; число сверх этого — сбой часов у агента, а не человек в окне.
+MAX_SPENT_SECONDS = 24 * 3600
+
 # Ключ тренажёра вики (src/components/wiki/trainers/registry.js). Сценарии
 # живут в коде, а не в базе, поэтому сервер знает только форму ключа: латиница,
 # цифры и дефис. Длина — как у wiki_trainer_runs.trainer_key.
@@ -478,6 +501,23 @@ _STATEMENTS = [
     "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;",
     "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS "
     "archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL;",
+    # ── ВРЕМЯ НА ЧТЕНИЕ И НА ТЕСТ (окно Oktell, 23.09.2026) ─────────────────
+    #
+    # Лимиты — у новости: NULL — «без ограничения», так лежат все прежние
+    # объявления и все объявления в портал (лимит есть только у окна Oktell).
+    # Без CHECK — пределы держит access.normalize_time_limit, как у растяжки.
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS read_limit_seconds INTEGER;",
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS quiz_limit_seconds INTEGER;",
+    # Сколько человек ФАКТИЧЕСКИ провёл на чтении и на тесте — нарастающим
+    # итогом за все открытия окна. У отметки прочтения, а не отдельной
+    # таблицей: строка (news_id, user_id) у человека ровно одна и появляется в
+    # момент показа, а журнал её уже читает.
+    #
+    # Нарастающим, а не «за последнее открытие»: окно живёт отдельной страницей
+    # и пересоздаётся при каждом показе (агент перезапустили, окно закрыли), и
+    # счёт с нуля дарил бы оператору новые три минуты за каждый перезапуск.
+    "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS read_spent_seconds INTEGER;",
+    "ALTER TABLE news_reads ADD COLUMN IF NOT EXISTS quiz_spent_seconds INTEGER;",
 ]
 
 # Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.
@@ -678,6 +718,33 @@ def takedown_ready(cursor):
     )
     row = cursor.fetchone()
     return bool(row and int(row[0]) == len(TAKEDOWN_COLUMNS))
+
+
+LIMIT_COLUMNS = (
+    ('news_posts', 'read_limit_seconds'),
+    ('news_posts', 'quiz_limit_seconds'),
+    ('news_reads', 'read_spent_seconds'),
+    ('news_reads', 'quiz_spent_seconds'),
+)
+
+
+def limits_ready(cursor):
+    """Развёрнуты ли лимиты времени окна Oktell и счёт потраченного времени.
+
+    Отдельно — по той же причине, что остальные защёлки раздела: колонки читают
+    карточка редактора, журнал и ручка агента, и не доехавший DDL уронил бы все
+    три. Нет колонок — окно работает как до этой правки: без таймеров.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND (table_name, column_name) IN (%s)
+        """ % ', '.join(['(%s, %s)'] * len(LIMIT_COLUMNS)),
+        [value for pair in LIMIT_COLUMNS for value in pair],
+    )
+    row = cursor.fetchone()
+    return bool(row and int(row[0]) == len(LIMIT_COLUMNS))
 
 
 def attempts_ready(cursor):

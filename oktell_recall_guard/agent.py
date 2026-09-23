@@ -2825,6 +2825,16 @@ NEWS_JS_TEMPLATE = r"""
   badge.setAttribute('style', 'display:inline-block;font:600 11.5px/1 -apple-system,Segoe UI,Arial;'
     + 'letter-spacing:.4px;color:#007aff;background:rgba(0,122,255,.1);padding:6px 10px;border-radius:999px');
 
+  // Отведённое время (решение владельца 23.09.2026): сколько осталось на
+  // чтение или на тест. Время вышло — окно НЕ закрывается и ничего не
+  // прерывает: таймер показывает перерасход, а журнал его отметит.
+  var timer = document.createElement('div');
+  timer.setAttribute('style', 'display:none;font:600 12.5px/1 -apple-system,Segoe UI,Arial;'
+    + 'font-variant-numeric:tabular-nums;padding:6px 10px;border-radius:999px;white-space:nowrap');
+  var head = document.createElement('div');
+  head.setAttribute('style', 'display:flex;align-items:center;justify-content:space-between;gap:12px');
+  head.appendChild(badge); head.appendChild(timer);
+
   var title = document.createElement('h2');
   title.textContent = data.title || '';
   title.setAttribute('style', 'font:600 22px/1.25 -apple-system,Segoe UI,Arial;margin:12px 0 14px');
@@ -2881,7 +2891,7 @@ NEWS_JS_TEMPLATE = r"""
   back.setAttribute('style', 'margin-top:8px;width:100%;padding:8px;border:none;background:none;'
     + 'color:#007aff;font:500 13px/1 -apple-system,Segoe UI,Arial;cursor:pointer;display:none');
 
-  card.appendChild(badge); card.appendChild(title); card.appendChild(body);
+  card.appendChild(head); card.appendChild(title); card.appendChild(body);
   card.appendChild(gallery);
   card.appendChild(warn); card.appendChild(quiz);
   card.appendChild(button); card.appendChild(back); card.appendChild(note);
@@ -2890,6 +2900,40 @@ NEWS_JS_TEMPLATE = r"""
 
   var left = Number(data.remaining_seconds || 0);
   var questions = data.quiz || [];
+  var limits = { read: Number(data.read_limit_seconds || 0),
+                 quiz: Number(data.quiz_limit_seconds || 0) };
+  // Потраченное — НАРАСТАЮЩИМ итогом за все открытия окна, с сервера: окно
+  // пересоздаётся при каждом показе, и счёт с нуля дарил бы оператору новые
+  // минуты за каждый перезапуск агента.
+  state.spent = { read: Number(data.read_spent_seconds || 0),
+                  quiz: Number(data.quiz_spent_seconds || 0) };
+
+  function clock(seconds) {
+    var total = Math.max(0, Math.floor(seconds));
+    var rest = total % 60;
+    return Math.floor(total / 60) + ':' + (rest < 10 ? '0' : '') + rest;
+  }
+
+  function paintTimer() {
+    var step = state.step === 'quiz' ? 'quiz' : 'read';
+    var limit = limits[step];
+    if (!limit) { timer.style.display = 'none'; return; }
+    var rest = limit - state.spent[step];
+    timer.style.display = '';
+    if (rest > 0) {
+      timer.textContent = 'Осталось ' + clock(rest);
+      // Последние полминуты — янтарём: предупредить, пока ещё можно успеть.
+      timer.style.background = rest <= 30 ? 'rgba(255,149,0,.14)' : '#f2f2f7';
+      timer.style.color = rest <= 30 ? '#c93400' : '#3a3a3c';
+    } else {
+      // Янтарём, а не красным: красное в окне ОДНО — уведомление о неверных
+      // ответах (решение владельца 21.09.2026), а перерасход — отметка, не
+      // ошибка: окно ничего не прерывает.
+      timer.textContent = rest < 0 ? 'Время вышло · +' + clock(-rest) : 'Время вышло';
+      timer.style.background = 'rgba(255,149,0,.22)';
+      timer.style.color = '#b25000';
+    }
+  }
 
   function answered() {
     for (var i = 0; i < questions.length; i++) {
@@ -2913,6 +2957,7 @@ NEWS_JS_TEMPLATE = r"""
       button.textContent = 'Подтвердить';
     }
     button.style.opacity = button.disabled ? '.45' : '1';
+    paintTimer();
   }
 
   // КАКОЙ вопрос неверен, окно НЕ показывает, и сервер его больше не присылает
@@ -2979,6 +3024,15 @@ NEWS_JS_TEMPLATE = r"""
     }, 1000);
   }
 
+  // Счёт времени идёт по шагу, на котором человек сейчас: «Перечитать
+  // новость» из теста — снова чтение. Агент забирает итог, пока окно открыто
+  // (build_news_progress_js), и вместе с ответами.
+  var ticker = setInterval(function () {
+    if (!document.getElementById(ID)) { clearInterval(ticker); return; }
+    state.spent[state.step === 'quiz' ? 'quiz' : 'read'] += 1;
+    paintTimer();
+  }, 1000);
+
   back.addEventListener('click', function () { state.step = 'read'; paint(); });
 
   button.addEventListener('click', function () {
@@ -2988,7 +3042,8 @@ NEWS_JS_TEMPLATE = r"""
     if (state.step === 'read' && questions.length) { state.step = 'quiz'; paint(); return; }
     button.disabled = true;
     button.textContent = 'Отправляем…';
-    state.result = { id: data.id, answers: state.answers };
+    state.result = { id: data.id, answers: state.answers,
+                     read_seconds: state.spent.read, quiz_seconds: state.spent.quiz };
     // Страховка на случай, когда забрать нажатие некому: программа перезапущена
     // сторожем, вкладка потеряла связь с ней, сеть легла. Без неё человек
     // остаётся с вечным «Отправляем…» и не понимает, услышали его или нет.
@@ -3046,6 +3101,12 @@ def build_news_js(item: dict) -> str:
             "title": item.get("title") or "",
             "body": item.get("body") or "",
             "remaining_seconds": int(item.get("remaining_seconds") or 0),
+            # Сколько отведено на чтение и на тест и сколько уже потрачено
+            # (решение владельца 23.09.2026). Ноль — без ограничения.
+            "read_limit_seconds": int(item.get("read_limit_seconds") or 0),
+            "quiz_limit_seconds": int(item.get("quiz_limit_seconds") or 0),
+            "read_spent_seconds": int(item.get("read_spent_seconds") or 0),
+            "quiz_spent_seconds": int(item.get("quiz_spent_seconds") or 0),
             # Кадры уже подписаны сервером: у окна только адрес и размеры.
             "photos": [
                 {"url": photo.get("url") or "",
@@ -3077,6 +3138,25 @@ def build_news_result_js() -> str:
   return out;
 })();
 """.strip()
+
+
+def build_news_progress_js() -> str:
+    """Сколько человек уже провёл в окне на чтении и на тесте. Без побочных
+    действий: итог остаётся в странице и продолжает расти."""
+    return """
+(function () {
+  var state = window.__oktellGuardNews;
+  if (!state || !state.spent) { return null; }
+  return { read: state.spent.read, quiz: state.spent.quiz };
+})();
+""".strip()
+
+
+def has_time_limits(item: Optional[dict]) -> bool:
+    """Есть ли у объявления отведённое время — только тогда агент шлёт замер."""
+    item = item or {}
+    return bool(int(item.get("read_limit_seconds") or 0)
+                or int(item.get("quiz_limit_seconds") or 0))
 
 
 def build_news_feedback_js(payload: dict) -> str:
@@ -3529,6 +3609,17 @@ class NewsOverlay:
             data = self.page.evaluate(build_news_result_js())
         except Exception:  # noqa: BLE001
             logging.debug("Ответ объявления не прочитан", exc_info=True)
+            return None
+        return data if isinstance(data, dict) else None
+
+    def progress(self) -> Optional[dict]:
+        """Замер времени из окна: {read, quiz} в секундах. None — не прочитали."""
+        if not self.alive():
+            return None
+        try:
+            data = self.page.evaluate(build_news_progress_js())
+        except Exception:  # noqa: BLE001
+            logging.debug("Замер времени объявления не прочитан", exc_info=True)
             return None
         return data if isinstance(data, dict) else None
 
@@ -4641,11 +4732,19 @@ class ServerLink:
             logging.debug("Объявления не получены", exc_info=True)
             return None
 
-    def news_read(self, news_id: int, answers: dict) -> dict:
-        """Подтверждение. Решение принимает сервер, мы только передаём ответ."""
+    def news_read(self, news_id: int, answers: dict, spent: Optional[dict] = None) -> dict:
+        """Подтверждение. Решение принимает сервер, мы только передаём ответ.
+
+        spent — сколько человек провёл на чтении и на тесте: сервер пишет замер
+        в журнал и при неверной попытке тоже.
+        """
         url = f"{self.base}/api/oktell_guard/news/{int(news_id)}/read"
+        body = {"answers": answers or {}}
+        if spent:
+            body["read_seconds"] = spent.get("read_seconds")
+            body["quiz_seconds"] = spent.get("quiz_seconds")
         try:
-            response = self._request("POST", url, json={"answers": answers or {}})
+            response = self._request("POST", url, json=body)
             payload = {}
             try:
                 payload = response.json() or {}
@@ -4659,6 +4758,16 @@ class ServerLink:
         except Exception as exc:  # noqa: BLE001
             logging.warning("Подтверждение не доставлено: %s", exc)
             return {"ok": False, "error": "Нет связи с iCORE — попробуйте ещё раз"}
+
+    def news_progress(self, news_id: int, spent: dict) -> None:
+        """Замер времени в окне — пока оно открыто. Не дошёл — не беда: следующий
+        замер несёт нарастающий итог и перекроет пропущенный."""
+        url = f"{self.base}/api/oktell_guard/news/{int(news_id)}/progress"
+        try:
+            self._request("POST", url, json={"read_seconds": spent.get("read"),
+                                             "quiz_seconds": spent.get("quiz")})
+        except Exception:  # noqa: BLE001
+            logging.debug("Замер времени объявления не доставлен", exc_info=True)
 
     def news_state(self, news_id: int) -> Optional[bool]:
         """Держит ли ещё объявление этого оператора. None — не знаем.
@@ -4820,6 +4929,13 @@ def run_agent(cfg: dict) -> int:
             if link.news_state(active_news.get("id")) is False:
                 release_news("снято с показа")
                 return True
+            # Тем же шагом — сколько человек уже провёл в окне. Без этого время
+            # узнавалось бы только при нажатии «Подтвердить», и тот, кто сидит
+            # в окне час и не жмёт ничего, превышением не значился бы вовсе.
+            if has_time_limits(active_news):
+                spent = news_overlay.progress()
+                if spent:
+                    link.news_progress(active_news.get("id"), spent)
         if not news_overlay.alive():
             # Окно закрыли, не подтвердив. Объявление обязательное — показываем
             # снова: «закрыл крестиком» не может быть способом его не читать.
@@ -4831,7 +4947,7 @@ def run_agent(cfg: dict) -> int:
         pressed = news_overlay.result()
         if not pressed:
             return False
-        verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {})
+        verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {}, pressed)
         if verdict.get("ok"):
             release_news("подтверждено")
         elif verdict.get("status") == 404:

@@ -181,7 +181,9 @@ class TestNewsWindow:
         """Верных ответов у страницы нет, и права ходить на наш адрес у неё
         тоже: нажатие забирает агент и решает сервер."""
         js = agent.build_news_js(self._item())
-        assert "state.result = { id: data.id, answers: state.answers }" in js
+        # С ответами уходит и замер времени в окне (23.09.2026) — решает всё
+        # равно сервер.
+        assert "state.result = { id: data.id, answers: state.answers," in js
         assert "fetch(" not in js
         assert "state.result" in agent.build_news_result_js()
 

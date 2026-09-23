@@ -46,7 +46,8 @@ AUDIT_ACTIONS = (
 # Тест, фотографии и расписание сравниваются отдельно: у карточки их нет
 # колонками, и сравнивает их роут.
 _COMPARED = ('title', 'body', 'kind', 'pass_score_percent', 'confirm_delay_seconds',
-             'expires_at', 'channel', 'trainer_key', 'pass_required')
+             'expires_at', 'channel', 'trainer_key', 'pass_required',
+             'read_limit_seconds', 'quiz_limit_seconds')
 
 
 def _rules(post):

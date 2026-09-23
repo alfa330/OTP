@@ -606,6 +606,15 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        вопрос в «Ждут статьи». */
     const finishNewsCompose = useCallback((request, newsId) => {
         setNewsCompose(null);
+        /* Пришли из статьи — к ней и возвращаемся, чем бы форма ни кончилась:
+           статья от новости не меняется, отмечать в ней нечего. */
+        if (request?.source === 'article') {
+            setTab('library');
+            if (request.articleSlug) {
+                setSearchTarget({ slug: request.articleSlug, from: request.from || null });
+            }
+            return;
+        }
         if (!request?.questionId) return;
         const back = () => {
             setTab('questions');
@@ -620,6 +629,41 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             .catch((e) => showToast?.(e?.response?.data?.error
                 || 'Новость вышла, но вопрос не отмечен', 'error'))
             .finally(back);
+    }, [base, headers, showToast]);
+
+    /* «ОПУБЛИКОВАТЬ СТАТЬЮ И КАК НОВОСТЬ» (просьба владельца 23.09.2026) — из
+       статьи и из редактора. Черновик готовит СЕРВЕР (wiki/routes_news.py): он
+       знает, какие картинки статьи этому человеку видны, и перекладывает их в
+       кадры новости — адреса вики у читателя новости не откроются. Форма
+       «Новостей» открывается заполненной тем же путём, что у вопроса
+       операторов, и, закрывшись, возвращает к статье. Промис — чтобы кнопка
+       в статье крутилась, пока черновик едет. */
+    const composeArticleNews = useCallback((article, door = null) => {
+        if (!article?.id) return Promise.resolve();
+        return axios.post(`${base}/articles/${article.id}/news-draft`, {}, { headers })
+            .then(({ data }) => {
+                if (data?.skipped_photos) {
+                    showToast?.(`Не все картинки статьи вошли в новость — пропущено ${
+                        data.skipped_photos}`, 'info');
+                }
+                setNewsCompose({
+                    source: 'article',
+                    articleSlug: article.slug,
+                    // Дверь статьи — вернуть её вместе со статьёй.
+                    from: door,
+                    draft: {
+                        title: data?.title || '',
+                        body: data?.body || '',
+                        photos: data?.photos || [],
+                        trainer_key: data?.trainer_key || null,
+                        audience: [],
+                    },
+                    nonce: Date.now(),
+                });
+                setTab('news');
+            })
+            .catch((e) => showToast?.(e?.response?.data?.error
+                || 'Не удалось подготовить новость из статьи', 'error'));
     }, [base, headers, showToast]);
 
     /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
@@ -1041,6 +1085,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         /* Поиск на витрине — тот же поиск, что в шапке, и выход
                            к помощнику у них обязан быть один и тот же. */
                         onAskAssistant={canAskAssistant ? askAssistant : null}
+                        /* Новостью — там, где вкладка «Новости» есть и человек
+                           вправе публиковать; в гостевом пространстве он
+                           читатель. */
+                        onPublishAsNews={features.news && canPublishNews && !activeSpace?.guest_only
+                            ? composeArticleNews : null}
                     />
                 )}
 

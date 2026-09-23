@@ -40,6 +40,11 @@ COLUMNS = (
     ('wave', 'Волна', 9),
     ('wave_planned_at', 'Волна по плану', 18),
     ('wave_activated_at', 'Волна фактически', 18),
+    # Время в окне Oktell (23.09.2026). У объявлений в портал замера нет, и
+    # колонки пропадают сами — как пустые (см. build).
+    ('read_spent', 'На чтении', 11),
+    ('quiz_spent', 'На тесте', 11),
+    ('overtime', 'Сверх отведённого', 22),
     ('status', 'Статус', 34),
 )
 
@@ -92,7 +97,34 @@ _RIGHT = (PatternFill(fill_type='solid', fgColor='DCFCE7'), Font(color='166534')
 _WRONG = (PatternFill(fill_type='solid', fgColor='FEF2F2'), Font(color='991B1B'))
 _EMPTY = (PatternFill(fill_type='solid', fgColor='F3F4F6'), Font(color='6B7280'))
 
+# Перерасход времени — янтарём, как «застрял на тесте» на экране: это то, по
+# чему руководитель будет разбираться с человеком.
+_OVER = (PatternFill(fill_type='solid', fgColor='FEF3C7'), Font(color='92400E'))
+
 _QUESTION_TITLE_LIMIT = 100
+
+
+def _duration(seconds):
+    """«4:12», «1:02:05». Текстом, а не долей суток: формат длительности
+    Numbers и Quick Look читают по-своему (см. DATE_FORMAT выше), а время в
+    окне читают глазами, не складывают."""
+    if seconds is None:
+        return ''
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return ('%d:%02d:%02d' % (hours, minutes, secs) if hours
+            else '%d:%02d' % (minutes, secs))
+
+
+def _overtime(row):
+    """«чтение +1:12 · тест +0:30» — на сколько превышено отведённое время."""
+    parts = []
+    for key, label in (('read_over_seconds', 'чтение'), ('quiz_over_seconds', 'тест')):
+        over = row.get(key)
+        if over:
+            parts.append('%s +%s' % (label, _duration(over)))
+    return ' · '.join(parts)
 
 
 def _moment(value):
@@ -137,6 +169,12 @@ def _value(key, row, post):
         return 'пройден' if row.get('trainer_passed_at') else ''
     if key == 'wave':
         return row.get('wave_no') or ''
+    if key == 'read_spent':
+        return _duration(row.get('read_spent_seconds'))
+    if key == 'quiz_spent':
+        return _duration(row.get('quiz_spent_seconds'))
+    if key == 'overtime':
+        return _overtime(row)
     if key == 'status':
         # Подпись берётся у сервера, а не пишется здесь второй раз: файл и
         # экран обязаны называть одно состояние одним словом.
@@ -286,9 +324,17 @@ def build(post, rows, questions=(), attempts=()):
                or column[0] in ('user_id', 'attempts')]
 
     book = Workbook()
-    _sheet(book, 'Ознакомление', headers,
-           [[values[key][index] for key, _t, _w in headers] for index in range(len(rows))],
-           first=True)
+    sheet = _sheet(book, 'Ознакомление', headers,
+                   [[values[key][index] for key, _t, _w in headers]
+                    for index in range(len(rows))],
+                   first=True)
+    keys = [key for key, _t, _w in headers]
+    if 'overtime' in keys:
+        column = keys.index('overtime') + 1
+        for index, value in enumerate(values['overtime'], start=2):
+            if value:
+                cell = sheet.cell(row=index, column=column)
+                cell.fill, cell.font = _OVER
     if questions and attempts:
         _attempts_sheet(book, rows, questions, attempts)
     if questions:

@@ -194,6 +194,14 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     # не попади она в журнал, «сдал с третьего раза» считалось бы по половине
     # операторов.
     _news_attempts = {'ready': False}
+    # Время на чтение и на тест (23.09.2026): без колонок окно работает как до
+    # правки — без таймеров, и замер агента просто не записывается.
+    _news_limits = {'ready': False}
+
+    def _news_limits_ready(cursor, probe):
+        if not _news_limits['ready']:
+            _news_limits['ready'] = probe(cursor)
+        return _news_limits['ready']
 
     def _news_photos_ready(cursor, probe):
         if not _news_photos['ready']:
@@ -384,6 +392,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         from news import photos as news_photos
         from news import queries as news_queries
         from news.schema import channel_ready as news_channel_ready
+        from news.schema import limits_ready as news_limits_ready
         from news.schema import photos_ready as news_photos_ready
         from news.schema import plan_ready as news_plan_ready
 
@@ -415,6 +424,13 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 return jsonify({"item": None, "known_operator": True})
             item = mandatory[0]
             news_queries.mark_shown(cursor, news_ids=[item['id']], user_id=viewer['user_id'])
+            # Сколько отведено на чтение и на тест и сколько уже потрачено.
+            # Потраченное нужно окну, чтобы продолжить счёт, а не начать заново:
+            # окно пересоздаётся при каждом показе. ПОСЛЕ mark_shown — у только
+            # что показанного объявления строка отметки уже есть.
+            if _news_limits_ready(cursor, news_limits_ready):
+                item.update(news_queries.agent_time_state(
+                    cursor, news_id=item['id'], user_id=viewer['user_id']))
         # Кадры подписываем ЗДЕСЬ и отдаём вместе с объявлением. Раньше их не
         # было вовсе: окно рисовалось внутри страницы АТС, и подписанная на час
         # ссылка могла протухнуть до показа. Теперь у объявления своё окно, и
@@ -455,6 +471,35 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 with_plan=_news_plan_ready(cursor, news_plan_ready))
         return jsonify({"required": bool(required)})
 
+    @agent_route('/news/<int:news_id>/progress', methods=('POST',))
+    def oktell_guard_agent_news_progress(news_id):
+        """Сколько оператор уже провёл в окне на чтении и на тесте.
+
+        Агент шлёт замер, пока окно открыто и у объявления есть лимит, — тем же
+        шагом, что проверку /state. Без этой ручки время узнавалось бы только
+        при нажатии «Подтвердить», и тот, кто сидит в окне час и не жмёт ничего,
+        в журнале превышением не значился бы вовсе, — а ради него лимит и заведён.
+
+        Пишет только в СВОЮ отметку и только в существующую
+        (queries.record_time_spent): чужую новость этим не «прочитать».
+        """
+        from news import access as news_access
+        from news import queries as news_queries
+        from news.schema import limits_ready as news_limits_ready
+
+        payload = request.get_json(silent=True) or {}
+        with db._get_cursor() as cursor:
+            owner = agent_owner(cursor)
+            if not owner:
+                return jsonify({"error": "Агент не опознан"}), 403
+            if not _news_limits_ready(cursor, news_limits_ready):
+                return jsonify({"ok": False})
+            news_queries.record_time_spent(
+                cursor, news_id=news_id, user_id=owner['user_id'],
+                read_seconds=news_access.clean_spent(payload.get('read_seconds')),
+                quiz_seconds=news_access.clean_spent(payload.get('quiz_seconds')))
+        return jsonify({"ok": True})
+
     @agent_route('/news/<int:news_id>/read', methods=('POST',))
     def oktell_guard_agent_news_read(news_id):
         """«Ознакомлен» из окна агента. Решает всё тот же сервер, что и на сайте.
@@ -464,8 +509,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         портала. Своей проверки здесь нет намеренно: две копии правила
         разъезжаются, а это правило про документооборот.
         """
+        from news import access as news_access
         from news import queries as news_queries
         from news.schema import attempts_ready as news_attempts_ready
+        from news.schema import limits_ready as news_limits_ready
         from news.schema import plan_ready as news_plan_ready
 
         payload = request.get_json(silent=True) or {}
@@ -476,6 +523,13 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             viewer = news_queries.load_viewer_context(cursor, owner['user_id'])
             if not viewer:
                 return jsonify({"error": "Сотрудник не найден"}), 404
+            # Замер времени — ДО проверки ответов: неверная попытка тоже время,
+            # и именно по ней видно, кто сидит в тесте, а не проходит его.
+            if _news_limits_ready(cursor, news_limits_ready):
+                news_queries.record_time_spent(
+                    cursor, news_id=news_id, user_id=viewer['user_id'],
+                    read_seconds=news_access.clean_spent(payload.get('read_seconds')),
+                    quiz_seconds=news_access.clean_spent(payload.get('quiz_seconds')))
             status, detail = news_queries.confirm_read(
                 cursor, news_id=news_id, user_id=viewer['user_id'],
                 otp_role=viewer['otp_role'], subjects=viewer['subjects'],

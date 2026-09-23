@@ -3,7 +3,7 @@ import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
     Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, History, Link2,
-    List, Loader2, Maximize2, Minimize2, Pencil, Star, User,
+    List, Loader2, Maximize2, Megaphone, Minimize2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 // fmtDeadline под своим именем: в файле уже есть свой fmtDate — «5 сентября
@@ -238,6 +238,12 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                       highlightTerm = null, classifierPrefill = null,
                                       onEdit = null, onArchived = null,
                                       onOpenArticle = null,
+                                      /* «Опубликовать статью и как новость»
+                                         (23.09.2026). null — вкладка «Новости»
+                                         выключена или новости публиковать нельзя.
+                                         Возвращает промис: пока сервер готовит
+                                         черновик, кнопка крутится. */
+                                      onPublishAsNews = null,
                                       /* Предыдущая статья цепочки и позиция, на
                                          которой в ней оборвали чтение, — обе
                                          приходят из витрины (articleTrail.js).
@@ -268,6 +274,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         setBodyReady(!!node);
     }, []);
     const [archiving, setArchiving] = useState(false);
+    const [newsBusy, setNewsBusy] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     /* Счётчик перезагрузки статьи. Нужен откату: после восстановления редакции
        в базе лежит другой текст, а на экране остался прежний — и человек видит,
@@ -822,6 +829,26 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             onClick={() => setHistoryOpen(true)}
                         >
                             <History size={14} /> История
+                        </button>
+                    )}
+                    {/* Новостью — только ВЫШЕДШАЯ статья: новость о черновике
+                        разослала бы то, чего в вике ещё нет. Слева от «Править»:
+                        оба действия — про то, что делают со статьёй дальше. */}
+                    {onPublishAsNews && article.status === 'published' && (
+                        <button
+                            type="button"
+                            className={iosBtnSecondary}
+                            disabled={newsBusy}
+                            title="Открыть форму новости с текстом и картинками этой статьи"
+                            onClick={() => {
+                                setNewsBusy(true);
+                                Promise.resolve(onPublishAsNews(article))
+                                    .finally(() => setNewsBusy(false));
+                            }}
+                        >
+                            {newsBusy ? <Loader2 size={14} className="animate-spin" />
+                                : <Megaphone size={14} />}
+                            Новостью
                         </button>
                     )}
                     {onEdit && article.permissions?.can_edit && (
