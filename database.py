@@ -6188,6 +6188,13 @@ class Database:
                 -- тот спам, которого владелец просил избежать.
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS schedule_change_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 
+                -- Отбивка «Табло Тез КЦ» лично себе: та же рассылка, что уходит
+                -- группам, но бот пишет админу в личные сообщения. Флаг, а не
+                -- строка в szov_wallboard_broadcast_chats: подписка принадлежит
+                -- человеку, а не чату — сменит он Telegram или потеряет права, и
+                -- рассылка обязана пойти следом, а не в прежний chat_id.
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS tez_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
                 -- Indexes for new tables
                 CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
                 CREATE INDEX IF NOT EXISTS idx_departments_slug ON departments(slug);
@@ -61424,6 +61431,80 @@ class Database:
             return False
         self.glb_forget_attendance_days(day_from=row[0])
         return True
+
+    # --- Отбивка «Табло Тез КЦ» лично себе ----------------------------------------------------
+
+    def get_tez_broadcast_personal(self, user_id) -> bool:
+        """Включена ли у человека личная отбивка Тез КЦ. Пустого профиля достаточно:
+        строку в admin_profiles заводит только запись."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(tez_broadcast_personal_enabled, FALSE)
+                  FROM admin_profiles
+                 WHERE user_id = %s
+            """, (int(user_id),))
+            row = cursor.fetchone()
+        return bool(row[0]) if row else False
+
+    def set_tez_broadcast_personal(self, user_id, enabled) -> bool:
+        """Включить/выключить личную отбивку. Право проверяет ручка (_szov_broadcast_guard
+        плюс роль админа), а рассылка перепроверяет его на каждой отправке — см.
+        get_tez_broadcast_personal_recipients."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO admin_profiles (user_id, tez_broadcast_personal_enabled)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET tez_broadcast_personal_enabled = EXCLUDED.tez_broadcast_personal_enabled
+                RETURNING tez_broadcast_personal_enabled
+            """, (int(user_id), bool(enabled)))
+            row = cursor.fetchone()
+        return bool(row[0]) if row else False
+
+    def get_tez_broadcast_personal_recipients(self, tez_department_id=None) -> List[Dict[str, Any]]:
+        """Кому отбивка Тез КЦ уходит лично: флаг включён и человек до сих пор вправе.
+
+        Право — админ или супер-админ, у которого раздел «Табло Тез КЦ» отображается
+        (постановка владельца 23.09.2026; та же лестница, что у _tez_wallboard_guard и
+        canAccessTezWallboardForUser): супер-админ; админ, который не возглавляет ни
+        одного отдела; админ — глава самого Тез КЦ. Перепроверяем на каждой отправке, а не
+        только при включении: админ, которого потом поставили главой другого отдела,
+        раздела больше не видит — и выключить подписку ему было бы негде.
+
+        Без Telegram отправлять некуда; уволенный тоже выпадает — увольнение не снимает
+        ни telegram_id, ни роль 'admin' ('dismissal' — такое же увольнение, как 'fired')."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.telegram_id
+                  FROM admin_profiles ap
+                  JOIN users u ON u.id = ap.user_id
+                 WHERE ap.tez_broadcast_personal_enabled = TRUE
+                   AND u.telegram_id IS NOT NULL
+                   AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                   AND (
+                       LOWER(COALESCE(u.role, '')) IN ('super_admin', 'superadmin', 'super-admin', 'super admin')
+                       OR (
+                           LOWER(COALESCE(u.role, '')) = 'admin'
+                           AND (
+                               NOT EXISTS (
+                                   SELECT 1 FROM departments d
+                                    WHERE d.head_user_id = u.id
+                                      AND COALESCE(d.is_active, TRUE) = TRUE
+                               )
+                               OR EXISTS (
+                                   SELECT 1 FROM departments d
+                                    WHERE d.head_user_id = u.id
+                                      AND COALESCE(d.is_active, TRUE) = TRUE
+                                      AND d.id = %s
+                               )
+                           )
+                       )
+                   )
+                 ORDER BY u.name, u.id
+            """, (tez_department_id,))
+            rows = cursor.fetchall() or []
+        return [{'id': int(row[0]), 'name': row[1] or '', 'telegram_id': int(row[2])}
+                for row in rows if row[2] is not None]
 
 
 # Initialize database

@@ -452,7 +452,8 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
         }
     };
 
-    const sendNow = async (chatId) => {
+    // target — { chat_id } для группы или { personal: true } для проверки личной отбивки.
+    const sendNow = async (target) => {
         setBusy(true);
         try {
             const build = headersRef.current;
@@ -462,7 +463,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                 method: 'POST',
                 headers,
                 credentials: 'include',
-                body: JSON.stringify({ chat_id: chatId, direction }),
+                body: JSON.stringify({ ...target, direction }),
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
@@ -477,6 +478,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
     const recipients = state?.recipients || [];
     const chats = state?.chats || [];
     const sendTimes = state?.send_times || [];
+    const personal = state?.personal || null;
 
     // Чат, который уже получает отбивку, второй раз не предлагаем: дублей быть не должно.
     const available = useMemo(() => {
@@ -512,10 +514,55 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                 <div className="py-6 text-center text-[13px] text-slate-500">Загружаем настройку…</div>
             ) : (
                 <div className="space-y-5">
+                    {/* Отбивка лично себе. Строку присылает сервер — только у «Тез КЦ» и
+                        только админу или супер-админу, которому раздел виден; у остальных
+                        направлений и ролей её нет вовсе. Выключить можно и без Telegram:
+                        переключатель гаснет лишь на включение. */}
+                    {personal ? (
+                        <div className={`${iosCard} divide-y divide-slate-100`}>
+                            <div className="flex flex-wrap items-center gap-3 px-4 py-3.5">
+                                <div className="min-w-[10rem] flex-1">
+                                    <div className="text-[14px] font-medium text-slate-900">Лично мне в Telegram</div>
+                                    <div className="mt-0.5 text-[12px] text-slate-400">
+                                        То же сообщение, что уходит группам, — вам в личные сообщения
+                                    </div>
+                                </div>
+                                {personal.enabled ? (
+                                    <button
+                                        type="button"
+                                        className={iosBtnGhost}
+                                        disabled={busy || !personal.telegram_connected}
+                                        title="Отправить мне прямо сейчас"
+                                        onClick={() => sendNow({ personal: true })}
+                                    >
+                                        <FaIcon className="fas fa-paper-plane"></FaIcon>
+                                    </button>
+                                ) : null}
+                                <IosToggle
+                                    checked={Boolean(personal.enabled)}
+                                    disabled={busy || (!personal.enabled && !personal.telegram_connected)}
+                                    onChange={(next) => save(
+                                        'POST',
+                                        { personal: next },
+                                        next ? 'Отбивка будет приходить вам лично' : 'Личная отбивка выключена',
+                                    )}
+                                />
+                            </div>
+                            {personal.telegram_connected ? null : (
+                                <div className="px-4 py-3 text-[12.5px] leading-relaxed text-amber-700">
+                                    К вашей учётной записи не привязан Telegram — отправлять некуда.
+                                    Привязка делается в боте портала: войдите в него своим логином.
+                                </div>
+                            )}
+                        </div>
+                    ) : null}
+
                     <div className={`${iosCard} divide-y divide-slate-100`}>
                         {recipients.length === 0 ? (
                             <div className="px-4 py-5 text-[13.5px] text-slate-500">
-                                Отбивка никуда не уходит: получателей пока нет.
+                                {personal?.enabled
+                                    ? 'Групп-получателей пока нет.'
+                                    : 'Отбивка никуда не уходит: получателей пока нет.'}
                             </div>
                         ) : recipients.map((item) => (
                             <div key={item.chat_id} className="flex flex-wrap items-center gap-3 px-4 py-3.5">
@@ -555,7 +602,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                                     className={iosBtnGhost}
                                     disabled={busy}
                                     title="Отправить в этот чат прямо сейчас"
-                                    onClick={() => sendNow(item.chat_id)}
+                                    onClick={() => sendNow({ chat_id: item.chat_id })}
                                 >
                                     <FaIcon className="fas fa-paper-plane"></FaIcon>
                                 </button>

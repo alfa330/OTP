@@ -9,6 +9,8 @@
 боевой БД (тот же приём в test_szov_break_violations.py).
 """
 import ast
+import asyncio
+import functools
 import html
 import logging
 import os
@@ -23,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 DB_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
 VIEW = (ROOT / "src" / "components" / "monitoring" / "TezWallboardView.jsx").read_text(encoding="utf-8-sig")
+SZOV_VIEW = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardView.jsx").read_text(encoding="utf-8-sig")
 
 NAMES = {
     '_env_int',
@@ -34,6 +37,12 @@ NAMES = {
     '_szov_break_classify', '_szov_break_violation_detail',
     '_TEZ_WALLBOARD_MODEL_BY_DIRECTION', 'TEZ_BREAK_NOTE_LIMIT',
     '_tez_break_status_keys', '_tez_break_violations_scan', '_tez_break_broadcast_text',
+    # Личная отбивка админам: джоба, её адресаты и право на строку «лично мне».
+    'SZOV_BROADCAST_DIRECTION_TEZ', 'SZOV_BROADCAST_DIRECTION_LINE',
+    '_tez_broadcast_personal_recipients', 'tez_break_broadcast_job',
+    '_szov_broadcast_personal_owner', '_szov_broadcast_personal_state',
+    '_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role',
+    '_is_admin_role',
 }
 
 PARSE = '%Y-%m-%d %H:%M:%S'
@@ -75,7 +84,7 @@ class _FakeDb:
         return len(rows)
 
 
-def _namespace(db=None, people=None):
+def _namespace(db=None, people=None, extra=None):
     tree = source_cache.parse(SOURCE)
     body = []
     for node in tree.body:
@@ -98,6 +107,7 @@ def _namespace(db=None, people=None):
         # Состав отдела берётся у табло — здесь подменяем, чтобы не ходить в базу.
         '_tez_wallboard_people': lambda *args, **kwargs: roster,
     }
+    ns.update(extra or {})
     exec(compile(module, "<tez-breaks>", "exec"), ns)
     missing = sorted(name for name in NAMES if name not in ns)
     if missing:
@@ -336,6 +346,224 @@ class TezBreakWiringTests(unittest.TestCase):
         self.assertIn('canManageBroadcast ?', VIEW)
         # Журнал открыт всем, кто видит табло, — он стоит вне проверки прав на отбивку.
         self.assertLess(VIEW.index('<BreakViolationsControls'), VIEW.index('canManageBroadcast ?'))
+
+
+class _FakeBot:
+    """Бот, который запоминает отправленное и умеет «быть заблокированным» адресатом."""
+
+    def __init__(self, fail_for=()):
+        self.sent = []
+        self.fail_for = set(fail_for)
+
+    async def send_message(self, chat_id, text, parse_mode=None):
+        if chat_id in self.fail_for:
+            raise RuntimeError('Forbidden: bot was blocked by the user')
+        self.sent.append((chat_id, text, parse_mode))
+
+
+class _BroadcastDb:
+    """База ровно в том объёме, в каком её трогает плановая отбивка Тез."""
+
+    def __init__(self, chats=(), people=(), violations=(), people_error=None, enabled_for=()):
+        self.chats = list(chats)
+        self.people = list(people)
+        self.violations = list(violations)
+        self.people_error = people_error
+        self.enabled_for = set(enabled_for)
+        self.people_calls = []
+        self.violation_reads = 0
+        self.marked = []
+
+    def get_szov_broadcast_chats(self, direction):
+        assert direction == 'tez', direction
+        return list(self.chats)
+
+    def get_tez_broadcast_personal_recipients(self, tez_department_id=None):
+        self.people_calls.append(tez_department_id)
+        if self.people_error:
+            raise self.people_error
+        return list(self.people)
+
+    def get_unreported_szov_break_violations(self, max_age_hours, direction=None):
+        assert direction == 'tez', direction
+        self.violation_reads += 1
+        return list(self.violations)
+
+    def mark_szov_break_violations_reported(self, ids):
+        self.marked.extend(ids)
+
+    def get_tez_broadcast_personal(self, user_id):
+        return user_id in self.enabled_for
+
+
+VIOLATION = {'id': 11, 'operator_name': 'Тлеу Аскар', 'started_at': '2026-09-22 16:00:00',
+             'violation_date': '2026-09-22', 'kind': 'not_planned', 'planned_start_minutes': None}
+TEZ_DEPARTMENT_ID = 7
+
+
+def _run_broadcast_job(db, bot):
+    ns = _namespace(db=db, extra={
+        'asyncio': asyncio, 'functools': functools, 'bot': bot, 'executor_pool': None,
+        '_tez_wallboard_department_id': lambda: TEZ_DEPARTMENT_ID,
+    })
+    asyncio.run(ns['tez_break_broadcast_job']())
+    return ns
+
+
+class TezPersonalBroadcastJobTests(unittest.TestCase):
+    """Плановая отбивка: админ, включивший её себе, получает то же, что и группы."""
+
+    def test_admin_gets_the_message_even_without_any_group(self):
+        """Личная отбивка не зависит от групп: у отдела может не быть ни одной."""
+        db = _BroadcastDb(people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}],
+                          violations=[VIOLATION])
+        bot = _FakeBot()
+        _run_broadcast_job(db, bot)
+        self.assertEqual([item[0] for item in bot.sent], [555])
+        self.assertIn('Тлеу Аскар', bot.sent[0][1])
+        self.assertEqual(bot.sent[0][2], 'HTML')
+        self.assertEqual(db.marked, [11])
+        # Граница отдела та же, что у формы: адресатов судят по id Тез КЦ.
+        self.assertEqual(db.people_calls, [TEZ_DEPARTMENT_ID])
+
+    def test_groups_and_admins_get_one_and_the_same_message(self):
+        db = _BroadcastDb(
+            chats=[{'chat_id': -100, 'is_enabled': True}, {'chat_id': -200, 'is_enabled': False}],
+            people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}],
+            violations=[VIOLATION])
+        bot = _FakeBot()
+        _run_broadcast_job(db, bot)
+        self.assertEqual(sorted(item[0] for item in bot.sent), [-100, 555])
+        self.assertEqual(len({item[1] for item in bot.sent}), 1)
+
+    def test_blocked_bot_does_not_cost_the_others(self):
+        """Человек заблокировал бота — группа всё равно получает, нарушения помечаются."""
+        db = _BroadcastDb(chats=[{'chat_id': -100, 'is_enabled': True}],
+                          people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}],
+                          violations=[VIOLATION])
+        bot = _FakeBot(fail_for={555})
+        _run_broadcast_job(db, bot)
+        self.assertEqual([item[0] for item in bot.sent], [-100])
+        self.assertEqual(db.marked, [11])
+
+    def test_failing_personal_lookup_does_not_silence_the_groups(self):
+        db = _BroadcastDb(chats=[{'chat_id': -100, 'is_enabled': True}],
+                          people_error=RuntimeError('column does not exist'),
+                          violations=[VIOLATION])
+        bot = _FakeBot()
+        with self.assertLogs(level='ERROR'):
+            _run_broadcast_job(db, bot)
+        self.assertEqual([item[0] for item in bot.sent], [-100])
+
+    def test_nobody_to_write_means_violations_are_not_read(self):
+        db = _BroadcastDb(chats=[{'chat_id': -100, 'is_enabled': False}], violations=[VIOLATION])
+        bot = _FakeBot()
+        _run_broadcast_job(db, bot)
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(db.violation_reads, 0)
+        self.assertEqual(db.marked, [])
+
+    def test_nothing_new_means_silence_for_admins_too(self):
+        """«Нарушений нет» раз в час — шум и в личке, не только в группе."""
+        db = _BroadcastDb(people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}])
+        bot = _FakeBot()
+        _run_broadcast_job(db, bot)
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(db.marked, [])
+
+
+def _owner_namespace(requester, db=None):
+    """requester — кортеж как у db.get_user: (id, telegram_id, name, role)."""
+    return _namespace(db=db or _BroadcastDb(), extra={
+        '_get_authenticated_requester': lambda: (requester[0], requester, None),
+    })
+
+
+class TezPersonalBroadcastOwnerTests(unittest.TestCase):
+    """Кому форма показывает строку «лично мне». Гейт отбивки к этому моменту пройден:
+    админ — глава чужого отдела табло Тез не видит и сюда не попадает."""
+
+    def test_admin_and_super_admin_get_the_row(self):
+        for role in ('admin', 'super_admin', 'superadmin', 'Super Admin'):
+            with self.subTest(role=role):
+                ns = _owner_namespace((300, 777, 'Глава', role))
+                self.assertIsNotNone(ns['_szov_broadcast_personal_owner']('tez'))
+
+    def test_roles_below_admin_do_not(self):
+        """Форму открывает любой глава Тез КЦ, но лично себе получает только админ."""
+        for role in ('sv', 'supervisor', 'operator', 'trainer', ''):
+            with self.subTest(role=role):
+                ns = _owner_namespace((3, 777, 'СВ', role))
+                self.assertIsNone(ns['_szov_broadcast_personal_owner']('tez'))
+                self.assertIsNone(ns['_szov_broadcast_personal_state']('tez'))
+
+    def test_only_the_tez_wallboard_has_it(self):
+        ns = _owner_namespace((300, 777, 'Админ', 'admin'))
+        for direction in ('osnova', 'chat', 'op'):
+            with self.subTest(direction=direction):
+                self.assertIsNone(ns['_szov_broadcast_personal_owner'](direction))
+                self.assertIsNone(ns['_szov_broadcast_personal_state'](direction))
+
+    def test_state_says_whether_telegram_is_linked(self):
+        db = _BroadcastDb(enabled_for={300})
+        linked = _owner_namespace((300, 777, 'Админ', 'admin'), db=db)
+        self.assertEqual(linked['_szov_broadcast_personal_state']('tez'),
+                         {'enabled': True, 'telegram_connected': True})
+        unlinked = _owner_namespace((301, None, 'Админ', 'admin'), db=db)
+        self.assertEqual(unlinked['_szov_broadcast_personal_state']('tez'),
+                         {'enabled': False, 'telegram_connected': False})
+
+
+class TezPersonalBroadcastWiringTests(unittest.TestCase):
+    """Ручки, схема и форма личной отбивки."""
+
+    def _handler(self, name):
+        body = SOURCE[SOURCE.index(f'def {name}():'):]
+        return body[:body.index('\n@app.route')]
+
+    def test_settings_endpoint_toggles_it_behind_the_broadcast_guard(self):
+        handler = self._handler('api_szov_wallboard_broadcast')
+        self.assertLess(handler.index('requester_id, err = _szov_broadcast_guard()'),
+                        handler.index("elif 'personal' in payload:"))
+        branch = handler[handler.index("elif 'personal' in payload:"):handler.index('            else:')]
+        self.assertIn('owner = _szov_broadcast_personal_owner(direction)', branch)
+        self.assertIn('if owner is None:', branch)
+        # Включить без Telegram нельзя — писать некуда; выключить можно всегда.
+        self.assertIn('if enabled and not owner[1]:', branch)
+        self.assertIn('db.set_tez_broadcast_personal(requester_id, enabled)', branch)
+        # Личная настройка — не общий список получателей: в «кто менял» не пишется.
+        self.assertNotIn('_log_szov_broadcast_change', branch)
+        self.assertIn('"personal": _szov_broadcast_personal_state(direction),', handler)
+
+    def test_test_send_writes_only_to_the_one_who_pressed(self):
+        handler = self._handler('api_szov_wallboard_broadcast_test')
+        branch = handler[handler.index("if payload.get('personal'):"):handler.index('    else:')]
+        self.assertIn('owner = _szov_broadcast_personal_owner(direction)', branch)
+        self.assertIn('chat_id = int(owner[1])', branch)
+        self.assertNotIn("payload.get('chat_id')", branch)
+
+    def test_schema_and_recipient_rule(self):
+        self.assertIn('ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS '
+                      'tez_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;', DB_SOURCE)
+        method = DB_SOURCE[DB_SOURCE.index('def get_tez_broadcast_personal_recipients('):]
+        method = method[:method.index('\n# Initialize database')]
+        self.assertIn('u.telegram_id IS NOT NULL', method)
+        self.assertIn("NOT IN ('fired', 'dismissal')", method)
+        # Лестница раздела: супер-админ, админ без отдела, админ — глава Тез КЦ.
+        self.assertIn("IN ('super_admin', 'superadmin', 'super-admin', 'super admin')", method)
+        self.assertIn("LOWER(COALESCE(u.role, '')) = 'admin'", method)
+        self.assertIn('NOT EXISTS (', method)
+        self.assertIn('AND d.id = %s', method)
+
+    def test_form_shows_the_row_only_when_the_server_sends_it(self):
+        self.assertIn("const personal = state?.personal || null;", SZOV_VIEW)
+        self.assertIn('{personal ? (', SZOV_VIEW)
+        self.assertIn('Лично мне в Telegram', SZOV_VIEW)
+        self.assertIn("{ personal: next }", SZOV_VIEW)
+        self.assertIn('sendNow({ personal: true })', SZOV_VIEW)
+        self.assertIn('sendNow({ chat_id: item.chat_id })', SZOV_VIEW)
+        # Переключатель гаснет только на включение: выключить без Telegram можно.
+        self.assertIn('disabled={busy || (!personal.enabled && !personal.telegram_connected)}', SZOV_VIEW)
 
 
 if __name__ == '__main__':

@@ -43494,17 +43494,37 @@ async def tez_break_scan_job():
         logging.error("Перерывы Тез КЦ: разбор не удался: %s", exc, exc_info=True)
 
 
+def _tez_broadcast_personal_recipients():
+    """Админы, включившие отбивку Тез КЦ себе лично, — с той же границей отдела, что у формы.
+
+    Сбой здесь группы не останавливает: личная рассылка — добавка к общей, и упавший
+    запрос не должен лишить предупреждения чаты отдела."""
+    try:
+        return db.get_tez_broadcast_personal_recipients(_tez_wallboard_department_id())
+    except Exception as exc:
+        logging.error("Перерывы Тез КЦ: не удалось прочитать личных получателей: %s", exc)
+        return []
+
+
 async def tez_break_broadcast_job():
     """Сообщение о новых нарушениях — в рабочие часы и только когда они есть.
 
     Сам разбор здесь НЕ повторяем: он идёт своей почасовой джобой. Нарушение, найденное
-    ночью, доедет сюда первым же утренним заходом — непрочитанные живут сутки."""
+    ночью, доедет сюда первым же утренним заходом — непрочитанные живут сутки.
+
+    Адресаты — группы из формы и админы, включившие отбивку себе лично: сообщение и
+    расписание у них одни. Личный chat_id в Telegram — это id пользователя, он
+    положительный и с группами (отрицательные id) не пересекается."""
     loop = asyncio.get_event_loop()
     try:
         chats = await loop.run_in_executor(
             executor_pool, functools.partial(db.get_szov_broadcast_chats,
                                              SZOV_BROADCAST_DIRECTION_TEZ))
-        recipients = [chat for chat in chats if chat.get('is_enabled') and chat.get('chat_id')]
+        people = await loop.run_in_executor(executor_pool, _tez_broadcast_personal_recipients)
+        recipients = ([(int(chat['chat_id']), f"чат {chat['chat_id']}")
+                       for chat in chats if chat.get('is_enabled') and chat.get('chat_id')]
+                      + [(int(person['telegram_id']), f"лично пользователю {person['id']}")
+                         for person in people])
         if not recipients:
             return
         violations = await loop.run_in_executor(
@@ -43516,15 +43536,15 @@ async def tez_break_broadcast_job():
         if not text:
             return
         delivered = False
-        for chat in recipients:
-            # Один недоступный чат (бота выгнали из группы) не должен лишать остальных.
+        for chat_id, label in recipients:
+            # Один недоступный адресат (бота выгнали из группы, человек заблокировал бота)
+            # не должен лишать остальных.
             try:
-                await bot.send_message(int(chat['chat_id']), text, parse_mode='HTML')
+                await bot.send_message(chat_id, text, parse_mode='HTML')
                 delivered = True
-                logging.info("Перерывы Тез КЦ: отправлено в чат %s", chat['chat_id'])
+                logging.info("Перерывы Тез КЦ: отправлено — %s", label)
             except Exception as exc:
-                logging.error("Перерывы Тез КЦ: чат %s не получил сообщение: %s",
-                              chat['chat_id'], exc)
+                logging.error("Перерывы Тез КЦ: не доставлено — %s: %s", label, exc)
         if delivered:
             # Помечаем только после удачной доставки: разом упавшая отправка иначе
             # проглотила бы предупреждения, и о них не написали бы никогда.
@@ -45672,6 +45692,34 @@ def _szov_broadcast_direction_times(direction):
     return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
 
 
+def _szov_broadcast_personal_owner(direction):
+    """Учётка запросившего, если он вправе получать отбивку направления лично; иначе None.
+
+    Лично себе отбивку получают только у «Тез КЦ» и только админы и супер-админы, у
+    которых этот раздел отображается (постановка владельца 23.09.2026): супер-админ, админ
+    без отдела и админ — глава Тез КЦ. Админу — главе чужого отдела табло не видно, и
+    гейт отбивки (_szov_broadcast_guard) его сюда уже не пустил; здесь остаётся отсечь
+    роль ниже админа — форму открывает любой глава Тез КЦ, но лично себе получает админ."""
+    if direction != SZOV_BROADCAST_DIRECTION_TEZ:
+        return None
+    _requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error or not requester or not _is_admin_role(requester[3]):
+        return None
+    return requester
+
+
+def _szov_broadcast_personal_state(direction):
+    """Строка «лично мне» для формы отбивки. None — строки в форме нет вовсе."""
+    requester = _szov_broadcast_personal_owner(direction)
+    if requester is None:
+        return None
+    return {
+        "enabled": db.get_tez_broadcast_personal(requester[0]),
+        # Без Telegram бот не знает, куда писать: форма гасит переключатель и объясняет.
+        "telegram_connected": bool(requester[1]),
+    }
+
+
 @app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
 @require_api_key
 def api_szov_wallboard_broadcast():
@@ -45679,7 +45727,11 @@ def api_szov_wallboard_broadcast():
 
     POST добавляет получателя или меняет его режим / включённость (чат — ключ, дублей не
     заводим), DELETE убирает из списка. Всё — в пределах одного направления: тот же чат в
-    «Линии» и в «Чате» это две независимые строки."""
+    «Линии» и в «Чате» это две независимые строки.
+
+    POST {personal: true|false} — личная отбивка самому себе (есть только у «Тез КЦ»). В
+    историю «кто менял» она не пишется: это настройка человека о себе, а не общий список
+    получателей."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _szov_broadcast_guard()
@@ -45696,6 +45748,17 @@ def api_szov_wallboard_broadcast():
                 db.delete_szov_broadcast_chat(
                     payload.get('chat_id') or request.args.get('chat_id'),
                     user_id=requester_id, direction=direction)
+            elif 'personal' in payload:
+                owner = _szov_broadcast_personal_owner(direction)
+                if owner is None:
+                    return jsonify({"error": "Лично себе получают только отбивку табло Тез КЦ и только админы"}), 403
+                enabled, flag_error = _parse_boolean_setting(payload.get('personal'), 'personal')
+                if flag_error:
+                    return jsonify({"error": "Некорректное значение personal"}), 400
+                if enabled and not owner[1]:
+                    return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
+                db.set_tez_broadcast_personal(requester_id, enabled)
+                logging.info("Отбивка %s: личная подписка у %s -> %s", direction, requester_id, enabled)
             else:
                 db.save_szov_broadcast_chat(payload, user_id=requester_id, direction=direction)
         except ValueError as exc:
@@ -45709,6 +45772,7 @@ def api_szov_wallboard_broadcast():
         "history": db.get_szov_broadcast_history(direction=direction),
         "chats": db.list_bot_group_chats(),
         "send_times": _szov_broadcast_direction_times(direction),
+        "personal": _szov_broadcast_personal_state(direction),
     })
 
 
@@ -45814,7 +45878,9 @@ def api_szov_wallboard_broadcast_test():
 
     Шлём в явно указанный чат и только если он уже в получателях: кнопка проверяет
     настроенную рассылку, а не служит способом написать в произвольную группу.
-    Режим «только при отклонениях» здесь не действует — проверяют вид сообщения."""
+    Режим «только при отклонениях» здесь не действует — проверяют вид сообщения.
+
+    {personal: true} — проверка личной отбивки: пишем самому нажавшему и никому больше."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _szov_broadcast_guard()
@@ -45825,14 +45891,22 @@ def api_szov_wallboard_broadcast_test():
         direction = _szov_broadcast_direction_arg(payload)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    raw = payload.get('chat_id')
-    recipients = {str(chat['chat_id']): chat
-                  for chat in db.get_szov_broadcast_chats(direction)}
-    if raw in (None, '') and len(recipients) == 1:
-        raw = next(iter(recipients))
-    if str(raw) not in recipients:
-        return jsonify({"error": "Сначала выберите чат"}), 400
-    chat_id = recipients[str(raw)]['chat_id']
+    if payload.get('personal'):
+        owner = _szov_broadcast_personal_owner(direction)
+        if owner is None:
+            return jsonify({"error": "Лично себе получают только отбивку табло Тез КЦ и только админы"}), 403
+        if not owner[1]:
+            return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
+        chat_id = int(owner[1])
+    else:
+        raw = payload.get('chat_id')
+        recipients = {str(chat['chat_id']): chat
+                      for chat in db.get_szov_broadcast_chats(direction)}
+        if raw in (None, '') and len(recipients) == 1:
+            raw = next(iter(recipients))
+        if str(raw) not in recipients:
+            return jsonify({"error": "Сначала выберите чат"}), 400
+        chat_id = recipients[str(raw)]['chat_id']
     send = {
         SZOV_BROADCAST_DIRECTION_CHAT: _szov_chat_broadcast_send,
         SZOV_BROADCAST_DIRECTION_OP: _op_broadcast_send,
