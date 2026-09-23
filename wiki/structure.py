@@ -1002,6 +1002,12 @@ AUDIT_GROUPS = {
                'office.day.set', 'office.day.clear',
                'office.closure.set', 'office.closure.clear'),
     'ack': ('ack.assign', 'ack.confirm'),
+    # Новости пишут в этот же журнал (news/audit.py: AUDIT_ACTIONS) — просьба
+    # владельца 23.09.2026: «чтобы при удалении можно было увидеть, кто это
+    # сделал». Список повторён здесь, а не импортирован: пакет вики не зависит
+    # от пакета новостей, а совпадение сверяет tests/test_news.py.
+    'news': ('news.create', 'news.update', 'news.publish', 'news.schedule',
+             'news.unschedule', 'news.archive', 'news.delete'),
 }
 
 # Название объекта берём из самой таблицы объекта, а не из details: details
@@ -1021,12 +1027,28 @@ _AUDIT_FROM = """
       LEFT JOIN wiki_promotions pro ON a.entity_type = 'promotion' AND pro.id = a.entity_id
 """
 
+# НОВОСТЬ — БЕЗ ДЖОЙНА на news_posts, и это решение, а не экономия. Пакеты
+# разворачиваются раздельно: ссылка на таблицу новостей из журнала вики уронила
+# бы весь журнал, сорвись у новостей миграция. Поэтому название — из самой
+# записи (details.title, на момент действия: для журнала событий это и есть
+# правда), а «удалена» — по записи об удалении в этом же журнале. Удалённая
+# новость другого следа и не оставляет: её строка стёрта вместе с журналом
+# прочтений.
 _AUDIT_ENTITY_NAME = (
-    "COALESCE(art.title, sec.name, spc.name, prk.name, off.name, pro.title)")
+    "COALESCE(art.title, sec.name, spc.name, prk.name, off.name, pro.title,"
+    " CASE WHEN a.entity_type = 'news' THEN a.details->>'title' END)")
 
+# У самой записи об удалении признак пустой (NULL), а не «удалена»: иначе рядом с
+# «Новость удалена» стояла бы плашка «удалена» — одно и то же дважды.
 _AUDIT_ENTITY_ALIVE = (
-    "(art.id IS NOT NULL OR sec.id IS NOT NULL OR spc.id IS NOT NULL"
-    " OR prk.id IS NOT NULL OR off.id IS NOT NULL OR pro.id IS NOT NULL)")
+    "(CASE WHEN a.entity_type = 'news' THEN"
+    "  CASE WHEN a.action = 'news.delete' THEN NULL"
+    "  ELSE NOT EXISTS (SELECT 1 FROM wiki_audit_log gone"
+    "                    WHERE gone.entity_type = 'news'"
+    "                      AND gone.entity_id = a.entity_id"
+    "                      AND gone.action = 'news.delete') END"
+    " ELSE (art.id IS NOT NULL OR sec.id IS NOT NULL OR spc.id IS NOT NULL"
+    " OR prk.id IS NOT NULL OR off.id IS NOT NULL OR pro.id IS NOT NULL) END)")
 
 # Кому выдали или у кого отобрали право. Субъект лежит в details парой
 # (subject_type, subject_id) — без имени запись читается как «выдано право

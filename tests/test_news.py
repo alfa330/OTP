@@ -2520,3 +2520,106 @@ class NewsTakeDownTests(unittest.TestCase):
         state = state[:state.index('@agent_route(')]
         self.assertIn('news_still_required(', state)
         self.assertNotIn('mark_shown', state)
+
+
+class NewsAuditJournalTests(unittest.TestCase):
+    """Действия с новостями — в «Журнал» вики (просьба владельца 23.09.2026):
+    «чтобы при удалении можно было увидеть, кто это сделал; сделать корректное
+    разделение и не перемешивать Таксопарки и Тез»."""
+
+    def test_three_lists_of_actions_agree(self):
+        """Действие без подписи выводится сырым ключом, без группы — теряется
+        под фильтром. Для действий вики это сторожит test_wiki_audit_space;
+        новости пишут из своего пакета, и страж того файла их не видит."""
+        from news import audit as news_audit
+        from wiki import structure as wiki_structure
+        self.assertEqual(set(wiki_structure.AUDIT_GROUPS['news']),
+                         set(news_audit.AUDIT_ACTIONS))
+        meta = _read('src', 'components', 'wiki', 'auditEvents.js')
+        labelled = set(re.findall(r"'([a-z_]+\.[a-z_.]+)':\s*\{\s*label:", meta))
+        self.assertEqual(set(news_audit.AUDIT_ACTIONS) - labelled, set())
+        self.assertIn("{ key: 'news', label: 'Новости' }", meta)
+
+    def test_every_writer_goes_through_one_door_with_a_known_action(self):
+        """Прямой log_action из пакета новостей обошёл бы и пространство, и
+        точку отката. Все записи — через news_audit.record / _audit."""
+        from news import audit as news_audit
+        for parts in (('news', 'routes.py'), ('bot_schedule2.py',),
+                      ('wiki', 'routes_questions.py')):
+            source = _code_only(_read(*parts))
+            for action in re.findall(r"'(news\.[a-z_]+)'", source):
+                self.assertIn(action, news_audit.AUDIT_ACTIONS, '%s: %s' % (parts, action))
+        self.assertNotIn('log_action(', _code_only(_read('news', 'routes.py')))
+
+    def test_the_space_is_always_named_and_the_record_never_breaks_the_action(self):
+        """Журнал вики держит строгую границу: запись без пространства не видна
+        ни в «Таксопарках», ни в «Тез». И журнал не вправе сорвать действие."""
+        source = _function_code(_read('news', 'audit.py'), 'record')
+        self.assertIn("payload['space_id'] = int(space_id)", source)
+        self.assertIn("(post or {}).get('space_id') or fallback_space_id", source)
+        self.assertIn("SAVEPOINT news_audit", source)
+        self.assertIn("ROLLBACK TO SAVEPOINT news_audit", source)
+
+    def test_the_wiki_journal_does_not_depend_on_the_news_tables(self):
+        """Ссылка на news_posts из общего журнала уронила бы ВЕСЬ журнал вики,
+        сорвись у новостей миграция: пакеты разворачиваются раздельно."""
+        structure = _code_only(_read('wiki', 'structure.py'))
+        self.assertNotIn('news_posts', structure)
+        schema = _read('wiki', 'schema.py')
+        self.assertNotIn('news_posts', schema[schema.index('AUDIT_SPACE_SQL = '):
+                                              schema.index('AUDIT_SPACE_ENTITIES = ')])
+        # Название — из самой записи, «удалена» — по записи об удалении.
+        self.assertIn("a.details->>'title'", structure)
+        self.assertIn("gone.action = 'news.delete'", structure)
+
+    def test_deletion_is_written_before_the_row_disappears(self):
+        routes = _code_only(_read('news', 'routes.py'))
+        delete = routes[routes.index('def news_post_delete('):]
+        delete = delete[:delete.index('@news_route(')]
+        self.assertLess(delete.index("'news.delete'"), delete.index('queries.delete_post('))
+        for key in ("'was_published'", "'addressed'", "'confirmed'"):
+            self.assertIn(key, delete)
+
+    def test_one_press_is_one_line(self):
+        """«Опубликовать» у новой новости — это и создание, и выпуск; две записи
+        в одну секунду были бы шумом."""
+        routes = _code_only(_read('news', 'routes.py'))
+        create = routes[routes.index('def news_post_create('):]
+        create = create[:create.index('def news_post_update(')]
+        self.assertIn("if not payload.get('publish'):", create)
+        self.assertIn('created=True', create)
+
+    def test_an_edit_names_only_what_really_changed(self):
+        from news import audit as news_audit
+        before = {'title': 'А', 'body': '<p>т</p>', 'kind': 'important',
+                  'audience': [{'subject_type': 'department', 'subject_id': 1}]}
+        same = dict(before)
+        self.assertEqual(news_audit.changed_fields(before, same), [])
+        after = dict(before, title='Б', audience=[
+            {'subject_type': 'department', 'subject_id': 2}])
+        self.assertEqual(news_audit.changed_fields(before, after), ['title', 'audience'])
+        # Отменённый запуск — своей записью, а не безликим «поле: запуск».
+        routes = _code_only(_read('news', 'routes.py'))
+        self.assertIn("'news.unschedule'", routes)
+        self.assertIn("field != 'schedule'", routes)
+
+    def test_the_scheduled_launch_is_written_without_an_author(self):
+        """Выпустила система — приписать это тому, кто нажал «Опубликовать»
+        накануне, значило бы соврать о времени."""
+        job = _function(_read('bot_schedule2.py'), 'publish_scheduled_news_job')
+        self.assertIn("actor_id=None, action='news.publish'", job)
+        self.assertIn("'by_schedule': True", job)
+        # И журнал называет такого автора «Система», а не «автор неизвестен»:
+        # он известен.
+        audit = _read('src', 'components', 'wiki', 'WikiAudit.jsx')
+        self.assertIn("item.details?.by_schedule ? 'Система'", audit)
+
+    def test_the_journal_line_says_what_was_wiped(self):
+        events = _read('src', 'components', 'wiki', 'auditEvents.js')
+        facts = events[events.index("case 'news.delete':"):]
+        facts = facts[:facts.index('break;')]
+        self.assertIn('журнал прочтений удалён вместе с ней', facts)
+        # Служебное пространство записи в строку не выходит — по нему журнал и
+        # отобран.
+        self.assertIn("!String(action).startsWith('news.')", events)
+        self.assertIn("NEWS_CONSUMED = ['space_id'", events)

@@ -17,8 +17,8 @@
 
 import {
     Archive, ArrowRightLeft, Building2, CalendarClock, CheckCircle2, Copy, FileDown,
-    FilePlus2, FileText, FolderPlus, Globe, KeyRound, Layers, MapPin, PenLine,
-    RefreshCw, RotateCcw, ShieldAlert, ShieldOff, Sparkles, Star, UserCheck, UserPlus,
+    FilePlus2, FileText, FolderPlus, Globe, KeyRound, Layers, MapPin, Megaphone, PenLine,
+    RefreshCw, RotateCcw, ShieldAlert, ShieldOff, Sparkles, Star, Trash2, UserCheck, UserPlus,
 } from 'lucide-react';
 
 /* Тон несёт смысл, а не украшает: зелёный — появилось, янтарный — убрали или
@@ -106,6 +106,19 @@ export const ACTION_META = {
     // ── Ознакомление ────────────────────────────────────────────────────
     'ack.assign': { label: 'Назначено ознакомление', tone: GRANTED, icon: UserCheck },
     'ack.confirm': { label: 'Ознакомление подтверждено', tone: CREATED, icon: CheckCircle2 },
+
+    // ── Новости (news/audit.py: AUDIT_ACTIONS) ───────────────────────────
+    /* Рупор — значок самой вкладки «Новости»: по нему строку узнают в ленте
+       статей и разделов с первого взгляда, не читая подпись. Корзина — только
+       у удаления: это единственное действие, после которого от новости не
+       остаётся ничего, кроме этой строки. */
+    'news.create': { label: 'Создана новость', tone: CREATED, icon: Megaphone },
+    'news.update': { label: 'Изменена новость', tone: CHANGED, icon: Megaphone },
+    'news.publish': { label: 'Опубликована новость', tone: CREATED, icon: Megaphone },
+    'news.schedule': { label: 'Запланирован запуск новости', tone: CHANGED, icon: CalendarClock },
+    'news.unschedule': { label: 'Запуск новости отменён', tone: REMOVED, icon: CalendarClock },
+    'news.archive': { label: 'Новость снята с показа', tone: REMOVED, icon: Archive },
+    'news.delete': { label: 'Новость удалена', tone: REMOVED, icon: Trash2 },
 };
 
 /* Группы — те же, что на сервере (structure.AUDIT_GROUPS): фильтр считает
@@ -117,6 +130,7 @@ export const AUDIT_GROUPS = [
     { key: 'articles', label: 'Статьи' },
     { key: 'places', label: 'Парки и офисы' },
     { key: 'ack', label: 'Ознакомления' },
+    { key: 'news', label: 'Новости' },
 ];
 
 /* Как назвать объект, которого больше нет. На проде таких 13%: таблицу офисов
@@ -125,6 +139,7 @@ export const AUDIT_GROUPS = [
 export const GONE_ENTITY = {
     article: 'удалена', section: 'удалён', space: 'удалено',
     park: 'удалён', office: 'удалён', promotion: 'удалена',
+    news: 'удалена',
 };
 
 /* Словарь портала, а не свой: ровно эти подписи стоят в выдаче прав
@@ -189,6 +204,13 @@ const FIELD_TITLE = {
     images: 'картинок', already_there: 'уже была в разделе',
     from_space_id: 'из пространства', to_space_id: 'в пространство',
     department_ids: 'кому видно', features: 'состав раздела',
+    /* Поля новости (news/audit.py: changed_fields) — теми словами, что стоят
+       в самой форме новости, иначе строку журнала не сопоставить с экраном. */
+    body: 'текст', audience: 'кому', pass_score_percent: 'проходной результат',
+    confirm_delay_seconds: 'задержка кнопки', expires_at: 'показывать до',
+    channel: 'куда отправить', trainer_key: 'тренажёр',
+    pass_required: 'обязательность теста', quiz: 'тест', photos: 'фотографии',
+    schedule: 'запуск',
 };
 
 const VALUE_TITLE = {
@@ -240,7 +262,19 @@ const ROW_ONLY_HIDDEN = new Set(['ai_index', 'space_restored']);
 /* Что уже сказано фразой в строке. Повторять это в подробностях незачем: тогда
    раскрытие есть у каждой записи и не значит ничего. Ключи, которых здесь нет,
    в подробностях остаются — там их и ищут при разборе инцидента. */
+const NEWS_CONSUMED = ['space_id', 'kind', 'mode', 'created', 'by_schedule',
+                       'scheduled_at', 'source', 'was_published', 'confirmed', 'addressed'];
+
 const CONSUMED = {
+    /* Пространство записи у новости — служебное: по нему журнал и отобран, и
+       «пространство: Таксопарки» в журнале Таксопарков было бы шумом. */
+    'news.create': NEWS_CONSUMED,
+    'news.update': NEWS_CONSUMED,
+    'news.publish': NEWS_CONSUMED,
+    'news.schedule': NEWS_CONSUMED,
+    'news.unschedule': NEWS_CONSUMED,
+    'news.archive': NEWS_CONSUMED,
+    'news.delete': NEWS_CONSUMED,
     'article.create': ['status'],
     'article.restore': ['version_id'],
     'article.adopt': ['section_id', 'section_name', 'already_there'],
@@ -375,6 +409,18 @@ const changedValuesPhrase = (details, keepEmpty = false, nameOf = null) => {
         parts.push(`${fieldTitle(key)}: ${shown}`);
     });
     return parts.length ? parts.join(' · ') : null;
+};
+
+/* Тип новости словами — те же, что в форме (WikiNews.jsx: NEWS_KINDS). */
+const NEWS_KIND_TITLE = { info: 'информационная', important: 'важная', critical: 'критичная' };
+
+/* «22.09 09:00» — момент запуска в строке журнала. Год не нужен: запланировать
+   объявление больше чем на год вперёд не станет никто. */
+const shortMoment = (iso) => {
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return String(iso);
+    const pad = (value) => String(value).padStart(2, '0');
+    return `${pad(at.getDate())}.${pad(at.getMonth() + 1)} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
 };
 
 /**
@@ -538,11 +584,48 @@ export function auditFacts(item, nameOf = null) {
             }
             break;
 
+        /* НОВОСТИ. Строка отвечает на вопрос, с которым журнал и открывают:
+           как объявление вышло и что с ним стало. Всё техническое (id
+           пространства, режим «сразу») — в подробности, а не в строку. */
+        case 'news.create':
+        case 'news.publish':
+        case 'news.schedule': {
+            if (details.kind && NEWS_KIND_TITLE[details.kind]) {
+                facts.push(NEWS_KIND_TITLE[details.kind]);
+            }
+            if (details.by_schedule) facts.push('по расписанию');
+            if (details.mode === 'spread') facts.push('волнами');
+            if (action === 'news.schedule' && details.scheduled_at) {
+                facts.push(`запуск ${shortMoment(details.scheduled_at)}`);
+            }
+            if (details.source === 'question') facts.push('из «Вопросов операторов»');
+            break;
+        }
+        case 'news.delete':
+            /* Главное про удаление — что стёрто вместе с новостью: журнал
+               прочтений восстановить уже нельзя, и строка обязана сказать,
+               сколько подтверждений ушло с ним. */
+            if (details.was_published) {
+                facts.push(`подтвердили ${details.confirmed ?? 0} из ${details.addressed ?? 0}`);
+                facts.push('журнал прочтений удалён вместе с ней');
+            } else {
+                facts.push('черновик, к людям не выходила');
+            }
+            break;
+        case 'news.update': {
+            const changed = changedFieldsPhrase(details);
+            if (changed) facts.push(changed);
+            break;
+        }
+
         default:
             break;
     }
 
-    if (!facts.length) {
+    /* У новости запасной разбор «все ключи подряд» не нужен: всё, что про неё
+       стоит сказать, сказано выше, а остаток — служебное пространство, которое
+       в журнале этого же пространства читалось бы как шум. */
+    if (!facts.length && !String(action).startsWith('news.')) {
         const changed = changedFieldsPhrase(details)
             || changedValuesPhrase(details, DIFF_ACTIONS.has(action), nameOf);
         if (changed) facts.push(changed);

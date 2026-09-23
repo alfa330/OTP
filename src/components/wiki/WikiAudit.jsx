@@ -151,8 +151,11 @@ const AuditRow = ({ item, nameOf, onOpenArticle }) => {
                     <div className="mt-0.5 text-[12px] leading-relaxed text-slate-500">
                         {/* actor_name пустеет, если человека удалили из портала:
                             в базе стоит ON DELETE SET NULL. Раньше выходило «#null». */}
+                        {/* Действие без автора по расписанию — не «автор неизвестен»:
+                            он известен, это система (выпуск новости кроном). */}
                         <span className="font-medium text-slate-600">
-                            {item.actor_name || (item.actor_id ? `Пользователь №${item.actor_id}` : 'Автор неизвестен')}
+                            {item.actor_name || (item.actor_id ? `Пользователь №${item.actor_id}`
+                                : (item.details?.by_schedule ? 'Система' : 'Автор неизвестен'))}
                         </span>
                         {/* Больше четырёх уточнений строка не несёт: остальное
                             ждёт в подробностях, где для него есть место. */}

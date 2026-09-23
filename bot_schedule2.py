@@ -65037,6 +65037,7 @@ def publish_scheduled_news_job():
     зафиксирован тогда же (queries.schedule_post).
     """
     from news import access as news_access
+    from news import audit as news_audit
     from news import queries as news_queries
     from news.schema import plan_ready as news_plan_ready
     from news.schema import space_ready as news_space_ready
@@ -65067,6 +65068,15 @@ def publish_scheduled_news_job():
                 # всплывшее раньше своего расписания, второй раз не всплывёт.
                 if news_queries.publish_scheduled(cursor, post['id']):
                     published += 1
+                    # В журнал вики — БЕЗ автора: выпустила система по
+                    # расписанию, и приписать это тому, кто нажал
+                    # «Опубликовать» накануне, значило бы соврать о времени.
+                    news_audit.record(
+                        cursor, actor_id=None, action='news.publish',
+                        post=news_queries.get_post(cursor, post['id'],
+                                                   with_space=with_space,
+                                                   with_plan=True),
+                        details={'mode': post['publish_mode'], 'by_schedule': True})
             waves = news_queries.activate_due_waves(cursor)
             if published or waves:
                 news_queries.poke_bell(cursor)

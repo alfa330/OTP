@@ -31,6 +31,7 @@ wiki/ai/knowledge.py. Здесь двери и порядок шагов.
 from flask import jsonify, request
 
 from news import access as news_access
+from news import audit as news_audit
 from news import queries as news_queries
 from news import schema as news_schema
 
@@ -496,6 +497,16 @@ def register(bp, wiki_route, db, log_ip, edit_helpers):
         # отдела без вопросов, а второй раз оно не всплывёт никогда.
         news_queries.set_quiz(cursor, post_id=post_id, quiz=quiz)
         news_queries.publish_post(cursor, post_id=post_id, audience_max_role_level=ceiling)
+        # В журнал — та же единственная дверь, что у вкладки «Новости»
+        # (news/audit.py): пространство новости, своя точка отката. Внутри
+        # точки сохранения вопроса, так что откат «коллега оформил раньше»
+        # уносит и эту запись.
+        news_audit.record(
+            cursor, actor_id=ctx['user_id'], action='news.publish',
+            post=news_queries.get_post(cursor, post_id, with_space=news_space_ready,
+                                       with_plan=news_schema.plan_ready(cursor)),
+            details={'mode': 'now', 'kind': 'critical', 'created': True,
+                     'source': 'question'})
 
         if not wiki_questions.finish_knowledge(cursor, question_id=question_id,
                                                status='published', by=ctx['user_id'],

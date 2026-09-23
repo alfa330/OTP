@@ -28,6 +28,7 @@ from flask import Blueprint, jsonify, request, send_file
 from wiki.sanitize import sanitize_html
 
 from . import access as news_access
+from . import audit as news_audit
 from . import photos as news_photos
 from . import queries
 from . import report_xlsx
@@ -649,6 +650,32 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             spread_minutes=plan.get('spread_minutes'),
             wave_interval_minutes=plan.get('wave_interval_minutes')))
 
+    def _audit(cursor, ctx, action, post, details=None):
+        """Одна дверь в журнал вики для всех роутов раздела (news/audit.py).
+
+        Пространство вкладки — только запасное: у новости со своим
+        пространством запись принадлежит ей, а не тому, куда человек смотрит.
+        """
+        news_audit.record(cursor, actor_id=ctx['user_id'], action=action, post=post,
+                          fallback_space_id=_request_space(cursor), details=details)
+
+    def _audit_launch(cursor, ctx, post_id, outcome, plan, created=False):
+        """Запись о выпуске или взведённом запуске — по тому, что сделал _launch.
+
+        created — новость создана этим же нажатием: отдельной строки «создана»
+        у неё нет, и подробность говорит об этом, чтобы по журналу было видно,
+        что до выпуска черновика не существовало.
+        """
+        post = _get_post(cursor, post_id)
+        details = {'mode': plan.get('publish_mode'), 'kind': plan.get('kind')}
+        if created:
+            details['created'] = True
+        if outcome == 'scheduled':
+            details['scheduled_at'] = post.get('scheduled_at')
+            _audit(cursor, ctx, 'news.schedule', post, details)
+        else:
+            _audit(cursor, ctx, 'news.publish', post, details)
+
     def _launch(cursor, post_id, plan, audience_max_role_level):
         """Выпуск по плану. 'scheduled' — запуск взведён, 'published' — ушло.
 
@@ -1086,14 +1113,25 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # Тренажёр и обязательность — тоже до публикации и по той же причине.
         if _pass_ready(cursor):
             queries.set_passes(cursor, post_id=post_id, **passes)
-        if payload.get('publish'):
+        # ЖУРНАЛ — одна строка на одно нажатие. «Опубликовать» у новой новости
+        # это и создание, и выпуск, и две записи в одну секунду («создана»,
+        # «опубликована») были бы шумом: пишем то, чем кончилось. Черновик —
+        # «создана». Отказ выпуска (просроченный срок) черновик НЕ отменяет:
+        # ответ 4xx здесь тоже фиксирует транзакцию, — значит и запись о нём.
+        if not payload.get('publish'):
+            _audit(cursor, ctx, 'news.create', _get_post(cursor, post_id),
+                   {'kind': plan.get('kind')})
+        else:
             refusal = _expiry_refusal(_get_post(cursor, post_id)['expires_at'], True)
             if refusal:
+                _audit(cursor, ctx, 'news.create', _get_post(cursor, post_id),
+                       {'kind': plan.get('kind')})
                 return jsonify({"error": refusal, "code": "NEWS_EXPIRED"}), 400
             # Волны строятся ВНУТРИ _launch и ДО publish_post — в той же
             # транзакции и по той же причине, что кадры и тест: объявление,
             # всплывшее раньше своего расписания, второй раз не всплывёт.
-            _launch(cursor, post_id, plan, audience_max_role_level=ctx['ceiling'])
+            outcome = _launch(cursor, post_id, plan, audience_max_role_level=ctx['ceiling'])
+            _audit_launch(cursor, ctx, post_id, outcome, plan, created=True)
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id))), 201
 
     @news_route('/posts/<int:post_id>', methods=('PATCH',), publisher=True)
@@ -1103,6 +1141,11 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Новость не найдена"}), 404
         if not _may_edit(ctx, post):
             return jsonify({"error": "Править новость может её автор"}), 403
+        # Тест и кадры ДО правки — для журнала: колонками в карточке их нет, и
+        # «что изменилось» по ним иначе не сказать (news/audit.py).
+        before_quiz = queries.post_quiz(cursor, post_id) if _quiz_ready(cursor) else []
+        before_photos = ([photo['id'] for photo in queries.post_photos(cursor, post_id)]
+                         if _photos_ready(cursor) else [])
 
         # Правка ОПУБЛИКОВАННОЙ новости не сбрасывает подтверждения. Это
         # решение, а не недосмотр: правят обычно опечатку, а сброс показал бы
@@ -1254,7 +1297,28 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
         if photo_refusal:
             return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
-        return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
+
+        # ЖУРНАЛ: что правка изменила на самом деле. Форма присылает все поля
+        # разом, поэтому сравниваем карточки до и после, а не ключи запроса —
+        # иначе каждая правка опечатки читалась бы как «поменяли всё».
+        after = _get_post(cursor, post_id)
+        fields = news_audit.changed_fields(post, after)
+        if 'quiz' in payload and _quiz_ready(cursor) \
+                and before_quiz != queries.post_quiz(cursor, post_id):
+            fields.append('quiz')
+        if 'photos' in payload and _photos_ready(cursor) and before_photos != [
+                photo['id'] for photo in queries.post_photos(cursor, post_id)]:
+            fields.append('photos')
+        # Снятый взвод — отдельная запись «запуск отменён», а не безликое
+        # «поле: запуск»: это решение, которое потом ищут по журналу.
+        unscheduled = post.get('state') == 'scheduled' and after.get('state') != 'scheduled'
+        if unscheduled:
+            fields = [field for field in fields if field != 'schedule']
+        if fields:
+            _audit(cursor, ctx, 'news.update', after, {'fields': fields})
+        if unscheduled:
+            _audit(cursor, ctx, 'news.unschedule', after)
+        return jsonify(_dress(cursor, ctx, after))
 
     @news_route('/posts/<int:post_id>/publish', methods=('POST',), publisher=True)
     def news_post_publish(cursor, ctx, post_id):
@@ -1280,7 +1344,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                                                   cursor, post_id)))
         if plan_refusal:
             return plan_refusal
-        _launch(cursor, post_id, plan, audience_max_role_level=ctx['ceiling'])
+        outcome = _launch(cursor, post_id, plan, audience_max_role_level=ctx['ceiling'])
+        _audit_launch(cursor, ctx, post_id, outcome, plan)
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>/archive', methods=('POST',), publisher=True)
@@ -1301,6 +1366,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Новость уже не на показе — "
                                      "её сняли раньше или она ещё не выходила",
                             "code": "NEWS_NOT_ON_AIR"}), 409
+        _audit(cursor, ctx, 'news.archive', post)
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     # defer_cursor: между удалением строк и сносом блобов стоит чужая сеть, и
@@ -1330,6 +1396,16 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             if post['status'] == 'published':
                 return jsonify({"error": "Новость на показе — сначала снимите её",
                                 "code": "NEWS_PUBLISHED"}), 409
+            # ЗАПИСЬ — ДО удаления и в той же транзакции. После удаления от
+            # новости не остаётся ничего: ни строки, ни журнала прочтений, ни
+            # теста, — и этот вопрос владелец и задал: «чтобы при удалении
+            # можно было увидеть, кто это сделал». Заодно фиксируем, ЧТО стёрто
+            # вместе с ней: сколько человек успели подтвердить.
+            addressed, confirmed = queries.audience_stats(
+                cursor, [post_id], with_space=_space_ready(cursor)).get(post_id, (0, 0))
+            _audit(cursor, ctx, 'news.delete', post, {
+                'was_published': bool(post.get('published_at')),
+                'addressed': addressed, 'confirmed': confirmed})
             refs = queries.delete_post(cursor, post_id,
                                        with_photos=_photos_ready(cursor))
         # ПОСЛЕ фиксации — тем же приёмом, что и снятие одного кадра.
