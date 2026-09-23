@@ -88,6 +88,9 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     );
 
     const [departments, setDepartments] = useState(null); // null — ещё грузим
+    const [candidates, setCandidates] = useState([]);     // отделы на Binotel, ещё не подключённые
+    const [enrollPick, setEnrollPick] = useState('');
+    const [enrolling, setEnrolling] = useState(false);
     const [departmentId, setDepartmentId] = useState('');
     const [tab, setTab] = useState('operators');
     const [date, setDate] = useState(todayIso);
@@ -95,28 +98,51 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
-    // Отделы раздела — своим списком: бэкенд сам знает, какие отделы в периметре
-    // и какие из них в зоне запросившего.
-    useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            try {
-                const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments`, { credentials: 'include', headers: authHeaders() });
-                const data = await resp.json().catch(() => ({}));
-                if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-                const list = Array.isArray(data.departments) ? data.departments : [];
-                if (cancelled) return;
-                setDepartments(list);
-                setDepartmentId((current) => current || (list[0] ? String(list[0].department_id) : ''));
-            } catch (e) {
-                if (!cancelled) {
-                    setDepartments([]);
-                    setError(e.message || 'Не удалось загрузить отделы');
-                }
-            }
-        })();
-        return () => { cancelled = true; };
+    // Отделы раздела — своим списком: бэкенд сам знает, какие отделы подключены
+    // и какие из них в зоне запросившего. Кандидаты (на Binotel, но ещё не
+    // подключённые) приходят только админу — для кнопки «Подключить отдел».
+    const loadDepartments = useCallback(async (preferId = null) => {
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments`, { credentials: 'include', headers: authHeaders() });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            const list = Array.isArray(data.departments) ? data.departments : [];
+            const cands = Array.isArray(data.candidates) ? data.candidates : [];
+            setDepartments(list);
+            setCandidates(cands);
+            setEnrollPick((cur) => cur || (cands[0] ? String(cands[0].department_id) : ''));
+            setDepartmentId((current) => {
+                if (preferId && list.some((d) => String(d.department_id) === String(preferId))) return String(preferId);
+                if (current && list.some((d) => String(d.department_id) === current)) return current;
+                return list[0] ? String(list[0].department_id) : '';
+            });
+        } catch (e) {
+            setDepartments([]);
+            setError(e.message || 'Не удалось загрузить отделы');
+        }
     }, [apiBaseUrl, authHeaders]);
+
+    useEffect(() => { loadDepartments(); }, [loadDepartments]);
+
+    const enroll = async () => {
+        if (!enrollPick || enrolling) return;
+        setEnrolling(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${enrollPick}/enroll`, {
+                method: 'POST', credentials: 'include', headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{}',
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            const picked = candidates.find((d) => String(d.department_id) === String(enrollPick));
+            showToast?.(`Отдел «${picked?.department_name || ''}» подключён. Включите режим во вкладке «Настройки»`, 'success');
+            await loadDepartments(enrollPick);
+            setTab('settings');
+        } catch (e) {
+            showToast?.(e.message || 'Не удалось подключить отдел', 'error');
+        } finally {
+            setEnrolling(false);
+        }
+    };
 
     const loadOverview = useCallback(async () => {
         if (!departmentId) { setRows([]); setLoading(false); return; }
@@ -157,7 +183,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const isToday = date === todayIso();
 
     const subtitle = !selected
-        ? 'Отделов для обзвона пока нет'
+        ? (candidates.length ? 'Подключите отдел, чтобы начать' : 'Отделов для обзвона пока нет')
         : enabled
             ? `Порции по ${dept.settings?.portion_size ?? selected.portion_size}, в базе ${selected.leads_total}${dept.summary ? `, доступно ${dept.summary.pool_available}` : ''}`
             : 'Режим выключен: операторы вкладку «Обзвон» не видят';
@@ -201,6 +227,28 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     </div>
                 </div>
 
+                {/* Подключение отдела: только админу и только пока есть кандидаты
+                    (отделы на Binotel, которых в разделе ещё нет). */}
+                {canEdit && candidates.length > 0 && (
+                    <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5">
+                        <span className="text-[12.5px] text-slate-600">Подключить отдел к обзвону:</span>
+                        <select
+                            value={enrollPick}
+                            onChange={(e) => setEnrollPick(e.target.value)}
+                            className={`${iosInput} w-60 py-1.5 text-[13px]`}
+                            aria-label="Отдел для подключения"
+                        >
+                            {candidates.map((d) => (
+                                <option key={d.department_id} value={String(d.department_id)}>{d.department_name || `Отдел ${d.department_id}`}</option>
+                            ))}
+                        </select>
+                        <button type="button" onClick={enroll} disabled={enrolling || !enrollPick} className={`${iosBtnSecondary} py-1.5`}>
+                            <FaIcon className={enrolling ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
+                            Подключить
+                        </button>
+                    </div>
+                )}
+
                 <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                     {[
                         { label: isToday ? 'Выдано сегодня' : 'Выдано', value: totals.issued },
@@ -225,9 +273,11 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                         <FaIcon className="fas fa-building" style={{ width: 18, height: 18 }} />
                     </div>
-                    <div className="mt-3 text-[14px] font-semibold text-slate-800">Нет отделов для обзвона</div>
+                    <div className="mt-3 text-[14px] font-semibold text-slate-800">Нет подключённых отделов</div>
                     <div className="mt-1 text-[12.5px] text-slate-500">
-                        Заведите отдел удалённого колл-центра с телефонией Binotel в «Настройках SIP» — он появится здесь.
+                        {candidates.length
+                            ? 'Выберите отдел в шапке и нажмите «Подключить».'
+                            : 'Заведите отдел удалённого колл-центра и переключите его телефонию на Binotel в «Настройках SIP» — тогда его можно будет подключить здесь.'}
                     </div>
                 </div>
             )}

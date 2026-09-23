@@ -200,11 +200,12 @@ class DialListService:
         }
 
     def list_departments(self, department_ids=None):
-        """Отделы раздела: те, что на Binotel, с заведёнными настройками обзвона или с
-        кодом из DIAL_LIST_DEPARTMENT_CODES. department_ids=None — все такие (админ)."""
+        """Отделы раздела: ЯВНО подключённые (есть строка настроек) либо с кодом из
+        DIAL_LIST_DEPARTMENT_CODES. «Отдел на Binotel» сам по себе в раздел не попадает —
+        иначе здесь оказывался бы любой отдел с этой АТС (замечание владельца 23.09.2026).
+        department_ids=None — все такие (админ)."""
         params = [DEFAULT_PORTION_SIZE]
-        where = ("(COALESCE(dc.provider, 'asterisk') = 'binotel' OR s.department_id IS NOT NULL "
-                 "OR LOWER(COALESCE(d.code, '')) = ANY(%s))")
+        where = "(s.department_id IS NOT NULL OR LOWER(COALESCE(d.code, '')) = ANY(%s))"
         params.append(sorted(DIAL_LIST_DEPARTMENT_CODES))
         if department_ids is not None:
             where += " AND d.id = ANY(%s)"
@@ -212,6 +213,40 @@ class DialListService:
         with self.db._get_cursor() as cur:
             cur.execute(self._DEPARTMENTS_SQL.format(where=where), params)
             return [self._department_row(r) for r in cur.fetchall()]
+
+    def candidate_departments(self):
+        """Отделы, которые МОЖНО подключить: телефония Binotel, но в разделе их ещё нет.
+        Из них админ выбирает в кнопке «Подключить отдел»."""
+        params = [DEFAULT_PORTION_SIZE, sorted(DIAL_LIST_DEPARTMENT_CODES)]
+        where = ("COALESCE(dc.provider, 'asterisk') = 'binotel' AND s.department_id IS NULL "
+                 "AND NOT (LOWER(COALESCE(d.code, '')) = ANY(%s))")
+        with self.db._get_cursor() as cur:
+            cur.execute(self._DEPARTMENTS_SQL.format(where=where), params)
+            return [self._department_row(r) for r in cur.fetchall()]
+
+    def enroll_department(self, department_id, changed_by=None):
+        """Подключить отдел к разделу: завести строку настроек (режим пока выключен)."""
+        department_id = int(department_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT d.id, COALESCE(dc.provider, 'asterisk')
+                FROM departments d
+                LEFT JOIN sip_department_config dc ON dc.department_id = d.id
+                WHERE d.id = %s AND COALESCE(d.is_active, TRUE)
+            """, (department_id,))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Отдел не найден", 404)
+            if row[1] != "binotel":
+                raise DialListError(
+                    "Телефония отдела не Binotel: сначала переключите провайдера отдела в «Настройках SIP»", 409)
+            cur.execute("""
+                INSERT INTO dial_list_department_settings (department_id, enabled, updated_by)
+                VALUES (%s, FALSE, %s)
+                ON CONFLICT (department_id) DO NOTHING
+            """, (department_id, changed_by))
+        log.info("dial_list: отдел %s подключён к разделу (пользователь %s)", department_id, changed_by)
+        return self.department_settings(department_id)
 
     def manager_scope(self, is_admin, headed_department_ids, login=None):
         """Что видит руководитель: None — всё (админ без своего отдела); список id —

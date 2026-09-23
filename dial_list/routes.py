@@ -134,8 +134,25 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def departments():
+        """Подключённые отделы в зоне запросившего; админу — ещё и кандидаты на
+        подключение (отделы на Binotel, которых в разделе пока нет)."""
         _requester_id, scope = _manager()
-        return jsonify({"status": "success", "departments": svc.list_departments(scope)}), 200
+        return jsonify({
+            "status": "success",
+            "departments": svc.list_departments(scope),
+            "candidates": svc.candidate_departments() if scope is None else [],
+        }), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/enroll', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def department_enroll(department_id):
+        """Подключить отдел к разделу. Только админ: глава видит лишь уже подключённые."""
+        requester_id, scope = _manager()
+        if scope is not None:
+            raise DialListError("Подключить отдел к обзвону может администратор", 403)
+        settings = svc.enroll_department(department_id, changed_by=requester_id)
+        return jsonify({"status": "success", "settings": settings}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/settings', methods=['GET', 'PUT', 'OPTIONS'])
     @require_api_key

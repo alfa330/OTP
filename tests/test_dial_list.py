@@ -240,6 +240,14 @@ class WiringTests(unittest.TestCase):
         self.assertIn("DIAL_LIST_DEPARTMENT_CODES = new Set(['remote_cc'])", app_src)
         self.assertNotIn('canAccessDialListSection = canAccessSipSettingsTez', app_src)
 
+    def test_binotel_alone_does_not_put_department_into_section(self):
+        # Замечание владельца 23.09.2026: Тез КЦ (тоже на Binotel) в разделе быть не должен.
+        src = inspect.getsource(dial_service.DialListService.list_departments)
+        self.assertNotIn("provider", src.split('where = ')[1].split('\n')[0])
+        self.assertIn("s.department_id IS NOT NULL", src)
+        cand = inspect.getsource(dial_service.DialListService.candidate_departments)
+        self.assertIn("= 'binotel' AND s.department_id IS NULL", cand)
+
     def test_manager_scope_rules(self):
         class _DB:
             pass
