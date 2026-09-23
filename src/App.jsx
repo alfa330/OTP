@@ -41568,7 +41568,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Правило дублируется на бэкенде, и там оно решающее: за подписанной
             // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.
             const canDownloadIcorePhone = isAdminLikeRole
-                || ICORE_PHONE_DEPARTMENT_IDS.has(Number(user?.department_id ?? user?.departmentId));
+                || ICORE_PHONE_DEPARTMENT_IDS.has(Number(user?.department_id ?? user?.departmentId))
+                // Отдел удалённого колл-центра («Обзвон из телефона») работает на том же
+                // телефоне; решающая проверка — на сервере (_can_download_icore_phone).
+                || DIAL_LIST_DEPARTMENT_CODES.has(normalizeDepartmentCode(user?.department_code ?? user?.departmentCode));
             // «Ограничитель Перезвона»: глобальные админы, глава СЗоВ и СВ СЗоВ.
             // Глава чужого отдела не проходит — назначение главой заменяет базовую
             // роль и режет периметр отделом, ровно как у табло СЗоВ. СВ раздел

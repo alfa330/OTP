@@ -29295,7 +29295,8 @@ def _can_download_icore_phone(requester_id, role) -> bool:
         return True
     try:
         headed = _headed_department_id(requester_id)
-        if headed is not None and int(headed) in ICORE_PHONE_DEPARTMENT_IDS:
+        if headed is not None and (int(headed) in ICORE_PHONE_DEPARTMENT_IDS
+                                   or _dial_list_department_allowed(headed)):
             return True
     except (TypeError, ValueError):
         pass
@@ -29308,9 +29309,14 @@ def _can_download_icore_phone(requester_id, role) -> bool:
     if dept_id is None:
         return False
     try:
-        return int(dept_id) in ICORE_PHONE_DEPARTMENT_IDS
+        if int(dept_id) in ICORE_PHONE_DEPARTMENT_IDS:
+            return True
     except (TypeError, ValueError):
         return False
+    # Отделы «Обзвона из телефона» (удалённый колл-центр) работают на том же
+    # телефоне: подключённый к разделу отдел получает дистрибутив и обновления
+    # без правки списка выше. Иначе тест-оператор ловил 403 на обновлении.
+    return _dial_list_department_allowed(dept_id)
 
 
 def _icore_phone_public_release(release):
@@ -62558,6 +62564,18 @@ try:
     logging.info("Раздел «Обзвон из телефона»: Blueprint подключён на /api/operator/dial_list")
 except Exception:
     logging.exception("Раздел «Обзвон из телефона»: Blueprint НЕ подключён")
+
+
+def _dial_list_department_allowed(department_id):
+    """Подключён ли отдел к «Обзвону из телефона» (строка настроек либо код remote_cc).
+    По этому признаку отдел получает дистрибутив iCORE Phone (_can_download_icore_phone)."""
+    if _dial_list_service is None or department_id is None:
+        return False
+    try:
+        return bool(_dial_list_service.list_departments([int(department_id)]))
+    except Exception:
+        logging.exception("dial_list: не удалось проверить отдел %s для дистрибутива телефона", department_id)
+        return False
 
 
 def _dial_list_phone_settings(user_id):
