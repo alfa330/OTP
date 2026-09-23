@@ -134,6 +134,25 @@ class ReconnectTests(unittest.TestCase):
         self.assertEqual(conn.closed, 0)
 
 
+class SnapshotTrapTests(unittest.TestCase):
+    """Без автокоммита соединение навсегда застревает в первом снимке базы.
+
+    У MariaDB изоляция REPEATABLE READ, а pymysql без autocommit открывает транзакцию
+    первым же SELECT. Соединение у моста одно на весь день, поэтому 22.09.2026 с 15:59
+    каждый запрос видел журнал очередей на момент первого, и новые звонки точных полей
+    не получали — без единой ошибки. Проверено на живой станции: max(id) у такого
+    соединения за две минуты не сдвинулся, у соединения с autocommit вырос.
+    """
+
+    def test_real_connection_is_opened_with_autocommit(self):
+        from unittest import mock
+        source = pbxdb.PbxDb(host='10.0.0.1', user='ro', password='x')
+        with mock.patch.object(pbxdb, 'pymysql') as driver:
+            source._connect_pymysql()
+        self.assertTrue(driver.connect.call_args.kwargs.get('autocommit'),
+                        'без autocommit мост читает один и тот же снимок весь день')
+
+
 class ConfigTests(unittest.TestCase):
     def test_empty_config_gives_a_disabled_source(self):
         self.assertFalse(pbxdb.from_config({}).enabled)

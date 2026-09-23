@@ -84,9 +84,15 @@ class PbxDb:
     def _connect_pymysql(self):
         if pymysql is None:
             raise PbxDbError('pymysql не установлен')
+        # autocommit обязателен. У MariaDB по умолчанию REPEATABLE READ, а pymysql без
+        # автокоммита открывает транзакцию первым же SELECT и держит её, пока соединение
+        # живо: каждый следующий запрос видит базу на момент первого. Соединение у нас
+        # одно на весь день, поэтому 22.09.2026 мост с 15:59 читал один и тот же снимок
+        # журнала очередей — новые звонки в нём не появлялись, и точные поля до утра
+        # 23.09 не приехали ни одному звонку. Ошибок при этом не было ни одной.
         return pymysql.connect(
             host=self.host, port=self.port, user=self.user, password=self.password,
-            database=self.database, charset='utf8mb4',
+            database=self.database, charset='utf8mb4', autocommit=True,
             connect_timeout=CONNECT_TIMEOUT, read_timeout=READ_TIMEOUT,
             write_timeout=CONNECT_TIMEOUT)
 
