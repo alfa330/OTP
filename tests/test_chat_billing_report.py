@@ -3,6 +3,7 @@
 план чатов и сотрудники, выгрузки в формате отчётов СЗоВ — «Ежедневный отчёт по чатам»
 и «Отчёт с группировкой по часам»."""
 import ast
+import copy
 import math
 import re
 import unittest
@@ -23,6 +24,7 @@ from resource_fte.chat import (
     _chat_billing_phone_claims_tx,
     _chat_billing_plan_base_tx,
     _chat_billing_planned_shifts_tx,
+    _chat_billing_planned_staff,
     attach_chat_billing_grouping_staff,
     attach_chat_billing_plan,
     build_chat_billing_grouping,
@@ -39,6 +41,7 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = ROOT / "database.py"
 VIEW_PATH = ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx"
 METRICS_JS_PATH = ROOT / "src" / "components" / "resources" / "chatBillingMetrics.js"
 
@@ -70,7 +73,6 @@ CONST_NAMES = (
     "CHAT_BILLING_LOW_RATING",
     "_CHAT_BILLING_HOURLY_COLUMNS",
     "_CHAT_BILLING_HOURLY_STAFF_KEYS",
-    "_CHAT_BILLING_HOURLY_DAY_HOURS_ROWS",
 )
 
 
@@ -93,6 +95,22 @@ def _namespace():
     }
     exec(compile(ast.Module(body=consts + selected, type_ignores=[]), str(BOT_PATH), "exec"), ns)
     return ns
+
+
+def _lot_parts_method():
+    """Настоящий Database._hourly_lot_parts_for_date: план сотрудников режет смены им."""
+    module = source_cache.parse(DATABASE_PATH.read_text(encoding="utf-8"))
+    database = next(node for node in module.body
+                    if isinstance(node, ast.ClassDef) and node.name == "Database")
+    method = next(node for node in database.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "_hourly_lot_parts_for_date")
+    # Копия: source_cache отдаёт общий разобранный модуль, и снятый прямо с него
+    # @staticmethod ломал соседние тесты, которые исполняют класс Database целиком.
+    method = copy.deepcopy(method)
+    method.decorator_list = []
+    ns = {"date": date}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(DATABASE_PATH), "exec"), ns)
+    return ns["_hourly_lot_parts_for_date"]
 
 
 def _aggregates(chats, answered, answered_sl, reply_sum, inner_sum, inner_replied,
@@ -231,6 +249,24 @@ class ChatBillingGroupingTests(unittest.TestCase):
         self.assertIn("EXTRACT(HOUR FROM r.request_start)", db.cursor.calls[0][0])
 
 
+class _PlannerDb:
+    """План сотрудников: лоты аукциона чата и настоящий разбор смены по часам."""
+
+    def __init__(self, lots):
+        self.lots = lots
+        self.requested = []
+        self._hourly_lot_parts_for_date = _lot_parts_method()
+
+    def get_shift_auction_lots_for_planner_date(self, day, direction_mode="line"):
+        self.requested.append((day, direction_mode))
+        return {"lots": self.lots}
+
+
+def _lot(operator_id, shift_date, start, end, status="claimed", kind=""):
+    return {"claimed_by": operator_id, "shift_date": shift_date, "start_time": start,
+            "end_time": end, "status": status, "shift_kind": kind}
+
+
 def _shift(operator_id, day, start, end):
     """Строка графика так, как её отдаёт psycopg2: дата и время объектами."""
     return (operator_id, date.fromisoformat(day), time.fromisoformat(start), time.fromisoformat(end))
@@ -253,6 +289,27 @@ class _SequenceCursor(_RowsCursor):
 
 
 class ChatBillingStaffTests(unittest.TestCase):
+    def test_planned_staff_skips_phone_and_unclaimed_and_unions_overlaps(self):
+        db = _PlannerDb([
+            _lot(1, "2026-09-12", "09:00", "18:00"),
+            # Наложенная смена того же человека — часы не задваиваются, голова одна.
+            _lot(1, "2026-09-12", "15:00", "21:30"),
+            _lot(2, "2026-09-12", "10:00", "11:00", kind="phone"),
+            _lot(3, "2026-09-12", "10:00", "11:00", status="available"),
+            # Хвост ночной смены прошлых суток.
+            _lot(4, "2026-09-11", "20:00", "02:00"),
+        ])
+        plan = _chat_billing_planned_staff(db, date(2026, 9, 12))
+        self.assertEqual(db.requested, [(date(2026, 9, 12), "chat")])
+        self.assertEqual(plan["heads"][:3], [1, 1, 0])
+        self.assertEqual(plan["heads"][10], 1)
+        self.assertEqual(plan["heads"][16], 1)
+        self.assertEqual(plan["heads"][21], 1)
+        self.assertEqual(sum(plan["hours"]), 2 + 12.5)
+        self.assertIsNone(_chat_billing_planned_staff(_PlannerDb([]), date(2026, 9, 12)))
+
+    # План по графику работы — только для выгрузки «Группировки»: экран постановщик
+    # просил не трогать (23.09.2026), он считает по сменам аукциона, как выше.
     def test_planned_staff_is_the_schedule_without_phone_time(self):
         plan = build_chat_billing_planned_staff(date(2026, 9, 12), date(2026, 9, 13), [
             _shift(1, "2026-09-12", "09:00", "18:00"),
@@ -309,7 +366,7 @@ class ChatBillingStaffTests(unittest.TestCase):
         self.assertIn("NOT EXISTS", sql)
         self.assertEqual(params, ["chat", "phone", date(2026, 9, 20), date(2026, 9, 27)] * 2)
 
-    def test_staff_is_three_queries_on_one_cursor(self):
+    def test_schedule_plan_is_three_queries_on_one_cursor(self):
         cursor = _SequenceCursor([
             [(date(2026, 9, 21), 9, 1, 3600.0)],
             [_shift(1, "2026-09-21", "08:00", "17:00"), _shift(2, "2026-09-21", "08:00", "17:00")],
@@ -321,7 +378,8 @@ class ChatBillingStaffTests(unittest.TestCase):
             def _get_cursor(self):
                 yield cursor
 
-        staff = get_chat_billing_staff(_Db(), date(2026, 9, 21), date(2026, 9, 21))
+        staff = get_chat_billing_staff(_Db(), date(2026, 9, 21), date(2026, 9, 21),
+                                       plan_from_schedule=True)
         self.assertEqual(len(cursor.calls), 3)
         day = staff["2026-09-21"]
         self.assertEqual(day["planned_heads"][9], 1)
@@ -590,17 +648,8 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertEqual(rows[2][8:11], [None, None, None])
         total = rows[26]
         self.assertEqual(total[:2], ["Общий итог", 16])
-        # Часы работы дня под итогом — на весь блок дня, как «Часы работы» на экране.
-        self.assertEqual(rows[27][:2], ["План по часам", 48.0])
-        self.assertEqual(rows[28][:2], ["Факт по часам", 24.0])
-        self.assertIn("B28:G28", [str(item) for item in ws.merged_cells.ranges])
-        self.assertEqual(ws["B28"].number_format, "0")
-        # Второй день без графика и статусов — пусто, а не ноль.
-        self.assertEqual([rows[27][7], rows[28][7]], [None, None])
 
         park_rows = [list(row) for row in workbook["Jana Taxi"].iter_rows(values_only=True)]
-        # У листа парка строк часов нет — лист кончается «Общим итогом».
-        self.assertEqual(park_rows[-1][0], "Общий итог")
         # У парка сотрудников нет — три колонки на день.
         self.assertEqual(park_rows[1][:4], ["Время", "Поступившие чаты", "Ср вр реакции на 1 сообщение",
                                             "Ср время ответа внутри чата"])
@@ -623,6 +672,10 @@ class ChatBillingExportTests(unittest.TestCase):
         route = backend[backend.index("def api_resource_fte_chat_billing_grouping"):]
         route = route[:route.index("# Выгрузка биллинга чата.")]
         self.assertIn("if not park:", route)
+        # План по графику работы — только в файле «Группировки»; экраны считают по аукциону.
+        self.assertEqual(backend.count("plan_from_schedule=True"), 1)
+        self.assertIn("plan_from_schedule=True", block[block.index("elif mode == 'grouping':"):
+                                                      block.index("elif mode == 'detail':")])
         self.assertIn("get_chat_billing_daily(db,", backend[backend.index("def api_resource_fte_chat_billing():"):])
 
 

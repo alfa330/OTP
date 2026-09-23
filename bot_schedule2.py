@@ -11104,13 +11104,6 @@ _CHAT_BILLING_HOURLY_COLUMNS = (
     ('inner_reply', 'Ср время ответа внутри чата', None, 11),
 )
 _CHAT_BILLING_HOURLY_STAFF_KEYS = frozenset({'staff_planned', 'staff_fact', 'staff_delta'})
-# Часы работы дня — строками под «Общим итогом», через весь блок дня: на экране это
-# «Часы работы: план · факт» в шапке дня. Подписи и формат — как в ежедневном отчёте.
-# Только на листе всего чата: люди не делятся по паркам.
-_CHAT_BILLING_HOURLY_DAY_HOURS_ROWS = (
-    ('planned_hours', 'План по часам', '0'),
-    ('fact_hours', 'Факт по часам', '0'),
-)
 
 
 def _chat_billing_minutes_label(seconds):
@@ -11354,12 +11347,6 @@ def _chat_billing_hourly_workbook(params, reports):
         total_label.font = bold
         total_label.alignment = center
         total_label.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        day_hours_rows = _CHAT_BILLING_HOURLY_DAY_HOURS_ROWS if park is None else ()
-        for offset, (_key, title, _fmt) in enumerate(day_hours_rows):
-            label = ws.cell(row=total_row + 1 + offset, column=1, value=title)
-            label.font = bold
-            label.alignment = center
-            label.border = Border(left=thin, right=thin, top=thin, bottom=thin)
         if not days:
             ws.cell(row=1, column=2, value='За выбранный период и окно времени обращений не нашлось')
             continue
@@ -11426,20 +11413,6 @@ def _chat_billing_hourly_workbook(params, reports):
                 cell.alignment = center
                 cell.border = Border(left=medium if column_offset == 0 else thin,
                                      right=thin, top=thin, bottom=thin)
-
-            staff = day.get('staff') or {}
-            for offset, (key, _title, fmt) in enumerate(day_hours_rows):
-                row = total_row + 1 + offset
-                value = staff.get(key)
-                for column_offset in range(width):
-                    ws.cell(row=row, column=start_column + column_offset).border = Border(
-                        left=medium if column_offset == 0 else thin, right=thin, top=thin, bottom=thin)
-                cell = ws.cell(row=row, column=start_column, value=value)
-                cell.alignment = center
-                if value is not None:
-                    cell.number_format = fmt
-                ws.merge_cells(start_row=row, start_column=start_column,
-                               end_row=row, end_column=start_column + width - 1)
         ws.freeze_panes = 'B3'
     return workbook
 
@@ -11567,8 +11540,14 @@ def api_resource_fte_chat_billing_export():
             reports = get_chat_billing_grouping_by_park(
                 db, params['start_day'], params['end_day'], park=_chat_billing_park_arg(), **window)
             if reports and reports[0][0] is None:
+                # План сотрудников в файле — по графику работы: по лотам аукциона колонка
+                # оставалась пустой там, где аукциона не было (01–08.09), и теряла куски
+                # смен. Экран «Группировки» считает по-прежнему — постановщик просил его
+                # не трогать.
                 attach_chat_billing_grouping_staff(
-                    reports[0][1], get_chat_billing_staff(db, params['start_day'], params['end_day']),
+                    reports[0][1],
+                    get_chat_billing_staff(db, params['start_day'], params['end_day'],
+                                           plan_from_schedule=True),
                     params['minute_from'], params['minute_to'])
             workbook = _chat_billing_hourly_workbook(params, reports)
         elif mode == 'detail':
