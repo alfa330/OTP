@@ -32,6 +32,10 @@ Playwright намеренно НЕ в requirements.txt: браузер нуже�
 Примеры:
     python scripts/fleet_edm_push_session.py
     python scripts/fleet_edm_push_session.py --target mailings   # аккаунт «Рассылок»
+    python scripts/fleet_edm_push_session.py --target mailings --cookie-file C:/Users/User/Desktop/fleet_cookie.txt
+        # без окна Chromium: заголовок Cookie из DevTools основного Chrome
+        # (Network → запрос parks → Request Headers → cookie → Copy value);
+        # файл после передачи удалить — это вход в кабинет
     python scripts/fleet_edm_push_session.py --profile "C:/pw/fleet" --wait-minutes 20
     python scripts/fleet_edm_push_session.py --base-url http://127.0.0.1:5000
     python scripts/fleet_edm_push_session.py --check          # только проверить, что лежит
@@ -40,12 +44,15 @@ Playwright намеренно НЕ в requirements.txt: браузер нуже�
 """
 import argparse
 import os
+import re
 import sys
 import time
 
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from fleet_edm.client import DEFAULT_USER_AGENT  # noqa: E402
 
 DEFAULT_API_BASE_URL = 'https://otp-2-fos4.onrender.com'
 FLEET_URL = 'https://fleet.yandex.kz/'
@@ -221,6 +228,36 @@ def _probe(page):
     return result
 
 
+def cookies_from_header_file(path):
+    """Куки из заголовка Cookie, скопированного в DevTools основного браузера.
+
+    Путь без Chromium: в основном Chrome человек уже вошёл, а прочитать куки из
+    его профиля нельзя (шифрование с привязкой к приложению, отладочный порт на
+    основном профиле закрыт с Chrome 136). Зато DevTools отдаёт готовый
+    заголовок: Network → запрос `parks` → Request Headers → `cookie` → Copy
+    value. Принимаем и его, и целую команду «Copy as cURL» (bash или cmd).
+    Так подключён аккаунт «Рассылок» 23.09.2026.
+    """
+    with open(path, encoding='utf-8-sig') as handle:
+        text = handle.read().strip()
+    match = (re.search(r"""-H\s+\^?["']cookie:\s*(.+?)\^?["']""", text, re.I | re.S)
+             or re.search(r"""(?:-b|--cookie)\s+\^?["'](.+?)\^?["']""", text, re.S))
+    if match:
+        text = match.group(1)
+    text = re.sub(r'^\s*cookie\s*:\s*', '', text, flags=re.I)
+    if '^"' in text or '^%' in text:
+        text = text.replace('^', '')        # экранирование «Copy as cURL (cmd)»
+    cookies = []
+    for part in re.split(r';\s*', text.replace('\r', '').replace('\n', '')):
+        name, sep, value = part.partition('=')
+        if sep and name.strip():
+            cookies.append({'name': name.strip(), 'value': value.strip()})
+    if not any(item['name'] == 'Session_id' for item in cookies):
+        raise SystemExit('В файле нет куки Session_id — скопирован не тот заголовок '
+                         'или вход в кабинет не выполнен.')
+    return cookies
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Передать порталу сессию кабинета Яндекс.Fleet')
@@ -229,7 +266,7 @@ def main():
                              'mailings — «Рассылки» (свой аккаунт)')
     parser.add_argument('--profile', default=None,
                         help='папка профиля Chromium (по умолчанию своя у каждой цели: {})'.format(
-                            ', '.join('{} → {}'.format(k, v['profile'])
+                            ', '.join('{}: {}'.format(k, v['profile'])
                                       for k, v in sorted(TARGETS.items()))))
     parser.add_argument('--base-url', default=None, help='адрес OTP')
     parser.add_argument('--login', default=None)
@@ -240,6 +277,9 @@ def main():
                         help='не показывать окно (годится, только если сессия уже жива)')
     parser.add_argument('--check', action='store_true',
                         help='только показать, что за сессия лежит в OTP')
+    parser.add_argument('--cookie-file', default=None,
+                        help='файл с заголовком Cookie (или «Copy as cURL») из DevTools '
+                             'основного браузера — вместо входа в окне Chromium')
     args = parser.parse_args()
 
     target = TARGETS[args.target]
@@ -262,10 +302,17 @@ def main():
             print('Последняя ошибка: {}'.format(status['last_error']))
         return 0
 
-    cookies, user_agent, account, parks = grab_cookies(
-        args.profile or target['profile'], wait_minutes=args.wait_minutes,
-        headless=args.headless, login_hint=target['login_hint'])
-    print('Кабинет открыт: {} ({} парков)'.format(account or '—', parks))
+    if args.cookie_file:
+        # Проверяет куки сам сервер (живым запросом в кабинет) — второй
+        # проверки здесь не делаем.
+        cookies = cookies_from_header_file(args.cookie_file)
+        user_agent = DEFAULT_USER_AGENT
+        print('Кук в заголовке: {}'.format(len(cookies)))
+    else:
+        cookies, user_agent, account, parks = grab_cookies(
+            args.profile or target['profile'], wait_minutes=args.wait_minutes,
+            headless=args.headless, login_hint=target['login_hint'])
+        print('Кабинет открыт: {} ({} парков)'.format(account or '—', parks))
 
     result = client.push(cookies, user_agent)
     status = result.get('session') or {}
