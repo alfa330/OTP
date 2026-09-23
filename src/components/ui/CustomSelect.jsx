@@ -33,6 +33,10 @@ import { APPLE_FONT } from './ios';
  *                       Без неё в кнопке стоит «Выбрано: N».
  *   maxSelected       — потолок выбора; при достижении невыбранные строки
  *                       гаснут, а не молча игнорируют клик.
+ *   bulkActions       — (только multiple) строка «Выбрать все · Сбросить» над
+ *                       списком. При строке поиска «Выбрать» берёт найденные,
+ *                       а не весь список: набрал «Астана» — отметил Астану.
+ *                       С maxSelected не сочетается: «все» там не бывает.
  */
 export default function CustomSelect({
   value,
@@ -49,6 +53,7 @@ export default function CustomSelect({
   multiple = false,
   renderValue = null,
   maxSelected = 0,
+  bulkActions = false,
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
@@ -183,6 +188,19 @@ export default function CustomSelect({
     });
   };
 
+  const showBulk = multiple && bulkActions && !(maxSelected > 0);
+  const searching = Boolean(showSearch && query.trim());
+  const pickable = filtered.filter((o) => !o.disabled).map((o) => String(o.value));
+  const allPicked = pickable.length > 0 && pickable.every((value) => selectedSet.has(value));
+
+  /* Порядок сохраняем тем же правилом, что и у одиночного щелчка: уже
+     выбранные остаются на своих местах, новые встают в хвост. */
+  const pickAll = () => {
+    const next = [...selectedValues];
+    pickable.forEach((value) => { if (!selectedSet.has(value)) next.push(value); });
+    onChange?.(next);
+  };
+
   const pick = (o) => {
     if (o.disabled) return;
     if (multiple) {
@@ -298,6 +316,29 @@ export default function CustomSelect({
                   ? 'w-full rounded-xl border-0 bg-slate-100 px-2.5 py-2 text-[12.5px] text-slate-900 outline-none placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-500/60'
                   : 'w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-400 focus:bg-white'}
               />
+            </div>
+          )}
+
+          {showBulk && (
+            <div className={`flex shrink-0 items-center justify-between gap-2 border-b px-1.5 py-1 ${isIos ? 'border-slate-100' : 'border-gray-100'}`}>
+              <button
+                type="button"
+                disabled={!pickable.length || allPicked}
+                onClick={pickAll}
+                className={`rounded-lg px-2 py-1 font-medium transition disabled:cursor-default disabled:opacity-40 ${
+                  isIos ? 'text-[12px] text-blue-600 hover:bg-blue-50' : 'text-xs text-blue-600 hover:bg-blue-50'}`}
+              >
+                {searching ? `Выбрать найденные · ${pickable.length}` : `Выбрать все · ${pickable.length}`}
+              </button>
+              <button
+                type="button"
+                disabled={!selectedValues.length}
+                onClick={() => onChange?.([])}
+                className={`rounded-lg px-2 py-1 font-medium transition disabled:cursor-default disabled:opacity-40 ${
+                  isIos ? 'text-[12px] text-slate-500 hover:bg-slate-100' : 'text-xs text-gray-500 hover:bg-gray-100'}`}
+              >
+                Сбросить
+              </button>
             </div>
           )}
 

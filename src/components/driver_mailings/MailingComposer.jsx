@@ -339,7 +339,6 @@ export default function MailingComposer({
         value: park.id,
         label: park.city ? `${park.name} · ${park.city}` : park.name,
     }));
-    const allParksSelected = parks.length > 0 && selectedParks.length === parks.length;
 
     return (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
@@ -411,23 +410,17 @@ export default function MailingComposer({
                     hint={selectedParks.length > 1
                         ? 'Рассылка уйдёт водителям всех выбранных диспетчерских, охват считается суммарно.'
                         : null}
-                    /* С аккаунтом рассылок диспетчерских не пять, а десятки:
-                       щёлкать каждую по одной — это «рассылка по всем» в
-                       девяносто кликов. */
-                    right={parks.length > 1 ? (
-                        <button
-                            type="button"
-                            onClick={() => patch({ park_ids: allParksSelected ? [] : parks.map((park) => park.id) })}
-                            className="rounded-lg px-1.5 py-0.5 text-[11.5px] font-medium text-blue-600 transition hover:bg-blue-50"
-                        >
-                            {allParksSelected ? 'Снять выбор' : `Выбрать все · ${parks.length}`}
-                        </button>
-                    ) : null}
                 >
+                    {/* С аккаунтом рассылок диспетчерских не пять, а десятки:
+                        щёлкать каждую по одной — это «рассылка по всем» в
+                        девяносто кликов. Поэтому в списке поиск (по названию и
+                        городу) и «Выбрать все · Сбросить»; при поиске «выбрать»
+                        берёт найденные — так отмечается целый город. */}
                     <CustomSelect
                         multiple
+                        bulkActions
                         variant="ios"
-                        searchable={parks.length > 8}
+                        searchable
                         searchPlaceholder="Диспетчерская или город"
                         ariaLabel="Диспетчерские"
                         placeholder="Выберите диспетчерские"
