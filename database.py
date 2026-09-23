@@ -23690,6 +23690,19 @@ class Database:
             row = cursor.fetchone()
         return row[0] if row else None
 
+    def wazzup_chat_last_messages(self, account='op'):
+        """chat_id → время последнего сохранённого сообщения по аккаунту.
+
+        Забор «Потока» сверяет с этим списком строку чата из Wazzup: если её
+        lastMessage уже у нас, сообщения чата не запрашиваются. Так загрузка
+        истории возобновляется после рестарта процесса (деплой убивает фоновый
+        поток), а регулярное дотягивание не перечитывает молчащие чаты."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT chat_id, last_message_at FROM wazzup_chats
+                 WHERE account = %s AND last_message_at IS NOT NULL""", (account,))
+            return {r[0]: r[1] for r in cursor.fetchall()}
+
     def wazzup_accounts_summary(self):
         """Сколько чатов и когда последнее сообщение — по аккаунтам, для
         переключателя раздела."""

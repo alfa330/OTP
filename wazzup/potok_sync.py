@@ -37,7 +37,7 @@ MEDIA_URI = 'https://store.wazzup24.com/{sha}/?filename={filename}'
 STATE = {
     'running': False, 'account': None, 'mode': None, 'since': None,
     'started_at': None, 'finished_at': None,
-    'chats_seen': 0, 'chats_done': 0, 'messages': 0, 'requests': 0,
+    'chats_seen': 0, 'chats_done': 0, 'skipped_known': 0, 'messages': 0, 'requests': 0,
     'error': None,
 }
 _RUN_LOCK = threading.Lock()
@@ -136,16 +136,39 @@ def build_client(account='potok'):
     )
 
 
+def _to_ms(value):
+    """TIMESTAMPTZ из базы → миллисекунды эпохи, как datetime у Wazzup."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return int(value.timestamp() * 1000)
+
+
 def sync_account(db, client, since_dt, account='potok'):
-    """Тянет из окна всё не старше since_dt и пишет в базу. Возвращает счётчики."""
+    """Тянет из окна всё не старше since_dt и пишет в базу. Возвращает счётчики.
+
+    Возобновляемо: чат, чьё последнее сообщение (lastMessage из списка Wazzup)
+    уже лежит у нас, пропускается без запроса сообщений. Сообщения чата пишутся
+    одним батчем, поэтому «есть последнее» = «чат загружен целиком в окне».
+    Рестарт процесса посреди многочасовой загрузки истории (любой деплой
+    убивает фоновый поток) — не потеря: следующий запуск за десятки секунд
+    пройдёт по загруженным чатам и продолжит с того, где остановился."""
     since_ms = int(since_dt.timestamp() * 1000)
-    stats = {'chats_seen': 0, 'chats_done': 0, 'messages': 0, 'skipped_chats': 0}
+    known = {cid: _to_ms(ts) for cid, ts in (db.wazzup_chat_last_messages(account) or {}).items()}
+    stats = {'chats_seen': 0, 'chats_done': 0, 'messages': 0, 'skipped_chats': 0,
+             'skipped_known': 0}
     for chat in client.iter_chats(since_ms):
         stats['chats_seen'] += 1
         STATE['chats_seen'] = stats['chats_seen']
         chat_id, chat_type, channel_id = client.chat_identity(chat)
         if not chat_id or not chat_type:
             stats['skipped_chats'] += 1
+            continue
+        stored_last = known.get(str(chat_id))
+        if stored_last is not None and stored_last >= client.chat_last_ms(chat):
+            stats['skipped_known'] += 1
+            STATE['skipped_known'] = stats['skipped_known']
             continue
         batch = []
         for m in client.iter_messages(chat_id, since_ms, chat_type=chat_type, channel_id=channel_id):
@@ -180,13 +203,14 @@ def run_sync(db, account='potok', days=None, overlap_hours=DEFAULT_OVERLAP_HOURS
             mode = 'incremental'
         STATE.update(running=True, account=account, mode=mode, since=since.isoformat(),
                      started_at=now.isoformat(), finished_at=None,
-                     chats_seen=0, chats_done=0, messages=0, requests=0, error=None)
+                     chats_seen=0, chats_done=0, skipped_known=0, messages=0, requests=0,
+                     error=None)
         client = client_factory(account)
         stats = sync_account(db, client, since, account=account)
         stats.update(mode=mode, since=since.isoformat(), requests=client.requests_made)
-        log.info('wazzup %s sync (%s, с %s): чатов %s, сообщений %s, запросов %s',
-                 account, mode, since.isoformat(), stats['chats_done'], stats['messages'],
-                 client.requests_made)
+        log.info('wazzup %s sync (%s, с %s): чатов %s (уже были %s), сообщений %s, запросов %s',
+                 account, mode, since.isoformat(), stats['chats_done'], stats.get('skipped_known', 0),
+                 stats['messages'], client.requests_made)
         return stats
     except Exception as error:
         STATE['error'] = f'{type(error).__name__}: {error}'

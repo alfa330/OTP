@@ -215,9 +215,10 @@ class PagingTests(unittest.TestCase):
 
 
 class _FakeDb:
-    def __init__(self, last=None):
+    def __init__(self, last=None, known=None):
         self.batches = []
         self.last = last
+        self.known = known or {}
 
     def store_wazzup_messages(self, messages, account="op"):
         self.batches.append((account, list(messages)))
@@ -225,6 +226,9 @@ class _FakeDb:
 
     def wazzup_last_message_at(self, account="op"):
         return self.last
+
+    def wazzup_chat_last_messages(self, account="op"):
+        return dict(self.known)
 
 
 class SyncTests(unittest.TestCase):
@@ -246,6 +250,27 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(stats["messages"], 1, "сообщение старше окна в базу не идёт")
         self.assertEqual(db.batches[0][0], "potok")
         self.assertEqual(db.batches[0][1][0]["messageId"], "new")
+
+    def test_known_chats_are_skipped_without_message_requests(self):
+        """Возобновление после рестарта: чат, чьё последнее сообщение уже у нас,
+        не запрашивается; чат с более свежим lastMessage — запрашивается."""
+        now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+        since = now - timedelta(days=45)
+        fresh = {"chatId": "new", "chatType": "whatsapp", "lastMessage": {"datetime": MS(now)},
+                 "chats": [{"channelId": "ch"}]}
+        stale = {"chatId": "old", "chatType": "whatsapp",
+                 "lastMessage": {"datetime": MS(now - timedelta(hours=1))}, "chats": [{"channelId": "ch"}]}
+        client = _FakePagingClient({0: [fresh, stale]}, {
+            ("new", 0): [{"id": "n1", "channelId": "ch", "datetime": MS(now), "incoming": True}],
+            ("old", 0): [{"id": "o1", "channelId": "ch", "datetime": MS(now - timedelta(hours=1)), "incoming": True}],
+        })
+        # «old» уже загружен ровно до его последнего сообщения, «new» — устарел на час
+        db = _FakeDb(known={"old": now - timedelta(hours=1), "new": now - timedelta(hours=1)})
+        stats = potok_sync.sync_account(db, client, since, account="potok")
+        self.assertEqual(stats["skipped_known"], 1)
+        self.assertEqual(stats["chats_done"], 1)
+        requested = [c[1]["chatId"] for c in client.calls if c[0] == "v2/messages"]
+        self.assertEqual(requested, ["new"], "сообщения запрошены только у изменившегося чата")
 
     def test_run_sync_incremental_uses_last_message_minus_overlap(self):
         last = datetime(2026, 9, 23, 10, 0, tzinfo=timezone.utc)
