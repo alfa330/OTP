@@ -471,6 +471,9 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     fleet_edm: [],
     driver_mailings: [],
     download_icore_phone: ['op', 'tez'],
+    // Раздел удалённого колл-центра (DIAL_LIST_DEPARTMENT_CODES выше). Ограничений
+    // по разделам у отдела нет, поэтому в DEPARTMENT_VIEW_ALLOWLIST его код не значится.
+    dial_list: ['remote_cc'],
     // Обучение
     trainings: ['szov', 'op'],
     voice_trainer: ['szov'],
@@ -52833,6 +52836,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             {renderDividerIfInner(
                                                 (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
+                                                canAccessDialListSection && deptAllowsInner('dial_list'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
                                                 canAccessPaymentsSection,

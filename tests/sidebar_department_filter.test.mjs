@@ -97,8 +97,14 @@ test('каждый пункт помечен ровно один раз на в�
 
 test('в карте только настоящие коды отделов', () => {
     // Отделы без ограничений в DEPARTMENT_VIEW_ALLOWLIST не значатся, поэтому
-    // СЗоВ добавлен отдельно — он и есть тот самый отдел по умолчанию.
-    const known = new Set(['szov', ...Object.keys(DEPARTMENT_VIEW_ALLOWLIST)]);
+    // СЗоВ добавлен отдельно — он и есть тот самый отдел по умолчанию. Так же
+    // без ограничений удалённый колл-центр: его код берём из списка раздела
+    // «Обзвон из телефона», чтобы опечатка в карте всё равно ловилась.
+    const known = new Set([
+        'szov',
+        ...Object.keys(DEPARTMENT_VIEW_ALLOWLIST),
+        ...evalDeclarations(['DIAL_LIST_DEPARTMENT_CODES'], 'DIAL_LIST_DEPARTMENT_CODES'),
+    ]);
     for (const [section, codes] of Object.entries(SECTION_DEPARTMENTS)) {
         // Пустой список допустим и значит «раздел не про отдел» (сейчас это
         // «Провайдер ЭДО» и «Рассылки» — они про водителей таксопарков):
