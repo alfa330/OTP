@@ -154,6 +154,24 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         settings = svc.enroll_department(department_id, changed_by=requester_id)
         return jsonify({"status": "success", "settings": settings}), 200
 
+    @bp.route('/api/dial_list/departments/<int:department_id>/unenroll', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def department_unenroll(department_id):
+        """Отключить отдел от раздела (пока по нему нет данных). Только админ."""
+        _requester_id, scope = _manager()
+        if scope is not None:
+            raise DialListError("Отключить отдел может администратор", 403)
+        return jsonify({"status": "success", **svc.unenroll_department(department_id)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/users', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def department_users(department_id):
+        """Сотрудники отдела с линией и персональным включением обзвона."""
+        _manager(department_id)
+        return jsonify({"status": "success", "users": svc.department_users(department_id)}), 200
+
     @bp.route('/api/dial_list/departments/<int:department_id>/settings', methods=['GET', 'PUT', 'OPTIONS'])
     @require_api_key
     @_guard

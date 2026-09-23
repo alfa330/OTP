@@ -279,17 +279,39 @@ class DialListService:
         return ep if isinstance(ep, dict) and str(ep.get("internalNumber") or "").strip() else None
 
     def department_users(self, department_id):
-        """Сотрудники отдела (все роли: тест ведёт и сам владелец) с их SIP-номером."""
+        """Сотрудники отдела (все роли: тест ведёт и сам владелец) с их SIP-номером и
+        персональным включением обзвона (None — как у отдела)."""
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT u.id, u.name, COALESCE(u.login, ''), COALESCE(u.role, ''),
-                       COALESCE(u.sip_number, ''), COALESCE(u.status, '')
+                       COALESCE(u.sip_number, ''), COALESCE(u.status, ''), ds.enabled
                 FROM users u
+                LEFT JOIN dial_list_user_settings ds ON ds.user_id = u.id
                 WHERE u.department_id = %s AND COALESCE(u.is_active, TRUE)
                 ORDER BY u.name
             """, (int(department_id),))
             return [{"id": r[0], "name": r[1] or "", "login": r[2], "role": r[3],
-                     "sip_number": (r[4] or "").strip(), "status": r[5]} for r in cur.fetchall()]
+                     "sip_number": (r[4] or "").strip(), "status": r[5],
+                     "dial_list_enabled": None if r[6] is None else bool(r[6])} for r in cur.fetchall()]
+
+    def unenroll_department(self, department_id):
+        """Отключить отдел от раздела. Только пока по нему нет выдач и базы: иначе
+        строка настроек спрятала бы данные, которые ещё могут понадобиться."""
+        department_id = int(department_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM dial_list_portions WHERE department_id = %s", (department_id,))
+            portions = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM dial_list_leads WHERE department_id = %s", (department_id,))
+            leads = int(cur.fetchone()[0])
+            if portions or leads:
+                raise DialListError(
+                    f"У отдела уже есть данные обзвона (выдач {portions}, водителей {leads}) — "
+                    "выключите режим вместо отключения", 409)
+            cur.execute("DELETE FROM dial_list_department_settings WHERE department_id = %s", (department_id,))
+        with self._clients_lock:
+            self._clients.pop(department_id, None)
+        log.info("dial_list: отдел %s отключён от раздела", department_id)
+        return {"department_id": department_id, "configured": False}
 
     def list_lines(self, department_id):
         """Линии компании Binotel + кто из iCORE на них сидит. Без логинов и паролей."""

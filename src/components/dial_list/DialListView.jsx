@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnSecondary, IosBadge, IosHint, IosSegmented } from '../ui/ios';
-import { DialListLeadsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
+import { DialListLeadsPanel, DialListOperatorsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
 import DialListLinesPanel from './DialListLinesPanel';
 
 /*
@@ -123,6 +123,31 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     }, [apiBaseUrl, authHeaders]);
 
     useEffect(() => { loadDepartments(); }, [loadDepartments]);
+
+    // Кандидаты приходят только админу: по ним же понимаем, что отключать отдел можно.
+    const candidatesAdmin = Array.isArray(candidates);
+
+    const unenroll = async () => {
+        if (!departmentId || enrolling) return;
+        const dep = (departments || []).find((d) => String(d.department_id) === String(departmentId));
+        if (!window.confirm(`Отключить отдел «${dep?.department_name || ''}» от обзвона? Операторы вернутся к обычному телефону после перезапуска.`)) return;
+        setEnrolling(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/unenroll`, {
+                method: 'POST', credentials: 'include', headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{}',
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            showToast?.('Отдел отключён от обзвона', 'success');
+            setDepartmentId('');
+            await loadDepartments();
+            setTab('operators');
+        } catch (e) {
+            showToast?.(e.message || 'Не удалось отключить отдел', 'error');
+        } finally {
+            setEnrolling(false);
+        }
+    };
 
     const enroll = async () => {
         if (!enrollPick || enrolling) return;
@@ -363,15 +388,33 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         dept.error
                             ? <div className={`${iosCard} p-4 text-[13px] text-rose-600`}>{dept.error}</div>
                             : (
-                                <DialListSettingsPanel
-                                    apiBaseUrl={apiBaseUrl}
-                                    authHeaders={authHeaders}
-                                    departmentId={selected.department_id}
-                                    settings={dept.settings}
-                                    onSaved={dept.reload}
-                                    canEdit={canEdit}
-                                    showToast={showToast}
-                                />
+                                <div className="space-y-4">
+                                    <DialListSettingsPanel
+                                        apiBaseUrl={apiBaseUrl}
+                                        authHeaders={authHeaders}
+                                        departmentId={selected.department_id}
+                                        settings={dept.settings}
+                                        onSaved={() => { dept.reload(); loadDepartments(selected.department_id); }}
+                                        canEdit={canEdit}
+                                        showToast={showToast}
+                                    />
+                                    <DialListOperatorsPanel
+                                        apiBaseUrl={apiBaseUrl}
+                                        authHeaders={authHeaders}
+                                        departmentId={selected.department_id}
+                                        departmentEnabled={enabled}
+                                        canEdit={canEdit}
+                                        showToast={showToast}
+                                    />
+                                    {canEdit && candidatesAdmin && (
+                                        <div className="flex justify-end">
+                                            <button type="button" onClick={unenroll} disabled={enrolling} className={`${iosBtnSecondary} text-rose-600`}>
+                                                <FaIcon className="fas fa-link-slash" />
+                                                Отключить отдел от обзвона
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
                             )
                     )}
                 </>

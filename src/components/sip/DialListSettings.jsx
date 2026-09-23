@@ -370,7 +370,103 @@ export const DialListDepartmentCard = ({ apiBaseUrl, authHeaders, departmentId, 
     );
 };
 
-/** Переключатель у сотрудника: как у отдела / включён / выключен. Сохраняется сразу. */
+/**
+ * Сотрудники отдела с персональным включением обзвора: как у отдела / включён /
+ * выключен. Сохраняется сразу. Живёт во вкладке «Настройки» раздела — в
+ * «Настройках SIP» этих переключателей нет (решение владельца 23.09.2026).
+ */
+export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentEnabled, canEdit = true, showToast }) => {
+    const [users, setUsers] = useState(null);
+    const [error, setError] = useState('');
+    const [busyId, setBusyId] = useState(null);
+
+    const toast = useCallback((msg, kind = 'success') => {
+        if (typeof showToast === 'function') showToast(msg, kind);
+    }, [showToast]);
+
+    const load = useCallback(async () => {
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/users`, { credentials: 'include', headers: authHeaders() });
+            if (!resp.ok) throw new Error(await readError(resp));
+            const data = await resp.json();
+            setUsers(Array.isArray(data.users) ? data.users : []);
+            setError('');
+        } catch (e) {
+            setError(e.message || 'Не удалось загрузить сотрудников');
+        }
+    }, [apiBaseUrl, authHeaders, departmentId]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const change = async (user, mode) => {
+        if (!canEdit || busyId) return;
+        setBusyId(user.id);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/operators/${user.id}/settings`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ enabled: modeTo(mode) }),
+            });
+            if (!resp.ok) throw new Error(await readError(resp));
+            const data = await resp.json();
+            setUsers((list) => (list || []).map((u) => (u.id === user.id ? { ...u, dial_list_enabled: data.enabled } : u)));
+            toast(data.effective
+                ? `${user.name}: обзвон включён, вкладка появится после перезапуска телефона`
+                : `${user.name}: обзвон выключен`, 'success');
+        } catch (e) {
+            toast(e.message || 'Не удалось сохранить', 'error');
+        } finally {
+            setBusyId(null);
+        }
+    };
+
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center justify-between gap-3 px-1">
+                <div className={iosGroupLabel}>Сотрудники</div>
+                <span className="text-[11.5px] text-slate-500">
+                    «Как у отдела» сейчас значит {departmentEnabled ? 'включён' : 'выключен'}
+                </span>
+            </div>
+            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                {error ? (
+                    <div className="px-4 py-4 text-[13px] text-rose-600">{error}</div>
+                ) : users === null ? (
+                    <div className="px-4 py-4 text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>
+                ) : users.length === 0 ? (
+                    <div className="px-4 py-5 text-center text-[13px] text-slate-500">В отделе пока нет сотрудников</div>
+                ) : users.map((u) => {
+                    const effective = u.dial_list_enabled == null ? departmentEnabled : u.dial_list_enabled;
+                    return (
+                        <div key={u.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                            <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                    <span className="truncate text-[13.5px] font-medium text-slate-800">{u.name || `#${u.id}`}</span>
+                                    {u.login && <span className="text-[11.5px] text-slate-400">@{u.login}</span>}
+                                    <IosBadge tone={effective ? 'green' : 'slate'}>{effective ? 'обзвон' : 'обычный телефон'}</IosBadge>
+                                </div>
+                                <div className="text-[11.5px] text-slate-500">
+                                    {u.sip_number ? `линия ${u.sip_number}` : 'линия не назначена — см. вкладку «Линии»'}
+                                </div>
+                            </div>
+                            <div className={canEdit && busyId !== u.id ? '' : 'pointer-events-none opacity-60'}>
+                                <IosSegmented
+                                    value={modeFrom(u.dial_list_enabled)}
+                                    options={OPERATOR_MODES}
+                                    onChange={(mode) => change(u, mode)}
+                                    ariaLabel={`Обзвон: ${u.name}`}
+                                />
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </section>
+    );
+};
+
+/** Переключатель у одного сотрудника: как у отдела / включён / выключен. Сохраняется сразу. */
 export const DialListOperatorToggle = ({ apiBaseUrl, authHeaders, operatorId, canEdit = true, showToast }) => {
     const [state, setState] = useState(null);
     const [saving, setSaving] = useState(false);
