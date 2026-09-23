@@ -34,6 +34,19 @@ class DispositionMappingTests(unittest.TestCase):
         self.assertEqual(dial_service.map_disposition(None), '')
         self.assertEqual(dial_service.map_disposition('ONLINE'), '')
         self.assertEqual(dial_service.map_disposition(' online '), '')
+        # CALLING — АТС ещё набирает водителя (живой тест 23.09.2026 закрыл попытку рано).
+        self.assertEqual(dial_service.map_disposition('CALLING'), '')
+        self.assertEqual(dial_service.map_disposition('RINGING'), '')
+
+    def test_late_final_outcome_overwrites_provisional_one(self):
+        # Попытку, закрытую по таймауту/промежуточному статусу, вебхук вправе дописать.
+        src = inspect.getsource(dial_service.DialListService._finish_attempt)
+        self.assertIn("state = 'finished' AND UPPER(disposition) IN %s", src)
+        self.assertIn('PROVISIONAL_DISPOSITIONS', src)
+        self.assertIn('UNKNOWN', dial_service.PROVISIONAL_DISPOSITIONS)
+        self.assertIn('CALLING', dial_service.PROVISIONAL_DISPOSITIONS)
+        webhook = inspect.getsource(dial_service.DialListService.handle_webhook)
+        self.assertNotIn('!= "finished" and map_disposition', webhook)
 
 
 class SettingsResolutionTests(unittest.TestCase):
@@ -316,6 +329,63 @@ class WiringTests(unittest.TestCase):
             src = inspect.getsource(module)
             self.assertNotIn('from tez', src)
             self.assertNotIn('import tez', src)
+
+
+class LeadsJournalTests(unittest.TestCase):
+    """Журнал водителей: руководитель видит историю, но не номер."""
+
+    def test_mask_keeps_only_tail(self):
+        self.assertEqual(dial_service.mask_phone('77011234567'), '+7 ••• ••• 45 67')
+        self.assertEqual(dial_service.mask_phone('380501234567'), '••• 45 67')
+        self.assertEqual(dial_service.mask_phone(''), '•••')
+        self.assertEqual(dial_service.mask_phone(None), '•••')
+
+    def test_journal_rows_expose_masked_phone_only(self):
+        src = inspect.getsource(dial_service.DialListService._journal_row)
+        self.assertIn('mask_phone(', src)
+        self.assertNotIn('"phone_norm"', src)
+        self.assertNotIn('"phone":', src)
+        card = inspect.getsource(dial_service.DialListService.lead_card)
+        self.assertNotIn('phone_norm', card.split('_journal_row', 1)[1])
+
+    def test_stage_filter_mirrors_pool_rules(self):
+        # «В очереди» в журнале и выдача порции считают одно и то же.
+        sql = dial_service.DialListService._JOURNAL_SQL
+        for fragment in ("a.state = 'issued'", "make_interval(hours => %(retry_hours)s)",
+                         "l.attempts_total >= %(max_attempts)s", "l.status = 'excluded'"):
+            self.assertIn(fragment, sql)
+        self.assertEqual(set(dial_service.LEAD_STAGES),
+                         {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded'})
+        svc = dial_service.DialListService(db=None)
+        with self.assertRaises(dial_service.DialListError):
+            svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24}
+            svc.leads_journal(1, stage='nope')
+
+    def test_manual_actions_are_logged_and_guarded(self):
+        ddl = ' '.join(dial_schema.DDL)
+        self.assertIn('dial_list_lead_events', ddl)
+        self.assertIn("kind IN ('requeue', 'exclude', 'restore', 'note')", ddl)
+        requeue = inspect.getsource(dial_service.DialListService.requeue_lead)
+        self.assertIn("state = 'issued'", requeue)          # строку у оператора не трогаем
+        self.assertIn('_log_lead_event', requeue)
+        exclude = inspect.getsource(dial_service.DialListService.exclude_lead)
+        self.assertIn("'leg_ringing', 'leg_answered'", exclude)  # во время звонка — нельзя
+        self.assertIn('_log_lead_event', exclude)
+
+    def test_recording_only_for_answered_calls(self):
+        src = inspect.getsource(dial_service.DialListService.attempt_recording)
+        self.assertIn('!= "answered"', src)
+        self.assertIn('get_call_record_url', src)
+
+    def test_journal_routes_are_manager_only(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        journal_part = src[src.index('# ── журнал водителей'):src.index("@bp.route('/api/dial_list/overview'")]
+        routes = [chunk for chunk in journal_part.split('@bp.route(')[1:]]
+        self.assertEqual(len(routes), 6)
+        for chunk in routes:
+            self.assertIn('_manager(', chunk, 'ручка журнала без проверки зоны руководителя')
+            self.assertIn('@require_api_key', chunk)
+        self.assertNotIn('/api/operator/', journal_part)
 
 
 if __name__ == '__main__':

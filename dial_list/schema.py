@@ -157,6 +157,23 @@ DDL = [
     "ALTER TABLE dial_list_department_settings DROP COLUMN IF EXISTS binotel_api_secret",
     "ALTER TABLE dial_list_department_settings DROP COLUMN IF EXISTS webhook_token",
     "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS binotel_company VARCHAR(32) NOT NULL DEFAULT 'remote_cc'",
+    # Журнал водителей (запрос владельца 23.09.2026): руководитель видит по каждому
+    # человеку ответственного, статус и историю звонков и может вручную вернуть
+    # его в список или исключить. Ручные действия — отдельной таблицей, чтобы в
+    # истории было видно, кто и когда вмешался; заметка руководителя — на лиде.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_lead_events (
+        id BIGSERIAL PRIMARY KEY,
+        lead_id UUID NOT NULL REFERENCES dial_list_leads(id) ON DELETE CASCADE,
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        kind VARCHAR(16) NOT NULL
+            CHECK (kind IN ('requeue', 'exclude', 'restore', 'note')),
+        note TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''",
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -175,6 +192,9 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_operator_state ON dial_list_attempts(operator_id, state)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_requested ON dial_list_attempts(requested_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_webhook_log_received ON dial_list_webhook_log(received_at)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_lead_events_lead ON dial_list_lead_events(lead_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_journal ON dial_list_leads(department_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_name ON dial_list_leads(department_id, lower(full_name))",
 ]
 
 

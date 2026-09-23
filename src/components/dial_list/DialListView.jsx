@@ -5,6 +5,7 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { DialListLeadsPanel, DialListOperatorsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
 import DialListLinesPanel from './DialListLinesPanel';
+import DialListJournal from './DialListJournal';
 
 /*
  * Раздел «Обзвон из телефона» — экран руководителя удалённого колл-центра.
@@ -23,6 +24,7 @@ const TABS = [
     { value: 'operators', label: 'Операторы', icon: <FaIcon className="fas fa-users" /> },
     { value: 'lines', label: 'Линии', icon: <FaIcon className="fas fa-phone" /> },
     { value: 'leads', label: 'База водителей', icon: <FaIcon className="fas fa-address-book" /> },
+    { value: 'journal', label: 'Журнал', icon: <FaIcon className="fas fa-clock-rotate-left" /> },
     { value: 'settings', label: 'Настройки', icon: <FaIcon className="fas fa-sliders" /> },
 ];
 
@@ -397,6 +399,18 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             authHeaders={authHeaders}
                             departmentId={selected.department_id}
                             summary={dept.summary}
+                            onChanged={dept.reload}
+                            canEdit={canEdit}
+                            showToast={showToast}
+                        />
+                    )}
+
+                    {tab === 'journal' && (
+                        <DialListJournal
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
+                            batches={dept.summary?.batches || []}
                             onChanged={dept.reload}
                             canEdit={canEdit}
                             showToast={showToast}

@@ -59,7 +59,12 @@ ACTIVE_ATTEMPT_WINDOW_MINUTES = 3
 ANSWERED_DISPOSITIONS = frozenset({"ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS"})
 BUSY_DISPOSITIONS = frozenset({"BUSY"})
 NO_ANSWER_DISPOSITIONS = frozenset({"NOANSWER", "NO ANSWER", "NO_ANSWER", "CANCEL", "CANCELLED", "CANCELED"})
-NON_FINAL_DISPOSITIONS = frozenset({"", "ONLINE"})
+# Промежуточные статусы call-details, пока звонок идёт: CALLING — АТС набирает
+# (живой тест 23.09.2026: опрос увидел CALLING на 10-й секунде и закрыл попытку
+# как «другое» с billsec 0, хотя разговор шёл 25 с), ONLINE — идёт разговор.
+NON_FINAL_DISPOSITIONS = frozenset({"", "ONLINE", "CALLING", "RINGING", "DIALING", "INPROGRESS", "IN-PROGRESS"})
+# Закрытые без настоящего исхода — их вебхук/опрос вправе дописать позже.
+PROVISIONAL_DISPOSITIONS = tuple(sorted(NON_FINAL_DISPOSITIONS | {"UNKNOWN"}))
 
 # Серверы Binotel из официального архива примеров (samples-api-call-settings.php):
 # вебхук без токена принимаем только с них.
@@ -162,6 +167,36 @@ def _iso(value):
 
 def _sid(value):
     return None if value is None else str(value)
+
+
+def mask_phone(phone_norm):
+    """Номер для журнала руководителя: только хвост. Полный номер из раздела не
+    выходит ни в одну ручку — ни оператору, ни руководителю: руководитель
+    удалённого КЦ тоже удалёнщик, а файл с номерами у загрузившего и так есть."""
+    digits = "".join(ch for ch in str(phone_norm or "") if ch.isdigit())
+    if len(digits) < 4:
+        return "•••"
+    tail = digits[-4:]
+    head = "+7 ••• ••• " if len(digits) == 11 and digits.startswith("7") else "••• "
+    return f"{head}{tail[:2]} {tail[2:]}"
+
+
+# Этапы лида в журнале (одно место правды — CASE в _JOURNAL_SQL, здесь подписи).
+LEAD_STAGES = {
+    "queue": "В очереди",
+    "waiting": "Ждёт повтора",
+    "issued": "У оператора",
+    "answered": "Дозвонились",
+    "exhausted": "Не дозвонились",
+    "excluded": "Исключён",
+}
+JOURNAL_SORTS = {
+    "activity": "activity_at DESC, created_at DESC",
+    "name": "lower(full_name) ASC, created_at ASC",
+    "created": "created_at DESC",
+    "attempts": "attempts_total DESC, activity_at DESC",
+}
+JOURNAL_MAX_LIMIT = 200
 
 
 class DialListService:
@@ -628,6 +663,400 @@ class DialListService:
             "batches": batches,
         }
 
+    # ------------------------------------------------------------ журнал водителей
+    # Один запрос и для списка, и для карточки: этап (stage) считается в SQL, чтобы
+    # фильтр «В очереди» показывал ровно то, что выдаст _POOL_SQL. Номер выбирается
+    # только ради маски — наружу уходит phone_masked.
+    _JOURNAL_SQL = """
+        WITH base AS (
+            SELECT l.id, l.department_id, l.full_name, l.phone_norm, l.status, l.attempts_total,
+                   l.last_attempt_at, l.answered_at, l.created_at, l.updated_at, l.upload_count,
+                   COALESCE(l.note, '') AS note,
+                   fb.file_name AS first_file, fb.created_at AS first_uploaded_at,
+                   lb.file_name AS last_file, lb.created_at AS last_uploaded_at,
+                   oa.operator_id AS open_operator_id, ou.name AS open_operator_name,
+                   la.operator_id AS last_operator_id, lu.name AS last_operator_name,
+                   la.result AS last_result, la.done_at AS last_done_at,
+                   lt.requested_at AS last_call_at, lt.state AS last_call_state,
+                   lt.disposition AS last_disposition, lt.billsec AS last_billsec,
+                   lt.api_error AS last_api_error, tu.name AS last_call_operator_name,
+                   GREATEST(l.created_at, COALESCE(lt.requested_at, l.created_at),
+                            COALESCE(lb.created_at, l.created_at)) AS activity_at,
+                   CASE
+                       WHEN l.status = 'excluded' THEN 'excluded'
+                       WHEN oa.operator_id IS NOT NULL THEN 'issued'
+                       WHEN l.status = 'done' AND l.answered_at IS NOT NULL THEN 'answered'
+                       WHEN l.status = 'done' THEN 'exhausted'
+                       WHEN l.attempts_total >= %(max_attempts)s THEN 'exhausted'
+                       WHEN l.last_attempt_at IS NOT NULL
+                            AND l.last_attempt_at >= CURRENT_TIMESTAMP - make_interval(hours => %(retry_hours)s)
+                           THEN 'waiting'
+                       ELSE 'queue'
+                   END AS stage,
+                   l.last_attempt_at + make_interval(hours => %(retry_hours)s) AS next_retry_at
+            FROM dial_list_leads l
+            LEFT JOIN dial_list_lead_batches fb ON fb.id = l.first_batch_id
+            LEFT JOIN dial_list_lead_batches lb ON lb.id = l.last_batch_id
+            LEFT JOIN LATERAL (
+                SELECT a.operator_id FROM dial_list_assignments a
+                WHERE a.lead_id = l.id AND a.state = 'issued'
+                ORDER BY a.created_at DESC LIMIT 1
+            ) oa ON TRUE
+            LEFT JOIN users ou ON ou.id = oa.operator_id
+            LEFT JOIN LATERAL (
+                SELECT a.operator_id, a.result, a.done_at FROM dial_list_assignments a
+                WHERE a.lead_id = l.id
+                ORDER BY a.created_at DESC LIMIT 1
+            ) la ON TRUE
+            LEFT JOIN users lu ON lu.id = la.operator_id
+            LEFT JOIN LATERAL (
+                SELECT t.requested_at, t.state, t.disposition, t.billsec, t.api_error, t.operator_id
+                FROM dial_list_attempts t
+                JOIN dial_list_assignments a2 ON a2.id = t.assignment_id
+                WHERE a2.lead_id = l.id
+                ORDER BY t.requested_at DESC LIMIT 1
+            ) lt ON TRUE
+            LEFT JOIN users tu ON tu.id = lt.operator_id
+            WHERE {scope}
+        )
+        SELECT id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
+               answered_at, created_at, updated_at, upload_count, note,
+               first_file, first_uploaded_at, last_file, last_uploaded_at,
+               open_operator_id, open_operator_name, last_operator_id, last_operator_name,
+               last_result, last_done_at, last_call_at, last_call_state, last_disposition,
+               last_billsec, last_api_error, last_call_operator_name, activity_at, stage, next_retry_at,
+               COUNT(*) OVER () AS total
+        FROM base
+        WHERE {filters}
+        ORDER BY {order}
+        LIMIT %(limit)s OFFSET %(offset)s
+    """
+
+    def _journal_row(self, r, max_attempts):
+        stage = r[29]
+        responsible_id = r[16] if r[16] is not None else r[18]
+        responsible_name = r[17] if r[16] is not None else r[19]
+        last_call = None
+        if r[22] is not None:
+            state = r[23] or ""
+            disposition = r[24] or ""
+            result = map_disposition(disposition) if state == "finished" else ("failed" if state == "failed" else "")
+            if state == "finished" and not result:
+                result = "other"
+            last_call = {
+                "at": _iso(r[22]), "state": state, "disposition": disposition, "result": result,
+                "billsec": int(r[25] or 0), "api_error": (r[26] or "")[:200], "operator_name": r[27] or "",
+            }
+        return {
+            "id": _sid(r[0]), "department_id": int(r[1]), "full_name": r[2] or "",
+            "phone_masked": mask_phone(r[3]), "status": r[4], "stage": stage,
+            "stage_label": LEAD_STAGES.get(stage, stage), "attempts_total": int(r[5] or 0),
+            "max_attempts": int(max_attempts), "last_attempt_at": _iso(r[6]), "answered_at": _iso(r[7]),
+            "created_at": _iso(r[8]), "updated_at": _iso(r[9]), "upload_count": int(r[10] or 1),
+            "note": r[11] or "",
+            "batch": {"file_name": r[12] or "", "uploaded_at": _iso(r[13])},
+            "last_batch": {"file_name": r[14] or "", "uploaded_at": _iso(r[15])},
+            "responsible": ({"id": int(responsible_id), "name": responsible_name or ""}
+                            if responsible_id is not None else None),
+            "responsible_is_current": r[16] is not None,
+            "last_result": r[20] or "",
+            "last_call": last_call,
+            "activity_at": _iso(r[28]),
+            "next_retry_at": _iso(r[30]) if stage == "waiting" else None,
+        }
+
+    def leads_journal(self, department_id, q="", stage="", operator_id=None, batch_id=None,
+                      date_from=None, date_to=None, sort="activity", limit=50, offset=0):
+        """Журнал водителей отдела: страница строк + всего. Все фильтры необязательны."""
+        department_id = int(department_id)
+        settings = self.department_settings(department_id)
+        params = {
+            "max_attempts": settings["max_attempts"], "retry_hours": settings["retry_after_hours"],
+            "department_id": department_id,
+            "limit": max(1, min(_to_int(limit, 50), JOURNAL_MAX_LIMIT)), "offset": max(0, _to_int(offset, 0)),
+        }
+        filters = ["TRUE"]
+        q = str(q or "").strip()
+        if q:
+            digits = "".join(ch for ch in q if ch.isdigit())
+            params["q_name"] = f"%{q}%"
+            if len(digits) >= 3 and len(digits) >= len(q) - 3:
+                # Поиск по хвосту номера (маска показывает 4 цифры) — сам номер всё равно не отдаём.
+                params["q_tail"] = f"%{digits}"
+                filters.append("(full_name ILIKE %(q_name)s OR phone_norm LIKE %(q_tail)s)")
+            else:
+                filters.append("full_name ILIKE %(q_name)s")
+        stage = str(stage or "").strip()
+        if stage:
+            if stage not in LEAD_STAGES:
+                raise DialListError("stage: неизвестный этап")
+            params["stage"] = stage
+            filters.append("stage = %(stage)s")
+        if operator_id:
+            params["operator_id"] = _to_int(operator_id, 0)
+            filters.append("""EXISTS (SELECT 1 FROM dial_list_assignments a
+                                      WHERE a.lead_id = base.id AND a.operator_id = %(operator_id)s)""")
+        if batch_id:
+            params["batch_id"] = str(batch_id)
+            filters.append("""EXISTS (SELECT 1 FROM dial_list_leads l2
+                                      WHERE l2.id = base.id
+                                        AND (l2.first_batch_id = %(batch_id)s::uuid OR l2.last_batch_id = %(batch_id)s::uuid))""")
+        if date_from:
+            params["date_from"] = str(date_from)
+            filters.append("(activity_at AT TIME ZONE 'Asia/Almaty')::date >= %(date_from)s::date")
+        if date_to:
+            params["date_to"] = str(date_to)
+            filters.append("(activity_at AT TIME ZONE 'Asia/Almaty')::date <= %(date_to)s::date")
+        order = JOURNAL_SORTS.get(str(sort or "activity"), JOURNAL_SORTS["activity"])
+        sql = self._JOURNAL_SQL.format(scope="l.department_id = %(department_id)s",
+                                       filters=" AND ".join(filters), order=order)
+        with self.db._get_cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            total = int(rows[0][31]) if rows else 0
+            if not rows and params["offset"] == 0:
+                total = 0
+            items = [self._journal_row(r, settings["max_attempts"]) for r in rows]
+            cur.execute("""
+                SELECT stage, COUNT(*) FROM (
+                    SELECT CASE
+                        WHEN l.status = 'excluded' THEN 'excluded'
+                        WHEN EXISTS (SELECT 1 FROM dial_list_assignments a
+                                     WHERE a.lead_id = l.id AND a.state = 'issued') THEN 'issued'
+                        WHEN l.status = 'done' AND l.answered_at IS NOT NULL THEN 'answered'
+                        WHEN l.status = 'done' THEN 'exhausted'
+                        WHEN l.attempts_total >= %(max_attempts)s THEN 'exhausted'
+                        WHEN l.last_attempt_at IS NOT NULL
+                             AND l.last_attempt_at >= CURRENT_TIMESTAMP - make_interval(hours => %(retry_hours)s)
+                            THEN 'waiting'
+                        ELSE 'queue' END AS stage
+                    FROM dial_list_leads l WHERE l.department_id = %(department_id)s
+                ) s GROUP BY stage
+            """, params)
+            by_stage = {k: 0 for k in LEAD_STAGES}
+            for row in cur.fetchall():
+                by_stage[row[0]] = int(row[1])
+        return {
+            "department_id": department_id, "items": items, "total": total,
+            "limit": params["limit"], "offset": params["offset"],
+            "by_stage": by_stage, "stages": LEAD_STAGES, "sort": sort if sort in JOURNAL_SORTS else "activity",
+        }
+
+    def lead_department(self, lead_id):
+        """Отдел лида (для проверки зоны руководителя) или 404."""
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT department_id FROM dial_list_leads WHERE id = %s", (str(lead_id),))
+            row = cur.fetchone()
+        if not row:
+            raise DialListError("Водитель не найден в журнале", 404)
+        return int(row[0])
+
+    def attempt_department(self, attempt_id):
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT l.department_id FROM dial_list_attempts t
+                JOIN dial_list_assignments a ON a.id = t.assignment_id
+                JOIN dial_list_leads l ON l.id = a.lead_id
+                WHERE t.id = %s
+            """, (str(attempt_id),))
+            row = cur.fetchone()
+        if not row:
+            raise DialListError("Попытка не найдена", 404)
+        return int(row[0])
+
+    def lead_card(self, lead_id):
+        """Карточка водителя: строка журнала + все попытки, ручные действия, загрузки."""
+        lead_id = str(lead_id)
+        department_id = self.lead_department(lead_id)
+        settings = self.department_settings(department_id)
+        params = {"max_attempts": settings["max_attempts"], "retry_hours": settings["retry_after_hours"],
+                  "lead_id": lead_id, "limit": 1, "offset": 0}
+        sql = self._JOURNAL_SQL.format(scope="l.id = %(lead_id)s", filters="TRUE", order="created_at")
+        with self.db._get_cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Водитель не найден в журнале", 404)
+            lead = self._journal_row(row, settings["max_attempts"])
+            cur.execute("""
+                SELECT t.id, t.requested_at, t.operator_id, COALESCE(u.name, ''), t.internal_number, t.state,
+                       t.disposition, t.billsec, t.waitsec, t.api_error, t.final_source, t.finished_at,
+                       t.phone_event_at, t.phone_ended_at,
+                       (t.general_call_id IS NOT NULL AND t.general_call_id <> ''),
+                       a.id, a.result, a.state, a.created_at
+                FROM dial_list_attempts t
+                JOIN dial_list_assignments a ON a.id = t.assignment_id
+                LEFT JOIN users u ON u.id = t.operator_id
+                WHERE a.lead_id = %s
+                ORDER BY t.requested_at DESC
+            """, (lead_id,))
+            attempts = []
+            for r in cur.fetchall():
+                state = r[5] or ""
+                disposition = r[6] or ""
+                result = map_disposition(disposition) if state == "finished" else ("failed" if state == "failed" else "")
+                if state == "finished" and not result:
+                    result = "other"
+                attempts.append({
+                    "id": _sid(r[0]), "requested_at": _iso(r[1]),
+                    "operator": {"id": r[2], "name": r[3]}, "internal_number": r[4] or "",
+                    "state": state, "disposition": disposition, "result": result,
+                    "billsec": int(r[7] or 0), "waitsec": int(r[8] or 0), "api_error": r[9] or "",
+                    "final_source": r[10] or "", "finished_at": _iso(r[11]),
+                    "phone_event_at": _iso(r[12]), "phone_ended_at": _iso(r[13]),
+                    # Запись есть только у состоявшегося разговора; ссылку даём по запросу
+                    # (attempt_recording) — она подписанная и живёт около часа.
+                    "recording_available": bool(r[14]) and state == "finished" and result == "answered"
+                                           and int(r[7] or 0) > 0,
+                    "assignment": {"id": _sid(r[15]), "result": r[16] or "", "state": r[17] or "",
+                                   "issued_at": _iso(r[18])},
+                })
+            cur.execute("""
+                SELECT e.id, e.kind, e.note, e.created_at, e.actor_id, COALESCE(u.name, '')
+                FROM dial_list_lead_events e
+                LEFT JOIN users u ON u.id = e.actor_id
+                WHERE e.lead_id = %s ORDER BY e.created_at DESC
+            """, (lead_id,))
+            events = [{"id": int(r[0]), "kind": r[1], "note": r[2] or "", "at": _iso(r[3]),
+                       "actor": {"id": r[4], "name": r[5]}} for r in cur.fetchall()]
+            cur.execute("""
+                SELECT a.id, a.created_at, a.state, a.result, a.done_at, a.operator_id, COALESCE(u.name, ''),
+                       a.attempts
+                FROM dial_list_assignments a
+                LEFT JOIN users u ON u.id = a.operator_id
+                WHERE a.lead_id = %s ORDER BY a.created_at DESC
+            """, (lead_id,))
+            assignments = [{"id": _sid(r[0]), "issued_at": _iso(r[1]), "state": r[2], "result": r[3] or "",
+                            "done_at": _iso(r[4]), "operator": {"id": r[5], "name": r[6]},
+                            "attempts": int(r[7] or 0)} for r in cur.fetchall()]
+            cur.execute("""
+                SELECT b.id, b.file_name, b.created_at, COALESCE(u.name, '')
+                FROM dial_list_lead_batches b
+                LEFT JOIN users u ON u.id = b.uploaded_by
+                WHERE b.id IN (SELECT first_batch_id FROM dial_list_leads WHERE id = %s
+                               UNION SELECT last_batch_id FROM dial_list_leads WHERE id = %s)
+                ORDER BY b.created_at
+            """, (lead_id, lead_id))
+            batches = [{"id": _sid(r[0]), "file_name": r[1] or "", "uploaded_at": _iso(r[2]),
+                        "uploaded_by": r[3]} for r in cur.fetchall()]
+        lead.update({"attempts": attempts, "events": events, "assignments": assignments, "batches": batches,
+                     "retry_after_hours": settings["retry_after_hours"]})
+        return lead
+
+    def _log_lead_event(self, cur, lead_id, department_id, actor_id, kind, note=""):
+        cur.execute("""
+            INSERT INTO dial_list_lead_events (lead_id, department_id, actor_id, kind, note)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (str(lead_id), int(department_id), actor_id, kind, str(note or "")[:500]))
+
+    def requeue_lead(self, lead_id, actor_id, note=""):
+        """Руководитель возвращает водителя в список: попытки обнуляются, лид снова в
+        пуле с ближайшей порцией. Строку, которая сейчас у оператора, не трогаем."""
+        lead_id = str(lead_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT department_id, status FROM dial_list_leads WHERE id = %s FOR UPDATE", (lead_id,))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Водитель не найден в журнале", 404)
+            cur.execute("SELECT 1 FROM dial_list_assignments WHERE lead_id = %s AND state = 'issued'", (lead_id,))
+            if cur.fetchone():
+                raise DialListError("Строка сейчас у оператора — она и так в списке", 409)
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET status = 'new', attempts_total = 0, last_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (lead_id,))
+            self._log_lead_event(cur, lead_id, row[0], actor_id,
+                                 "restore" if row[1] == "excluded" else "requeue", note)
+        return self.lead_card(lead_id)
+
+    def exclude_lead(self, lead_id, actor_id, note=""):
+        """Исключить водителя из обзвона. Если строка у оператора — снимаем её с его
+        списка (закрываем выдачу без результата); во время идущего звонка — нельзя."""
+        lead_id = str(lead_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT department_id, status FROM dial_list_leads WHERE id = %s FOR UPDATE", (lead_id,))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Водитель не найден в журнале", 404)
+            if row[1] == "excluded":
+                raise DialListError("Водитель уже исключён", 409)
+            cur.execute("""
+                SELECT a.id FROM dial_list_assignments a WHERE a.lead_id = %s AND a.state = 'issued' FOR UPDATE
+            """, (lead_id,))
+            open_assignment = cur.fetchone()
+            if open_assignment:
+                cur.execute("""
+                    SELECT 1 FROM dial_list_attempts
+                    WHERE assignment_id = %s AND state IN ('requested', 'leg_ringing', 'leg_answered', 'ended')
+                """, (str(open_assignment[0]),))
+                if cur.fetchone():
+                    raise DialListError("Оператор сейчас звонит этому водителю — дождитесь окончания", 409)
+                cur.execute("""
+                    UPDATE dial_list_assignments
+                    SET state = 'done', result = 'other', done_at = CURRENT_TIMESTAMP
+                    WHERE id = %s RETURNING portion_id
+                """, (str(open_assignment[0]),))
+                portion = cur.fetchone()
+                if portion:
+                    cur.execute("""
+                        UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND closed_at IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM dial_list_assignments
+                                          WHERE portion_id = %s AND state = 'issued')
+                    """, (str(portion[0]), str(portion[0])))
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET status = 'excluded', updated_at = CURRENT_TIMESTAMP,
+                    note = CASE WHEN %s <> '' THEN %s ELSE note END
+                WHERE id = %s
+            """, (str(note or "")[:500], str(note or "")[:500], lead_id))
+            self._log_lead_event(cur, lead_id, row[0], actor_id, "exclude", note)
+        return self.lead_card(lead_id)
+
+    def set_lead_note(self, lead_id, actor_id, note):
+        lead_id = str(lead_id)
+        note = str(note or "").strip()[:500]
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT department_id FROM dial_list_leads WHERE id = %s FOR UPDATE", (lead_id,))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Водитель не найден в журнале", 404)
+            cur.execute("UPDATE dial_list_leads SET note = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (note, lead_id))
+            self._log_lead_event(cur, lead_id, row[0], actor_id, "note", note)
+        return self.lead_card(lead_id)
+
+    def attempt_recording(self, attempt_id):
+        """Ссылка на запись разговора у Binotel (подписанная, живёт ~1 час)."""
+        attempt_id = str(attempt_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT t.general_call_id, t.state, t.disposition, t.billsec, l.department_id
+                FROM dial_list_attempts t
+                JOIN dial_list_assignments a ON a.id = t.assignment_id
+                JOIN dial_list_leads l ON l.id = a.lead_id
+                WHERE t.id = %s
+            """, (attempt_id,))
+            row = cur.fetchone()
+        if not row:
+            raise DialListError("Попытка не найдена", 404)
+        general_call_id, state, disposition, billsec, department_id = row
+        if not general_call_id:
+            raise DialListError("У этой попытки не было звонка через АТС", 404)
+        if state != "finished" or map_disposition(disposition) != "answered" or int(billsec or 0) <= 0:
+            raise DialListError("Разговора не было — записи нет", 404)
+        try:
+            url = self._client(int(department_id)).get_call_record_url(general_call_id)
+        except DialListError:
+            raise
+        except Exception as exc:
+            log.warning("dial_list: запись %s недоступна: %s", general_call_id, exc)
+            raise DialListError("АТС не отдала запись. Попробуйте позже", 502)
+        if not url:
+            raise DialListError("Запись ещё не готова у АТС. Попробуйте через минуту", 404)
+        return {"attempt_id": attempt_id, "url": url, "billsec": int(billsec or 0)}
+
     # Пул: лиды отдела, которые можно выдать сейчас. Один и тот же текст для
     # выдачи (с блокировкой) и для подсчёта (без неё), чтобы цифра «доступно»
     # совпадала с тем, что реально выдаётся.
@@ -992,7 +1421,29 @@ class DialListService:
             """, (disposition, int(billsec or 0), int(waitsec or 0), source, str(attempt_id)))
             row = cur.fetchone()
             if not row:
-                return False
+                # Уже закрыта. Если закрыли без настоящего исхода (UNKNOWN по таймауту
+                # или промежуточный статус), а теперь пришёл финальный — дописываем
+                # его, чтобы журнал и запись разговора были правдой. Строку выдачи и
+                # счётчик попыток второй раз не трогаем — только факт дозвона у лида.
+                cur.execute("""
+                    UPDATE dial_list_attempts
+                    SET disposition = %s, billsec = %s, waitsec = %s, final_source = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND state = 'finished' AND UPPER(disposition) IN %s
+                    RETURNING assignment_id
+                """, (disposition, int(billsec or 0), int(waitsec or 0), source, str(attempt_id),
+                      PROVISIONAL_DISPOSITIONS))
+                late = cur.fetchone()
+                if late and result == "answered":
+                    cur.execute("""
+                        UPDATE dial_list_leads l
+                        SET answered_at = COALESCE(l.answered_at, CURRENT_TIMESTAMP),
+                            status = CASE WHEN l.status IN ('new', 'in_progress') THEN 'done' ELSE l.status END,
+                            updated_at = CURRENT_TIMESTAMP
+                        FROM dial_list_assignments a
+                        WHERE a.id = %s AND l.id = a.lead_id
+                    """, (str(late[0]),))
+                return bool(late)
             assignment_id = str(row[0])
             cur.execute("SELECT lead_id, state FROM dial_list_assignments WHERE id = %s FOR UPDATE", (assignment_id,))
             a = cur.fetchone()
@@ -1090,7 +1541,9 @@ class DialListService:
                 row = cur.fetchone()
             if row:
                 matched = True
-                if row[1] != "finished" and map_disposition(disposition):
+                # Уже закрытую попытку _finish_attempt дописывает только если она
+                # закрылась без настоящего исхода (таймаут/промежуточный статус).
+                if map_disposition(disposition):
                     self._finish_attempt(str(row[0]), disposition, billsec, waitsec, "webhook")
         payload = json.dumps(data, ensure_ascii=False)
         if len(payload) > WEBHOOK_PAYLOAD_MAX_CHARS:

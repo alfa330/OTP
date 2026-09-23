@@ -19,6 +19,14 @@
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО+телефон
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле
+    GET     /api/dial_list/departments/<id>/leads            журнал водителей (фильтры:
+                                                             q, stage, operator_id, batch_id,
+                                                             date_from, date_to, sort, limit, offset)
+    GET     /api/dial_list/leads/<lead_id>                   карточка: попытки, действия, загрузки
+    POST    /api/dial_list/leads/<lead_id>/requeue           вернуть в список  {note}
+    POST    /api/dial_list/leads/<lead_id>/exclude           исключить         {note}
+    PUT     /api/dial_list/leads/<lead_id>/note              заметка руководителя
+    GET     /api/dial_list/attempts/<attempt_id>/recording   ссылка на запись разговора (Binotel)
     GET     /api/dial_list/overview?date=YYYY-MM-DD[&department_id=]
 
 Binotel (без авторизации, токен в адресе либо IP сервера Binotel):
@@ -29,6 +37,7 @@ Binotel (без авторизации, токен в адресе либо IP �
 """
 import logging
 import os
+import uuid
 from datetime import date, datetime
 
 from flask import Blueprint, jsonify, request
@@ -281,6 +290,83 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def leads_summary(department_id):
         _manager(department_id)
         return jsonify({"status": "success", **svc.leads_summary(department_id)}), 200
+
+    # ── журнал водителей ────────────────────────────────────────────────────
+    # Номер водителя и здесь не отдаётся (только маска): руководитель удалённого
+    # КЦ — тоже удалёнщик, а файл с номерами у загрузившего и так есть.
+    def _uuid_or_404(value, what):
+        try:
+            return str(uuid.UUID(str(value)))
+        except (ValueError, AttributeError, TypeError):
+            raise DialListError(f"{what} не найден", 404)
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/leads', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def leads_journal(department_id):
+        _manager(department_id)
+        args = request.args
+        for key in ('date_from', 'date_to'):
+            if args.get(key):
+                try:
+                    datetime.strptime(args.get(key), '%Y-%m-%d')
+                except ValueError:
+                    raise DialListError(f"{key}: ожидается YYYY-MM-DD")
+        batch_id = args.get('batch_id') or None
+        if batch_id:
+            batch_id = _uuid_or_404(batch_id, "Файл загрузки")
+        return jsonify({"status": "success", **svc.leads_journal(
+            department_id, q=args.get('q', ''), stage=args.get('stage', ''),
+            operator_id=args.get('operator_id') or None, batch_id=batch_id,
+            date_from=args.get('date_from') or None, date_to=args.get('date_to') or None,
+            sort=args.get('sort', 'activity'), limit=args.get('limit', 50), offset=args.get('offset', 0),
+        )}), 200
+
+    @bp.route('/api/dial_list/leads/<lead_id>', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lead_card(lead_id):
+        lead_id = _uuid_or_404(lead_id, "Водитель")
+        _manager(svc.lead_department(lead_id))
+        return jsonify({"status": "success", "lead": svc.lead_card(lead_id)}), 200
+
+    @bp.route('/api/dial_list/leads/<lead_id>/requeue', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lead_requeue(lead_id):
+        lead_id = _uuid_or_404(lead_id, "Водитель")
+        requester_id, _scope = _manager(svc.lead_department(lead_id))
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success",
+                        "lead": svc.requeue_lead(lead_id, requester_id, note=payload.get('note', ''))}), 200
+
+    @bp.route('/api/dial_list/leads/<lead_id>/exclude', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lead_exclude(lead_id):
+        lead_id = _uuid_or_404(lead_id, "Водитель")
+        requester_id, _scope = _manager(svc.lead_department(lead_id))
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success",
+                        "lead": svc.exclude_lead(lead_id, requester_id, note=payload.get('note', ''))}), 200
+
+    @bp.route('/api/dial_list/leads/<lead_id>/note', methods=['PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lead_note(lead_id):
+        lead_id = _uuid_or_404(lead_id, "Водитель")
+        requester_id, _scope = _manager(svc.lead_department(lead_id))
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success",
+                        "lead": svc.set_lead_note(lead_id, requester_id, payload.get('note', ''))}), 200
+
+    @bp.route('/api/dial_list/attempts/<attempt_id>/recording', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def attempt_recording(attempt_id):
+        attempt_id = _uuid_or_404(attempt_id, "Попытка")
+        _manager(svc.attempt_department(attempt_id))
+        return jsonify({"status": "success", **svc.attempt_recording(attempt_id)}), 200
 
     @bp.route('/api/dial_list/overview', methods=['GET', 'OPTIONS'])
     @require_api_key
