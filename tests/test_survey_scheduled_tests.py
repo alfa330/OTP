@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = ROOT / "database.py"
 APP_PATH = ROOT / "bot_schedule2.py"
 SURVEYS_VIEW_PATH = ROOT / "src" / "components" / "surveys" / "SurveysView.jsx"
+RESULTS_KIT_PATH = ROOT / "src" / "components" / "surveys" / "resultsKit.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
 
 
@@ -448,8 +449,11 @@ class SurveyTestFrontendTests(unittest.TestCase):
         self.assertIn("question.type === 'multiple' && (", toggle_block)
 
     def test_partial_answer_has_its_own_status(self):
-        self.assertIn("label: 'Частично'", self.src)
-        self.assertIn("isTestAnswerPartiallyCorrect", self.src)
+        # Правило разбора живёт в общем модуле результатов (resultsKit.jsx):
+        # его же показывают результаты новостей.
+        kit = _read(RESULTS_KIT_PATH)
+        self.assertIn("label: 'Частично'", kit)
+        self.assertIn("isTestAnswerPartiallyCorrect", kit)
 
     def test_group_assignment_chips(self):
         self.assertIn("groupOptions", self.src)
@@ -512,8 +516,9 @@ class SurveyTestFrontendTests(unittest.TestCase):
         глазами приходится сопоставлять два списка, и не видно, чего человек
         НЕ выбрал, хотя следовало.
         """
-        review_start = self.src.index("const ReviewOptionRow = (")
-        review = self.src[review_start:self.src.index("const AttemptReview = (")]
+        kit = _read(RESULTS_KIT_PATH)
+        review_start = kit.index("export const ReviewOptionRow = (")
+        review = kit[review_start:kit.index("export const AttemptReview = (")]
         for mark in ("rightChoice", "wrongChoice", "missedRight"):
             self.assertIn(mark, review)
         self.assertIn("Правильный", review)
@@ -521,7 +526,10 @@ class SurveyTestFrontendTests(unittest.TestCase):
         # Оператору внутри открытого окна теста правильные варианты не
         # приходят — разбор не должен превращаться в подсказку.
         self.assertIn("revealCorrect", review)
-        self.assertIn("const revealCorrect = isTest && expectedOptions.length > 0;", self.src)
+        self.assertIn("const revealCorrect = isTest && expectedOptions.length > 0;", kit)
+        # «Опросы» берут разбор из общего модуля, а не держат свою копию.
+        self.assertIn("} from './resultsKit';", self.src)
+        self.assertNotIn("const AttemptReview = (", self.src)
 
     def test_review_is_shared_by_manager_and_operator(self):
         """Один разбор на оба места: иначе они разъедутся правилами показа."""

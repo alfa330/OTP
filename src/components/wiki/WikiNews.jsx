@@ -8,13 +8,21 @@ import Highlight from '@tiptap/extension-highlight';
 import {
     AlertTriangle, Bold, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Image as ImageIcon,
     Italic, Link2, List, ListChecks, ListOrdered, Loader2, Megaphone, PlayCircle, Plus,
-    Sparkles, Underline as UnderlineIcon, Users, X,
+    Search, Sparkles, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
     IosBadge, IosHint, IosMenu, IosModal, IosSegmented, IosToggle,
 } from '../ui/ios';
 import { publishedLabel, roleTitle } from '../news/newsShared';
+/* Результаты новости собраны из тех же кирпичей, что результаты опросов
+   (просьба владельца 23.09.2026): плитки, распределение ответов и разбор
+   попытки — один код на оба раздела. */
+import {
+    AttemptReview, Badge, OptionStatRow, StatTiles, scoreToneClass,
+} from '../surveys/resultsKit';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import NewsFeed from '../news/NewsFeed';
 import NewsGallery from '../news/NewsGallery';
 import NewsQuizEditor from '../news/NewsQuizEditor';
@@ -121,12 +129,12 @@ const kindRule = (kind) => KIND_RULES[kind] || KIND_RULES.important;
    файл и экран обязаны называть одно состояние одним словом. */
 const STATUS_LABELS = {
     passed: 'Успешно пройден',
-    done: 'Ознакомился',
+    done: 'Ознакомление подтверждено',
     retrying: 'Проходит повторно',
     failed: 'Тест не пройден',
     pending: 'Ожидает ознакомления',
-    absent: 'Не выходил на смену после публикации',
-    not_seen: 'Не открывал объявление',
+    absent: 'Нет смен после публикации',
+    not_seen: 'Объявление не открыто',
 };
 
 /* Часы и минуты человеческими словами — для расчёта рассылки и подписи строки:
@@ -1745,46 +1753,119 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
 // Журнал прочтений
 // ─────────────────────────────────────────────────────────────────────────────
 
+/* ─── РЕЗУЛЬТАТЫ НОВОСТИ ────────────────────────────────────────────────────
+ *
+ * Просьба владельца (23.09.2026): «о результатах при наличии теста и прочтении
+ * сделать примерно как в разделе "Опросы", переиспользовать». Поэтому экран
+ * повторяет результаты опроса и собран из ТЕХ ЖЕ кирпичей
+ * (surveys/resultsKit.jsx): плитки итогов, карточки сотрудников, разбор
+ * попытки со всеми вариантами и распределение ответов по вопросу. Человек,
+ * который смотрит результаты опросов, читает этот экран без привыкания.
+ *
+ * Отличия от опросов — только там, где их требует сама новость:
+ *   * у новости без теста вкладок нет — только люди; вторая вкладка с пустой
+ *     статистикой была бы вопросом без ответа;
+ *   * у теста новости бывают ПОВТОРНЫЕ попытки (неверный ответ снимает весь
+ *     выбор), поэтому в разборе можно переключать попытки, а статистика по
+ *     вопросам считается по первой — см. news/queries.py: question_stats.
+ */
+
+// Цвет плашки состояния: янтарный — застрял на тесте, это требует действия;
+// остальное нейтрально. Успешных плашкой не метим: это норма, а не событие.
+const STATUS_BADGE_COLOR = {
+    retrying: 'amber', failed: 'amber', pending: 'gray', absent: 'gray', not_seen: 'gray',
+};
+
+// «2 попытки», «5 попыток» — считается у каждой карточки, склонять обязательно.
+const attemptsLabel = (count) => {
+    const n = Math.abs(Number(count) || 0);
+    const last = n % 10;
+    const lastTwo = n % 100;
+    if (last === 1 && lastTwo !== 11) return `${n} попытка`;
+    if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) return `${n} попытки`;
+    return `${n} попыток`;
+};
+
+const shortTime = (iso) => {
+    if (!iso) return '';
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return '';
+    return at.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit',
+                                        hour: '2-digit', minute: '2-digit' });
+};
+
 function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
     const [state, setState] = useState(null);
     const [loading, setLoading] = useState(false);
-    const [onlyPending, setOnlyPending] = useState(false);
+    const [tab, setTab] = useState('people');
+    const [query, setQuery] = useState('');
+    const [onlyAttention, setOnlyAttention] = useState(false);
     const [exporting, setExporting] = useState(false);
+    /* Второй уровень окна — разбор одного сотрудника, как «Ответы» в опросах.
+       Не второе окно: IosModal умеет шеврон «назад» внутри себя. */
+    const [person, setPerson] = useState(null);
+    const [personData, setPersonData] = useState(null);
+    const [attemptNo, setAttemptNo] = useState(null);
 
     useEffect(() => {
         if (!open || !post?.id) { setState(null); return; }
         setLoading(true);
+        setTab('people');
+        setQuery('');
+        setOnlyAttention(false);
+        setPerson(null);
         axios.get(`${apiBaseUrl}/api/news/posts/${post.id}/report`, { headers })
             .then((r) => setState(r.data))
             .catch(() => setState(null))
             .finally(() => setLoading(false));
     }, [apiBaseUrl, headers, open, post?.id]);
 
-    /* Что у новости есть проходить (задача #342): от этого зависят счётчики в
-       шапке и отметки в строках. Без теста и тренажёра журнал выглядит как
-       прежде — лишних пустых колонок у простого объявления нет. */
+    /* Что у новости есть проходить (задача #342): от этого зависят плитки,
+       вкладки и то, открывается ли карточка сотрудника. */
     const hasQuiz = (post?.quiz_count || 0) > 0;
     const hasTrainer = !!post?.trainer_key;
 
-    const rows = useMemo(() => {
-        const items = state?.items || [];
-        /* «Требуют внимания» — про тех, от кого ещё чего-то ждут: не
-           подтвердил ИЛИ не сдал тест. Раньше фильтр умел только первое, и
-           человек, зависший на третьей попытке, в него не попадал — хотя
-           именно к нему и надо подойти. Выбывшего из адресатов не показываем:
-           дожимать его незачем. */
-        return onlyPending
-            ? items.filter((row) => row.in_audience
-                && !['passed', 'done'].includes(row.status))
-            : items;
-    }, [state, onlyPending]);
+    const people = useMemo(() => {
+        const text = query.trim().toLowerCase();
+        return (state?.items || []).filter((row) => (
+            (!text || String(row.name || '').toLowerCase().includes(text))
+            /* «Требуют внимания» — от кого ещё чего-то ждут: не подтвердил ИЛИ
+               не сдал тест. Выбывшего из адресатов не показываем: дожимать его
+               незачем. */
+            && (!onlyAttention || (row.in_audience && !['passed', 'done'].includes(row.status)))
+        ));
+    }, [state, query, onlyAttention]);
 
-    /* Вопросы, на которых спотыкаются (ТЗ #300, п.12). Показываем только те, где
-       ошибались: список из десяти строк с нулями не говорит ничего. Самый
-       непонятный — сверху. */
-    const mistakes = useMemo(() => (state?.questions || [])
-        .filter((item) => item.wrong_people > 0)
-        .sort((a, b) => b.percent - a.percent), [state]);
+    const openPerson = (row) => {
+        if (!hasQuiz || !row.attempts) return;
+        setPerson(row);
+        setPersonData(null);
+        setAttemptNo(null);
+        axios.get(`${apiBaseUrl}/api/news/posts/${post.id}/attempts/${row.user_id}`, { headers })
+            .then((r) => {
+                setPersonData(r.data);
+                const attempts = r.data?.attempts || [];
+                setAttemptNo(attempts.length ? attempts[attempts.length - 1].attempt_no : null);
+            })
+            .catch(() => setPersonData({ attempts: [], quiz: [] }));
+    };
+    const closePerson = useCallback(() => setPerson(null), []);
+
+    /* Esc и системное «назад» из разбора — на шаг, к списку, а не закрывают
+       окно целиком: так же ведут себя «Ответы» в опросах. Запись «назад»
+       кладётся ПОЗЖЕ записи окна и снимается первой. */
+    const isMobileShell = useIsMobileShell();
+    useScreenBackGesture(isMobileShell && !!person, closePerson);
+    useEffect(() => {
+        if (!person) return undefined;
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            event.stopPropagation();
+            closePerson();
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [person, closePerson]);
 
     const exportReport = () => {
         if (!post?.id || exporting) return;
@@ -1804,17 +1885,45 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
             .finally(() => setExporting(false));
     };
 
+    /* Тест новости в виде вопросов опроса — чтобы разбор попытки был ТЕМ ЖЕ
+       компонентом, что в «Опросах». У новости всегда один верный вариант. */
+    const reviewQuestions = useMemo(() => (personData?.quiz || []).map((item) => ({
+        id: item.id,
+        text: item.prompt,
+        type: 'single',
+        options: item.options,
+        correct_options: [item.options[item.correct]],
+        __correctIndex: item.correct,
+    })), [personData]);
+    const attempts = personData?.attempts || [];
+    const attempt = attempts.find((item) => item.attempt_no === attemptNo) || null;
+
+    const tiles = state ? (hasQuiz ? [
+        { key: 'assigned', label: 'Назначено', value: state.assigned ?? state.total ?? 0 },
+        { key: 'confirmed', label: 'Ознакомились', value: state.confirmed ?? 0 },
+        { key: 'passed', label: 'Прошли тест', value: state.quiz_passed ?? 0,
+          hint: `${state.percent ?? 0}%` },
+        { key: 'attempts', label: 'Попыток',
+          value: state.avg_attempts ? String(state.avg_attempts).replace('.', ',') : '—',
+          hint: state.avg_attempts ? 'в среднем' : null },
+    ] : [
+        { key: 'assigned', label: 'Назначено', value: state.assigned ?? state.total ?? 0 },
+        { key: 'confirmed', label: 'Ознакомились', value: state.confirmed ?? 0 },
+        { key: 'rate', label: 'Доля ознакомления', value: `${state.percent ?? 0}%` },
+    ]) : [];
+
     return (
         <IosModal
             open={open}
             onClose={onClose}
-            title="Кто прочитал"
+            onBack={person ? closePerson : null}
+            title={person ? person.name : 'Результаты'}
             subtitle={post?.title}
-            maxWidth="max-w-xl"
-            footer={(
+            maxWidth="max-w-2xl"
+            footer={person ? null : (
                 <>
                     {/* Выгрузка — там же, где закрывают окно: её берут, когда
-                        журнал уже посмотрели (ТЗ #300, п.14). */}
+                        результаты уже посмотрели (ТЗ #300, п.14). */}
                     <button type="button" className={iosBtnSecondary}
                             disabled={exporting || !state} onClick={exportReport}>
                         {exporting
@@ -1831,184 +1940,300 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                     <Loader2 className="mr-1.5 inline h-4 w-4 animate-spin" />Считаем
                 </p>
             )}
-            {!loading && state && (
-                <>
-                    <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                            <p className="text-[14px] text-slate-900 tabular-nums">
-                                Подтвердили {state.confirmed} из {state.total}
-                            </p>
-                            {/* Подтвердившие, которых в адресатах уже нет,
-                                в знаменатель не идут, но и не исчезают: журнал
-                                читают при разборе, задним числом. */}
+
+            {/* ── РАЗБОР СОТРУДНИКА ─────────────────────────────────────── */}
+            {!loading && state && person && (
+                <div className="animate-card-open space-y-3">
+                    {!personData && (
+                        <p className="py-8 text-center text-[13px] text-slate-400">
+                            <Loader2 className="mr-1.5 inline h-4 w-4 animate-spin" />Загружаем попытки
+                        </p>
+                    )}
+                    {personData && attempt && (
+                        <>
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/70 pb-3">
+                                <div className="min-w-0">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <Badge color={attempt.passed ? 'green' : 'amber'}>
+                                            {attempt.passed ? 'Засчитана' : 'Не засчитана'}
+                                        </Badge>
+                                        {STATUS_LABELS[person.status] && !['passed', 'done'].includes(person.status) && (
+                                            <Badge color={STATUS_BADGE_COLOR[person.status] || 'gray'}>
+                                                {STATUS_LABELS[person.status]}
+                                            </Badge>
+                                        )}
+                                    </div>
+                                    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                                        <span>
+                                            Верно:{' '}
+                                            <strong className="tabular-nums text-slate-800">
+                                                {attempt.correct} из {attempt.total}
+                                            </strong>
+                                        </span>
+                                        <span>
+                                            Нужно:{' '}
+                                            <strong className="tabular-nums text-slate-800">{attempt.needed}</strong>
+                                        </span>
+                                        <span className="tabular-nums text-slate-400">{shortTime(attempt.created_at)}</span>
+                                    </div>
+                                </div>
+                                <div className={`shrink-0 text-[26px] font-bold leading-none tabular-nums ${
+                                    scoreToneClass(attempt.total ? attempt.correct * 100 / attempt.total : 0)}`}>
+                                    {attempt.total ? Math.round(attempt.correct * 100 / attempt.total) : 0}%
+                                </div>
+                            </div>
+
+                            {/* Переключатель попыток — только когда их несколько: у
+                                сдавшего с первого раза выбирать не из чего. Последняя
+                                открыта сразу — она и есть итог. */}
+                            {attempts.length > 1 && (
+                                <div className="flex items-center gap-2.5">
+                                    <span className="text-[12.5px] text-slate-500">Попытка</span>
+                                    <IosSegmented
+                                        value={attemptNo}
+                                        onChange={setAttemptNo}
+                                        ariaLabel="Попытка"
+                                        options={attempts.map((item) => ({
+                                            value: item.attempt_no,
+                                            label: `${item.attempt_no}`,
+                                        }))}
+                                    />
+                                </div>
+                            )}
+
+                            <AttemptReview
+                                questions={reviewQuestions}
+                                isTest
+                                getAnswer={(question) => {
+                                    const chosen = attempt.answers?.[String(question.id)];
+                                    if (chosen === undefined || chosen === null) return null;
+                                    return {
+                                        selected_options: [question.options[Number(chosen)]],
+                                        is_correct: Number(chosen) === question.__correctIndex,
+                                    };
+                                }}
+                            />
+                        </>
+                    )}
+                    {personData && !attempt && (
+                        <p className="py-8 text-center text-[13px] text-slate-400">Попыток нет</p>
+                    )}
+                </div>
+            )}
+
+            {/* ── СВОДКА И СПИСКИ ───────────────────────────────────────── */}
+            {!loading && state && !person && (
+                <div className="space-y-3">
+                    <StatTiles tiles={tiles} />
+
+                    {/* Обстоятельства выпуска — мелкой строкой под плитками и только
+                        когда они есть: растяжка, запуск по плану, снятие. */}
+                    {(state.confirmed_outside > 0 || hasTrainer || state.plan?.publish_mode === 'spread'
+                      || state.plan?.scheduled_at || post?.archived_at) && (
+                        <div className="space-y-0.5 px-1 text-[12px] tabular-nums text-slate-500">
                             {state.confirmed_outside > 0 && (
-                                <p className="text-[12px] text-slate-400 tabular-nums">
-                                    и ещё {state.confirmed_outside} — из тех, кто больше не в адресатах
-                                </p>
+                                <p>и ещё {state.confirmed_outside} подтвердили из тех, кто больше не в адресатах</p>
                             )}
-                            {/* Сводка для руководителя (ТЗ #300, п.13) — одной
-                                строкой и только тем, что есть у этой новости.
-                                «Ещё не ознакомились» отдельным числом не пишем:
-                                оно уже сказано в «12 из 30», а второй раз — шум. */}
-                            {(hasQuiz || hasTrainer) && (
-                                <p className="text-[12px] text-slate-500 tabular-nums">
-                                    {[hasTrainer ? `тренажёр прошли ${state.trainer_passed || 0}` : null,
-                                      hasQuiz ? `тест прошли ${state.quiz_passed || 0} из ${
-                                          state.assigned ?? state.total ?? 0} (${state.percent ?? 0}%)` : null,
-                                      hasQuiz && state.quiz_failed ? `не прошли ${state.quiz_failed}` : null,
-                                      /* «попыток в среднем 1,7», а не «в среднем
-                                         1,7 попытки»: существительное перед
-                                         числом не надо склонять под каждое
-                                         значение, и строка не рвётся на слове. */
-                                      hasQuiz && state.avg_attempts
-                                          ? `попыток в среднем ${String(state.avg_attempts).replace('.', ',')}`
-                                          : null]
-                                        .filter(Boolean).join(' · ')}
-                                </p>
-                            )}
-                            {/* Строка про растяжку — только у растянутой новости
-                                (ТЗ п.8.5). У обычной её нет вовсе: «опубликована
-                                сразу» и так видно по дате выпуска. */}
+                            {hasTrainer && <p>тренажёр прошли {state.trainer_passed || 0}</p>}
                             {state.plan?.publish_mode === 'spread' && (
-                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                <p>
                                     волнами: {state.plan.waves} по {minutesLabel(state.plan.wave_interval_minutes)}
                                     {', всего '}{minutesLabel(state.plan.spread_minutes)}
                                 </p>
                             )}
-                            {/* Запланированный запуск против фактического: если
-                                они разошлись, это первое, что спросят. */}
                             {state.plan?.scheduled_at && (
-                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                <p>
                                     запуск по плану {publishedLabel(state.plan.scheduled_at)}
                                     {state.plan.published_at
                                         ? `, вышла ${publishedLabel(state.plan.published_at)}` : ''}
                                 </p>
                             )}
-                            {/* КТО И КОГДА СНЯЛ (ТЗ #300, п.16). Здесь — с именем
-                                всегда: автора в шапке журнала нет, и «снята» без
-                                имени не ответило бы на вопрос, ради которого его
-                                открыли. «Снималась» — у выпущенной заново:
-                                перерыв в показе обязан объясняться и потом. */}
+                            {/* КТО И КОГДА СНЯЛ (ТЗ #300, п.16). «Снималась» — у
+                                выпущенной заново: перерыв в показе обязан
+                                объясняться и потом. */}
                             {post?.archived_at && (
-                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                <p>
                                     {post.status === 'archived' ? 'снята с показа' : 'снималась с показа'}
                                     {' '}{publishedLabel(post.archived_at)}
                                     {post.archived_by_name ? ` · ${post.archived_by_name}` : ''}
                                 </p>
                             )}
                         </div>
-                        <button
-                            type="button"
-                            onClick={() => setOnlyPending((value) => !value)}
-                            className={`shrink-0 rounded-full px-3 py-1 text-[12px] tabular-nums transition active:scale-[0.98] ${
-                                onlyPending ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}
-                        >
-                            Требуют внимания{state.needs_attention ? ` · ${state.needs_attention}` : ''}
-                        </button>
-                    </div>
-                    {/* ГДЕ ЧАЩЕ ОШИБАЮТСЯ (ТЗ #300, п.12): «позволит выявлять не
-                        только недостаток знаний, но и случаи, когда сама
-                        инструкция сформулирована недостаточно понятно».
-                        Вопросов без единой ошибки в списке нет — десять строк с
-                        нулями не говорят ничего. */}
-                    {mistakes.length > 0 && (
-                        <div className="mt-3 rounded-2xl bg-slate-50 px-3.5 py-3 ring-1 ring-slate-200/70">
-                            <p className="text-[12px] font-medium text-slate-500">Чаще ошибаются</p>
-                            <ul className="mt-1.5 space-y-1">
-                                {mistakes.map((item) => (
-                                    <li key={item.id}
-                                        className="flex items-baseline justify-between gap-3 text-[13px]">
-                                        <span className="min-w-0 truncate text-slate-900">
-                                            {item.number}. {item.prompt}
-                                        </span>
-                                        <span className="shrink-0 tabular-nums text-slate-500">
-                                            {item.percent}% ({item.wrong_people} из {item.people})
-                                        </span>
-                                    </li>
-                                ))}
-                            </ul>
+                    )}
+
+                    {/* Вкладки — только у новости с тестом: без него «Вопросов»
+                        нет, и переключатель из одной кнопки был бы шумом. */}
+                    {hasQuiz && (
+                        <IosSegmented
+                            value={tab}
+                            onChange={setTab}
+                            stretch
+                            ariaLabel="Результаты новости"
+                            options={[
+                                { value: 'people', label: 'Сотрудники', count: (state.items || []).length },
+                                { value: 'questions', label: 'Вопросы', count: (state.questions || []).length },
+                            ]}
+                        />
+                    )}
+
+                    {tab === 'people' && (
+                        <div className="animate-card-open space-y-2.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <div className="relative min-w-0 flex-1">
+                                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                                    <input
+                                        value={query}
+                                        onChange={(e) => setQuery(e.target.value)}
+                                        placeholder="Поиск по сотруднику"
+                                        className={`${iosInput} py-2 pl-8 text-[13px]`}
+                                    />
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setOnlyAttention((value) => !value)}
+                                    aria-pressed={onlyAttention}
+                                    className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                        onlyAttention ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                >
+                                    Требуют внимания{state.needs_attention ? ` · ${state.needs_attention}` : ''}
+                                </button>
+                            </div>
+
+                            {people.length === 0 && (
+                                <p className="py-8 text-center text-[13px] text-slate-400">
+                                    {query ? 'Сотрудники не найдены'
+                                        : (onlyAttention ? 'Все ознакомились' : 'Адресатов нет')}
+                                </p>
+                            )}
+
+                            {/* Карточки — как «Ответы» в опросах: по две в ряд,
+                                открывается та, у которой есть что разбирать. */}
+                            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                                {people.map((row) => {
+                                    const clickable = hasQuiz && row.attempts > 0;
+                                    const score = row.last_total
+                                        ? Math.round((row.last_correct || 0) * 100 / row.last_total) : null;
+                                    const settled = ['passed', 'done'].includes(row.status);
+                                    return (
+                                        <button
+                                            key={row.user_id}
+                                            type="button"
+                                            disabled={!clickable}
+                                            onClick={() => openPerson(row)}
+                                            className={`flex min-h-[88px] flex-col justify-between rounded-2xl px-4 py-3.5 text-left ring-1 transition-all duration-200 ${
+                                                clickable
+                                                    ? 'bg-white ring-slate-200/70 hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(15,23,42,0.4)] hover:ring-blue-300 active:scale-[0.99]'
+                                                    : `cursor-default ring-slate-200/60 ${settled ? 'bg-white' : 'bg-slate-50'}`
+                                            }`}
+                                        >
+                                            <div className="min-w-0">
+                                                <div className={`truncate text-[13.5px] font-semibold leading-snug ${
+                                                    settled || clickable ? 'text-slate-900' : 'text-slate-500'}`}>
+                                                    {row.name}
+                                                </div>
+                                                <div className="mt-0.5 truncate text-[11.5px] text-slate-400">
+                                                    {[roleTitle(row.role), row.department_name,
+                                                      row.wave_no ? `волна ${row.wave_no}` : null]
+                                                        .filter(Boolean).join(' · ')}
+                                                </div>
+                                            </div>
+                                            <div className="mt-2 flex items-end justify-between gap-2">
+                                                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                                    {!settled && (
+                                                        <Badge color={STATUS_BADGE_COLOR[row.status] || 'gray'}>
+                                                            {STATUS_LABELS[row.status] || 'Объявление не открыто'}
+                                                        </Badge>
+                                                    )}
+                                                    {settled && row.confirmed_at && (
+                                                        <span className="text-[11.5px] tabular-nums text-slate-400">
+                                                            {/* «прочитано», а не «ознакомился»: по
+                                                                имени пол не угадывают. */}
+                                                            прочитано {publishedLabel(row.confirmed_at)}
+                                                        </span>
+                                                    )}
+                                                    {!row.in_audience && <Badge color="gray">уже не в адресатах</Badge>}
+                                                    {/* Число попыток — только когда их больше одной:
+                                                        «с первого раза» это норма. */}
+                                                    {hasQuiz && row.attempts > 1 && (
+                                                        <Badge color="blue">{attemptsLabel(row.attempts)}</Badge>
+                                                    )}
+                                                    {hasTrainer && row.trainer_passed_at && (
+                                                        <Badge color="green">тренажёр</Badge>
+                                                    )}
+                                                </div>
+                                                {hasQuiz && score !== null && (
+                                                    <span className={`shrink-0 text-[19px] font-bold leading-none tabular-nums ${scoreToneClass(score)}`}>
+                                                        {score}%
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </button>
+                                    );
+                                })}
+                            </div>
                         </div>
                     )}
 
-                    <div className="mt-3 space-y-1">
-                        {rows.length === 0 && (
-                            <p className="py-6 text-center text-[13px] text-slate-400">
-                                {onlyPending ? 'Прочитали все' : 'Адресатов нет'}
+                    {tab === 'questions' && hasQuiz && (
+                        <div className="animate-card-open space-y-2.5">
+                            {/* По какой попытке — сказано один раз, за «i», а не у
+                                каждого вопроса. */}
+                            <p className="flex items-center gap-1.5 px-1 text-[12px] text-slate-500">
+                                Ответы по первой попытке
+                                <IosHint
+                                    label="Почему по первой попытке"
+                                    text="Первая попытка показывает, понятен ли текст новости. Повторные — уже нет: после неверной попытки выбор сбрасывается, и человек отвечает, помня, какой вариант не прошёл. К десятой попытке верно ответят все, и непонятный вопрос выглядел бы понятным."
+                                />
                             </p>
-                        )}
-                        {rows.map((row) => (
-                            <div key={row.user_id}
-                                 className="flex items-center justify-between gap-3 rounded-xl px-3 py-2 hover:bg-slate-50">
-                                <div className="min-w-0">
-                                    <p className="truncate text-[14px] text-slate-900">{row.name}</p>
-                                    <p className="truncate text-[12px] text-slate-400">
-                                        {[roleTitle(row.role), row.department_name,
-                                          /* Номер волны — там же, где отдел: это
-                                             свойство человека в этой рассылке, а
-                                             не отдельная колонка (ТЗ п.8.5).
-                                             Пусто — растяжки не было или человек
-                                             попал в адресаты уже после выпуска,
-                                             и объявление ему видно сразу. */
-                                          row.wave_no ? `волна ${row.wave_no}` : null,
-                                          row.in_audience ? null : 'уже не в адресатах']
-                                            .filter(Boolean).join(' · ')}
-                                    </p>
-                                </div>
-                                {/* Обе стороны — серой подписью.
-                                    Плашка на непрочитавшем выглядела разумно на
-                                    одной строке и превращалась в стену цвета на
-                                    восемнадцати: цвет, который стоит у половины
-                                    списка, не значит ничего. Кто не прочитал,
-                                    видно и так — они наверху (сортировка) и
-                                    посчитаны в шапке. */}
-                                <span className="flex shrink-0 flex-col items-end gap-0.5">
-                                    {/* Подтвердил — показываем КОГДА: это ответ на
-                                        «успел ли». Не подтвердил — показываем
-                                        СОСТОЯНИЕ словом, и считает его сервер
-                                        (ТЗ #300, п.11.2): раньше здесь было две
-                                        самодельных фразы, и «не выходил на смену»
-                                        от «не открывал» они не отличали. */}
-                                    <span className="text-right text-[12px] tabular-nums text-slate-400">
-                                        {row.confirmed_at
-                                            ? publishedLabel(row.confirmed_at)
-                                            : (STATUS_LABELS[row.status] || 'не видел')}
-                                    </span>
-                                    {/* Пройденное — галочкой, непройденное не пишем
-                                        вовсе: «не прошёл» у половины строк стало бы
-                                        той же стеной серого, от которой ушли выше. */}
-                                    {((hasTrainer && row.trainer_passed_at) || (hasQuiz && row.quiz_passed_at)) && (
-                                        <span className="flex items-center gap-2 text-[11.5px] tabular-nums text-slate-500">
-                                            {hasTrainer && row.trainer_passed_at && (
-                                                <span className="inline-flex items-center gap-0.5">
-                                                    <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} aria-hidden="true" />
-                                                    тренажёр
-                                                </span>
-                                            )}
-                                            {hasQuiz && row.quiz_passed_at && (
-                                                <span className="inline-flex items-center gap-0.5">
-                                                    <Check className="h-3 w-3 text-emerald-600" strokeWidth={3} aria-hidden="true" />
-                                                    тест
-                                                    {/* «С первого раза» не пишем — это
-                                                        норма. А вот третья попытка уже
-                                                        говорит про инструкцию. */}
-                                                    {row.attempts > 1 && ` с ${row.attempts}-й попытки`}
-                                                </span>
-                                            )}
-                                        </span>
-                                    )}
-                                    {/* Не сдал, но отвечал: сколько взял и сколько раз
-                                        пробовал (ТЗ #300, п.4.2 и п.11.2). */}
-                                    {hasQuiz && !row.quiz_passed_at && row.attempts > 0 && (
-                                        <span className="text-[11.5px] tabular-nums text-slate-500">
-                                            тест {row.last_correct ?? 0} из {row.last_total ?? 0}
-                                            {row.attempts > 1 && ` · попыток ${row.attempts}`}
-                                        </span>
-                                    )}
-                                </span>
-                            </div>
-                        ))}
-                    </div>
-                </>
+                            {(state.questions || []).length === 0 && (
+                                <p className="py-8 text-center text-[13px] text-slate-400">Ответов пока нет</p>
+                            )}
+                            {(state.questions || []).map((question) => {
+                                const leader = Math.max(0, ...question.options.map((option) => option.count));
+                                return (
+                                    <div key={question.id} className="rounded-2xl bg-white p-4 ring-1 ring-slate-200/70">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <div className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+                                                    Вопрос {question.number}
+                                                </div>
+                                                <div className="mt-0.5 text-[13.5px] font-medium text-slate-900">
+                                                    {question.prompt}
+                                                </div>
+                                            </div>
+                                            <div className="shrink-0 text-right">
+                                                <div className="text-[15px] font-semibold tabular-nums text-slate-900">
+                                                    {question.answered}
+                                                </div>
+                                                <div className="text-[10.5px] text-slate-400">ответили</div>
+                                            </div>
+                                        </div>
+                                        {/* Доля ошибившихся — янтарём, и только когда
+                                            ошибались: «ошиблись 0%» у каждого вопроса
+                                            было бы шумом (ТЗ #300, п.12). */}
+                                        {question.wrong_people > 0 && (
+                                            <div className="mt-1.5 text-[11.5px] tabular-nums text-amber-700">
+                                                ошиблись {question.percent}% ({question.wrong_people} из {question.answered})
+                                            </div>
+                                        )}
+                                        <div className="mt-3 space-y-1.5">
+                                            {question.options.map((option) => (
+                                                <OptionStatRow
+                                                    key={option.index}
+                                                    label={option.label}
+                                                    count={option.count}
+                                                    percent={option.percent}
+                                                    isCorrect={option.is_correct}
+                                                    isLeader={leader > 0 && option.count === leader}
+                                                />
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
             )}
         </IosModal>
     );

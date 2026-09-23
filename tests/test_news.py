@@ -361,8 +361,9 @@ class NewsPerimeterTests(unittest.TestCase):
         routes = _code_only(_read('news', 'routes.py'))
         self.assertIn('def _may_read_post(', routes)
         # ВСЕ точечные двери ходят через него — карточка, журнал, его выгрузка
-        # в Excel — и ни одна не через прежнюю проверку «только отдел».
-        self.assertEqual(routes.count('if not _may_read_post(ctx, post):'), 4)
+        # в Excel и разбор попыток сотрудника — и ни одна не через прежнюю
+        # проверку «только отдел».
+        self.assertEqual(routes.count('if not _may_read_post(ctx, post):'), 5)
         self.assertNotIn("post.get('author_department_id') not in (", routes)
         # Меряется должностью автора, а не только отделом.
         self.assertIn("effective_role_level(post.get('author_role'))", routes)
@@ -2333,7 +2334,7 @@ class NewsReportTests(unittest.TestCase):
         self.assertEqual(set(news_access.PERSON_STATUS_LABELS), set(news_access.PERSON_STATUSES))
 
     def test_absence_is_never_claimed_without_data(self):
-        """«Не выходил на смену» говорим, только когда источник посещаемости по
+        """«Нет смен после публикации» говорим, только когда источник посещаемости по
         этому кругу вообще отвечает: обвинять в прогуле по отсутствию данных
         нельзя. Молчит источник — человек просто не открывал объявление."""
         blind = news_access.person_status(has_quiz=False, shown_at=None, confirmed_at=None,
@@ -2388,13 +2389,19 @@ class NewsReportTests(unittest.TestCase):
         self.assertEqual(dict(re.findall(r"(\w+): '([^']+)'", titles)),
                          news_access.ROLE_TITLES)
 
-    def test_mistakes_count_people_and_not_attempts(self):
-        """«Вопрос №3 — ошиблись 38% сотрудников»: один человек, трижды
-        ошибшийся в одном вопросе, — это один человек, а не три ошибки."""
-        source = _function_code(_read('news', 'queries.py'), 'question_mistakes')
-        self.assertIn('COUNT(DISTINCT a.user_id)', source)
-        self.assertIn('COUNT(DISTINCT user_id)', source)
-        self.assertIn('wrong_ids @> to_jsonb(z.id)', source)
+    def test_question_stats_are_by_the_first_attempt_and_count_people(self):
+        """«Вопрос №3 — ошиблись 38% сотрудников» — по ПЕРВОЙ попытке.
+
+        Повторные меряют уже не понятность текста: после неверной попытки выбор
+        снимается, и человек отвечает, помня, какой вариант не прошёл. К десятой
+        попытке верно ответят все, и непонятный вопрос выглядел бы понятным.
+        """
+        source = _function_code(_read('news', 'queries.py'), 'question_stats')
+        self.assertIn('DISTINCT ON (user_id)', source)
+        self.assertIn('ORDER BY user_id, attempt_no', source)
+        # Распределение по вариантам — как «Статистика» в опросах.
+        self.assertIn("'options': [{", source)
+        self.assertIn("'is_correct': index == correct", source)
 
     def test_the_export_repeats_the_journal_and_never_counts_its_own(self):
         """Файл, расходящийся с экраном, хуже отсутствующего файла."""
@@ -2623,3 +2630,82 @@ class NewsAuditJournalTests(unittest.TestCase):
         # отобран.
         self.assertIn("!String(action).startsWith('news.')", events)
         self.assertIn("NEWS_CONSUMED = ['space_id'", events)
+
+
+class NewsResultsScreenTests(unittest.TestCase):
+    """Результаты новости — как результаты «Опросов» и из тех же кирпичей
+    (просьба владельца 23.09.2026: «примерно как в разделе опросы,
+    переиспользовать»)."""
+
+    FORM = ('src', 'components', 'wiki', 'WikiNews.jsx')
+
+    def _report(self):
+        form = _read(*self.FORM)
+        start = form.index('function NewsReport(')
+        return form[start:form.index('\n}\n', start)]
+
+    def test_built_from_the_same_kit_as_surveys(self):
+        form = _read(*self.FORM)
+        self.assertIn("} from '../surveys/resultsKit';", form)
+        report = self._report()
+        for piece in ('<StatTiles', '<AttemptReview', '<OptionStatRow', '<Badge'):
+            self.assertIn(piece, report)
+        # И сами «Опросы» берут их оттуда же — иначе это уже не переиспользование.
+        surveys = _read('src', 'components', 'surveys', 'SurveysView.jsx')
+        self.assertIn("} from './resultsKit';", surveys)
+        for piece in ('<StatTiles', '<AttemptReview', '<OptionStatRow'):
+            self.assertIn(piece, surveys)
+        for local in ('const AttemptReview = (', 'const Badge = (', 'const ReviewOptionRow = ('):
+            self.assertNotIn(local, surveys)
+
+    def test_a_news_without_a_test_has_no_tabs(self):
+        """Вкладка «Вопросы» с пустой статистикой — вопрос без ответа."""
+        report = _jsx_code_only(self._report())
+        self.assertIn('{hasQuiz && (\n                        <IosSegmented', report)
+
+    def test_the_person_opens_inside_the_same_window_and_back_is_one_step(self):
+        """Разбор сотрудника — второй уровень окна, а Esc и системное «назад»
+        возвращают к списку, а не закрывают всё: так ведут себя «Ответы»."""
+        report = _jsx_code_only(self._report())
+        self.assertIn('onBack={person ? closePerson : null}', report)
+        self.assertIn('useScreenBackGesture(isMobileShell && !!person, closePerson)', report)
+        self.assertIn("if (event.key !== 'Escape') return;", report)
+        self.assertIn('event.stopPropagation();', report)
+
+    def test_attempts_can_be_switched_only_when_there_are_several(self):
+        report = _jsx_code_only(self._report())
+        self.assertIn('{attempts.length > 1 && (', report)
+        # Открыта последняя — она и есть итог.
+        self.assertIn('attempts[attempts.length - 1].attempt_no', report)
+
+    def test_only_those_with_something_to_review_open(self):
+        report = _jsx_code_only(self._report())
+        self.assertIn('const clickable = hasQuiz && row.attempts > 0;', report)
+        self.assertIn('disabled={!clickable}', report)
+
+    def test_the_editor_sees_the_right_answers_only_through_the_perimeter(self):
+        """Разбор с верными ответами — только редактору и тем, кто выше автора."""
+        routes = _code_only(_read('news', 'routes.py'))
+        door = routes[routes.index('def news_post_person_attempts('):]
+        door = door[:door.index('@news_route(')]
+        self.assertIn('if not _may_read_post(ctx, post):', door)
+        self.assertIn("'/posts/<int:post_id>/attempts/<int:user_id>', publisher=True",
+                      _read('news', 'routes.py'))
+
+
+class NewsResultsNeutralWordingTests(unittest.TestCase):
+    """Подписи стоят рядом с именем конкретного человека, а по имени пол не
+    угадывают: «ознакомился», «не выходил», «не открывал» — мужской род."""
+
+    MASCULINE_PAST = re.compile(r'\b\w+(?:ился|ался|ался|ил|ал|ел|ыл|ол)\b', re.IGNORECASE)
+
+    def test_status_labels_have_no_gendered_verbs(self):
+        for code, label in news_access.PERSON_STATUS_LABELS.items():
+            self.assertIsNone(self.MASCULINE_PAST.search(label), '%s: %s' % (code, label))
+
+    def test_the_card_says_read_not_he_read(self):
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        start = form.index('function NewsReport(')
+        report = form[start:form.index('\n}\n', start)]
+        self.assertIn('прочитано {publishedLabel(row.confirmed_at)}', report)
+        self.assertNotIn('ознакомился', report)

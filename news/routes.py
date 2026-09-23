@@ -1561,7 +1561,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                    with_attempts=_attempts_ready(cursor))
         has_quiz = bool(_quiz_ready(cursor)
                         and queries.quiz_answer_key(cursor, post['id']))
-        # «Не выходил на смену» говорим только про того, чьи часы вообще ведут
+        # «Нет смен после публикации» говорим только про того, чьи часы ведут
         # (queries.read_report: CTE hours). Учёт есть не у всех отделов и не у
         # каждого человека, и по одному «часов после публикации нет» мы
         # приписали бы прогул тому, чьи смены просто нигде не считают.
@@ -1573,9 +1573,30 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 attendance_known=row['attendance_tracked'])
         summary = news_access.report_summary(
             rows, has_quiz=has_quiz, has_trainer=bool(post.get('trainer_key')))
-        questions = (queries.question_mistakes(cursor, post['id'])
+        questions = (queries.question_stats(cursor, post['id'])
                      if has_quiz and _attempts_ready(cursor) else [])
         return rows, summary, questions
+
+    @news_route('/posts/<int:post_id>/attempts/<int:user_id>', publisher=True)
+    def news_post_person_attempts(cursor, ctx, post_id, user_id):
+        """Попытки одного сотрудника с ответами — разбор, как «Ответы» в опросах.
+
+        Верные ответы здесь есть, и это правильно: сюда приходят только через
+        _may_read_post, то есть редактор и те, кто выше автора. Сотруднику
+        сервер не называет даже, КАКОЙ вопрос он завалил (решение владельца
+        21.09.2026), — но руководитель разбирает ошибки именно по вопросам.
+        """
+        post = _get_post(cursor, post_id)
+        if not post:
+            return jsonify({"error": "Новость не найдена"}), 404
+        if not _may_read_post(ctx, post):
+            return jsonify({"error": "Эта новость не из вашего периметра"}), 403
+        if not (_quiz_ready(cursor) and _attempts_ready(cursor)):
+            return jsonify({"attempts": [], "quiz": []})
+        return jsonify({
+            "attempts": queries.person_attempts(cursor, post_id, user_id),
+            "quiz": queries.post_quiz(cursor, post_id),
+        })
 
     @news_route('/posts/<int:post_id>/report.xlsx', publisher=True, defer_cursor=True)
     def news_post_report_export(ctx, post_id):

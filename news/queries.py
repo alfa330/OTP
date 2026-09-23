@@ -592,42 +592,92 @@ def record_attempt(cursor, *, news_id, user_id, result, answers):
     return int(cursor.fetchone()[0])
 
 
-def question_mistakes(cursor, post_id):
-    """Где чаще ошибаются (ТЗ #300, п.12). Список вопросов со счётом ошибок.
+def question_stats(cursor, post_id):
+    """Как ответили на каждый вопрос (ТЗ #300, п.12) — как вкладка «Статистика» опросов.
 
-    «Вопрос №3 — ошиблись 38% сотрудников»: считаем ЛЮДЕЙ, а не попытки. Один
-    человек, трижды не ответивший на третий вопрос, — это один человек, которому
-    инструкция непонятна, а не три ошибки.
+    По ПЕРВОЙ попытке каждого человека, и это главное решение этой функции.
+    Первая попытка меряет, понятен ли текст новости. Повторные — уже нет: после
+    неверной попытки окно снимает весь выбор, и человек отвечает, помня, какой
+    вариант не прошёл, — к десятой попытке верно ответят все, и распределение
+    сказало бы «вопрос понятен», когда он непонятен. «Ошиблись 38%» — это доля
+    ошибившихся с первого раза, из тех, кто вообще отвечал.
 
-    Знаменатель — те, кто вообще отвечал: доля от всех адресатов мерила бы не
-    понятность вопроса, а явку.
+    Считаем ЛЮДЕЙ, а не выборы: у вопроса один верный вариант, и один человек
+    даёт ровно один ответ на вопрос в попытке.
     """
     cursor.execute(
         """
-        SELECT z.id, z.position, z.prompt,
-               COUNT(DISTINCT a.user_id) AS wrong_people,
-               (SELECT COUNT(DISTINCT user_id) FROM news_quiz_attempts
-                 WHERE news_id = %(post_id)s) AS people
+        WITH first AS (
+            SELECT DISTINCT ON (user_id) user_id, answers
+              FROM news_quiz_attempts
+             WHERE news_id = %(post_id)s
+             ORDER BY user_id, attempt_no
+        )
+        SELECT z.id, z.prompt, z.options, z.correct_index,
+               COALESCE((
+                   SELECT json_object_agg(t.choice, t.people)
+                     FROM (SELECT f.answers->>(z.id::text) AS choice,
+                                  COUNT(*)                 AS people
+                             FROM first f
+                            WHERE f.answers ? (z.id::text)
+                            GROUP BY 1) t
+               ), '{}'::json) AS distribution,
+               (SELECT COUNT(*) FROM first) AS people
           FROM news_quiz_questions z
-          LEFT JOIN news_quiz_attempts a
-                 ON a.news_id = z.news_id
-                AND a.wrong_ids @> to_jsonb(z.id)
          WHERE z.news_id = %(post_id)s
-         GROUP BY z.id, z.position, z.prompt
          ORDER BY z.position, z.id
         """,
         {'post_id': post_id},
     )
-    rows = cursor.fetchall()
+    stats = []
+    for number, row in enumerate(cursor.fetchall(), start=1):
+        options = list(row[2] or [])
+        correct = int(row[3])
+        distribution = {str(key): int(value) for key, value in (row[4] or {}).items()}
+        answered = sum(distribution.values())
+        right = distribution.get(str(correct), 0)
+        stats.append({
+            'id': int(row[0]),
+            # Номер, как его видит сотрудник в окне: позиция с единицы.
+            'number': number,
+            'prompt': row[1],
+            'correct': correct,
+            'options': [{
+                'index': index,
+                'label': label,
+                'count': distribution.get(str(index), 0),
+                'percent': (round(distribution.get(str(index), 0) * 100 / answered, 1)
+                            if answered else 0),
+                'is_correct': index == correct,
+            } for index, label in enumerate(options)],
+            'answered': answered,
+            'people': int(row[5] or 0),
+            'wrong_people': answered - right,
+            'percent': round((answered - right) * 100 / answered) if answered else 0,
+        })
+    return stats
+
+
+def person_attempts(cursor, post_id, user_id):
+    """Все попытки одного человека по новости — для разбора, как «Ответы» в опросах."""
+    cursor.execute(
+        """
+        SELECT attempt_no, correct, total, needed, passed, answers, created_at
+          FROM news_quiz_attempts
+         WHERE news_id = %s AND user_id = %s
+         ORDER BY attempt_no
+        """,
+        (post_id, user_id),
+    )
     return [{
-        'id': int(row[0]),
-        # Номер, как его видит сотрудник в окне: позиция с единицы.
-        'number': index,
-        'prompt': row[2],
-        'wrong_people': int(row[3] or 0),
-        'people': int(row[4] or 0),
-        'percent': round(int(row[3] or 0) * 100 / int(row[4])) if row[4] else 0,
-    } for index, row in enumerate(rows, start=1)]
+        'attempt_no': int(row[0]),
+        'correct': int(row[1]),
+        'total': int(row[2]),
+        'needed': int(row[3]),
+        'passed': bool(row[4]),
+        'answers': dict(row[5] or {}),
+        'created_at': row[6].isoformat() if row[6] else None,
+    } for row in cursor.fetchall()]
 
 
 def set_quiz(cursor, *, post_id, quiz):
