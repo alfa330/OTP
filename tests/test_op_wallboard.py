@@ -507,21 +507,19 @@ class GroupTests(unittest.TestCase):
                 ('3030', '6999', 10)]                          # чужой номер не голосует
         self.assertEqual(S.queue_owner_groups(rows, ext_group), {'3010': 36, '3001': 36})
 
-    def test_missed_call_belongs_to_the_queue_owner_not_to_the_last_rung_agent(self):
-        """23.09.2026: в очередях сидела сотрудница без группы (вн. 6661), очередь звонила ей
-        1943 раза и ни разу не дозвонилась. Потерянный звонок несёт номер последнего, кому
-        звонили, и уходил к ней — то есть ни в одну группу. Потерянный — забота хозяина
-        очереди, а не того, чей телефон молчал."""
+    def test_missed_call_on_a_stranger_stays_out_of_the_groups(self):
+        """Владелец, 23.09.2026: разница «Все» против фильтра группы должна быть видна — по ней
+        ловят человека без группы во входящих очередях (в тот день вн. 6661, 1943 звонка очереди
+        без единого ответа). Потерянный с номером не отдаётся хозяину очереди."""
         ext_group = {'6650': 36}
         owners = {'3010': 36}
         lost_on_stranger = {'call_type': 'Входящий (не приняли)', 'ext': '6661', 'queue': '3010'}
-        self.assertEqual(S.touch_group(lost_on_stranger, ext_group, owners), 36)
-        # Принятый звонок по-прежнему считается за тем, кто разговаривал.
-        answered = {'call_type': 'Входящий', 'ext': '6650', 'queue': '3010'}
-        self.assertEqual(S.touch_group(answered, {'6650': 15}, owners), 15)
-        # У очереди без хозяина потерянный идёт по номеру, как раньше.
-        self.assertEqual(S.touch_group({'call_type': 'Входящий (не приняли)', 'ext': '6650',
-                                        'queue': '3099'}, ext_group, owners), 36)
+        self.assertIsNone(S.touch_group(lost_on_stranger, ext_group, owners))
+        lost_on_member = {'call_type': 'Входящий (не приняли)', 'ext': '6650', 'queue': '3099'}
+        self.assertEqual(S.touch_group(lost_on_member, ext_group, owners), 36)
+        # Без номера входящий по-прежнему идёт к хозяину очереди.
+        lost_nobody = {'call_type': 'Входящий (не приняли)', 'ext': '', 'queue': '3010'}
+        self.assertEqual(S.touch_group(lost_nobody, ext_group, owners), 36)
 
     def test_groups_sum_to_the_department_and_queue_drops_go_to_the_queue_owner(self):
         touches = [
