@@ -43,6 +43,21 @@ const fmtTalk = (sec) => {
 
 const pct = (part, total) => (total ? Math.round((part / total) * 100) : null);
 
+// Порядок отделов в шапке: сначала с включённым режимом, затем с базой, затем по
+// имени. Иначе первым по алфавиту вставал отдел, к обзвону не относящийся.
+const sortDepartments = (list) => [...list].sort((a, b) => (
+    (Number(!!b.enabled) - Number(!!a.enabled))
+    || ((b.leads_total || 0) - (a.leads_total || 0))
+    || String(a.department_name || '').localeCompare(String(b.department_name || ''), 'ru')
+));
+
+// Последний открытый отдел помним в браузере: раздел открывается на нём, а не на
+// первом в списке. Хранилище может быть недоступно (приватное окно) — тогда молча
+// без памяти.
+const LAST_DEPT_KEY = 'otp.dial_list.last_department';
+const readLastDept = () => { try { return window.localStorage.getItem(LAST_DEPT_KEY) || ''; } catch { return ''; } };
+const writeLastDept = (id) => { try { if (id) window.localStorage.setItem(LAST_DEPT_KEY, String(id)); } catch { /* нет хранилища */ } };
+
 const initials = (name) => String(name || '')
     .split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '•';
 
@@ -108,14 +123,17 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments`, { credentials: 'include', headers: authHeaders() });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-            const list = Array.isArray(data.departments) ? data.departments : [];
+            const list = sortDepartments(Array.isArray(data.departments) ? data.departments : []);
             const cands = Array.isArray(data.candidates) ? data.candidates : [];
             setDepartments(list);
             setCandidates(cands);
             setEnrollPick((cur) => cur || (cands[0] ? String(cands[0].department_id) : ''));
+            const has = (id) => id && list.some((d) => String(d.department_id) === String(id));
             setDepartmentId((current) => {
-                if (preferId && list.some((d) => String(d.department_id) === String(preferId))) return String(preferId);
-                if (current && list.some((d) => String(d.department_id) === current)) return current;
+                if (has(preferId)) return String(preferId);
+                if (has(current)) return current;
+                const remembered = readLastDept();
+                if (has(remembered)) return remembered;
                 return list[0] ? String(list[0].department_id) : '';
             });
         } catch (e) {
@@ -125,6 +143,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     }, [apiBaseUrl, authHeaders]);
 
     useEffect(() => { loadDepartments(); }, [loadDepartments]);
+    useEffect(() => { writeLastDept(departmentId); }, [departmentId]);
 
     // Кандидаты приходят только админу: по ним же понимаем, что отключать отдел можно.
     const candidatesAdmin = Array.isArray(candidates);
@@ -243,7 +262,10 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                 value={departmentId}
                                 onChange={(v) => setDepartmentId(String(v))}
                                 ariaLabel="Отдел"
-                                options={departments.map((d) => ({ value: String(d.department_id), label: d.department_name || `Отдел ${d.department_id}` }))}
+                                options={departments.map((d) => ({
+                                    value: String(d.department_id),
+                                    label: `${d.department_name || `Отдел ${d.department_id}`}${d.enabled ? ' · включён' : ''}`,
+                                }))}
                             />
                         )}
                         {departments && departments.length === 1 && (
