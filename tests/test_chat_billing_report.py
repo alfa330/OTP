@@ -70,6 +70,7 @@ CONST_NAMES = (
     "CHAT_BILLING_LOW_RATING",
     "_CHAT_BILLING_HOURLY_COLUMNS",
     "_CHAT_BILLING_HOURLY_STAFF_KEYS",
+    "_CHAT_BILLING_HOURLY_DAY_HOURS_ROWS",
 )
 
 
@@ -589,8 +590,17 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertEqual(rows[2][8:11], [None, None, None])
         total = rows[26]
         self.assertEqual(total[:2], ["Общий итог", 16])
+        # Часы работы дня под итогом — на весь блок дня, как «Часы работы» на экране.
+        self.assertEqual(rows[27][:2], ["План по часам", 48.0])
+        self.assertEqual(rows[28][:2], ["Факт по часам", 24.0])
+        self.assertIn("B28:G28", [str(item) for item in ws.merged_cells.ranges])
+        self.assertEqual(ws["B28"].number_format, "0")
+        # Второй день без графика и статусов — пусто, а не ноль.
+        self.assertEqual([rows[27][7], rows[28][7]], [None, None])
 
         park_rows = [list(row) for row in workbook["Jana Taxi"].iter_rows(values_only=True)]
+        # У листа парка строк часов нет — лист кончается «Общим итогом».
+        self.assertEqual(park_rows[-1][0], "Общий итог")
         # У парка сотрудников нет — три колонки на день.
         self.assertEqual(park_rows[1][:4], ["Время", "Поступившие чаты", "Ср вр реакции на 1 сообщение",
                                             "Ср время ответа внутри чата"])
