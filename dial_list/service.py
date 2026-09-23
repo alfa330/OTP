@@ -821,10 +821,13 @@ class DialListService:
             cur.execute("UPDATE dial_list_assignments SET attempts = attempts + 1 WHERE id = %s", (assignment_id,))
             attempts_now = int(row[2] or 0) + 1
 
-        extra = {}
-        caller_id = settings.get("caller_id_for_employee") or ""
-        if caller_id:
-            extra["callerIdForEmployee"] = caller_id
+        # Что линия оператора увидит во From. Без подмены Binotel ставит туда номер
+        # водителя — и он виден в SIP-пакете (Wireshark), что и было главным
+        # требованием закрыть. Проверено живьём 23.09.2026: callerIdForEmployee
+        # подменяет From ровно на переданное значение. Поле отдела пусто — ставим
+        # внутренний номер самого оператора: нейтрально и всегда есть.
+        caller_id = (settings.get("caller_id_for_employee") or "").strip() or ctx["internal_number"]
+        extra = {"callerIdForEmployee": caller_id}
         try:
             client = self._client(ctx["department_id"])
             general_call_id = client.originate_internal_to_external(

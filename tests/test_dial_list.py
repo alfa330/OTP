@@ -197,6 +197,14 @@ class LinesTests(unittest.TestCase):
         self.assertIn("LOWER(COALESCE(u.status, '')) <> ALL(%s)", src)
         self.assertIn('_SIP_INACTIVE_STATUSES', src)
 
+    def test_caller_id_for_employee_is_always_sent(self):
+        # Живая проверка 23.09.2026: без callerIdForEmployee Binotel кладёт во From номер
+        # водителя (виден в SIP-пакете), с ним — переданное значение. Поэтому параметр
+        # уходит ВСЕГДА: поле отдела либо внутренний номер оператора.
+        src = inspect.getsource(dial_service.DialListService.start_call)
+        self.assertIn('extra = {"callerIdForEmployee": caller_id}', src)
+        self.assertIn('or ctx["internal_number"]', src)
+
     def test_ext_unreachable_is_not_counted_against_lead(self):
         # Binotel code=150 «Can't call to the ext»: телефон оператора не зарегистрирован —
         # попытка по лиду не считается, а оператору объясняется, что проверить.
