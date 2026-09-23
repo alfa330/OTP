@@ -154,6 +154,18 @@ def _to_ms(value):
     return int(value.timestamp() * 1000)
 
 
+BACKFILL_SLACK_MS = 24 * 3600 * 1000
+
+
+def needs_backfill(known, since_ms):
+    """Есть ли за потолком списка незагруженная история: самый старый известный
+    чат заметно моложе начала окна (или чатов ещё нет вовсе)."""
+    if not known:
+        return True
+    oldest = min(v for v in known.values() if v is not None)
+    return oldest > since_ms + BACKFILL_SLACK_MS
+
+
 def sync_account(db, client, since_dt, account='potok'):
     """Тянет из окна всё не старше since_dt и пишет в базу. Возвращает счётчики.
 
@@ -206,9 +218,15 @@ def sync_account(db, client, since_dt, account='potok'):
             raise
         stats['list_ceiling'] = True
         STATE['list_ceiling'] = True
-        log.warning('wazzup %s: список чатов упёрся в потолок после %s чатов — добираю масками',
+        log.warning('wazzup %s: список чатов упёрся в потолок после %s чатов',
                     account, stats['chats_seen'])
-    if stats['list_ceiling']:
+    # Маски — только пока за потолком есть незагруженная история. Любое новое
+    # сообщение поднимает чат в начало общего списка, поэтому в штатном режиме
+    # всё свежее ловит основной проход, а чаты, замолчавшие давно, уже у нас
+    # с прошлых прогонов. Признак «история не догружена» — самый старый
+    # известный чат моложе начала окна больше чем на сутки.
+    if stats['list_ceiling'] and needs_backfill(known, since_ms):
+        log.warning('wazzup %s: за потолком есть незагруженная история — добираю масками', account)
         for pattern in PHONE_PATTERNS:
             for chat in client.iter_chats(since_ms, name=pattern):
                 handle(chat)

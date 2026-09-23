@@ -282,6 +282,26 @@ class SyncTests(unittest.TestCase):
         requested = [c[1]["chatId"] for c in client.calls if c[0] == "v2/messages"]
         self.assertEqual(requested, ["77001111111", "77002222222"])
 
+    def test_masks_skipped_when_history_already_covers_the_window(self):
+        """В штатном режиме потолок списка упирается каждый прогон (в окне 14 тыс.
+        чатов), но маски не нужны: старые чаты уже загружены, свежее ловит
+        основной проход. Гоняли бы 100 масок каждые 10 минут — зря."""
+        now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+        since = now - timedelta(days=45)
+        row = {"chatId": "77001111111", "chatType": "whatsapp",
+               "lastMessage": {"datetime": MS(now)}, "chats": [{"channelId": "ch"}]}
+        client = _FakePagingClient({0: [row] * 100, 100: "CEILING"}, {})
+        # самый старый известный чат — у самого начала окна: история загружена
+        db = _FakeDb(known={"77001111111": now, "old": since + timedelta(hours=3)})
+        stats = potok_sync.sync_account(db, client, since, account="potok")
+        self.assertTrue(stats["list_ceiling"])
+        self.assertEqual(stats["patterns_done"], 0)
+        self.assertFalse(any(c[1].get("name") for c in client.calls))
+        # а если самого старого известного чата нет и близко к началу окна — маски нужны
+        self.assertTrue(potok_sync.needs_backfill({"a": MS(now - timedelta(days=10))}, MS(since)))
+        self.assertTrue(potok_sync.needs_backfill({}, MS(since)))
+        self.assertFalse(potok_sync.needs_backfill({"a": MS(since + timedelta(hours=1))}, MS(since)))
+
     def test_other_list_errors_still_raise(self):
         pages = {0: [{"chatId": "x", "chatType": "whatsapp", "lastMessage": {"datetime": 10 ** 13}, "chats": [{"channelId": "c"}]}] * 100}
         client = _FakePagingClient(pages, {})
