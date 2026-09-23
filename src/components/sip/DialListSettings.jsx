@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosToggle, IosSegmented } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
+import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
 
 /*
  * Обзвон из телефона (раздел dial_list): панели настроек отдела, базы водителей
@@ -53,8 +55,9 @@ const Row = ({ label, hint, children, wrap = false }) => (
     </div>
 );
 
-/* Загрузка состояния отдела: настройки + сводка базы. Один хук на обе панели. */
-export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId }) => {
+/* Загрузка состояния отдела: настройки + сводка базы за месяц (period — ISO
+ * первого дня; пусто — обзваниваемый месяц). Один хук на все панели. */
+export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, period = '' }) => {
     const [settings, setSettings] = useState(null);
     const [summary, setSummary] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -68,9 +71,10 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId })
         setLoading(true);
         setError('');
         try {
+            const qs = period && period !== 'all' ? `?period=${encodeURIComponent(period)}` : '';
             const [sResp, lResp] = await Promise.all([
                 fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/settings`, { credentials: 'include', headers: authHeaders() }),
-                fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads/summary`, { credentials: 'include', headers: authHeaders() }),
+                fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads/summary${qs}`, { credentials: 'include', headers: authHeaders() }),
             ]);
             if (sResp.status === 403) { setForbidden(true); return; }
             if (!sResp.ok) throw new Error(await readError(sResp));
@@ -82,15 +86,15 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId })
         } finally {
             setLoading(false);
         }
-    }, [apiBaseUrl, authHeaders, departmentId]);
+    }, [apiBaseUrl, authHeaders, departmentId, period]);
 
     useEffect(() => { load(); }, [load]);
 
     return { settings, summary, loading, error, forbidden, reload: load };
 };
 
-/** Панель настроек отдела: режим, порция, повторы, номер для линии оператора. */
-export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, settings, onSaved, canEdit = true, showToast }) => {
+/** Панель настроек отдела: режим, порция, повторы, обзваниваемый месяц, номер для линии оператора. */
+export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, settings, periods = [], onSaved, canEdit = true, showToast }) => {
     const [form, setForm] = useState(null);
     const [saving, setSaving] = useState(false);
 
@@ -106,6 +110,7 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             max_attempts: String(settings.max_attempts ?? 3),
             retry_after_hours: String(settings.retry_after_hours ?? 24),
             caller_id_for_employee: settings.caller_id_for_employee || '',
+            active_period: settings.active_period || '',
         });
     }, [settings]);
 
@@ -119,6 +124,7 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                 max_attempts: numOr(form.max_attempts, 3),
                 retry_after_hours: numOr(form.retry_after_hours, 24),
                 caller_id_for_employee: form.caller_id_for_employee.trim(),
+                active_period: form.active_period || '',
             };
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/settings`, {
                 method: 'PUT',
@@ -170,6 +176,26 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             </section>
 
             <section className="space-y-1.5">
+                <div className={iosGroupLabel}>База</div>
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                    <Row
+                        label="Какой месяц обзванивается"
+                        hint={`Операторы получают порции только из базы этого месяца. Сейчас: ${monthLabel(settings?.period) || 'текущий месяц'}. Номер может повторяться в базах разных месяцев.`}
+                        wrap
+                    >
+                        <CustomSelect
+                            value={form.active_period}
+                            onChange={(v) => setForm((f) => ({ ...f, active_period: v }))}
+                            disabled={!canEdit}
+                            options={[{ value: '', label: 'Текущий календарный месяц (автоматически)' },
+                                ...buildPeriodOptions(periods, { includeNext: true }).filter((o) => o.value !== 'all')]}
+                            ariaLabel="Обзваниваемый месяц"
+                        />
+                    </Row>
+                </div>
+            </section>
+
+            <section className="space-y-1.5">
                 <div className={iosGroupLabel}>Звонок</div>
                 <div className={`${iosCard} divide-y divide-slate-100`}>
                     <Row
@@ -201,8 +227,8 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
     );
 };
 
-/** Панель базы водителей отдела: цифры, загрузка файла, последние загрузки. */
-export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, onChanged, canEdit = true, showToast }) => {
+/** Панель базы водителей отдела за месяц: цифры, загрузка файла, последние загрузки. */
+export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, period = '', onPeriodChange, onChanged, canEdit = true, showToast }) => {
     const [uploading, setUploading] = useState(false);
     const [dragOver, setDragOver] = useState(false);
     const fileRef = useRef(null);
@@ -211,12 +237,17 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
         if (typeof showToast === 'function') showToast(msg, kind);
     }, [showToast]);
 
+    const shownPeriod = period || summary?.period || '';
+    const isActive = summary ? summary.is_active_period !== false : true;
+    const periodOptions = buildPeriodOptions(summary?.periods || [], { includeNext: true, activePeriod: summary?.active_period });
+
     const upload = async (file) => {
         if (!file || !canEdit) return;
         setUploading(true);
         try {
             const body = new FormData();
             body.append('file', file);
+            if (shownPeriod) body.append('period', shownPeriod);
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads/upload`, {
                 method: 'POST',
                 credentials: 'include',
@@ -225,7 +256,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-            toast(`Загружено: новых ${data.rows_new ?? 0}, повторов ${data.rows_duplicate ?? 0}, без номера ${data.rows_invalid ?? 0}`, 'success');
+            toast(`${monthLabel(data.period || shownPeriod)}: новых ${data.rows_new ?? 0}, повторов ${data.rows_duplicate ?? 0}, без номера ${data.rows_invalid ?? 0}`, 'success');
             onChanged?.();
         } catch (e) {
             toast(e.message || 'Не удалось загрузить список', 'error');
@@ -246,11 +277,31 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
         { label: 'Не звонили', value: summary?.by_status?.new ?? 0, tone: 'text-slate-900' },
         { label: 'В работе', value: summary?.by_status?.in_progress ?? 0, tone: 'text-amber-600' },
         { label: 'Закрыто', value: summary?.by_status?.done ?? 0, tone: 'text-emerald-600' },
-        { label: 'Доступно сейчас', value: summary?.pool_available ?? 0, tone: 'text-blue-600' },
+        { label: 'Доступно сейчас', value: isActive ? (summary?.pool_available ?? 0) : '—', tone: 'text-blue-600' },
     ];
 
     return (
         <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                <div className="flex items-center gap-2">
+                    <div className={iosGroupLabel}>База за месяц</div>
+                    {summary && (
+                        <IosBadge tone={isActive ? 'green' : 'slate'}>{isActive ? 'обзванивается' : 'не обзванивается'}</IosBadge>
+                    )}
+                </div>
+                <CustomSelect
+                    value={shownPeriod}
+                    onChange={(v) => onPeriodChange?.(v)}
+                    options={periodOptions}
+                    className="w-full sm:w-72"
+                    ariaLabel="Месяц базы"
+                />
+            </div>
+            {summary && !isActive && (
+                <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+                    Операторы сейчас получают порции из базы за {monthLabel(summary.active_period)}. Чтобы обзванивать этот месяц, переключите его во вкладке «Настройки».
+                </div>
+            )}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                 {tiles.map((t) => (
                     <div key={t.label} className={`${iosCard} px-3 py-3`}>
@@ -272,10 +323,10 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                     <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-blue-600">
                         <FaIcon className={uploading ? 'fas fa-spinner fa-spin' : 'fas fa-file-arrow-up'} style={{ width: 18, height: 18 }} />
                     </div>
-                    <div className="mt-3 text-[14px] font-semibold text-slate-800">Загрузить список водителей</div>
+                    <div className="mt-3 text-[14px] font-semibold text-slate-800">Загрузить список водителей{shownPeriod ? ` за ${monthLabel(shownPeriod)}` : ''}</div>
                     <div className="mt-1 text-[12.5px] text-slate-500">
                         Перетащите сюда CSV или Excel с колонками <b>fio</b> и <b>phone</b>, или выберите файл.
-                        Повторные номера не дублируются.
+                        Внутри месяца повторные номера не дублируются; в базе другого месяца тот же номер допускается.
                     </div>
                     <input
                         ref={fileRef}
@@ -292,10 +343,10 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             )}
 
             <section className="space-y-1.5">
-                <div className={iosGroupLabel}>Последние загрузки</div>
+                <div className={iosGroupLabel}>Загрузки за {monthLabel(shownPeriod) || 'месяц'}</div>
                 <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                     {!summary?.batches?.length ? (
-                        <div className="px-4 py-5 text-center text-[13px] text-slate-500">Файлов ещё не загружали</div>
+                        <div className="px-4 py-5 text-center text-[13px] text-slate-500">В этот месяц файлов ещё не загружали</div>
                     ) : summary.batches.slice(0, 8).map((b) => (
                         <div key={b.id} className="flex items-center justify-between gap-3 px-4 py-3">
                             <div className="min-w-0">

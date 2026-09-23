@@ -3,15 +3,20 @@ import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
+import { OutcomeBadge } from './DialListOutcomesPanel';
+import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 
 /*
  * Журнал водителей раздела «Обзвон из телефона» (запрос владельца 23.09.2026).
  *
- * Список всех, кого загрузили для обзвона: этап, ответственный оператор, сколько
- * было попыток и чем кончился последний звонок. Карточка — вся история: каждая
- * попытка с исходом и длительностью, запись разговора (если дозвонились), ручные
- * действия руководителя. Руководитель может вернуть человека в список (попытки
- * обнуляются) или исключить его из обзвона.
+ * Список всех, кого загрузили для обзвона за месяц: этап, ответственный оператор,
+ * сколько было попыток, чем кончился последний звонок и какой итог поставил
+ * оператор (с комментарием). Карточка — вся история: каждая попытка с исходом
+ * АТС, итогом оператора, длительностью, запись разговора (если дозвонились),
+ * ручные действия руководителя. Руководитель может вернуть человека в список
+ * (попытки обнуляются) или исключить его из обзвона.
+ *
+ * Базы делятся по месяцам: переключатель месяца в тулбаре, «Все месяцы» — сводно.
  *
  * Номер телефона здесь — только маска (последние 4 цифры), как и везде в
  * разделе: файл с номерами есть у того, кто его загрузил, а сервер номер наружу
@@ -100,6 +105,17 @@ const StageBadge = ({ lead }) => (
     <IosBadge tone={STAGE_TONE[lead.stage] || 'slate'}>{lead.stage_label || lead.stage}</IosBadge>
 );
 
+/** Комментарий оператора: одной строкой в списке, целиком в карточке. */
+const Comment = ({ text, clamp = true }) => {
+    if (!text) return null;
+    return (
+        <span className={`inline-flex min-w-0 items-start gap-1 text-[12px] text-slate-500 ${clamp ? 'truncate' : ''}`} title={clamp ? text : undefined}>
+            <FaIcon className="fas fa-comment mt-0.5 shrink-0 text-slate-400" style={{ width: 10, height: 10 }} />
+            <span className={clamp ? 'truncate' : 'whitespace-pre-wrap'}>{text}</span>
+        </span>
+    );
+};
+
 /* ─── строка списка ─────────────────────────────────────────────────────── */
 
 const LeadRow = ({ lead, onOpen }) => {
@@ -113,14 +129,23 @@ const LeadRow = ({ lead, onOpen }) => {
         >
             <Avatar name={lead.full_name} tone={STAGE_TONE[lead.stage]} />
             <div className="min-w-0 flex-1">
-                <div className={`truncate text-[14px] font-semibold ${lead.stage === 'excluded' ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
-                    {lead.full_name || 'Без имени'}
+                <div className="flex min-w-0 items-center gap-2">
+                    <span className={`truncate text-[14px] font-semibold ${lead.stage === 'excluded' ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
+                        {lead.full_name || 'Без имени'}
+                    </span>
+                    {lead.outcome && <OutcomeBadge outcome={lead.outcome} small />}
                 </div>
-                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[12px] text-slate-500">
+                <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-[12px] text-slate-500">
                     <span className="font-mono tabular-nums">{lead.phone_masked}</span>
                     <span className="text-slate-300">·</span>
                     <span>попыток {lead.attempts_total}/{lead.max_attempts}</span>
-                    {lead.note && (
+                    {lead.comment && (
+                        <>
+                            <span className="text-slate-300">·</span>
+                            <Comment text={lead.comment} />
+                        </>
+                    )}
+                    {!lead.comment && lead.note && (
                         <>
                             <span className="text-slate-300">·</span>
                             <span className="truncate text-slate-400"><FaIcon className="fas fa-pen" style={{ width: 10, height: 10 }} /> {lead.note}</span>
@@ -178,6 +203,16 @@ const AttemptItem = ({ attempt, onRecording, recording }) => {
                     {attempt.internal_number && <> · линия {attempt.internal_number}</>}
                     {attempt.final_source && <> · исход: {attempt.final_source === 'webhook' ? 'вебхук Binotel' : attempt.final_source === 'poll' ? 'опрос Binotel' : attempt.final_source}</>}
                 </div>
+                {(attempt.outcome || attempt.comment) && (
+                    <div className="mt-1.5 flex flex-wrap items-start gap-2">
+                        {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} />}
+                        {attempt.comment && (
+                            <div className="min-w-0 flex-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[12.5px] text-slate-700">
+                                <Comment text={attempt.comment} clamp={false} />
+                            </div>
+                        )}
+                    </div>
+                )}
                 {attempt.api_error && (
                     <div className="mt-1 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[12px] text-rose-600">{attempt.api_error}</div>
                 )}
@@ -257,6 +292,10 @@ const LeadCard = ({ lead, loading, error, canEdit, busy, onRequeue, onExclude, o
                     {lead.attempts_total} из {lead.max_attempts}
                     {lead.next_retry_at && <div className="text-[11.5px] text-slate-400">повтор не раньше {fmtDateTime(lead.next_retry_at)}</div>}
                 </MetaCell>
+                <MetaCell label="Итог оператора">
+                    {lead.outcome ? <OutcomeBadge outcome={lead.outcome} /> : (lead.last_call ? 'не указан' : '—')}
+                    {lead.comment && <div className="mt-1 text-[12px] text-slate-600">{lead.comment}</div>}
+                </MetaCell>
                 <MetaCell label="Последний звонок">
                     {lead.last_call ? (
                         <>
@@ -268,17 +307,12 @@ const LeadCard = ({ lead, loading, error, canEdit, busy, onRequeue, onExclude, o
                 <MetaCell label="Дозвонились">
                     {lead.answered_at ? fmtDateTime(lead.answered_at) : 'нет'}
                 </MetaCell>
-                <MetaCell label="Загружен">
-                    {fmtDate(firstBatch?.uploaded_at || lead.created_at)}
+                <MetaCell label="База">
+                    {monthLabel(lead.period) || fmtDate(firstBatch?.uploaded_at || lead.created_at)}
                     <div className="truncate text-[11.5px] text-slate-400" title={firstBatch?.file_name}>
-                        {firstBatch?.file_name || lead.batch?.file_name || ''}{firstBatch?.uploaded_by ? ` · ${firstBatch.uploaded_by}` : ''}
+                        {fmtDate(firstBatch?.uploaded_at || lead.created_at)}{firstBatch?.file_name ? ` · ${firstBatch.file_name}` : ''}{firstBatch?.uploaded_by ? ` · ${firstBatch.uploaded_by}` : ''}
+                        {lead.upload_count > 1 && lastBatch ? ` · в файлах ${lead.upload_count} раза` : ''}
                     </div>
-                </MetaCell>
-                <MetaCell label="В файлах">
-                    {lead.upload_count} {lead.upload_count === 1 ? 'раз' : 'раза'}
-                    {lead.upload_count > 1 && lastBatch && (
-                        <div className="truncate text-[11.5px] text-slate-400">последний: {fmtDate(lastBatch.uploaded_at)}</div>
-                    )}
                 </MetaCell>
             </div>
 
@@ -376,20 +410,58 @@ const LeadCard = ({ lead, loading, error, canEdit, busy, onRequeue, onExclude, o
     );
 };
 
+/* ─── чипы итогов ───────────────────────────────────────────────────────── */
+
+const OutcomeChips = ({ outcomes = [], value, onChange }) => {
+    const visible = outcomes.filter((o) => o.is_active !== false || o.count > 0);
+    if (visible.length === 0) return null;
+    return (
+        <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Итоги</span>
+            {visible.map((o) => {
+                const active = value === o.id;
+                const color = /^#[0-9A-Fa-f]{6}$/.test(o.color || '') ? o.color : '#8E8E93';
+                return (
+                    <button
+                        key={o.id}
+                        type="button"
+                        onClick={() => onChange(active ? '' : o.id)}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium transition active:scale-95 ${active ? 'text-white' : 'text-slate-700 hover:bg-slate-50'}`}
+                        style={active
+                            ? { backgroundColor: color }
+                            : { backgroundColor: `${color}14`, boxShadow: `inset 0 0 0 1px ${color}40` }}
+                        title={o.is_active === false ? 'Итог выключен, но встречается в истории' : o.name}
+                    >
+                        {!active && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />}
+                        <span className={o.is_active === false ? 'line-through' : ''}>{o.name}</span>
+                        <span className={`tabular-nums ${active ? 'text-white/80' : 'text-slate-400'}`}>{o.count}</span>
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
+
 /* ─── сам журнал ────────────────────────────────────────────────────────── */
 
-const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], canEdit = true, showToast, onChanged }) => {
+const DialListJournal = ({
+    apiBaseUrl, authHeaders, departmentId, batches = [], periods = [], activePeriod = '',
+    period = '', onPeriodChange, canEdit = true, showToast, onChanged,
+}) => {
     const [q, setQ] = useState('');
     const [qDebounced, setQDebounced] = useState('');
     const [stage, setStage] = useState('');
     const [operatorId, setOperatorId] = useState('');
     const [batchId, setBatchId] = useState('');
+    const [outcomeId, setOutcomeId] = useState('');
     const [range, setRange] = useState({ from: '', to: '' });
     const [sort, setSort] = useState('activity');
 
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
     const [byStage, setByStage] = useState({});
+    const [byOutcome, setByOutcome] = useState([]);
+    const [meta, setMeta] = useState({});
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState('');
@@ -419,7 +491,7 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
                 const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/users`, { credentials: 'include', headers: authHeaders() });
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-                if (!cancelled) setUsers(Array.isArray(data.users) ? data.users : Array.isArray(data.items) ? data.items : []);
+                if (!cancelled) setUsers(Array.isArray(data.users) ? data.users : []);
             } catch {
                 if (!cancelled) setUsers([]);
             }
@@ -427,16 +499,21 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
         return () => { cancelled = true; };
     }, [apiBaseUrl, authHeaders, departmentId]);
 
+    // Месяц: '' — обзваниваемый (сервер знает какой), 'all' — все, иначе ISO первого дня.
+    const shownPeriod = period || activePeriod || '';
+
     const buildQuery = useCallback((offset) => {
         const qs = new URLSearchParams({ limit: String(PAGE), offset: String(offset), sort });
         if (qDebounced) qs.set('q', qDebounced);
         if (stage) qs.set('stage', stage);
         if (operatorId) qs.set('operator_id', operatorId);
         if (batchId) qs.set('batch_id', batchId);
+        if (outcomeId) qs.set('outcome_id', outcomeId);
+        if (period) qs.set('period', period);
         if (range.from) qs.set('date_from', range.from);
         if (range.to) qs.set('date_to', range.to);
         return qs;
-    }, [qDebounced, stage, operatorId, batchId, range.from, range.to, sort]);
+    }, [qDebounced, stage, operatorId, batchId, outcomeId, period, range.from, range.to, sort]);
 
     const load = useCallback(async (offset = 0) => {
         const seq = ++requestSeq.current;
@@ -451,6 +528,8 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
             setItems((cur) => (offset === 0 ? list : [...cur, ...list]));
             setTotal(Number(data.total) || 0);
             setByStage(data.by_stage || {});
+            setByOutcome(Array.isArray(data.by_outcome) ? data.by_outcome : []);
+            setMeta({ period: data.period, period_label: data.period_label, active_period: data.active_period });
         } catch (e) {
             if (seq !== requestSeq.current) return;
             setError(e.message || 'Не удалось загрузить журнал');
@@ -543,6 +622,11 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
         ...batches.map((b) => ({ value: String(b.id), label: `${b.file_name || 'файл'} · ${fmtDate(b.created_at)}` })),
     ], [batches]);
 
+    const periodOptions = useMemo(
+        () => buildPeriodOptions(periods, { includeAll: true, activePeriod }),
+        [periods, activePeriod],
+    );
+
     const sortOptions = [
         { value: 'activity', label: 'Сначала свежие' },
         { value: 'name', label: 'По ФИО' },
@@ -550,13 +634,21 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
         { value: 'attempts', label: 'Больше попыток' },
     ];
 
-    const hasFilters = Boolean(qDebounced || stage || operatorId || batchId || range.from || range.to);
-    const resetFilters = () => { setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setRange({ from: '', to: '' }); };
+    const hasFilters = Boolean(qDebounced || stage || operatorId || batchId || outcomeId || range.from || range.to);
+    const resetFilters = () => { setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setOutcomeId(''); setRange({ from: '', to: '' }); };
+    const viewingOtherMonth = shownPeriod && shownPeriod !== 'all' && activePeriod && shownPeriod !== activePeriod;
 
     return (
         <section className="space-y-3">
             <div className={`${iosCard} space-y-3 p-3`}>
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+                    <CustomSelect
+                        value={shownPeriod}
+                        onChange={(v) => onPeriodChange?.(v)}
+                        options={periodOptions}
+                        className="lg:w-60"
+                        ariaLabel="Месяц базы"
+                    />
                     <div className="relative flex-1">
                         <FaIcon className="fas fa-magnifying-glass pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" style={{ width: 13, height: 13 }} />
                         <input
@@ -567,8 +659,8 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
                             aria-label="Поиск по журналу"
                         />
                     </div>
-                    <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} className="lg:w-52" ariaLabel="Оператор" searchable={users.length > 8} />
-                    <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} className="lg:w-56" ariaLabel="Файл загрузки" />
+                    <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} className="lg:w-48" ariaLabel="Оператор" searchable={users.length > 8} />
+                    <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} className="lg:w-52" ariaLabel="Файл загрузки" />
                     <IosDateRangePicker
                         from={range.from}
                         to={range.to}
@@ -589,12 +681,18 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
                         </button>
                     )}
                 </div>
+                <OutcomeChips outcomes={byOutcome} value={outcomeId} onChange={setOutcomeId} />
+                {viewingOtherMonth && (
+                    <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+                        {monthLabel(shownPeriod)} сейчас не обзванивается: операторы получают порции из базы за {monthLabel(activePeriod)}.
+                    </div>
+                )}
             </div>
 
             <div className={`${iosCard} overflow-hidden`}>
                 <div className="hidden items-center gap-3 border-b border-slate-100 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 md:flex">
                     <div className="w-9" />
-                    <div className="flex-1">Водитель</div>
+                    <div className="flex-1">Водитель · итог оператора</div>
                     <div className="w-44">Ответственный</div>
                     <div className="w-44 text-right">Этап · последний звонок</div>
                     <div className="w-3" />
@@ -608,7 +706,7 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
                         <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                             <FaIcon className="fas fa-address-book" style={{ width: 18, height: 18 }} />
                         </div>
-                        <div className="mt-3 text-[14px] font-semibold text-slate-800">{hasFilters ? 'Никого не нашли' : 'Журнал пуст'}</div>
+                        <div className="mt-3 text-[14px] font-semibold text-slate-800">{hasFilters ? 'Никого не нашли' : `За ${meta.period_label || monthLabel(shownPeriod) || 'этот месяц'} база пуста`}</div>
                         <div className="mt-1 text-[12.5px] text-slate-500">
                             {hasFilters ? 'Попробуйте снять часть фильтров.' : 'Загрузите список водителей во вкладке «База водителей» — они появятся здесь.'}
                         </div>
@@ -619,7 +717,7 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
                             {items.map((lead) => <LeadRow key={lead.id} lead={lead} onOpen={openLead} />)}
                         </div>
                         <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-2.5 text-[12px] text-slate-500">
-                            <span>Показано {items.length} из {total}</span>
+                            <span>Показано {items.length} из {total}{meta.period_label ? ` · ${meta.period_label}` : ''}</span>
                             {items.length < total && (
                                 <button type="button" onClick={() => load(items.length)} disabled={loadingMore} className={`${iosBtnSecondary} py-1.5 text-[12.5px]`}>
                                     {loadingMore ? <FaIcon className="fas fa-spinner fa-spin" /> : <FaIcon className="fas fa-arrow-down" style={{ width: 11, height: 11 }} />}
@@ -639,6 +737,7 @@ const DialListJournal = ({ apiBaseUrl, authHeaders, departmentId, batches = [], 
                     <span className="inline-flex flex-wrap items-center gap-2">
                         <span className="font-mono tabular-nums">{card.phone_masked}</span>
                         <StageBadge lead={card} />
+                        {card.period && <span className="text-slate-400">{monthLabel(card.period)}</span>}
                     </span>
                 ) : undefined}
                 maxWidth="max-w-2xl"

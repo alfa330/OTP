@@ -10,6 +10,9 @@
     POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке
     POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
                                                              {event: ringing|answered|ended|no_leg}
+    POST /api/operator/dial_list/attempts/<attempt_id>/outcome
+                                                             {outcome_id, comment} — итог разговора
+                                                             (обязателен перед следующим звонком)
 
 Ручки руководителя. Круг свой, не от «Настроек SIP»: админ видит все отделы
 раздела, глава отдела — свои отделы, если они в периметре (Binotel, заведённые
@@ -17,8 +20,9 @@
     GET     /api/dial_list/departments                       отделы раздела в моей зоне
     GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
-    POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО+телефон
-    GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле
+    POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО+телефон (+period=YYYY-MM)
+    GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле (?period=)
+    GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка
     GET     /api/dial_list/departments/<id>/leads            журнал водителей (фильтры:
                                                              q, stage, operator_id, batch_id,
                                                              date_from, date_to, sort, limit, offset)
@@ -42,7 +46,7 @@ from datetime import date, datetime
 
 from flask import Blueprint, jsonify, request
 
-from .service import DialListError, DialListService
+from .service import DialListError, DialListService, parse_period
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +140,15 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         user_id, _ = _operator()
         payload = request.get_json(silent=True) or {}
         result = svc.phone_event(user_id, attempt_id, payload.get('event'), payload.get('at'))
+        return jsonify({"status": "success", **result}), 200
+
+    @bp.route('/api/operator/dial_list/attempts/<attempt_id>/outcome', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_outcome(attempt_id):
+        user_id, _ = _operator()
+        payload = request.get_json(silent=True) or {}
+        result = svc.set_attempt_outcome(user_id, attempt_id, payload.get('outcome_id'), payload.get('comment', ''))
         return jsonify({"status": "success", **result}), 200
 
     # ── руководитель ────────────────────────────────────────────────────────
@@ -274,6 +287,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             raise DialListError("Файл пустой")
         if len(raw_bytes) > LEADS_MAX_FILE_SIZE_BYTES:
             raise DialListError(f"Файл слишком большой. Лимит: {LEADS_MAX_FILE_SIZE_MB} MB", 413)
+        # База какого месяца: поле формы period=YYYY-MM; пусто — обзваниваемый месяц.
+        period = parse_period(request.form.get('period'))
         # Общий разбор файла «fio + phone» и общая нормализация номера — одна
         # точка правды для всей телефонии проекта.
         from common.leads_file import parse_leads_file
@@ -281,7 +296,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             rows = parse_leads_file(raw_bytes, file_ext)
         except ValueError as exc:
             raise DialListError(str(exc))
-        counts = svc.import_leads(department_id, requester_id, file_name, rows)
+        counts = svc.import_leads(department_id, requester_id, file_name, rows, period=period)
         return jsonify({"status": "success", **counts}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/summary', methods=['GET', 'OPTIONS'])
@@ -289,7 +304,21 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def leads_summary(department_id):
         _manager(department_id)
-        return jsonify({"status": "success", **svc.leads_summary(department_id)}), 200
+        period = parse_period(request.args.get('period'))
+        return jsonify({"status": "success", **svc.leads_summary(department_id, period=period)}), 200
+
+    # ── итоги звонка ────────────────────────────────────────────────────────
+    @bp.route('/api/dial_list/departments/<int:department_id>/outcomes', methods=['GET', 'PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def outcomes(department_id):
+        requester_id, _scope = _manager(department_id)
+        if request.method == 'PUT':
+            payload = request.get_json(silent=True) or {}
+            items = payload.get('items')
+            return jsonify({"status": "success",
+                            "outcomes": svc.save_outcomes(department_id, items, changed_by=requester_id)}), 200
+        return jsonify({"status": "success", "outcomes": svc.outcomes(department_id)}), 200
 
     # ── журнал водителей ────────────────────────────────────────────────────
     # Номер водителя и здесь не отдаётся (только маска): руководитель удалённого
@@ -315,11 +344,15 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         batch_id = args.get('batch_id') or None
         if batch_id:
             batch_id = _uuid_or_404(batch_id, "Файл загрузки")
+        outcome_id = args.get('outcome_id') or None
+        if outcome_id:
+            outcome_id = _uuid_or_404(outcome_id, "Итог")
         return jsonify({"status": "success", **svc.leads_journal(
             department_id, q=args.get('q', ''), stage=args.get('stage', ''),
             operator_id=args.get('operator_id') or None, batch_id=batch_id,
             date_from=args.get('date_from') or None, date_to=args.get('date_to') or None,
             sort=args.get('sort', 'activity'), limit=args.get('limit', 50), offset=args.get('offset', 0),
+            period=parse_period(args.get('period'), allow_all=True), outcome_id=outcome_id,
         )}), 200
 
     @bp.route('/api/dial_list/leads/<lead_id>', methods=['GET', 'OPTIONS'])

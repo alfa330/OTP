@@ -6,6 +6,8 @@ import IosDatePicker from '../ui/DatePicker';
 import { DialListLeadsPanel, DialListOperatorsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
 import DialListLinesPanel from './DialListLinesPanel';
 import DialListJournal from './DialListJournal';
+import DialListOutcomesPanel from './DialListOutcomesPanel';
+import { monthLabel } from './dialListPeriods';
 
 /*
  * Раздел «Обзвон из телефона» — экран руководителя удалённого колл-центра.
@@ -112,6 +114,9 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const [enrolling, setEnrolling] = useState(false);
     const [departmentId, setDepartmentId] = useState('');
     const [tab, setTab] = useState('operators');
+    // Месяц базы, который смотрим во вкладках «База водителей» и «Журнал»
+    // ('' — обзваниваемый месяц отдела). Сбрасывается при смене отдела.
+    const [period, setPeriod] = useState('');
     const [date, setDate] = useState(todayIso);
     const [rows, setRows] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -145,7 +150,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     }, [apiBaseUrl, authHeaders]);
 
     useEffect(() => { loadDepartments(); }, [loadDepartments]);
-    useEffect(() => { writeLastDept(departmentId); }, [departmentId]);
+    useEffect(() => { writeLastDept(departmentId); setPeriod(''); }, [departmentId]);
 
     // Кандидаты приходят только админу: по ним же понимаем, что отключать отдел можно.
     const candidatesAdmin = Array.isArray(candidates);
@@ -212,7 +217,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
 
     useEffect(() => { loadOverview(); }, [loadOverview]);
 
-    const dept = useDialListDepartment({ apiBaseUrl, authHeaders, departmentId: departmentId || null });
+    const dept = useDialListDepartment({ apiBaseUrl, authHeaders, departmentId: departmentId || null, period: period === 'all' ? '' : period });
     const selected = (departments || []).find((d) => String(d.department_id) === String(departmentId));
 
     const totals = useMemo(() => rows.reduce((acc, r) => ({
@@ -256,6 +261,12 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     <div className="flex flex-wrap items-center gap-2">
                         {selected && (
                             <IosBadge tone={enabled ? 'green' : 'slate'}>{enabled ? 'Включён' : 'Выключен'}</IosBadge>
+                        )}
+                        {selected && dept.settings?.period && (
+                            <IosBadge tone="blue" title="Какой месяц базы сейчас обзванивается">
+                                <FaIcon className="fas fa-calendar" style={{ width: 10, height: 10 }} />
+                                {monthLabel(dept.settings.period)}
+                            </IosBadge>
                         )}
                         {departments && departments.length > 1 && (
                             <CustomSelect
@@ -399,6 +410,8 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             authHeaders={authHeaders}
                             departmentId={selected.department_id}
                             summary={dept.summary}
+                            period={period === 'all' ? '' : period}
+                            onPeriodChange={setPeriod}
                             onChanged={dept.reload}
                             canEdit={canEdit}
                             showToast={showToast}
@@ -411,6 +424,10 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             authHeaders={authHeaders}
                             departmentId={selected.department_id}
                             batches={dept.summary?.batches || []}
+                            periods={dept.summary?.periods || []}
+                            activePeriod={dept.summary?.active_period || dept.settings?.period || ''}
+                            period={period}
+                            onPeriodChange={setPeriod}
                             onChanged={dept.reload}
                             canEdit={canEdit}
                             showToast={showToast}
@@ -427,7 +444,15 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         authHeaders={authHeaders}
                                         departmentId={selected.department_id}
                                         settings={dept.settings}
+                                        periods={dept.summary?.periods || []}
                                         onSaved={() => { dept.reload(); loadDepartments(selected.department_id); }}
+                                        canEdit={canEdit}
+                                        showToast={showToast}
+                                    />
+                                    <DialListOutcomesPanel
+                                        apiBaseUrl={apiBaseUrl}
+                                        authHeaders={authHeaders}
+                                        departmentId={selected.department_id}
                                         canEdit={canEdit}
                                         showToast={showToast}
                                     />

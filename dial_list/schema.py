@@ -88,9 +88,26 @@ DDL = [
         attempts_total SMALLINT NOT NULL DEFAULT 0,
         last_attempt_at TIMESTAMP WITH TIME ZONE,
         answered_at TIMESTAMP WITH TIME ZONE,
+        period DATE NOT NULL DEFAULT (date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))::date,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (department_id, phone_norm)
+        CONSTRAINT uq_dial_list_leads_period_phone UNIQUE (department_id, period, phone_norm)
+    )
+    """,
+    # Итоги звонка (запрос владельца 23.09.2026): справочник отдела, оператор
+    # обязан выбрать один после каждого разговора; цвет и порядок задаёт
+    # руководитель. Не удаляются, а выключаются — история на них ссылается.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_outcomes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        name VARCHAR(64) NOT NULL,
+        color VARCHAR(7) NOT NULL DEFAULT '#8E8E93',
+        position SMALLINT NOT NULL DEFAULT 0,
+        requeue BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
     """
@@ -174,6 +191,31 @@ DDL = [
     )
     """,
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''",
+    # Базы по месяцам (запрос владельца 23.09.2026): один и тот же номер может
+    # повторяться в базе другого месяца, внутри месяца — нет. Уникальность
+    # переезжает с (отдел, номер) на (отдел, месяц, номер); старое ограничение
+    # снимаем по автоимени Postgres.
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS period DATE NOT NULL"
+    " DEFAULT (date_trunc('month', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))::date",
+    "ALTER TABLE dial_list_leads DROP CONSTRAINT IF EXISTS dial_list_leads_department_id_phone_norm_key",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_dial_list_leads_period_phone') THEN
+            ALTER TABLE dial_list_leads
+                ADD CONSTRAINT uq_dial_list_leads_period_phone UNIQUE (department_id, period, phone_norm);
+        END IF;
+    END $$
+    """,
+    "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS period DATE",
+    # Какой месяц сейчас обзванивается; NULL — текущий календарный.
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS active_period DATE",
+    # Итог и комментарий оператора по попытке; когда телефон принял плечо —
+    # по этому признаку сервер понимает, что разговор был и итог обязателен.
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS outcome_id UUID REFERENCES dial_list_outcomes(id) ON DELETE SET NULL",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_comment TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS outcome_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS leg_answered_at TIMESTAMP WITH TIME ZONE",
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -195,6 +237,10 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_lead_events_lead ON dial_list_lead_events(lead_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_journal ON dial_list_leads(department_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_name ON dial_list_leads(department_id, lower(full_name))",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_period ON dial_list_leads(department_id, period)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_outcomes_department ON dial_list_outcomes(department_id, position)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_outcome ON dial_list_attempts(outcome_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_pending_outcome ON dial_list_attempts(operator_id) WHERE outcome_id IS NULL AND leg_answered_at IS NOT NULL",
 ]
 
 

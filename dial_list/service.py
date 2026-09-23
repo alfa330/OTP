@@ -94,6 +94,21 @@ COMPANY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg")
 
+# Итоги звонка: стартовый набор отдела (руководитель правит в разделе), цвет —
+# hex как в системной палитре iOS, requeue — «перезвонить»: водитель снова
+# попадёт в порции через retry_after_hours, счётчик попыток обнуляется.
+DEFAULT_OUTCOMES = (
+    ("Заинтересован", "#34C759", False),
+    ("Отказ", "#FF3B30", False),
+    ("Перезвонить позже", "#FF9F0A", True),
+    ("Неверный номер", "#8E8E93", False),
+)
+OUTCOME_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+OUTCOME_NAME_MAX = 64
+OUTCOMES_MAX = 30
+COMMENT_MAX = 500
+PERIOD_TZ = timezone(timedelta(hours=5))  # Asia/Almaty
+
 # Отделы, чья работа — этот обзвон (удалённый колл-центр). Глава такого отдела
 # управляет разделом без роли админа. Отдел считается «своим» для раздела также,
 # если ему уже заведены настройки обзвона или его телефония — Binotel: код в
@@ -179,6 +194,37 @@ def mask_phone(phone_norm):
     tail = digits[-4:]
     head = "+7 ••• ••• " if len(digits) == 11 and digits.startswith("7") else "••• "
     return f"{head}{tail[:2]} {tail[2:]}"
+
+
+def current_period():
+    """Первый день текущего месяца по Алматы — база «по умолчанию»."""
+    today = datetime.now(PERIOD_TZ).date()
+    return today.replace(day=1)
+
+
+def parse_period(value, allow_all=False):
+    """'YYYY-MM' или 'YYYY-MM-DD' → первый день месяца (date). Пусто → None
+    (текущий месяц у вызывающего). 'all' → 'all', если разрешено."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if allow_all and text == "all":
+        return "all"
+    for fmt in ("%Y-%m", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).date().replace(day=1)
+        except ValueError:
+            continue
+    raise DialListError("period: ожидается месяц в виде YYYY-MM")
+
+
+def period_label(day):
+    """'Сентябрь 2026' для подписей в ответах (фронт может и сам, но телефону проще так)."""
+    if not day:
+        return ""
+    months = ("Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+              "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь")
+    return f"{months[day.month - 1]} {day.year}"
 
 
 # Этапы лида в журнале (одно место правды — CASE в _JOURNAL_SQL, здесь подписи).
@@ -454,11 +500,13 @@ class DialListService:
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT enabled, portion_size, max_attempts, retry_after_hours,
-                       caller_id_for_employee, updated_at, binotel_company
+                       caller_id_for_employee, updated_at, binotel_company, active_period
                 FROM dial_list_department_settings WHERE department_id = %s
             """, (int(department_id),))
             row = cur.fetchone()
         company = ((row[6] or "").strip() if row else "") or DEFAULT_BINOTEL_COMPANY
+        active_period = row[7] if row else None
+        effective = active_period or current_period()
         settings = {
             "department_id": int(department_id),
             "configured": bool(row),
@@ -469,6 +517,11 @@ class DialListService:
             "caller_id_for_employee": (row[4] or "") if row else "",
             "updated_at": _iso(row[5]) if row else None,
             "binotel_company": company,
+            # Какой месяц обзванивается: явно выбранный руководителем или текущий.
+            "active_period": active_period.isoformat() if active_period else None,
+            "period": effective.isoformat(),
+            "period_label": period_label(effective),
+            "_period": effective,
         }
         return settings
 
@@ -505,13 +558,18 @@ class DialListService:
         for key in ("binotel_api_key", "binotel_api_secret", "webhook_token"):
             if str(payload.get(key) or "").strip():
                 raise DialListError("Это поле не настраивается в iCORE", 400)
+        # active_period: 'YYYY-MM' — обзванивать этот месяц; '' — текущий календарный.
+        if "active_period" in payload:
+            active_period = parse_period(payload.get("active_period"))
+        else:
+            active_period = parse_period(current["active_period"])
 
         with self.db._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO dial_list_department_settings (
                     department_id, enabled, portion_size, max_attempts, retry_after_hours,
-                    caller_id_for_employee, binotel_company, updated_by, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                    caller_id_for_employee, binotel_company, active_period, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                 ON CONFLICT (department_id) DO UPDATE SET
                     enabled = EXCLUDED.enabled,
@@ -520,10 +578,11 @@ class DialListService:
                     retry_after_hours = EXCLUDED.retry_after_hours,
                     caller_id_for_employee = EXCLUDED.caller_id_for_employee,
                     binotel_company = EXCLUDED.binotel_company,
+                    active_period = EXCLUDED.active_period,
                     updated_by = EXCLUDED.updated_by,
                     updated_at = EXCLUDED.updated_at
             """, (int(department_id), enabled, portion_size, max_attempts, retry_after_hours,
-                  caller_id, company, changed_by))
+                  caller_id, company, active_period, changed_by))
         with self._clients_lock:
             self._clients.pop(int(department_id), None)
         return self.department_settings(department_id)
@@ -596,15 +655,18 @@ class DialListService:
         return client
 
     # ------------------------------------------------------------ лиды отдела
-    def import_leads(self, department_id, uploaded_by, file_name, rows):
-        """rows — из common.leads_file.parse_leads_file: (row_number, fio, phone_raw, phone_norm)."""
+    def import_leads(self, department_id, uploaded_by, file_name, rows, period=None):
+        """rows — из common.leads_file.parse_leads_file: (row_number, fio, phone_raw, phone_norm).
+        period — база какого месяца (date, первый день); пусто — месяц, который обзванивается."""
         department_id = int(department_id)
-        counts = {"rows_total": len(rows), "rows_new": 0, "rows_duplicate": 0, "rows_invalid": 0}
+        period = period or self.department_settings(department_id)["_period"]
+        counts = {"rows_total": len(rows), "rows_new": 0, "rows_duplicate": 0, "rows_invalid": 0,
+                  "period": period.isoformat()}
         with self.db._get_cursor() as cur:
             cur.execute("""
-                INSERT INTO dial_list_lead_batches (department_id, uploaded_by, file_name, rows_total)
-                VALUES (%s, %s, %s, %s) RETURNING id
-            """, (department_id, uploaded_by, str(file_name or "")[:255], len(rows)))
+                INSERT INTO dial_list_lead_batches (department_id, uploaded_by, file_name, rows_total, period)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (department_id, uploaded_by, str(file_name or "")[:255], len(rows), period))
             batch_id = str(cur.fetchone()[0])
             seen = set()
             for _row_number, fio, _phone_raw, phone_norm in rows:
@@ -616,16 +678,16 @@ class DialListService:
                     continue
                 seen.add(phone_norm)
                 cur.execute("""
-                    INSERT INTO dial_list_leads (department_id, phone_norm, full_name, first_batch_id, last_batch_id)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (department_id, phone_norm) DO UPDATE SET
+                    INSERT INTO dial_list_leads (department_id, phone_norm, full_name, first_batch_id, last_batch_id, period)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (department_id, period, phone_norm) DO UPDATE SET
                         full_name = CASE WHEN EXCLUDED.full_name <> '' THEN EXCLUDED.full_name
                                          ELSE dial_list_leads.full_name END,
                         last_batch_id = EXCLUDED.last_batch_id,
                         upload_count = dial_list_leads.upload_count + 1,
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING (xmax = 0) AS inserted
-                """, (department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id))
+                """, (department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id, period))
                 inserted = cur.fetchone()[0]
                 counts["rows_new" if inserted else "rows_duplicate"] += 1
             cur.execute("""
@@ -635,33 +697,226 @@ class DialListService:
         counts["batch_id"] = batch_id
         return counts
 
-    def leads_summary(self, department_id):
+    def leads_summary(self, department_id, period=None):
+        """Сводка базы за месяц (period — date первого дня; пусто — обзваниваемый
+        месяц) плюс список всех месяцев отдела для переключателя."""
         department_id = int(department_id)
         settings = self.department_settings(department_id)
+        active = settings["_period"]
+        period = period or active
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT status, COUNT(*) FROM dial_list_leads WHERE department_id = %s GROUP BY status
-            """, (department_id,))
+                SELECT status, COUNT(*) FROM dial_list_leads
+                WHERE department_id = %s AND period = %s GROUP BY status
+            """, (department_id, period))
             by_status = {row[0]: int(row[1]) for row in cur.fetchall()}
-            cur.execute(self._POOL_SQL.format(lock="") .replace("LIMIT %s", ""), (
-                department_id, settings["retry_after_hours"], settings["max_attempts"]))
-            pool = len(cur.fetchall())
+            # «Доступно сейчас» имеет смысл только для обзваниваемого месяца.
+            pool = 0
+            if period == active:
+                cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
+                    department_id, active, settings["retry_after_hours"], settings["max_attempts"]))
+                pool = len(cur.fetchall())
             cur.execute("""
                 SELECT id, file_name, rows_total, rows_new, rows_duplicate, rows_invalid, created_at
-                FROM dial_list_lead_batches WHERE department_id = %s
+                FROM dial_list_lead_batches WHERE department_id = %s AND period = %s
                 ORDER BY created_at DESC LIMIT 20
-            """, (department_id,))
+            """, (department_id, period))
             batches = [{
                 "id": _sid(r[0]), "file_name": r[1], "rows_total": r[2], "rows_new": r[3],
                 "rows_duplicate": r[4], "rows_invalid": r[5], "created_at": _iso(r[6]),
             } for r in cur.fetchall()]
+            cur.execute("""
+                SELECT period, COUNT(*),
+                       COUNT(*) FILTER (WHERE status = 'done' AND answered_at IS NOT NULL),
+                       COUNT(*) FILTER (WHERE status IN ('new', 'in_progress'))
+                FROM dial_list_leads WHERE department_id = %s
+                GROUP BY period ORDER BY period DESC
+            """, (department_id,))
+            periods = [{"period": r[0].isoformat(), "label": period_label(r[0]), "total": int(r[1]),
+                        "answered": int(r[2]), "open": int(r[3]), "active": r[0] == active}
+                       for r in cur.fetchall()]
+        if not any(p["period"] == active.isoformat() for p in periods):
+            periods.insert(0, {"period": active.isoformat(), "label": period_label(active), "total": 0,
+                               "answered": 0, "open": 0, "active": True})
         return {
             "department_id": department_id,
+            "period": period.isoformat(),
+            "period_label": period_label(period),
+            "active_period": active.isoformat(),
+            "is_active_period": period == active,
             "total": sum(by_status.values()),
             "by_status": {k: by_status.get(k, 0) for k in ("new", "in_progress", "done", "excluded")},
             "pool_available": pool,
             "batches": batches,
+            "periods": periods,
         }
+
+    # ------------------------------------------------------------ итоги звонка
+    # Справочник отдела: оператор после каждого разговора обязан выбрать итог (и
+    # может оставить комментарий). Пока итог не указан, ни следующий звонок, ни
+    # следующая порция не выдаются — проверяет и телефон, и сервер. Итоги не
+    # удаляются, а выключаются: на них ссылается история.
+
+    def _outcome_rows(self, cur, department_id, active_only=False):
+        cur.execute("""
+            SELECT id, name, color, position, requeue, is_active,
+                   (SELECT COUNT(*) FROM dial_list_attempts t WHERE t.outcome_id = o.id) AS used
+            FROM dial_list_outcomes o
+            WHERE department_id = %s {active}
+            ORDER BY is_active DESC, position, created_at
+        """.format(active="AND is_active" if active_only else ""), (int(department_id),))
+        rows = cur.fetchall()
+        if not rows and active_only:
+            # У отдела ещё нет ни одного итога — заводим стартовый набор один раз.
+            cur.execute("SELECT 1 FROM dial_list_outcomes WHERE department_id = %s LIMIT 1", (int(department_id),))
+            if not cur.fetchone():
+                self._seed_outcomes(cur, department_id)
+                return self._outcome_rows(cur, department_id, active_only=True)
+        return [{"id": _sid(r[0]), "name": r[1], "color": r[2], "position": int(r[3]),
+                 "requeue": bool(r[4]), "is_active": bool(r[5]), "used": int(r[6] or 0)} for r in rows]
+
+    def _seed_outcomes(self, cur, department_id):
+        for position, (name, color, requeue) in enumerate(DEFAULT_OUTCOMES, start=1):
+            cur.execute("""
+                INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (int(department_id), name, color, position, requeue))
+        log.info("dial_list: отделу %s заведён стартовый набор итогов", department_id)
+
+    def outcomes(self, department_id):
+        """Все итоги отдела (включая выключенные) для редактора руководителя."""
+        with self.db._get_cursor() as cur:
+            rows = self._outcome_rows(cur, department_id)
+            if not rows:
+                self._seed_outcomes(cur, department_id)
+                rows = self._outcome_rows(cur, department_id)
+        return rows
+
+    def save_outcomes(self, department_id, items, changed_by=None):
+        """Полный список от редактора: с id — обновить, без id — добавить, отсутствующие
+        в списке — выключить (не удалить). Порядок — как в списке."""
+        department_id = int(department_id)
+        if not isinstance(items, list):
+            raise DialListError("items: ожидается список итогов")
+        if len(items) > OUTCOMES_MAX:
+            raise DialListError(f"Итогов не больше {OUTCOMES_MAX}")
+        cleaned = []
+        seen_names = set()
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise DialListError("Каждый итог — объект {id?, name, color, requeue, is_active}")
+            name = str(raw.get("name") or "").strip()[:OUTCOME_NAME_MAX]
+            if not name:
+                raise DialListError("У итога должно быть название")
+            if name.lower() in seen_names:
+                raise DialListError(f"Итог «{name}» повторяется")
+            seen_names.add(name.lower())
+            color = str(raw.get("color") or "#8E8E93").strip().upper()
+            if not OUTCOME_COLOR_RE.match(color):
+                raise DialListError(f"Цвет итога «{name}»: ожидается #RRGGBB")
+            cleaned.append({
+                "id": _sid(raw.get("id")) or None, "name": name, "color": color,
+                "requeue": bool(raw.get("requeue")), "is_active": raw.get("is_active", True) is not False,
+            })
+        if not any(c["is_active"] for c in cleaned):
+            raise DialListError("Хотя бы один итог должен быть включён")
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT id FROM dial_list_outcomes WHERE department_id = %s", (department_id,))
+            existing = {str(r[0]) for r in cur.fetchall()}
+            kept = set()
+            for position, c in enumerate(cleaned, start=1):
+                if c["id"] and c["id"] in existing:
+                    cur.execute("""
+                        UPDATE dial_list_outcomes
+                        SET name = %s, color = %s, position = %s, requeue = %s, is_active = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND department_id = %s
+                    """, (c["name"], c["color"], position, c["requeue"], c["is_active"], c["id"], department_id))
+                    kept.add(c["id"])
+                else:
+                    cur.execute("""
+                        INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, is_active)
+                        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+                    """, (department_id, c["name"], c["color"], position, c["requeue"], c["is_active"]))
+                    kept.add(str(cur.fetchone()[0]))
+            gone = existing - kept
+            if gone:
+                cur.execute("""
+                    UPDATE dial_list_outcomes SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                    WHERE department_id = %s AND id = ANY(%s::uuid[])
+                """, (department_id, list(gone)))
+        log.info("dial_list: итоги отдела %s сохранены (%d, пользователь %s)", department_id, len(cleaned), changed_by)
+        return self.outcomes(department_id)
+
+    def _pending_outcome(self, cur, user_id):
+        """Последняя попытка оператора, где телефон принял плечо (разговор был), а итог
+        ещё не указан. Попытки до появления итогов (leg_answered_at пуст) не считаются."""
+        cur.execute("""
+            SELECT t.id, l.full_name, COALESCE(t.phone_ended_at, t.finished_at, t.updated_at), t.requested_at
+            FROM dial_list_attempts t
+            JOIN dial_list_assignments a ON a.id = t.assignment_id
+            JOIN dial_list_leads l ON l.id = a.lead_id
+            WHERE t.operator_id = %s AND t.outcome_id IS NULL AND t.leg_answered_at IS NOT NULL
+              AND t.state IN ('ended', 'finished')
+            ORDER BY t.requested_at DESC LIMIT 1
+        """, (int(user_id),))
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {"attempt_id": _sid(r[0]), "full_name": r[1] or "", "ended_at": _iso(r[2]),
+                "requested_at": _iso(r[3])}
+
+    def _require_outcome_done(self, cur, ctx):
+        if not self._outcome_rows(cur, ctx["department_id"], active_only=True):
+            return
+        pending = self._pending_outcome(cur, ctx["user_id"])
+        if pending:
+            raise DialListError(
+                f"Сначала укажите итог звонка: {pending['full_name'] or 'предыдущий разговор'}", 409)
+
+    def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment=""):
+        """Оператор указал итог разговора (и, возможно, комментарий)."""
+        ctx = self.operator_context(user_id)
+        attempt_id = str(attempt_id)
+        outcome_id = str(outcome_id or "").strip()
+        comment = str(comment or "").strip()[:COMMENT_MAX]
+        if not outcome_id:
+            raise DialListError("Выберите итог звонка")
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT t.state, a.lead_id, t.outcome_id FROM dial_list_attempts t
+                JOIN dial_list_assignments a ON a.id = t.assignment_id
+                WHERE t.id = %s AND t.operator_id = %s FOR UPDATE OF t
+            """, (attempt_id, ctx["user_id"]))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Попытка не найдена", 404)
+            cur.execute("""
+                SELECT id, name, color, requeue FROM dial_list_outcomes
+                WHERE id = %s AND department_id = %s AND is_active
+            """, (outcome_id, ctx["department_id"]))
+            outcome = cur.fetchone()
+            if not outcome:
+                raise DialListError("Такого итога нет — обновите список", 400)
+            cur.execute("""
+                UPDATE dial_list_attempts
+                SET outcome_id = %s, operator_comment = %s, outcome_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (outcome_id, comment, attempt_id))
+            if outcome[3]:
+                # «Перезвонить»: лид снова в работе, попытки с нуля. Если исход от АТС
+                # приедет позже, _touch_lead увидит этот итог и статус не перебьёт.
+                cur.execute("""
+                    UPDATE dial_list_leads
+                    SET status = CASE WHEN status = 'excluded' THEN status ELSE 'in_progress' END,
+                        attempts_total = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (str(row[1]),))
+        log.info("dial_list: оператор %s указал итог %s по попытке %s", ctx["user_id"], outcome[1], attempt_id)
+        return {"attempt_id": attempt_id,
+                "outcome": {"id": _sid(outcome[0]), "name": outcome[1], "color": outcome[2], "requeue": bool(outcome[3])},
+                "comment": comment}
 
     # ------------------------------------------------------------ журнал водителей
     # Один запрос и для списка, и для карточки: этап (stage) считается в SQL, чтобы
@@ -672,6 +927,9 @@ class DialListService:
             SELECT l.id, l.department_id, l.full_name, l.phone_norm, l.status, l.attempts_total,
                    l.last_attempt_at, l.answered_at, l.created_at, l.updated_at, l.upload_count,
                    COALESCE(l.note, '') AS note,
+                   l.period,
+                   lo.id AS last_outcome_id, lo.name AS last_outcome_name, lo.color AS last_outcome_color,
+                   COALESCE(lt.operator_comment, '') AS last_comment,
                    fb.file_name AS first_file, fb.created_at AS first_uploaded_at,
                    lb.file_name AS last_file, lb.created_at AS last_uploaded_at,
                    oa.operator_id AS open_operator_id, ou.name AS open_operator_name,
@@ -710,13 +968,15 @@ class DialListService:
             ) la ON TRUE
             LEFT JOIN users lu ON lu.id = la.operator_id
             LEFT JOIN LATERAL (
-                SELECT t.requested_at, t.state, t.disposition, t.billsec, t.api_error, t.operator_id
+                SELECT t.requested_at, t.state, t.disposition, t.billsec, t.api_error, t.operator_id,
+                       t.outcome_id, t.operator_comment
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a2 ON a2.id = t.assignment_id
                 WHERE a2.lead_id = l.id
                 ORDER BY t.requested_at DESC LIMIT 1
             ) lt ON TRUE
             LEFT JOIN users tu ON tu.id = lt.operator_id
+            LEFT JOIN dial_list_outcomes lo ON lo.id = lt.outcome_id
             WHERE {scope}
         )
         SELECT id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
@@ -725,6 +985,7 @@ class DialListService:
                open_operator_id, open_operator_name, last_operator_id, last_operator_name,
                last_result, last_done_at, last_call_at, last_call_state, last_disposition,
                last_billsec, last_api_error, last_call_operator_name, activity_at, stage, next_retry_at,
+               period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment,
                COUNT(*) OVER () AS total
         FROM base
         WHERE {filters}
@@ -763,19 +1024,36 @@ class DialListService:
             "last_call": last_call,
             "activity_at": _iso(r[28]),
             "next_retry_at": _iso(r[30]) if stage == "waiting" else None,
+            "period": r[31].isoformat() if r[31] else None,
+            "period_label": period_label(r[31]),
+            # Итог и комментарий оператора по последнему звонку.
+            "outcome": ({"id": _sid(r[32]), "name": r[33] or "", "color": r[34] or "#8E8E93"}
+                        if r[32] is not None else None),
+            "comment": r[35] or "",
         }
 
     def leads_journal(self, department_id, q="", stage="", operator_id=None, batch_id=None,
-                      date_from=None, date_to=None, sort="activity", limit=50, offset=0):
-        """Журнал водителей отдела: страница строк + всего. Все фильтры необязательны."""
+                      date_from=None, date_to=None, sort="activity", limit=50, offset=0,
+                      period=None, outcome_id=None):
+        """Журнал водителей отдела: страница строк + всего. Все фильтры необязательны.
+        period — date первого дня месяца, 'all' — все месяцы, пусто — обзваниваемый."""
         department_id = int(department_id)
         settings = self.department_settings(department_id)
+        if period is None:
+            period = settings["_period"]
         params = {
             "max_attempts": settings["max_attempts"], "retry_hours": settings["retry_after_hours"],
             "department_id": department_id,
             "limit": max(1, min(_to_int(limit, 50), JOURNAL_MAX_LIMIT)), "offset": max(0, _to_int(offset, 0)),
         }
+        scope = "l.department_id = %(department_id)s"
+        if period != "all":
+            params["period"] = period
+            scope += " AND l.period = %(period)s"
         filters = ["TRUE"]
+        if outcome_id:
+            params["outcome_id"] = str(outcome_id)
+            filters.append("last_outcome_id = %(outcome_id)s::uuid")
         q = str(q or "").strip()
         if q:
             digits = "".join(ch for ch in q if ch.isdigit())
@@ -808,14 +1086,11 @@ class DialListService:
             params["date_to"] = str(date_to)
             filters.append("(activity_at AT TIME ZONE 'Asia/Almaty')::date <= %(date_to)s::date")
         order = JOURNAL_SORTS.get(str(sort or "activity"), JOURNAL_SORTS["activity"])
-        sql = self._JOURNAL_SQL.format(scope="l.department_id = %(department_id)s",
-                                       filters=" AND ".join(filters), order=order)
+        sql = self._JOURNAL_SQL.format(scope=scope, filters=" AND ".join(filters), order=order)
         with self.db._get_cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-            total = int(rows[0][31]) if rows else 0
-            if not rows and params["offset"] == 0:
-                total = 0
+            total = int(rows[0][36]) if rows else 0
             items = [self._journal_row(r, settings["max_attempts"]) for r in rows]
             cur.execute("""
                 SELECT stage, COUNT(*) FROM (
@@ -830,16 +1105,47 @@ class DialListService:
                              AND l.last_attempt_at >= CURRENT_TIMESTAMP - make_interval(hours => %(retry_hours)s)
                             THEN 'waiting'
                         ELSE 'queue' END AS stage
-                    FROM dial_list_leads l WHERE l.department_id = %(department_id)s
+                    FROM dial_list_leads l WHERE {scope}
                 ) s GROUP BY stage
-            """, params)
+            """.format(scope=scope), params)
             by_stage = {k: 0 for k in LEAD_STAGES}
             for row in cur.fetchall():
                 by_stage[row[0]] = int(row[1])
+            # Сколько разговоров с каждым итогом за этот месяц — цветные чипы над списком.
+            cur.execute("""
+                SELECT o.id, o.name, o.color, o.is_active, COUNT(t.id)
+                FROM dial_list_outcomes o
+                LEFT JOIN dial_list_attempts t ON t.outcome_id = o.id
+                LEFT JOIN dial_list_assignments a ON a.id = t.assignment_id
+                LEFT JOIN dial_list_leads l ON l.id = a.lead_id AND {scope}
+                WHERE o.department_id = %(department_id)s
+                GROUP BY o.id, o.name, o.color, o.is_active, o.position
+                ORDER BY o.is_active DESC, o.position
+            """.format(scope=scope), params)
+            by_outcome = [{"id": _sid(r[0]), "name": r[1], "color": r[2], "is_active": bool(r[3]),
+                           "count": int(r[4] or 0)} for r in cur.fetchall()]
+            # COUNT(t.id) считает попытки и по лидам вне периода (LEFT JOIN с условием
+            # на l не режет t): фильтруем честно вторым проходом только если период задан.
+            if period != "all":
+                cur.execute("""
+                    SELECT t.outcome_id, COUNT(*)
+                    FROM dial_list_attempts t
+                    JOIN dial_list_assignments a ON a.id = t.assignment_id
+                    JOIN dial_list_leads l ON l.id = a.lead_id
+                    WHERE t.outcome_id IS NOT NULL AND {scope}
+                    GROUP BY t.outcome_id
+                """.format(scope=scope), params)
+                counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
+                for o in by_outcome:
+                    o["count"] = counts.get(o["id"], 0)
         return {
             "department_id": department_id, "items": items, "total": total,
             "limit": params["limit"], "offset": params["offset"],
-            "by_stage": by_stage, "stages": LEAD_STAGES, "sort": sort if sort in JOURNAL_SORTS else "activity",
+            "period": None if period == "all" else period.isoformat(),
+            "period_label": "Все месяцы" if period == "all" else period_label(period),
+            "active_period": settings["period"],
+            "by_stage": by_stage, "stages": LEAD_STAGES, "by_outcome": by_outcome,
+            "sort": sort if sort in JOURNAL_SORTS else "activity",
         }
 
     def lead_department(self, lead_id):
@@ -883,10 +1189,12 @@ class DialListService:
                        t.disposition, t.billsec, t.waitsec, t.api_error, t.final_source, t.finished_at,
                        t.phone_event_at, t.phone_ended_at,
                        (t.general_call_id IS NOT NULL AND t.general_call_id <> ''),
-                       a.id, a.result, a.state, a.created_at
+                       a.id, a.result, a.state, a.created_at,
+                       o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 LEFT JOIN users u ON u.id = t.operator_id
+                LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
                 WHERE a.lead_id = %s
                 ORDER BY t.requested_at DESC
             """, (lead_id,))
@@ -910,6 +1218,10 @@ class DialListService:
                                            and int(r[7] or 0) > 0,
                     "assignment": {"id": _sid(r[15]), "result": r[16] or "", "state": r[17] or "",
                                    "issued_at": _iso(r[18])},
+                    "outcome": ({"id": _sid(r[19]), "name": r[20] or "", "color": r[21] or "#8E8E93"}
+                                if r[19] is not None else None),
+                    "comment": r[22] or "",
+                    "outcome_at": _iso(r[23]),
                 })
             cur.execute("""
                 SELECT e.id, e.kind, e.note, e.created_at, e.actor_id, COALESCE(u.name, '')
@@ -1064,6 +1376,7 @@ class DialListService:
         SELECT l.id
         FROM dial_list_leads l
         WHERE l.department_id = %s
+          AND l.period = %s
           AND l.status IN ('new', 'in_progress')
           AND NOT EXISTS (SELECT 1 FROM dial_list_assignments a
                           WHERE a.lead_id = l.id AND a.state = 'issued')
@@ -1112,14 +1425,16 @@ class DialListService:
     def _portion_items(self, cur, portion_id):
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
-                   t.id, t.state, t.disposition, t.requested_at, t.general_call_id
+                   t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
+                   o.name, o.color
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
-                SELECT id, state, disposition, requested_at, general_call_id
+                SELECT id, state, disposition, requested_at, general_call_id, outcome_id
                 FROM dial_list_attempts WHERE assignment_id = a.id
                 ORDER BY requested_at DESC LIMIT 1
             ) t ON TRUE
+            LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
             WHERE a.portion_id = %s
             ORDER BY a.position
         """, (portion_id,))
@@ -1136,6 +1451,7 @@ class DialListService:
                 "last_attempt": None if r[7] is None else {
                     "attempt_id": str(r[7]), "state": r[8], "disposition": r[9] or "",
                     "requested_at": _iso(r[10]), "general_call_id": r[11],
+                    "outcome_name": r[12] or "", "outcome_color": r[13] or "",
                 },
             })
         return items
@@ -1166,21 +1482,30 @@ class DialListService:
             items = self._portion_items(cur, portion["id"]) if portion else []
             active = self._active_attempt(cur, user_id)
             cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
-                ctx["department_id"], settings["retry_after_hours"], settings["max_attempts"]))
+                ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"]))
             pool = len(cur.fetchall())
+            outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
+            pending_outcome = self._pending_outcome(cur, ctx["user_id"]) if outcomes else None
         pending = sum(1 for i in items if i["state"] == "issued")
         return {
             "enabled": True,
             "operator": {"id": ctx["user_id"], "name": ctx["name"], "internal_number": ctx["internal_number"]},
             "portion_size": settings["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
+            "period": settings["period"],
+            "period_label": settings["period_label"],
             "portion": None if not portion else {
                 "id": portion["id"], "size": portion["size"], "issued_at": _iso(portion["issued_at"]),
                 "pending": pending, "items": items,
             },
-            "can_request_next": pending == 0 and pool > 0,
+            "can_request_next": pending == 0 and pool > 0 and pending_outcome is None,
             "pool_available": pool,
             "active_attempt": active,
+            # Справочник итогов для окна после разговора и попытка, по которой итог
+            # ещё не указан (телефон не даст звонить дальше, сервер — тоже).
+            "outcomes": [{"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"]}
+                         for o in outcomes],
+            "pending_outcome": pending_outcome,
         }
 
     def issue_next_portion(self, user_id):
@@ -1199,8 +1524,9 @@ class DialListService:
                 # Все строки закрыты, а выдача почему-то открыта — закрываем здесь.
                 cur.execute("UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP WHERE id = %s",
                             (portion["id"],))
+            self._require_outcome_done(cur, ctx)
             cur.execute(self._POOL_SQL.format(lock="FOR UPDATE SKIP LOCKED"), (
-                ctx["department_id"], settings["retry_after_hours"], settings["max_attempts"],
+                ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"],
                 settings["portion_size"]))
             lead_ids = [str(r[0]) for r in cur.fetchall()]
             if not lead_ids:
@@ -1240,6 +1566,7 @@ class DialListService:
             if active:
                 raise DialListError(
                     f"Идёт звонок ({active['full_name']}). Дождитесь его завершения", 409)
+            self._require_outcome_done(cur, ctx)
             phone_norm, full_name, lead_id = row[3], row[4] or "", str(row[5])
             cur.execute("""
                 INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number)
@@ -1349,9 +1676,12 @@ class DialListService:
                 UPDATE dial_list_attempts
                 SET state = %s, phone_event_at = CURRENT_TIMESTAMP,
                     phone_ended_at = CASE WHEN %s = 'ended' THEN CURRENT_TIMESTAMP ELSE phone_ended_at END,
+                    leg_answered_at = CASE WHEN %s = 'answered'
+                                           THEN COALESCE(leg_answered_at, CURRENT_TIMESTAMP)
+                                           ELSE leg_answered_at END,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-            """, (new_state, event, attempt_id))
+            """, (new_state, event, event, attempt_id))
         result = {"attempt_id": attempt_id, "state": new_state, "final": False}
         # Разговор кончился — сразу спрашиваем Binotel, чтобы строка закрылась
         # без ожидания вебхука. Не вышло — доберёт reconcile на следующем запросе.
@@ -1445,24 +1775,33 @@ class DialListService:
                     """, (str(late[0]),))
                 return bool(late)
             assignment_id = str(row[0])
+            # Оператор мог успеть выбрать итог «перезвонить» раньше, чем приехал исход
+            # от АТС: тогда лид не закрываем, а оставляем на повтор.
+            cur.execute("""
+                SELECT COALESCE(o.requeue, FALSE) FROM dial_list_attempts t
+                LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id WHERE t.id = %s
+            """, (str(attempt_id),))
+            picked = cur.fetchone()
+            requeue = bool(picked and picked[0])
             cur.execute("SELECT lead_id, state FROM dial_list_assignments WHERE id = %s FOR UPDATE", (assignment_id,))
             a = cur.fetchone()
             if a and a[1] == "issued":
                 self._close_assignment(cur, assignment_id, str(a[0]), result,
-                                       answered=(result == "answered"), count_attempt=True)
+                                       answered=(result == "answered"), count_attempt=True, requeue=requeue)
             elif a:
                 # Строка уже закрыта прошлой попыткой — лид всё равно учитывает звонок.
-                self._touch_lead(cur, str(a[0]), answered=(result == "answered"), count_attempt=True)
+                self._touch_lead(cur, str(a[0]), answered=(result == "answered"), count_attempt=True,
+                                 requeue=requeue)
         return True
 
-    def _close_assignment(self, cur, assignment_id, lead_id, result, answered, count_attempt):
+    def _close_assignment(self, cur, assignment_id, lead_id, result, answered, count_attempt, requeue=False):
         cur.execute("""
             UPDATE dial_list_assignments
             SET state = 'done', result = %s, done_at = CURRENT_TIMESTAMP
             WHERE id = %s RETURNING portion_id
         """, (result, assignment_id))
         row = cur.fetchone()
-        self._touch_lead(cur, lead_id, answered=answered, count_attempt=count_attempt)
+        self._touch_lead(cur, lead_id, answered=answered, count_attempt=count_attempt, requeue=requeue)
         if row:
             portion_id = str(row[0])
             cur.execute("""
@@ -1472,7 +1811,7 @@ class DialListService:
                                   WHERE portion_id = %s AND state = 'issued')
             """, (portion_id, portion_id))
 
-    def _touch_lead(self, cur, lead_id, answered, count_attempt):
+    def _touch_lead(self, cur, lead_id, answered, count_attempt, requeue=False):
         cur.execute("""
             SELECT department_id, attempts_total FROM dial_list_leads WHERE id = %s FOR UPDATE
         """, (lead_id,))
@@ -1485,7 +1824,10 @@ class DialListService:
         s = cur.fetchone()
         max_attempts = int(s[0]) if s else DEFAULT_MAX_ATTEMPTS
         attempts_total = int(row[1] or 0) + (1 if count_attempt else 0)
-        if answered:
+        if requeue:
+            # Итог «перезвонить»: попытки с нуля, лид вернётся в пул через retry_after_hours.
+            status, attempts_total = "in_progress", 0
+        elif answered:
             status = "done"
         elif attempts_total >= max_attempts:
             status = "done"

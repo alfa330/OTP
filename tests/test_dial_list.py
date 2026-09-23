@@ -248,7 +248,9 @@ class SchemaTests(unittest.TestCase):
 
     def test_leads_belong_to_department(self):
         ddl = ' '.join(dial_schema.DDL)
-        self.assertIn('UNIQUE (department_id, phone_norm)', ddl)
+        # Номер уникален в базе месяца, повтор в другом месяце допускается.
+        self.assertIn('UNIQUE (department_id, period, phone_norm)', ddl)
+        self.assertIn('DROP CONSTRAINT IF EXISTS dial_list_leads_department_id_phone_norm_key', ddl)
         self.assertNotIn('REFERENCES tez_leads', ddl)
 
 
@@ -358,7 +360,8 @@ class LeadsJournalTests(unittest.TestCase):
                          {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded'})
         svc = dial_service.DialListService(db=None)
         with self.assertRaises(dial_service.DialListError):
-            svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24}
+            svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24,
+                                                 "_period": dial_service.current_period()}
             svc.leads_journal(1, stage='nope')
 
     def test_manual_actions_are_logged_and_guarded(self):
@@ -376,6 +379,64 @@ class LeadsJournalTests(unittest.TestCase):
         src = inspect.getsource(dial_service.DialListService.attempt_recording)
         self.assertIn('!= "answered"', src)
         self.assertIn('get_call_record_url', src)
+
+    def test_outcomes_and_periods_schema(self):
+        ddl = ' '.join(dial_schema.DDL)
+        self.assertIn('CREATE TABLE IF NOT EXISTS dial_list_outcomes', ddl)
+        for column in ('outcome_id UUID REFERENCES dial_list_outcomes', 'operator_comment TEXT',
+                       'leg_answered_at TIMESTAMP', 'active_period DATE'):
+            self.assertIn(column, ddl)
+
+    def test_pool_is_limited_to_active_period(self):
+        self.assertIn('AND l.period = %s', dial_service.DialListService._POOL_SQL)
+        for name in ('get_state', 'issue_next_portion', 'leads_summary'):
+            src = inspect.getsource(getattr(dial_service.DialListService, name))
+            self.assertIn('_POOL_SQL', src)
+            self.assertIn('_period', src, f'{name} зовёт пул без месяца')
+
+    def test_period_parsing(self):
+        import datetime as dt
+        self.assertEqual(dial_service.parse_period('2026-09'), dt.date(2026, 9, 1))
+        self.assertEqual(dial_service.parse_period('2026-09-17'), dt.date(2026, 9, 1))
+        self.assertIsNone(dial_service.parse_period(''))
+        self.assertEqual(dial_service.parse_period('all', allow_all=True), 'all')
+        with self.assertRaises(dial_service.DialListError):
+            dial_service.parse_period('all')
+        with self.assertRaises(dial_service.DialListError):
+            dial_service.parse_period('сентябрь')
+        self.assertEqual(dial_service.period_label(dt.date(2026, 9, 1)), 'Сентябрь 2026')
+
+    def test_outcome_is_required_before_next_call_or_portion(self):
+        for name in ('start_call', 'issue_next_portion'):
+            src = inspect.getsource(getattr(dial_service.DialListService, name))
+            self.assertIn('_require_outcome_done', src, f'{name} не проверяет итог предыдущего звонка')
+        state = inspect.getsource(dial_service.DialListService.get_state)
+        self.assertIn('"pending_outcome"', state)
+        self.assertIn('"outcomes"', state)
+        pending = inspect.getsource(dial_service.DialListService._pending_outcome)
+        # Итог нужен только там, где разговор был (плечо принято), и только с этого релиза.
+        self.assertIn('leg_answered_at IS NOT NULL', pending)
+        self.assertIn('outcome_id IS NULL', pending)
+
+    def test_save_outcomes_validation(self):
+        svc = dial_service.DialListService(db=None)
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_outcomes(1, [{"name": "", "color": "#FFFFFF"}])
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_outcomes(1, [{"name": "Отказ", "color": "red"}])
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_outcomes(1, [{"name": "Отказ", "color": "#FF0000"}, {"name": "отказ", "color": "#00FF00"}])
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_outcomes(1, [{"name": "Отказ", "color": "#FF0000", "is_active": False}])
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_outcomes(1, "not a list")
+
+    def test_requeue_outcome_survives_late_pbx_outcome(self):
+        # «Перезвонить» от оператора не должен перебиваться исходом АТС, пришедшим позже.
+        finish = inspect.getsource(dial_service.DialListService._finish_attempt)
+        self.assertIn('requeue', finish)
+        touch = inspect.getsource(dial_service.DialListService._touch_lead)
+        self.assertIn('if requeue:', touch)
 
     def test_journal_routes_are_manager_only(self):
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
