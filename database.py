@@ -6194,6 +6194,11 @@ class Database:
                 -- человеку, а не чату — сменит он Telegram или потеряет права, и
                 -- рассылка обязана пойти следом, а не в прежний chat_id.
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS tez_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                -- Режим личной отбивки — те же два, что у группы: каждую отбивку или только
+                -- при отклонениях. Отбивка табло идёт каждый час круглые сутки, и без выбора
+                -- лично подписанный админ получал бы 24 сообщения в сутки. Значение проверяет
+                -- код (SZOV_BROADCAST_MODES), CHECK здесь не заводим.
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS tez_broadcast_personal_mode VARCHAR(16) NOT NULL DEFAULT 'always';
 
                 -- Indexes for new tables
                 CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
@@ -61434,32 +61439,46 @@ class Database:
 
     # --- Отбивка «Табло Тез КЦ» лично себе ----------------------------------------------------
 
-    def get_tez_broadcast_personal(self, user_id) -> bool:
-        """Включена ли у человека личная отбивка Тез КЦ. Пустого профиля достаточно:
+    def get_tez_broadcast_personal(self, user_id) -> Dict[str, Any]:
+        """Личная отбивка Тез КЦ у человека: {enabled, mode}. Пустого профиля достаточно:
         строку в admin_profiles заводит только запись."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT COALESCE(tez_broadcast_personal_enabled, FALSE)
+                SELECT COALESCE(tez_broadcast_personal_enabled, FALSE),
+                       COALESCE(tez_broadcast_personal_mode, 'always')
                   FROM admin_profiles
                  WHERE user_id = %s
             """, (int(user_id),))
             row = cursor.fetchone()
-        return bool(row[0]) if row else False
+        if not row:
+            return {'enabled': False, 'mode': 'always'}
+        return {'enabled': bool(row[0]), 'mode': row[1] or 'always'}
 
-    def set_tez_broadcast_personal(self, user_id, enabled) -> bool:
-        """Включить/выключить личную отбивку. Право проверяет ручка (_szov_broadcast_guard
-        плюс роль админа), а рассылка перепроверяет его на каждой отправке — см.
-        get_tez_broadcast_personal_recipients."""
+    def set_tez_broadcast_personal(self, user_id, enabled=None, mode=None) -> Dict[str, Any]:
+        """Включить/выключить личную отбивку или сменить её режим. Не переданное поле остаётся
+        как было — форма шлёт точечные патчи, как у получателей-чатов.
+
+        Право проверяет ручка (_szov_broadcast_guard плюс роль админа), а рассылка
+        перепроверяет его на каждой отправке — см. get_tez_broadcast_personal_recipients."""
+        if mode is not None:
+            mode = str(mode).strip()
+            if mode not in self.SZOV_BROADCAST_MODES:
+                raise ValueError("Неизвестный режим отправки")
+        current = self.get_tez_broadcast_personal(user_id)
+        enabled = current['enabled'] if enabled is None else bool(enabled)
+        mode = current['mode'] if mode is None else mode
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO admin_profiles (user_id, tez_broadcast_personal_enabled)
-                VALUES (%s, %s)
+                INSERT INTO admin_profiles (user_id, tez_broadcast_personal_enabled,
+                                            tez_broadcast_personal_mode)
+                VALUES (%s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE
-                   SET tez_broadcast_personal_enabled = EXCLUDED.tez_broadcast_personal_enabled
-                RETURNING tez_broadcast_personal_enabled
-            """, (int(user_id), bool(enabled)))
+                   SET tez_broadcast_personal_enabled = EXCLUDED.tez_broadcast_personal_enabled,
+                       tez_broadcast_personal_mode = EXCLUDED.tez_broadcast_personal_mode
+                RETURNING tez_broadcast_personal_enabled, tez_broadcast_personal_mode
+            """, (int(user_id), enabled, mode))
             row = cursor.fetchone()
-        return bool(row[0]) if row else False
+        return {'enabled': bool(row[0]), 'mode': row[1] or 'always'}
 
     def get_tez_broadcast_personal_recipients(self, tez_department_id=None) -> List[Dict[str, Any]]:
         """Кому отбивка Тез КЦ уходит лично: флаг включён и человек до сих пор вправе.
@@ -61475,7 +61494,8 @@ class Database:
         ни telegram_id, ни роль 'admin' ('dismissal' — такое же увольнение, как 'fired')."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.telegram_id
+                SELECT u.id, u.name, u.telegram_id,
+                       COALESCE(ap.tez_broadcast_personal_mode, 'always')
                   FROM admin_profiles ap
                   JOIN users u ON u.id = ap.user_id
                  WHERE ap.tez_broadcast_personal_enabled = TRUE
@@ -61503,7 +61523,8 @@ class Database:
                  ORDER BY u.name, u.id
             """, (tez_department_id,))
             rows = cursor.fetchall() or []
-        return [{'id': int(row[0]), 'name': row[1] or '', 'telegram_id': int(row[2])}
+        return [{'id': int(row[0]), 'name': row[1] or '', 'telegram_id': int(row[2]),
+                 'mode': row[3] or 'always'}
                 for row in rows if row[2] is not None]
 
 

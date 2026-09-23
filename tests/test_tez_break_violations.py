@@ -15,8 +15,10 @@ import html
 import logging
 import os
 import re
+import time
 import unittest
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from tests import source_cache
 
@@ -36,10 +38,22 @@ NAMES = {
     '_szov_break_merge_episodes', '_szov_break_planned_for_day', '_szov_break_on_shift',
     '_szov_break_classify', '_szov_break_violation_detail',
     '_TEZ_WALLBOARD_MODEL_BY_DIRECTION', 'TEZ_BREAK_NOTE_LIMIT',
-    '_tez_break_status_keys', '_tez_break_violations_scan', '_tez_break_broadcast_text',
-    # Личная отбивка админам: джоба, её адресаты и право на строку «лично мне».
+    '_tez_break_status_keys', '_tez_break_violations_scan', '_tez_break_violation_lines',
+    # Отбивка табло Тез КЦ (23.09.2026): период, итоги часа, отклонения, подпись, картинки.
+    'TEZ_AR_TARGET_PERCENT', 'TEZ_AR_BAD_PERCENT', 'TEZ_WALLBOARD_ABANDON_FROM_SECONDS',
+    'TEZ_BROADCAST_HOUR_MIN_CALLS', 'TEZ_BROADCAST_TIMEZONE', 'TEZ_BROADCAST_JOURNAL_WAIT_SECONDS',
+    'TELEGRAM_MAX_CAPTION_CHARS', 'SZOV_BROADCAST_MODE_ALWAYS', 'SZOV_BROADCAST_MODE_DEVIATIONS',
+    '_szov_wallboard_int', '_szov_plural', '_szov_format_age_ru', '_szov_broadcast_stale_note',
+    '_op_broadcast_percent', '_op_broadcast_duration',
+    '_tez_broadcast_count', '_tez_broadcast_pair', '_tez_broadcast_ar_colors',
+    '_tez_broadcast_period', '_tez_broadcast_window_totals', '_tez_broadcast_tp_line',
+    '_tez_broadcast_assemble', '_tez_broadcast_deviations', '_tez_broadcast_caption',
+    '_TEZ_BROADCAST_TABLE_ROWS', '_tez_broadcast_text', '_tez_broadcast_tp_key_tiles',
+    '_tez_render_tp_day_png', '_tez_render_tp_hour_png', '_tez_render_op_png',
+    '_tez_broadcast_journal', '_tez_broadcast_mark_reported', '_szov_broadcast_run_job',
+    # Личная отбивка админам: адресаты и право на строку «лично мне».
     'SZOV_BROADCAST_DIRECTION_TEZ', 'SZOV_BROADCAST_DIRECTION_LINE',
-    '_tez_broadcast_personal_recipients', 'tez_break_broadcast_job',
+    '_tez_broadcast_personal_recipients',
     '_szov_broadcast_personal_owner', '_szov_broadcast_personal_state',
     '_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role',
     '_is_admin_role',
@@ -100,8 +114,9 @@ def _namespace(db=None, people=None, extra=None):
         'op': [{'id': 2, 'name': 'Ким Дана'}],
     }
     ns = {
-        'os': os, 're': re, 'logging': logging, 'html': html,
-        'datetime': datetime, 'timedelta': timedelta,
+        'os': os, 're': re, 'logging': logging, 'html': html, 'time': time,
+        'datetime': datetime, 'timedelta': timedelta, 'ZoneInfo': ZoneInfo,
+        'asyncio': asyncio, 'functools': functools, 'executor_pool': None,
         '_env_int': lambda name, default, minimum=None, maximum=None: default,
         'db': db if db is not None else _FakeDb(),
         # Состав отдела берётся у табло — здесь подменяем, чтобы не ходить в базу.
@@ -201,8 +216,8 @@ class TezBreakScanTests(unittest.TestCase):
         self.assertEqual(db.episode_calls, [])
 
 
-class TezBreakBroadcastTextTests(unittest.TestCase):
-    """Текст сообщения: молчание без нарушений и человеческие формулировки."""
+class TezBreakViolationLinesTests(unittest.TestCase):
+    """Строки о перерывах в подписи отбивки: молчание без нарушений и человеческие формулировки."""
 
     def setUp(self):
         self.ns = _namespace()
@@ -211,16 +226,15 @@ class TezBreakBroadcastTextTests(unittest.TestCase):
         return {'operator_name': name, 'started_at': started, 'violation_date': started[:10],
                 'kind': kind, 'planned_start_minutes': planned_start}
 
-    def test_no_violations_means_no_message(self):
-        """Пустой текст — это и есть «писать не о чем»: джоба тогда молчит."""
-        self.assertEqual(self.ns['_tez_break_broadcast_text']([]), '')
-        self.assertEqual(self.ns['_tez_break_broadcast_text'](None), '')
+    def test_no_violations_means_no_lines(self):
+        self.assertEqual(self.ns['_tez_break_violation_lines']([]), [])
+        self.assertEqual(self.ns['_tez_break_violation_lines'](None), [])
 
     def test_line_names_the_person_the_time_and_the_reason(self):
-        text = self.ns['_tez_break_broadcast_text']([
+        text = '\n'.join(self.ns['_tez_break_violation_lines']([
             self._violation('Тлеу Аскар', '2026-09-22 16:00:00'),
-        ])
-        self.assertIn('Тез КЦ', text)
+        ]))
+        self.assertIn('Перерывы не по графику', text)
         self.assertIn('Тлеу Аскар', text)
         self.assertIn('22.09', text)
         self.assertIn('16:00', text)
@@ -230,22 +244,22 @@ class TezBreakBroadcastTextTests(unittest.TestCase):
         """Одно нарушение обязано читаться одинаково, в какой бы отдел про него ни написали."""
         row = self._violation('Тлеу Аскар', '2026-09-22 16:00:00',
                               kind='off_schedule', planned_start=840)
-        text = self.ns['_tez_break_broadcast_text']([row])
+        text = '\n'.join(self.ns['_tez_break_violation_lines']([row]))
         self.assertIn(self.ns['_szov_break_violation_detail'](row), text)
 
     def test_long_list_is_cut_with_a_counter(self):
         """Поимённо — до предела, остальные счётчиком: сообщение читают с телефона."""
         limit = self.ns['TEZ_BREAK_NOTE_LIMIT']
         rows = [self._violation(f'Оператор {i}', '2026-09-22 16:00:00') for i in range(limit + 3)]
-        text = self.ns['_tez_break_broadcast_text'](rows)
+        text = '\n'.join(self.ns['_tez_break_violation_lines'](rows))
         self.assertEqual(text.count('•'), limit)
         self.assertIn('и ещё 3', text)
 
     def test_names_are_escaped_for_html(self):
-        """Сообщение уходит с parse_mode HTML: имя с «<» иначе уронило бы отправку."""
-        text = self.ns['_tez_break_broadcast_text']([
+        """Подпись уходит с parse_mode HTML: имя с «<» иначе уронило бы отправку."""
+        text = '\n'.join(self.ns['_tez_break_violation_lines']([
             self._violation('Тлеу <Аскар>', '2026-09-22 16:00:00'),
-        ])
+        ]))
         self.assertIn('&lt;Аскар&gt;', text)
         self.assertNotIn('<Аскар>', text)
 
@@ -276,31 +290,37 @@ class TezBreakWiringTests(unittest.TestCase):
     """Проводка: расписание, ручка журнала, получатели и кнопки на экране."""
 
     def test_scan_runs_every_hour_around_the_clock(self):
-        """Смена отдела начинается затемно, а окно захода — три часа: гоняй разбор только
-        по часам отбивки, и перерыв в 05:22 не разобрал бы никто."""
+        """Смена отдела начинается затемно, а окно захода — три часа: разбор идёт своей джобой
+        каждый час, независимо от отбивки."""
         self.assertIn('tez_break_scan_job,', SOURCE)
         self.assertIn("id='tez_break_scan'", SOURCE)
         self.assertIn("CronTrigger(hour='*', minute=TEZ_BREAK_SCAN_MINUTE,", SOURCE)
-        # А сообщения — по своему расписанию, в рабочие часы.
-        self.assertIn('tez_break_broadcast_job,', SOURCE)
-        self.assertIn("id=f'tez_break_broadcast_{_hour:02d}{_minute:02d}'", SOURCE)
-        self.assertIn('def _tez_break_broadcast_send_times():', SOURCE)
+
+    def test_broadcast_is_hourly_around_the_clock(self):
+        """Решение владельца 23.09.2026: каждый час круглые сутки, как у СЗоВ и ОП. Отдельной
+        отбивки только о перерывах больше нет — они едут в подписи отбивки табло."""
+        self.assertIn("TEZ_BROADCAST_SEND_TIMES = (os.getenv('TEZ_BROADCAST_SEND_TIMES') "
+                      "or _SZOV_BROADCAST_HOURLY).strip()", SOURCE)
+        self.assertIn('for _hour, _minute in _tez_broadcast_send_times():', SOURCE)
+        self.assertIn('tez_broadcast_job,', SOURCE)
+        self.assertIn("id=f'tez_wallboard_broadcast_{_hour:02d}{_minute:02d}'", SOURCE)
+        for gone in ('tez_break_broadcast_job', '_tez_break_broadcast_send',
+                     'TEZ_BREAK_BROADCAST_SEND_TIMES'):
+            self.assertNotIn(gone, SOURCE)
 
     def test_journal_fills_even_without_recipients(self):
         """Журнал в iCore обязан наполняться и тогда, когда отбивку никто не получает."""
         scan = SOURCE[SOURCE.index('async def tez_break_scan_job():'):]
-        scan = scan[:scan.index('\nasync def ', 10)]
+        scan = scan[:scan.index('\ndef ', 10)]
         self.assertIn('_tez_break_violations_scan', scan)
         self.assertNotIn('get_szov_broadcast_chats', scan)
-        job = SOURCE[SOURCE.index('async def tez_break_broadcast_job():'):]
+        job = SOURCE[SOURCE.index('async def tez_broadcast_job():'):]
         job = job[:job.index('\n@app.route')]
-        # Отправка разбор НЕ повторяет: он идёт своей почасовой джобой.
+        # Отбивка разбор НЕ повторяет, а прочитанными нарушения помечает только после доставки.
         self.assertNotIn('_tez_break_violations_scan', job)
-        self.assertIn('if not recipients:', job)
-        # Помечаем прочитанными только после удачной доставки: разом упавшая отправка
-        # иначе проглотила бы предупреждения.
-        self.assertIn('if delivered:', job)
-        self.assertIn('mark_szov_break_violations_reported', job)
+        self.assertIn('on_delivered=_tez_broadcast_mark_reported', job)
+        self.assertIn('personal=_tez_broadcast_personal_recipients', job)
+        self.assertIn('deviations=_tez_broadcast_deviations', job)
 
     def test_journal_endpoint_is_registered_and_guarded(self):
         self.assertIn(
@@ -329,154 +349,468 @@ class TezBreakWiringTests(unittest.TestCase):
         self.assertIn('const canManageTezBroadcastForUser',
                       (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8-sig'))
 
-    def test_test_send_writes_even_when_there_is_nothing_to_report(self):
-        """Кнопку нажал человек и ждёт ответа: молчание тут читалось бы как поломка."""
-        send = SOURCE[SOURCE.index('async def _tez_break_broadcast_send('):]
-        send = send[:send.index('\nasync def ', 10)]
-        self.assertIn('сообщение проверочное', send)
+    def test_test_send_and_preview_use_the_wallboard_broadcast(self):
+        """Кнопка проверки шлёт настоящую отбивку табло и нарушения прочитанными не помечает."""
+        self.assertIn('SZOV_BROADCAST_DIRECTION_TEZ: _tez_broadcast_send,', SOURCE)
+        send = SOURCE[SOURCE.index('async def _tez_broadcast_send('):]
+        send = send[:send.index('\n_TEZ_BROADCAST_PREVIEW_IMAGES')]
         self.assertNotIn('mark_szov_break_violations_reported', send)
-        self.assertIn('SZOV_BROADCAST_DIRECTION_TEZ: _tez_break_broadcast_send,', SOURCE)
+        preview = SOURCE[SOURCE.index('def api_szov_wallboard_broadcast_preview():'):]
+        preview = preview[:preview.index('\ndef ', 10)]
+        self.assertIn('return _tez_broadcast_preview()', preview)
 
-    def test_screen_has_both_buttons_and_hides_the_modes(self):
-        """Режимы получателя у Тез бессмысленны: сообщение и так уходит только при
-        нарушениях, а выбор, который ни на что не влияет, — обещание без содержания."""
+    def test_screen_has_both_buttons_and_shows_the_modes(self):
+        """С отбивкой табло режимы получателя обрели смысл: «только при отклонениях» пишет, лишь
+        когда прошедший час ТП вне нормы."""
         self.assertIn('<BreakViolationsControls', VIEW)
         self.assertIn('<BroadcastControls', VIEW)
-        self.assertIn('withModes={false}', VIEW)
+        self.assertNotIn('withModes={false}', VIEW)
+        self.assertNotIn('Отбивка перерывов', VIEW)
         self.assertIn('canManageBroadcast ?', VIEW)
         # Журнал открыт всем, кто видит табло, — он стоит вне проверки прав на отбивку.
         self.assertLess(VIEW.index('<BreakViolationsControls'), VIEW.index('canManageBroadcast ?'))
 
 
+# --- Отбивка табло: правила ---------------------------------------------------------------------
+
+ZONE = ZoneInfo('Asia/Almaty')
+
+
+def _ts(value):
+    return int(datetime.strptime(value, PARSE).replace(tzinfo=ZONE).timestamp())
+
+
+LINE = '77003000770'
+
+
+def _call(started, disposition='ANSWER', stage='901', line=LINE, call_type=0):
+    return {'call_type': call_type, 'line_number': line, 'disposition': disposition,
+            'waitsec': 12, 'internal_number': stage, 'start_time': _ts(started)}
+
+
+def _snapshot(day='2026-09-23', **extra):
+    snapshot = {
+        'day': day,
+        'binotel_now': '%s 10:00:07' % day,
+        'stale': False,
+        'age_seconds': 4,
+        'diagnostics': {'tp_line_number': LINE},
+        'tp': {'now': {'queue': 1, 'operators_online': 4, 'operators_free': 2,
+                       'operators_talking': 2, 'operators_on_break': 1},
+               'today': {'arrived': 99, 'served': 99, 'lost': 0, 'ar_ratio': 0.0, 'sl_ratio': 0.9,
+                         'avg_wait_seconds': 18, 'avg_talk_seconds': 129,
+                         'outgoing_success': 10, 'outgoing_total': 46}},
+        'op': {'now': {'operators_online': 5, 'operators_free': 3, 'operators_talking': 2,
+                       'operators_on_break': 0},
+               'today': {'outgoing_success': 65, 'outgoing_total': 152,
+                         'outgoing_success_ratio': 0.4276, 'avg_talk_seconds': 95}},
+    }
+    snapshot.update(extra)
+    return snapshot
+
+
+class _AssembleDb:
+    def __init__(self, violations=()):
+        self.violations = list(violations)
+
+    def get_unreported_szov_break_violations(self, max_age_hours, direction=None):
+        assert direction == 'tez', direction
+        return list(self.violations)
+
+
+def _assemble(snapshot, calls, now=datetime(2026, 9, 23, 10, 0, 5), violations=(), **kwargs):
+    ns = _namespace(db=_AssembleDb(violations))
+    return ns, ns['_tez_broadcast_assemble'](snapshot, calls, kwargs.get('journal_error'), now,
+                                             kwargs.get('snapshot_error'))
+
+
+class TezBroadcastPeriodTests(unittest.TestCase):
+    """Какой час судит отбивка и чем она считает его приём и потери."""
+
+    def test_last_full_hour_is_judged(self):
+        ns = _namespace()
+        for now, expected in ((datetime(2026, 9, 23, 10, 0, 5), (9, 10)),
+                              (datetime(2026, 9, 23, 10, 37), (9, 10)),
+                              (datetime(2026, 9, 23, 0, 0, 3), (23, 0))):
+            start, end = ns['_tez_broadcast_period'](now)
+            self.assertEqual((start.hour, end.hour), expected, now)
+
+    def test_hour_totals_use_the_wallboard_rule_on_the_hour_window(self):
+        """Одно определение «потеряно» у плитки и у строки в Telegram: приветствие в AR не идёт,
+        чужая линия и исходящие — тоже, звонки соседних часов — мимо окна."""
+        calls = [
+            _call('2026-09-23 09:05:00'),
+            _call('2026-09-23 09:10:00', 'NOANSWER', 'Очередь'),
+            _call('2026-09-23 09:20:00', 'NOANSWER', 'Приветствие в рабочее время New'),
+            _call('2026-09-23 09:30:00', line='77000000000'),
+            _call('2026-09-23 09:40:00', call_type=1),
+            _call('2026-09-23 08:59:59', 'NOANSWER', 'Очередь'),
+            _call('2026-09-23 10:00:00', 'NOANSWER', 'Очередь'),
+        ]
+        ns = _namespace()
+        totals = ns['_tez_broadcast_window_totals'](calls, LINE, datetime(2026, 9, 23, 9),
+                                                    datetime(2026, 9, 23, 10))
+        self.assertEqual((totals['arrived'], totals['served'], totals['lost']), (2, 1, 1))
+        self.assertEqual(totals['ar_ratio'], 0.5)
+
+    def test_day_tiles_take_intake_from_the_fresh_journal(self):
+        """Ночью табло никто не смотрит и журнал в снимке старый: итог дня пересчитан по журналу
+        отбивки, а кабинетные SL, ожидание и разговор остаются из снимка."""
+        calls = [_call('2026-09-23 08:10:00'), _call('2026-09-23 09:10:00'),
+                 _call('2026-09-23 09:20:00', 'NOANSWER', 'Очередь')]
+        _ns, data = _assemble(_snapshot(), calls)
+        self.assertFalse(data['day_closed'])
+        self.assertEqual(data['day_label'], 'за день')
+        self.assertEqual((data['tp_day']['arrived'], data['tp_day']['lost']), (3, 1))
+        self.assertEqual(data['tp_day']['sl_ratio'], 0.9)
+        self.assertEqual((data['tp_hour']['arrived'], data['tp_hour']['lost']), (2, 1))
+        self.assertEqual(data['hour_label'], '09:00–10:00')
+        self.assertEqual(data['stamp'], '23.09 10:00')
+
+    def test_midnight_reports_the_closed_day_without_cabinet_numbers(self):
+        """В 00:00 час и итог дня — вчерашние, а снимок живёт новыми сутками. Кабинетных цифр за
+        прошлые сутки взять негде — их нет вовсе, а не нули нового дня."""
+        calls = [_call('2026-09-22 23:10:00'), _call('2026-09-22 23:20:00', 'NOANSWER', 'Очередь'),
+                 _call('2026-09-22 12:00:00')]
+        _ns, data = _assemble(_snapshot(), calls, now=datetime(2026, 9, 23, 0, 0, 4))
+        self.assertTrue(data['day_closed'])
+        self.assertEqual(data['day_label'], 'за 22.09')
+        self.assertEqual(data['hour_label'], '23:00–24:00')
+        self.assertEqual(data['tp_day'], {'arrived': 3, 'served': 2, 'lost': 1,
+                                          'ar_ratio': round(1 / 3.0, 4)})
+        self.assertEqual((data['tp_hour']['arrived'], data['tp_hour']['lost']), (2, 1))
+
+    def test_line_is_found_by_the_roster_when_the_snapshot_missed_it(self):
+        calls = [_call('2026-09-23 09:10:00', stage='901'), _call('2026-09-23 09:20:00', stage='901')]
+        snapshot = _snapshot(diagnostics={})
+        ns = _namespace(db=_AssembleDb(), people={'tp': [{'id': 1, 'sip_number': '901'}], 'op': []})
+        data = ns['_tez_broadcast_assemble'](snapshot, calls, None, datetime(2026, 9, 23, 10, 0, 5))
+        self.assertEqual(data['tp_hour']['arrived'], 2)
+
+    def test_no_journal_means_no_hour(self):
+        _ns, data = _assemble(_snapshot(), None, journal_error='too frequent')
+        self.assertIsNone(data['tp_hour'])
+        # Итог дня тогда остаётся кабинетным, как на стене, — без подмены.
+        self.assertEqual(data['tp_day']['arrived'], 99)
+
+
+class TezBroadcastDeviationTests(unittest.TestCase):
+    """Отклонения: AR прошедшего часа выше потолка при достаточной выборке и молчание источника."""
+
+    def _deviations(self, hour, **data):
+        ns = _namespace()
+        base = {'tp': {'now': {}}, 'tp_hour': hour, 'hour_label': '09:00–10:00',
+                'snapshot_stale': False, 'snapshot_age_seconds': 0}
+        base.update(data)
+        return ns['_tez_broadcast_deviations'](base)
+
+    def test_high_ar_with_enough_calls_is_a_warning_with_counts(self):
+        notes = self._deviations({'arrived': 5, 'served': 4, 'lost': 1, 'ar_ratio': 0.2})
+        self.assertEqual(len(notes), 1)
+        self.assertIn('Обратите внимание (за час 09:00–10:00)', notes[0])
+        self.assertIn('20,0 %', notes[0])
+        # Выборка крошечная — без «1 из 5» процент читался бы как авария.
+        self.assertIn('(1 из 5)', notes[0])
+        self.assertIn('до 5 %', notes[0])
+
+    def test_too_few_calls_are_not_judged(self):
+        self.assertEqual(self._deviations({'arrived': 4, 'served': 3, 'lost': 1, 'ar_ratio': 0.25}), [])
+
+    def test_ar_at_the_ceiling_is_the_norm(self):
+        """Потолок: ровно 5 % — норма, как у плитки (arCeilingTone)."""
+        self.assertEqual(self._deviations({'arrived': 20, 'served': 19, 'lost': 1, 'ar_ratio': 0.05}), [])
+
+    def test_silent_sources_are_deviations(self):
+        self.assertIn('Журнал звонков Binotel не обновился', self._deviations(None)[0])
+        self.assertIn('Страница очереди Binotel недоступна', self._deviations({}, tp=None)[0])
+        stale = self._deviations({'arrived': 0, 'served': 0, 'lost': 0, 'ar_ratio': None},
+                                 snapshot_stale=True, snapshot_age_seconds=900)
+        self.assertIn('Binotel', stale[-1])
+        self.assertIn('15 минут', stale[-1])
+        self.assertEqual(self._deviations({}, snapshot_error='boom'),
+                         ['Binotel не отвечает — показателей табло Тез КЦ нет.'])
+
+    def test_break_violations_are_not_deviations(self):
+        """Решение владельца 23.09.2026: перерывы — строкой в подписи, но режим «только при
+        отклонениях» они не будят (так же у «Линии»)."""
+        calm = {'arrived': 6, 'served': 6, 'lost': 0, 'ar_ratio': 0.0}
+        notes = self._deviations(calm, break_violations=[VIOLATION])
+        self.assertEqual(notes, [])
+
+
+class TezBroadcastCaptionTests(unittest.TestCase):
+    """Подпись: отклонения, под ними перерывы; лимит подписи альбома Telegram."""
+
+    def _data(self, violations=(), hour=None):
+        return {'tp': {'now': {}}, 'hour_label': '09:00–10:00', 'snapshot_stale': False,
+                'tp_hour': hour or {'arrived': 5, 'served': 4, 'lost': 1, 'ar_ratio': 0.2},
+                'break_violations': list(violations)}
+
+    def test_warning_first_then_breaks(self):
+        ns = _namespace()
+        caption = ns['_tez_broadcast_caption'](self._data([VIOLATION]))
+        self.assertLess(caption.index('Обратите внимание'), caption.index('Перерывы не по графику'))
+        self.assertIn('Тлеу Аскар', caption)
+
+    def test_calm_hour_without_breaks_has_no_caption(self):
+        ns = _namespace()
+        calm = {'arrived': 6, 'served': 6, 'lost': 0, 'ar_ratio': 0.0}
+        self.assertEqual(ns['_tez_broadcast_caption'](self._data(hour=calm)), '')
+
+    def test_long_break_list_is_cut_to_fit_the_album_caption(self):
+        """Подпись альбома — до 1024 символов; не влезли перерывы — режем их до счётчика, а
+        предупреждение не трогаем никогда."""
+        ns = _namespace()
+        long_name = 'Оператор с очень длинной фамилией и именем ' * 3
+        rows = [dict(VIOLATION, id=i, operator_name=long_name) for i in range(6)]
+        caption = ns['_tez_broadcast_caption'](self._data(rows))
+        self.assertLessEqual(len(caption), ns['TELEGRAM_MAX_CAPTION_CHARS'])
+        self.assertIn('Обратите внимание', caption)
+        self.assertIn('и ещё', caption)
+
+
+class TezBroadcastPictureTests(unittest.TestCase):
+    """Картинки: те же плитки и тот же цвет, что на стене."""
+
+    def setUp(self):
+        self.captured = []
+        self.ns = _namespace(db=_AssembleDb(), extra={})
+        self.ns['_szov_render_tiles_png'] = lambda title, subtitle, key_tiles, stat_tiles: (
+            self.captured.append((title, subtitle, key_tiles, stat_tiles)) or b'png')
+
+    def _data(self, **extra):
+        calls = [_call('2026-09-23 09:10:00'), _call('2026-09-23 09:20:00', 'NOANSWER', 'Очередь')]
+        data = self.ns['_tez_broadcast_assemble'](_snapshot(), calls, None,
+                                                  datetime(2026, 9, 23, 10, 0, 5))
+        data.update(extra)
+        return data
+
+    def test_ar_tile_follows_the_ceiling(self):
+        colors = self.ns['_tez_broadcast_ar_colors']
+        self.assertEqual(colors(0.05), ('#d1fae5', '#047857'))
+        self.assertEqual(colors(0.07), ('#fef3c7', '#b45309'))
+        self.assertEqual(colors(0.0701), ('#ffe4e6', '#be123c'))
+        self.assertEqual(colors(None), ('#f1f5f9', '#334155'))
+
+    def test_day_picture_has_cabinet_row_and_people_now(self):
+        self.ns['_tez_render_tp_day_png'](self._data())
+        title, subtitle, keys, rows = self.captured[-1]
+        self.assertEqual(title, 'Табло Тез КЦ · ТП')
+        self.assertIn('за день', subtitle)
+        self.assertEqual([tile[0] for tile in keys], ['Входящих', 'Принято', 'Потеряно', 'AR'])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], ('SL', '90,0 %'))
+        self.assertEqual(rows[1][0], ('В очереди', '1'))
+
+    def test_closed_day_picture_drops_the_cabinet_row(self):
+        self.ns['_tez_render_tp_day_png'](self._data(day_closed=True, day_label='за 22.09'))
+        _title, subtitle, _keys, rows = self.captured[-1]
+        self.assertIn('за 22.09', subtitle)
+        self.assertEqual(len(rows), 1)
+
+    def test_hour_picture_is_only_intake(self):
+        """SL и ожидание кабинет отдаёт только за день — у часа их нет вовсе."""
+        self.ns['_tez_render_tp_hour_png'](self._data())
+        title, subtitle, keys, rows = self.captured[-1]
+        self.assertEqual(title, 'Табло Тез КЦ · ТП · за час')
+        self.assertIn('09:00–10:00', subtitle)
+        self.assertEqual(keys[0][1], '2')
+        self.assertEqual(rows, [])
+
+    def test_empty_count_is_a_dash_not_zero(self):
+        self.ns['_tez_render_tp_hour_png'](self._data(tp_hour={}))
+        _title, _subtitle, keys, _rows = self.captured[-1]
+        self.assertEqual([tile[1] for tile in keys], ['—', '—', '—', '—'])
+
+    def test_op_picture_mirrors_the_wall(self):
+        self.ns['_tez_render_op_png'](self._data())
+        title, _subtitle, keys, rows = self.captured[-1]
+        self.assertEqual(title, 'Табло Тез КЦ · ОП')
+        self.assertEqual([tile[0] for tile in keys], ['Онлайн', 'Свободны', 'В разговоре', 'Перерыв'])
+        self.assertEqual(rows[0], [('Поднято / совершено', '65 / 152'), ('Дозвон', '42,8 %'),
+                                   ('Ср. разговор', '1:35')])
+        # Жёлтый — только когда на перерыве кто-то есть: жёлтый ноль — цвет без смысла.
+        self.assertEqual(keys[3][2:], ('#f1f5f9', '#334155'))
+        on_break = dict(_snapshot()['op'], now={'operators_on_break': 2})
+        self.ns['_tez_render_op_png'](self._data(op=on_break))
+        self.assertEqual(self.captured[-1][2][3][2:], ('#fef3c7', '#b45309'))
+
+    def test_renderer_draws_no_rows_for_an_empty_list(self):
+        renderer = SOURCE[SOURCE.index('def _szov_render_tiles_png('):]
+        renderer = renderer[:renderer.index('\ndef ', 10)]
+        self.assertIn('if not stat_tiles:\n        rows = []', renderer)
+
+
+class TezBroadcastJournalTests(unittest.TestCase):
+    """Журнал для отбивки: выкачанный ПОСЛЕ конца часа, а не какой лежит в кэше."""
+
+    def _ns(self, journal, api_calls=None, wait=30):
+        ns = _namespace()
+        ns['TEZ_BROADCAST_JOURNAL_WAIT_SECONDS'] = wait
+        ns['_tez_wallboard_journal'] = journal
+
+        class _FastAsyncio:
+            get_event_loop = staticmethod(asyncio.get_event_loop)
+
+            @staticmethod
+            async def sleep(_seconds):
+                return None
+        ns['asyncio'] = _FastAsyncio
+        return ns
+
+    def test_waits_until_the_journal_covers_the_hour(self):
+        """Кэш табло свежий, но выкачан до конца часа — ждём следующую выкачку."""
+        hour_end = time.time() - 30
+        answers = [(['old'], 40, None), (['old'], 40, None), (['fresh'], 5, None)]
+        ns = self._ns(lambda day_key: answers.pop(0))
+        today = datetime.now(ZONE).strftime('%Y-%m-%d')
+        calls, error = asyncio.run(ns['_tez_broadcast_journal'](today, hour_end))
+        self.assertEqual(calls, ['fresh'])
+        self.assertIsNone(error)
+
+    def test_gives_up_with_a_dash_rather_than_a_cut_hour(self):
+        ns = self._ns(lambda day_key: (['old'], 999, 'too frequent'), wait=0)
+        today = datetime.now(ZONE).strftime('%Y-%m-%d')
+        calls, error = asyncio.run(ns['_tez_broadcast_journal'](today, time.time()))
+        self.assertIsNone(calls)
+        self.assertEqual(error, 'too frequent')
+
+    def test_yesterday_is_fetched_directly_not_through_the_wall_cache(self):
+        """Вчерашние сутки в кэше табло не лежат, и выбивать оттуда сегодняшний журнал нельзя."""
+        body = SOURCE[SOURCE.index('async def _tez_broadcast_journal('):]
+        body = body[:body.index('\nasync def ', 10)]
+        self.assertIn('if day_key != today_key:', body)
+        self.assertIn('list_calls_for_day(day_key)', body)
+        direct = body[body.index('if day_key != today_key:'):body.index('deadline =')]
+        self.assertNotIn('_tez_wallboard_journal', direct)
+        self.assertIn('run_in_executor(\n                None,', direct)
+
+
+# --- Общий обход получателей: группы и личные подписчики ----------------------------------------
+
 class _FakeBot:
-    """Бот, который запоминает отправленное и умеет «быть заблокированным» адресатом."""
+    """Доставка, которая запоминает адресатов и умеет «быть заблокированной»."""
 
     def __init__(self, fail_for=()):
         self.sent = []
         self.fail_for = set(fail_for)
 
-    async def send_message(self, chat_id, text, parse_mode=None):
+    async def deliver(self, chat_id, text, media):
         if chat_id in self.fail_for:
             raise RuntimeError('Forbidden: bot was blocked by the user')
-        self.sent.append((chat_id, text, parse_mode))
+        self.sent.append((chat_id, text, media))
 
 
-class _BroadcastDb:
-    """База ровно в том объёме, в каком её трогает плановая отбивка Тез."""
-
-    def __init__(self, chats=(), people=(), violations=(), people_error=None, enabled_for=()):
+class _RunJobDb:
+    def __init__(self, chats=()):
         self.chats = list(chats)
-        self.people = list(people)
-        self.violations = list(violations)
-        self.people_error = people_error
-        self.enabled_for = set(enabled_for)
-        self.people_calls = []
-        self.violation_reads = 0
-        self.marked = []
 
     def get_szov_broadcast_chats(self, direction):
         assert direction == 'tez', direction
         return list(self.chats)
 
-    def get_tez_broadcast_personal_recipients(self, tez_department_id=None):
-        self.people_calls.append(tez_department_id)
-        if self.people_error:
-            raise self.people_error
-        return list(self.people)
-
-    def get_unreported_szov_break_violations(self, max_age_hours, direction=None):
-        assert direction == 'tez', direction
-        self.violation_reads += 1
-        return list(self.violations)
-
-    def mark_szov_break_violations_reported(self, ids):
-        self.marked.extend(ids)
-
-    def get_tez_broadcast_personal(self, user_id):
-        return user_id in self.enabled_for
-
 
 VIOLATION = {'id': 11, 'operator_name': 'Тлеу Аскар', 'started_at': '2026-09-22 16:00:00',
              'violation_date': '2026-09-22', 'kind': 'not_planned', 'planned_start_minutes': None}
-TEZ_DEPARTMENT_ID = 7
 
 
-def _run_broadcast_job(db, bot):
-    ns = _namespace(db=db, extra={
-        'asyncio': asyncio, 'functools': functools, 'bot': bot, 'executor_pool': None,
-        '_tez_wallboard_department_id': lambda: TEZ_DEPARTMENT_ID,
-    })
-    asyncio.run(ns['tez_break_broadcast_job']())
-    return ns
+def _run_job(chats=(), people=(), notes=(), fail_for=()):
+    bot = _FakeBot(fail_for)
+    delivered = []
+    prepared = []
+
+    def personal():
+        return list(people)
+
+    async def prepare():
+        prepared.append(1)
+        return {'break_violations': [VIOLATION]}, 'caption', [('a.png', b'1'), ('b.png', b'2')]
+
+    async def on_delivered(data):
+        delivered.append(data)
+
+    ns = _namespace(db=_RunJobDb(chats), extra={'_szov_broadcast_deliver': bot.deliver})
+    asyncio.run(ns['_szov_broadcast_run_job'](
+        direction='tez', label='Отбивка табло Тез КЦ', prepare=prepare,
+        deviations=lambda data: list(notes), on_delivered=on_delivered, personal=personal))
+    return bot, delivered, prepared
 
 
-class TezPersonalBroadcastJobTests(unittest.TestCase):
-    """Плановая отбивка: админ, включивший её себе, получает то же, что и группы."""
+class TezBroadcastRecipientsTests(unittest.TestCase):
+    """Группы и админы, включившие отбивку себе, идут одним обходом со своими режимами."""
 
-    def test_admin_gets_the_message_even_without_any_group(self):
-        """Личная отбивка не зависит от групп: у отдела может не быть ни одной."""
-        db = _BroadcastDb(people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}],
-                          violations=[VIOLATION])
-        bot = _FakeBot()
-        _run_broadcast_job(db, bot)
+    ADMIN = {'id': 5, 'name': 'Админ', 'telegram_id': 555, 'mode': 'always'}
+
+    def test_admin_gets_it_even_without_any_group(self):
+        bot, delivered, prepared = _run_job(people=[self.ADMIN])
         self.assertEqual([item[0] for item in bot.sent], [555])
-        self.assertIn('Тлеу Аскар', bot.sent[0][1])
-        self.assertEqual(bot.sent[0][2], 'HTML')
-        self.assertEqual(db.marked, [11])
-        # Граница отдела та же, что у формы: адресатов судят по id Тез КЦ.
-        self.assertEqual(db.people_calls, [TEZ_DEPARTMENT_ID])
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(len(delivered), 1)
 
-    def test_groups_and_admins_get_one_and_the_same_message(self):
-        db = _BroadcastDb(
-            chats=[{'chat_id': -100, 'is_enabled': True}, {'chat_id': -200, 'is_enabled': False}],
-            people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}],
-            violations=[VIOLATION])
-        bot = _FakeBot()
-        _run_broadcast_job(db, bot)
+    def test_groups_and_admins_get_one_and_the_same_album(self):
+        bot, _delivered, prepared = _run_job(
+            chats=[{'chat_id': -100, 'is_enabled': True, 'mode': 'always'},
+                   {'chat_id': -200, 'is_enabled': False, 'mode': 'always'}],
+            people=[self.ADMIN])
         self.assertEqual(sorted(item[0] for item in bot.sent), [-100, 555])
-        self.assertEqual(len({item[1] for item in bot.sent}), 1)
+        # Сбор один на всех получателей.
+        self.assertEqual(len(prepared), 1)
+
+    def test_personal_mode_is_respected(self):
+        """«Только при отклонениях» у личной подписки работает так же, как у группы."""
+        quiet = dict(self.ADMIN, mode='deviations')
+        bot, delivered, _prepared = _run_job(people=[quiet])
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(delivered, [])
+        bot, _delivered, _prepared = _run_job(people=[quiet], notes=['Обратите внимание…'])
+        self.assertEqual([item[0] for item in bot.sent], [555])
 
     def test_blocked_bot_does_not_cost_the_others(self):
-        """Человек заблокировал бота — группа всё равно получает, нарушения помечаются."""
-        db = _BroadcastDb(chats=[{'chat_id': -100, 'is_enabled': True}],
-                          people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}],
-                          violations=[VIOLATION])
-        bot = _FakeBot(fail_for={555})
-        _run_broadcast_job(db, bot)
+        bot, delivered, _prepared = _run_job(
+            chats=[{'chat_id': -100, 'is_enabled': True, 'mode': 'always'}],
+            people=[self.ADMIN], fail_for={555})
         self.assertEqual([item[0] for item in bot.sent], [-100])
-        self.assertEqual(db.marked, [11])
+        self.assertEqual(len(delivered), 1)
+
+    def test_nobody_to_write_means_nothing_is_collected(self):
+        """Получателей нет — отбивка не ходит в Binotel вовсе."""
+        bot, _delivered, prepared = _run_job(chats=[{'chat_id': -100, 'is_enabled': False}])
+        self.assertEqual(bot.sent, [])
+        self.assertEqual(prepared, [])
 
     def test_failing_personal_lookup_does_not_silence_the_groups(self):
-        db = _BroadcastDb(chats=[{'chat_id': -100, 'is_enabled': True}],
-                          people_error=RuntimeError('column does not exist'),
-                          violations=[VIOLATION])
-        bot = _FakeBot()
+        class _Db(_RunJobDb):
+            def get_tez_broadcast_personal_recipients(self, tez_department_id=None):
+                raise RuntimeError('column does not exist')
+        ns = _namespace(db=_Db(), extra={'_tez_wallboard_department_id': lambda: 7})
         with self.assertLogs(level='ERROR'):
-            _run_broadcast_job(db, bot)
-        self.assertEqual([item[0] for item in bot.sent], [-100])
+            self.assertEqual(ns['_tez_broadcast_personal_recipients'](), [])
 
-    def test_nobody_to_write_means_violations_are_not_read(self):
-        db = _BroadcastDb(chats=[{'chat_id': -100, 'is_enabled': False}], violations=[VIOLATION])
-        bot = _FakeBot()
-        _run_broadcast_job(db, bot)
-        self.assertEqual(bot.sent, [])
-        self.assertEqual(db.violation_reads, 0)
-        self.assertEqual(db.marked, [])
+    def test_personal_recipients_are_judged_by_the_tez_department(self):
+        calls = []
 
-    def test_nothing_new_means_silence_for_admins_too(self):
-        """«Нарушений нет» раз в час — шум и в личке, не только в группе."""
-        db = _BroadcastDb(people=[{'id': 5, 'name': 'Админ', 'telegram_id': 555}])
-        bot = _FakeBot()
-        _run_broadcast_job(db, bot)
-        self.assertEqual(bot.sent, [])
-        self.assertEqual(db.marked, [])
+        class _Db(_RunJobDb):
+            def get_tez_broadcast_personal_recipients(self, tez_department_id=None):
+                calls.append(tez_department_id)
+                return []
+        ns = _namespace(db=_Db(), extra={'_tez_wallboard_department_id': lambda: 7})
+        ns['_tez_broadcast_personal_recipients']()
+        self.assertEqual(calls, [7])
 
 
 def _owner_namespace(requester, db=None):
     """requester — кортеж как у db.get_user: (id, telegram_id, name, role)."""
-    return _namespace(db=db or _BroadcastDb(), extra={
+    return _namespace(db=db or _PersonalDb(), extra={
         '_get_authenticated_requester': lambda: (requester[0], requester, None),
     })
+
+
+class _PersonalDb:
+    def __init__(self, states=None):
+        self.states = states or {}
+
+    def get_tez_broadcast_personal(self, user_id):
+        return self.states.get(user_id, {'enabled': False, 'mode': 'always'})
 
 
 class TezPersonalBroadcastOwnerTests(unittest.TestCase):
@@ -504,14 +838,14 @@ class TezPersonalBroadcastOwnerTests(unittest.TestCase):
                 self.assertIsNone(ns['_szov_broadcast_personal_owner'](direction))
                 self.assertIsNone(ns['_szov_broadcast_personal_state'](direction))
 
-    def test_state_says_whether_telegram_is_linked(self):
-        db = _BroadcastDb(enabled_for={300})
+    def test_state_says_mode_and_whether_telegram_is_linked(self):
+        db = _PersonalDb({300: {'enabled': True, 'mode': 'deviations'}})
         linked = _owner_namespace((300, 777, 'Админ', 'admin'), db=db)
         self.assertEqual(linked['_szov_broadcast_personal_state']('tez'),
-                         {'enabled': True, 'telegram_connected': True})
+                         {'enabled': True, 'mode': 'deviations', 'telegram_connected': True})
         unlinked = _owner_namespace((301, None, 'Админ', 'admin'), db=db)
         self.assertEqual(unlinked['_szov_broadcast_personal_state']('tez'),
-                         {'enabled': False, 'telegram_connected': False})
+                         {'enabled': False, 'mode': 'always', 'telegram_connected': False})
 
 
 class TezPersonalBroadcastWiringTests(unittest.TestCase):
@@ -523,14 +857,15 @@ class TezPersonalBroadcastWiringTests(unittest.TestCase):
 
     def test_settings_endpoint_toggles_it_behind_the_broadcast_guard(self):
         handler = self._handler('api_szov_wallboard_broadcast')
+        marker = "elif 'personal' in payload or 'personal_mode' in payload:"
         self.assertLess(handler.index('requester_id, err = _szov_broadcast_guard()'),
-                        handler.index("elif 'personal' in payload:"))
-        branch = handler[handler.index("elif 'personal' in payload:"):handler.index('            else:')]
+                        handler.index(marker))
+        branch = handler[handler.index(marker):handler.index('            else:')]
         self.assertIn('owner = _szov_broadcast_personal_owner(direction)', branch)
         self.assertIn('if owner is None:', branch)
         # Включить без Telegram нельзя — писать некуда; выключить можно всегда.
         self.assertIn('if enabled and not owner[1]:', branch)
-        self.assertIn('db.set_tez_broadcast_personal(requester_id, enabled)', branch)
+        self.assertIn("mode=payload.get('personal_mode')", branch)
         # Личная настройка — не общий список получателей: в «кто менял» не пишется.
         self.assertNotIn('_log_szov_broadcast_change', branch)
         self.assertIn('"personal": _szov_broadcast_personal_state(direction),', handler)
@@ -545,6 +880,8 @@ class TezPersonalBroadcastWiringTests(unittest.TestCase):
     def test_schema_and_recipient_rule(self):
         self.assertIn('ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS '
                       'tez_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;', DB_SOURCE)
+        self.assertIn('ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS '
+                      "tez_broadcast_personal_mode VARCHAR(16) NOT NULL DEFAULT 'always';", DB_SOURCE)
         method = DB_SOURCE[DB_SOURCE.index('def get_tez_broadcast_personal_recipients('):]
         method = method[:method.index('\n# Initialize database')]
         self.assertIn('u.telegram_id IS NOT NULL', method)
@@ -554,17 +891,22 @@ class TezPersonalBroadcastWiringTests(unittest.TestCase):
         self.assertIn("LOWER(COALESCE(u.role, '')) = 'admin'", method)
         self.assertIn('NOT EXISTS (', method)
         self.assertIn('AND d.id = %s', method)
+        self.assertIn("COALESCE(ap.tez_broadcast_personal_mode, 'always')", method)
+        setter = DB_SOURCE[DB_SOURCE.index('def set_tez_broadcast_personal('):]
+        setter = setter[:setter.index('\n    def ', 10)]
+        self.assertIn('if mode not in self.SZOV_BROADCAST_MODES:', setter)
 
     def test_form_shows_the_row_only_when_the_server_sends_it(self):
         self.assertIn("const personal = state?.personal || null;", SZOV_VIEW)
         self.assertIn('{personal ? (', SZOV_VIEW)
         self.assertIn('Лично мне в Telegram', SZOV_VIEW)
         self.assertIn("{ personal: next }", SZOV_VIEW)
+        self.assertIn("{ personal_mode: mode }", SZOV_VIEW)
+        self.assertIn('personal.enabled && withModes ?', SZOV_VIEW)
         self.assertIn('sendNow({ personal: true })', SZOV_VIEW)
         self.assertIn('sendNow({ chat_id: item.chat_id })', SZOV_VIEW)
         # Переключатель гаснет только на включение: выключить без Telegram можно.
         self.assertIn('disabled={busy || (!personal.enabled && !personal.telegram_connected)}', SZOV_VIEW)
-
 
 if __name__ == '__main__':
     unittest.main()

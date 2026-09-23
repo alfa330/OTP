@@ -8,6 +8,7 @@ import { canOpenWallboardWidget, formatClock, wallboardStaleNotice } from './szo
 import { SegmentedSwitch } from './SzovWallboardTiles';
 import { BreakViolationsControls, BroadcastControls } from './SzovWallboardView';
 import {
+    TEZ_AR_TARGET_PERCENT,
     TEZ_EXPORT_MAX_DAYS,
     TEZ_WALLBOARD_DIRECTIONS,
     TEZ_WALLBOARD_DIRECTION_LIST,
@@ -52,14 +53,25 @@ const FULLSCREEN_Z = 150;
 const DIRECTIONS = TEZ_WALLBOARD_DIRECTION_LIST;
 
 /*
- * Перерывы вне графика у Тез КЦ. Ключ направления один на весь отдел (ТП и ОП вместе) —
- * и у журнала нарушений, и у получателей отбивки: сверяется перерыв ЧЕЛОВЕКА с его же
- * графиком, а руководитель у обоих направлений один.
+ * Отбивка и перерывы вне графика у Тез КЦ. Ключ направления один на весь отдел (ТП и ОП
+ * вместе) — и у журнала нарушений, и у получателей отбивки: сверяется перерыв ЧЕЛОВЕКА с его
+ * же графиком, а руководитель у обоих направлений один.
+ *
+ * С 23.09.2026 отбивка — это отбивка ТАБЛО, как у СЗоВ и ОП: картинки ТП за день и за час и
+ * картинка ОП каждый час. Подсказка называет, что считается отклонением, — ровно то, что
+ * решает сервер (_tez_broadcast_deviations): иначе режим «только при отклонениях» — обещание
+ * без содержания.
  */
 const TEZ_BREAK_DIRECTION = 'tez';
-const TEZ_BROADCAST_HINT = 'Сообщение уходит, только когда есть новые перерывы вне графика: '
-    + 'в спокойный час бот молчит. Проверить связь с группой можно кнопкой отправки в строке '
-    + 'получателя — она напишет даже тогда, когда нарушений нет.';
+const TEZ_BROADCAST_HINT = (
+    <>
+        Каждый час бот присылает табло ТП за день и за прошедший час и табло ОП. Отклонением
+        считаем то, что подсвечено на табло, но за прошедший час: ТП потеряла больше
+        {' '}{TEZ_AR_TARGET_PERCENT}% входящих, или Binotel не отвечает и цифры замерли. Часы
+        с единичными звонками в тревогу не идут. Перерывы вне графика приходят строкой в той
+        же отбивке, но отклонением не считаются. У ОП входящих нет, поэтому и предупреждений нет.
+    </>
+);
 
 /*
  * Кнопка виджета. Окно «поверх других» у документа ОДНО на всё приложение, поэтому кнопка
@@ -270,14 +282,12 @@ const TezWallboardHeader = ({
                 withAccessTokenHeader={withAccessTokenHeader}
                 showToast={showToast}
             />
-            {/* А вот кому уходят предупреждения в Telegram, решает только руководитель
-                отдела — ту же границу держит _szov_broadcast_guard с направлением «tez». */}
+            {/* А вот кому уходит отбивка в Telegram, решает только руководитель отдела — ту
+                же границу держит _szov_broadcast_guard с направлением «tez». */}
             {canManageBroadcast ? (
                 <BroadcastControls
                     direction={TEZ_BREAK_DIRECTION}
                     directionLabel="Тез КЦ"
-                    modalTitle="Отбивка перерывов"
-                    withModes={false}
                     deviationHint={TEZ_BROADCAST_HINT}
                     apiBaseUrl={apiBaseUrl}
                     withAccessTokenHeader={withAccessTokenHeader}

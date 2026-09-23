@@ -494,7 +494,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
         save('POST', {
             chat_id: picked.chat_id,
             chat_title: picked.title || picked.username || String(picked.chat_id),
-            // Направление без режимов («Тез КЦ» пишет только когда есть нарушения) всё равно
+            // Направление без режимов (withModes={false}) всё равно
             // обязано положить в базу допустимое значение: режим там NOT NULL с CHECK.
             mode: withModes ? draftMode : 'always',
             is_enabled: true,
@@ -527,6 +527,15 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                                         То же сообщение, что уходит группам, — вам в личные сообщения
                                     </div>
                                 </div>
+                                {/* Режим — как у группы: отбивка табло идёт каждый час круглые
+                                    сутки, и без выбора в личку падало бы 24 сообщения в сутки. */}
+                                {personal.enabled && withModes ? (
+                                    <ModeSwitch
+                                        value={personal.mode || 'always'}
+                                        disabled={busy}
+                                        onChange={(mode) => save('POST', { personal_mode: mode }, 'Режим изменён')}
+                                    />
+                                ) : null}
                                 {personal.enabled ? (
                                     <button
                                         type="button"
