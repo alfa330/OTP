@@ -7373,7 +7373,10 @@ def wazzup_webhook(token):
     """Приёмник вебхуков Wazzup (messagesAndStatuses). Обработчик намеренно
     тонкий: принял → записал → 200 (Wazzup ждёт ответ не дольше 30 секунд;
     на не-2xx повторяет доставку, upsert делает повтор безопасным)."""
-    if not WAZZUP_WEBHOOK_TOKEN or not hmac.compare_digest(token, WAZZUP_WEBHOOK_TOKEN):
+    # Токен — не только пароль, но и адрес: у каждого аккаунта Wazzup свой
+    # (wazzup/accounts.py), по нему сообщения ложатся в свой аккаунт.
+    account = wazzup_accounts.account_by_webhook_token(token)
+    if account is None:
         return jsonify({"error": "not found"}), 404
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
@@ -7382,7 +7385,7 @@ def wazzup_webhook(token):
         # Проверочный запрос при регистрации webhooksUri
         return jsonify({"ok": True}), 200
     try:
-        stored = db.store_wazzup_messages(payload.get('messages'))
+        stored = db.store_wazzup_messages(payload.get('messages'), account=account)
         updated = db.update_wazzup_statuses(payload.get('statuses'))
     except Exception:
         logging.exception("wazzup webhook: ошибка записи")
@@ -7395,29 +7398,33 @@ def wazzup_webhook(token):
 # авторы, показатели) идёт под _verifier_chats_guard — он шире и пускает
 # глобальных админов, а эпизоды ниже остаются под _ai_qa_guard: эпизод — единица
 # ИИ-оценки, и админу он не открывается. Сводить их обратно в один нельзя.
-WAZZUP_API_KEY = (os.getenv('WAZZUP_OP_API_KEY') or '').strip()
-_WAZZUP_CHANNELS_CACHE = {'ts': 0.0, 'items': None}
+# Кэш имён каналов — на каждый аккаунт свой: ключи API у аккаунтов разные
+# (wazzup/accounts.py), и список каналов у каждого свой.
+_WAZZUP_CHANNELS_CACHE = {}
 _WAZZUP_CHANNELS_CACHE_TTL = 600  # имена каналов меняются редко
 
 
-def _wazzup_channels_from_api():
+def _wazzup_channels_from_api(account='op'):
     """Список каналов аккаунта из Wazzup API (имя, номер, состояние) с кэшем.
     При ошибке отдаёт последний удачный ответ — список чатов живёт и без имён."""
     now = time.time()
-    cached = _WAZZUP_CHANNELS_CACHE['items']
-    if cached is not None and now - _WAZZUP_CHANNELS_CACHE['ts'] < _WAZZUP_CHANNELS_CACHE_TTL:
+    cache = _WAZZUP_CHANNELS_CACHE.setdefault(account, {'ts': 0.0, 'items': None})
+    cached = cache['items']
+    if cached is not None and now - cache['ts'] < _WAZZUP_CHANNELS_CACHE_TTL:
         return cached
     items = cached or []
-    if WAZZUP_API_KEY:
+    api_key = wazzup_accounts.api_key(account)
+    if api_key:
         try:
             r = requests.get('https://api.wazzup24.com/v3/channels',
-                             headers={'Authorization': f'Bearer {WAZZUP_API_KEY}'},
+                             headers={'Authorization': f'Bearer {api_key}'},
                              timeout=10)
             r.raise_for_status()
             items = r.json() or []
         except Exception:
-            logging.warning("wazzup: не удалось обновить список каналов", exc_info=True)
-    _WAZZUP_CHANNELS_CACHE.update(ts=now, items=items)
+            logging.warning("wazzup(%s): не удалось обновить список каналов", account,
+                            exc_info=True)
+    cache.update(ts=now, items=items)
     return items
 
 
@@ -7429,14 +7436,18 @@ def api_wazzup_channels():
     _, err = _verifier_chats_guard()
     if err:
         return err
+    account = _wazzup_account_arg()
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
     try:
         with db._get_cursor() as cursor:
             cursor.execute("""SELECT channel_id, COUNT(*), MAX(last_message_at)
-                              FROM wazzup_chats GROUP BY channel_id""")
+                              FROM wazzup_chats WHERE account = %s GROUP BY channel_id""",
+                           (account,))
             counts = {r[0]: (r[1], r[2].isoformat() if r[2] else None)
                       for r in cursor.fetchall()}
         items, seen = [], set()
-        for ch in _wazzup_channels_from_api():
+        for ch in _wazzup_channels_from_api(account):
             cid = ch.get('channelId')
             seen.add(cid)
             chats_count, last_at = counts.get(cid, (0, None))
@@ -7465,6 +7476,9 @@ def api_wazzup_chats():
     _, err = _verifier_chats_guard()
     if err:
         return err
+    account = _wazzup_account_arg()
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
     channel_id = (request.args.get('channel_id') or '').strip() or None
     q = (request.args.get('q') or '').strip()
     try:
@@ -7475,7 +7489,7 @@ def api_wazzup_chats():
         offset = max(int(request.args.get('offset', 0)), 0)
     except (TypeError, ValueError):
         offset = 0
-    where, params = ["TRUE"], []
+    where, params = ["account = %s"], [account]
     if channel_id:
         where.append("channel_id = %s")
         params.append(channel_id)
@@ -7522,6 +7536,9 @@ def api_wazzup_chat_messages():
     _, err = _verifier_chats_guard()
     if err:
         return err
+    account = _wazzup_account_arg()
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
     channel_id = (request.args.get('channel_id') or '').strip()
     chat_id = (request.args.get('chat_id') or '').strip()
     if not channel_id or not chat_id:
@@ -7531,8 +7548,8 @@ def api_wazzup_chat_messages():
         limit = min(max(int(request.args.get('limit', 50)), 1), 200)
     except (TypeError, ValueError):
         limit = 50
-    where = ["channel_id = %s", "chat_id = %s"]
-    params = [channel_id, chat_id]
+    where = ["account = %s", "channel_id = %s", "chat_id = %s"]
+    params = [account, channel_id, chat_id]
     if before:
         where.append("dt < %s")
         params.append(before)
@@ -7557,38 +7574,42 @@ def api_wazzup_chat_messages():
         return jsonify({"error": str(error)}), 500
 
 
-# Казахские буквы → русские аналоги: «Тестбаев Нұрасыл» в Wazzup и «Тестбаев Нурасыл»
-# в users — один человек, подсказка не должна спотыкаться об алфавит.
-# Мягкий и твёрдый знаки просто выбрасываем: то же имя пишут и «Әділхан», и
-# «Адильхан» — казахское написание мягкого знака не знает, русское его вставляет.
-_WAZZUP_KAZ_TRANS = str.maketrans({
-    'ә': 'а', 'ғ': 'г', 'қ': 'к', 'ң': 'н', 'ө': 'о', 'ұ': 'у', 'ү': 'у',
-    'һ': 'х', 'і': 'и', 'ь': None, 'ъ': None,
-})
+# Нормализация имён и автоподсказка привязки живут в wazzup/names.py: тем же
+# правилом забор истории «Потока» строит ключ автора (там id автора нет).
+from wazzup.names import normalize_name as _wazzup_normalize_name  # noqa: E402
+from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
+from wazzup import accounts as wazzup_accounts  # noqa: E402
+from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
 
 
-def _wazzup_normalize_name(value):
-    """Нормализация имени для автоподсказки: регистр, ё, казахские буквы, пробелы."""
-    s = str(value or '').lower().replace('ё', 'е').translate(_WAZZUP_KAZ_TRANS)
-    return ' '.join(s.split())
+def _wazzup_account_arg():
+    """Аккаунт Wazzup из ?account=… (пусто — «op»). None — незнакомое значение:
+    маршрут отвечает 400, а не молча показывает чужой аккаунт."""
+    return wazzup_accounts.normalize_account(request.args.get('account'))
 
 
-def _wazzup_suggest_user(author_name, operators):
-    """Кандидат по имени: точное совпадение нормализованных имён, либо все слова
-    автора входят в слова ФИО оператора (у нас ФИО полнее, чем ник в Wazzup).
-    Двусмысленность (>1 кандидата) — подсказки нет."""
-    norm = _wazzup_normalize_name(author_name)
-    if not norm:
-        return None
-    exact = [op for op in operators if _wazzup_normalize_name(op['name']) == norm]
-    if len(exact) == 1:
-        return exact[0]
-    tokens = set(norm.split())
-    if len(tokens) < 2:
-        return None
-    partial = [op for op in operators
-               if tokens <= set(_wazzup_normalize_name(op['name']).split())]
-    return partial[0] if len(partial) == 1 else None
+@app.route('/api/wazzup/accounts', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_wazzup_accounts():
+    """Аккаунты раздела «Чаты ОП» для переключателя: ярлык, воркспейс,
+    сколько чатов и когда последнее сообщение."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _verifier_chats_guard()
+    if err:
+        return err
+    try:
+        summary = db.wazzup_accounts_summary()
+        items = []
+        for meta in wazzup_accounts.public_accounts():
+            s = summary.get(meta['key'], {})
+            last = s.get('last_message_at')
+            items.append({**meta, 'chatsCount': s.get('chats', 0),
+                          'lastMessageAt': last.isoformat() if last else None})
+        return jsonify({"status": "success", "items": items}), 200
+    except Exception as error:
+        logging.exception("wazzup accounts failed")
+        return jsonify({"error": str(error)}), 500
 
 
 # Показатели раздела «Чаты ОП» делятся по направлениям отдела продаж.
@@ -7668,10 +7689,13 @@ def api_wazzup_authors():
     _, err = _verifier_chats_guard()
     if err:
         return err
+    account = _wazzup_account_arg()
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
     try:
         operators = db.list_wazzup_operator_candidates()
         items = []
-        for a in db.list_wazzup_authors():
+        for a in db.list_wazzup_authors(account):
             suggested = None
             if a['user_id'] is None and not a['is_bot']:
                 suggested = _wazzup_suggest_user(a['author_name'], operators)
@@ -7688,7 +7712,8 @@ def api_wazzup_authors():
                 'directionName': op['direction_name'],
                 'group': _wazzup_group_label(op['direction_id'], op['direction_name'])}
                for op in operators]
-        return jsonify({"status": "success", "items": items, "operators": ops}), 200
+        return jsonify({"status": "success", "items": items, "operators": ops,
+                        "account": account}), 200
     except Exception as error:
         logging.exception("wazzup authors failed")
         return jsonify({"error": str(error)}), 500
@@ -7703,6 +7728,9 @@ def api_wazzup_authors_map():
     if err:
         return err
     data = request.get_json(silent=True) or {}
+    account = wazzup_accounts.normalize_account(data.get('account'))
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
     author_id = str(data.get('authorId') or '').strip()
     if not author_id:
         return jsonify({"error": "authorId is required"}), 400
@@ -7718,7 +7746,7 @@ def api_wazzup_authors_map():
     try:
         db.upsert_wazzup_author_map(
             author_id, author_name=data.get('authorName'),
-            user_id=user_id, is_bot=is_bot, updated_by=requester_id)
+            user_id=user_id, is_bot=is_bot, updated_by=requester_id, account=account)
         return jsonify({"status": "success"}), 200
     except Exception as error:
         logging.exception("wazzup author map failed")
@@ -7745,13 +7773,17 @@ def api_wazzup_analytics():
     _, err = _verifier_chats_guard()
     if err:
         return err
+    account = _wazzup_account_arg()
+    if account is None:
+        return jsonify({"error": "unknown account"}), 400
     try:
         date_from = _wazzup_analytics_date(request.args.get('from'))
         date_to = _wazzup_analytics_date(request.args.get('to'))
     except ValueError:
         return jsonify({"error": "from/to must be YYYY-MM-DD"}), 400
     try:
-        result = db.wazzup_operator_analytics(date_from=date_from, date_to=date_to)
+        result = db.wazzup_operator_analytics(date_from=date_from, date_to=date_to,
+                                              account=account)
         items = [{'key': r['key'], 'userId': r['user_id'],
                   'name': r['user_name'] or r['author_name'] or r['author_id'],
                   'authorName': r['author_name'], 'authorId': r['author_id'],
@@ -7774,10 +7806,55 @@ def api_wazzup_analytics():
                                     'medianResponseSecs': s['median_response_secs'],
                                     'managers': s['managers']},
                         "groups": _wazzup_direction_groups(result['directions']),
+                        "account": account,
                         "from": date_from, "to": date_to}), 200
     except Exception as error:
         logging.exception("wazzup analytics failed")
         return jsonify({"error": str(error)}), 500
+
+
+# ── Wazzup «Поток»: забор переписки внутренним API окна чатов ────────────────
+# Вебхук этого аккаунта занят другой системой, а история пользовательскому API
+# недоступна — сообщения тянет wazzup/potok_sync.py: раз в 10 минут по
+# расписанию и вручную (первоначальная загрузка истории за N дней). Прогон
+# долгий (тысячи запросов), поэтому идёт в фоновом потоке, а ручка отвечает
+# сразу; ход виден в GET.
+
+def _wazzup_potok_sync_thread(days):
+    try:
+        wazzup_potok_sync.run_sync(db, account='potok', days=days)
+    except Exception:
+        logging.exception("wazzup potok sync (manual) failed")
+
+
+@app.route('/api/wazzup/potok/sync', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_wazzup_potok_sync():
+    """GET — состояние последнего/текущего забора; POST {days?} — запустить.
+    days задан — история за столько дней, иначе — дотянуть с последнего."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _verifier_chats_guard()
+    if err:
+        return err
+    if request.method == 'GET':
+        return jsonify({"status": "success", "state": dict(wazzup_potok_sync.STATE)}), 200
+    if not wazzup_accounts.api_key('potok'):
+        return jsonify({"error": "WAZZUP_OP_POTOK_API_KEY не задан"}), 503
+    data = request.get_json(silent=True) or {}
+    days = data.get('days')
+    if days is not None:
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            return jsonify({"error": "days must be an integer"}), 400
+        if not 1 <= days <= 90:
+            return jsonify({"error": "days must be within 1..90"}), 400
+    if wazzup_potok_sync.STATE.get('running'):
+        return jsonify({"status": "running", "state": dict(wazzup_potok_sync.STATE)}), 409
+    threading.Thread(target=_wazzup_potok_sync_thread, args=(days,),
+                     name='wazzup-potok-sync', daemon=True).start()
+    return jsonify({"status": "started", "days": days}), 202
 
 
 # ── Wazzup: эпизоды (единица ИИ-оценки) ──────────────────────────────────────
@@ -65326,6 +65403,22 @@ async def run_wazzup_retention_async():
         logging.exception("wazzup retention failed")
 
 
+async def run_wazzup_potok_sync_async():
+    # Дотягивание переписки «Потока» (см. wazzup/potok_sync.py): с последнего
+    # сохранённого сообщения минус перекрытие. Без ключа — тихий no-op: локальные
+    # стенды и тесты аккаунта не знают. Отдельный поток, а не executor_pool:
+    # прогон сетевой и может занять минуты, а пул из четырёх мест общий с
+    # ботом ([[shared-executor-pool-budget]] — цикл держит четыре места).
+    if not wazzup_accounts.api_key('potok'):
+        return None
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            None, lambda: wazzup_potok_sync.run_sync(db, account='potok'))
+    except Exception:
+        logging.exception("wazzup potok sync failed")
+
+
 async def run_user_sessions_retention_async():
     # Чистка давно протухших сессий (см. db.cleanup_expired_user_sessions).
     loop = asyncio.get_event_loop()
@@ -66385,13 +66478,25 @@ if __name__ == '__main__':
         coalesce=True
     )
 
-    # Ретеншн переписки Wazzup (Верификаторы): сообщения старше 30 дней
-    # удаляются ежедневно в 03:30 (Asia/Almaty) — диск прода 1 ГБ.
+    # Ретеншн переписки Wazzup (оба аккаунта): сообщения старше 45 дней
+    # удаляются ежедневно в 03:30 (Asia/Almaty); диск базы 5 ГБ.
     scheduler.add_job(
         run_wazzup_retention_async,
         CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='wazzup_retention_daily',
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Переписка «Потока» — забор внутренним API окна Wazzup каждые 10 минут
+    # (вебхук аккаунта занят другой системой). Полуминутный сдвиг — чтобы не
+    # совпадать с почасовыми джобами на :00.
+    scheduler.add_job(
+        run_wazzup_potok_sync_async,
+        CronTrigger(minute='3,13,23,33,43,53', timezone=ZoneInfo('Asia/Almaty')),
+        id='wazzup_potok_sync_10min',
+        misfire_grace_time=300,
         max_instances=1,
         coalesce=True
     )

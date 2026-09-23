@@ -12,24 +12,39 @@ import {
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import {
     buildWazzupChatLink, findWazzupChatExact, matchWazzupChatsByPhone, syncWazzupChatDeepLink,
+    normalizeWazzupAccount, WAZZUP_DEFAULT_ACCOUNT,
 } from './chatLink';
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
  * к нашим операторам). Раздел начинался с одних Верификаторов, но к Wazzup
  * подключились и другие направления ОП — отсюда деление показателей.
- * Данные копятся вебхуком с 2026-07-17, ретеншн 30 дней (database.py:
+ * Данные копятся вебхуком с 2026-07-17, ретеншн 45 дней (database.py:
  * cleanup_wazzup_messages, джоба зовёт её без аргументов) — более ранняя
- * история доступна только в самом Wazzup (кнопка «Открыть в Wazzup»). */
+ * история доступна только в самом Wazzup (кнопка «Открыть в Wazzup»).
+ *
+ * Аккаунтов Wazzup два («op» — Верификаторы, «potok» — «Поток», см.
+ * wazzup/accounts.py на бэкенде), и раздел переключается между ними целиком:
+ * каналы, чаты, лента, показатели и привязка — всё по выбранному аккаунту.
+ * Переписку «Потока» бэкенд забирает сам (wazzup/potok_sync.py). */
 
 const PAGE_SIZE = 30;
 const THREAD_PAGE = 50;
 
-// Воркспейс аккаунта в веб-приложении Wazzup; конкретный чат открывается по
-// /chat/<chatType>/<chatId>/<channelId> внутри него.
-const WAZZUP_APP_BASE = 'https://app.wazzup24.com/6757-7677';
-const wazzupChatUrl = (chat) =>
-    `${WAZZUP_APP_BASE}/chat/${chat.chatType || 'whatsapp'}/${encodeURIComponent(chat.chatId)}/${chat.channelId}`;
+// Воркспейсы аккаунтов в веб-приложении Wazzup; конкретный чат открывается по
+// /chat/<chatType>/<chatId>/<channelId> внутри воркспейса. Актуальный список
+// приходит из /api/wazzup/accounts, это — запас на случай, если ручка не ответила.
+const FALLBACK_ACCOUNTS = [
+    { key: 'op', label: 'Верификаторы', workspace: '6757-7677' },
+    { key: 'potok', label: 'Поток', workspace: '2682-1109' },
+];
+const workspaceBase = (accounts, account) => {
+    const meta = (accounts || []).find((a) => a.key === account)
+        || FALLBACK_ACCOUNTS.find((a) => a.key === account) || FALLBACK_ACCOUNTS[0];
+    return `https://app.wazzup24.com/${meta.workspace}`;
+};
+const wazzupChatUrl = (chat, accounts, account) =>
+    `${workspaceBase(accounts, account)}/chat/${chat.chatType || 'whatsapp'}/${encodeURIComponent(chat.chatId)}/${chat.channelId}`;
 
 const MEDIA_LABELS = {
     image: 'Фото', video: 'Видео', audio: 'Голосовое', document: 'Документ',
@@ -267,7 +282,7 @@ const PERIOD_PRESETS = [
 
 
 
-function AnalyticsTab({ apiBaseUrl, headers, showToast, onGoToMapping }) {
+function AnalyticsTab({ apiBaseUrl, headers, showToast, onGoToMapping, account }) {
     const [from, setFrom] = useState(presetStart(30));
     const [to, setTo] = useState(isoDate(new Date()));
     const [data, setData] = useState(null);          // {items, summary, groups} | null = загрузка
@@ -283,7 +298,7 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast, onGoToMapping }) {
         setData(null); setError(null);
         axios.get(`${apiBaseUrl}/api/wazzup/analytics`, {
             headers: headers(),
-            params: { from: range.from || undefined, to: range.to || undefined },
+            params: { from: range.from || undefined, to: range.to || undefined, account },
         }).then((r) => {
             if (requestId !== request.current.id) return;
             setData({ items: r.data.items || [], summary: r.data.summary || {},
@@ -293,7 +308,7 @@ function AnalyticsTab({ apiBaseUrl, headers, showToast, onGoToMapping }) {
             setError('Не удалось загрузить аналитику');
         });
     };
-    useEffect(() => { load(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+    useEffect(() => { load(); /* eslint-disable-next-line */ }, [apiBaseUrl, account]);
 
     const applyPreset = (days) => {
         const next = days === null ? { from: '', to: '' }
@@ -644,7 +659,7 @@ function AuthorRow({ author, operators, saving, onSave }) {
     );
 }
 
-function AuthorsTab({ apiBaseUrl, headers, showToast }) {
+function AuthorsTab({ apiBaseUrl, headers, showToast, account }) {
     const [data, setData] = useState(null);       // {items, operators} | null = загрузка
     const [error, setError] = useState(null);
     const [savingId, setSavingId] = useState(null);
@@ -652,11 +667,11 @@ function AuthorsTab({ apiBaseUrl, headers, showToast }) {
 
     const load = () => {
         setData(null); setError(null);
-        axios.get(`${apiBaseUrl}/api/wazzup/authors`, { headers: headers() })
+        axios.get(`${apiBaseUrl}/api/wazzup/authors`, { headers: headers(), params: { account } })
             .then((r) => setData({ items: r.data.items || [], operators: r.data.operators || [] }))
             .catch(() => setError('Не удалось загрузить авторов'));
     };
-    useEffect(() => { load(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+    useEffect(() => { load(); /* eslint-disable-next-line */ }, [apiBaseUrl, account]);
 
     const save = (author, patch) => {
         const next = { userId: author.userId, isBot: author.isBot, ...patch };
@@ -664,7 +679,7 @@ function AuthorsTab({ apiBaseUrl, headers, showToast }) {
         setSavingId(author.authorId);
         axios.post(`${apiBaseUrl}/api/wazzup/authors/map`, {
             authorId: author.authorId, authorName: author.authorName,
-            userId: next.isBot ? null : next.userId, isBot: next.isBot,
+            userId: next.isBot ? null : next.userId, isBot: next.isBot, account,
         }, { headers: headers() }).then(() => {
             setSavingId(null);
             const opName = (data.operators.find((o) => o.id === next.userId) || {}).name || null;
@@ -760,7 +775,7 @@ function AuthorsTab({ apiBaseUrl, headers, showToast }) {
 
 /* Подраздел «Операторы»: аналитика открывается первой — привязка нужна реже,
  * это разовая настройка. */
-function OperatorsTab({ apiBaseUrl, headers, showToast }) {
+function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
     const [subTab, setSubTab] = useState('analytics');
     return (
         <div className="space-y-3">
@@ -772,8 +787,9 @@ function OperatorsTab({ apiBaseUrl, headers, showToast }) {
             </div>
             {subTab === 'analytics'
                 ? <AnalyticsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                                onGoToMapping={() => setSubTab('mapping')} />
-                : <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />}
+                                account={account} onGoToMapping={() => setSubTab('mapping')} />
+                : <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                              account={account} />}
         </div>
     );
 }
@@ -785,6 +801,21 @@ export default function WazzupChatsView(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [mainTab, setMainTab] = useState('chats');
+
+    /* Аккаунт Wazzup, в который смотрит раздел. Стартовый — из ссылки на чат
+       (account=potok), иначе основной. Загрузчики читают аккаунт через ref, а
+       не из state: переход по ссылке на чат «Потока» переключает аккаунт и в том
+       же тике грузит чат — state к этому моменту ещё старый. */
+    const [account, setAccount] = useState(normalizeWazzupAccount(initialChat?.account));
+    const accountRef = useRef(account);
+    accountRef.current = account;
+    const [accounts, setAccounts] = useState(null);      // из /api/wazzup/accounts
+    const accountList = accounts || FALLBACK_ACCOUNTS;
+    const loadAccounts = () => {
+        axios.get(`${apiBaseUrl}/api/wazzup/accounts`, { headers: headers() })
+            .then((r) => setAccounts(r.data.items?.length ? r.data.items : FALLBACK_ACCOUNTS))
+            .catch(() => setAccounts(FALLBACK_ACCOUNTS));
+    };
 
     const [channels, setChannels] = useState(null);       // null = загрузка
     const [channelId, setChannelId] = useState('');       // '' = все каналы
@@ -825,8 +856,9 @@ export default function WazzupChatsView(props) {
     }, [channels]);
 
     const loadChannels = () => {
-        axios.get(`${apiBaseUrl}/api/wazzup/channels`, { headers: headers() })
-            .then((r) => setChannels(r.data.items || []))
+        const acc = accountRef.current;
+        axios.get(`${apiBaseUrl}/api/wazzup/channels`, { headers: headers(), params: { account: acc } })
+            .then((r) => { if (accountRef.current === acc) setChannels(r.data.items || []); })
             .catch(() => { setChannels([]); showToast?.('Не удалось загрузить каналы', 'error'); });
     };
 
@@ -849,7 +881,8 @@ export default function WazzupChatsView(props) {
         if (reset) { setChats(null); setChatsError(null); }
         return axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
             headers: headers(), signal: controller.signal,
-            params: { channel_id: channel || undefined, q: q || undefined, limit: PAGE_SIZE, offset },
+            params: { channel_id: channel || undefined, q: q || undefined, limit: PAGE_SIZE, offset,
+                      account: accountRef.current },
         }).then((r) => {
             if (requestId !== chatsRequest.current.id) return null;
             setChatsTotal(r.data.total || 0);
@@ -873,7 +906,8 @@ export default function WazzupChatsView(props) {
         axios.get(`${apiBaseUrl}/api/wazzup/chat-messages`, {
             headers: headers(), signal: controller.signal,
             params: { channel_id: chat.channelId, chat_id: chat.chatId,
-                      before: before || undefined, limit: THREAD_PAGE },
+                      before: before || undefined, limit: THREAD_PAGE,
+                      account: accountRef.current },
         }).then((r) => {
             if (requestId !== threadRequest.current.id) return;
             setThreadHasMore(Boolean(r.data.hasMore));
@@ -901,7 +935,26 @@ export default function WazzupChatsView(props) {
         });
     };
 
-    useEffect(() => { loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+    useEffect(() => { loadAccounts(); loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
+
+    /* Переключение аккаунта — это смена источника целиком: каналы, список,
+       открытая переписка и поиск относятся к прошлому аккаунту и сбрасываются.
+       Ref обновляем сразу, чтобы загрузчики этого же тика пошли в новый аккаунт. */
+    const switchAccount = (next) => {
+        const key = normalizeWazzupAccount(next);
+        if (key === accountRef.current) return;
+        accountRef.current = key;
+        setAccount(key);
+        chatsRequest.current.controller?.abort();
+        threadRequest.current.controller?.abort();
+        setChannelId(''); setSearch(''); setAppliedSearch('');
+        setSelected(null); setThread(null); setThreadHasMore(false);
+        setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
+        deepLinkPending.current = false;
+        setChannels(null);
+        loadChannels();
+        loadChats({ reset: true, channel: '', q: '' });
+    };
 
     const pickChannel = (cid) => {
         setChannelId(cid);
@@ -953,12 +1006,22 @@ export default function WazzupChatsView(props) {
     useEffect(() => {
         const target = initialChat;
         if (!target) return;
-        const key = target.channelId ? `${target.channelId}/${target.chatId}` : target.phone;
-        if (!key || initialChatDone.current === key) return;
+        const targetAccount = normalizeWazzupAccount(target.account);
+        const key = `${targetAccount}:${target.channelId ? `${target.channelId}/${target.chatId}` : target.phone}`;
+        if (!target.channelId && !target.phone) return;
+        if (initialChatDone.current === key) return;
         initialChatDone.current = key;
         // Карточка чатов не размонтируется, а скрывается display:none: придя на
         // вкладке «Операторы», ссылка выставила бы чат невидимо.
         setMainTab('chats');
+        /* Ссылка на чат «Потока» переключает раздел на «Поток» до загрузки чата:
+           ref — сразу (им пользуются загрузчики ниже), state — к следующему рендеру. */
+        if (accountRef.current !== targetAccount) {
+            accountRef.current = targetAccount;
+            setAccount(targetAccount);
+            setChannels(null);
+            loadChannels();
+        }
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
         /* Фильтр по каналу НЕ ставим даже для точной пары. Поиска по chatId
            достаточно, чтобы строка нашлась, а выставленный канал потом нечем
@@ -999,7 +1062,7 @@ export default function WazzupChatsView(props) {
                 // таблицы одним правилом (database.cleanup_wazzup_messages).
                 setSelected(null); setThread(null);
                 setDeepLinkMiss(target.chatId);
-                setDeepLinkChatUrl(wazzupChatUrl(target));
+                setDeepLinkChatUrl(wazzupChatUrl(target, accounts, accountRef.current));
                 return;
             }
             const matches = matchWazzupChatsByPhone(items, target.phone);
@@ -1029,7 +1092,7 @@ export default function WazzupChatsView(props) {
        после этого теряла и чат, и состояния «не найден» / «несколько». */
     useEffect(() => {
         if (!selected && deepLinkPending.current) return undefined;
-        syncWazzupChatDeepLink(selected);
+        syncWazzupChatDeepLink(selected, account);
         return () => {
             /* Уборку тоже держим за флагом. Она срабатывает не только при
                размонтировании, но и перед КАЖДЫМ следующим прогоном эффекта —
@@ -1037,16 +1100,16 @@ export default function WazzupChatsView(props) {
                Без этой проверки метка chat= стиралась там, где перезагрузка
                обязана воспроизвести тот же экран «чат не найден». Уход из
                раздела метку снимает сам App (syncAppViewWithUrl). */
-            if (!deepLinkPending.current) syncWazzupChatDeepLink(null);
+            if (!deepLinkPending.current) syncWazzupChatDeepLink(null, accountRef.current);
         };
-    }, [selected?.channelId, selected?.chatId]);
+    }, [selected?.channelId, selected?.chatId, account]);
 
     /* Ссылка на этот чат. Кладём в буфер: адресную строку человек не открывает,
        а ссылку надо отправить в переписке. Запасной путь через execCommand
        нужен не для красоты — clipboard.writeText есть только в защищённом
        контексте, и в старом вебвью кнопка иначе молча ничего не делала бы. */
     const copyChatLink = () => {
-        const link = buildWazzupChatLink(selected);
+        const link = buildWazzupChatLink(selected, account);
         if (!link) { showToast?.('Не удалось собрать ссылку на чат', 'error'); return; }
         const ok = () => showToast?.('Ссылка на чат скопирована', 'success');
         const fallback = () => {
@@ -1100,15 +1163,35 @@ export default function WazzupChatsView(props) {
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты ОП</h2>
                     <p className="text-xs text-slate-500">
-                        Переписка Wazzup; история хранится 30 дней, более ранняя — в самом Wazzup
+                        Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
                     </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                    {/* Аккаунт Wazzup: «Верификаторы» и «Поток» — два разных аккаунта
+                        с разной перепиской и своими показателями; переключатель
+                        меняет источник всего раздела. Счётчик — чатов в окне хранения. */}
+                    <div className="flex rounded-xl bg-slate-100 p-1" data-testid="wazzup-account-switch">
+                        {accountList.map((a) => (
+                            <button key={a.key} onClick={() => switchAccount(a.key)}
+                                    title={a.lastMessageAt ? `Последнее сообщение: ${fmtListDate(a.lastMessageAt)}` : undefined}
+                                    className={`flex items-center gap-1.5 rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
+                                        account === a.key ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                                                          : 'text-slate-500 hover:text-slate-700'}`}>
+                                {a.label}
+                                {typeof a.chatsCount === 'number' && (
+                                    <span className={`rounded-full px-1.5 text-[10.5px] tabular-nums ${
+                                        account === a.key ? 'bg-blue-50 text-blue-600' : 'bg-slate-200/70 text-slate-500'}`}>
+                                        {a.chatsCount}
+                                    </span>
+                                )}
+                            </button>
+                        ))}
+                    </div>
                     <div className="flex rounded-xl bg-slate-100 p-1">
                         {segBtn('chats', MessageSquare, 'Чаты')}
                         {segBtn('authors', Users, 'Операторы')}
                     </div>
-                    <a href={WAZZUP_APP_BASE} target="_blank" rel="noopener noreferrer"
+                    <a href={workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
                        className={iosBtnGhost}>
                         <ExternalLink size={13} /> Открыть в Wazzup
                     </a>
@@ -1121,7 +1204,8 @@ export default function WazzupChatsView(props) {
             </div>
 
             {mainTab === 'authors' && (
-                <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                              account={account} />
             )}
 
             <div className={`${iosCard} flex overflow-hidden`}
@@ -1266,7 +1350,7 @@ export default function WazzupChatsView(props) {
                                 хранения в портале и осталась только в самом Wazzup. Стоит
                                 проверить номер и поискать вручную.
                             </span>
-                            <a href={deepLinkChatUrl || WAZZUP_APP_BASE} target="_blank" rel="noopener noreferrer"
+                            <a href={deepLinkChatUrl || workspaceBase(accounts, account)} target="_blank" rel="noopener noreferrer"
                                className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
                                 <ExternalLink size={12} /> {deepLinkChatUrl ? 'Открыть чат в Wazzup' : 'Открыть Wazzup'}
                             </a>
@@ -1313,8 +1397,8 @@ export default function WazzupChatsView(props) {
                                         собралась бы наугад «как whatsapp» и у чата
                                         другого транспорта вела бы в пустоту. */}
                                     {selected.chatType && (
-                                        <a href={wazzupChatUrl(selected)} target="_blank" rel="noopener noreferrer"
-                                           title="Открыть этот чат в Wazzup (там доступна и история старше 30 дней)"
+                                        <a href={wazzupChatUrl(selected, accounts, account)} target="_blank" rel="noopener noreferrer"
+                                           title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)"
                                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
                                             <ExternalLink size={12} /> В Wazzup
                                         </a>

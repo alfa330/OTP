@@ -87,8 +87,10 @@ class WazzupAnalyticsPeriodTests(unittest.TestCase):
         self.assertEqual(len(cursor.executions), 2)
         item_query, item_params = cursor.executions[0]
         summary_query, summary_params = cursor.executions[1]
-        self.assertEqual(item_params, ["2026-07-20", "2026-07-26"])
-        self.assertEqual(summary_params, ["2026-07-20", "2026-07-26"])
+        # аккаунт — первое условие окна: показатели считаются по одному аккаунту
+        self.assertEqual(item_params, ["op", "2026-07-20", "2026-07-26"])
+        self.assertEqual(summary_params, ["op", "2026-07-20", "2026-07-26"])
+        self.assertIn("m.account = %s", item_query)
         self.assertIn("WHERE NOT m.is_deleted", item_query)
         self.assertIn(
             "m.dt >= (%s::date::timestamp AT TIME ZONE 'Asia/Almaty')",

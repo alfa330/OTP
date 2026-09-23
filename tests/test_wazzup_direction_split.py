@@ -266,20 +266,15 @@ class NameSuggestionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # правила живут в wazzup/names.py; bot_schedule2 их только импортирует
+        from wazzup import names as wazzup_names
+        cls.namespace = {
+            "_wazzup_normalize_name": wazzup_names.normalize_name,
+            "_wazzup_suggest_user": wazzup_names.suggest_user,
+        }
         source = API_PATH.read_text(encoding="utf-8-sig")
-        cls.namespace = {}
-        tree = source_cache.parse(source)
-        node = next(
-            item for item in tree.body
-            if isinstance(item, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "_WAZZUP_KAZ_TRANS"
-                    for t in item.targets)
-        )
-        module = ast.Module(body=[node], type_ignores=[])
-        ast.fix_missing_locations(module)
-        exec(compile(module, "<wazzup-split>", "exec"), cls.namespace)
-        _module_function(source, "_wazzup_normalize_name", cls.namespace)
-        _module_function(source, "_wazzup_suggest_user", cls.namespace)
+        assert "from wazzup.names import normalize_name as _wazzup_normalize_name" in source
+        assert "from wazzup.names import suggest_user as _wazzup_suggest_user" in source
 
     def test_soft_sign_does_not_break_the_match(self):
         # в Wazzup «Кенжебай Адильхан», в карточке «Кенжебай Әділхан»

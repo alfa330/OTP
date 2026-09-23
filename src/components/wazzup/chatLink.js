@@ -24,6 +24,25 @@ import { stripTechnicalQueryParams } from '../../utils/urlHygiene.js';
 export const WAZZUP_CHATS_VIEW = 'wazzup_chats';
 export const APP_VIEW_QUERY_PARAM = 'view';
 export const WAZZUP_CHAT_QUERY_PARAM = 'chat';
+/* Аккаунт Wazzup (wazzup/accounts.py на бэкенде): раздел смотрит в два —
+   «op» (Верификаторы) и «potok» («Поток»). В адресе живёт только НЕ основной:
+   ссылки на чаты Верификаторов остаются прежними, а ссылка на чат «Потока»
+   несёт account=potok, иначе раздел искал бы чат в другом аккаунте. */
+export const WAZZUP_ACCOUNT_QUERY_PARAM = 'account';
+export const WAZZUP_DEFAULT_ACCOUNT = 'op';
+const WAZZUP_ACCOUNTS = ['op', 'potok'];
+
+/** Ключ аккаунта из адреса/пропсов; неизвестное значение → основной. */
+export const normalizeWazzupAccount = (value) => {
+    const key = String(value ?? '').trim().toLowerCase();
+    return WAZZUP_ACCOUNTS.includes(key) ? key : WAZZUP_DEFAULT_ACCOUNT;
+};
+
+const setAccountParam = (url, account) => {
+    const key = normalizeWazzupAccount(account);
+    if (key === WAZZUP_DEFAULT_ACCOUNT) url.searchParams.delete(WAZZUP_ACCOUNT_QUERY_PARAM);
+    else url.searchParams.set(WAZZUP_ACCOUNT_QUERY_PARAM, key);
+};
 
 /* channelId Wazzup — uuid канала, приходит из вебхука как есть. Проверка важна
    не по алфавиту, а по СЛУЖЕБНЫМ символам: значение уходит в параметр запроса
@@ -80,7 +99,12 @@ export const parseWazzupChatTarget = (value) => {
 export const readWazzupChatTargetFromSearch = (search) => {
     try {
         const params = new URLSearchParams(String(search || ''));
-        return parseWazzupChatTarget(params.get(WAZZUP_CHAT_QUERY_PARAM));
+        const target = parseWazzupChatTarget(params.get(WAZZUP_CHAT_QUERY_PARAM));
+        if (!target) return null;
+        /* Аккаунт кладём в цель только когда он НЕ основной: форма цели для
+           ссылок Верификаторов не меняется (её сравнивают целиком). */
+        const account = normalizeWazzupAccount(params.get(WAZZUP_ACCOUNT_QUERY_PARAM));
+        return account === WAZZUP_DEFAULT_ACCOUNT ? target : { ...target, account };
     } catch (error) {
         return null;
     }
@@ -141,7 +165,7 @@ export const pickWazzupChatByPhone = (items, phone) => matchWazzupChatsByPhone(i
 const FOREIGN_QUERY_PARAMS = ['task_id', 'ticket_id', 'article'];
 
 /** Ссылка на чат, которую можно скопировать и отправить. '' — если пара битая. */
-export const buildWazzupChatLink = (chat) => {
+export const buildWazzupChatLink = (chat, account = WAZZUP_DEFAULT_ACCOUNT) => {
     if (typeof window === 'undefined') return '';
     const target = formatWazzupChatTarget(chat);
     if (!target) return '';
@@ -152,6 +176,7 @@ export const buildWazzupChatLink = (chat) => {
         FOREIGN_QUERY_PARAMS.forEach((name) => url.searchParams.delete(name));
         url.searchParams.set(APP_VIEW_QUERY_PARAM, WAZZUP_CHATS_VIEW);
         url.searchParams.set(WAZZUP_CHAT_QUERY_PARAM, target);
+        setAccountParam(url, account);
         return url.toString();
     } catch (error) {
         return '';
@@ -164,7 +189,7 @@ export const buildWazzupChatLink = (chat) => {
  * должно уводить туда, откуда человек пришёл в портал, а не отматывать
  * открытые чаты по одному.
  */
-export const syncWazzupChatDeepLink = (chat) => {
+export const syncWazzupChatDeepLink = (chat, account = WAZZUP_DEFAULT_ACCOUNT) => {
     if (typeof window === 'undefined') return;
     try {
         const url = new URL(window.location.href);
@@ -176,6 +201,9 @@ export const syncWazzupChatDeepLink = (chat) => {
         } else {
             url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
         }
+        /* Аккаунт в адресе держим и без открытого чата: перезагрузка на
+           «Потоке» обязана вернуть «Поток», а не Верификаторов. */
+        setAccountParam(url, account);
         window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
     } catch (error) {
         // В урезанных браузерных контекстах адресная строка недоступна — не беда.

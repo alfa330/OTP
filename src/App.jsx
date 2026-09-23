@@ -117,7 +117,7 @@ import {
 } from './components/wiki/tabLink';
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
    импорт компонента ради двух функций утащил бы его в основной бандл. */
-import { WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
+import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
@@ -2766,6 +2766,7 @@ const buildAppViewUrl = (nextView) => {
            пункту меню унёс бы чужой chat= в новую вкладку. */
         if (nextView !== 'wazzup_chats') {
             url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
+            url.searchParams.delete(WAZZUP_ACCOUNT_QUERY_PARAM);
         }
         return url.toString();
     } catch (error) {
@@ -2813,6 +2814,7 @@ const syncAppViewWithUrl = (nextView) => {
            перезагрузка теряла бы открытый чат. */
         if (nextView !== 'wazzup_chats') {
             url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
+            url.searchParams.delete(WAZZUP_ACCOUNT_QUERY_PARAM);
         }
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);

@@ -2812,7 +2812,7 @@ class Database:
                 ON chat_metric_surge_windows(month, start_at);
             """)
             # Wazzup (Верификаторы): сырые сообщения из вебхука messagesAndStatuses.
-            # Ретеншн 30 дней (см. cleanup_wazzup_messages) — таблица не растёт бесконечно.
+            # Ретеншн 45 дней (см. cleanup_wazzup_messages) — таблица не растёт бесконечно.
             # Полезная нагрузка вебхука разобрана по типизированным колонкам; целиком
             # (колонка raw JSONB) она больше не хранится — это было 60% веса таблицы
             # при нулевом числе читателей.
@@ -2883,6 +2883,31 @@ class Database:
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
+            """)
+            # Два аккаунта Wazzup в одном разделе («op» — Верификаторы, «potok» —
+            # «Поток», см. wazzup/accounts.py). channel_id у аккаунтов не
+            # пересекается, поэтому колонка нужна не для уникальности, а чтобы
+            # список чатов, показатели и привязка авторов фильтровались по
+            # аккаунту одним условием. Метаданные-DEFAULT — без перезаписи строк.
+            cursor.execute("""
+                ALTER TABLE wazzup_messages
+                    ADD COLUMN IF NOT EXISTS account TEXT NOT NULL DEFAULT 'op';
+            """)
+            cursor.execute("""
+                ALTER TABLE wazzup_chats
+                    ADD COLUMN IF NOT EXISTS account TEXT NOT NULL DEFAULT 'op';
+            """)
+            cursor.execute("""
+                ALTER TABLE wazzup_operator_map
+                    ADD COLUMN IF NOT EXISTS account TEXT NOT NULL DEFAULT 'op';
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_messages_account_dt
+                ON wazzup_messages(account, dt);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wazzup_chats_account_last
+                ON wazzup_chats(account, last_message_at DESC);
             """)
             # Эпизоды Wazzup: чат нарезан по паузе неактивности (порог откалиброван
             # по данным: «долина» 4–11 ч, см. build_wazzup_episodes). Единица ИИ-оценки.
@@ -23542,13 +23567,20 @@ class Database:
 
     # ── Wazzup (Верификаторы): приём вебхуков ────────────────────────────────
 
-    def store_wazzup_messages(self, messages):
+    def store_wazzup_messages(self, messages, account='op'):
         """Идемпотентный upsert сообщений из вебхука Wazzup (messagesAndStatuses).
 
         Повторная доставка безопасна (PK message_id); правки/удаления
         (isEdited/isDeleted) обновляют существующую строку. После вставки
         обновляет сводки wazzup_chats затронутых чатов. Возвращает число
-        обработанных сообщений."""
+        обработанных сообщений.
+
+        account — аккаунт Wazzup (wazzup/accounts.py). Сюда же, в форме
+        вебхука, пишет и забор истории «Потока» (wazzup/potok_sync.py).
+        Ключ автора у исходящих строится в wazzup.names.author_key: у «op»
+        это authorId вебхука, у «potok» — нормализованное имя, потому что
+        у истории из окна чатов id автора нет."""
+        from wazzup.names import author_key
         if not isinstance(messages, list) or not messages:
             return 0
         processed = 0
@@ -23564,13 +23596,16 @@ class Database:
                 if not message_id or not channel_id or chat_id is None or not dt:
                     continue
                 contact = m.get('contact') if isinstance(m.get('contact'), dict) else {}
+                is_echo = bool(m.get('isEcho'))
+                author_id = author_key(account, m.get('authorId'), m.get('authorName')) \
+                    if is_echo else None
                 cursor.execute("""
                     INSERT INTO wazzup_messages (
                         message_id, channel_id, chat_type, chat_id, dt, is_echo,
                         type, text, content_uri, author_name, author_id,
                         contact_name, contact_phone, status, sent_from_app,
-                        is_edited, is_deleted)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        is_edited, is_deleted, account)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (message_id) DO UPDATE SET
                         -- событие удаления приходит без текста: сохраняем последний
                         -- известный текст, факт удаления фиксирует is_deleted
@@ -23583,20 +23618,22 @@ class Database:
                         is_deleted = EXCLUDED.is_deleted
                 """, (
                     str(message_id), str(channel_id), m.get('chatType'), str(chat_id),
-                    dt, bool(m.get('isEcho')), m.get('type'), m.get('text'),
-                    m.get('contentUri'), m.get('authorName'),
-                    str(m['authorId']) if m.get('authorId') is not None else None,
+                    dt, is_echo, m.get('type'), m.get('text'),
+                    m.get('contentUri'), m.get('authorName'), author_id,
                     contact.get('name'), contact.get('phone'), m.get('status'),
                     m.get('sentFromApp'), bool(m.get('isEdited')), bool(m.get('isDeleted')),
+                    account,
                 ))
                 processed += 1
                 affected[(str(channel_id), str(chat_id))] = (m.get('chatType'), contact)
             for (channel_id, chat_id), (chat_type, contact) in affected.items():
-                self._refresh_wazzup_chat_tx(cursor, channel_id, chat_id, chat_type, contact)
+                self._refresh_wazzup_chat_tx(cursor, channel_id, chat_id, chat_type, contact,
+                                             account=account)
         return processed
 
     @staticmethod
-    def _refresh_wazzup_chat_tx(cursor, channel_id, chat_id, chat_type=None, contact=None):
+    def _refresh_wazzup_chat_tx(cursor, channel_id, chat_id, chat_type=None, contact=None,
+                                account='op'):
         """Пересчитывает сводку чата из wazzup_messages (в текущей транзакции).
 
         Счётчики отражают окно ретеншна (старые сообщения удаляются), это
@@ -23606,11 +23643,11 @@ class Database:
             INSERT INTO wazzup_chats (
                 channel_id, chat_id, chat_type, contact_name, contact_phone,
                 last_message_at, last_message_text, last_message_is_echo,
-                messages_count, inbound_count, outbound_count, updated_at)
+                messages_count, inbound_count, outbound_count, updated_at, account)
             SELECT %(channel_id)s, %(chat_id)s, %(chat_type)s,
                    %(contact_name)s, %(contact_phone)s,
                    a.last_at, lm.preview, lm.is_echo,
-                   a.total, a.inbound, a.outbound, now()
+                   a.total, a.inbound, a.outbound, now(), %(account)s
             FROM (SELECT COUNT(*) AS total,
                          COUNT(*) FILTER (WHERE NOT is_echo) AS inbound,
                          COUNT(*) FILTER (WHERE is_echo) AS outbound,
@@ -23641,7 +23678,26 @@ class Database:
         """, {
             'channel_id': channel_id, 'chat_id': chat_id, 'chat_type': chat_type,
             'contact_name': contact.get('name'), 'contact_phone': contact.get('phone'),
+            'account': account,
         })
+
+    def wazzup_last_message_at(self, account='op'):
+        """Время последнего сохранённого сообщения аккаунта (None — пусто).
+        Отсюда регулярный забор «Потока» отсчитывает своё окно."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT MAX(dt) FROM wazzup_messages WHERE account = %s",
+                           (account,))
+            row = cursor.fetchone()
+        return row[0] if row else None
+
+    def wazzup_accounts_summary(self):
+        """Сколько чатов и когда последнее сообщение — по аккаунтам, для
+        переключателя раздела."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT account, COUNT(*), MAX(last_message_at)
+                  FROM wazzup_chats GROUP BY account""")
+            return {r[0]: {'chats': r[1], 'last_message_at': r[2]} for r in cursor.fetchall()}
 
     def update_wazzup_statuses(self, statuses):
         """Обновляет статусы доставки (sent/delivered/read/error) сообщений.
@@ -23690,8 +23746,11 @@ class Database:
         """)
         return cursor.rowcount
 
-    def cleanup_wazzup_messages(self, retention_days=30):
+    def cleanup_wazzup_messages(self, retention_days=45):
         """Ретеншн Wazzup: удаляет сырые данные старше retention_days.
+
+        45 дней — общее окно обоих аккаунтов (решение владельца 23.09.2026,
+        столько же истории «Потока» загружено первоначально); диск базы 5 ГБ.
 
         Эпизоды с успешной ИИ-оценкой или финальной человеческой оценкой в
         «Журнале оценок» сохраняются бессрочно. Неоценённые эпизоды живут столько
@@ -23758,10 +23817,11 @@ class Database:
             'journal_marked': marked_journal_episodes,
         }
 
-    def list_wazzup_authors(self):
+    def list_wazzup_authors(self, account='op'):
         """Авторы исходящих сообщений Wazzup (по author_id) со статистикой
         и текущей привязкой из wazzup_operator_map. Привязки без сообщений
-        в окне ретеншна тоже возвращаются (FULL JOIN) — маппинг не «исчезает»."""
+        в окне ретеншна тоже возвращаются (FULL JOIN) — маппинг не «исчезает».
+        Аккаунты не смешиваются: у каждого свои авторы и своя привязка."""
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT COALESCE(a.author_id, map.author_id) AS author_id,
@@ -23776,19 +23836,20 @@ class Database:
                                MAX(dt) AS last_message_at,
                                COUNT(DISTINCT (channel_id, chat_id)) AS chats_count
                           FROM wazzup_messages
-                         WHERE is_echo AND author_id IS NOT NULL
+                         WHERE is_echo AND author_id IS NOT NULL AND account = %s
                          GROUP BY author_id) a
-                  FULL JOIN wazzup_operator_map map ON map.author_id = a.author_id
+                  FULL JOIN (SELECT * FROM wazzup_operator_map WHERE account = %s) map
+                    ON map.author_id = a.author_id
                   LEFT JOIN users u ON u.id = map.user_id
                  ORDER BY COALESCE(a.messages_count, 0) DESC, author_name
-            """)
+            """, (account, account))
             return [{'author_id': r[0], 'author_name': r[1], 'messages_count': r[2],
                      'last_message_at': r[3], 'chats_count': r[4],
                      'user_id': r[5], 'user_name': r[6], 'is_bot': r[7]}
                     for r in cursor.fetchall()]
 
     def upsert_wazzup_author_map(self, author_id, author_name=None, user_id=None,
-                                 is_bot=False, updated_by=None):
+                                 is_bot=False, updated_by=None, account='op'):
         """Сохраняет привязку автора Wazzup: user_id (наш оператор) и/или is_bot.
         user_id=None + is_bot=False — сброс привязки (строка остаётся как факт разбора)."""
         author_id = str(author_id or '').strip()
@@ -23797,18 +23858,20 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO wazzup_operator_map
-                       (author_id, author_name, user_id, is_bot, updated_by, updated_at)
-                VALUES (%s, %s, %s, %s, %s, now())
+                       (author_id, author_name, user_id, is_bot, updated_by, updated_at, account)
+                VALUES (%s, %s, %s, %s, %s, now(), %s)
                 ON CONFLICT (author_id) DO UPDATE SET
                     author_name = COALESCE(EXCLUDED.author_name, wazzup_operator_map.author_name),
                     user_id = EXCLUDED.user_id,
                     is_bot = EXCLUDED.is_bot,
                     updated_by = EXCLUDED.updated_by,
-                    updated_at = now()
+                    updated_at = now(),
+                    account = EXCLUDED.account
             """, (author_id, author_name,
                   int(user_id) if user_id is not None else None,
                   bool(is_bot),
-                  int(updated_by) if updated_by is not None else None))
+                  int(updated_by) if updated_by is not None else None,
+                  account))
         return True
 
     # Направления отдела продаж, по которым раздел «Чаты ОП» делит показатели.
@@ -23883,8 +23946,9 @@ class Database:
         )
     """
 
-    def wazzup_operator_analytics(self, date_from=None, date_to=None):
-        """Аналитика по менеджерам Wazzup за период (границы — даты Алматы).
+    def wazzup_operator_analytics(self, date_from=None, date_to=None, account='op'):
+        """Аналитика по менеджерам Wazzup за период (границы — даты Алматы)
+        по ОДНОМУ аккаунту: у «Верификаторов» и «Потока» показатели свои.
 
         • Диалоги — сумма активных чатов по дням: один чат в два разных дня
           считается дважды. Именно так недельные итоги строит Wazzup.
@@ -23905,7 +23969,7 @@ class Database:
         в общем итоге считаются ВМЕСТЕ с grp, поэтому итог направления — ровно
         сумма его строк, как и показывает подвал таблицы.
         """
-        window, params = ["TRUE"], []
+        window, params = ["m.account = %s"], [account]
         if date_from:
             # Явный timestamp обязателен. Для date PostgreSQL выбирает другую
             # перегрузку AT TIME ZONE и при UTC-сессии сдвигает границу на +10 ч.
@@ -24056,8 +24120,13 @@ class Database:
         return f"[{stamp}] {who}: {' '.join(parts)}"
 
     def build_wazzup_episodes(self, gap_hours=6, force_close_hours=48,
-                              force_close_msgs=200, context_tail=10, now=None):
+                              force_close_msgs=200, context_tail=10, now=None,
+                              account='op'):
         """Нарезает переписку Wazzup на эпизоды и сохраняет закрытые.
+
+        account — эпизоды (единица ИИ-оценки) пока строятся ТОЛЬКО по
+        историческому аккаунту: переписка «Потока» в разделе видна, но в
+        оценку не идёт — это отдельное решение владельца (объём и критерии).
 
         Эпизод = подряд идущие сообщения чата с паузами < gap_hours (порог — «дно
         долины» бимодального распределения пауз). Сохраняются только эпизоды,
@@ -24099,8 +24168,8 @@ class Database:
                                FROM wazzup_episodes
                               GROUP BY channel_id, chat_id) e
                     ON e.channel_id = m.channel_id AND e.chat_id = m.chat_id
-                 WHERE e.le IS NULL OR m.dt > e.le
-                 ORDER BY m.channel_id, m.chat_id, m.dt, m.message_id""")
+                 WHERE m.account = %s AND (e.le IS NULL OR m.dt > e.le)
+                 ORDER BY m.channel_id, m.chat_id, m.dt, m.message_id""", (account,))
             chats = {}
             for r in cursor.fetchall():
                 key = (r[0], r[1])
