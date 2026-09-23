@@ -20,12 +20,20 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from wazzup import accounts as wz_accounts
-from wazzup.potok_client import WazzupInternalClient
+from wazzup.potok_client import WazzupInternalClient, WazzupInternalError
 
 log = logging.getLogger(__name__)
 
 DEFAULT_HISTORY_DAYS = 45
 DEFAULT_OVERLAP_HOURS = 2
+
+# Маски для добора за потолком списка (potok_client.CHAT_LIST_CEILING_CODE).
+# Поиск окна `name=` — подстрока по номеру, а казахстанский номер всегда
+# начинается на 77 + код оператора, то есть содержит свои первые четыре цифры:
+# сто масок 7700…7799 покрывают все чаты, у каждой маски своя пагинация.
+# Маски пересекаются (подстрока может встретиться и в середине номера) — от
+# повторов защищают множество уже виденных чатов и пропуск загруженных.
+PHONE_PATTERNS = tuple('77%02d' % i for i in range(100))
 
 TYPE_BY_CODE = {1: 'text', 2: 'image', 3: 'audio', 4: 'video', 5: 'document',
                 6: 'vcard', 7: 'geo'}
@@ -38,6 +46,7 @@ STATE = {
     'running': False, 'account': None, 'mode': None, 'since': None,
     'started_at': None, 'finished_at': None,
     'chats_seen': 0, 'chats_done': 0, 'skipped_known': 0, 'messages': 0, 'requests': 0,
+    'list_ceiling': False, 'patterns_done': 0,
     'error': None,
 }
 _RUN_LOCK = threading.Lock()
@@ -157,19 +166,24 @@ def sync_account(db, client, since_dt, account='potok'):
     since_ms = int(since_dt.timestamp() * 1000)
     known = {cid: _to_ms(ts) for cid, ts in (db.wazzup_chat_last_messages(account) or {}).items()}
     stats = {'chats_seen': 0, 'chats_done': 0, 'messages': 0, 'skipped_chats': 0,
-             'skipped_known': 0}
-    for chat in client.iter_chats(since_ms):
+             'skipped_known': 0, 'list_ceiling': False, 'patterns_done': 0}
+    seen = set()
+
+    def handle(chat):
+        chat_id, chat_type, channel_id = client.chat_identity(chat)
+        if not chat_id or str(chat_id) in seen:
+            return
+        seen.add(str(chat_id))
         stats['chats_seen'] += 1
         STATE['chats_seen'] = stats['chats_seen']
-        chat_id, chat_type, channel_id = client.chat_identity(chat)
-        if not chat_id or not chat_type:
+        if not chat_type:
             stats['skipped_chats'] += 1
-            continue
+            return
         stored_last = known.get(str(chat_id))
         if stored_last is not None and stored_last >= client.chat_last_ms(chat):
             stats['skipped_known'] += 1
             STATE['skipped_known'] = stats['skipped_known']
-            continue
+            return
         batch = []
         for m in client.iter_messages(chat_id, since_ms, chat_type=chat_type, channel_id=channel_id):
             converted = to_webhook_message(m, chat)
@@ -181,6 +195,26 @@ def sync_account(db, client, since_dt, account='potok'):
         STATE['chats_done'] = stats['chats_done']
         STATE['messages'] = stats['messages']
         STATE['requests'] = client.requests_made
+
+    # Основной проход — общий список. Он может упереться в потолок глубины
+    # (~7850 чатов): тогда всё, что ниже, добираем масками номеров.
+    try:
+        for chat in client.iter_chats(since_ms):
+            handle(chat)
+    except WazzupInternalError as error:
+        if not client.is_list_ceiling(error):
+            raise
+        stats['list_ceiling'] = True
+        STATE['list_ceiling'] = True
+        log.warning('wazzup %s: список чатов упёрся в потолок после %s чатов — добираю масками',
+                    account, stats['chats_seen'])
+    if stats['list_ceiling']:
+        for pattern in PHONE_PATTERNS:
+            for chat in client.iter_chats(since_ms, name=pattern):
+                handle(chat)
+            stats['patterns_done'] += 1
+            STATE['patterns_done'] = stats['patterns_done']
+            STATE['requests'] = client.requests_made
     return stats
 
 
@@ -204,7 +238,7 @@ def run_sync(db, account='potok', days=None, overlap_hours=DEFAULT_OVERLAP_HOURS
         STATE.update(running=True, account=account, mode=mode, since=since.isoformat(),
                      started_at=now.isoformat(), finished_at=None,
                      chats_seen=0, chats_done=0, skipped_known=0, messages=0, requests=0,
-                     error=None)
+                     list_ceiling=False, patterns_done=0, error=None)
         client = client_factory(account)
         stats = sync_account(db, client, since, account=account)
         stats.update(mode=mode, since=since.isoformat(), requests=client.requests_made)

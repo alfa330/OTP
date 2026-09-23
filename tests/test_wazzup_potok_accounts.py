@@ -153,7 +153,12 @@ class _FakePagingClient(potok_client.WazzupInternalClient):
     def _get(self, path, params):
         self.calls.append((path, dict(params)))
         if path == "v2/chats":
-            return {"data": self._chats_pages.get(params["offset"], [])}
+            key = (params["name"], params["offset"]) if params.get("name") else params["offset"]
+            page = self._chats_pages.get(key, [])
+            if page == "CEILING":
+                raise potok_client.WazzupInternalError(
+                    'v2/chats: HTTP 500 {"errors":[{"code":"CHAT_CAN_NOT_GET_CHATS"}]}')
+            return {"data": page}
         rows = self._messages_pages.get((params["chatId"], params["offset"]), [])
         # как настоящий сервер: сообщения несут chatId запрошенного чата
         return {"messages": [dict(m, chatId=m.get("chatId", params["chatId"])) for m in rows]}
@@ -250,6 +255,39 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(stats["messages"], 1, "сообщение старше окна в базу не идёт")
         self.assertEqual(db.batches[0][0], "potok")
         self.assertEqual(db.batches[0][1][0]["messageId"], "new")
+
+    def test_list_ceiling_falls_back_to_phone_patterns(self):
+        """Список чатов кончается 500 на глубине ~7850: остаток добираем масками
+        номеров через поиск name=, уже виденные чаты не перечитываем."""
+        now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+        since = now - timedelta(days=45)
+        row = lambda cid: {"chatId": cid, "chatType": "whatsapp",  # noqa: E731
+                           "lastMessage": {"datetime": MS(now)}, "chats": [{"channelId": "ch"}]}
+        pages = {0: [row("77001111111")] * 1, 100: "CEILING"}
+        # маска 7700 находит и уже виденный чат, и новый; остальные маски пусты
+        pages[("7700", 0)] = [row("77001111111"), row("77002222222")]
+        msgs = {("77001111111", 0): [{"id": "a", "channelId": "ch", "datetime": MS(now), "incoming": True}],
+                ("77002222222", 0): [{"id": "b", "channelId": "ch", "datetime": MS(now), "incoming": True}]}
+        client = _FakePagingClient(pages, msgs)
+        # первая страница «полная» только по флагу: делаем её из 100 строк одного чата
+        client._chats_pages[0] = [row("77001111111")] * 100
+        db = _FakeDb()
+        stats = potok_sync.sync_account(db, client, since, account="potok")
+        self.assertTrue(stats["list_ceiling"])
+        self.assertEqual(stats["patterns_done"], len(potok_sync.PHONE_PATTERNS))
+        self.assertEqual(stats["chats_done"], 2, "новый чат из маски догружен, виденный — один раз")
+        names = [c[1].get("name") for c in client.calls if c[0] == "v2/chats" and c[1].get("name")]
+        self.assertEqual(names[0], "7700")
+        self.assertEqual(len(set(names)), 100)
+        requested = [c[1]["chatId"] for c in client.calls if c[0] == "v2/messages"]
+        self.assertEqual(requested, ["77001111111", "77002222222"])
+
+    def test_other_list_errors_still_raise(self):
+        pages = {0: [{"chatId": "x", "chatType": "whatsapp", "lastMessage": {"datetime": 10 ** 13}, "chats": [{"channelId": "c"}]}] * 100}
+        client = _FakePagingClient(pages, {})
+        client._get = lambda path, params: (_ for _ in ()).throw(potok_client.WazzupInternalError("v2/chats: HTTP 502 bad gateway"))
+        with self.assertRaises(potok_client.WazzupInternalError):
+            potok_sync.sync_account(_FakeDb(), client, datetime(2026, 1, 1, tzinfo=timezone.utc), account="potok")
 
     def test_known_chats_are_skipped_without_message_requests(self):
         """Возобновление после рестарта: чат, чьё последнее сообщение уже у нас,

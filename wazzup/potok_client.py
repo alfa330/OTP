@@ -41,6 +41,12 @@ APP_API = 'https://app.wazzup24.com/api/'
 CHATS_PAGE = 100       # больше сервер не отдаёт (limit=200 → 100 строк)
 MESSAGES_PAGE = 1000   # фактически ~998; дальше листаем offset'ом
 
+# Список чатов кончается не там, где кончаются чаты: со смещения ~7850 сервер
+# отвечает 500 с этим кодом — всегда, не транзиентно (проверено 23.09.2026).
+# Глубже достаём поиском `name=` (подстрока по номеру и имени контакта, своя
+# пагинация без такого потолка) — см. potok_sync.PHONE_PATTERNS.
+CHAT_LIST_CEILING_CODE = 'CHAT_CAN_NOT_GET_CHATS'
+
 # Страница считается «короткой» (последней), если строк заметно меньше запрошенного:
 # сервер отдаёт 998 на limit=1000, и точное сравнение здесь не годится.
 _SHORT_PAGE_RATIO = 0.5
@@ -131,6 +137,9 @@ class WazzupInternalClient:
                 self.issue_token()
                 refreshed = True
                 continue
+            if r.status_code >= 500 and CHAT_LIST_CEILING_CODE in r.text:
+                # потолок глубины списка — детерминированный, повторы бесполезны
+                raise WazzupInternalError(f'{path}: HTTP {r.status_code} {r.text[:200]}')
             if r.status_code == 429 or r.status_code >= 500:
                 if attempt < len(_RETRY_DELAYS):
                     time.sleep(_RETRY_DELAYS[attempt])
@@ -143,8 +152,16 @@ class WazzupInternalClient:
                 raise WazzupInternalError(f'{path}: не JSON ({error})')
         raise WazzupInternalError(f'{path}: исчерпаны повторы')
 
-    def list_chats(self, offset=0, limit=CHATS_PAGE):
-        data = self._get('v2/chats', {'limit': limit, 'offset': offset, 'filterChannels': ''})
+    @staticmethod
+    def is_list_ceiling(error):
+        return CHAT_LIST_CEILING_CODE in str(error)
+
+    def list_chats(self, offset=0, limit=CHATS_PAGE, name=None):
+        """Страница списка чатов; name — поиск окна (подстрока по номеру/имени)."""
+        params = {'limit': limit, 'offset': offset, 'filterChannels': ''}
+        if name:
+            params['name'] = name
+        data = self._get('v2/chats', params)
         rows = data.get('data') if isinstance(data, dict) else None
         if not isinstance(rows, list):
             raise WazzupInternalError(f'v2/chats: неожиданный ответ {str(data)[:200]}')
@@ -173,12 +190,13 @@ class WazzupInternalClient:
     def chat_last_ms(chat):
         return int((chat.get('lastMessage') or {}).get('datetime') or 0)
 
-    def iter_chats(self, since_ms):
+    def iter_chats(self, since_ms, name=None):
         """Чаты с последним сообщением не старше since_ms. Список отсортирован
-        свежими вперёд, поэтому первая страница, зашедшая за границу, — последняя."""
+        свежими вперёд, поэтому первая страница, зашедшая за границу, — последняя.
+        name — тот же список, суженный поиском окна."""
         offset = 0
         while True:
-            rows = self.list_chats(offset=offset)
+            rows = self.list_chats(offset=offset, name=name)
             if not rows:
                 return
             oldest = None
