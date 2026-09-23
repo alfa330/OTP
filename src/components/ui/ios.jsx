@@ -464,8 +464,10 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                 </div>
                 {/* overflow-x-hidden: экраны второго уровня въезжают сдвигом по
                     горизонтали, и без этого сдвиг на 16px давал бы полосу
-                    прокрутки внизу окна на всё время перехода. */}
-                <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5">
+                    прокрутки внизу окна на всё время перехода.
+                    thin-scroll: полоса в 3 px, как у остальных тонких скроллов
+                    портала (styles.css), а не системная в ~15 px вдоль окна. */}
+                <div className="thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5">
                     {children}
                 </div>
                 {/* flex-wrap в подвале: там бывает не только «Отмена/Сохранить»,
