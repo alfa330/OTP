@@ -1,5 +1,11 @@
 #!/usr/bin/env python
-"""Передать разделу «Провайдер ЭДО» живую сессию кабинета Яндекс.Fleet.
+"""Передать порталу живую сессию кабинета Яндекс.Fleet — для «Провайдера ЭДО»
+или (с --target mailings) для «Рассылок».
+
+Аккаунтов два. «Провайдер ЭДО» ходит под служебным аккаунтом с доступом ко всем
+диспетчерским; у «Рассылок» с 23.09.2026 свой аккаунт — с правом рассылать во
+всех диспетчерских (у служебного оно было в пяти из девяноста). Поэтому у
+каждой цели свой профиль Chromium: вход под одним аккаунтом не выбивает другой.
 
 Зачем это нужно. Кабинет fleet.yandex.kz не выдаёт сервисных ключей: единственный
 способ туда попасть — куки живого логина Яндекс ID. Сервер сам залогиниться не
@@ -11,7 +17,9 @@
     1. Открывает Chromium с постоянным профилем (по умолчанию тот же, что
        использовался при разовых выгрузках) и заходит на fleet.yandex.kz.
     2. Если вход не выполнен — ждёт, пока человек залогинится в открывшемся окне.
-    3. Забирает куки и user-agent и кладёт их в OTP через /api/fleet_edm/session.
+    3. Забирает куки и user-agent и кладёт их в OTP через /api/fleet_edm/session
+       (с --target mailings — через /api/driver_mailings/session; там сервер
+       заодно переспрашивает, в каких диспетчерских аккаунту разрешена рассылка).
        Сервер сразу проверяет их живым запросом и отказывается принимать
        нерабочие: молча сохранённая мёртвая сессия — это выгрузка, падающая через
        десять минут ожидания вместо честного отказа сейчас.
@@ -23,6 +31,7 @@ Playwright намеренно НЕ в requirements.txt: браузер нуже�
 
 Примеры:
     python scripts/fleet_edm_push_session.py
+    python scripts/fleet_edm_push_session.py --target mailings   # аккаунт «Рассылок»
     python scripts/fleet_edm_push_session.py --profile "C:/pw/fleet" --wait-minutes 20
     python scripts/fleet_edm_push_session.py --base-url http://127.0.0.1:5000
     python scripts/fleet_edm_push_session.py --check          # только проверить, что лежит
@@ -39,8 +48,24 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_API_BASE_URL = 'https://otp-2-fos4.onrender.com'
-DEFAULT_PROFILE = os.path.expanduser(r'~\.claude\pw-profiles\fleet-yandex')
 FLEET_URL = 'https://fleet.yandex.kz/'
+
+# Куда нести сессию и в каком профиле Chromium держать вход. Профили разные:
+# у разделов разные аккаунты, и общий профиль означал бы перелогин туда-обратно.
+TARGETS = {
+    'edm': {
+        'title': '«Провайдер ЭДО»',
+        'session_path': '/api/fleet_edm/session',
+        'profile': os.path.expanduser(r'~\.claude\pw-profiles\fleet-yandex'),
+        'login_hint': 'под служебным аккаунтом с доступом ко всем диспетчерским',
+    },
+    'mailings': {
+        'title': '«Рассылки»',
+        'session_path': '/api/driver_mailings/session',
+        'profile': os.path.expanduser(r'~\.claude\pw-profiles\fleet-yandex-mailings'),
+        'login_hint': 'под аккаунтом рассылок (с правом рассылать во всех диспетчерских)',
+    },
+}
 PARKS_PATH = '/api/fleet/ui/v1/user/parks'
 PROFILE_PATH = '/api/fleet/ui/v1/parks/users/profile'
 
@@ -61,11 +86,13 @@ class OtpClient:
     """Тот же способ входа, что у scripts/task_board.py: bearer, куки сбрасываем —
     иначе прод отвечает 403 «Invalid request origin»."""
 
-    def __init__(self, base_url=None, login=None, password=None):
+    def __init__(self, base_url=None, login=None, password=None,
+                 session_path=TARGETS['edm']['session_path']):
         self.base_url = (base_url or os.getenv('OTP_API_BASE_URL')
                          or DEFAULT_API_BASE_URL).rstrip('/')
         self.login = login or os.getenv('ADMIN_LOGIN')
         self.password = password or os.getenv('ADMIN_PASSWORD')
+        self.session_path = session_path
         self.session = requests.Session()
 
     def authenticate(self):
@@ -93,25 +120,30 @@ class OtpClient:
         return self
 
     def session_status(self):
-        response = self.session.get('{}/api/fleet_edm/session'.format(self.base_url), timeout=60)
+        response = self.session.get('{}{}'.format(self.base_url, self.session_path), timeout=60)
         if response.status_code >= 400:
-            raise SystemExit('GET /api/fleet_edm/session → {}: {}'.format(
-                response.status_code, response.text[:300]))
+            raise SystemExit('GET {} → {}: {}'.format(
+                self.session_path, response.status_code, response.text[:300]))
         return (response.json() or {}).get('session') or {}
 
     def push(self, cookies, user_agent):
+        """Ответ сервера целиком: «Рассылки» кладут рядом с сессией итог
+        опроса парков (parks_checked / parks_enabled)."""
         response = self.session.post(
-            '{}/api/fleet_edm/session'.format(self.base_url),
+            '{}{}'.format(self.base_url, self.session_path),
             json={'cookies': cookies, 'user_agent': user_agent},
-            timeout=120,
+            # «Рассылки» после приёма сразу опрашивают все диспетчерские —
+            # это ещё секунд десять-двадцать сверх проверки.
+            timeout=300,
         )
         if response.status_code >= 400:
             raise SystemExit('Сервер не принял сессию → {}: {}'.format(
                 response.status_code, response.text[:300]))
-        return (response.json() or {}).get('session') or {}
+        return response.json() or {}
 
 
-def grab_cookies(profile_dir, wait_minutes=15, headless=False):
+def grab_cookies(profile_dir, wait_minutes=15, headless=False,
+                 login_hint=TARGETS['edm']['login_hint']):
     """Куки живого кабинета. Возвращает (cookies, user_agent, account, parks)."""
     try:
         from playwright.sync_api import sync_playwright
@@ -144,8 +176,7 @@ def grab_cookies(profile_dir, wait_minutes=15, headless=False):
                     )
                 if time.time() > deadline:
                     raise SystemExit('Вход не выполнен за {} минут'.format(wait_minutes))
-                print('Войдите в открывшемся окне под аккаунтом с доступом ко всем '
-                      'диспетчерским. Жду...', flush=True)
+                print('Войдите в открывшемся окне {}. Жду...'.format(login_hint), flush=True)
                 time.sleep(5)
 
             cookies = context.cookies(FLEET_URL)
@@ -192,9 +223,14 @@ def _probe(page):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Передать разделу «Провайдер ЭДО» сессию кабинета Яндекс.Fleet')
-    parser.add_argument('--profile', default=DEFAULT_PROFILE,
-                        help='папка профиля Chromium (по умолчанию {})'.format(DEFAULT_PROFILE))
+        description='Передать порталу сессию кабинета Яндекс.Fleet')
+    parser.add_argument('--target', choices=sorted(TARGETS), default='edm',
+                        help='куда: edm — «Провайдер ЭДО» (по умолчанию), '
+                             'mailings — «Рассылки» (свой аккаунт)')
+    parser.add_argument('--profile', default=None,
+                        help='папка профиля Chromium (по умолчанию своя у каждой цели: {})'.format(
+                            ', '.join('{} → {}'.format(k, v['profile'])
+                                      for k, v in sorted(TARGETS.items()))))
     parser.add_argument('--base-url', default=None, help='адрес OTP')
     parser.add_argument('--login', default=None)
     parser.add_argument('--password', default=None)
@@ -206,14 +242,18 @@ def main():
                         help='только показать, что за сессия лежит в OTP')
     args = parser.parse_args()
 
+    target = TARGETS[args.target]
     load_env()
-    client = OtpClient(args.base_url, args.login, args.password).authenticate()
+    client = OtpClient(args.base_url, args.login, args.password,
+                       session_path=target['session_path']).authenticate()
 
     if args.check:
         status = client.session_status()
         if not status.get('configured'):
-            print('Сессия в OTP не настроена')
+            print('Сессия {} в OTP не настроена'.format(target['title']))
             return 0
+        if status.get('source') == 'shared':
+            print('Своего аккаунта у «Рассылок» нет — работают на общей сессии «Провайдера ЭДО»')
         print('Аккаунт:        {}'.format(status.get('account') or '—'))
         print('Парков:         {}'.format(status.get('parks_count') or '—'))
         print('Обновлена:      {}'.format(status.get('updated_at') or '—'))
@@ -223,13 +263,21 @@ def main():
         return 0
 
     cookies, user_agent, account, parks = grab_cookies(
-        args.profile, wait_minutes=args.wait_minutes, headless=args.headless)
+        args.profile or target['profile'], wait_minutes=args.wait_minutes,
+        headless=args.headless, login_hint=target['login_hint'])
     print('Кабинет открыт: {} ({} парков)'.format(account or '—', parks))
 
-    status = client.push(cookies, user_agent)
-    print('Сессия принята сервером: аккаунт {}, парков {}, обновлена {}'.format(
-        status.get('account') or '—', status.get('parks_count') or '—',
+    result = client.push(cookies, user_agent)
+    status = result.get('session') or {}
+    print('Сессия {} принята сервером: аккаунт {}, парков {}, обновлена {}'.format(
+        target['title'], status.get('account') or '—', status.get('parks_count') or '—',
         status.get('updated_at') or '—'))
+    if 'parks_enabled' in result:
+        print('Рассылка разрешена в {} диспетчерских из {}'.format(
+            result.get('parks_enabled'), result.get('parks_checked')))
+    if result.get('scan_error'):
+        print('Опрос диспетчерских сорвался: {} — раздел переспросит их при входе'.format(
+            result['scan_error']))
     return 0
 
 

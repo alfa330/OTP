@@ -10,6 +10,16 @@ init_fleet_edm_schema и init_parcels_schema.
     driver_mailing_targets    её же в разрезе диспетчерских: по строке на парк
     driver_mailing_templates  заготовки текста и фильтров
     driver_mailing_parks      кэш «где вообще разрешена рассылка»
+    driver_mailing_session    своя сессия кабинета под аккаунт с правом рассылки
+
+ПОЧЕМУ У РАССЫЛОК СВОЯ СЕССИЯ. До 23.09.2026 куки были одни на портал и жили в
+«Провайдере ЭДО», а раздел их только читал. Но у того служебного аккаунта
+рассылка разрешена в пяти диспетчерских из девяноста, и под рассылки выдали
+ОТДЕЛЬНЫЙ аккаунт с правом рассылать везде. Переложить его в общую строку
+нельзя: выгрузки «Провайдера ЭДО» годами живут на своём аккаунте, и менять им
+учётку ради чужого раздела — значит рисковать тем, что работает. Поэтому
+строка своя, устроена так же (одна строка, куки как пароль, наружу только
+метаданные). Пока она пуста, раздел работает на общей сессии — как раньше.
 
 ПОЧЕМУ У РАССЫЛКИ ОТДЕЛЬНАЯ ТАБЛИЦА ЦЕЛЕЙ. В кабинете нет понятия «отправить в
 несколько диспетчерских»: парк задаётся заголовком x-park-id, и одна отправка —
@@ -115,6 +125,20 @@ CREATE TABLE IF NOT EXISTS driver_mailing_parks (
     per_day         INTEGER,
     revoke_seconds  INTEGER,
     checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Куки аккаунта рассылок. Это по сути пароль от кабинета: значение наружу через
+-- API не уходит (только аккаунт и даты), в логи не пишется.
+CREATE TABLE IF NOT EXISTS driver_mailing_session (
+    id           INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    cookies      TEXT NOT NULL,
+    user_agent   TEXT,
+    account      TEXT,
+    parks_count  INTEGER,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by   INTEGER,
+    last_ok_at   TIMESTAMPTZ,
+    last_error   TEXT
 );
 """
 

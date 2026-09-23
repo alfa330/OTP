@@ -6,13 +6,16 @@
 рассылки и все её цели, и разорвать её на пять самостоятельных коммитов значило
 бы получить рассылку без целей при первой же ошибке связи.
 
-Куки кабинета здесь не читаются и не пишутся: сессия общая с «Провайдером ЭДО»,
-за ней ходят в fleet_edm.queries.load_session (см. докстроку пакета).
+Куки кабинета здесь — только СВОИ, аккаунта рассылок (driver_mailing_session).
+Общая сессия «Провайдера ЭДО» читается его же модулем fleet_edm.queries и
+отсюда никогда не пишется (см. докстроку пакета).
 
 Все запросы параметризованные. Там, где список полей собирается на лету
 (частичное обновление шаблона), в SQL уходят ТОЛЬКО имена колонок из
 зашитого в модуль кортежа, а значения — всегда через %s.
 """
+
+import json
 
 from psycopg2.extras import Json, execute_values
 
@@ -118,6 +121,77 @@ def access_context(cursor, user_id):
     return _row_to_dict(cursor, cursor.fetchone())
 
 
+# ── Своя сессия кабинета ─────────────────────────────────────────────────────
+#
+# Та же форма, что у fleet_edm_session, но строка своя: под рассылки выдан
+# отдельный аккаунт (см. schema.py). Пустая строка = «своей нет», и тогда
+# раздел берёт общую сессию «Провайдера ЭДО».
+
+def save_session(cursor, *, cookies, user_agent=None, account=None, parks_count=None,
+                 updated_by=None):
+    """cookies — список словарей браузера либо {name: value}."""
+    payload = json.dumps(cookies, ensure_ascii=False)
+    cursor.execute(
+        """
+        INSERT INTO driver_mailing_session (id, cookies, user_agent, account, parks_count,
+                                            updated_at, updated_by, last_ok_at, last_error)
+        VALUES (1, %s, %s, %s, %s, NOW(), %s, NOW(), NULL)
+        ON CONFLICT (id) DO UPDATE
+            SET cookies = EXCLUDED.cookies,
+                user_agent = EXCLUDED.user_agent,
+                account = EXCLUDED.account,
+                parks_count = EXCLUDED.parks_count,
+                updated_at = NOW(),
+                updated_by = EXCLUDED.updated_by,
+                last_ok_at = NOW(),
+                last_error = NULL
+        """,
+        (payload, _text(user_agent), _text(account), _int(parks_count), _int(updated_by)),
+    )
+
+
+def load_session(cursor):
+    """Полная строка ВМЕСТЕ с куками — только для клиента кабинета."""
+    cursor.execute(
+        """
+        SELECT cookies, user_agent, account, parks_count, updated_at, last_ok_at, last_error
+          FROM driver_mailing_session WHERE id = 1
+        """
+    )
+    row = _row_to_dict(cursor, cursor.fetchone())
+    if not row:
+        return None
+    try:
+        row['cookies'] = json.loads(row['cookies'] or '[]')
+    except (TypeError, ValueError):
+        row['cookies'] = []
+    return row
+
+
+def session_status(cursor):
+    """То же самое БЕЗ кук — это уходит в интерфейс."""
+    row = load_session(cursor)
+    if not row or not row.get('cookies'):
+        return {'configured': False}
+    row.pop('cookies', None)
+    row['configured'] = True
+    return row
+
+
+def mark_session_ok(cursor):
+    """Без своей строки — ничего не делает: общую сессию отсюда не трогаем."""
+    cursor.execute(
+        "UPDATE driver_mailing_session SET last_ok_at = NOW(), last_error = NULL WHERE id = 1"
+    )
+
+
+def mark_session_error(cursor, message):
+    cursor.execute(
+        "UPDATE driver_mailing_session SET last_error = %s WHERE id = 1",
+        (str(message)[:500],),
+    )
+
+
 # ── Кэш диспетчерских ────────────────────────────────────────────────────────
 
 def parks_cache(cursor):
@@ -208,6 +282,17 @@ def parks_cache_age(cursor):
     if not row or row[0] is None:
         return None
     return float(row[0])
+
+
+def clear_parks_cache(cursor):
+    """Забыть список диспетчерских целиком.
+
+    Нужно ровно в одном случае: сменили аккаунт, а опрос под новым сорвался.
+    Оставить кэш старого аккаунта нельзя — форма предлагала бы парки, права в
+    которых были у прежней учётки. Пустой кэш раздел переспросит при следующем
+    входе сам (parks_cache_age даст None).
+    """
+    cursor.execute("DELETE FROM driver_mailing_parks")
 
 
 # ── Рассылка и её цели ───────────────────────────────────────────────────────

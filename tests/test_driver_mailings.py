@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import unittest
+from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -73,6 +74,13 @@ class AccessTests(unittest.TestCase):
     def test_empty_context_is_refused(self):
         for ctx in (None, {}, {'id': None, 'role': None}, {'role': ''}):
             self.assertFalse(access.can_view_section(ctx), ctx)
+
+    def test_only_super_admin_connects_the_cabinet_account(self):
+        # Куки — вход в кабинет с правом писать водителям во всех парках.
+        self.assertTrue(access.can_manage_session({'id': 1, 'role': 'super_admin'}))
+        self.assertFalse(access.can_manage_session({'id': 476, 'role': 'admin'}))
+        self.assertFalse(access.can_manage_session({'id': 2, 'role': 'admin'}))
+        self.assertFalse(access.can_manage_session(None))
 
     def test_send_and_templates_match_view(self):
         allowed = {'id': 476, 'role': 'admin'}
@@ -468,9 +476,242 @@ class SchemaTests(unittest.TestCase):
         # Единственная защита от второй рассылки тем же людям при двойном клике.
         self.assertIn('idempotency_key     TEXT UNIQUE', DRIVER_MAILINGS_SCHEMA_SQL)
 
-    def test_no_second_place_for_cabinet_cookies(self):
-        # Сессия кабинета одна на портал и живёт в «Провайдере ЭДО».
-        self.assertNotIn('cookies', DRIVER_MAILINGS_SCHEMA_SQL)
+    def test_own_session_is_a_single_row(self):
+        # Своя сессия аккаунта рассылок (23.09.2026) — одна строка, как у ЭДО:
+        # два набора кук в одной таблице означали бы «какими из них ходить?».
+        block = DRIVER_MAILINGS_SCHEMA_SQL.split('CREATE TABLE IF NOT EXISTS driver_mailing_session')[1]
+        block = block.split(');')[0]
+        self.assertIn('CHECK (id = 1)', block)
+        self.assertIn('cookies', block)
+        # Больше кук нигде в схеме раздела нет.
+        self.assertEqual(DRIVER_MAILINGS_SCHEMA_SQL.count('cookies'), 1)
+
+    def test_routes_never_write_the_shared_session(self):
+        # В fleet_edm_session смысл «куки ЭДО протухли»; наши ошибки туда не пишем.
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'driver_mailings', 'routes.py')
+        with open(path, encoding='utf-8') as handle:
+            source = handle.read()
+        for forbidden in ('fleet_session.save_session', 'fleet_session.mark_session_error',
+                          'fleet_session.mark_session_ok'):
+            self.assertNotIn(forbidden, source)
+
+
+class ChooseSessionTests(unittest.TestCase):
+    """Какими куками ходить в кабинет: своими, а без своих — общими."""
+
+    def setUp(self):
+        from driver_mailings import routes
+        self.routes = routes
+        self.own = {'cookies': [{'name': 'Session_id', 'value': 'own'}], 'account': 'mailings@x'}
+        self.shared = {'cookies': [{'name': 'Session_id', 'value': 'edm'}], 'account': 'edm@x'}
+
+    def test_own_session_wins(self):
+        session, source = self.routes.choose_session(self.own, self.shared)
+        self.assertIs(session, self.own)
+        self.assertEqual(source, self.routes.SESSION_OWN)
+
+    def test_expired_own_session_still_wins(self):
+        # Молча откатиться на аккаунт с пятью парками — подмена отправителя.
+        own = dict(self.own, last_error='Сессия протухла')
+        session, source = self.routes.choose_session(own, self.shared)
+        self.assertIs(session, own)
+        self.assertEqual(source, self.routes.SESSION_OWN)
+
+    def test_shared_until_own_is_connected(self):
+        for own in (None, {}, {'cookies': []}):
+            session, source = self.routes.choose_session(own, self.shared)
+            self.assertIs(session, self.shared)
+            self.assertEqual(source, self.routes.SESSION_SHARED)
+
+    def test_nothing_configured(self):
+        self.assertEqual(self.routes.choose_session(None, None), (None, None))
+        self.assertEqual(self.routes.choose_session({'cookies': []}, {'cookies': []}),
+                         (None, None))
+
+
+class _FakeDb:
+    @contextmanager
+    def _get_cursor(self):
+        yield object()
+
+
+class _FakeCabinet:
+    """Кабинет для маршрутов: какие парки есть и где разрешена рассылка."""
+
+    parks_list = []
+    enabled = set()
+    check_error = None
+    parks_error = None
+    created = []
+
+    def __init__(self, cookies, user_agent=None):
+        self.cookies = cookies
+        _FakeCabinet.created.append(cookies)
+
+    def check(self):
+        if _FakeCabinet.check_error:
+            raise _FakeCabinet.check_error
+        return {'account': 'mailings@yandextaxi.kz', 'parks_count': len(self.parks_list)}
+
+    def parks(self):
+        if _FakeCabinet.parks_error:
+            raise _FakeCabinet.parks_error
+        return list(self.parks_list)
+
+    def mailing_limits(self, park_id):
+        if park_id not in self.enabled:
+            return None
+        return {'pro': {'status': 'ok', 'restriction': {
+            'is_enabled': True, 'max_title_length': 120, 'max_message_length': 1500,
+            'time_limit': {'day': 30}, 'delete_limit': {'seconds': 300}}}}
+
+    pro_limits = staticmethod(MailingsClient.pro_limits)
+
+
+class SessionRouteTests(unittest.TestCase):
+    """Подключение аккаунта рассылок и честные ошибки про его сессию."""
+
+    def setUp(self):
+        from unittest import mock
+
+        from flask import Flask
+
+        from driver_mailings import queries, routes
+        from fleet_edm import queries as fleet_queries
+
+        self.routes = routes
+        self.requester = {'id': 1, 'name': 'Админ', 'role': 'super_admin'}
+        self.own_row = None
+        self.shared_row = {'cookies': [{'name': 'Session_id', 'value': 'edm'}]}
+        self.calls = []
+
+        _FakeCabinet.parks_list = [{'id': 'a', 'name': 'Anytime', 'city': 'Алматы'},
+                                   {'id': 'b', 'name': 'Jana', 'city': 'Астана'},
+                                   {'id': 'c', 'name': 'Tenge', 'city': 'Шымкент'}]
+        _FakeCabinet.enabled = {'a', 'b', 'c'}
+        _FakeCabinet.check_error = None
+        _FakeCabinet.parks_error = None
+        _FakeCabinet.created = []
+
+        def record(name, result=None):
+            def inner(*args, **kwargs):
+                self.calls.append((name, args[1:], kwargs))
+                return result() if callable(result) else result
+            return inner
+
+        patches = [
+            mock.patch.object(routes, 'MailingsClient', _FakeCabinet),
+            mock.patch.object(queries, 'access_context', lambda cursor, uid: self.requester),
+            mock.patch.object(queries, 'load_session', lambda cursor: self.own_row),
+            mock.patch.object(queries, 'session_status', lambda cursor: (
+                {'configured': True, 'account': 'mailings@yandextaxi.kz'}
+                if self.own_row else {'configured': False})),
+            mock.patch.object(queries, 'save_session', record('save_session')),
+            mock.patch.object(queries, 'mark_session_ok', record('mark_session_ok')),
+            mock.patch.object(queries, 'mark_session_error', record('mark_session_error')),
+            mock.patch.object(queries, 'save_parks_cache', record('save_parks_cache')),
+            mock.patch.object(queries, 'clear_parks_cache', record('clear_parks_cache')),
+            mock.patch.object(fleet_queries, 'load_session', lambda cursor: self.shared_row),
+            mock.patch.object(fleet_queries, 'session_status', lambda cursor: {
+                'configured': True, 'account': 'edm@yandextaxi.kz'}),
+            mock.patch.object(fleet_queries, 'mark_session_error', record('shared_mark_error')),
+            mock.patch.object(fleet_queries, 'save_session', record('shared_save')),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        app = Flask(__name__)
+        app.register_blueprint(routes.build_driver_mailings_blueprint(
+            db=_FakeDb(),
+            require_api_key=lambda handler: handler,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (self.requester['id'], None, None),
+        ))
+        self.http = app.test_client()
+
+    def names(self):
+        return [name for name, _args, _kwargs in self.calls]
+
+    def push(self):
+        return self.http.post('/api/driver_mailings/session', json={
+            'cookies': [{'name': 'Session_id', 'value': 'new'}], 'user_agent': 'UA'})
+
+    def test_push_saves_session_and_rescans_parks(self):
+        response = self.push()
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body['parks_checked'], 3)
+        self.assertEqual(body['parks_enabled'], 3)
+        self.assertIsNone(body['scan_error'])
+        saved = [kwargs for name, _a, kwargs in self.calls if name == 'save_session'][0]
+        self.assertEqual(saved['account'], 'mailings@yandextaxi.kz')
+        self.assertEqual(saved['updated_by'], 1)
+        # Кэш парков переписан опросом ПОД НОВЫМИ куками, а не старыми.
+        self.assertIn('save_parks_cache', self.names())
+        self.assertEqual(_FakeCabinet.created, [[{'name': 'Session_id', 'value': 'new'}]])
+        # Общую сессию «Провайдера ЭДО» подключение не трогает.
+        self.assertNotIn('shared_save', self.names())
+
+    def test_only_super_admin_connects_the_account(self):
+        # Дана раздел видит и рассылки отправляет, но аккаунт не подключает.
+        self.requester = {'id': 476, 'name': 'Дана', 'role': 'admin'}
+        response = self.push()
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn('save_session', self.names())
+        self.assertEqual(self.http.get('/api/driver_mailings/session').status_code, 403)
+
+    def test_dead_cookies_are_refused_without_blaming_the_old_session(self):
+        from fleet_edm.client import FleetSessionExpired
+        self.own_row = {'cookies': [{'name': 'Session_id', 'value': 'old'}]}
+        _FakeCabinet.check_error = FleetSessionExpired('Кабинет отдал страницу входа')
+        response = self.push()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'SESSION_INVALID')
+        self.assertNotIn('save_session', self.names())
+        self.assertNotIn('mark_session_error', self.names())
+
+    def test_failed_scan_forgets_the_previous_account_parks(self):
+        from fleet_edm.client import FleetError
+        _FakeCabinet.parks_error = FleetError('500')
+        response = self.push()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['scan_error'])
+        self.assertIn('save_session', self.names())
+        self.assertIn('clear_parks_cache', self.names())
+        self.assertNotIn('save_parks_cache', self.names())
+
+    def test_expired_own_session_says_so_and_is_marked(self):
+        from fleet_edm.client import FleetSessionExpired
+        self.own_row = {'cookies': [{'name': 'Session_id', 'value': 'own'}]}
+        _FakeCabinet.parks_error = FleetSessionExpired('протухла')
+        response = self.http.post('/api/driver_mailings/parks/refresh')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()['error'], self.routes.SESSION_EXPIRED_OWN)
+        self.assertIn('mark_session_error', self.names())
+        # Ходили СВОИМИ куками, общими — нет.
+        self.assertEqual(_FakeCabinet.created, [[{'name': 'Session_id', 'value': 'own'}]])
+        self.assertNotIn('shared_mark_error', self.names())
+
+    def test_without_own_session_the_shared_one_is_used_and_left_alone(self):
+        from fleet_edm.client import FleetSessionExpired
+        _FakeCabinet.parks_error = FleetSessionExpired('протухла')
+        response = self.http.post('/api/driver_mailings/parks/refresh')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()['error'], self.routes.SESSION_EXPIRED_SHARED)
+        self.assertEqual(_FakeCabinet.created, [self.shared_row['cookies']])
+        self.assertNotIn('mark_session_error', self.names())
+        self.assertNotIn('shared_mark_error', self.names())
+
+    def test_session_status_tells_whose_account_is_in_use(self):
+        body = self.http.get('/api/driver_mailings/session').get_json()
+        self.assertEqual(body['session']['source'], self.routes.SESSION_SHARED)
+        self.assertEqual(body['session']['account'], 'edm@yandextaxi.kz')
+        self.own_row = {'cookies': [{'name': 'Session_id', 'value': 'own'}]}
+        body = self.http.get('/api/driver_mailings/session').get_json()
+        self.assertEqual(body['session']['source'], self.routes.SESSION_OWN)
+        self.assertEqual(body['session']['account'], 'mailings@yandextaxi.kz')
 
 
 class FrontendWiringTests(unittest.TestCase):

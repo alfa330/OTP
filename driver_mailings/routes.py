@@ -94,6 +94,40 @@ JOURNAL_MAX_LIMIT = 100
 # промежуток между двумя рассылками с одинаковым заголовком.
 HEAL_WINDOW_SECONDS = 3600
 
+# Чья сессия кабинета в работе: своя строка аккаунта рассылок или общая строка
+# «Провайдера ЭДО». Уходит в интерфейс — человеку важно видеть, от чьего имени
+# уйдёт рассылка.
+SESSION_OWN = 'own'
+SESSION_SHARED = 'shared'
+
+SESSION_EXPIRED_OWN = (
+    "Связь с кабинетом для рассылок прервалась — нужен новый вход под аккаунтом "
+    "рассылок. Его делает разработчик со своего компьютера."
+)
+SESSION_EXPIRED_SHARED = (
+    "Связь с кабинетом диспетчерской прервалась. "
+    "Её восстанавливают в разделе «Провайдер ЭДО»."
+)
+
+
+def choose_session(own, shared):
+    """Какой сессией ходить в кабинет: (строка, SESSION_OWN|SESSION_SHARED).
+
+    Своя строка, если она есть, — ВСЕГДА, даже протухшая. Откатываться на общую
+    при мёртвой своей нельзя: у общего аккаунта рассылка разрешена в пяти парках
+    из девяноста, и молчаливая подмена учётки выглядела бы как «половина
+    диспетчерских пропала», а рассылка ушла бы от чужого имени. Протухла —
+    честно говорим «нужен новый вход».
+
+    Общая — только пока своей нет вовсе: так раздел работал до выдачи
+    отдельного аккаунта и продолжает работать до его подключения.
+    """
+    if own and own.get('cookies'):
+        return own, SESSION_OWN
+    if shared and shared.get('cookies'):
+        return shared, SESSION_SHARED
+    return None, None
+
 
 def _parse_stamp(value):
     """Время из базы или из ответа кабинета — в единый datetime с зоной.
@@ -172,9 +206,9 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                     # Единственная ошибка, которую чинит не разработчик, а живой
                     # человек в браузере, — поэтому она говорит прямым текстом.
                     logging.warning('Рассылки: сессия кабинета недействительна (%s)', error)
+                    own = note_session_expired(error)
                     return jsonify({
-                        "error": "Связь с кабинетом диспетчерской прервалась. "
-                                 "Её восстанавливают в разделе «Провайдер ЭДО».",
+                        "error": SESSION_EXPIRED_OWN if own else SESSION_EXPIRED_SHARED,
                         "code": "SESSION_EXPIRED",
                     }), 503
                 except FleetError as error:
@@ -189,21 +223,49 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
 
     # ── кабинет ──────────────────────────────────────────────────────────────
 
-    def make_client():
-        """Клиент кабинета на общей сессии портала.
+    def load_cabinet_session():
+        """(строка сессии, чья она) — см. choose_session.
 
-        Сессия одна на все разделы и живёт в «Провайдере ЭДО»: учётная запись
-        кабинета одна, и второе хранилище тех же кук означало бы две даты
-        обновления и молчаливые 401 в половине портала. Обновлять её отсюда
-        нельзя — только читать.
+        Общую строку даже не читаем, если своя есть: куки — это пароль, и
+        держать в памяти лишний не за чем.
         """
         with db._get_cursor() as cursor:
-            session = fleet_session.load_session(cursor)
-        if not session or not session.get('cookies'):
-            raise FleetSessionExpired(
-                'Связь с кабинетом диспетчерской не настроена. '
-                'Её настраивают в разделе «Провайдер ЭДО».')
+            own = queries.load_session(cursor)
+            shared = None if own and own.get('cookies') else fleet_session.load_session(cursor)
+        return choose_session(own, shared)
+
+    def make_client():
+        """Клиент кабинета: на сессии аккаунта рассылок, а пока её нет — на общей.
+
+        Общую («Провайдер ЭДО») отсюда только читаем и никогда не пишем в неё
+        last_error: там смысл «куки протухли», а наши 403 — про права на
+        рассылку в конкретном парке.
+        """
+        session, _source = load_cabinet_session()
+        if not session:
+            raise FleetSessionExpired('Связь с кабинетом диспетчерской не настроена.')
         return MailingsClient(session['cookies'], session.get('user_agent'))
+
+    def note_session_expired(error):
+        """Отметить протухание в СВОЕЙ строке. True — если она есть (значит,
+        и в кабинет ходили ею: choose_session берёт свою всегда, когда она есть)."""
+        try:
+            with db._get_cursor() as cursor:
+                if not queries.session_status(cursor).get('configured'):
+                    return False
+                queries.mark_session_error(cursor, str(error))
+            return True
+        except Exception:
+            logging.exception('Рассылки: не удалось отметить протухшую сессию')
+            return False
+
+    def session_for_view(cursor):
+        """Метаданные сессии в работе — без кук."""
+        own = queries.session_status(cursor)
+        if own.get('configured'):
+            return dict(own, source=SESSION_OWN)
+        shared = fleet_session.session_status(cursor)
+        return dict(shared, source=SESSION_SHARED if shared.get('configured') else None)
 
     def scan_parks(client):
         """Опросить все диспетчерские аккаунта и понять, где разрешена рассылка.
@@ -247,6 +309,9 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         rows = scan_parks(client)
         with db._get_cursor() as cursor:
             queries.save_parks_cache(cursor, rows)
+            # Опрос прошёл — своя сессия жива. Без своей строки это пустой
+            # UPDATE: общую сессию отсюда не трогаем.
+            queries.mark_session_ok(cursor)
         return rows
 
     def parks_for_view(refresh_if_stale=True):
@@ -542,7 +607,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
     def driver_mailings_overview(requester_id, requester):
         rows = parks_for_view()
         with db._get_cursor() as cursor:
-            session = fleet_session.session_status(cursor)
+            session = session_for_view(cursor)
             template_rows = queries.templates(cursor)
         allowed = enabled_parks(rows)
         # Пределы берём из первой разрешённой диспетчерской: они одинаковы во
@@ -558,6 +623,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             'status': 'success',
             'session': {
                 'configured': bool(session.get('configured')),
+                'source': session.get('source'),
                 'account': session.get('account'),
                 'updated_at': session.get('updated_at'),
                 'last_ok_at': session.get('last_ok_at'),
@@ -579,6 +645,73 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             'status': 'success',
             'checked': len(rows),
             'enabled': len(allowed),
+        })
+
+    @section_route('/session', methods=('GET', 'POST'))
+    def driver_mailings_session(requester_id, requester):
+        """Подключить аккаунт кабинета для рассылок (куки несёт
+        scripts/fleet_edm_push_session.py --target mailings).
+
+        Принимаем только то, что реально работает: сразу ходим в кабинет, а
+        потом переспрашиваем все диспетчерские — у нового аккаунта свой набор
+        парков с правом рассылки, и кэш прежнего здесь только соврёт. Число
+        «где разрешено» возвращаем в ответе: ради него аккаунт и меняли.
+        """
+        if not access.can_manage_session(requester):
+            return jsonify({"error": "Подключать аккаунт кабинета может только супер-админ",
+                            "code": "MAILINGS_SESSION_FORBIDDEN"}), 403
+        if request.method == 'GET':
+            with db._get_cursor() as cursor:
+                return jsonify({'status': 'success', 'session': session_for_view(cursor)})
+
+        payload = request.get_json(silent=True) or {}
+        cookies = payload.get('cookies')
+        if not cookies:
+            return jsonify({"error": "Не переданы куки сессии"}), 400
+        user_agent = str(payload.get('user_agent') or '').strip()
+
+        # Исключения кабинета ловим здесь, а не в общей обёртке: та отметила бы
+        # протухшей ПРЕЖНЮЮ сессию, хотя не годятся как раз новые куки.
+        client = MailingsClient(cookies, user_agent)
+        try:
+            checked = client.check()
+        except FleetSessionExpired as error:
+            return jsonify({"error": str(error), "code": "SESSION_INVALID"}), 400
+        except FleetError as error:
+            return jsonify({"error": "Кабинет не ответил: {}".format(error)}), 502
+
+        with db._get_cursor() as cursor:
+            queries.save_session(
+                cursor, cookies=cookies, user_agent=user_agent,
+                account=checked.get('account'), parks_count=checked.get('parks_count'),
+                updated_by=requester_id,
+            )
+        with _refs_lock:
+            _refs_cache.clear()
+
+        scan_error = None
+        rows = []
+        try:
+            rows = refresh_parks(client)
+        except FleetError as error:
+            # Сессия принята (кабинет её узнал), а опрос сорвался. Кэш прежнего
+            # аккаунта оставлять нельзя: форма предложила бы чужие парки.
+            scan_error = str(error)
+            logging.warning('Рассылки: опрос парков под новым аккаунтом сорвался (%s)', error)
+            with db._get_cursor() as cursor:
+                queries.clear_parks_cache(cursor)
+
+        with db._get_cursor() as cursor:
+            session = session_for_view(cursor)
+        enabled = [row for row in rows if row.get('is_enabled')]
+        logging.info('Рассылки: подключён аккаунт кабинета (%s парков, рассылка разрешена в %s)',
+                     len(rows), len(enabled))
+        return jsonify({
+            'status': 'success',
+            'session': session,
+            'parks_checked': len(rows),
+            'parks_enabled': len(enabled),
+            'scan_error': scan_error,
         })
 
     @section_route('/filters')

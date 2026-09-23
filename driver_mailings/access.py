@@ -135,6 +135,17 @@ def can_manage_templates(ctx) -> bool:
     return can_view_section(ctx)
 
 
+def can_manage_session(ctx) -> bool:
+    """Кто подключает аккаунт кабинета для рассылок.
+
+    Только супер-админ, даже не Дана: куки — это вход в кабинет от имени живого
+    аккаунта с правом писать водителям во всех диспетчерских. Подключают его
+    скриптом с машины разработчика (scripts/fleet_edm_push_session.py
+    --target mailings), кнопки в интерфейсе нет.
+    """
+    return normalize_role(_field(ctx, 'role')) == 'super_admin'
+
+
 def capabilities(ctx) -> dict:
     """Что показывать в интерфейсе.
 
