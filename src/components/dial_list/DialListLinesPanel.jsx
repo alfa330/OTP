@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge } from '../ui/ios';
+import { iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 
 /*
  * Линии Binotel отдела: какие внутренние номера есть у компании, кто из них
@@ -187,19 +188,20 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = t
                                 {isPicking && (
                                     <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
                                         <span className="text-[12.5px] text-slate-600">Кому:</span>
-                                        <select
+                                        <CustomSelect
+                                            className="w-72"
+                                            variant="ios"
                                             value={pickedUser}
-                                            onChange={(e) => setPickedUser(e.target.value)}
-                                            className={`${iosInput} w-64 py-2`}
-                                            aria-label="Сотрудник"
-                                        >
-                                            {users.length === 0 && <option value="">В отделе нет сотрудников</option>}
-                                            {users.map((u) => (
-                                                <option key={u.id} value={String(u.id)}>
-                                                    {u.name}{u.login ? ` (@${u.login})` : ''}{u.sip_number ? ` — сейчас линия ${u.sip_number}` : ''}
-                                                </option>
-                                            ))}
-                                        </select>
+                                            onChange={(v) => setPickedUser(String(v))}
+                                            ariaLabel="Сотрудник"
+                                            placeholder={users.length === 0 ? 'В отделе нет сотрудников' : 'Выберите сотрудника'}
+                                            disabled={users.length === 0}
+                                            searchable={users.length > 8}
+                                            options={users.map((u) => ({
+                                                value: String(u.id),
+                                                label: `${u.name}${u.login ? ` (@${u.login})` : ''}${u.sip_number ? ` — сейчас линия ${u.sip_number}` : ''}`,
+                                            }))}
+                                        />
                                         <button type="button" onClick={() => assign(line)} disabled={busy || !pickedUser} className={iosBtnPrimary}>
                                             <FaIcon className={busy ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />
                                             Назначить

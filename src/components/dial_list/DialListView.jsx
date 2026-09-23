@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnSecondary, IosBadge, IosHint, IosSegmented } from '../ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge, IosHint, IosSegmented } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
+import IosDatePicker from '../ui/DatePicker';
 import { DialListLeadsPanel, DialListOperatorsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
 import DialListLinesPanel from './DialListLinesPanel';
 
@@ -235,16 +237,14 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             <IosBadge tone={enabled ? 'green' : 'slate'}>{enabled ? 'Включён' : 'Выключен'}</IosBadge>
                         )}
                         {departments && departments.length > 1 && (
-                            <select
+                            <CustomSelect
+                                className="w-56"
+                                variant="ios"
                                 value={departmentId}
-                                onChange={(e) => setDepartmentId(e.target.value)}
-                                className={`${iosInput} w-52 py-2`}
-                                aria-label="Отдел"
-                            >
-                                {departments.map((d) => (
-                                    <option key={d.department_id} value={String(d.department_id)}>{d.department_name || `Отдел ${d.department_id}`}</option>
-                                ))}
-                            </select>
+                                onChange={(v) => setDepartmentId(String(v))}
+                                ariaLabel="Отдел"
+                                options={departments.map((d) => ({ value: String(d.department_id), label: d.department_name || `Отдел ${d.department_id}` }))}
+                            />
                         )}
                         {departments && departments.length === 1 && (
                             <span className="rounded-xl bg-slate-100 px-3 py-2 text-[13px] font-medium text-slate-700">{selected?.department_name}</span>
@@ -257,16 +257,15 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                 {canEdit && candidates.length > 0 && (
                     <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5">
                         <span className="text-[12.5px] text-slate-600">Подключить отдел к обзвону:</span>
-                        <select
+                        <CustomSelect
+                            className="w-60"
+                            variant="ios"
                             value={enrollPick}
-                            onChange={(e) => setEnrollPick(e.target.value)}
-                            className={`${iosInput} w-60 py-1.5 text-[13px]`}
-                            aria-label="Отдел для подключения"
-                        >
-                            {candidates.map((d) => (
-                                <option key={d.department_id} value={String(d.department_id)}>{d.department_name || `Отдел ${d.department_id}`}</option>
-                            ))}
-                        </select>
+                            onChange={(v) => setEnrollPick(String(v))}
+                            ariaLabel="Отдел для подключения"
+                            placeholder="Выберите отдел"
+                            options={candidates.map((d) => ({ value: String(d.department_id), label: d.department_name || `Отдел ${d.department_id}` }))}
+                        />
                         <button type="button" onClick={enroll} disabled={enrolling || !enrollPick} className={`${iosBtnSecondary} py-1.5`}>
                             <FaIcon className={enrolling ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
                             Подключить
@@ -323,13 +322,11 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             <div className="flex items-center justify-between gap-3 px-1">
                                 <div className={iosGroupLabel}>По операторам</div>
                                 <div className="flex items-center gap-2">
-                                    <input
-                                        type="date"
+                                    <IosDatePicker
                                         value={date}
                                         max={todayIso()}
-                                        onChange={(e) => setDate(e.target.value || todayIso())}
-                                        className={`${iosInput} w-40 py-1.5 text-[13px]`}
-                                        aria-label="Дата"
+                                        onChange={(iso) => setDate(iso || todayIso())}
+                                        placeholder="Дата"
                                     />
                                     <button type="button" onClick={loadOverview} disabled={loading} className={`${iosBtnSecondary} py-1.5`}>
                                         <FaIcon className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />

@@ -189,6 +189,14 @@ class LinesTests(unittest.TestCase):
             svc.assign_line(7, 42, "907")   # сотрудника нет
         self.assertEqual(saved, {})
 
+    def test_department_users_filter_by_status_not_is_active(self):
+        # users.is_active у живых сотрудников бывает FALSE — фильтровать по нему нельзя
+        # (23.09.2026 из-за этого «В отделе нет сотрудников» при живом тест-операторе).
+        src = inspect.getsource(dial_service.DialListService.department_users)
+        self.assertNotIn('is_active', src.split('cur.execute')[1])
+        self.assertIn("LOWER(COALESCE(u.status, '')) <> ALL(%s)", src)
+        self.assertIn('_SIP_INACTIVE_STATUSES', src)
+
     def test_lines_route_never_returns_secrets(self):
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         lines_part = src[src.index("def lines(department_id)"):src.index("def lines_assign")]

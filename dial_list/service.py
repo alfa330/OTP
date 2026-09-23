@@ -281,15 +281,20 @@ class DialListService:
     def department_users(self, department_id):
         """Сотрудники отдела (все роли: тест ведёт и сам владелец) с их SIP-номером и
         персональным включением обзвона (None — как у отдела)."""
+        # «Работает ли человек» в iCORE — это users.status ('working' / 'fired' / …),
+        # а не is_active: тот у большинства живых сотрудников FALSE (так пропал из
+        # списка первый же тест-оператор). Список уволенных — тот же, что у панели SIP.
+        inactive = list(getattr(self.db, "_SIP_INACTIVE_STATUSES", ("fired",)))
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT u.id, u.name, COALESCE(u.login, ''), COALESCE(u.role, ''),
                        COALESCE(u.sip_number, ''), COALESCE(u.status, ''), ds.enabled
                 FROM users u
                 LEFT JOIN dial_list_user_settings ds ON ds.user_id = u.id
-                WHERE u.department_id = %s AND COALESCE(u.is_active, TRUE)
+                WHERE u.department_id = %s
+                  AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
                 ORDER BY u.name
-            """, (int(department_id),))
+            """, (int(department_id), inactive))
             return [{"id": r[0], "name": r[1] or "", "login": r[2], "role": r[3],
                      "sip_number": (r[4] or "").strip(), "status": r[5],
                      "dial_list_enabled": None if r[6] is None else bool(r[6])} for r in cur.fetchall()]
