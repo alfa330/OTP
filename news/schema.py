@@ -461,6 +461,23 @@ _STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_news_quiz_attempts "
     "ON news_quiz_attempts(news_id, user_id, attempt_no);",
+    # ── КТО И КОГДА СНЯЛ С ПОКАЗА (ТЗ #300, п.16) ───────────────────────────
+    #
+    # «Сама публикация сохраняется в истории; фиксируется, кто и когда отменил
+    # публикацию». Снять новость вправе не только автор, но и руководитель выше
+    # него (routes._may_take_down), — значит «кто снял» не выводится из автора,
+    # и без этих колонок на вопрос «почему окно пропало у отдела» ответа нет.
+    #
+    # Хранится ПОСЛЕДНЕЕ снятие, и повторный выпуск его НЕ стирает: ошибочно
+    # запущенная, снятая и выпущенная заново новость обязана и дальше отвечать,
+    # что с 09:00 до 09:40 она висела по ошибке и кто её остановил. Показывают
+    # эти колонки журнал и строка списка; «сейчас снята» говорит статус.
+    #
+    # Ссылка на users с ON DELETE SET NULL: уволенного удалить можно, а время
+    # снятия от этого не пропадёт.
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;",
+    "ALTER TABLE news_posts ADD COLUMN IF NOT EXISTS "
+    "archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL;",
 ]
 
 # Колонки задачи #342 — по ним pass_ready отвечает, можно ли их читать.
@@ -635,6 +652,32 @@ def pass_ready(cursor):
     )
     row = cursor.fetchone()
     return bool(row and int(row[0]) == len(PASS_COLUMNS))
+
+
+TAKEDOWN_COLUMNS = (
+    ('news_posts', 'archived_at'),
+    ('news_posts', 'archived_by'),
+)
+
+
+def takedown_ready(cursor):
+    """Развёрнуты ли колонки «кто и когда снял» (ТЗ #300, п.16).
+
+    Отдельно — по той же причине, что остальные защёлки раздела: их читают
+    список и карточка редактора, и колонка, до которой не доехал DDL, уронила
+    бы вкладку «Новости» целиком. Нет колонок — снятие работает как раньше,
+    просто без подписи, кто снял.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND (table_name, column_name) IN (%s)
+        """ % ', '.join(['(%s, %s)'] * len(TAKEDOWN_COLUMNS)),
+        [value for pair in TAKEDOWN_COLUMNS for value in pair],
+    )
+    row = cursor.fetchone()
+    return bool(row and int(row[0]) == len(TAKEDOWN_COLUMNS))
 
 
 def attempts_ready(cursor):

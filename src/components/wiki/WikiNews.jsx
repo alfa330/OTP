@@ -135,6 +135,18 @@ const STATUS_LABELS = {
 /* «09:00» у сегодняшнего момента и «22.09 09:00» у любого другого: расчёт
    читают прямо перед нажатием «Опубликовать», и дата в нём нужна ровно тогда,
    когда она не сегодняшняя. */
+/* «снята сегодня, 09:40 · Зарина Алиева» — кто и когда остановил объявление
+   (ТЗ #300, п.16). Имя — только если снял НЕ автор: автор уже стоит первым в
+   той же строке, и «Руслан · … · снята · Руслан» говорило бы одно дважды.
+   Без глагола в роде («снял/сняла») — по имени пол не угадывают. */
+const takedownLabel = (post) => {
+    const when = publishedLabel(post?.archived_at);
+    if (!when) return '';
+    const who = post.archived_by && post.archived_by !== post.author_id
+        ? post.archived_by_name : '';
+    return who ? `снята ${when} · ${who}` : `снята ${when}`;
+};
+
 const whenLabel = (iso) => {
     if (!iso) return '';
     const at = new Date(iso);
@@ -1872,6 +1884,18 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                         ? `, вышла ${publishedLabel(state.plan.published_at)}` : ''}
                                 </p>
                             )}
+                            {/* КТО И КОГДА СНЯЛ (ТЗ #300, п.16). Здесь — с именем
+                                всегда: автора в шапке журнала нет, и «снята» без
+                                имени не ответило бы на вопрос, ради которого его
+                                открыли. «Снималась» — у выпущенной заново:
+                                перерыв в показе обязан объясняться и потом. */}
+                            {post?.archived_at && (
+                                <p className="text-[12px] text-slate-500 tabular-nums">
+                                    {post.status === 'archived' ? 'снята с показа' : 'снималась с показа'}
+                                    {' '}{publishedLabel(post.archived_at)}
+                                    {post.archived_by_name ? ` · ${post.archived_by_name}` : ''}
+                                </p>
+                            )}
                         </div>
                         <button
                             type="button"
@@ -2010,6 +2034,11 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
     const [saving, setSaving] = useState(false);
     const [formPost, setFormPost] = useState(undefined);   // undefined — закрыта
     const [reportPost, setReportPost] = useState(null);
+    /* Какую новость сейчас снимают: подтверждение стоит прямо в её строке.
+       Не отдельное окно — на телефоне любое окно здесь целый экран, а вопрос в
+       одну строку целого экрана не стоит. */
+    const [takingDown, setTakingDown] = useState(null);
+    const [takeDownBusy, setTakeDownBusy] = useState(false);
 
     /* «Опубликовать как новость» из вкладки «Вопросы» (задача #321): форма
        открывается сама — с заголовком, текстом и отделом оператора. Один раз на
@@ -2145,6 +2174,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
            правило хранилось бы в двух местах. */
         const reset = { publish_mode: 'now', scheduled_at: null,
                         spread_minutes: null, wave_interval_minutes: null };
+        if (action === 'archive') setTakeDownBusy(true);
         const request = action === 'delete'
             ? axios.delete(url, { headers })
             : action === 'unschedule'
@@ -2165,9 +2195,19 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                     archive: 'Новость снята с показа',
                     delete: post.published_at ? 'Новость удалена' : 'Черновик удалён',
                 }[action], 'success');
+                if (action === 'archive') setTakingDown(null);
                 load();
             })
-            .catch((e) => toastRef.current?.(errText(e, 'Не получилось'), 'error'));
+            .catch((e) => {
+                /* Сняли раньше нас (сервер: NEWS_NOT_ON_AIR) — вопрос в строке
+                   больше не о чем задавать, а список показывает устаревшее. */
+                if (action === 'archive' && e?.response?.status === 409) {
+                    setTakingDown(null);
+                    load();
+                }
+                toastRef.current?.(errText(e, 'Не получилось'), 'error');
+            })
+            .finally(() => { if (action === 'archive') setTakeDownBusy(false); });
     }, [apiBaseUrl, headers, load]);
 
     /* «Раздел разворачивается» и «нет прав» — разные ответы, и путать их
@@ -2280,10 +2320,16 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                                  такой строки, а созданием её никто не меряет. */
                               post.state === 'scheduled'
                                   ? `запуск ${publishedLabel(post.scheduled_at)}`
-                                  : publishedLabel(post.published_at || post.created_at)]
+                                  : (post.status === 'archived' && post.archived_at
+                                      ? takedownLabel(post)
+                                      : publishedLabel(post.published_at || post.created_at))]
                                 .filter(Boolean).join(' · ')}
                         </p>
-                        {post.status === 'published' && hasJournal(post) && (
+                        {/* Журнал — и у СНЯТОЙ новости (ТЗ #300, п.16: «публикация
+                            сохраняется в истории»). Раньше кнопка пропадала вместе
+                            с показом, и у ошибочного объявления, которое как раз
+                            разбирают, журнал становился недоступен. */}
+                        {post.published_at && hasJournal(post) && (
                             <button
                                 type="button"
                                 onClick={() => setReportPost(post)}
@@ -2294,6 +2340,42 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                                     Прочитали: {post.confirmed_count} из {post.audience_count}
                                 </span>
                             </button>
+                        )}
+                        {/* ПОДТВЕРЖДЕНИЕ СНЯТИЯ — как системный алерт: нейтральная
+                            плашка, красная только сама кнопка действия. Текст —
+                            последствие, а не вопрос «вы уверены?»: человеку
+                            надо знать, ЧТО произойдёт, а не подтверждать, что он
+                            нажимал. Журнал упомянут, потому что именно его боятся
+                            потерять, снимая ошибочное объявление. */}
+                        {takingDown === post.id && (
+                            <div className="mt-3 rounded-xl bg-slate-50 px-3.5 py-3 ring-1 ring-slate-200/70">
+                                <p className="text-[13.5px] font-semibold text-slate-900">
+                                    Снять с показа?
+                                </p>
+                                <p className="mt-0.5 text-[12.5px] leading-snug text-slate-500">
+                                    Объявление перестанет показываться. Журнал «Кто прочитал»
+                                    останется, и в нём будет видно, кто снял и когда.
+                                </p>
+                                <div className="mt-2.5 flex justify-end gap-2">
+                                    <button
+                                        type="button"
+                                        disabled={takeDownBusy}
+                                        onClick={() => setTakingDown(null)}
+                                        className={`${iosBtnSecondary} !px-3.5 !py-1.5 text-[13px]`}
+                                    >
+                                        Отмена
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={takeDownBusy}
+                                        onClick={() => act(post, 'archive')}
+                                        className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-rose-600 px-3.5 py-1.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-rose-700 active:scale-[0.98] disabled:opacity-60"
+                                    >
+                                        {takeDownBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+                                        Снять с показа
+                                    </button>
+                                </div>
+                            </div>
                         )}
                     </div>
                     {/* Что можно с этой новостью, решает СЕРВЕР и присылает
@@ -2323,11 +2405,22 @@ export default function WikiNews({ apiBaseUrl, headers, showToast, compose = nul
                                 ? [{ key: 'publish', label: 'Опубликовать',
                                      onSelect: () => act(post, 'publish') }]
                                 : []),
-                            ...(post.can_take_down && post.status === 'published'
-                                ? [{ key: 'archive', label: 'Снять с показа',
-                                     onSelect: () => act(post, 'archive') }]
+                            /* Снятую по ошибке — выпустить снова. Кто её снимал,
+                               после этого не забывается: сервер хранит последнее
+                               снятие и после повторного выпуска. */
+                            ...(post.can_edit && post.status === 'archived'
+                                ? [{ key: 'publish', label: 'Опубликовать снова',
+                                     onSelect: () => act(post, 'publish') }]
                                 : []),
-                            ...(post.status === 'published' && hasJournal(post)
+                            /* Снятие — через подтверждение прямо в строке: оно
+                               убирает окно у всего круга адресатов разом, и
+                               промах мимо соседнего пункта меню стоил бы отделу
+                               пропавшего объявления. */
+                            ...(post.can_take_down && post.status === 'published'
+                                ? [{ key: 'archive', label: 'Снять с показа', danger: true,
+                                     onSelect: () => setTakingDown(post.id) }]
+                                : []),
+                            ...(post.published_at && hasJournal(post)
                                 ? [{ key: 'report', label: 'Кто прочитал',
                                      onSelect: () => setReportPost(post) }]
                                 : []),

@@ -64,7 +64,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.31"
+VERSION = "1.0.32"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -4652,10 +4652,32 @@ class ServerLink:
             except Exception:  # noqa: BLE001
                 payload = {}
             payload["ok"] = response.status_code == 200
+            # Код нужен циклу: 404 значит «объявления больше нет» (сняли с
+            # показа), и держать человека вне линии дальше незачем.
+            payload["status"] = response.status_code
             return payload
         except Exception as exc:  # noqa: BLE001
             logging.warning("Подтверждение не доставлено: %s", exc)
             return {"ok": False, "error": "Нет связи с iCORE — попробуйте ещё раз"}
+
+    def news_state(self, news_id: int) -> Optional[bool]:
+        """Держит ли ещё объявление этого оператора. None — не знаем.
+
+        Окно, пока открыто, сервер иначе не спрашивает вовсе: объявление,
+        снятое с показа по ошибке, висело бы у оператора до конца смены, а сам
+        он оставался бы в «Тренинге» — вне линии. None (нет связи, старый
+        сервер без этой ручки) окно НЕ закрывает: «не знаем» — не «сняли».
+        """
+        url = f"{self.base}/api/oktell_guard/news/{int(news_id)}/state"
+        try:
+            response = self._request("GET", url)
+            if response.status_code != 200:
+                return None
+            data = response.json() or {}
+            return bool(data.get("required")) if "required" in data else None
+        except Exception:  # noqa: BLE001 — нет связи: окно остаётся как было
+            logging.debug("Состояние объявления не получено", exc_info=True)
+            return None
 
     def ack(self, payload: dict) -> None:
         url = self._url("ack_path", "/api/oktell_guard/ack")
@@ -4763,6 +4785,11 @@ def run_agent(cfg: dict) -> int:
     news_every_s = max(30.0, float(cfg.get("news_poll_s", 60)))
     next_news_check = time.time()
     active_news: Optional[dict] = None     # показанное объявление, ждём подтверждения
+    # Как часто спрашивать сервер, держит ли ещё открытое объявление человека.
+    # Двадцать секунд: снятое по ошибке объявление должно отпускать оператора
+    # на линию быстро, а запрос этот лёгкий и идёт, только пока окно открыто.
+    news_state_every_s = 20.0
+    next_news_state_check = 0.0
     training_set = False                   # это мы сняли оператора с линии
     status_before: dict = {}               # куда возвращать: туда, где он был,
                                            # включая ПРИЧИНУ перерыва: обед и
@@ -4783,8 +4810,16 @@ def run_agent(cfg: dict) -> int:
         каждые полсекунды, пока объявление на экране (см. wait_for_next_round).
         """
         nonlocal active_news, training_set, next_news_check, status_before
+        nonlocal next_news_state_check
         if active_news is None:
             return False
+        # Сначала — жива ли сама новость: снятую с показа не показываем заново,
+        # даже если окно успели закрыть (ветка ниже открыла бы его опять).
+        if time.time() >= next_news_state_check:
+            next_news_state_check = time.time() + news_state_every_s
+            if link.news_state(active_news.get("id")) is False:
+                release_news("снято с показа")
+                return True
         if not news_overlay.alive():
             # Окно закрыли, не подтвердив. Объявление обязательное — показываем
             # снова: «закрыл крестиком» не может быть способом его не читать.
@@ -4798,19 +4833,34 @@ def run_agent(cfg: dict) -> int:
             return False
         verdict = link.news_read(pressed.get("id"), pressed.get("answers") or {})
         if verdict.get("ok"):
-            news_overlay.close()
-            # Возвращаем статус только если сами его и забрали: у того, кто к
-            # моменту объявления уже был на перерыве, статус не наш.
-            if training_set:
-                browser.set_operator_status(status_before.get("status"),
-                                            status_before.get("reason"))
-                training_set = False
-            logging.info("Объявление #%s подтверждено", pressed.get("id"))
-            active_news = None
-            next_news_check = time.time()   # очередь может быть длиннее одного
+            release_news("подтверждено")
+        elif verdict.get("status") == 404:
+            # Объявления на сервере больше нет — его сняли, пока человек читал.
+            # Показать «Новость не найдена» и оставить окно значило бы запереть
+            # оператора вне линии до конца смены ради того, чего уже нет.
+            release_news("снято с показа")
         else:
             news_overlay.feedback(verdict)
         return True
+
+    def release_news(reason: str) -> None:
+        """Объявление больше не держит человека: закрыть окно, вернуть на линию.
+
+        ОДИН выход на оба случая — подтвердил и сняли с показа. Две копии этого
+        кода разошлись бы ровно в том, что важнее всего: вернули бы человека на
+        линию в одной ветке и забыли бы в другой.
+        """
+        nonlocal active_news, training_set, next_news_check
+        news_overlay.close()
+        # Возвращаем статус только если сами его и забрали: у того, кто к
+        # моменту объявления уже был на перерыве, статус не наш.
+        if training_set:
+            browser.set_operator_status(status_before.get("status"),
+                                        status_before.get("reason"))
+            training_set = False
+        logging.info("Объявление #%s %s", (active_news or {}).get("id"), reason)
+        active_news = None
+        next_news_check = time.time()   # очередь может быть длиннее одного
 
     stop_after_update = False              # обновились по нажатию — пора уходить
 
@@ -5013,6 +5063,9 @@ def run_agent(cfg: dict) -> int:
                                     "но звонок может прийти во время чтения")
                             if news_overlay.show(item):
                                 active_news = item
+                                # Первый вопрос «держит ли ещё» — через интервал,
+                                # а не сразу: объявление только что пришло.
+                                next_news_state_check = time.time() + news_state_every_s
                             elif training_set:
                                 browser.set_operator_status(status_before.get("status"),
                                                             status_before.get("reason"))

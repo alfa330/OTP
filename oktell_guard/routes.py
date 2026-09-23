@@ -426,6 +426,35 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             item['photos'] = []
         return jsonify({"item": item, "known_operator": True})
 
+    @agent_route('/news/<int:news_id>/state')
+    def oktell_guard_agent_news_state(news_id):
+        """Держит ли ещё объявление этого оператора (ТЗ #300, п.16).
+
+        Окно поверх клиента АТС, пока открыто, сервер иначе не спрашивает: снятое
+        с показа по ошибке объявление висело бы у оператора до конца смены, а
+        сам он оставался бы вне линии. Агент зовёт эту ручку, пока окно открыто,
+        и, получив «нет», закрывает его и возвращает человека на линию.
+
+        Ответ — тем же периметром, что у подтверждения (опубликовано, адресовано,
+        волна наступила, ещё не подтверждено), и БЕЗ побочных действий: /news
+        ставит отметку «показали», а здесь её ставить не за что.
+        """
+        from news import queries as news_queries
+        from news.schema import plan_ready as news_plan_ready
+
+        with db._get_cursor() as cursor:
+            owner = agent_owner(cursor)
+            if not owner:
+                return jsonify({"error": "Агент не опознан"}), 403
+            viewer = news_queries.load_viewer_context(cursor, owner['user_id'])
+            if not viewer:
+                return jsonify({"error": "Сотрудник не найден"}), 404
+            required = news_queries.news_still_required(
+                cursor, news_id=news_id, user_id=viewer['user_id'],
+                otp_role=viewer['otp_role'], subjects=viewer['subjects'],
+                with_plan=_news_plan_ready(cursor, news_plan_ready))
+        return jsonify({"required": bool(required)})
+
     @agent_route('/news/<int:news_id>/read', methods=('POST',))
     def oktell_guard_agent_news_read(news_id):
         """«Ознакомлен» из окна агента. Решает всё тот же сервер, что и на сайте.

@@ -101,8 +101,16 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                     const head = prev[0];
                     if (!head) return items;
                     const fresh = items.find((item) => item.id === head.id);
+                    /* Головы в свежей выдаче НЕТ — значит сервер её больше не
+                       требует: сняли с показа, истёк срок, человек выбыл из
+                       адресатов. Держать её на экране нельзя (ТЗ #300, п.16:
+                       «блокировка сотрудников снимается»): у обязательной
+                       новости нет крестика, и окно, которого больше нет на
+                       сервере, запирало портал до перезагрузки страницы, а
+                       «Прочитал» отвечало «Новость не найдена». */
+                    if (!fresh) return items;
                     const rest = items.filter((item) => item.id !== head.id);
-                    return [fresh || head, ...rest];
+                    return [fresh, ...rest];
                 });
             })
             .catch(() => { /* молчим: окно — не повод показывать ошибку сети */ });
@@ -185,6 +193,15 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 if (e?.response?.data?.code === 'NEWS_QUIZ_WRONG') {
                     attempt.fail(e.response.data);
                     setError('');
+                    return;
+                }
+                /* Новости на сервере больше нет — её сняли, пока человек читал.
+                   Это не ошибка человека: убираем окно и берём свежую очередь,
+                   вместо красной строки «Новость не найдена» над кнопкой,
+                   которая больше никогда не сработает. */
+                if (e?.response?.status === 404) {
+                    dropCurrent();
+                    load(true);
                     return;
                 }
                 /* Сервер не видит отметки тренажёра (не доехала) — возвращаем

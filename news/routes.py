@@ -35,6 +35,7 @@ from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
                      MAX_SPREAD_MINUTES, MIN_SPREAD_MINUTES,
                      MIN_WAVE_INTERVAL_MINUTES,
                      attempts_ready as schema_attempts_ready,
+                     takedown_ready as schema_takedown_ready,
                      channel_ready as schema_channel_ready,
                      pass_ready as schema_pass_ready,
                      photos_ready as schema_photos_ready,
@@ -130,6 +131,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _plan_columns['ready']:
             _plan_columns['ready'] = schema_plan_ready(cursor)
         return _plan_columns['ready']
+
+    # Кто и когда снял с показа (ТЗ #300, п.16) — тем же кэшем: колонки читает
+    # список редактора на каждое открытие вкладки.
+    _takedown_columns = {'ready': False}
+
+    def _takedown_ready(cursor):
+        if not _takedown_columns['ready']:
+            _takedown_columns['ready'] = schema_takedown_ready(cursor)
+        return _takedown_columns['ready']
 
     # Таблица попыток (ТЗ #300, п.4.2) — тем же кэшем. Её спрашивает
     # подтверждение новости, то есть самый горячий пишущий роут раздела.
@@ -231,7 +241,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return queries.get_post(cursor, post_id, with_pass=_pass_ready(cursor),
                                 with_space=_space_ready(cursor),
                                 with_channel=_channel_ready(cursor),
-                                with_plan=_plan_ready(cursor))
+                                with_plan=_plan_ready(cursor),
+                                with_takedown=_takedown_ready(cursor))
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -983,6 +994,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             departments=ctx['departments'], status=status,
             limit=limit, offset=offset, with_photos=_photos_ready(cursor),
             with_channel=_channel_ready(cursor), with_plan=_plan_ready(cursor),
+            with_takedown=_takedown_ready(cursor),
             with_quiz=_quiz_ready(cursor), with_pass=_pass_ready(cursor),
             with_space=_space_ready(cursor), space_id=_request_space(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
@@ -1279,7 +1291,16 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _may_take_down(ctx, post):
             return jsonify({"error": "Снять новость может её автор "
                                      "или руководитель выше него"}), 403
-        queries.set_status(cursor, post_id=post_id, status='archived')
+        # Снимают только то, что на показе (ТЗ #300, п.16). Черновик снимать
+        # не с чего, а снятую второй раз — значит переписать имя и время
+        # первого, кто её остановил. Условие живёт В САМОМ UPDATE
+        # (queries.take_down): двое, нажавшие одновременно, иначе оба получили
+        # бы «сняли», и в истории остался бы второй.
+        if not queries.take_down(cursor, post_id=post_id, by=ctx['user_id'],
+                                 with_takedown=_takedown_ready(cursor)):
+            return jsonify({"error": "Новость уже не на показе — "
+                                     "её сняли раньше или она ещё не выходила",
+                            "code": "NEWS_NOT_ON_AIR"}), 409
         return jsonify(_dress(cursor, ctx, _get_post(cursor, post_id)))
 
     # defer_cursor: между удалением строк и сносом блобов стоит чужая сеть, и

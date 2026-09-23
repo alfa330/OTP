@@ -270,6 +270,30 @@ def _status_filter(status, with_plan):
     return "AND p.status = %(status)s"
 
 
+def _takedown_sql(with_takedown):
+    """Кто и когда снял новость с показа (ТЗ #300, п.16) — для выборок с `p`.
+
+    Имя снявшего подтягивает подзапрос, а не третий джойн на users: джойнов на
+    эту таблицу в карточке уже два, и псевдонимы у них — ровно то место, где
+    правка чужого запроса однажды уронила «Настройки SIP».
+    Без колонок — литералы: форма строки одна при любой готовности схемы.
+    """
+    if not with_takedown:
+        return ("NULL::timestamp AS archived_at, NULL::int AS archived_by, "
+                "NULL::varchar AS archived_by_name")
+    return ("p.archived_at, p.archived_by, "
+            "(SELECT ua.name FROM users ua WHERE ua.id = p.archived_by) AS archived_by_name")
+
+
+def _takedown_fields(row, offset):
+    """Три колонки _takedown_sql из строки выборки, начиная с offset."""
+    return {
+        'archived_at': row[offset].isoformat() if row[offset] else None,
+        'archived_by': row[offset + 1],
+        'archived_by_name': row[offset + 2],
+    }
+
+
 def _wave_gate(with_plan):
     """Условие «волна этого человека уже наступила» для выборок с `p` = news_posts.
 
@@ -824,6 +848,22 @@ def _viewer_post(cursor, *, news_id, user_id, otp_role, subjects, with_pass,
             'pass_score_percent': int(row[6] or news_access.DEFAULT_PASS_SCORE_PERCENT)}
 
 
+def news_still_required(cursor, *, news_id, user_id, otp_role, subjects,
+                        with_space=False, with_plan=False):
+    """Держит ли ещё это объявление человека. Для окна поверх клиента АТС.
+
+    Окно в Oktell, пока открыто, сервер не спрашивает — и объявление, снятое
+    с показа по ошибке, так и висело бы у оператора, а сам он оставался бы в
+    «Тренинге», вне линии (ТЗ #300, п.16: «блокировка сотрудников снимается»).
+    Ответ — тем же периметром, что у подтверждения: опубликована, адресована,
+    волна наступила, и человек её ещё не подтвердил.
+    """
+    post = _viewer_post(cursor, news_id=news_id, user_id=user_id, otp_role=otp_role,
+                        subjects=subjects, with_pass=False, with_space=with_space,
+                        with_plan=with_plan)
+    return bool(post) and post.get('confirmed_at') is None
+
+
 def _mark_pass(cursor, *, news_id, user_id, column):
     """Отметка «прошёл» в строке журнала. Первая остаётся — повтор её не двигает.
 
@@ -1037,7 +1077,8 @@ def feed_post(cursor, *, news_id, user_id, otp_role, subjects, with_photos=False
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                limit=50, offset=0, with_photos=False, with_quiz=False, with_pass=False,
-               with_space=False, space_id=None, with_channel=False, with_plan=False):
+               with_space=False, space_id=None, with_channel=False, with_plan=False,
+               with_takedown=False):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
@@ -1065,7 +1106,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                {quiz_count} AS quiz_count,
                {trainer_key} AS trainer_key,
                {channel} AS channel,
-               {plan}
+               {plan},
+               {takedown}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -1099,6 +1141,7 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
             channel=("p.channel" if with_channel
                      else "'%s'::varchar" % news_access.DEFAULT_CHANNEL),
             plan=_plan_columns_sql(with_plan),
+            takedown=_takedown_sql(with_takedown),
             status=_status_filter(status, with_plan),
         ),
         params,
@@ -1166,6 +1209,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         'wave_interval_minutes': row[23],
         # «Запланирована» для колонок и подписи строки.
         'state': news_access.post_state(row[2], row[20], row[21]),
+        # Кто и когда снял (ТЗ #300, п.16) — подпись строки в «Архиве».
+        **_takedown_fields(row, 24),
         # Заполняется ниже одним запросом на всю страницу: считать его
         # подзапросом по news_reads значило бы считать НЕ ТО, что показывает
         # журнал (там знаменатель — нынешние адресаты), и «Прочитали: 14» на
@@ -1215,7 +1260,7 @@ def audience_stats(cursor, post_ids, with_space=False):
 
 
 def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=False,
-             with_plan=False):
+             with_plan=False, with_takedown=False):
     """Карточка новости с адресатами. None — нет такой.
 
     with_pass — развёрнуты ли колонки тренажёра и обязательности прохождения
@@ -1234,7 +1279,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
                p.author_id, p.author_department_id, p.audience_max_role_level,
                u.name, d.name, p.created_at, p.updated_at, u.role,
                {pass_required}, {trainer_key}, {space_id}, {channel},
-               {plan}
+               {plan},
+               {takedown}
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -1244,7 +1290,8 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
                    space_id='p.space_id' if with_space else 'NULL::int',
                    channel=('p.channel' if with_channel
                             else "'%s'::varchar" % news_access.DEFAULT_CHANNEL),
-                   plan=_plan_columns_sql(with_plan)),
+                   plan=_plan_columns_sql(with_plan),
+                   takedown=_takedown_sql(with_takedown)),
         (post_id,),
     )
     row = cursor.fetchone()
@@ -1294,6 +1341,9 @@ def get_post(cursor, post_id, with_pass=False, with_space=False, with_channel=Fa
         # (см. news/schema.py). Считает его access.post_state — одна функция на
         # карточку, список и крон.
         'state': news_access.post_state(row[3], row[23], row[24]),
+        # ТЗ #300, п.16: кто и когда снял с показа. Хранится и после повторного
+        # выпуска — «сейчас снята» говорит статус, а эти поля — историю.
+        **_takedown_fields(row, 27),
         'audience': audience_rules(cursor, post_id),
     }
 
@@ -1502,6 +1552,33 @@ def publish_post(cursor, *, post_id, audience_max_role_level):
         """.format(now=_NOW),
         {'id': post_id, 'ceiling': audience_max_role_level},
     )
+
+
+def take_down(cursor, *, post_id, by, with_takedown=False):
+    """Снять новость с показа (ТЗ #300, п.16). True — сняли именно мы.
+
+    Условие «сейчас на показе» стоит В САМОМ UPDATE, а не проверкой перед ним:
+    двое, одновременно снимающие одно объявление, иначе оба получили бы «сняли»
+    и второй переписал бы время и имя первого. Так остаётся тот, кто успел.
+
+    Блокировку людей это снимает само: выдача окна (pending_for_user) и
+    подтверждение (confirm_read) спрашивают status = 'published', а смена
+    статуса будит все открытые вкладки триггером колокола (trg_bell_news).
+    """
+    cursor.execute(
+        """
+        UPDATE news_posts
+           SET status = 'archived',
+               {who}
+               updated_at = {now}
+         WHERE id = %(id)s
+           AND status = 'published'
+        """.format(now=_NOW,
+                   who=('archived_at = {now}, archived_by = %(by)s,'.format(now=_NOW)
+                        if with_takedown else '')),
+        {'id': post_id, 'by': by},
+    )
+    return bool(cursor.rowcount)
 
 
 def set_status(cursor, *, post_id, status):

@@ -2238,7 +2238,9 @@ class NewsScheduleTests(unittest.TestCase):
         немедленно — и человек подтвердил бы его раньше своей волны.
         """
         agent = _read('oktell_guard', 'routes.py')
-        self.assertEqual(agent.count('with_plan=_news_plan_ready(cursor, news_plan_ready)'), 2)
+        # Три двери агента: выдача окна, подтверждение и вопрос «держит ли ещё»
+        # (п.16) — все с одной границей волны.
+        self.assertEqual(agent.count('with_plan=_news_plan_ready(cursor, news_plan_ready)'), 3)
 
     def test_the_form_asks_the_server_for_the_calculation(self):
         """ТЗ п.8.4: расчёт перед запуском считает тот же код, что и выпуск."""
@@ -2417,3 +2419,104 @@ class NewsReportTests(unittest.TestCase):
         source = _read('news', 'report_xlsx.py')
         self.assertIn('news_access.PERSON_STATUS_LABELS', source)
         self.assertNotIn('Успешно пройден', source)
+
+
+class NewsTakeDownTests(unittest.TestCase):
+    """ТЗ #300, п.16: «блокировка сотрудников снимается; сама публикация
+    сохраняется в истории; фиксируется, кто и когда отменил публикацию»."""
+
+    def test_who_and_when_are_stored_and_survive_the_person(self):
+        schema = _read('news', 'schema.py')
+        self.assertIn('ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP', schema)
+        # Уволенного удалить можно, а время снятия от этого не пропадёт.
+        self.assertIn('archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL', schema)
+        self.assertIn('def takedown_ready(', schema)
+
+    def test_only_what_is_on_air_is_taken_down_and_only_once(self):
+        """Условие «на показе» — В САМОМ UPDATE: двое, нажавшие одновременно,
+        иначе оба получили бы «сняли», и в истории остался бы второй."""
+        take_down = _function_code(_read('news', 'queries.py'), 'take_down')
+        self.assertIn("AND status = 'published'", take_down)
+        self.assertIn('archived_by = %(by)s', take_down)
+        routes = _code_only(_read('news', 'routes.py'))
+        archive = routes[routes.index('def news_post_archive('):]
+        archive = archive[:archive.index('@news_route(')]
+        self.assertIn("by=ctx['user_id']", archive)
+        self.assertIn('NEWS_NOT_ON_AIR', archive)
+        self.assertNotIn("set_status(cursor, post_id=post_id, status='archived')", archive)
+
+    def test_republishing_keeps_the_history_of_the_takedown(self):
+        """Ошибочно запущенную, снятую и выпущенную заново новость журнал обязан
+        и дальше объяснять: кто её останавливал и когда."""
+        source = _read('news', 'queries.py')
+        for name in ('publish_post', 'publish_scheduled'):
+            self.assertNotIn('archived_by', _function_code(source, name), name)
+
+    def test_the_journal_stays_open_after_the_takedown(self):
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn('post.published_at && hasJournal(post)', form)
+        self.assertNotIn("post.status === 'published' && hasJournal(post)", form)
+        # Снятую по ошибке можно выпустить снова.
+        self.assertIn("post.can_edit && post.status === 'archived'", form)
+        self.assertIn('Опубликовать снова', form)
+
+    def test_taking_down_asks_first_and_never_in_a_second_window(self):
+        """Снятие убирает окно у всего круга разом — через подтверждение. И не
+        отдельным окном: на телефоне любое окно здесь целый экран."""
+        form = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn("onSelect: () => setTakingDown(post.id)", form)
+        self.assertNotIn("onSelect: () => act(post, 'archive')", form)
+        strip = form[form.index('{takingDown === post.id && ('):]
+        strip = strip[:strip.index("onClick={() => act(post, 'archive')}")]
+        self.assertIn('Снять с показа?', strip)
+        self.assertNotIn('IosModal', strip)
+
+    def test_the_label_names_who_without_guessing_gender(self):
+        """«снята … · Зарина Алиева», а не «снял/сняла»: по имени пол не угадывают."""
+        form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        label = form[form.index('const takedownLabel = '):]
+        label = label[:label.index('\n};')]
+        self.assertIn('снята', label)
+        self.assertNotIn('снял ', label)
+        self.assertNotIn('сняла', label)
+        # Автор уже первым в строке — имя второй раз не пишем.
+        self.assertIn('post.archived_by !== post.author_id', label)
+
+    def test_an_open_portal_window_lets_go_of_a_withdrawn_news(self):
+        """У обязательной новости нет крестика: окно, которого больше нет на
+        сервере, запирало портал до перезагрузки страницы."""
+        modal = _jsx_code_only(_read('src', 'components', 'news', 'NewsOfDayModal.jsx'))
+        self.assertIn('if (!fresh) return items;', modal)
+        self.assertNotIn('fresh || head', modal)
+        self.assertIn('e?.response?.status === 404', modal)
+
+    def test_the_oktell_window_lets_the_operator_back_on_the_line(self):
+        """Окно поверх клиента АТС, пока открыто, сервер не спрашивало вовсе:
+        снятое объявление держало оператора в «Тренинге» до конца смены."""
+        agent = _read('oktell_recall_guard', 'agent.py')
+        self.assertIn('def news_state(self, news_id', agent)
+        self.assertIn('def release_news(reason', agent)
+        # Один выход на «подтвердил» и «сняли»: разбор нажатия сам статус не
+        # возвращает — это делает только release_news, и забыть его в одной из
+        # веток больше нельзя.
+        press = agent[agent.index('    def handle_news_press('):]
+        press = press[:press.index('    def release_news(')]
+        self.assertNotIn('set_operator_status', press)
+        release = agent[agent.index('    def release_news('):]
+        release = release[:release.index('\n    def ', 10)]
+        self.assertIn('set_operator_status', release)
+        self.assertIn('release_news("подтверждено")', agent)
+        self.assertIn('elif verdict.get("status") == 404:', agent)
+        # «Не знаем» (нет связи) окно не закрывает: закрывает только явное «нет».
+        self.assertIn('link.news_state(active_news.get("id")) is False', agent)
+        # Правка едет только новой сборкой — версия поднята.
+        self.assertNotIn('VERSION = "1.0.31"', agent)
+
+    def test_the_state_door_has_no_side_effects(self):
+        """/news ставит отметку «показали», а спрашивать «держит ли ещё» можно
+        сколько угодно — отметку ставить здесь не за что."""
+        routes = _code_only(_read('oktell_guard', 'routes.py'))
+        state = routes[routes.index('def oktell_guard_agent_news_state('):]
+        state = state[:state.index('@agent_route(')]
+        self.assertIn('news_still_required(', state)
+        self.assertNotIn('mark_shown', state)
