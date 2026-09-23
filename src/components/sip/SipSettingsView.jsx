@@ -406,6 +406,27 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         [withAccessTokenHeader, user?.id]
     );
 
+    // Отделы, подключённые к «Обзвону из телефона»: их сотрудникам линию Binotel
+    // назначают там, и учётку АТС здесь вводить не нужно — карточка показывает
+    // только подсказку. Отказ ручки (раздел не для этого человека) — пустой набор.
+    const [dialListDeptIds, setDialListDeptIds] = useState(() => new Set());
+    useEffect(() => {
+        if (provider !== 'binotel') return undefined;
+        let cancelled = false;
+        (async () => {
+            try {
+                const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments`, { credentials: 'include', headers: authHeaders() });
+                if (!resp.ok) return;
+                const data = await resp.json().catch(() => ({}));
+                const ids = (Array.isArray(data.departments) ? data.departments : []).map((d) => Number(d.department_id));
+                if (!cancelled) setDialListDeptIds(new Set(ids));
+            } catch {
+                /* раздел недоступен — карточки остаются обычными */
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [apiBaseUrl, authHeaders, provider]);
+
     /* ─── загрузка ─── */
     // Список и настройки отделов приходят одним запросом — второй вызов не нужен.
     // Переезд в другой раздел: списки, фильтры и выделение к нему не относятся,
@@ -2200,6 +2221,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 title={editing?.name || ''}
                 subtitle={[editing?.department_name, editing?.group_name].filter(Boolean).join(' · ') || 'SIP-настройки'}
                 footer={canEdit ? (
+                    isBinotel && dialListDeptIds.has(Number(editing?.department_id)) ? (
+                        /* Отдел на обзвоне: сохранять здесь нечего — линия и режим
+                           задаются в разделе «Обзвон из телефона». */
+                        <button type="button" onClick={closeEditor} className={iosBtnSecondary}>Закрыть</button>
+                    ) : (
                     <>
                         <button type="button" onClick={closeEditor} className={iosBtnSecondary}>Отмена</button>
                         <button
@@ -2212,10 +2238,42 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             Сохранить
                         </button>
                     </>
+                    )
                 ) : null}
             >
-                {isBinotel ? (
-                    /* ─── Tez: всё персональное; автодозвона и FOP2 здесь нет ─── */
+                {isBinotel && dialListDeptIds.has(Number(editing?.department_id)) ? (
+                    /* ─── Отдел на обзвоне: учётку АТС сотруднику не вводят ─── */
+                    <div className="space-y-4">
+                        <section className="space-y-1.5">
+                            <div className={iosGroupLabel}>Телефония</div>
+                            <div className={`${iosCard} p-4`}>
+                                <div className="flex items-start gap-3">
+                                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-blue-50 text-blue-600">
+                                        <FaIcon className="fas fa-list-check" style={{ width: 16, height: 16 }} />
+                                    </div>
+                                    <div className="min-w-0">
+                                        <div className="text-[13.5px] font-semibold text-slate-800">Отдел работает через «Обзвон из телефона»</div>
+                                        <div className="mt-0.5 text-[12.5px] leading-snug text-slate-500">
+                                            Линию Binotel сотруднику назначают в разделе «Обзвон из телефона», вкладка «Линии».
+                                            Телефон подключается к АТС сам после входа логином iCORE — вводить здесь ничего не нужно.
+                                        </div>
+                                        <div className="mt-3">
+                                            {editing?.sip_number ? (
+                                                <IosBadge tone="green">
+                                                    <FaIcon className="fas fa-phone" style={{ width: 11, height: 11 }} />
+                                                    линия <span className="font-mono">{editing.sip_number}</span>
+                                                </IosBadge>
+                                            ) : (
+                                                <IosBadge tone="amber">линия пока не назначена</IosBadge>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                ) : isBinotel ? (
+                    /* ─── Binotel: всё персональное; автодозвона и FOP2 здесь нет ─── */
                     <div className="space-y-4">
                         <section className="space-y-1.5">
                             <div className={iosGroupLabel}>Регистрация в Binotel</div>
