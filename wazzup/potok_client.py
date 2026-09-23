@@ -7,12 +7,19 @@
 Ровно эти два вызова мы и делаем сами, без браузера:
 
     GET /api/v2/chats?limit=100&offset=N       — чаты, свежие первыми
-    GET /api/v2/messages?chatId=…&limit=1000&offset=N — сообщения чата, свежие первыми
+    GET /api/v2/messages?chatId=…&chatType=…&channelId=…&limit=1000&offset=N
+                                               — сообщения чата, свежие первыми
 
 Проверено 23.09.2026: `limit` у списка чатов режется до 100, у сообщений — до
 ~1000; из параметров пагинации работает только `offset` (before/page/dateTo
 игнорируются). Заголовки: `Authorization: <jwt без Bearer>`, `X-Account-ID`,
 `x-wazzup-webapp: true`.
+
+ЛОВУШКА, стоившая одного бесполезного прогона: без `chatType` сервер МОЛЧА
+игнорирует `chatId` и отдаёт ленту последних сообщений всего аккаунта — одну и
+ту же на любой чат. Поэтому `chatType` обязателен, `channelId` (ровно 36
+символов, иначе 400) передаём тоже, а полученные сообщения сверяем с
+запрошенным чатом и чужие отбрасываем.
 
 Окно выписывается ОТ ИМЕНИ пользователя аккаунта, и видит он то, что видел бы
 в интерфейсе: у части людей список урезан (Жанетова видела 73 чата из 100).
@@ -143,11 +150,23 @@ class WazzupInternalClient:
             raise WazzupInternalError(f'v2/chats: неожиданный ответ {str(data)[:200]}')
         return rows
 
-    def list_messages(self, chat_id, offset=0, limit=MESSAGES_PAGE):
-        data = self._get('v2/messages', {'chatId': chat_id, 'limit': limit, 'offset': offset})
+    def list_messages(self, chat_id, chat_type, channel_id=None, offset=0, limit=MESSAGES_PAGE):
+        if not chat_type:
+            # см. ловушку в докстринге модуля: без типа придёт лента всего аккаунта
+            raise WazzupInternalError(f'v2/messages: у чата {chat_id} нет chatType')
+        params = {'chatId': chat_id, 'chatType': chat_type, 'limit': limit, 'offset': offset}
+        if channel_id and len(str(channel_id)) == 36:
+            params['channelId'] = channel_id
+        data = self._get('v2/messages', params)
         rows = data.get('messages') if isinstance(data, dict) else None
         if not isinstance(rows, list):
             raise WazzupInternalError(f'v2/messages: неожиданный ответ {str(data)[:200]}')
+        foreign = [m for m in rows if str(m.get('chatId') or chat_id) != str(chat_id)]
+        if foreign:
+            # сервер отдал не тот чат — контракт поменялся, шумим, а не пишем чужое
+            raise WazzupInternalError(
+                f'v2/messages: для чата {chat_id} пришли сообщения других чатов '
+                f'({len(foreign)} из {len(rows)}) — контракт параметров изменился')
         return rows
 
     @staticmethod
@@ -174,11 +193,25 @@ class WazzupInternalClient:
                 return
             offset += len(rows)
 
-    def iter_messages(self, chat_id, since_ms, page=MESSAGES_PAGE):
+    @staticmethod
+    def chat_identity(chat):
+        """(chatId, chatType, channelId) строки списка чатов. channelId лежит во
+        вложенном chats[] — по каналу на запись; у аккаунта «Поток» канал один."""
+        chat_id = chat.get('chatId')
+        chat_type = chat.get('chatType')
+        channel_id = None
+        for sub in chat.get('chats') or []:
+            if sub.get('channelId'):
+                channel_id = sub['channelId']
+                chat_type = chat_type or sub.get('chatType')
+                break
+        return chat_id, chat_type, channel_id
+
+    def iter_messages(self, chat_id, since_ms, chat_type=None, channel_id=None, page=MESSAGES_PAGE):
         """Сообщения чата не старше since_ms, свежие первыми."""
         offset = 0
         while True:
-            rows = self.list_messages(chat_id, offset=offset, limit=page)
+            rows = self.list_messages(chat_id, chat_type, channel_id, offset=offset, limit=page)
             if not rows:
                 return
             oldest = None

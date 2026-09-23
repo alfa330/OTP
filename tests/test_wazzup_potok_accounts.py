@@ -95,6 +95,11 @@ class MessageConversionTests(unittest.TestCase):
         self.assertEqual(out["dateTime"], "2026-09-23T06:21:43.231000+00:00")
         self.assertEqual(out["contact"], {"name": "77002199865", "phone": "77002199865"})
 
+    def test_contact_ignores_responsible_user_fields(self):
+        # userName/userPhone в строке списка — ответственный менеджер, не клиент
+        chat = dict(self.CHAT, userName="Аман Алан", userPhone="77072480500")
+        self.assertEqual(potok_sync.chat_contact(chat), {"name": "77002199865", "phone": "77002199865"})
+
     def test_outgoing_by_manager(self):
         m = {"id": "x1", "channelId": "35ac2ea6", "chatId": "77002199865", "chatType": "whatsapp",
              "datetime": 1790142011046, "incoming": False, "status": 3, "type": 1,
@@ -149,7 +154,9 @@ class _FakePagingClient(potok_client.WazzupInternalClient):
         self.calls.append((path, dict(params)))
         if path == "v2/chats":
             return {"data": self._chats_pages.get(params["offset"], [])}
-        return {"messages": self._messages_pages.get((params["chatId"], params["offset"]), [])}
+        rows = self._messages_pages.get((params["chatId"], params["offset"]), [])
+        # как настоящий сервер: сообщения несут chatId запрошенного чата
+        return {"messages": [dict(m, chatId=m.get("chatId", params["chatId"])) for m in rows]}
 
 
 class PagingTests(unittest.TestCase):
@@ -174,11 +181,37 @@ class PagingTests(unittest.TestCase):
             ("b", 0): [{"datetime": 900}, {"datetime": 800}],            # короткая — последняя
         }
         client = _FakePagingClient({}, pages)
-        self.assertEqual(len(list(client.iter_messages("a", since))), 998)
+        self.assertEqual(len(list(client.iter_messages("a", since, chat_type="whatsapp"))), 998)
         self.assertEqual([c[1]["offset"] for c in client.calls if c[1].get("chatId") == "a"], [0, 998])
         client.calls.clear()
-        self.assertEqual(len(list(client.iter_messages("b", since))), 2)
+        self.assertEqual(len(list(client.iter_messages("b", since, chat_type="whatsapp"))), 2)
         self.assertEqual(len(client.calls), 1, "короткая страница не тянет за собой пустой запрос")
+
+    def test_messages_request_always_carries_chat_type(self):
+        """Без chatType сервер молча отдаёт ленту всего аккаунта — одну на любой чат.
+        Ровно так первый прогон на проде записал 551 сообщение и 33 тысячи раз их
+        перезаписал. Тип обязателен, канал — если он 36 символов."""
+        client = _FakePagingClient({}, {("a", 0): [{"datetime": 5}]})
+        list(client.iter_messages("a", 1, chat_type="whatsapp",
+                                  channel_id="35ac2ea6-9592-45bd-9d9b-1435007d9f60"))
+        params = client.calls[0][1]
+        self.assertEqual(params["chatType"], "whatsapp")
+        self.assertEqual(params["channelId"], "35ac2ea6-9592-45bd-9d9b-1435007d9f60")
+        with self.assertRaises(potok_client.WazzupInternalError):
+            list(client.iter_messages("a", 1, chat_type=None))
+
+    def test_foreign_chat_messages_are_refused(self):
+        """Если сервер отдал сообщения другого чата — контракт поменялся: шумим,
+        а не пишем чужое под этим чатом."""
+        client = _FakePagingClient({}, {("a", 0): [{"datetime": 5, "chatId": "someone-else"}]})
+        with self.assertRaises(potok_client.WazzupInternalError):
+            list(client.iter_messages("a", 1, chat_type="whatsapp"))
+
+    def test_chat_identity_from_list_row(self):
+        row = {"chatId": "77002199865", "chatType": "whatsapp",
+               "chats": [{"chatType": "whatsapp", "channelId": "35ac2ea6-9592-45bd-9d9b-1435007d9f60"}]}
+        self.assertEqual(potok_client.WazzupInternalClient.chat_identity(row),
+                         ("77002199865", "whatsapp", "35ac2ea6-9592-45bd-9d9b-1435007d9f60"))
 
 
 class _FakeDb:

@@ -86,11 +86,13 @@ def iso_utc(ms):
 
 
 def chat_contact(chat):
-    """Контакт чата: имя из списка, телефон — из списка либо сам chatId
-    (у whatsapp это и есть номер)."""
+    """Контакт чата: имя — contactName из списка, телефон — сам chatId (у
+    whatsapp это и есть номер). userName/userPhone в строке списка — это
+    ОТВЕТСТВЕННЫЙ менеджер, а не клиент: взяв их, я один раз записал всем
+    чатам «Потока» один и тот же телефон сотрудника."""
     chat_id = str(chat.get('chatId') or '')
-    phone = chat.get('userPhone') or (chat_id if chat.get('chatType') == 'whatsapp' and chat_id.isdigit() else None)
-    name = chat.get('contactName') or chat.get('userName') or None
+    phone = chat_id if chat.get('chatType') == 'whatsapp' and chat_id.isdigit() else None
+    name = chat.get('contactName') or None
     return {'name': name, 'phone': phone}
 
 
@@ -141,12 +143,12 @@ def sync_account(db, client, since_dt, account='potok'):
     for chat in client.iter_chats(since_ms):
         stats['chats_seen'] += 1
         STATE['chats_seen'] = stats['chats_seen']
-        chat_id = chat.get('chatId')
-        if not chat_id:
+        chat_id, chat_type, channel_id = client.chat_identity(chat)
+        if not chat_id or not chat_type:
             stats['skipped_chats'] += 1
             continue
         batch = []
-        for m in client.iter_messages(chat_id, since_ms):
+        for m in client.iter_messages(chat_id, since_ms, chat_type=chat_type, channel_id=channel_id):
             converted = to_webhook_message(m, chat)
             if converted['messageId'] and converted['dateTime'] and converted['channelId']:
                 batch.append(converted)
