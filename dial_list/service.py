@@ -835,10 +835,20 @@ class DialListService:
             raise
         except Exception as exc:  # отказ АТС или сеть
             message = str(exc)[:500]
+            lowered = message.lower()
+            # Код 150 «Can't call to the ext» — АТС не достучалась до ЛИНИИ оператора:
+            # телефон не зарегистрирован (неверный сервер/пароль, нет сети). Это не
+            # вина водителя — попытку по лиду не считаем и говорим оператору, что делать.
+            ext_unreachable = "code=150" in lowered or "call to the ext" in lowered
             self._fail_attempt(attempt_id, assignment_id, lead_id, message,
-                               attempts_now, settings["max_attempts"])
+                               attempts_now, settings["max_attempts"],
+                               count_for_lead=not ext_unreachable)
             log.warning("dial_list: Binotel отказал оператору %s: %s", ctx["user_id"], message)
-            status = 429 if "too frequent" in message.lower() or "часто" in message.lower() else 502
+            if ext_unreachable:
+                raise DialListError(
+                    f"Линия {ctx['internal_number']} не на связи: АТС не смогла до неё дозвониться. "
+                    "Телефон не зарегистрирован в Binotel — проверьте регистрацию и повторите", 409)
+            status = 429 if "too frequent" in lowered or "часто" in lowered else 502
             raise DialListError(f"АТС не приняла звонок: {message}", status)
 
         with self.db._get_cursor() as cur:
@@ -856,9 +866,12 @@ class DialListService:
             "expect_leg_within_sec": LEG_TIMEOUT_SEC,
         }
 
-    def _fail_attempt(self, attempt_id, assignment_id, lead_id, message, attempts_now, max_attempts):
+    def _fail_attempt(self, attempt_id, assignment_id, lead_id, message, attempts_now, max_attempts,
+                      count_for_lead=True):
         """АТС отказала: попытка failed. Строка остаётся в работе, пока есть попытки —
-        оператор может нажать ещё раз; исчерпали — закрываем как failed."""
+        оператор может нажать ещё раз; исчерпали — закрываем как failed.
+        count_for_lead=False — сбой на нашей стороне (линия оператора не на связи):
+        счётчик попыток строки откатываем, водителю это в минус не идёт."""
         with self.db._get_cursor() as cur:
             cur.execute("""
                 UPDATE dial_list_attempts
@@ -866,6 +879,10 @@ class DialListService:
                     finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (message, attempt_id))
+            if not count_for_lead:
+                cur.execute("UPDATE dial_list_assignments SET attempts = GREATEST(attempts - 1, 0) WHERE id = %s",
+                            (assignment_id,))
+                return
             if attempts_now >= int(max_attempts):
                 self._close_assignment(cur, assignment_id, lead_id, "failed", answered=False, count_attempt=True)
 

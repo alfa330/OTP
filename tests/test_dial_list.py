@@ -197,6 +197,16 @@ class LinesTests(unittest.TestCase):
         self.assertIn("LOWER(COALESCE(u.status, '')) <> ALL(%s)", src)
         self.assertIn('_SIP_INACTIVE_STATUSES', src)
 
+    def test_ext_unreachable_is_not_counted_against_lead(self):
+        # Binotel code=150 «Can't call to the ext»: телефон оператора не зарегистрирован —
+        # попытка по лиду не считается, а оператору объясняется, что проверить.
+        src = inspect.getsource(dial_service.DialListService.start_call)
+        self.assertIn('code=150', src)
+        self.assertIn('count_for_lead=not ext_unreachable', src)
+        self.assertIn('не на связи', src)
+        fail_src = inspect.getsource(dial_service.DialListService._fail_attempt)
+        self.assertIn('GREATEST(attempts - 1, 0)', fail_src)
+
     def test_lines_route_never_returns_secrets(self):
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         lines_part = src[src.index("def lines(department_id)"):src.index("def lines_assign")]
