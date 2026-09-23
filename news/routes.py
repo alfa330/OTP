@@ -22,6 +22,7 @@ import logging
 import re
 from datetime import datetime
 from functools import wraps
+from urllib.parse import quote
 
 from flask import Blueprint, jsonify, request, send_file
 
@@ -1614,17 +1615,28 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 return jsonify({"error": "Новость не найдена"}), 404
             if not _may_read_post(ctx, post):
                 return jsonify({"error": "Эта новость не из вашего периметра"}), 403
-            rows, _summary, _questions = _report_data(cursor, post)
-        stream = report_xlsx.build(post, rows)
+            rows, _summary, questions = _report_data(cursor, post)
+            # Попытки — только когда есть тест: questions пуст и без теста, и
+            # без таблицы попыток, так что отдельная проверка схемы не нужна.
+            attempts = queries.post_attempts(cursor, post_id) if questions else []
+        stream = report_xlsx.build(post, rows, questions=questions, attempts=attempts)
         # Имя файла — заголовком новости: в папке «Загрузки» пять одинаковых
         # «Ознакомление.xlsx» не различить. Чистим то, чем давятся файловые
         # системы, и режем: длинный заголовок делает имя нечитаемым.
         safe = re.sub(r'[\\/:*?"<>|]+', ' ', post['title']).strip()[:60] or 'новость'
-        return send_file(
+        response = send_file(
             stream,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name='Ознакомление — %s.xlsx' % safe)
+            download_name='news-%d.xlsx' % post_id)
+        # Кириллица — только в filename*. Запасное filename send_file строит
+        # сам, выбрасывая всё не-ASCII, и из «Ознакомление — …» оставались
+        # одни пробелы: «           .xlsx». Запасное имя латиницей и с номером
+        # новости — его берут клиенты, не понимающие filename*.
+        response.headers['Content-Disposition'] = (
+            "attachment; filename=\"news-%d.xlsx\"; filename*=UTF-8''%s"
+            % (post_id, quote('Ознакомление — %s.xlsx' % safe)))
+        return response
 
     @news_route('/posts/<int:post_id>/report', publisher=True)
     def news_post_report(cursor, ctx, post_id):

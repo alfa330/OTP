@@ -1794,6 +1794,72 @@ const shortTime = (iso) => {
                                         hour: '2-digit', minute: '2-digit' });
 };
 
+/* Какие номера попыток показать: все, пока их не больше семи, дальше —
+   «1 … 6 7 8 … 22». Первая и последняя видны всегда: первая говорит, понятен
+   ли текст, последняя — чем кончилось. Ячеек всегда не больше семи, поэтому
+   ширина ряда от числа попыток не зависит. null — многоточие. */
+const ATTEMPT_SLOTS = 7;
+const attemptSlots = (count, current) => {
+    const all = Array.from({ length: count }, (_, i) => i);
+    if (count <= ATTEMPT_SLOTS) return all;
+    if (current <= 3) return [0, 1, 2, 3, 4, null, count - 1];
+    if (current >= count - 4) return [0, null, ...all.slice(count - 5)];
+    return [0, null, current - 1, current, current + 1, null, count - 1];
+};
+
+/* Переключатель попыток в разборе сотрудника. Вид — IosSegmented, но свой:
+   сегментному контролу нечем нарисовать многоточие. Двадцать две попытки
+   сегментами в ряд уезжали за край окна, и выбранная — последняя — оказывалась
+   как раз за краем (#300, 23.09.2026). */
+function AttemptSwitcher({ attempts, value, onChange }) {
+    const current = Math.max(0, attempts.findIndex((item) => item.attempt_no === value));
+    /* Фокус идёт за выбранной попыткой. Иначе после клика по «1» и листания
+       стрелками рамка фокуса оставалась на «1», а выбрана была «10» — два
+       выделенных номера в одном ряду. Ловим, только если фокус уже в ряду:
+       отбирать его у остального окна незачем. */
+    const listRef = useRef(null);
+    useEffect(() => {
+        const list = listRef.current;
+        if (!list || !list.contains(document.activeElement)) return;
+        list.querySelector('[aria-selected="true"]')?.focus();
+    }, [value]);
+    return (
+        <div className="flex items-center gap-2.5">
+            <span className="shrink-0 text-[12.5px] text-slate-500">Попытка</span>
+            <div ref={listRef} role="tablist" aria-label="Попытка"
+                 className="inline-flex min-w-0 items-center rounded-[10px] bg-slate-100 p-[3px]">
+                {attemptSlots(attempts.length, current).map((slot, position) => {
+                    if (slot === null) {
+                        return (
+                            <span key={`gap-${position}`} aria-hidden="true"
+                                  className="px-1 text-[12.5px] text-slate-400">…</span>
+                        );
+                    }
+                    const item = attempts[slot];
+                    const active = slot === current;
+                    return (
+                        <button
+                            key={item.attempt_no}
+                            type="button"
+                            role="tab"
+                            aria-selected={active}
+                            aria-label={`Попытка ${item.attempt_no} из ${attempts.length}`}
+                            onClick={() => onChange(item.attempt_no)}
+                            className={`min-w-[2.25rem] rounded-[8px] px-2.5 py-[5px] text-[12.5px] font-medium tabular-nums transition-all active:scale-[0.98] ${
+                                active
+                                    ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                    : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                        >
+                            {item.attempt_no}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
     const [state, setState] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -1856,16 +1922,31 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
        кладётся ПОЗЖЕ записи окна и снимается первой. */
     const isMobileShell = useIsMobileShell();
     useScreenBackGesture(isMobileShell && !!person, closePerson);
+    /* ←/→ листают попытки: при двадцати попытках до соседней мышью далеко, а
+       ряд номеров показывает не все. */
+    const attemptNumbers = useMemo(
+        () => (personData?.attempts || []).map((item) => item.attempt_no), [personData]);
     useEffect(() => {
         if (!person) return undefined;
         const onKey = (event) => {
-            if (event.key !== 'Escape') return;
-            event.stopPropagation();
-            closePerson();
+            if (event.key === 'Escape') {
+                event.stopPropagation();
+                closePerson();
+                return;
+            }
+            const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+            if (!step || attemptNumbers.length < 2) return;
+            const target = event.target;
+            if (target?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return;
+            event.preventDefault();
+            setAttemptNo((currentNo) => {
+                const next = attemptNumbers.indexOf(currentNo) + step;
+                return next >= 0 && next < attemptNumbers.length ? attemptNumbers[next] : currentNo;
+            });
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-    }, [person, closePerson]);
+    }, [person, closePerson, attemptNumbers]);
 
     const exportReport = () => {
         if (!post?.id || exporting) return;
@@ -1987,18 +2068,8 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                 сдавшего с первого раза выбирать не из чего. Последняя
                                 открыта сразу — она и есть итог. */}
                             {attempts.length > 1 && (
-                                <div className="flex items-center gap-2.5">
-                                    <span className="text-[12.5px] text-slate-500">Попытка</span>
-                                    <IosSegmented
-                                        value={attemptNo}
-                                        onChange={setAttemptNo}
-                                        ariaLabel="Попытка"
-                                        options={attempts.map((item) => ({
-                                            value: item.attempt_no,
-                                            label: `${item.attempt_no}`,
-                                        }))}
-                                    />
-                                </div>
+                                <AttemptSwitcher attempts={attempts} value={attemptNo}
+                                                 onChange={setAttemptNo} />
                             )}
 
                             <AttemptReview

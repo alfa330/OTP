@@ -680,6 +680,38 @@ def person_attempts(cursor, post_id, user_id):
     } for row in cursor.fetchall()]
 
 
+def post_attempts(cursor, post_id):
+    """Все попытки всех людей по новости — лист «Попытки» в выгрузке (п.14).
+
+    Та же выборка, что у person_attempts, только без фильтра по человеку: разбор
+    на экране и строка в файле обязаны показывать одну и ту же попытку. Имя —
+    на случай, если человека уже нет в журнале: попытка без подписи в файле
+    бесполезна.
+    """
+    cursor.execute(
+        """
+        SELECT a.user_id, u.name, a.attempt_no, a.correct, a.total, a.needed,
+               a.passed, a.answers, a.created_at
+          FROM news_quiz_attempts a
+          LEFT JOIN users u ON u.id = a.user_id
+         WHERE a.news_id = %s
+         ORDER BY a.user_id, a.attempt_no
+        """,
+        (post_id,),
+    )
+    return [{
+        'user_id': int(row[0]),
+        'name': row[1],
+        'attempt_no': int(row[2]),
+        'correct': int(row[3]),
+        'total': int(row[4]),
+        'needed': int(row[5]),
+        'passed': bool(row[6]),
+        'answers': dict(row[7] or {}),
+        'created_at': row[8].isoformat() if row[8] else None,
+    } for row in cursor.fetchall()]
+
+
 def set_quiz(cursor, *, post_id, quiz):
     """Полная замена теста. quiz уже прошёл news_access.normalize_quiz."""
     cursor.execute('DELETE FROM news_quiz_questions WHERE news_id = %s', (post_id,))

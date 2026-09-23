@@ -4,9 +4,14 @@
 Отдельный модуль, а не кусок routes.py: сборка книги — это чистая работа над
 готовыми строками, без базы и без flask, и проверять её удобно без сервера.
 
-Оформление взято у выгрузки задач (bot_schedule2.py: _task_export_fill_sheet)
-целиком, а не придумано заново: человек открывает оба файла в одном Excel, и
-две разные шапки в них читались бы как два разных продукта.
+Оформление шапки взято у выгрузки задач (bot_schedule2.py:
+_task_export_fill_sheet), цвета ответов — у выгрузки «Опросов»: человек
+открывает эти файлы в одном Excel, и разные шапки и разные «зелёный — верно»
+читались бы как разные продукты.
+
+Листы повторяют экран «Результаты»: «Ознакомление» — список сотрудников,
+«Попытки» — разбор каждой попытки, «Вопросы» — где ошибаются. Двух последних
+нет у новости без теста.
 """
 
 from datetime import datetime
@@ -24,7 +29,7 @@ from . import access as news_access
 COLUMNS = (
     ('name', 'ФИО', 32),
     ('user_id', 'ID сотрудника', 14),
-    ('department', 'Подразделение', 22),
+    ('department', 'Подразделение', 30),
     ('role', 'Должность', 18),
     ('published_at', 'Дата публикации', 18),
     ('shown_at', 'Первый показ', 18),
@@ -38,8 +43,56 @@ COLUMNS = (
     ('status', 'Статус', 34),
 )
 
-_DATE_KEYS = ('published_at', 'shown_at', 'confirmed_at',
+# Лист «Попытки»: одна строка — одна попытка, дальше по колонке на вопрос.
+ATTEMPT_COLUMNS = (
+    ('name', 'ФИО', 32),
+    ('user_id', 'ID сотрудника', 14),
+    ('department', 'Подразделение', 30),
+    ('attempt_no', 'Попытка', 10),
+    ('created_at', 'Время', 18),
+    ('score', 'Верных ответов', 16),
+    ('needed', 'Нужно для зачёта', 12),
+    ('result', 'Итог', 15),
+)
+
+# Лист «Вопросы»: одна строка — один вопрос. Не строка на вариант, как в
+# «Опросах»: там ответы бывают рейтингом и текстом, здесь вариант всегда один
+# верный, и руководителю нужен ответ «какой вопрос заваливают и что выбирают
+# вместо верного» — он читается в одной строке.
+QUESTION_COLUMNS = (
+    ('number', '№', 6),
+    ('prompt', 'Вопрос', 44),
+    ('correct', 'Верный ответ', 28),
+    ('answered', 'Ответили', 11),
+    ('wrong', 'Ошиблись', 11),
+    ('wrong_share', 'Ошиблись, %', 12),
+    ('top_wrong', 'Чаще всего выбирали неверный', 30),
+    ('distribution', 'Все ответы', 46),
+)
+
+ATTEMPTS_SHEET = 'Попытки'
+# По первой попытке — как вкладка «Вопросы» на экране (queries.question_stats).
+# Сказано в имени листа: иначе «ошиблись 5 из 80» при двадцати попытках у
+# одного человека читалось бы как неправда.
+QUESTIONS_SHEET = 'Вопросы (1-я попытка)'
+
+# СТРОЧНЫМИ. «DD.MM.YYYY» Excel понимает, а Numbers и Quick Look — то, чем
+# файл открывается на iPhone и Mac, — читают «D» как день ГОДА: 21 сентября
+# превращалось в «264.09.2026». Поймано на боевой выгрузке.
+DATE_FORMAT = 'dd.mm.yyyy hh:mm'
+
+_DATE_KEYS = ('published_at', 'shown_at', 'confirmed_at', 'created_at',
               'wave_planned_at', 'wave_activated_at')
+_NUMBER_KEYS = ('user_id', 'attempts', 'wave', 'attempt_no', 'needed',
+                'number', 'answered', 'wrong')
+
+# Цвета ответа — те же, что в выгрузке «Опросов» (bot_schedule2.py:
+# answer_correct_fill и соседи).
+_RIGHT = (PatternFill(fill_type='solid', fgColor='DCFCE7'), Font(color='166534'))
+_WRONG = (PatternFill(fill_type='solid', fgColor='FEF2F2'), Font(color='991B1B'))
+_EMPTY = (PatternFill(fill_type='solid', fgColor='F3F4F6'), Font(color='6B7280'))
+
+_QUESTION_TITLE_LIMIT = 100
 
 
 def _moment(value):
@@ -54,6 +107,12 @@ def _moment(value):
         return datetime.fromisoformat(str(value))
     except ValueError:
         return None
+
+
+def _score(correct, total):
+    # «2 из 3» — так же, как на экране. Числом долю не пишем: в Excel её
+    # немедленно сложат с другими долями и получат бессмыслицу.
+    return '%s из %s' % (correct or 0, total) if total else ''
 
 
 def _value(key, row, post):
@@ -71,11 +130,7 @@ def _value(key, row, post):
     if key in _DATE_KEYS:
         return _moment(row.get(key))
     if key == 'score':
-        # «2 из 3» — так же, как на экране. Числом долю не пишем: в Excel её
-        # немедленно сложат с другими долями и получат бессмыслицу.
-        if row.get('last_total'):
-            return '%s из %s' % (row.get('last_correct') or 0, row['last_total'])
-        return ''
+        return _score(row.get('last_correct'), row.get('last_total'))
     if key == 'attempts':
         return row.get('attempts') or 0
     if key == 'trainer':
@@ -90,43 +145,154 @@ def _value(key, row, post):
     return ''
 
 
-def build(post, rows):
-    """Книга Excel по журналу новости. Возвращает BytesIO, готовый к отдаче."""
-    values = {key: [_value(key, row, post) for row in rows]
-              for key, _title, _width in COLUMNS}
-    # Колонку, пустую во ВСЕХ строках, не выводим: заголовок без единого
-    # значения — шум, из-за которого лист приходится листать вбок. У новости
-    # без теста, тренажёра и волн так уходит половина таблицы.
-    keys = [key for key, _t, _w in COLUMNS
-            if not rows or any(value not in (None, '', 0) for value in values[key])
-            or key in ('user_id', 'attempts')]
-
-    book = Workbook()
-    sheet = book.active
-    sheet.title = 'Ознакомление'
+def _sheet(book, title, headers, rows, *, first=False):
+    """Лист с оформленной шапкой. headers: [(ключ, заголовок, ширина)],
+    rows: [[значение, …]] в том же порядке. Возвращает лист."""
+    sheet = book.active if first else book.create_sheet()
+    sheet.title = title
 
     header_font = Font(bold=True, color='FFFFFF')
     header_fill = PatternFill(fill_type='solid', fgColor='1F2937')
-    for column, key in enumerate(keys, start=1):
-        title, width = next((t, w) for k, t, w in COLUMNS if k == key)
-        cell = sheet.cell(row=1, column=column, value=title)
+    for column, (_key, text, width) in enumerate(headers, start=1):
+        cell = sheet.cell(row=1, column=column, value=text)
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         sheet.column_dimensions[get_column_letter(column)].width = width
 
-    for index in range(len(rows)):
-        for column, key in enumerate(keys, start=1):
-            cell = sheet.cell(row=index + 2, column=column, value=values[key][index])
+    for index, values in enumerate(rows, start=2):
+        for column, ((key, _text, _width), value) in enumerate(zip(headers, values), start=1):
+            cell = sheet.cell(row=index, column=column, value=value)
             if key in _DATE_KEYS:
-                cell.number_format = 'DD.MM.YYYY HH:MM'
-            elif key in ('user_id', 'attempts', 'wave'):
+                cell.number_format = DATE_FORMAT
+            elif key in _NUMBER_KEYS:
                 cell.number_format = '0'
 
     # Шапка закреплена и с фильтром: журнал на двести человек иначе не читается.
     sheet.freeze_panes = 'A2'
-    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(keys)),
+    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
                                          max(len(rows) + 1, 2))
+    return sheet
+
+
+def _question_title(question):
+    # «Q1: …» — как колонки ответов в выгрузке «Опросов». Длинный вопрос
+    # режем: шапка на полэкрана прячет сами ответы.
+    text = ' '.join(str(question.get('prompt') or '').split())
+    if len(text) > _QUESTION_TITLE_LIMIT:
+        text = text[:_QUESTION_TITLE_LIMIT - 1].rstrip() + '…'
+    return 'Q%s: %s' % (question.get('number'), text)
+
+
+def _attempts_sheet(book, rows, questions, attempts):
+    """Каждая попытка каждого человека с ответами — «Ответы» опросов, только
+    попыток у человека бывает двадцать, и каждая здесь своей строкой."""
+    known = {row.get('user_id'): row for row in rows}
+    ordered = sorted(attempts, key=lambda item: (
+        str((known.get(item['user_id']) or item).get('name') or '').casefold(),
+        item['user_id'], item['attempt_no']))
+
+    headers = list(ATTEMPT_COLUMNS) + [
+        ('q%s' % question['id'], _question_title(question), 28) for question in questions]
+    table, marks = [], []
+    for item in ordered:
+        person = known.get(item['user_id']) or {}
+        line = [
+            person.get('name') or item.get('name') or '—',
+            item['user_id'],
+            person.get('department_name') or '',
+            item['attempt_no'],
+            _moment(item.get('created_at')),
+            _score(item['correct'], item['total']),
+            item['needed'],
+            'Засчитана' if item['passed'] else 'Не засчитана',
+        ]
+        tones = []
+        for question in questions:
+            chosen = item['answers'].get(str(question['id']))
+            labels = [option['label'] for option in question['options']]
+            try:
+                index = int(chosen)
+            except (TypeError, ValueError):
+                index = None
+            if index is None or not 0 <= index < len(labels):
+                line.append('—')
+                tones.append(_EMPTY)
+            else:
+                line.append(labels[index])
+                tones.append(_RIGHT if index == question['correct'] else _WRONG)
+        table.append(line)
+        marks.append((item['passed'], tones))
+
+    sheet = _sheet(book, ATTEMPTS_SHEET, headers, table)
+    first_answer = len(ATTEMPT_COLUMNS) + 1
+    for index, (passed, tones) in enumerate(marks, start=2):
+        verdict = sheet.cell(row=index, column=len(ATTEMPT_COLUMNS))
+        verdict.fill, verdict.font = _RIGHT if passed else _WRONG
+        for offset, (fill, font) in enumerate(tones):
+            cell = sheet.cell(row=index, column=first_answer + offset)
+            cell.fill, cell.font = fill, font
+            cell.alignment = Alignment(wrap_text=True, vertical='top')
+    return sheet
+
+
+def _questions_sheet(book, questions):
+    """Где ошибаются (ТЗ #300, п.12) — вкладка «Вопросы» экрана одной строкой
+    на вопрос."""
+    table = []
+    for question in questions:
+        options = question['options']
+        right = next((option for option in options if option['is_correct']), None)
+        wrong = [option for option in options if not option['is_correct'] and option['count']]
+        top = max(wrong, key=lambda option: option['count']) if wrong else None
+        table.append([
+            question['number'],
+            question['prompt'],
+            right['label'] if right else '',
+            question['answered'],
+            question['wrong_people'],
+            # Долей, а не «38»: с форматом «0%» Excel и покажет 38%, и
+            # отсортирует как число.
+            (question['wrong_people'] / question['answered']) if question['answered'] else 0,
+            ('%s — %s' % (top['label'], top['count'])) if top else '',
+            '\n'.join('%s — %s (%s%%)%s' % (
+                option['label'], option['count'],
+                ('%g' % option['percent']).replace('.', ','),
+                ' · верный' if option['is_correct'] else '') for option in options),
+        ])
+    sheet = _sheet(book, QUESTIONS_SHEET, QUESTION_COLUMNS, table)
+    for index in range(2, len(table) + 2):
+        sheet.cell(row=index, column=6).number_format = '0%'
+        for column in (2, 3, 7, 8):
+            sheet.cell(row=index, column=column).alignment = Alignment(
+                wrap_text=True, vertical='top')
+        sheet.cell(row=index, column=3).fill, sheet.cell(row=index, column=3).font = _RIGHT
+    return sheet
+
+
+def build(post, rows, questions=(), attempts=()):
+    """Книга Excel по журналу новости. Возвращает BytesIO, готовый к отдаче.
+
+    questions — queries.question_stats, attempts — queries.post_attempts. Оба
+    пусты у новости без теста, и тогда в книге один лист.
+    """
+    values = {key: [_value(key, row, post) for row in rows]
+              for key, _title, _width in COLUMNS}
+    # Колонку, пустую во ВСЕХ строках, не выводим: заголовок без единого
+    # значения — шум, из-за которого лист приходится листать вбок. У новости
+    # без теста, тренажёра и волн так уходит половина таблицы.
+    headers = [column for column in COLUMNS
+               if not rows or any(value not in (None, '', 0) for value in values[column[0]])
+               or column[0] in ('user_id', 'attempts')]
+
+    book = Workbook()
+    _sheet(book, 'Ознакомление', headers,
+           [[values[key][index] for key, _t, _w in headers] for index in range(len(rows))],
+           first=True)
+    if questions and attempts:
+        _attempts_sheet(book, rows, questions, attempts)
+    if questions:
+        _questions_sheet(book, questions)
 
     stream = BytesIO()
     book.save(stream)

@@ -2411,7 +2411,8 @@ class NewsReportTests(unittest.TestCase):
         self.assertEqual(routes.count('= _report_data(cursor, post)'), 2)
         export = routes[routes.index('def news_post_report_export('):]
         export = export[:export.index('@news_route(')]
-        self.assertIn('report_xlsx.build(post, rows)', export)
+        self.assertIn('report_xlsx.build(post, rows, questions=questions, attempts=attempts)',
+                      export)
         # Курсор закрыт ДО сборки книги: openpyxl не держит слот пула.
         self.assertIn("defer_cursor=True", _read('news', 'routes.py'))
         self.assertLess(export.index('_get_cursor'), export.index('report_xlsx.build('))
@@ -2669,7 +2670,7 @@ class NewsResultsScreenTests(unittest.TestCase):
         report = _jsx_code_only(self._report())
         self.assertIn('onBack={person ? closePerson : null}', report)
         self.assertIn('useScreenBackGesture(isMobileShell && !!person, closePerson)', report)
-        self.assertIn("if (event.key !== 'Escape') return;", report)
+        self.assertIn("if (event.key === 'Escape') {", report)
         self.assertIn('event.stopPropagation();', report)
 
     def test_attempts_can_be_switched_only_when_there_are_several(self):
@@ -2691,6 +2692,126 @@ class NewsResultsScreenTests(unittest.TestCase):
         self.assertIn('if not _may_read_post(ctx, post):', door)
         self.assertIn("'/posts/<int:post_id>/attempts/<int:user_id>', publisher=True",
                       _read('news', 'routes.py'))
+
+
+
+class NewsManyAttemptsTests(unittest.TestCase):
+    """У сотрудника бывает двадцать две попытки (новость #31, 23.09.2026):
+    ряд номеров уезжал за край окна, а выгрузка знала о попытках одно число."""
+
+    FORM = ('src', 'components', 'wiki', 'WikiNews.jsx')
+
+    def _slots(self, cases):
+        """attemptSlots из самого WikiNews.jsx, выполненный node: проверяем
+        поведение, а не текст."""
+        import json
+        import shutil
+        import subprocess
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node недоступен')
+        form = _read(*self.FORM)
+        start = form.index('const ATTEMPT_SLOTS = ')
+        end = form.index('\n};\n', form.index('const attemptSlots = ')) + 3
+        script = form[start:end] + (
+            'process.stdout.write(JSON.stringify(%s.map(([n, c]) => attemptSlots(n, c))));'
+            % json.dumps(cases))
+        out = subprocess.run([node, '--input-type=module', '-e', script],
+                             capture_output=True, check=True)
+        return json.loads(out.stdout.decode('utf-8'))
+
+    def test_the_row_never_grows_and_keeps_first_last_and_current(self):
+        cases = [[count, current] for count in range(2, 41) for current in range(count)]
+        for (count, current), slots in zip(cases, self._slots(cases)):
+            shown = [slot for slot in slots if slot is not None]
+            self.assertLessEqual(len(slots), 7, (count, current))
+            self.assertIn(current, shown, (count, current))
+            self.assertEqual((shown[0], shown[-1]), (0, count - 1), (count, current))
+            self.assertEqual(shown, sorted(set(shown)), (count, current))
+            if count <= 7:
+                self.assertEqual(slots, list(range(count)))
+            # Многоточие — только там, где что-то спрятано, и не два подряд.
+            for left, gap, right in zip(slots, slots[1:], slots[2:]):
+                if gap is None:
+                    self.assertIsNotNone(left)
+                    self.assertGreaterEqual(right - left, 2, (count, current, slots))
+            for left, right in zip(slots, slots[1:]):
+                if left is not None and right is not None:
+                    self.assertEqual(right - left, 1, (count, current, slots))
+
+    def test_the_report_uses_the_switcher_and_arrows_page_attempts(self):
+        form = _jsx_code_only(_read(*self.FORM))
+        report = form[form.index('function NewsReport('):]
+        report = report[:report.index('\n}\n')]
+        self.assertIn('<AttemptSwitcher attempts={attempts}', report)
+        self.assertIn("{ ArrowLeft: -1, ArrowRight: 1 }[event.key]", report)
+        # Стрелки в поле ввода — это курсор, а не попытки.
+        self.assertIn("['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)", report)
+
+    def test_the_export_repeats_attempts_and_questions(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        from news import report_xlsx
+        questions = [{
+            'id': 7, 'number': 1, 'prompt': 'Сколько дней на условия?', 'correct': 1,
+            'options': [
+                {'index': 0, 'label': '30 дней', 'count': 2, 'percent': 40.0, 'is_correct': False},
+                {'index': 1, 'label': '60 дней', 'count': 3, 'percent': 60.0, 'is_correct': True},
+            ],
+            'answered': 5, 'people': 5, 'wrong_people': 2, 'percent': 40,
+        }]
+        rows = [{'user_id': 1, 'name': 'Сотрудник Б', 'department_name': 'Отдел',
+                 'role': 'operator', 'attempts': 2, 'last_correct': 1, 'last_total': 1,
+                 'confirmed_at': '2026-09-21T18:36:00', 'status': 'passed'}]
+        attempts = [
+            {'user_id': 1, 'name': None, 'attempt_no': 2, 'correct': 1, 'total': 1,
+             'needed': 1, 'passed': True, 'answers': {'7': 1},
+             'created_at': '2026-09-21T18:36:00'},
+            {'user_id': 1, 'name': None, 'attempt_no': 1, 'correct': 0, 'total': 1,
+             'needed': 1, 'passed': False, 'answers': {'7': 0},
+             'created_at': '2026-09-21T18:30:00'},
+        ]
+        book = load_workbook(BytesIO(report_xlsx.build(
+            {'published_at': '2026-09-21T16:56:00'}, rows,
+            questions=questions, attempts=attempts).read()))
+        self.assertEqual(book.sheetnames,
+                         ['Ознакомление', report_xlsx.ATTEMPTS_SHEET, report_xlsx.QUESTIONS_SHEET])
+
+        tries = list(book[report_xlsx.ATTEMPTS_SHEET].iter_rows(values_only=True))
+        self.assertEqual(tries[0][-1], 'Q1: Сколько дней на условия?')
+        # По порядку попыток, каждая своей строкой, с выбранным ответом.
+        self.assertEqual([(line[3], line[-2], line[-1]) for line in tries[1:]],
+                         [(1, 'Не засчитана', '30 дней'), (2, 'Засчитана', '60 дней')])
+        sheet = book[report_xlsx.ATTEMPTS_SHEET]
+        self.assertEqual(sheet.cell(row=2, column=len(tries[0])).fill.fgColor.rgb[-6:], 'FEF2F2')
+        self.assertEqual(sheet.cell(row=3, column=len(tries[0])).fill.fgColor.rgb[-6:], 'DCFCE7')
+
+        asked = list(book[report_xlsx.QUESTIONS_SHEET].iter_rows(values_only=True))
+        self.assertEqual(asked[1][:7], (1, 'Сколько дней на условия?', '60 дней', 5, 2, 0.4,
+                                        '30 дней — 2'))
+
+    def test_a_news_without_a_test_keeps_one_sheet(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        from news import report_xlsx
+        book = load_workbook(BytesIO(report_xlsx.build({}, [{'user_id': 1, 'name': 'А'}]).read()))
+        self.assertEqual(book.sheetnames, ['Ознакомление'])
+
+    def test_dates_read_the_same_in_numbers_and_quick_look(self):
+        """«DD» Numbers и Quick Look читают как день года: 21.09 → «264.09»."""
+        from news import report_xlsx
+        self.assertEqual(report_xlsx.DATE_FORMAT, 'dd.mm.yyyy hh:mm')
+        self.assertNotIn("'DD.", _read('news', 'report_xlsx.py'))
+
+    def test_the_file_name_has_a_latin_fallback(self):
+        """send_file выбрасывает из запасного имени всё не-ASCII, и от
+        «Ознакомление — …» оставались пробелы."""
+        routes = _code_only(_read('news', 'routes.py'))
+        export = routes[routes.index('def news_post_report_export('):]
+        export = export[:export.index('@news_route(')]
+        self.assertIn('attachment; filename=\\"news-%d.xlsx\\"; filename*=UTF-8\'\'%s', export)
+        self.assertIn("quote('Ознакомление — %s.xlsx' % safe)", export)
+        self.assertIn('queries.post_attempts(cursor, post_id) if questions else []', export)
 
 
 class NewsResultsNeutralWordingTests(unittest.TestCase):
