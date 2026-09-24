@@ -101,7 +101,7 @@ def recheck_pending(db, oktell_query, days: int = 14, limit: int = 200) -> dict:
 
 
 def run_patrol(db, oktell_query, since: datetime, until: datetime,
-               department_code=None, dry_run: bool = False) -> dict:
+               dry_run: bool = False) -> dict:
     """Один прогон сверки. Возвращает сводку для лога.
 
     dry_run здесь означает «посчитай и покажи, но в журнал не пиши» — это для
@@ -111,7 +111,7 @@ def run_patrol(db, oktell_query, since: datetime, until: datetime,
     segments = sweep.recall_segments(rows)
 
     with db._get_cursor() as cursor:
-        people, ambiguous = queries.thresholds_by_sip(cursor, department_code)
+        people, ambiguous = queries.thresholds_by_sip(cursor)
         known = queries.violations_between(cursor, since - timedelta(minutes=5),
                                            until + timedelta(minutes=5))
     if ambiguous:

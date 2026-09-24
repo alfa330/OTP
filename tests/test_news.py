@@ -1753,13 +1753,21 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         # Своего правила «кому уйдёт» здесь нет ни одного.
         self.assertNotIn("subject_type = 'department'", body)
 
-    def test_the_check_is_about_the_sip_number(self):
-        """«Данные Oktell» у человека — это его SIP-номер в разделе
-        «Настройки SIP»: без номера он в АТС не работает."""
+    def test_the_check_is_about_the_oktell_login_of_szov(self):
+        """«Данные Oktell» у человека — логин Oktell по правилу ограничителя:
+        только СЗоВ (решение владельца 24.09.2026 — «не перемешивай SIP-номера
+        с другими разделами»), кабинет из «Настроек SIP», без него — sip_number.
+        По одному users.sip_number оператор с заведённым кабинетом значился «без
+        номера», а номер АТС ОП засчитывался как вход в Oktell."""
         source = _read('news', 'queries.py')
         body = source[source.index('def audience_sip_check('):]
         body = body[:body.index('\ndef ', 10)]
-        self.assertIn("NULLIF(btrim(COALESCE(u.sip_number, '')), '') IS NOT NULL", body)
+        self.assertIn('okd.code = %(oktell_department)s', body)
+        self.assertIn('OKTELL_LOGIN_SQL + """ IS NOT NULL) AS has_sip', body)
+        self.assertIn('LEFT JOIN oktell_user_accounts oka ON oka.user_id = u.id', body)
+        self.assertNotIn("COALESCE(u.sip_number, '')), '') IS NOT NULL", body)
+        self.assertIn('from oktell_guard.queries import OKTELL_DEPARTMENT_CODE, OKTELL_LOGIN_SQL',
+                      source)
 
     def test_the_route_keeps_the_same_perimeter(self):
         """Иначе ручка стала бы способом перебрать чужих людей по id: правила
@@ -1883,7 +1891,10 @@ class NewsOktellSipWarningTests(unittest.TestCase):
         self.assertIn('{sipMissing > 1 && (', form)
         self.assertIn('Как добавить номер', form)
         self.assertIn('«Настройки SIP»', form)
-        self.assertIn('«SIP-номер»', form)
+        # С 21.09 у карточки СЗоВ нет поля «SIP-номер» — только «Кабинет Oktell».
+        self.assertIn('«Кабинет Oktell»', form)
+        self.assertIn('«Логин кабинета»', form)
+        self.assertNotIn('«SIP-номер»', form)
 
 
 if __name__ == '__main__':

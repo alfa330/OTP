@@ -8,6 +8,7 @@
 import html
 import json
 
+from oktell_guard.queries import OKTELL_DEPARTMENT_CODE, OKTELL_LOGIN_SQL
 from wiki import access as wiki_access
 from wiki import structure as wiki_structure
 
@@ -2187,6 +2188,12 @@ def audience_sip_check(cursor, *, rules, author_id, audience_max_role_level,
     в АТС человек без номера не работает — значит и окна он не увидит. Форма
     предупреждает об этом ДО публикации, поимённо.
 
+    «Номер» здесь — логин Oktell по тому же правилу, что у ограничителя
+    (oktell_guard.queries.OKTELL_LOGIN_SQL): только сотрудники СЗоВ, кабинет из
+    «Настроек SIP», без кабинета — users.sip_number. По одному users.sip_number
+    оператор с заведённым кабинетом значился «без номера», а номер чужой АТС
+    (ОП) засчитывался как вход в Oktell.
+
     ПРАВИЛА АДРЕСАТА ЗДЕСЬ НЕ ПЕРЕПИСАНЫ. Считать «кому уйдёт» вторым способом
     означало бы предупреждение про одних людей и показ другим; расходятся такие
     копии молча. Поэтому берётся тот же report_match, что у журнала и у счётчика
@@ -2204,7 +2211,8 @@ def audience_sip_check(cursor, *, rules, author_id, audience_max_role_level,
         'min_role_level': rule.get('min_role_level'),
     } for rule in rules], ensure_ascii=False)
     params = {'rules': payload, 'author': author_id,
-              'ceiling': audience_max_role_level, 'space': space_id}
+              'ceiling': audience_max_role_level, 'space': space_id,
+              'oktell_department': OKTELL_DEPARTMENT_CODE}
     params.update(_role_params())
     cursor.execute(
         """
@@ -2222,10 +2230,13 @@ def audience_sip_check(cursor, *, rules, author_id, audience_max_role_level,
         ),
         """ + _VIEWER_SUBJECTS_CTE + """
         SELECT v.id, v.name, v.role, v.department_name,
-               NULLIF(btrim(COALESCE(u.sip_number, '')), '') IS NOT NULL AS has_sip
+               (okd.code = %(oktell_department)s
+                AND """ + OKTELL_LOGIN_SQL + """ IS NOT NULL) AS has_sip
           FROM news_posts p
           JOIN viewers v ON TRUE
           JOIN users u ON u.id = v.id
+          LEFT JOIN departments okd ON okd.id = u.department_id
+          LEFT JOIN oktell_user_accounts oka ON oka.user_id = u.id
          WHERE v.id IS DISTINCT FROM p.author_id
            AND
         """ + report_match(with_space) + """

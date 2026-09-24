@@ -3,8 +3,9 @@
 Функции принимают ГОТОВЫЙ курсор (из Database._get_cursor) и не управляют ни
 транзакцией, ни соединением — как в crm/queries.py.
 
-Логин агента = SIP-номер сотрудника (`users.sip_number`), своего справочника
-логинов раздел не заводит.
+Логин агента = логин человека в Oktell, и ищется он ТОЛЬКО среди сотрудников
+СЗоВ: кабинет из «Настроек SIP», а без кабинета — `users.sip_number`
+(см. OKTELL_LOGIN_SQL).
 """
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
@@ -163,11 +164,31 @@ def save_settings(cursor, payload: dict, updated_by=None) -> dict:
 EMPLOYEE_ROLES = ('operator', 'trainee')
 INACTIVE_STATUSES = ('fired', 'dismissal')
 
+# Логин человека в Oktell. Решение владельца 24.09.2026: «не перемешивай SIP-номера
+# с другими разделами, только раздел СЗоВ — чтобы для Oktell подтягивалось только с
+# него». В Oktell работает один отдел, а номера разных АТС совпадают: логин Oktell
+# оператора СЗоВ и номер своей АТС у сотрудника ОП бывают одним и тем же числом.
+# Поиск по всей компании отдавал машину СЗоВ чужому человеку, в том числе
+# уволенному, и туда же уходили его выбросы.
+OKTELL_DEPARTMENT_CODE = 'szov'
+
+# Кабинет — первым: ровно этим логином агент входит в Oktell (/config) и ровно его
+# присылает обратно (cookie __oktelllogin). С 21.09 карточка СЗоВ ведёт только
+# кабинет, а users.sip_number при сохранении не трогает — у 21 человека он пуст,
+# у одного устарел. users.sip_number — запасной, пока кабинет не завели: до 21.09
+# логином был он. Требует `u` = users и LEFT JOIN `oka` = oktell_user_accounts.
+OKTELL_LOGIN_SQL = ("COALESCE(NULLIF(btrim(oka.cabinet_login), ''), "
+                    "NULLIF(btrim(u.sip_number), ''))")
+
 _EMPLOYEES_SQL = """
     SELECT u.id,
            u.name,
            LOWER(COALESCE(u.role, ''))           AS role,
-           COALESCE(u.sip_number, '')            AS sip_number,
+           -- Ключ прежний (sip_number), значение — логин Oktell: вкладка ищет и
+           -- помечает «нет SIP-номера» по нему. Вне СЗоВ логина Oktell нет.
+           CASE WHEN d.code = %(oktell_department)s
+                THEN COALESCE(""" + OKTELL_LOGIN_SQL + """, '')
+                ELSE '' END                      AS sip_number,
            d.code                                AS department_code,
            d.name                                AS department_name,
            r.threshold_s                         AS personal_threshold_s,
@@ -189,6 +210,7 @@ _EMPLOYEES_SQL = """
            (m.day IS NOT NULL)                   AS managed_today
       FROM users u
       LEFT JOIN departments d ON d.id = u.department_id
+      LEFT JOIN oktell_user_accounts oka ON oka.user_id = u.id
       LEFT JOIN oktell_guard_user_rules r ON r.user_id = u.id
       LEFT JOIN oktell_guard_agents a ON a.user_id = u.id
       LEFT JOIN oktell_guard_managed_days m
@@ -220,6 +242,7 @@ def list_employees(cursor, department_code=None, since=None):
     """
     cursor.execute(_EMPLOYEES_SQL, {
         'department_code': department_code,
+        'oktell_department': OKTELL_DEPARTMENT_CODE,
         'since': since,
         'roles': list(EMPLOYEE_ROLES),
         'inactive': list(INACTIVE_STATUSES),
@@ -271,7 +294,12 @@ def bulk_set_rules(cursor, user_ids, *, threshold_s=None, enabled=None, updated_
 
 
 def personal_rule_by_sip(cursor, sip_number: str):
-    """Персональные настройки по SIP-номеру — так агент себя и представляет."""
+    """Персональные настройки по логину Oktell — так агент себя и представляет.
+
+    Только СЗоВ (OKTELL_LOGIN_SQL). Логин на двух действующих людях — никто: как
+    и в thresholds_by_sip, машину и выбросы наугад не приписываем. Раньше здесь
+    стоял LIMIT 1 без порядка, и такой номер доставался случайному из двух.
+    """
     sip = str(sip_number or '').strip()
     if not sip:
         return None
@@ -279,14 +307,20 @@ def personal_rule_by_sip(cursor, sip_number: str):
         """
         SELECT u.id AS user_id, u.name, r.threshold_s, COALESCE(r.enabled, TRUE) AS enabled
           FROM users u
+          JOIN departments d ON d.id = u.department_id
+          LEFT JOIN oktell_user_accounts oka ON oka.user_id = u.id
           LEFT JOIN oktell_guard_user_rules r ON r.user_id = u.id
-         WHERE COALESCE(u.sip_number, '') = %(sip)s
+         WHERE d.code = %(oktell_department)s
+           AND """ + OKTELL_LOGIN_SQL + """ = %(sip)s
            AND LOWER(COALESCE(u.status, '')) <> ALL(%(inactive)s)
-         LIMIT 1
+         ORDER BY u.id
+         LIMIT 2
         """,
-        {'sip': sip, 'inactive': list(INACTIVE_STATUSES)},
+        {'sip': sip, 'inactive': list(INACTIVE_STATUSES),
+         'oktell_department': OKTELL_DEPARTMENT_CODE},
     )
-    return fetch_one(cursor)
+    rows = fetch_all(cursor)
+    return rows[0] if len(rows) == 1 else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -354,35 +388,38 @@ def upsert_agent(cursor, payload: dict) -> None:
     )
 
 
-def thresholds_by_sip(cursor, department_code=None):
-    """Кого касается правило: ({sip: {user_id, threshold_s}}, {спорный sip: [id]}).
+def thresholds_by_sip(cursor):
+    """Кого касается правило: ({логин: {user_id, threshold_s}}, {спорный логин: [id]}).
 
     В первый словарь попадают только те, кого правило касается: действующие
-    операторы нужного отдела с заполненным номером и не выключенные лично.
+    операторы СЗоВ с логином Oktell (OKTELL_LOGIN_SQL) и не выключенные лично.
     Остальные из сверки выпадают целиком — иначе она нашла бы «нарушения» у тех,
-    к кому ограничитель не применяется вовсе.
+    к кому ограничитель не применяется вовсе. Отдел не параметр: раньше сверку
+    звали без него, и история Oktell сверялась с номерами всей компании — чужой
+    номер ОП забирал себе «Перезвон» оператора СЗоВ.
 
-    Второй словарь — номера, висящие сразу на нескольких действующих людях.
+    Второй словарь — логины, висящие сразу на нескольких действующих людях.
     Это не ошибка сверки, а расхождение в справочнике, и чинить его надо там.
     """
     cursor.execute(
         """
-        SELECT COALESCE(u.sip_number, '')                    AS sip_number,
+        SELECT """ + OKTELL_LOGIN_SQL + """                  AS sip_number,
                u.id                                          AS user_id,
                COALESCE(r.threshold_s, s.threshold_s, 180)   AS threshold_s,
                (COALESCE(r.enabled, TRUE) AND s.enabled)     AS enabled
           FROM users u
-          LEFT JOIN departments d ON d.id = u.department_id
+          JOIN departments d ON d.id = u.department_id
+          LEFT JOIN oktell_user_accounts oka ON oka.user_id = u.id
           LEFT JOIN oktell_guard_user_rules r ON r.user_id = u.id
           CROSS JOIN oktell_guard_settings s
          WHERE s.id = 1
+           AND d.code = %(oktell_department)s
            AND LOWER(COALESCE(u.role, '')) = ANY(%(roles)s)
            AND LOWER(COALESCE(u.status, '')) <> ALL(%(inactive)s)
-           AND COALESCE(u.sip_number, '') <> ''
-           AND (%(department_code)s IS NULL OR d.code = %(department_code)s)
+           AND """ + OKTELL_LOGIN_SQL + """ IS NOT NULL
         """,
         {'roles': list(EMPLOYEE_ROLES), 'inactive': list(INACTIVE_STATUSES),
-         'department_code': department_code},
+         'oktell_department': OKTELL_DEPARTMENT_CODE},
     )
     out, seen = {}, {}
     for row in fetch_all(cursor):
@@ -592,20 +629,28 @@ def add_release(cursor, *, version, filename, sha256, size_bytes, gcs_bucket, gc
 # ─────────────────────────────────────────────────────────────────────────────
 
 def user_brief(cursor, user_id):
-    """Имя и SIP вошедшего. Форма та же, что была у user_by_token.
+    """Имя и логин Oktell вошедшего. Форма та же, что была у user_by_token.
 
-    SIP нужен не для красоты: по нему сверяется, про свой ли номер прислан факт
+    Логин нужен не для красоты: по нему сверяется, про свой ли номер прислан факт
     выброса. Поэтому брать человека `db.get_user` нельзя — там этой колонки нет.
+    Ключ прежний (sip_number), значение — OKTELL_LOGIN_SQL: по users.sip_number
+    оператор, у которого кабинет расходится с устаревшим номером, получал на
+    каждый свой выброс пометку «агент принадлежит <ему же>, факт про номер …».
     """
     if not user_id:
         return None
     cursor.execute(
         """
-        SELECT u.id AS user_id, u.name, COALESCE(u.sip_number, '') AS sip_number
+        SELECT u.id AS user_id, u.name,
+               CASE WHEN d.code = %(oktell_department)s
+                    THEN COALESCE(""" + OKTELL_LOGIN_SQL + """, '')
+                    ELSE '' END AS sip_number
           FROM users u
+          LEFT JOIN departments d ON d.id = u.department_id
+          LEFT JOIN oktell_user_accounts oka ON oka.user_id = u.id
          WHERE u.id = %(user_id)s
         """,
-        {'user_id': int(user_id)},
+        {'user_id': int(user_id), 'oktell_department': OKTELL_DEPARTMENT_CODE},
     )
     return fetch_one(cursor)
 

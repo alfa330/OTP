@@ -1402,8 +1402,8 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                                                     <p className="font-medium text-amber-900">Как добавить номер</p>
                                                     <ol className="mt-1 list-decimal space-y-0.5 pl-4">
                                                         <li>Меню слева → «Настройки SIP».</li>
-                                                        <li>Выберите отдел сотрудника и найдите его в списке.</li>
-                                                        <li>Впишите номер в поле «SIP-номер» и нажмите «Сохранить».</li>
+                                                        <li>Выберите отдел «СЗоВ» и найдите сотрудника в списке.</li>
+                                                        <li>В блоке «Кабинет Oktell» впишите «Логин кабинета» и пароль, нажмите «Сохранить».</li>
                                                     </ol>
                                                     <p className="mt-1.5">
                                                         Номер появится у человека сразу — новость можно
