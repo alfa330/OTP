@@ -362,6 +362,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     from . import routes_offices
     routes_offices.register(bp, wiki_route, db, _ip)
 
+    # Города — рядом с офисами: обслуживающий офис города берётся из того же
+    # справочника и той же границей пространства.
+    from . import routes_cities
+    routes_cities.register(bp, wiki_route, db, _ip)
+
     from . import routes_ai
     routes_ai.register(bp, wiki_route, db, _ip)
 

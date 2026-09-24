@@ -3,7 +3,7 @@ import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
     AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
-    Layers, Link2, MapPin,
+    Layers, Link2, Map as MapIcon, MapPin,
     Network,
     Building2, LineChart, Loader2, Megaphone, Plus, RefreshCw,
     MessageCircleQuestion, ScrollText, ShieldCheck, Sparkles, Users,
@@ -34,6 +34,9 @@ const WikiAssistant = lazy(() => import('./WikiAssistant'));
    на треть у всех читателей. */
 const WikiNews = lazy(() => import('./WikiNews'));
 const WikiQuestions = lazy(() => import('./WikiQuestions'));
+/* «Города» — лениво: схема страны, карточка тарифов и редактор нужны тому,
+   кто открыл вкладку, а не каждому вошедшему в вики. */
+const WikiCities = lazy(() => import('./WikiCities'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import { readArticleSlugFromSearch } from './articleLink';
 import { getScrollContainer, scrollPortalTo } from './scrollContainer';
@@ -97,6 +100,7 @@ const RETURN_LABELS = {
     audit: 'К журналу',
     parks: 'К паркам',
     offices: 'К офисам',
+    cities: 'К городам',
     overview: 'К обзору',
 };
 
@@ -456,6 +460,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: features.overview },
         { key: 'parks', label: 'Парки', icon: Building2, show: features.parks },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: features.offices },
+        /* «Города» (задача #322) — всем, как «Офисы»: карточка города —
+           справка для оператора, а правку сервер открывает по той же
+           способности, что у справочника офисов. Список у каждого
+           пространства свой (wiki_cities.space_id). */
+        { key: 'cities', label: 'Города', icon: MapIcon, show: features.cities },
         // Отдельных вкладок «Структура» и «Доступы» нет: структура переехала
         // внутрь «Статей» переключателем, а права выдаются из строки раздела
         // там же. Раздел выбран тем, что человек на него нажал, а не селектом
@@ -1347,6 +1356,22 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 {tab === 'offices' && (
                     <WikiOffices base={base} headers={headers} showToast={showToast}
                                  spaceId={activeSpace?.id || null} />
+                )}
+
+                {tab === 'cities' && (
+                    <Suspense fallback={(
+                        <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
+                            <Loader2 size={18} className="animate-spin" />
+                            <span className="text-[13px]">Загружаем города…</span>
+                        </div>
+                    )}>
+                        {/* key — пространство: у Таксопарков и Тез свои города,
+                            и состояние вкладки (выбор, догруженные карточки)
+                            одной вики не должно пережить переход в другую. */}
+                        <WikiCities key={activeSpace?.id || 'default'}
+                                    base={base} headers={headers} showToast={showToast}
+                                    spaceId={activeSpace?.id || null} />
+                    </Suspense>
                 )}
 
                 {tab === 'analytics' && (

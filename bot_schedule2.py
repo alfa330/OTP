@@ -66023,6 +66023,36 @@ async def run_wiki_yandex_pro_sync_async():
     except Exception:
         logging.exception("wiki yandex pro sync job failed")
 
+
+def wiki_city_tariffs_sync_job():
+    """Тарифы Яндекс Go по городам вкладки «Города» (задача #322).
+
+    Берёт только давно не сверенные города (wiki.cities.SYNC_MAX_AGE_HOURS),
+    поэтому догоняющий прогон после деплоя не перекачивает всё заново, а
+    город, заведённый днём, получает тарифы уже при сохранении ссылки.
+    Страницы качаются без открытого соединения — курсор берётся на короткие
+    такты внутри sync_due.
+    """
+    try:
+        from wiki import cities as wiki_cities
+        summary = wiki_cities.sync_due(db)
+        if summary.get('checked') or summary.get('errors'):
+            logging.info("Wiki «Города»: сверка тарифов Яндекса %s", summary)
+        return summary
+    except Exception:
+        logging.exception("wiki city tariffs sync job failed")
+        return None
+
+
+async def run_wiki_city_tariffs_sync_async():
+    loop = asyncio.get_event_loop()
+    try:
+        # Тот же пул на одно место, что у сверки Яндекс Про: оба обхода ходят
+        # к Яндексу, и в одну минуту им незачем идти вдвоём.
+        return await loop.run_in_executor(yandex_pro_pool, wiki_city_tariffs_sync_job)
+    except Exception:
+        logging.exception("wiki city tariffs sync job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -66779,6 +66809,21 @@ if __name__ == '__main__':
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
+    )
+
+    # Тарифы Яндекс Go по городам — в 05:20, следом за сверкой базы знаний, и
+    # догоняющий прогон через три минуты после старта: города, заведённые
+    # схемой при первом запуске, иначе ждали бы тарифов до утра. Прогон берёт
+    # только давно не сверенные города, так что перезапуски источник не
+    # нагружают.
+    scheduler.add_job(
+        run_wiki_city_tariffs_sync_async,
+        CronTrigger(hour=5, minute=20, timezone=ZoneInfo('Asia/Almaty')),
+        id='wiki_city_tariffs_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=3)
     )
 
     # Тесты в «Опросах»: раз в минуту добираем попытки, у которых истекло

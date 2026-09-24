@@ -36,7 +36,7 @@ export const WIKI_SPACE_QUERY_PARAM = 'space';
  */
 export const WIKI_TAB_KEYS = [
     'library', 'assistant', 'questions', 'catalog', 'news',
-    'overview', 'parks', 'offices', 'analytics', 'audit',
+    'overview', 'parks', 'offices', 'cities', 'analytics', 'audit',
 ];
 
 /** Вкладка по умолчанию — витрина статей. Метки в адресе у неё нет. */

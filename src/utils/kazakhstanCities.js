@@ -68,3 +68,17 @@ export const OPERATING_CITIES = [
 const KAZAKHSTAN_CITY_NAMES = new Set(KAZAKHSTAN_CITY_OPTIONS.map((option) => option.value));
 
 export const isKnownKazakhstanCity = (value) => KAZAKHSTAN_CITY_NAMES.has(String(value ?? '').trim());
+
+const REGION_BY_CITY = new Map(
+    CITIES_BY_REGION.flatMap(([region, cities]) => cities.map((city) => [city, region]))
+);
+
+/* Область города для подписи в карточке («Экибастуз · Павлодарская область»).
+ * Для трёх городов республиканского значения — так и пишем, в единственном
+ * числе. Незнакомый город — пустая строка: придумывать ему область нельзя. */
+export const regionOfCity = (value) => {
+    const region = REGION_BY_CITY.get(String(value ?? '').trim()) || '';
+    return region === 'Города республиканского значения'
+        ? 'Город республиканского значения'
+        : region;
+};

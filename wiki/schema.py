@@ -76,6 +76,7 @@ SPACE_FEATURES = (
     'overview',           # вкладка «Обзор»
     'parks',              # вкладка «Парки»
     'offices',            # вкладка «Офисы»
+    'cities',             # вкладка «Города»: тарифы Яндекс Go по городу, задача #322
     'analytics',          # вкладка «Аналитика»
     'audit',              # вкладка «Журнал»
     'library_park_rail',  # рельс парков на главной
@@ -735,6 +736,7 @@ AUDIT_SPACE_SQL = """
                 WHEN 'park'      THEN (SELECT x.space_id FROM wiki_taxi_parks x WHERE x.id = %(eid)s)
                 WHEN 'office'    THEN (SELECT x.space_id FROM wiki_offices    x WHERE x.id = %(eid)s)
                 WHEN 'promotion' THEN (SELECT x.space_id FROM wiki_promotions x WHERE x.id = %(eid)s)
+                WHEN 'city'      THEN (SELECT x.space_id FROM wiki_cities     x WHERE x.id = %(eid)s)
                 WHEN 'article'   THEN (SELECT sec.space_id
                                          FROM wiki_article_sections link
                                          JOIN wiki_sections sec ON sec.id = link.section_id
@@ -750,7 +752,8 @@ AUDIT_SPACE_SQL = """
 # отдельно от самого SQL, чтобы страж (tests/test_wiki_audit_space.py) мог
 # сверить его с типами, которые пишут роуты: забытый тип не ломается, он молча
 # кладёт запись в журнал ВСЕХ пространств — тише, чем ошибка, и хуже.
-AUDIT_SPACE_ENTITIES = ('space', 'section', 'park', 'office', 'promotion', 'article')
+AUDIT_SPACE_ENTITIES = ('space', 'section', 'park', 'office', 'promotion', 'city',
+                        'article')
 
 
 def audit_space_sql(entity_type, entity_id, details):
@@ -1114,6 +1117,98 @@ def _scope_directories_to_space(cursor):
                        ' ON ' + table + '(space_id, slug)')
         cursor.execute('ALTER TABLE ' + table +
                        ' DROP CONSTRAINT IF EXISTS ' + table + '_slug_key')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Города (задача #322)
+#
+# Карточка города: тарифы Яндекс Go слепком со страницы taxi.yandex.*/<город>/
+# tariff (wiki/yandex_tariffs.py) плюс то, чего на публичной странице нет, —
+# комиссии, требования к авто, услуги парка, обслуживающий офис.
+#
+# Справочник принадлежит пространству с первого дня: space_id NOT NULL и
+# уникальность названия ВНУТРИ пространства — те же выводы, что у офисов и
+# парков (_scope_directories_to_space), только без переезда: общим он не был
+# никогда. У Таксопарков и Тез города разные и правятся независимо.
+#
+# Ручные поля — JSONB, а не таблицы на тариф и услугу: карточка правится
+# целиком одной формой, по отдельности их никто не читает, а тарифы Яндекса
+# сами живут слепком. Привязка ручных полей к тарифу — по коду Яндекса
+# («econom»), см. шапку wiki/cities.py.
+#
+# serving_office_id — «куда направлять водителя» и зона города на карте.
+# ON DELETE SET NULL: офисы архивируют, а не удаляют, но и удалённый офис не
+# должен уносить с собой город.
+# ─────────────────────────────────────────────────────────────────────────────
+_CITY_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_cities (
+        id                SERIAL PRIMARY KEY,
+        space_id          INTEGER NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE,
+        name              VARCHAR(120) NOT NULL,
+        yandex_url        TEXT,
+        yandex_zone       VARCHAR(64),
+        yandex_data       JSONB,
+        yandex_hash       VARCHAR(64),
+        yandex_checked_at TIMESTAMP,
+        yandex_changed_at TIMESTAMP,
+        yandex_error      TEXT,
+        serving_office_id INTEGER REFERENCES wiki_offices(id) ON DELETE SET NULL,
+        park_commission   NUMERIC(5,2),
+        tariff_meta       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        extra_tariffs     JSONB NOT NULL DEFAULT '[]'::jsonb,
+        services          JSONB NOT NULL DEFAULT '[]'::jsonb,
+        note              TEXT,
+        status            VARCHAR(16) NOT NULL DEFAULT 'active'
+                          CHECK (status IN ('active', 'archived')),
+        position          INTEGER NOT NULL DEFAULT 0,
+        created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at        TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at        TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    # Один город — одна запись в пространстве. Без учёта регистра: «алматы» и
+    # «Алматы» — один город, и вторую карточку заводить незачем.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_cities_space_name "
+    "ON wiki_cities(space_id, lower(name));",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_cities_space "
+    "ON wiki_cities(space_id, status, position, id);",
+    # Ночной обход берёт давно не сверенные — по всем пространствам.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_cities_checked "
+    "ON wiki_cities(yandex_checked_at NULLS FIRST) WHERE status = 'active';",
+]
+
+
+def _seed_cities(cursor):
+    """Города постановки #322 — в пространство по умолчанию, один раз.
+
+    «Один раз» — это «у пространства ещё нет ни одного города», а не флаг:
+    города архивируют, а не удаляют, поэтому убранный в архив город назад не
+    вернётся, а пространство, в котором города уже ведут, сид не тронет.
+    Тарифы сид не качает — это сеть, а схема разворачивается на старте под
+    замком; их подтянет первый прогон сверки (bot_schedule2, через пару минут
+    после старта).
+
+    В другие пространства не сеем: у Тез свои города и свои тарифы, и
+    чужой список там был бы той самой утечкой между вики, от которой
+    справочники и привязаны к пространству.
+    """
+    from .cities import DEFAULT_CITIES
+    cursor.execute('SELECT id FROM wiki_spaces WHERE code = %s', (DEFAULT_SPACE_CODE,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    space_id = row[0]
+    cursor.execute('SELECT 1 FROM wiki_cities WHERE space_id = %s LIMIT 1', (space_id,))
+    if cursor.fetchone():
+        return
+    for position, (name, url) in enumerate(DEFAULT_CITIES):
+        cursor.execute(
+            'INSERT INTO wiki_cities (space_id, name, yandex_url, position) '
+            'VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING',
+            (space_id, name, url, position),
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2604,6 +2699,13 @@ def init_wiki_schema(cursor):
     # и парки, и офисы, и акции, и читает wiki_spaces, которую к этому моменту
     # уже завёл _merge_legacy_spaces.
     _scope_directories_to_space(cursor)
+
+    # Города — после офисов (обслуживающий офис — ссылка на wiki_offices) и
+    # ДО журнала: формула пространства записи журнала (AUDIT_SPACE_SQL) читает
+    # wiki_cities, и разбор истории ниже без таблицы упал бы.
+    for statement in _CITY_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
+    _seed_cities(cursor)
 
     # Граница пространства у журнала — здесь же и по той же причине: функция
     # разбирает историю по разделам, паркам и офисам, а значит все три таблицы

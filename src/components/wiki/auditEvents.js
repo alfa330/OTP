@@ -102,6 +102,10 @@ export const ACTION_META = {
     'office.day.clear': { label: 'Отметка по офису снята', tone: REMOVED, icon: MapPin },
     'office.closure.set': { label: 'Офис закрыт на период', tone: REMOVED, icon: CalendarClock },
     'office.closure.clear': { label: 'Закрытие офиса отменено', tone: CREATED, icon: CalendarClock },
+    'city.create': { label: 'Добавлен город', tone: CREATED, icon: MapPin },
+    'city.update': { label: 'Изменён город', tone: CHANGED, icon: MapPin },
+    'city.archive': { label: 'Город в архиве', tone: REMOVED, icon: Archive },
+    'city.sync': { label: 'Тарифы города сверены с Яндексом', tone: CHANGED, icon: RefreshCw },
 
     // ── Ознакомление ────────────────────────────────────────────────────
     'ack.assign': { label: 'Назначено ознакомление', tone: GRANTED, icon: UserCheck },
@@ -128,7 +132,7 @@ export const AUDIT_GROUPS = [
     { key: 'access', label: 'Доступы' },
     { key: 'structure', label: 'Структура' },
     { key: 'articles', label: 'Статьи' },
-    { key: 'places', label: 'Парки и офисы' },
+    { key: 'places', label: 'Парки, офисы и города' },
     { key: 'ack', label: 'Ознакомления' },
     { key: 'news', label: 'Новости' },
 ];
