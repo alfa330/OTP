@@ -638,35 +638,142 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
  *
  * ESCAPE ЛОВИМ В ФАЗЕ ЗАХВАТА И ГАСИМ ДАЛЬШЕ. Иначе одно нажатие закрыло бы и
  * просмотр, и карточку под ним: обработчик модалки висит на том же window.
+ * Стрелки ←/→ — по той же причине и так же.
+ *
+ * НЕСКОЛЬКО КАДРОВ И «СКАЧАТЬ» — необязательные, без них просмотр прежний.
+ * onPrev/onNext и counter дают капсулу «‹ 2 из 5 ›» внизу, как у Quick Look и
+ * «Фото»: стрелки по бокам ложились бы на сам снимок. Нет onPrev — первая
+ * кнопка серая, листание не закольцовано: на последнем кадре «вперёд» не
+ * должно молча вернуть к первому. onDownload — кнопка справа сверху: в
+ * «Задачах» просмотр заменил собой щелчок «скачать файл», и сохранить снимок
+ * должно остаться в одно касание.
+ *
+ * «НАЗАД» НА ТЕЛЕФОНЕ закрывает снимок, а не экран под ним — как у IosModal.
+ * Без своей записи в истории жест закрывал бы карточку, в которой снимок
+ * открыт, и человек терял бы и то и другое.
+ *
+ * ФОКУС ПЕРЕХОДИТ В ПРОСМОТР и возвращается туда, откуда его открыли. Иначе он
+ * оставался на плитке под затемнением: пробел или Enter снова «нажимали» её и
+ * перекидывали на первый снимок, а Tab водил по скрытым кнопкам карточки.
+ * Tab ходит по кругу внутри просмотра.
  */
-export const IosLightbox = ({ url, alt = '', onClose }) => {
+const LightboxGlyph = ({ d }) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d={d} />
+    </svg>
+);
+
+const lightboxRoundBtn = 'grid h-8 w-8 place-items-center rounded-full text-white transition '
+    + 'hover:bg-white/15 active:scale-95 disabled:pointer-events-none disabled:opacity-35';
+
+export const IosLightbox = ({
+    url, alt = '', onClose, onPrev, onNext, counter = '', onDownload, onError,
+}) => {
+    const isNarrow = useIsMobileShell();
+    const open = Boolean(url);
+    const rootRef = React.useRef(null);
+    useScreenBackGesture(isNarrow && open, onClose);
+
+    // Своя зависимость — только «открыт ли»: обработчики листания приходят
+    // новыми на каждом рендере карточки, и фокус не должен прыгать вместе с ними.
+    React.useEffect(() => {
+        if (!open) return undefined;
+        const opener = document.activeElement;
+        rootRef.current?.focus({ preventScroll: true });
+        return () => {
+            if (opener && typeof opener.focus === 'function' && document.contains(opener)) {
+                opener.focus({ preventScroll: true });
+            }
+        };
+    }, [open]);
+
     React.useEffect(() => {
         if (!url) return undefined;
         const onKey = (event) => {
-            if (event.key !== 'Escape') return;
+            if (event.key === 'Tab') {
+                const root = rootRef.current;
+                const items = root ? [...root.querySelectorAll('button:not([disabled])')] : [];
+                const at = items.indexOf(document.activeElement);
+                event.preventDefault();
+                if (!items.length) return;
+                const next = event.shiftKey
+                    ? items[at <= 0 ? items.length - 1 : at - 1]
+                    : items[at < 0 || at === items.length - 1 ? 0 : at + 1];
+                next.focus();
+                return;
+            }
+            const action = event.key === 'Escape' ? onClose
+                : event.key === 'ArrowLeft' ? onPrev
+                    : event.key === 'ArrowRight' ? onNext
+                        : null;
+            if (!action) return;
+            event.preventDefault();
             event.stopImmediatePropagation();
-            onClose?.();
+            action();
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-    }, [onClose, url]);
+    }, [onClose, onNext, onPrev, url]);
 
     if (!url || typeof document === 'undefined') return null;
+    const paged = Boolean(onPrev || onNext || counter);
+    const press = (action) => (event) => {
+        event.stopPropagation();
+        action?.();
+    };
     return createPortal(
         <div
-            className="fixed inset-0 z-[300] flex cursor-zoom-out items-center justify-center bg-slate-900/85 p-4"
+            ref={rootRef}
+            className="fixed inset-0 z-[300] flex cursor-zoom-out items-center justify-center bg-slate-900/85 p-4 outline-none"
             style={{ fontFamily: APPLE_FONT }}
             onClick={onClose}
-            role="presentation"
+            role="dialog"
+            aria-modal="true"
+            aria-label={alt || 'Просмотр фотографии'}
+            tabIndex={-1}
         >
             <img
                 src={url}
                 alt={alt}
+                onError={onError}
                 /* Щелчок по самой картинке не закрывает: её разглядывают,
                    а промах по ней — обычное дело на телефоне. */
                 onClick={(event) => event.stopPropagation()}
-                className="max-h-[86vh] w-auto max-w-[94vw] cursor-default rounded-2xl object-contain shadow-2xl"
+                className={`${paged || onDownload ? 'max-h-[calc(100dvh-144px)]' : 'max-h-[86vh]'} w-auto max-w-[94vw] cursor-default rounded-2xl object-contain shadow-2xl`}
             />
+            {onDownload && (
+                <button
+                    type="button"
+                    onClick={press(onDownload)}
+                    className="absolute right-4 top-[max(16px,env(safe-area-inset-top))] inline-flex h-9 items-center gap-1.5 rounded-full bg-white/15 px-3.5 text-[13px] font-medium text-white backdrop-blur-md transition hover:bg-white/25 active:scale-[.97]"
+                >
+                    <LightboxGlyph d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" />
+                    Скачать
+                </button>
+            )}
+            {paged && (
+                <div
+                    className="absolute bottom-[max(20px,env(safe-area-inset-bottom))] left-1/2 flex -translate-x-1/2 cursor-default items-center gap-1 rounded-full bg-white/15 p-1 text-white backdrop-blur-md"
+                    onClick={(event) => event.stopPropagation()}
+                    role="group"
+                    aria-label="Листать фотографии"
+                >
+                    <button type="button" className={lightboxRoundBtn} disabled={!onPrev}
+                        aria-label="Предыдущая фотография" onClick={press(onPrev)}>
+                        <LightboxGlyph d="M15 18l-6-6 6-6" />
+                    </button>
+                    {counter && (
+                        <span className="min-w-[56px] px-1 text-center text-[13px] font-medium tabular-nums text-white/85">
+                            {counter}
+                        </span>
+                    )}
+                    <button type="button" className={lightboxRoundBtn} disabled={!onNext}
+                        aria-label="Следующая фотография" onClick={press(onNext)}>
+                        <LightboxGlyph d="M9 18l6-6-6-6" />
+                    </button>
+                </div>
+            )}
         </div>,
         document.body,
     );

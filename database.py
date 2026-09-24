@@ -4494,6 +4494,11 @@ class Database:
             cursor.execute("ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS message_id INTEGER REFERENCES task_messages(id) ON DELETE SET NULL;")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_attachments_message ON task_attachments(message_id) WHERE message_id IS NOT NULL;")
 
+            # Миниатюра фотографии для плитки в карточке (task_photos). NULL —
+            # не картинка, картинка загружена до предпросмотра или кадр меньше
+            # миниатюры: плитка тогда показывает сам файл.
+            cursor.execute("ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS thumb_blob_path TEXT;")
+
             # ──────────────────────────────────────────────────────────────
             # СОСТАВ ИСПОЛНИТЕЛЕЙ. У задачи их может быть несколько, и права у
             # них равные: каждый берёт задачу в работу, отмечает пункты чеклиста,
@@ -56175,10 +56180,14 @@ class Database:
                 cursor.execute("""
                     INSERT INTO task_attachments (
                         task_id, file_name, content_type, file_size, file_data,
-                        storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
+                        storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by,
+                        thumb_blob_path
                     )
-                    VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s)
-                """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, created_by_id))
+                    VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s, %s)
+                """, (
+                    task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, created_by_id,
+                    (attachment.get('thumb_blob_path') or '').strip() or None
+                ))
 
         return {
             "id": task_id,
@@ -56973,12 +56982,14 @@ class Database:
                 cursor.execute("""
                     INSERT INTO task_attachments (
                         task_id, file_name, content_type, file_size, file_data,
-                        storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by, message_id
+                        storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by,
+                        thumb_blob_path, message_id
                     )
-                    VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s, %s)
+                    VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s, %s, %s)
                 """, (
                     task_id, file_name, content_type, int(attachment.get('file_size') or 0),
-                    gcs_bucket, gcs_blob_path, requester_id, message_id
+                    gcs_bucket, gcs_blob_path, requester_id,
+                    (attachment.get('thumb_blob_path') or '').strip() or None, message_id
                 ))
 
             if kind_norm == 'answer':
@@ -57277,7 +57288,8 @@ class Database:
                     id, file_name,
                     COALESCE(storage_type, 'db'),
                     gcs_bucket, gcs_blob_path,
-                    COALESCE(attachment_kind, 'initial')
+                    COALESCE(attachment_kind, 'initial'),
+                    thumb_blob_path
                 FROM task_attachments
                 WHERE task_id = %s
                 ORDER BY id ASC
@@ -57300,7 +57312,9 @@ class Database:
                 "storage_type": row[2],
                 "gcs_bucket": row[3],
                 "gcs_blob_path": row[4],
-                "attachment_kind": row[5]
+                "attachment_kind": row[5],
+                # Миниатюра фотографии уходит из бакета вместе с кадром.
+                "thumb_blob_path": row[6]
             }
             for row in attachment_rows
         ]
@@ -58705,10 +58719,15 @@ class Database:
                     cursor.execute("""
                         INSERT INTO task_attachments (
                             task_id, file_name, content_type, file_size, file_data,
-                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
+                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by,
+                            thumb_blob_path
                         )
-                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, %s, %s)
-                    """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, attachment_kind, requester_id))
+                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, %s, %s, %s)
+                    """, (
+                        task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path,
+                        attachment_kind, requester_id,
+                        (attachment.get('thumb_blob_path') or '').strip() or None
+                    ))
 
             return {
                 "task_id": task_id,
@@ -61647,6 +61666,54 @@ class Database:
         return [{'id': int(row[0]), 'name': row[1] or '', 'telegram_id': int(row[2]),
                  'mode': row[3] or 'always'}
                 for row in rows if row[2] is not None]
+
+    def list_task_photo_attachments_for_requester(self, task_id, requester_id, requester_role,
+                                                  content_types):
+        """Картинки задачи для плиток карточки: файлы постановки, результата и уточнений.
+
+        Доступ — ровно как у скачивания одного файла (get_task_attachment_for_requester):
+        кто видит задачу или читает её как коллега-СВ, тот видит и её картинки.
+        None — задачи нет; PermissionError — задача чужая.
+        """
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        types = [str(item).lower() for item in (content_types or [])]
+        if not types:
+            return []
+
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT created_by, requested_by_id FROM tasks WHERE id = %s", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            created_by = row[0]
+            assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
+            if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, row[1]):
+                if not self._task_observable_by_colleague_tx(cursor, role, requester_id, created_by):
+                    raise PermissionError("TASK_FORBIDDEN")
+
+            # Тип сравнивается без параметров («image/png; charset=binary»): так
+            # же его читает фронт, иначе плитка и ответ разошлись бы.
+            cursor.execute("""
+                SELECT id, content_type, gcs_bucket, gcs_blob_path, thumb_blob_path
+                FROM task_attachments
+                WHERE task_id = %s
+                  AND COALESCE(storage_type, 'db') = 'gcs'
+                  AND gcs_bucket IS NOT NULL AND gcs_blob_path IS NOT NULL
+                  AND lower(trim(split_part(COALESCE(content_type, ''), ';', 1))) = ANY(%s)
+                ORDER BY id ASC
+            """, (task_id, types))
+            return [
+                {
+                    "id": item[0],
+                    "content_type": item[1],
+                    "gcs_bucket": item[2],
+                    "gcs_blob_path": item[3],
+                    "thumb_blob_path": item[4],
+                }
+                for item in cursor.fetchall()
+            ]
 
 
 # Initialize database

@@ -122,12 +122,13 @@ def _resample(Image):
     return getattr(Image, 'Resampling', Image).LANCZOS
 
 
-def _fit(Image, img):
-    """Ужимает длинную сторону до MAX_SIDE. Кадр меньше отдаётся как есть."""
+def _fit(Image, img, max_side=MAX_SIDE):
+    """Ужимает длинную сторону до max_side. Кадр меньше (или max_side=None)
+    отдаётся как есть."""
     side = max(img.size)
-    if side <= MAX_SIDE:
+    if max_side is None or side <= max_side:
         return img
-    scale = float(MAX_SIDE) / float(side)
+    scale = float(max_side) / float(side)
     size = (max(1, int(round(img.width * scale))), max(1, int(round(img.height * scale))))
     return img.resize(size, _resample(Image))
 
@@ -148,14 +149,16 @@ def _encode(img, icc=None, **options):
     return out.getvalue()
 
 
-def _still(Image, ImageOps, img, kind):
+def _still(Image, ImageOps, img, kind, max_side=MAX_SIDE):
     """Один кадр: (картинка после подгонки, байты WebP)."""
     # У JPEG просим декодер сразу отдать уменьшенный кадр. Это не замена
     # ресайзу ниже, а способ не разворачивать в памяти то, что всё равно будет
     # выброшено: libjpeg умеет распаковывать в 1/2, 1/4, 1/8 размера, и на
     # фотографии в 8000 пикселей это разница между 256 и 64 МБ. Для остальных
-    # форматов вызов — пустая операция.
-    img.draft('RGB', (MAX_SIDE, MAX_SIDE))
+    # форматов вызов — пустая операция. Без предела стороны (max_side=None)
+    # уменьшать при распаковке нельзя: кадр нужен целиком.
+    if max_side is not None:
+        img.draft('RGB', (max_side, max_side))
     if img.width * img.height > MAX_PIXELS:
         logging.info('wiki: кадр %dx%d не пережимаем, кладём как есть',
                      img.width, img.height)
@@ -185,7 +188,7 @@ def _still(Image, ImageOps, img, kind):
         img = img.convert('RGBA')
     elif img.mode not in ('RGB', 'RGBA'):
         img = img.convert('RGBA' if 'A' in img.getbands() else 'RGB')
-    img = _fit(Image, img)
+    img = _fit(Image, img, max_side)
 
     if kind not in SCREEN_TYPES:
         return img, _encode(img, icc, quality=_LOSSY_QUALITY, method=6)
@@ -200,7 +203,7 @@ def _still(Image, ImageOps, img, kind):
     return img, best
 
 
-def _animated(Image, ImageSequence, src):
+def _animated(Image, ImageSequence, src, max_side=MAX_SIDE):
     """Анимация в анимированный WebP. None — она слишком велика (см. ниже).
 
     Кадры пишутся БЕЗ ПОТЕРЬ, и это не перестраховка. Анимация приезжает в вики
@@ -225,7 +228,7 @@ def _animated(Image, ImageSequence, src):
         # требует одинаковых габаритов у всей анимации, а подгонка каждого
         # кадра по его собственной длинной стороне дала бы разные размеры и
         # отказ кодировщика уже в конце работы.
-        images.append(_fit(Image, shot) if not images
+        images.append(_fit(Image, shot, max_side) if not images
                       else (shot if shot.size == images[0].size
                             else shot.resize(images[0].size, _resample(Image))))
         durations.append(int(frame.info.get('duration') or 80))
@@ -245,12 +248,25 @@ def _animated(Image, ImageSequence, src):
     return images[0], data
 
 
-def to_webp(data, content_type=''):
+def to_webp(data, content_type='', *, keep_smaller=True, max_side=MAX_SIDE):
     """Картинка в WebP: (байты, 'image/webp', ширина, высота).
 
     None — переводить нечего (не картинка, SVG, битый файл) или нечем (нет
     Pillow). Что делать с этим, решает вызывающий: отказать в загрузке из-за
     конвертера хуже, чем положить файл исходным форматом.
+
+    keep_smaller=False — формат важнее веса: WebP возвращается и тогда, когда
+    вышел тяжелее исходника (правило «пережали, а стало тяжелее» ниже не
+    действует). Так хранит фотографии раздел «Задачи» (task_photos): владелец
+    поставил правило «фото лежат в WebP» без оговорок, а самый частый источник
+    там — уже пережатый снимок из Telegram, на котором правило веса оставляло
+    бы JPEG почти всегда.
+
+    max_side=None — без ужатия. MAX_SIDE подобран под колонку статьи, а у
+    задачи переведённый файл и есть вложение: скачивают именно его, и длинный
+    скриншот, ужатый до 2560 по длинной стороне, стал бы нечитаемой полоской.
+    Память по-прежнему бережёт MAX_PIXELS, а кадр больше предела WebP (16383
+    по стороне) кодировщик не примет — тогда None и файл ложится как есть.
     """
     pil = _pil()
     if not pil or not data:
@@ -277,12 +293,12 @@ def to_webp(data, content_type=''):
             # Уже WebP и в габаритах — отдаём ИСХОДНЫЕ байты. Нужны от него
             # здесь только размеры: колонки width/height в wiki_files есть с
             # самого начала и до сих пор заполнялись значением NULL.
-            if kind == 'image/webp' and max(width, height) <= MAX_SIDE:
+            if kind == 'image/webp' and (max_side is None or max(width, height) <= max_side):
                 return data, 'image/webp', width, height
 
             animated = kind in ANIMATED_TYPES and getattr(src, 'n_frames', 1) > 1
-            result = (_animated(Image, ImageSequence, src) if animated
-                      else _still(Image, ImageOps, src, kind))
+            result = (_animated(Image, ImageSequence, src, max_side) if animated
+                      else _still(Image, ImageOps, src, kind, max_side))
             if not result:
                 return None
             image, encoded = result
@@ -294,7 +310,8 @@ def to_webp(data, content_type=''):
             # (потери накладываются на потери). Замер: JPEG q=50 весом 218 КБ
             # превращался в WebP на 308 КБ. Условие про размер обязательно —
             # у ужатого кадра сравнивать не с чем, там выигрыш даёт сам ресайз.
-            if (image.width, image.height) == (width, height) and len(encoded) >= len(data):
+            if (keep_smaller and (image.width, image.height) == (width, height)
+                    and len(encoded) >= len(data)):
                 logging.info('wiki: WebP вышел не меньше исходника (%d против %d), '
                              'оставляем %s', len(encoded), len(data), kind)
                 return data, kind, width, height

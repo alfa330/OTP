@@ -4203,6 +4203,11 @@ def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachm
             data = {
                 'chat_id': int(chat_id)
             }
+            if content_type.lower().startswith('image/webp'):
+                # Фото задач теперь лежат в WebP (task_photos), а .webp,
+                # присланный документом, Telegram распознаёт и показывает
+                # СТИКЕРОМ — без подписи и без кнопки «сохранить файл».
+                data['disable_content_type_detection'] = 'true'
             if idx == 1:
                 task_subject_html = _escape_telegram_html(task_subject or 'Без названия', 180)
                 if task_link:
@@ -5020,6 +5025,15 @@ def _delete_task_attachment_blobs_from_gcs(attachments):
         except Exception as delete_error:
             warnings.append(f"Failed to delete '{file_name}' from GCS: {delete_error}")
 
+        # Миниатюра фотографии — служебный файл: человеку о ней знать незачем,
+        # поэтому её осечка в предупреждения не попадает, только в журнал.
+        thumb_path = (attachment.get('thumb_blob_path') or '').strip()
+        if thumb_path:
+            try:
+                gcs_client.bucket(bucket_name).blob(thumb_path).delete()
+            except Exception:
+                logging.warning("Failed to delete task photo thumbnail %s", thumb_path, exc_info=True)
+
     return warnings
 
 
@@ -5049,6 +5063,22 @@ def _upload_task_attachments_to_gcs(files, stage='initial'):
 
         safe_name = secure_filename(file_storage.filename) or f'attachment_{idx + 1}'
         content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
+
+        # Картинка уходит в бакет WebP'ом, рядом — миниатюра для плитки в
+        # карточке (task_photos). Всё, что не перевелось, ложится как есть:
+        # отказать во вложении из-за кодека хуже, чем сохранить исходник.
+        photo = None
+        try:
+            import task_photos
+            photo = task_photos.prepare(file_data, filename=file_storage.filename,
+                                        content_type=content_type)
+        except Exception:
+            logging.exception("Task photo conversion failed, storing the file as is")
+        if photo:
+            file_data = photo['data']
+            content_type = photo['content_type']
+            safe_name = photo['file_name']
+
         blob_path = (
             f"{upload_prefix}tasks/{stage}/"
             f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
@@ -5059,13 +5089,26 @@ def _upload_task_attachments_to_gcs(files, stage='initial'):
         blob.upload_from_string(file_data, content_type=content_type)
         uploaded_blob_paths.append(blob_path)
 
+        # Миниатюра не обязательна: без неё плитка покажет полный кадр, поэтому
+        # её осечка не отменяет загрузку вложения.
+        thumb_path = None
+        if photo and photo.get('thumb'):
+            candidate = task_photos.thumb_blob_path(blob_path)
+            try:
+                gcs_bucket.blob(candidate).upload_from_string(photo['thumb'], content_type='image/webp')
+                uploaded_blob_paths.append(candidate)
+                thumb_path = candidate
+            except Exception:
+                logging.warning("Task photo thumbnail upload failed", exc_info=True)
+
         attachments.append({
             "file_name": safe_name,
             "content_type": content_type,
             "file_size": len(file_data),
             "storage_type": "gcs",
             "gcs_bucket": bucket_name,
-            "gcs_blob_path": blob_path
+            "gcs_blob_path": blob_path,
+            "thumb_blob_path": thumb_path
         })
 
     return attachments, uploaded_blob_paths, gcs_bucket
@@ -25969,6 +26012,39 @@ def download_task_attachment(attachment_id):
     except Exception as e:
         logging.error(f"Error in download_task_attachment: {e}")
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/tasks/<int:task_id>/photos', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_task_photo_previews(task_id):
+    """Адреса картинок задачи для плиток карточки — одним запросом на карточку.
+
+    Подписанные ссылки, а не байты через API: <img> на другом домене не шлёт
+    заголовок авторизации, а прокси означал бы по запросу на каждую плитку.
+    Подробности — в шапке task_photos.
+    """
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        import task_photos
+        try:
+            rows = db.list_task_photo_attachments_for_requester(
+                task_id=task_id,
+                requester_id=requester_id,
+                requester_role=getattr(g, 'effective_task_role', requester[3]),
+                content_types=task_photos.PREVIEW_TYPES,
+            )
+        except PermissionError:
+            return jsonify({"error": "You do not have access to this task"}), 403
+        if rows is None:
+            return jsonify({"error": "Task not found"}), 404
+
+        return jsonify({"photos": task_photos.sign_previews(get_gcs_client, rows)}), 200
+    except Exception as e:
+        logging.error(f"Error in get_task_photo_previews: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key

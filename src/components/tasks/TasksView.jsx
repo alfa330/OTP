@@ -63,6 +63,9 @@ import {
   isActionNeedSeen,
   taskActionNeed,
 } from './taskActionNeeds';
+import { IosLightbox } from '../ui/ios';
+import { isPreviewablePhoto, splitTaskFiles } from './taskPhotos';
+import useTaskPhotoPreviews from './useTaskPhotoPreviews';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -1134,6 +1137,27 @@ styleTag.textContent = `
     max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tv-file-btn:hover { background: var(--border); color: var(--ink); }
+  /* Картинки во вложениях — квадратные плитки с обрезкой по центру, как в
+     «Сообщениях». Пока адрес не пришёл, плитка стоит пустой: место занято, и
+     кнопки файлов ниже не прыгают. Без мерцания-«скелета» — оно было бы шумом
+     на долю секунды. Цвета — переменные раздела, поэтому тёмная тема своя. */
+  .tv-photo-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tv-photo-grid + .tv-file-list { margin-top: 8px; }
+  .tv-photo-tile {
+    display: block; flex: none; width: 76px; height: 76px; padding: 0;
+    border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border); background: var(--surface-2);
+    cursor: zoom-in; transition: transform .12s ease, border-color .12s ease;
+  }
+  .tv-photo-tile img {
+    display: block; width: 100%; height: 100%; object-fit: cover;
+    -webkit-user-drag: none; user-select: none;
+  }
+  .tv-photo-tile:hover:not(:disabled) { border-color: var(--border-strong); }
+  .tv-photo-tile:active:not(:disabled) { transform: scale(.97); }
+  .tv-photo-tile:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tv-photo-tile:disabled { cursor: default; }
+  .tv-clar-bubble .tv-photo-tile { width: 64px; height: 64px; border-radius: 10px; }
 
   .tv-deadline-chip {
     display: inline-flex;
@@ -3518,6 +3542,60 @@ const FileIcon = () => (
     <path d="M9 1v5h5" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
   </svg>
 );
+/* Файлы одного блока карточки: картинки — плитками, как вложения в «Сообщениях»
+   (щелчок открывает снимок во весь экран), остальное — прежними кнопками
+   «скачать». Картинка, для которой адреса нет, остаётся кнопкой (splitTaskFiles).
+   Имени у плитки нет намеренно: «photo.webp» под каждой картинкой — шум, а
+   имя файла видно в просмотре по кнопке «Скачать». */
+const TaskFileGroup = ({ attachments, photoState, onOpenPhoto, onDownload, fileBtnStyle }) => {
+  const { photos, files } = splitTaskFiles(
+    attachments,
+    photoState?.previews,
+    photoState ? photoState.settled : true,
+    photoState?.broken
+  );
+  const openable = photos.filter((item) => item.preview).map((item) => item.attachment);
+  return (
+    <>
+      {photos.length > 0 && (
+        <div className="tv-photo-grid">
+          {photos.map(({ attachment, preview }) => (
+            <button
+              key={attachment.id}
+              type="button"
+              className="tv-photo-tile"
+              disabled={!preview}
+              aria-label={preview ? 'Открыть фотографию' : 'Фотография загружается'}
+              onClick={() => onOpenPhoto?.(openable, openable.indexOf(attachment))}
+            >
+              {preview && (
+                <img
+                  src={preview.thumbUrl}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  draggable={false}
+                  onError={() => photoState?.markBroken?.(attachment.id)}
+                />
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {files.length > 0 && (
+        <div className="tv-file-list">
+          {files.map((att) => (
+            <button key={att.id} type="button" className="tv-file-btn" style={fileBtnStyle}
+              onClick={() => onDownload?.(att)}>
+              <FileIcon />{att.file_name}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+};
+const RESULT_FILE_BTN_STYLE = { background: '#e0e7ff', borderColor: '#c7d2fe', color: '#3730a3' };
 const ChevronRight = () => (
   <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
     <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
@@ -5105,6 +5183,8 @@ const TaskClarificationsBlock = ({
   onSubmitMessage,
   onWithdrawRequest,
   downloadAttachment,
+  photoState,
+  onOpenPhoto,
 }) => {
   const [composerKind, setComposerKind] = useState('');
   const [draftBody, setDraftBody] = useState('');
@@ -5187,9 +5267,12 @@ const TaskClarificationsBlock = ({
               // сверяем автора с множеством, а не с одним человеком.
               const side = authorId && assigneeIdSet.has(authorId) ? 'is-assignee' : 'is-owner';
               const isOpenRequest = message.kind === 'request' && !message.resolved_at;
+              // Пузырь с фото на телефоне получает ширину заранее (tasks-mobile.css):
+              // иначе он сжат по подписи, и плитки прыгают, когда приедет картинка.
+              const hasPhotos = Array.isArray(message.attachments) && message.attachments.some(isPreviewablePhoto);
               return (
                 <div key={message.id} className={`tv-clar-item ${side}`}>
-                  <div className={`tv-clar-bubble ${isOpenRequest ? 'is-open' : ''}`}>
+                  <div className={`tv-clar-bubble ${isOpenRequest ? 'is-open' : ''} ${hasPhotos ? 'has-photos' : ''}`}>
                     <span className="tv-clar-top">
                       <span className="tv-clar-kind">
                         {TASK_MESSAGE_KIND_LABEL[message.kind] || 'Уточнение'}
@@ -5199,18 +5282,12 @@ const TaskClarificationsBlock = ({
                     </span>
                     {message.body && <p className="tv-clar-body">{message.body}</p>}
                     {Array.isArray(message.attachments) && message.attachments.length > 0 && (
-                      <div className="tv-file-list">
-                        {message.attachments.map((att) => (
-                          <button
-                            key={att.id}
-                            type="button"
-                            className="tv-file-btn"
-                            onClick={() => downloadAttachment?.(att)}
-                          >
-                            <FileIcon />{att.file_name}
-                          </button>
-                        ))}
-                      </div>
+                      <TaskFileGroup
+                        attachments={message.attachments}
+                        photoState={photoState}
+                        onOpenPhoto={onOpenPhoto}
+                        onDownload={downloadAttachment}
+                      />
                     )}
                     {message.kind === 'request' && message.resolved_at && (
                       <span className="tv-clar-resolved">
@@ -5294,7 +5371,7 @@ const TaskDrawer = React.memo(({
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
-  onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false,
+  onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false, loadTaskPhotos,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -5330,6 +5407,25 @@ const TaskDrawer = React.memo(({
   );
   // Лист «⋯» с действиями над задачей — только на телефоне.
   const [actionsOpen, setActionsOpen] = useState(false);
+
+  /* Картинки карточки: адреса одним запросом на карточку, просмотр во весь
+     экран. Листается внутри того блока, из которого открыли: снимки постановки
+     и снимки результата — разные истории, и «вперёд» из постановки не должно
+     молча уводить в результат. */
+  const photoState = useTaskPhotoPreviews(task, loadTaskPhotos);
+  const [photoView, setPhotoView] = useState(null);
+  const openPhoto = useCallback((items, index) => {
+    if (Array.isArray(items) && index >= 0 && index < items.length) setPhotoView({ items, index });
+  }, []);
+  const closePhoto = useCallback(() => setPhotoView(null), []);
+  // Другая задача в той же карточке — снимок прежней не должен остаться поверх.
+  useEffect(() => { setPhotoView(null); }, [task?.id]);
+  const viewedPhoto = photoView ? photoView.items[photoView.index] : null;
+  const viewedPhotoUrl = viewedPhoto ? photoState.previews[Number(viewedPhoto.id)]?.url || '' : '';
+  const photoCount = photoView ? photoView.items.length : 0;
+  const stepPhoto = (delta) => () => setPhotoView((prev) => (
+    prev ? { ...prev, index: Math.min(prev.items.length - 1, Math.max(0, prev.index + delta)) } : prev
+  ));
 
   // ESC key handler
   useEffect(() => {
@@ -5540,13 +5636,12 @@ const TaskDrawer = React.memo(({
               <hr className="tv-divider" />
               <div>
                 <p className="tv-block-label">Файлы задачи</p>
-                <div className="tv-file-list">
-                  {attachments.map(att => (
-                    <button key={att.id} className="tv-file-btn" onClick={() => downloadAttachment(att)}>
-                      <FileIcon />{att.file_name}
-                    </button>
-                  ))}
-                </div>
+                <TaskFileGroup
+                  attachments={attachments}
+                  photoState={photoState}
+                  onOpenPhoto={openPhoto}
+                  onDownload={downloadAttachment}
+                />
               </div>
             </>
           )}
@@ -5560,6 +5655,8 @@ const TaskDrawer = React.memo(({
             onSubmitMessage={onSubmitTaskMessage}
             onWithdrawRequest={onWithdrawInfoRequest}
             downloadAttachment={downloadAttachment}
+            photoState={photoState}
+            onOpenPhoto={openPhoto}
           />
 
           {checklist.length > 0 && (
@@ -5624,15 +5721,13 @@ const TaskDrawer = React.memo(({
               {compAttachments.length > 0 && (
                 <div className="tv-completion-block" style={{ marginTop: 12 }}>
                   <p className="tv-block-label">Файлы результата</p>
-                  <div className="tv-file-list">
-                    {compAttachments.map(att => (
-                      <button key={att.id} className="tv-file-btn"
-                        style={{ background: '#e0e7ff', borderColor: '#c7d2fe', color: '#3730a3' }}
-                        onClick={() => downloadAttachment(att)}>
-                        <FileIcon />{att.file_name}
-                      </button>
-                    ))}
-                  </div>
+                  <TaskFileGroup
+                    attachments={compAttachments}
+                    photoState={photoState}
+                    onOpenPhoto={openPhoto}
+                    onDownload={downloadAttachment}
+                    fileBtnStyle={RESULT_FILE_BTN_STYLE}
+                  />
                 </div>
               )}
             </>
@@ -5688,6 +5783,20 @@ const TaskDrawer = React.memo(({
             })}
           </div>
         )}
+
+        {/* Портал в body: над карточкой и на компьютере, и на экране телефона. */}
+        <IosLightbox
+          url={viewedPhotoUrl}
+          alt={viewedPhoto?.file_name || ''}
+          onClose={closePhoto}
+          counter={photoCount > 1 ? `${photoView.index + 1} из ${photoCount}` : ''}
+          onPrev={photoView && photoView.index > 0 ? stepPhoto(-1) : undefined}
+          onNext={photoView && photoView.index < photoCount - 1 ? stepPhoto(1) : undefined}
+          onDownload={viewedPhoto ? () => downloadAttachment(viewedPhoto) : undefined}
+          /* Ссылка истекла, пока карточка была открыта: адреса перезапрашиваются
+             один раз (useTaskPhotoPreviews.refresh), и снимок подменяется сам. */
+          onError={photoState.refresh}
+        />
       </>
   );
 
@@ -8023,6 +8132,15 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders, notify]);
 
+  /* Адреса картинок карточки — один запрос на карточку (useTaskPhotoPreviews). */
+  const loadTaskPhotos = useCallback(async (taskId) => {
+    const res = await axios.get(
+      `${apiBaseUrl}/api/tasks/${taskId}/photos`,
+      { headers: buildHeaders() }
+    );
+    return Array.isArray(res?.data?.photos) ? res.data.photos : [];
+  }, [apiBaseUrl, buildHeaders]);
+
   /* ── Action buttons ── */
   const getActionButtons = useCallback((task) => {
     return buildTaskActionButtons(task, currentUserId, currentUserRole);
@@ -8563,6 +8681,7 @@ const TasksView = ({
           openStatusModal={openStatusModal}
           updateStatus={updateStatus}
           downloadAttachment={downloadAttachment}
+          loadTaskPhotos={loadTaskPhotos}
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}

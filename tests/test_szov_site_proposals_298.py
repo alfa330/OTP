@@ -216,8 +216,13 @@ class TaskColleagueObserverTests(unittest.TestCase):
         self.assertEqual(colleague.count("%s"), 1)
 
     def test_colleague_gets_reading_not_actions(self):
-        # Чтение открыто в трёх местах: журнал отчётов, лента уточнений, файлы.
-        self.assertEqual(self.database.count("self._task_observable_by_colleague_tx("), 3)
+        # Чтение открыто в четырёх местах: журнал отчётов, лента уточнений, файлы
+        # и плитки фотографий карточки (те же файлы, только адресами для <img>).
+        self.assertEqual(self.database.count("self._task_observable_by_colleague_tx("), 4)
+        self.assertIn(
+            "self._task_observable_by_colleague_tx(",
+            _between(self.database, "    def list_task_photo_attachments_for_requester(", "\n# Initialize database"),
+        )
         self.assertEqual(self.database.count("allow_observer=True"), 2)
         self.assertIn("allow_observer=True", _between(self.database, "    def get_task_reports(", "\n    def "))
         self.assertIn("allow_observer=True", _between(self.database, "    def get_task_messages(", "\n    def "))

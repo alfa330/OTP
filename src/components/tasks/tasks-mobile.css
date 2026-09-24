@@ -743,6 +743,23 @@ body.mobile-shell .tv-root .tv-drawer-screen .tv-file-btn {
     font-size: 13px;
 }
 
+/* Плитки фотографий — сеткой в четыре колонки на всю ширину, как в «Фото»:
+   76 px с компьютера оставляли бы справа пустую полосу и мелкую цель для
+   пальца. Квадрат держит aspect-ratio, а не высота: ширина колонки зависит от
+   экрана и от того, в пузыре уточнения плитка или в блоке файлов. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-photo-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-photo-tile {
+    width: auto;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    border-radius: 10px;
+}
+
 body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-body .tv-btn {
     min-height: 38px;
 }
@@ -1056,4 +1073,11 @@ body.mobile-shell .tv-root .tb-timeline-name {
 body.mobile-shell .tv-root .tb-timeline-rows {
     max-height: none;
     overflow: visible;
+}
+
+/* Пузырь уточнения с фото — сразу во всю свою ширину. Без этого он сжат по
+   подписи («Дополнение · Имя · время»), колонки сетки выходят по 40 px, а когда
+   приезжает миниатюра, её собственная ширина распирает пузырь и плитки прыгают. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-clar-bubble.has-photos {
+    width: 85%;
 }
