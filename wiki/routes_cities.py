@@ -89,8 +89,10 @@ def register(bp, wiki_route, db, log_ip):
 
     def _taken(status):
         if status == 'archived':
-            return jsonify({"error": "Этот город уже есть в архиве — включите «Архив» "
-                                     "и верните его оттуда",
+            # Только для переименования: добавление архивного города
+            # возвращает его карточку (см. POST /cities).
+            return jsonify({"error": "Этот город в архиве — добавьте его через «+ Город», "
+                                     "и вернётся его прежняя карточка",
                             "code": "WIKI_CITY_ARCHIVED"}), 409
         return jsonify({"error": "Такой город уже есть в списке",
                         "code": "WIKI_CITY_EXISTS"}), 409
@@ -116,14 +118,9 @@ def register(bp, wiki_route, db, log_ip):
             return error
 
         if request.method == 'GET':
-            can_manage = _may_edit(ctx)
-            # Архив — только тому, кто правит, и только по просьбе: читателю
-            # убранный город не нужен вовсе, а управляющему мешал бы в списке.
-            show_archived = can_manage and request.args.get('archived') in ('1', 'true')
             return jsonify({
-                'items': wiki_cities.list_cities(cursor, space_id=space_id,
-                                                 include_archived=show_archived),
-                'can_manage': can_manage,
+                'items': wiki_cities.list_cities(cursor, space_id=space_id),
+                'can_manage': _may_edit(ctx),
             })
 
         if not _may_edit(ctx):
@@ -135,9 +132,27 @@ def register(bp, wiki_route, db, log_ip):
             return _bad(field_error)
         if not fields.get('name'):
             return jsonify({"error": "Укажите город"}), 400
-        taken = wiki_cities.name_taken(cursor, fields['name'], space_id=space_id)
-        if taken:
-            return _taken(taken)
+        found = wiki_cities.find_by_name(cursor, fields['name'], space_id=space_id)
+        if found and found[1] == 'active':
+            return _taken(found[1])
+        if found:
+            # Город уже был и лежит в архиве. Своего переключателя архива у
+            # вкладки нет, поэтому «добавить снова» и есть возврат: та же
+            # карточка со всем, что в неё вписывали, а не вторая пустая рядом.
+            # Поля формы не применяем — они пустые у нового города и стёрли бы
+            # прежние комиссии и услуги; править — уже в открытой карточке.
+            city_id = found[0]
+            wiki_cities.update_city(cursor, city_id, {'status': 'active'},
+                                    space_id=space_id, updated_by=ctx['user_id'])
+            queries.log_action(cursor, actor_id=ctx['user_id'], action='city.restore',
+                               entity_type='city', entity_id=city_id,
+                               details={'name': fields['name']}, ip_address=log_ip())
+            return jsonify({
+                "id": city_id,
+                "restored": True,
+                "sync": None,
+                "city": wiki_cities.get_city(cursor, city_id, space_id=space_id),
+            })
 
         city_id = wiki_cities.create_city(cursor, fields=fields,
                                           created_by=ctx['user_id'], space_id=space_id)
@@ -188,10 +203,10 @@ def register(bp, wiki_route, db, log_ip):
         if 'name' in fields:
             if not fields['name']:
                 return jsonify({"error": "Название города не может быть пустым"}), 400
-            taken = wiki_cities.name_taken(cursor, fields['name'], exclude_id=city_id,
-                                           space_id=space_id)
-            if taken:
-                return _taken(taken)
+            found = wiki_cities.find_by_name(cursor, fields['name'], exclude_id=city_id,
+                                             space_id=space_id)
+            if found:
+                return _taken(found[1])
         if not fields:
             return jsonify({"error": "Нечего обновлять"}), 400
 

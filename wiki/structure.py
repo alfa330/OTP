@@ -1001,7 +1001,8 @@ AUDIT_GROUPS = {
                'office.create', 'office.update', 'office.archive',
                'office.day.set', 'office.day.clear',
                'office.closure.set', 'office.closure.clear',
-               'city.create', 'city.update', 'city.archive', 'city.sync'),
+               'city.create', 'city.update', 'city.archive', 'city.restore',
+               'city.sync'),
     'ack': ('ack.assign', 'ack.confirm'),
     # Новости пишут в этот же журнал (news/audit.py: AUDIT_ACTIONS) — просьба
     # владельца 23.09.2026: «чтобы при удалении можно было увидеть, кто это

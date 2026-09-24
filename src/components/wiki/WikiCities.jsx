@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { Loader2, Map as MapIcon, Plus, Search } from 'lucide-react';
 import {
-    iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal, IosToggle,
+    iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal,
 } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useStableCallback from './useStableCallback';
@@ -55,7 +55,6 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
     const [canManage, setCanManage] = useState(false);
     const [loading, setLoading] = useState(true);
     const [query, setQuery] = useState('');
-    const [showArchived, setShowArchived] = useState(false);
     const [selectedId, setSelectedId] = useState(() => readSelected(spaceId));
     const [details, setDetails] = useState({});
     const [detailLoading, setDetailLoading] = useState(false);
@@ -75,9 +74,7 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
     const load = useCallback(() => {
         setLoading(true);
         Promise.all([
-            axios.get(`${base}/cities`, {
-                ...req, params: { ...req.params, archived: showArchived ? 1 : undefined },
-            }),
+            axios.get(`${base}/cities`, req),
             axios.get(`${base}/offices`, req),
         ])
             .then(([cityResponse, officeResponse]) => {
@@ -87,7 +84,7 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить города'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, req, showArchived, toast]);
+    }, [base, req, toast]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -148,7 +145,7 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
             const merged = exists
                 ? list.map((item) => (item.id === city.id ? { ...item, ...city } : item))
                 : [...list, city];
-            return merged.filter((item) => showArchived || item.status === 'active');
+            return merged.filter((item) => item.status === 'active');
         });
     };
 
@@ -180,7 +177,10 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
                 absorb(city);
                 if (city && !draft.id) select(city);
                 setDraft(null);
-                toast(draft.id ? 'Город обновлён' : 'Город добавлен', 'success');
+                /* Город из архива возвращается той же карточкой — со всем, что в
+                   неё вписывали (routes_cities: POST на архивное название). */
+                toast(r.data?.restored ? 'Город возвращён из архива — с прежней карточкой'
+                    : draft.id ? 'Город обновлён' : 'Город добавлен', 'success');
                 if (r.data?.sync) reportSync(r.data.sync);
             })
             .catch((e) => toast(errText(e, 'Не удалось сохранить'), 'error'))
@@ -204,14 +204,6 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
                 load();
             })
             .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
-            .finally(() => setBusy(false));
-    };
-
-    const restore = (city) => {
-        setBusy(true);
-        axios.patch(`${base}/cities/${city.id}`, { status: 'active' }, req)
-            .then((r) => { absorb(r.data?.city); toast('Город возвращён из архива', 'success'); })
-            .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
     };
 
@@ -240,7 +232,6 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
             onEdit={(city) => { setPhoneOpen(false); openEditor(city); }}
             onSync={sync}
             onArchive={archive}
-            onRestore={restore}
             onOpenOffice={(office) => { setPhoneOpen(false); setOfficeTarget(office); }}
         />
     );
@@ -273,9 +264,6 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
                                         style={{ background: color || '#e2e8f0' }}
                                     />
                                     <span className="min-w-0 flex-1 truncate">{city.name}</span>
-                                    {city.status === 'archived' && (
-                                        <span className="text-[11px] font-medium text-amber-600">архив</span>
-                                    )}
                                 </button>
                             </li>
                         );
@@ -297,12 +285,6 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
                     </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
-                    {canManage && (
-                        <label className="flex items-center gap-2 text-[12.5px] text-slate-500">
-                            Архив
-                            <IosToggle checked={showArchived} onChange={setShowArchived} />
-                        </label>
-                    )}
                     {canManage && (
                         <button type="button" className={iosBtnPrimary} onClick={() => openEditor(null)}>
                             <Plus size={15} /> Город

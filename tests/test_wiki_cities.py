@@ -322,7 +322,7 @@ class CitySqlScopeTest(unittest.TestCase):
         for call, rows in (
             (lambda c: wiki_cities.list_cities(c, space_id=SPACE), []),
             (lambda c: wiki_cities.get_city(c, 3, space_id=SPACE), []),
-            (lambda c: wiki_cities.name_taken(c, 'Алматы', space_id=SPACE), []),
+            (lambda c: wiki_cities.find_by_name(c, 'Алматы', space_id=SPACE), []),
             (lambda c: wiki_cities.own_office(c, 5, space_id=SPACE), []),
             (lambda c: wiki_cities.update_city(c, 3, {'note': 'x'}, space_id=SPACE), []),
             (lambda c: wiki_cities.store_tariffs(c, 3, error='нет ответа', space_id=SPACE), []),
@@ -499,12 +499,35 @@ class CityRouteTest(unittest.TestCase):
         inserts = [c for c in cursor.execute.call_args_list if 'INSERT INTO wiki_cities' in str(c)]
         self.assertEqual(inserts, [])
 
-    def test_archived_name_says_where_to_look(self):
+    def test_adding_an_archived_city_brings_its_card_back(self):
+        """Переключателя архива у вкладки нет (решение владельца 24.09.2026):
+        добавить город снова — единственный путь назад, и он обязан вернуть ту
+        же карточку, а не завести вторую пустую рядом."""
         client, cursor = self.build([12])
-        cursor.fetchone.return_value = ('archived',)
-        response = client.post('/api/wiki/cities', json={'name': 'Кызылорда'})
+        cursor.fetchone.side_effect = [(25, 'archived')] + [None] * 10
+        response = client.post('/api/wiki/cities', json={'name': 'Кызылорда',
+                                                         'park_commission': '9'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['restored'])
+        sql = [str(c.args[0]) for c in cursor.execute.call_args_list]
+        self.assertFalse(any('INSERT INTO wiki_cities' in q for q in sql))
+        updates = [c for c in cursor.execute.call_args_list if 'UPDATE wiki_cities' in str(c.args[0])]
+        self.assertEqual(len(updates), 1)
+        # Поля формы не применяются — они стёрли бы прежние комиссии и услуги.
+        self.assertNotIn('park_commission', str(updates[0].args[0]))
+        self.assertIn('status = %s', str(updates[0].args[0]))
+
+    def test_active_duplicate_is_refused(self):
+        client, cursor = self.build([12])
+        cursor.fetchone.side_effect = [(4, 'active')] + [None] * 10
+        response = client.post('/api/wiki/cities', json={'name': 'Алматы'})
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.get_json()['code'], 'WIKI_CITY_ARCHIVED')
+        self.assertEqual(response.get_json()['code'], 'WIKI_CITY_EXISTS')
+
+    def test_list_shows_only_live_cities(self):
+        cursor = _RecordingCursor()
+        wiki_cities.list_cities(cursor, space_id=SPACE)
+        self.assertIn("c.status = 'active'", cursor.calls[0][0])
 
 
 # ── Развёртывание ────────────────────────────────────────────────────────────
@@ -560,7 +583,8 @@ class CitySchemaTest(unittest.TestCase):
     def test_audit_labels_and_filter_know_city_actions(self):
         meta = (ROOT / 'src/components/wiki/auditEvents.js').read_text(encoding='utf-8')
         from wiki import structure as wiki_structure
-        for action in ('city.create', 'city.update', 'city.archive', 'city.sync'):
+        for action in ('city.create', 'city.update', 'city.archive', 'city.restore',
+                       'city.sync'):
             self.assertRegex(meta, r"'%s':\s*\{\s*label:" % re.escape(action))
             self.assertIn(action, wiki_structure.AUDIT_GROUPS['places'])
 

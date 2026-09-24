@@ -1,11 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import {
-    Accessibility, AlertTriangle, Archive, ArchiveRestore, Baby, Bike, Building2,
+    Accessibility, AlertTriangle, Archive, Baby, Bike, Building2,
     Car, ChevronDown, ChevronRight, CircleDollarSign, DoorOpen, Droplets, ExternalLink,
     FileText, Fuel, Loader2, MapPin, Milestone, Package, PawPrint, Pencil, Phone,
     Plane, RefreshCw, ShieldCheck, Snowflake, Sparkles, Tag, Wrench,
 } from 'lucide-react';
-import { iosCard, iosGroupLabel, IosBadge, IosMenu } from '../ui/ios';
+import { iosCard, iosGroupLabel, IosMenu } from '../ui/ios';
 import { regionOfCity } from '../../utils/kazakhstanCities';
 import { OfficeStatusBadge } from './officeBadges';
 import { officeDayStatus } from './officeDayStatus';
@@ -240,7 +240,7 @@ const OfficeRow = ({ office, onOpen, tick }) => {
 
 export default function CityCard({
     city, loading = false, offices = [], canManage = false, busy = false, tick = 0,
-    zoneColor = null, onEdit, onSync, onArchive, onRestore, onOpenOffice,
+    zoneColor = null, onEdit, onSync, onArchive, onOpenOffice,
     embedded = false,
 }) {
     const [openKey, setOpenKey] = useState('');
@@ -255,7 +255,6 @@ export default function CityCard({
     const region = regionOfCity(city.name);
     const updated = cityUpdatedAt(city);
     const phone = city.yandex_data?.phone || city.order_phone;
-    const archived = city.status === 'archived';
     const neverSynced = city.yandex_url && !city.yandex_checked_at;
     const hasParkCommission = city.park_commission !== null && city.park_commission !== undefined;
     const hasTiles = !!range || hasParkCommission;
@@ -265,11 +264,11 @@ export default function CityCard({
            с источником и временем сверки, — второй такой же пункт в меню был
            бы дублем на одном экране. */
         { key: 'edit', label: 'Изменить', icon: Pencil, onSelect: () => onEdit(city) },
-        archived
-            ? { key: 'restore', label: 'Вернуть из архива', icon: ArchiveRestore,
-                onSelect: () => onRestore(city), separatorBefore: true }
-            : { key: 'archive', label: 'В архив', icon: Archive, danger: true,
-                onSelect: () => onArchive(city), separatorBefore: true },
+        /* Вернуть город из архива — добавить его снова через «+ Город»:
+           вернётся та же карточка (routes_cities). Своего переключателя
+           архива у вкладки нет — решение владельца 24.09.2026. */
+        { key: 'archive', label: 'В архив', icon: Archive, danger: true,
+          onSelect: () => onArchive(city), separatorBefore: true },
     ] : [];
 
     return (
@@ -285,15 +284,10 @@ export default function CityCard({
                     </span>
                 )}
                 <div className="min-w-0 flex-1">
-                    {(!embedded || archived) && (
-                        <div className="flex flex-wrap items-center gap-2">
-                            {!embedded && (
-                                <h3 className="text-[19px] font-semibold leading-tight tracking-tight text-slate-900">
-                                    {city.name}
-                                </h3>
-                            )}
-                            {archived && <IosBadge tone="amber">В архиве</IosBadge>}
-                        </div>
+                    {!embedded && (
+                        <h3 className="text-[19px] font-semibold leading-tight tracking-tight text-slate-900">
+                            {city.name}
+                        </h3>
                     )}
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
                         {region && <span>{region}</span>}

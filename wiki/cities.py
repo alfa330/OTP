@@ -253,15 +253,18 @@ def _city_row(row):
     return city
 
 
-def list_cities(cursor, *, space_id, include_archived=False):
-    """Сводка по городам пространства — для списка, поиска и карты."""
+def list_cities(cursor, *, space_id):
+    """Сводка по живым городам пространства — для списка, поиска и карты.
+
+    Архива во вкладке нет (решение владельца 24.09.2026: переключатель
+    «Архив» убран): архивный город возвращают, добавив его снова.
+    """
     cursor.execute(
         'SELECT ' + _SUMMARY_COLUMNS + _SUMMARY_FROM + """
-         WHERE c.space_id = %(space)s
-           AND (%(archived)s OR c.status = 'active')
+         WHERE c.space_id = %(space)s AND c.status = 'active'
          ORDER BY c.position, c.name
         """,
-        {'space': space_id, 'archived': bool(include_archived)},
+        {'space': space_id},
     )
     return [_city_row(row) for row in cursor.fetchall()]
 
@@ -281,21 +284,20 @@ def get_city(cursor, city_id, *, space_id):
     return city
 
 
-def name_taken(cursor, name, exclude_id=None, *, space_id):
-    """Статус записи с таким названием В ЭТОМ пространстве или None.
+def find_by_name(cursor, name, exclude_id=None, *, space_id):
+    """(id, статус) записи с таким названием В ЭТОМ пространстве или None.
 
-    Статус, а не да/нет: город в архиве тоже занимает название (уникальный
-    индекс архива не различает), но человек в списке его не видит — ответ
-    «такой город уже есть» без слова «архив» отправил бы его искать город,
-    которого на экране нет.
+    Без учёта регистра и вместе с архивом: уникальный индекс архива не
+    различает, а архивный город — это не «занято», а «уже был»: добавить его
+    снова значит вернуть ту же карточку (routes_cities).
     """
     cursor.execute(
-        'SELECT status FROM wiki_cities WHERE space_id = %s AND lower(name) = lower(%s) '
+        'SELECT id, status FROM wiki_cities WHERE space_id = %s AND lower(name) = lower(%s) '
         ' AND (%s::int IS NULL OR id <> %s::int) LIMIT 1',
         (space_id, name, exclude_id, exclude_id),
     )
     row = cursor.fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
 def own_office(cursor, office_id, *, space_id):

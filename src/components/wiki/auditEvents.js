@@ -105,6 +105,7 @@ export const ACTION_META = {
     'city.create': { label: 'Добавлен город', tone: CREATED, icon: MapPin },
     'city.update': { label: 'Изменён город', tone: CHANGED, icon: MapPin },
     'city.archive': { label: 'Город в архиве', tone: REMOVED, icon: Archive },
+    'city.restore': { label: 'Город возвращён из архива', tone: CREATED, icon: MapPin },
     'city.sync': { label: 'Тарифы города сверены с Яндексом', tone: CHANGED, icon: RefreshCw },
 
     // ── Ознакомление ────────────────────────────────────────────────────
