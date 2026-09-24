@@ -316,7 +316,9 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
 
             {cities.length > 0 && (
                 <>
-                    <div className={`${iosCard} px-3 pb-3 pt-2 sm:px-5 sm:pb-4`}>
+                    {/* Схема лежит в карточке с тонкими полями: у неё свои
+                        скругления, стеклянные кнопки и легенда поверх. */}
+                    <div className={`${iosCard} p-1.5`}>
                         <CityMap
                             cities={cities}
                             selectedId={isPhone ? null : effectiveId}

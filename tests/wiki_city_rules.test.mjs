@@ -212,3 +212,28 @@ test('координаты схемы — в пределах страны', () 
         assert.ok(lat > 40.5 && lat < 55.5 && lon > 46.5 && lon < 87.5, name);
     }
 });
+
+test('вид схемы: приближение держит точку под пальцем и не выходит за края', async () => {
+    const {
+        FULL_VIEW, MIN_VIEW_WIDTH, clampView, fitView, viewHeight, zoomView,
+    } = await import('../src/components/wiki/kazakhstanMap.js');
+    const zoomed = zoomView(FULL_VIEW, 2, 300, 200);
+    assert.equal(zoomed.w, MAP_WIDTH / 2);
+    // Точка (300, 200) осталась на той же доле окна, что и до приближения.
+    assert.ok(Math.abs((300 - zoomed.x) / zoomed.w - 300 / MAP_WIDTH) < 1e-9);
+    assert.ok(Math.abs((200 - zoomed.y) / viewHeight(zoomed) - 200 / MAP_HEIGHT) < 1e-9);
+    // Не мельче ×5 и не крупнее всей схемы.
+    assert.equal(zoomView(FULL_VIEW, 100, 500, 280).w, MIN_VIEW_WIDTH);
+    assert.deepEqual(zoomView(FULL_VIEW, 0.2, 500, 280), FULL_VIEW);
+    // Сдвиг за край возвращается в схему.
+    const off = clampView({ w: 400, x: 900, y: -50 });
+    assert.equal(off.x, MAP_WIDTH - 400);
+    assert.equal(off.y, 0);
+    // Зона вписывается целиком, с полями.
+    const points = ['Астана', 'Экибастуз', 'Петропавловск'].map(cityPoint);
+    const fit = fitView(points);
+    for (const p of points) {
+        assert.ok(p.x > fit.x && p.x < fit.x + fit.w && p.y > fit.y && p.y < fit.y + viewHeight(fit));
+    }
+    assert.deepEqual(fitView([]), FULL_VIEW);
+});

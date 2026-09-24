@@ -344,7 +344,10 @@ export default function CustomSelect({
 
           <div
             id={listboxId}
-            className="min-h-0 overflow-auto py-1"
+            /* В iOS-виде — тонкий ползунок портала (.thin-scroll), как у тела
+               IosModal: список городов в редакторе «Городов» длинный, и штатная
+               полоса вдоль скруглённой панели выглядела чужой. */
+            className={`min-h-0 overflow-auto py-1${isIos ? ' thin-scroll' : ''}`}
             role="listbox"
             aria-multiselectable={multiple || undefined}
             aria-label={ariaLabel ? `${ariaLabel}: варианты` : undefined}

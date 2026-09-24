@@ -589,5 +589,38 @@ class CitySchemaTest(unittest.TestCase):
             self.assertIn(action, wiki_structure.AUDIT_GROUPS['places'])
 
 
+
+class CityScrollTest(unittest.TestCase):
+    """Тонкие полосы во вкладке «Города» (просьба владельца 24.09.2026).
+
+    Три места, и в каждом полоса была толще задуманной по своей причине
+    (замер в Chrome с постоянными полосами macOS): страница вики — ~11 px
+    индиговая от custom-scrollbar, список городов — 6 px от правила
+    .wiki-scope ::-webkit-scrollbar, выпадающий список в редакторе — штатные
+    15 px."""
+
+    def test_wiki_page_scrolls_with_the_portal_thin_thumb(self):
+        css = (ROOT / 'src/styles.css').read_text(encoding='utf-8')
+        rule = css[css.index('.main-content:has(> .wiki-scope)::-webkit-scrollbar,'):]
+        self.assertIn('width: 3px;', rule[:rule.index('}')])
+        # custom-scrollbar задаёт scrollbar-width, а с ним Chrome псевдоэлементы
+        # не применяет — сброс обязан стоять, и только для WebKit/Blink.
+        reset = css[css.index('@supports selector(::-webkit-scrollbar) {'):]
+        reset = reset[:reset.index('}\n}') + 3]
+        self.assertIn('.main-content:has(> .wiki-scope)', reset)
+        self.assertIn('scrollbar-width: auto;', reset)
+
+    def test_thin_scroll_stays_thin_inside_the_wiki(self):
+        css = (ROOT / 'src/components/wiki/wiki-theme.css').read_text(encoding='utf-8')
+        rule = css[css.index('.wiki-scope .thin-scroll::-webkit-scrollbar {'):]
+        self.assertIn('width: 3px;', rule[:rule.index('}')])
+        jsx = (ROOT / 'src/components/wiki/WikiCities.jsx').read_text(encoding='utf-8')
+        self.assertRegex(jsx, r'<ul className="[^"]*thin-scroll')
+
+    def test_ios_select_list_scrolls_thin(self):
+        jsx = (ROOT / 'src/components/ui/CustomSelect.jsx').read_text(encoding='utf-8')
+        self.assertIn("${isIos ? ' thin-scroll' : ''}", jsx)
+
+
 if __name__ == '__main__':
     unittest.main()
