@@ -15,7 +15,9 @@
 
 import ast
 import asyncio
+import builtins
 import re
+import symtable
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -516,7 +518,8 @@ class GroupBroadcastTests(unittest.TestCase):
 
     def setUp(self):
         self.ns = _namespace()
-        self.ns['date'] = date
+        # Имя — как его импортирует монолит; что оно там вообще есть, сверяет ModuleNamesTests.
+        self.ns['dt_date'] = date
 
     def _snapshot(self):
         data = with_hour()
@@ -564,7 +567,7 @@ class GroupRunJobTests(unittest.TestCase):
     """Плановая отбивка собирает данные по разу на каждую группу получателей, а не по разу на
     чат, и каждый чат получает сообщение своей группы."""
 
-    def _run(self, chats):
+    def _run(self, chats, broken=()):
         node = next(n for n in _module().body
                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "_szov_broadcast_run_job")
         delivered, prepared = [], []
@@ -574,6 +577,8 @@ class GroupRunJobTests(unittest.TestCase):
 
         async def prepare(group_id=None):
             prepared.append(group_id)
+            if group_id in broken:
+                raise NameError("name 'date' is not defined")
             return {'group': group_id}, 'цифры группы %s' % group_id, []
 
         quiet = type('log', (), {'info': staticmethod(lambda *a, **k: None),
@@ -604,6 +609,46 @@ class GroupRunJobTests(unittest.TestCase):
             {'chat_id': 1, 'is_enabled': False, 'mode': 'always', 'group_id': 36},
         ])
         self.assertEqual((delivered, prepared), ([], []))
+
+    def test_broken_group_does_not_silence_the_other_chats(self):
+        """Сбор среза группы упал — чат всего отдела всё равно получает своё. Раньше исключение
+        одного среза выбрасывало из всего обхода, и молчали все получатели направления."""
+        delivered, prepared = self._run([
+            {'chat_id': 1, 'is_enabled': True, 'mode': 'always', 'group_id': 36},
+            {'chat_id': 3, 'is_enabled': True, 'mode': 'always', 'group_id': None},
+        ], broken={36})
+        self.assertEqual(prepared, [36, None])
+        self.assertEqual(delivered, [(3, 'цифры группы None')])
+
+
+class ModuleNamesTests(unittest.TestCase):
+    """Функции отбивки здесь гоняются вырезанными из монолита, в пространстве имён, которое
+    собирает сам тест, — и подложенное тестом имя прячет опечатку. 23.09.2026
+    `_op_broadcast_group_view` звал `date`, а монолит импортирует его как `dt_date`: тест
+    подкладывал `date` и был зелёным, а на проде каждая отбивка ОП сутки падала NameError.
+    Поэтому глобальные имена цепочки отбивки сверяются с самим модулем."""
+
+    CHAIN = {"_szov_broadcast_run_job", "_szov_broadcast_deliver", "op_broadcast_job"}
+
+    def test_every_global_name_of_the_broadcast_is_bound_in_the_module(self):
+        top = symtable.symtable(BOT_PATH.read_text(encoding="utf-8-sig"), str(BOT_PATH), "exec")
+        bound = {name for name in top.get_identifiers()
+                 if top.lookup(name).is_assigned() or top.lookup(name).is_imported()}
+        bound |= set(dir(builtins))
+
+        def unbound(table):
+            missing = {name for name in table.get_globals() if name not in bound}
+            for child in table.get_children():
+                missing |= unbound(child)
+            return missing
+
+        checked = [table for table in top.get_children()
+                   if isinstance(table, symtable.Function)
+                   and (table.get_name() in self.CHAIN | HELPERS
+                        or table.get_name().startswith(('_op_broadcast', '_op_render')))]
+        self.assertTrue(HELPERS <= {table.get_name() for table in checked})
+        for table in checked:
+            self.assertEqual(unbound(table), set(), table.get_name())
 
 
 class GroupStorageTests(unittest.TestCase):

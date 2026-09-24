@@ -40754,8 +40754,16 @@ async def _szov_broadcast_run_job(*, direction, label, prepare, deviations, on_d
         delivered = False
         data = None
         for group_id, members in buckets.items():
-            data, text, media = await (prepare(group_id=group_id) if group_of is not None
-                                       else prepare())
+            # Сбой сбора одного среза не лишает отбивки остальных: чат всего отдела получает
+            # своё, даже когда срез группы упал (23.09.2026 так молчало всё направление ОП).
+            try:
+                data, text, media = await (prepare(group_id=group_id) if group_of is not None
+                                           else prepare())
+            except Exception as exc:
+                logging.error("%s: плановая отправка не удалась%s: %s", label,
+                              ' (группа %s)' % group_id if group_id is not None else '', exc,
+                              exc_info=True)
+                continue
             notes = deviations(data)
             targets = [chat for chat in members
                        if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or notes]
@@ -45305,7 +45313,7 @@ def _op_broadcast_group_view(data, group_id, day_parts):
     расформировать — тогда отбивка честно пишет её номер, а не молча шлёт весь отдел."""
     out = dict(data)
     group = next((item for item in (data.get('groups') or []) if item.get('id') == group_id), None)
-    parts = day_parts(date.fromisoformat(str(data.get('day'))))
+    parts = day_parts(dt_date.fromisoformat(str(data.get('day'))))
     out['totals'] = parts['totals']
     out['hourly'] = parts['hourly']
     if group is not None:
