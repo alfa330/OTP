@@ -156,11 +156,16 @@ MASTER_PROMPT_BIRTHDAY = """ТЫ — Dos, дружелюбный и тактич
 """
 
 # Рекомендуемые параметры генерации (более детерминированно)
+#
+# maxOutputTokens — ровно потолок gemini-2.5-flash. Раньше здесь стояло 1 500 000:
+# AI Studio такое молча урезал до потолка, а Vertex (основной путь с 22.08.2026)
+# отвечает 400 «supported range is from 1 (inclusive) to 65537 (exclusive)».
+# Из-за этого до 24.09.2026 не сгенерировалось ни одного поздравления с днём рождения.
 generation_config = {
     "temperature": 0.2,
     "topP": 0.9,
     "topK": 40,
-    "maxOutputTokens": 1500000,
+    "maxOutputTokens": 65536,
 }
 
 safety_settings = [
