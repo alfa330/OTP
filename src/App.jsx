@@ -42074,7 +42074,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [birthdaysDate, setBirthdaysDate] = useState('');
             const [birthdayGreeting, setBirthdayGreeting] = useState('');
             const [birthdayGreetingLoading, setBirthdayGreetingLoading] = useState(false);
-            const [birthdayGreetingError, setBirthdayGreetingError] = useState('');
             const [showBirthdayGreetingModal, setShowBirthdayGreetingModal] = useState(false);
             // checked — ответ сервера уже приходил. Без него закрытый раздел мигал бы
             // замком тому, кто доступ давно подтвердил: granted стартует с false.
@@ -48058,7 +48057,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setBirthdaysDate('');
                     setBirthdayGreeting('');
                     setBirthdayGreetingLoading(false);
-                    setBirthdayGreetingError('');
                     setShowBirthdayGreetingModal(false);
                 }
             }, [user?.id]);
@@ -48116,7 +48114,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 runSingleFlight(requestKey, async () => {
                     if (isMounted.current) {
                         setBirthdayGreetingLoading(true);
-                        setBirthdayGreetingError('');
                         setShowBirthdayGreetingModal(true);
                     }
                     try {
@@ -48126,19 +48123,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             { headers: withAccessTokenHeader({ 'X-User-Id': user.id }) }
                         );
                         const data = resp?.data || {};
-                        if (!cancelled && isMounted.current) {
-                            if (data.status === 'success' && data.result) {
-                                const greetingText = String(data.result.greeting || '').trim();
-                                setBirthdayGreeting(greetingText || 'С днем рождения!');
-                                try { sessionStorage.setItem(storageKey, '1'); } catch (e) {}
-                            } else {
-                                setBirthdayGreetingError(typeof data?.error === 'string' ? data.error : 'Не удалось получить поздравление');
-                            }
+                        if (!cancelled && isMounted.current && data.status === 'success' && data.result) {
+                            const greetingText = String(data.result.greeting || '').trim();
+                            setBirthdayGreeting(greetingText || 'С днем рождения!');
+                            try { sessionStorage.setItem(storageKey, '1'); } catch (e) {}
                         }
                     } catch (err) {
-                        if (!cancelled && isMounted.current) {
-                            setBirthdayGreetingError(err.response?.data?.error || 'Не удалось получить поздравление');
-                        }
+                        /* ИИ не ответил — окно покажет обычное поздравление, а не
+                           технический код вроде «ai_failed»: именинник ошибку не
+                           исправит. Отметку «показано» не ставим, чтобы при
+                           следующем входе попробовать сгенерировать ещё раз. */
                     } finally {
                         if (!cancelled && isMounted.current) {
                             setBirthdayGreetingLoading(false);
@@ -49154,7 +49148,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setBirthdaysDate('');
                     setBirthdayGreeting('');
                     setBirthdayGreetingLoading(false);
-                    setBirthdayGreetingError('');
                     setShowBirthdayGreetingModal(false);
                     setUser(null);
                     setSvList([]);
@@ -60055,13 +60048,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             )}
 
-                                            {!birthdayGreetingLoading && birthdayGreetingError && (
-                                                <div className="rounded-2xl border border-red-200 bg-red-50/90 text-red-700 p-4 text-sm">
-                                                    {birthdayGreetingError}
-                                                </div>
-                                            )}
-
-                                            {!birthdayGreetingLoading && !birthdayGreetingError && (
+                                            {!birthdayGreetingLoading && (
                                                 <div className="rounded-2xl border border-amber-200/70 bg-white/80 p-5 text-gray-700 leading-relaxed whitespace-pre-line shadow-sm backdrop-blur">
                                                     {birthdayGreeting || 'С днем рождения! Пусть всё задуманное получается легко.'}
                                                 </div>
