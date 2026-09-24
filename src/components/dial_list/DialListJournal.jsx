@@ -23,7 +23,7 @@ import { buildPeriodOptions, monthLabel } from './dialListPeriods';
  * Раскладка — канон фильтров сайта («Касания», «Посылки», «ИИ-оценка»):
  *   1) полоса: поиск, месяц базы, кнопка «Фильтры · N», обновить;
  *   2) чипы отобранного под полосой — видно, что отобрано, не раскрывая панель;
- *   3) панель редких фильтров (оператор, файл, даты) — только по кнопке;
+ *   3) панель редких фильтров (оператор, файл, дата звонка) — только по кнопке;
  *   4) полоса этапов — она же легенда цвета точек в строках, и чипы итогов.
  * Числа на полосе этапов и на чипах итогов сервер считает по той же выборке, что
  * и список (этапы — без фильтра этапа, итоги — без фильтра итога): число на чипе
@@ -93,6 +93,8 @@ const BTN_DANGER = 'inline-flex items-center justify-center gap-2 rounded-xl bg-
     + 'disabled:cursor-not-allowed disabled:opacity-50';
 const BTN_DANGER_GHOST = 'inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium '
     + 'text-rose-600 transition-all hover:bg-rose-50 active:scale-[0.98]';
+
+const FIELD_HEAD = `flex h-5 items-center ${iosGroupLabel}`;
 
 const shiftDays = (days) => {
     const d = new Date();
@@ -994,7 +996,7 @@ const DialListJournal = ({
             clear: () => setBatchId(''),
         },
         (range.from || range.to) && {
-            key: 'range', name: 'Движение', label: rangeLabel(range.from, range.to),
+            key: 'range', name: 'Звонили', label: rangeLabel(range.from, range.to),
             clear: () => setRange({ from: '', to: '' }),
         },
     ].filter(Boolean);
@@ -1077,23 +1079,24 @@ const DialListJournal = ({
             )}
 
             {filtersOpen && (
+                /* Подпись каждого поля — блок одной высоты (FIELD_HEAD). Строчная
+                   подпись внутри <label> занимала строку высотой со шрифт самого
+                   label (~24 px), а подпись-блок — свою (18 px), и поле дат
+                   стояло на 6 px выше соседей. */
                 <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-3`}>
                     <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Оператор</span>
+                        <span className={FIELD_HEAD}>Оператор</span>
                         <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} variant="ios" searchable={users.length > 8} ariaLabel="Оператор" />
                     </label>
                     <label className="block space-y-1.5">
-                        <span className={iosGroupLabel}>Файл загрузки</span>
+                        <span className={FIELD_HEAD}>Файл загрузки</span>
                         <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} variant="ios" ariaLabel="Файл загрузки" />
                     </label>
-                    {/* div, а не label: внутри подсказка «i» и календарь, и label
-                        отдавал бы любой щелчок по подписи или по пустому месту
-                        календаря первой кнопке внутри — то есть «i». */}
+                    {/* div, а не label: календарь раскрывается внутри, и label
+                        отдавал бы щелчок по пустому месту календаря кнопке-чипу —
+                        календарь закрывался бы на полуслове. */}
                     <div className="space-y-1.5">
-                        <span className="flex items-center gap-1.5">
-                            <span className={iosGroupLabel}>Движение по водителю</span>
-                            <IosHint align="right" text="День, когда по водителю было последнее движение: звонок или загрузка в базу." />
-                        </span>
+                        <span className={FIELD_HEAD}>Дата звонка</span>
                         <IosDateRangePicker
                             from={range.from}
                             to={range.to}

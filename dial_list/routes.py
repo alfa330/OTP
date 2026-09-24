@@ -24,8 +24,9 @@
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле (?period=)
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка
     GET     /api/dial_list/departments/<id>/leads            журнал водителей (фильтры:
-                                                             q, stage, operator_id, batch_id,
-                                                             date_from, date_to, sort, limit, offset)
+                                                             q, stage, operator_id, batch_id, outcome_id,
+                                                             date_from/date_to — дни звонков, period,
+                                                             sort, limit, offset)
     GET     /api/dial_list/leads/<lead_id>                   карточка: попытки, действия, загрузки
     POST    /api/dial_list/leads/<lead_id>/requeue           вернуть в список  {note}
     POST    /api/dial_list/leads/<lead_id>/exclude           исключить         {note}

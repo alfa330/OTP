@@ -1126,12 +1126,20 @@ class DialListService:
             filters.append("""EXISTS (SELECT 1 FROM dial_list_leads l2
                                       WHERE l2.id = base.id
                                         AND (l2.first_batch_id = %(batch_id)s::uuid OR l2.last_batch_id = %(batch_id)s::uuid))""")
+        # «Дата звонка»: водителю звонили в эти дни (хотя бы одна попытка, дни по
+        # Алматы). Обе границы — на ОДНОЙ попытке: звонок до периода и звонок после
+        # него вместе не делают водителя «звонили в эти дни».
+        call_bounds = []
         if date_from:
             params["date_from"] = str(date_from)
-            filters.append("(activity_at AT TIME ZONE 'Asia/Almaty')::date >= %(date_from)s::date")
+            call_bounds.append("t.requested_at >= (%(date_from)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'")
         if date_to:
             params["date_to"] = str(date_to)
-            filters.append("(activity_at AT TIME ZONE 'Asia/Almaty')::date <= %(date_to)s::date")
+            call_bounds.append("t.requested_at < (%(date_to)s::date + 1)::timestamp AT TIME ZONE 'Asia/Almaty'")
+        if call_bounds:
+            filters.append("""EXISTS (SELECT 1 FROM dial_list_attempts t
+                                      JOIN dial_list_assignments a ON a.id = t.assignment_id
+                                      WHERE a.lead_id = base.id AND {})""".format(" AND ".join(call_bounds)))
         order = JOURNAL_SORTS.get(str(sort or "activity"), JOURNAL_SORTS["activity"])
         sql = self._JOURNAL_PAGE_SQL.format(scope=scope, filters=" AND ".join(filters), order=order,
                                             stage_ok=stage_ok, outcome_ok=outcome_ok)

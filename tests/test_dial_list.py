@@ -419,6 +419,40 @@ class LeadsJournalTests(unittest.TestCase):
         self.assertEqual(res['by_stage']['queue'], 0)
         self.assertEqual({o['name']: o['count'] for o in res['by_outcome']}, {'Отказ': 4, 'Перезвонить': 2})
 
+    def test_date_filter_means_call_date(self):
+        # «Дата звонка»: хотя бы одна попытка в эти дни, обе границы — на одной
+        # попытке. Раньше фильтр шёл по «последнему движению» (звонок ИЛИ загрузка
+        # файла) — руководителю было непонятно, что он отбирает.
+        import contextlib
+        executed = []
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                executed.append((sql, dict(params or {})))
+
+            def fetchall(self):
+                return [(None,) * 38 + ([],)] if 'counts.summary' in executed[-1][0] else []
+
+        class Db:
+            @contextlib.contextmanager
+            def _get_cursor(self):
+                yield Cursor()
+
+        svc = dial_service.DialListService(db=Db())
+        svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24, "period": "2026-09-01",
+                                             "_period": dial_service.current_period()}
+        svc.leads_journal(1, date_from='2026-09-20', date_to='2026-09-24')
+        sql, params = executed[0]
+        f_part = sql.split('f AS MATERIALIZED', 1)[1].split('page AS', 1)[0]
+        self.assertNotIn('activity_at', f_part)
+        exists = f_part.split('EXISTS', 1)[1]
+        self.assertIn('FROM dial_list_attempts t', exists)
+        self.assertIn('%(date_from)s', exists)
+        self.assertIn('%(date_to)s', exists)
+        self.assertEqual(f_part.count('EXISTS'), 1)                 # обе границы в одном EXISTS
+        self.assertIn("AT TIME ZONE 'Asia/Almaty'", exists)
+        self.assertEqual((params['date_from'], params['date_to']), ('2026-09-20', '2026-09-24'))
+
     def test_manual_actions_are_logged_and_guarded(self):
         ddl = ' '.join(dial_schema.DDL)
         self.assertIn('dial_list_lead_events', ddl)
