@@ -6,6 +6,7 @@
 
 Ручки телефона (bearer оператора, как /api/operator/sip_settings):
     GET  /api/operator/dial_list                             текущая порция и состояние
+    GET  /api/operator/dial_list/progress                    «Мой прогресс»: счётчики за месяц и сегодня
     POST /api/operator/dial_list/next                        выдать следующую порцию
     POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке
     POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
@@ -121,6 +122,14 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_state():
         user_id, _ = _operator()
         return jsonify({"status": "success", **svc.get_state(user_id)}), 200
+
+    @bp.route('/api/operator/dial_list/progress', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_progress():
+        """«Мой прогресс» на телефоне: счётчики оператора за месяц и за сегодня, без ФИО и номеров."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.operator_progress(user_id)}), 200
 
     @bp.route('/api/operator/dial_list/next', methods=['POST', 'OPTIONS'])
     @require_api_key

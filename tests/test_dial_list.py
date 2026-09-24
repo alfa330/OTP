@@ -644,5 +644,25 @@ class PortionStaysVisibleTests(unittest.TestCase):
         self.assertIn("Строка сейчас у оператора", src)
 
 
+class OperatorProgressTests(unittest.TestCase):
+    """Вкладка «Мой прогресс» на телефоне: счётчики оператора за месяц и за сегодня."""
+
+    def test_progress_route_is_operator_only_and_counts_only(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
+        self.assertIn("/api/operator/dial_list/progress", operator_part)
+        progress = inspect.getsource(dial_service.DialListService.operator_progress)
+        for forbidden in ('phone_norm', 'full_name', 'dial_list_leads'):
+            self.assertNotIn(forbidden, progress)
+            self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_SQL)
+            self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_OUTCOMES_SQL)
+        # Отменённые до ответа попытки не входят в «попытки», дозвон — по диспозициям Binotel.
+        self.assertIn('WHERE NOT cancelled', dial_service.DialListService._PROGRESS_SQL)
+        self.assertIn('disp IN %(answered)s', dial_service.DialListService._PROGRESS_SQL)
+        self.assertIn('"today_stats"', progress)
+        self.assertIn('"outcomes"', progress)
+        self.assertIn('current_period()', progress)
+
+
 if __name__ == '__main__':
     unittest.main()

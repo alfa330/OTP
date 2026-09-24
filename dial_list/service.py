@@ -1633,6 +1633,79 @@ class DialListService:
             "pending_outcome": pending_outcome,
         }
 
+    # Счётчики оператора для вкладки «Мой прогресс»: за месяц (первый день — %(month)s)
+    # и за сегодня (%(today)s), дни — по Алматы. Отменённые оператором попытки в
+    # попытки не входят (они не в счёт). Только числа: ни ФИО, ни номеров.
+    _PROGRESS_SQL = """
+        WITH att AS (
+            SELECT t.state, UPPER(t.disposition) AS disp, t.billsec, t.cancelled,
+                   (t.requested_at AT TIME ZONE 'Asia/Almaty')::date AS day
+            FROM dial_list_attempts t
+            WHERE t.operator_id = %(operator_id)s
+              AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+        ), asg AS (
+            SELECT a.state,
+                   (a.created_at AT TIME ZONE 'Asia/Almaty')::date AS day,
+                   (a.done_at AT TIME ZONE 'Asia/Almaty')::date AS done_day
+            FROM dial_list_assignments a
+            WHERE a.operator_id = %(operator_id)s
+              AND a.created_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+        )
+        SELECT
+            (SELECT COUNT(*) FROM asg)                                                    AS issued,
+            (SELECT COUNT(*) FROM asg WHERE state = 'done')                               AS done,
+            (SELECT COUNT(*) FROM asg WHERE state = 'done' AND done_day = %(today)s)      AS done_today,
+            (SELECT COUNT(*) FROM att WHERE NOT cancelled)                                AS attempts,
+            (SELECT COUNT(*) FROM att WHERE NOT cancelled AND day = %(today)s)            AS attempts_today,
+            (SELECT COUNT(*) FROM att WHERE state = 'finished' AND disp IN %(answered)s)  AS answered,
+            (SELECT COUNT(*) FROM att WHERE state = 'finished' AND disp IN %(answered)s
+                                        AND day = %(today)s)                              AS answered_today,
+            (SELECT COALESCE(SUM(billsec), 0) FROM att WHERE state = 'finished')          AS talk_sec,
+            (SELECT COALESCE(SUM(billsec), 0) FROM att WHERE state = 'finished'
+                                                          AND day = %(today)s)            AS talk_sec_today,
+            (SELECT COUNT(*) FROM att WHERE cancelled)                                    AS cancelled
+    """
+    _PROGRESS_OUTCOMES_SQL = """
+        SELECT o.id, o.name, o.color, COUNT(*) AS cnt,
+               COUNT(*) FILTER (WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %(today)s) AS cnt_today
+        FROM dial_list_attempts t
+        JOIN dial_list_outcomes o ON o.id = t.outcome_id
+        WHERE t.operator_id = %(operator_id)s
+          AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+        GROUP BY o.id, o.name, o.color, o.position
+        ORDER BY cnt DESC, o.position, o.name
+    """
+
+    def operator_progress(self, user_id):
+        """«Мой прогресс» на телефоне: сколько строк выдано и обработано, попыток,
+        дозвонов, минут разговора и какие итоги ставил оператор — за текущий месяц
+        (по Алматы) и отдельно за сегодня. Никаких ФИО и номеров — только счётчики."""
+        ctx = self.operator_context(user_id)
+        month = current_period()
+        today = datetime.now(PERIOD_TZ).date()
+        params = {"operator_id": ctx["user_id"], "month": month, "today": today, "answered": ANSWERED_SQL}
+        with self.db._get_cursor() as cur:
+            cur.execute(self._PROGRESS_SQL, params)
+            r = cur.fetchone() or (0,) * 10
+            cur.execute(self._PROGRESS_OUTCOMES_SQL, params)
+            outcomes = [{"id": _sid(o[0]), "name": o[1], "color": o[2] or "#8E8E93",
+                         "count": int(o[3] or 0), "count_today": int(o[4] or 0)} for o in cur.fetchall()]
+        return {
+            "operator": {"id": ctx["user_id"], "name": ctx["name"]},
+            "period": month.isoformat(),
+            "period_label": period_label(month),
+            "today": today.isoformat(),
+            "month": {
+                "issued": int(r[0] or 0), "done": int(r[1] or 0), "attempts": int(r[3] or 0),
+                "answered": int(r[5] or 0), "talk_sec": int(r[7] or 0), "cancelled": int(r[9] or 0),
+            },
+            "today_stats": {
+                "done": int(r[2] or 0), "attempts": int(r[4] or 0),
+                "answered": int(r[6] or 0), "talk_sec": int(r[8] or 0),
+            },
+            "outcomes": outcomes,
+        }
+
     def issue_next_portion(self, user_id):
         ctx = self.operator_context(user_id)
         settings = ctx["settings"]
