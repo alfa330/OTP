@@ -1331,7 +1331,14 @@ class DialListService:
 
     def requeue_lead(self, lead_id, actor_id, note=""):
         """Руководитель возвращает водителя в список: попытки обнуляются, лид снова в
-        пуле с ближайшей порцией. Строку, которая сейчас у оператора, не трогаем."""
+        пуле. Строку, которая сейчас у оператора (issued), не трогаем — она и так в списке.
+
+        Если водителя уже обработали, а его строка лежит в ПОСЛЕДНЕЙ выдаче оператора
+        (открытой или закрытой — телефон показывает её до «Ещё»), строка
+        переоткрывается прямо там: иначе оператор видел бы «Перезвонить позже» и не
+        мог позвонить, пока не закроет всю пачку и не возьмёт следующую (владелец,
+        24.09.2026). Строка в более старой выдаче не трогается — водитель придёт с
+        ближайшей порцией."""
         lead_id = str(lead_id)
         with self.db._get_cursor() as cur:
             cur.execute("SELECT department_id, status FROM dial_list_leads WHERE id = %s FOR UPDATE", (lead_id,))
@@ -1346,9 +1353,40 @@ class DialListService:
                 SET status = 'new', attempts_total = 0, last_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (lead_id,))
+            reopened = self._reopen_in_latest_portion(cur, lead_id)
             self._log_lead_event(cur, lead_id, row[0], actor_id,
                                  "restore" if row[1] == "excluded" else "requeue", note)
-        return self.lead_card(lead_id)
+        card = self.lead_card(lead_id)
+        card["reopened_for_operator"] = reopened
+        return card
+
+    def _reopen_in_latest_portion(self, cur, lead_id):
+        """Обработанная строка водителя в последней выдаче её оператора → снова issued;
+        закрытая выдача открывается обратно. Возвращает True, если переоткрыли."""
+        cur.execute("""
+            SELECT a.id, a.portion_id, a.operator_id
+            FROM dial_list_assignments a
+            WHERE a.lead_id = %s AND a.state = 'done'
+            ORDER BY a.created_at DESC LIMIT 1
+        """, (str(lead_id),))
+        last = cur.fetchone()
+        if not last:
+            return False
+        cur.execute("""
+            SELECT id FROM dial_list_portions WHERE operator_id = %s
+            ORDER BY issued_at DESC LIMIT 1
+        """, (int(last[2]),))
+        latest = cur.fetchone()
+        if not latest or str(latest[0]) != str(last[1]):
+            return False
+        cur.execute("""
+            UPDATE dial_list_assignments
+            SET state = 'issued', result = '', done_at = NULL
+            WHERE id = %s
+        """, (str(last[0]),))
+        cur.execute("UPDATE dial_list_portions SET closed_at = NULL WHERE id = %s", (str(last[1]),))
+        log.info("dial_list: водитель %s возвращён в список — строка снова у оператора %s", lead_id, last[2])
+        return True
 
     def exclude_lead(self, lead_id, actor_id, note=""):
         """Исключить водителя из обзвона. Если строка у оператора — снимаем её с его

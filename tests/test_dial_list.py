@@ -627,6 +627,22 @@ class PortionStaysVisibleTests(unittest.TestCase):
         items = inspect.getsource(dial_service.DialListService._portion_items)
         self.assertIn('"cancelled"', items)
 
+    def test_requeue_reopens_row_in_operator_latest_portion(self):
+        # «Вернуть в список» по уже обработанному водителю: строка в последней выдаче
+        # оператора снова issued и выдача открыта — иначе оператор видел бы старый итог
+        # и не мог позвонить до следующей порции (владелец, 24.09.2026).
+        src = inspect.getsource(dial_service.DialListService.requeue_lead)
+        self.assertIn('_reopen_in_latest_portion', src)
+        self.assertIn('reopened_for_operator', src)
+        reopen = inspect.getsource(dial_service.DialListService._reopen_in_latest_portion)
+        self.assertIn("a.state = 'done'", reopen)
+        self.assertIn('ORDER BY issued_at DESC LIMIT 1', reopen)      # только последняя выдача оператора
+        self.assertIn("SET state = 'issued', result = '', done_at = NULL", reopen)
+        self.assertIn('SET closed_at = NULL', reopen)
+        self.assertNotIn('phone_norm', reopen)
+        # Строку, которая и так у оператора, возврат не дублирует (уникальный индекс).
+        self.assertIn("Строка сейчас у оператора", src)
+
 
 if __name__ == '__main__':
     unittest.main()
