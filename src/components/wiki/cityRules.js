@@ -244,12 +244,20 @@ export const cityMatches = (city, query) => {
 };
 
 /* ── Офисы города ───────────────────────────────────────────────────────────
- * «Куда направлять водителя»: обслуживающий офис, если его выбрали; иначе
- * собственные офисы города (парковые, живые, не «офиса нет»). Список
- * офисов приходит той же выборкой, что во вкладке «Офисы», — второго
+ * «Куда направлять водителя», по убыванию силы:
+ *   1. офисы, отмеченные в редакторе (driver_office_ids), — ровно они и в
+ *      том порядке, в каком их отметили (просьба владельца 24.09.2026);
+ *   2. обслуживающий офис, если отмеченных нет;
+ *   3. собственные офисы города (парковые, живые, не «офиса нет»).
+ * Список офисов приходит той же выборкой, что во вкладке «Офисы», — второго
  * источника адресов у раздела нет. */
 export const cityOffices = (city, offices) => {
     const list = offices || [];
+    const chosen = city?.driver_office_ids || [];
+    if (chosen.length) {
+        const byId = new Map(list.map((office) => [office.id, office]));
+        return chosen.map((id) => byId.get(id)).filter(Boolean);
+    }
     if (city?.serving_office_id) {
         const office = list.find((item) => item.id === city.serving_office_id);
         return office ? [office] : [];

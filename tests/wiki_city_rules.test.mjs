@@ -175,6 +175,22 @@ test('куда направлять водителя: обслуживающий
     assert.deepEqual(cityOffices({ name: 'Балхаш' }, offices), []);
 });
 
+test('куда направлять водителя: отмеченные в редакторе — ровно они и в их порядке', () => {
+    const offices = [
+        { id: 5, city: 'Алматы', no_office: false, kind: 'park', status: 'active' },
+        { id: 7, city: 'Алматы', no_office: false, kind: 'partner', status: 'active' },
+        { id: 9, city: 'Астана', no_office: false, kind: 'park', status: 'active' },
+    ];
+    // Отмеченные сильнее и обслуживающего офиса, и офисов самого города;
+    // партнёрская точка, если её отметили, тоже показывается.
+    const city = { name: 'Алматы', serving_office_id: 9, driver_office_ids: [7, 9] };
+    assert.deepEqual(cityOffices(city, offices).map((o) => o.id), [7, 9]);
+    // Офис, которого в выборке уже нет (архив), просто не показывается.
+    assert.deepEqual(cityOffices({ name: 'Алматы', driver_office_ids: [42, 5] }, offices).map((o) => o.id), [5]);
+    // Пустой список — прежнее правило.
+    assert.deepEqual(cityOffices({ name: 'Алматы', driver_office_ids: [] }, offices).map((o) => o.id), [5]);
+});
+
 test('поиск города без учёта регистра и ё', () => {
     assert.equal(cityMatches({ name: 'Семей' }, 'сем'), true);
     assert.equal(cityMatches({ name: 'Алматы' }, ''), true);

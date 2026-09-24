@@ -1177,6 +1177,23 @@ _CITY_STATEMENTS = [
     # Ночной обход берёт давно не сверенные — по всем пространствам.
     "CREATE INDEX IF NOT EXISTS idx_wiki_cities_checked "
     "ON wiki_cities(yandex_checked_at NULLS FIRST) WHERE status = 'active';",
+    # «Куда направлять водителя» — офисы, которые оператор видит в карточке
+    # города (просьба владельца 24.09.2026: выбирать их в редакторе). Таблица
+    # связи, а не массив в городе: у офиса есть внешний ключ, и удалённый офис
+    # уходит из карточки сам, а не висит в ней мёртвым номером. Своего
+    # space_id у связи нет — пространство у обоих концов, и запись пускает
+    # только офис того же пространства, что и город (cities.set_city_offices).
+    # position — порядок, в котором офисы отметили: первым оператор видит тот,
+    # куда направлять в первую очередь.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_city_offices (
+        city_id   INTEGER NOT NULL REFERENCES wiki_cities(id) ON DELETE CASCADE,
+        office_id INTEGER NOT NULL REFERENCES wiki_offices(id) ON DELETE CASCADE,
+        position  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (city_id, office_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_city_offices_office ON wiki_city_offices(office_id);",
 ]
 
 

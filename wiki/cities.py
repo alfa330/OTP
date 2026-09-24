@@ -206,6 +206,11 @@ _SUMMARY_COLUMNS = """
     COALESCE(jsonb_array_length(c.yandex_data->'tariffs'), 0),
     c.yandex_data->>'phone',
     so.name, so.city,
+    ARRAY(SELECT co.office_id FROM wiki_city_offices co
+            JOIN wiki_offices oo ON oo.id = co.office_id
+             AND oo.space_id = c.space_id AND oo.status = 'active'
+           WHERE co.city_id = c.id
+           ORDER BY co.position, co.office_id),
     EXISTS (SELECT 1 FROM wiki_offices o
              WHERE o.space_id = c.space_id AND o.status = 'active'
                AND NOT o.no_office AND o.kind = 'park'
@@ -220,6 +225,7 @@ _SUMMARY_KEYS = (
     'created_at', 'updated_at',
     'tariff_count', 'order_phone',
     'serving_office_name', 'serving_office_city',
+    'driver_office_ids',
     'has_office',
 )
 
@@ -247,6 +253,7 @@ def _city_row(row):
     city['tariff_meta'] = city['tariff_meta'] or {}
     city['extra_tariffs'] = city['extra_tariffs'] or []
     city['services'] = city['services'] or []
+    city['driver_office_ids'] = list(city['driver_office_ids'] or [])
     if not city['serving_office_name']:
         # Офис ушёл в архив или оказался чужим — «обслуживает» его нет вовсе.
         city['serving_office_id'] = None
@@ -319,6 +326,60 @@ def own_office(cursor, office_id, *, space_id):
 
 # ── Запись ───────────────────────────────────────────────────────────────────
 
+# Больше офисов в одной карточке оператор не прочтёт — это уже справочник
+# «Офисы», а не ответ на вопрос «куда направить водителя».
+MAX_DRIVER_OFFICES = 20
+
+
+def clean_office_ids(value):
+    """Список id офисов из формы: целые, без повторов, в порядке выбора."""
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise CityFieldError('Офисы пришли в неверном виде')
+    result = []
+    for raw in value:
+        try:
+            office_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if office_id > 0 and office_id not in result:
+            result.append(office_id)
+    if len(result) > MAX_DRIVER_OFFICES:
+        raise CityFieldError('Офисов для направления — не больше %d' % MAX_DRIVER_OFFICES)
+    return result
+
+
+def set_city_offices(cursor, city_id, office_ids, *, space_id):
+    """«Куда направлять водителя»: заменить список офисов города целиком.
+
+    Граница пространства — в самих запросах, а не проверкой снаружи: удаляем
+    связи только у города этого пространства, а вставляем только офисы того
+    же пространства (живые и не «офиса нет»). Чужой id не вызывает ошибку, а
+    просто не попадает в список — то же правило, что у связей «офис ↔ парк».
+    Возвращает число записанных офисов.
+    """
+    cursor.execute(
+        'DELETE FROM wiki_city_offices co USING wiki_cities c '
+        ' WHERE co.city_id = c.id AND c.id = %s AND c.space_id = %s',
+        (city_id, space_id),
+    )
+    if not office_ids:
+        return 0
+    cursor.execute(
+        """
+        INSERT INTO wiki_city_offices (city_id, office_id, position)
+        SELECT c.id, o.id, x.ord
+          FROM unnest(%s::int[]) WITH ORDINALITY AS x(office_id, ord)
+          JOIN wiki_offices o ON o.id = x.office_id
+          JOIN wiki_cities c ON c.id = %s AND c.space_id = o.space_id
+         WHERE o.space_id = %s AND o.status = 'active' AND NOT o.no_office
+        ON CONFLICT DO NOTHING
+        """,
+        (list(office_ids), city_id, space_id),
+    )
+    return cursor.rowcount
+
 _WRITABLE = ('name', 'yandex_url', 'serving_office_id', 'park_commission',
              'tariff_meta', 'extra_tariffs', 'services', 'note', 'status', 'position')
 _JSON_FIELDS = ('tariff_meta', 'extra_tariffs', 'services')
@@ -383,6 +444,16 @@ def update_city(cursor, city_id, fields, *, space_id, updated_by=None):
     # Postgres все выражения SET считаются по строке до изменения.
     cursor.execute('UPDATE wiki_cities SET ' + ', '.join(sets) +
                    ' WHERE id = %s AND space_id = %s', values)
+    return cursor.rowcount > 0
+
+
+def touch_city(cursor, city_id, *, space_id, updated_by=None):
+    """Отметить правку карточки, не меняя полей (правили только связи)."""
+    cursor.execute(
+        "UPDATE wiki_cities SET updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), "
+        "updated_by = %s WHERE id = %s AND space_id = %s",
+        (updated_by, city_id, space_id),
+    )
     return cursor.rowcount > 0
 
 

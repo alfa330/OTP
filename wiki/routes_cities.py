@@ -132,6 +132,10 @@ def register(bp, wiki_route, db, log_ip):
             return _bad(field_error)
         if not fields.get('name'):
             return jsonify({"error": "Укажите город"}), 400
+        try:
+            office_ids = wiki_cities.clean_office_ids(data.get('driver_office_ids'))
+        except wiki_cities.CityFieldError as field_error:
+            return _bad(field_error)
         found = wiki_cities.find_by_name(cursor, fields['name'], space_id=space_id)
         if found and found[1] == 'active':
             return _taken(found[1])
@@ -156,6 +160,8 @@ def register(bp, wiki_route, db, log_ip):
 
         city_id = wiki_cities.create_city(cursor, fields=fields,
                                           created_by=ctx['user_id'], space_id=space_id)
+        if office_ids:
+            wiki_cities.set_city_offices(cursor, city_id, office_ids, space_id=space_id)
         queries.log_action(cursor, actor_id=ctx['user_id'], action='city.create',
                            entity_type='city', entity_id=city_id,
                            details={'name': fields['name'], 'space_id': space_id},
@@ -198,6 +204,10 @@ def register(bp, wiki_route, db, log_ip):
         data = _body()
         try:
             fields = _fields(cursor, data, partial=True, space_id=space_id)
+            # Офисы «куда направлять» — связью, а не полем города: приходят
+            # только если их прислали, и тогда заменяют список целиком.
+            office_ids = (wiki_cities.clean_office_ids(data.get('driver_office_ids'))
+                          if 'driver_office_ids' in data else None)
         except wiki_cities.CityFieldError as field_error:
             return _bad(field_error)
         if 'name' in fields:
@@ -207,14 +217,23 @@ def register(bp, wiki_route, db, log_ip):
                                              space_id=space_id)
             if found:
                 return _taken(found[1])
-        if not fields:
+        if not fields and office_ids is None:
             return jsonify({"error": "Нечего обновлять"}), 400
 
-        wiki_cities.update_city(cursor, city_id, fields, space_id=space_id,
-                                updated_by=ctx['user_id'])
+        if fields:
+            wiki_cities.update_city(cursor, city_id, fields, space_id=space_id,
+                                    updated_by=ctx['user_id'])
+        changed = sorted(fields.keys())
+        if office_ids is not None:
+            wiki_cities.set_city_offices(cursor, city_id, office_ids, space_id=space_id)
+            if not fields:
+                # Дата «Обновлено» обязана сдвинуться и от правки одного списка.
+                wiki_cities.touch_city(cursor, city_id, space_id=space_id,
+                                       updated_by=ctx['user_id'])
+            changed.append('driver_office_ids')
         queries.log_action(cursor, actor_id=ctx['user_id'], action='city.update',
                            entity_type='city', entity_id=city_id,
-                           details={'fields': sorted(fields.keys())}, ip_address=log_ip())
+                           details={'fields': changed}, ip_address=log_ip())
         # Сверяем, только если ссылку правда сменили: иначе каждое сохранение
         # комиссии ходило бы к Яндексу.
         url_changed = 'yandex_url' in fields and fields['yandex_url'] \

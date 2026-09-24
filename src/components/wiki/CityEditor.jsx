@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { Eye, EyeOff, Plus, Trash2 } from 'lucide-react';
+import React, { useMemo, useRef, useState } from 'react';
+import { Check, Eye, EyeOff, Plus, Search, Trash2 } from 'lucide-react';
 import { iosBtnGhost, iosGroupLabel, iosInput } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
@@ -67,6 +67,7 @@ export const draftFromCity = (city) => {
         name: city?.name || '',
         yandex_url: city?.yandex_url || '',
         serving_office_id: city?.serving_office_id || '',
+        driver_office_ids: [...(city?.driver_office_ids || [])],
         park_commission: city?.park_commission ?? '',
         tariff_meta: meta,
         extra_tariffs: (city?.extra_tariffs || []).map((item) => ({
@@ -91,6 +92,7 @@ export const payloadFromDraft = (draft) => ({
     name: draft.name.trim(),
     yandex_url: draft.yandex_url.trim() || null,
     serving_office_id: draft.serving_office_id || null,
+    driver_office_ids: draft.driver_office_ids || [],
     park_commission: String(draft.park_commission ?? '').trim() || null,
     tariff_meta: Object.fromEntries(
         Object.entries(draft.tariff_meta || {}).map(([code, entry]) => [code, {
@@ -112,6 +114,137 @@ export const payloadFromDraft = (draft) => ({
         .map((item) => ({ title: item.title.trim(), note: item.note.trim() || null })),
     note: draft.note.trim() || null,
 });
+
+const fold = (value) => String(value || '').toLowerCase().replace(/ё/g, 'е').trim();
+
+/* «Куда направлять водителя» — офисы, которые оператор увидит в карточке
+ * города (просьба владельца 24.09.2026). Список всех офисов пространства с
+ * отметками: офисы самого города — первой группой, остальные по городам.
+ * Порядок отметок и есть порядок показа — номер у отмеченного говорит, кого
+ * оператор увидит первым. Ничего не отмечено — карточка берёт офисы самого
+ * города, как и раньше (cityRules.cityOffices). */
+const DriverOffices = ({ offices, cityName, value, onChange }) => {
+    const [query, setQuery] = useState('');
+    const chosen = useMemo(() => new Set(value), [value]);
+    /* Города, где офисы уже отмечены, — наверх, чтобы выбор был виден сразу
+       при открытии. Считается ОДИН раз, по отметкам на момент открытия:
+       пересчёт на каждое нажатие двигал бы группы под пальцем. */
+    const initiallyChosen = useRef(new Set(value)).current;
+
+    const groups = useMemo(() => {
+        const collator = new Intl.Collator('ru');
+        const own = fold(cityName);
+        const needle = fold(query);
+        const usable = (offices || []).filter((office) => (
+            office.status === 'active' && !office.no_office
+            && (!needle || [office.name, office.city, office.address].some((text) => fold(text).includes(needle)))
+        ));
+        const byCity = new Map();
+        usable.forEach((office) => {
+            const key = office.city || 'Без города';
+            if (!byCity.has(key)) byCity.set(key, []);
+            byCity.get(key).push(office);
+        });
+        return [...byCity.entries()]
+            .map(([city, items]) => ({
+                city,
+                own: fold(city) === own,
+                picked: items.some((office) => initiallyChosen.has(office.id)),
+                items: items.sort((a, b) => collator.compare(a.name || '', b.name || '')),
+            }))
+            .sort((a, b) => (b.own - a.own) || (b.picked - a.picked)
+                || collator.compare(a.city, b.city));
+    }, [offices, cityName, query, initiallyChosen]);
+
+    const total = (offices || []).filter((office) => office.status === 'active' && !office.no_office).length;
+    const toggle = (id) => onChange(chosen.has(id) ? value.filter((item) => item !== id) : [...value, id]);
+
+    return (
+        <Group
+            title="Куда направлять водителя"
+            right={value.length > 0 ? (
+                <button type="button" className={`${iosBtnGhost} !py-1`} onClick={() => onChange([])}>
+                    Сбросить · {value.length}
+                </button>
+            ) : null}
+            hint={value.length
+                ? 'Оператор увидит отмеченные офисы в этом порядке — номер показывает, какой первым.'
+                : 'Отметьте офисы, которые оператор увидит в карточке города. Ничего не отмечено — показываются офисы самого города.'}
+        >
+            {total === 0 ? (
+                <div className="rounded-2xl bg-slate-50 px-4 py-3 text-[13px] text-slate-500 ring-1 ring-slate-200/70">
+                    В справочнике «Офисы» этого пространства пока нет офисов.
+                </div>
+            ) : (
+                <div className="overflow-hidden rounded-2xl bg-slate-50 ring-1 ring-slate-200/70">
+                    {total > 6 && (
+                        <div className="relative border-b border-slate-200/70 bg-white/70 p-2">
+                            <Search size={14} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                            <input
+                                className="w-full rounded-lg bg-slate-100 py-1.5 pl-8 pr-2.5 text-[13px] text-slate-900 placeholder-slate-400 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                placeholder="Поиск офиса или города"
+                                aria-label="Поиск офиса"
+                            />
+                        </div>
+                    )}
+                    <div className="max-h-72 overflow-y-auto overscroll-contain thin-scroll">
+                        {groups.length === 0 && (
+                            <div className="px-4 py-3 text-[13px] text-slate-500">Ничего не найдено</div>
+                        )}
+                        {groups.map((group) => (
+                            <div key={group.city}>
+                                <div className="sticky top-0 z-[1] bg-slate-50/95 px-3.5 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 backdrop-blur">
+                                    {group.city}{group.own ? ' · этот город' : ''}
+                                </div>
+                                {group.items.map((office) => {
+                                    const checked = chosen.has(office.id);
+                                    const order = value.indexOf(office.id) + 1;
+                                    return (
+                                        <button
+                                            key={office.id}
+                                            type="button"
+                                            role="checkbox"
+                                            aria-checked={checked}
+                                            onClick={() => toggle(office.id)}
+                                            className="flex w-full items-center gap-3 px-3.5 py-2 text-left transition hover:bg-slate-100/80 active:bg-slate-100"
+                                        >
+                                            <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full transition ${
+                                                checked ? 'bg-blue-600 text-white' : 'bg-white ring-[1.5px] ring-inset ring-slate-300'
+                                            }`}
+                                            >
+                                                {checked && <Check size={12} strokeWidth={3} />}
+                                            </span>
+                                            <span className="min-w-0 flex-1">
+                                                <span className="block truncate text-[13.5px] font-medium text-slate-900">
+                                                    {office.name}
+                                                </span>
+                                                {office.address && (
+                                                    <span className="block truncate text-[12px] text-slate-500">{office.address}</span>
+                                                )}
+                                            </span>
+                                            {office.kind === 'partner' && (
+                                                <span className="shrink-0 text-[11.5px] text-slate-400">
+                                                    {office.partner_label || 'партнёр'}
+                                                </span>
+                                            )}
+                                            {checked && value.length > 1 && (
+                                                <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-blue-50 px-1.5 text-[11px] font-semibold tabular-nums text-blue-700">
+                                                    {order}
+                                                </span>
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+        </Group>
+    );
+};
 
 export default function CityEditor({ draft, setDraft, offices = [], takenNames = [] }) {
     const patch = (fields) => setDraft((current) => ({ ...current, ...fields }));
@@ -144,7 +277,7 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
             .sort((a, b) => collator.compare(a.city || '', b.city || '')
                 || collator.compare(a.name || '', b.name || ''));
         return [
-            { value: '', label: 'Не выбран — офисы самого города' },
+            { value: '', label: 'Не выбрана' },
             ...usable.map((office) => ({
                 value: office.id,
                 label: office.address ? `${office.name} — ${office.address}` : office.name,
@@ -214,9 +347,12 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
                         spellCheck={false}
                     />
                 </Field>
+                {/* Зона — это другой вопрос, чем «куда направлять водителя»:
+                    она красит город на схеме и пишет «Обслуживает офис …».
+                    Офисы для оператора выбираются внизу формы. */}
                 <Field
-                    label="Куда направлять водителя"
-                    hint="Офис задаёт и зону города на карте. Не выбран — показываются офисы самого города."
+                    label="Зона — офис, который обслуживает город"
+                    hint="Задаёт цвет зоны на карте. Офисы, куда направлять водителя, — внизу формы."
                 >
                     <CustomSelect
                         variant="ios"
@@ -224,7 +360,7 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
                         value={draft.serving_office_id}
                         onChange={(value) => patch({ serving_office_id: value })}
                         options={officeOptions}
-                        placeholder="Не выбран — офисы самого города"
+                        placeholder="Не выбрана"
                         searchable
                         searchPlaceholder="Поиск по офису…"
                         ariaLabel="Обслуживающий офис"
@@ -428,6 +564,13 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
                     )}
                 </div>
             )}
+
+            <DriverOffices
+                offices={offices}
+                cityName={draft.name}
+                value={draft.driver_office_ids || []}
+                onChange={(ids) => patch({ driver_office_ids: ids })}
+            />
         </div>
     );
 }

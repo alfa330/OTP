@@ -241,7 +241,7 @@ class CityFieldTest(unittest.TestCase):
 
 # ── Граница пространства ─────────────────────────────────────────────────────
 
-SCOPED_TABLES = ('wiki_cities', 'wiki_offices')
+SCOPED_TABLES = ('wiki_cities', 'wiki_offices', 'wiki_city_offices')
 EXEMPT = {
     'due_cities': 'ночной обход идёт по всем пространствам: пространство здесь — '
                   'часть ответа, а запись результата (store_tariffs) идёт через него',
@@ -341,6 +341,40 @@ class CitySqlScopeTest(unittest.TestCase):
         sql = cursor.calls[0][0]
         self.assertIn('so.space_id = c.space_id', sql)
         self.assertIn('o.space_id = c.space_id', sql)
+
+    def test_driver_offices_stay_inside_the_space(self):
+        """«Куда направлять водителя» — связь двух справочников: удалять можно
+        только у города своего пространства, вставлять — только офис того же
+        пространства, что и город. Чужой id не попадает в список молча."""
+        cursor = _RecordingCursor()
+        wiki_cities.set_city_offices(cursor, 3, [9, 5], space_id=SPACE)
+        delete, insert = cursor.calls[0][0], cursor.calls[1][0]
+        self.assertIn('c.space_id = %s', delete)
+        self.assertIn('o.space_id = %s', insert)
+        self.assertIn('c.space_id = o.space_id', insert)
+        self.assertIn("NOT o.no_office", insert)
+        self.assertIn('WITH ORDINALITY', insert)          # порядок отметок — порядок показа
+        self.assertEqual(cursor.calls[1][1], ([9, 5], 3, SPACE))
+        # Пустой список — только снять старые связи.
+        cursor = _RecordingCursor()
+        wiki_cities.set_city_offices(cursor, 3, [], space_id=SPACE)
+        self.assertEqual(len(cursor.calls), 1)
+
+    def test_office_ids_are_cleaned(self):
+        self.assertEqual(wiki_cities.clean_office_ids(['9', 5, 9, 'x', -1, None]), [9, 5])
+        self.assertEqual(wiki_cities.clean_office_ids(None), [])
+        with self.assertRaises(wiki_cities.CityFieldError):
+            wiki_cities.clean_office_ids('9,5')
+        with self.assertRaises(wiki_cities.CityFieldError):
+            wiki_cities.clean_office_ids(list(range(1, 30)))
+
+    def test_summary_lists_only_live_offices_of_the_space(self):
+        cursor = _RecordingCursor()
+        wiki_cities.list_cities(cursor, space_id=SPACE)
+        sql = cursor.calls[0][0]
+        self.assertIn('FROM wiki_city_offices co', sql)
+        self.assertIn('oo.space_id = c.space_id', sql)
+        self.assertIn('ORDER BY co.position', sql)
 
     def test_foreign_office_is_not_kept(self):
         self.assertIsNone(wiki_cities.own_office(_RecordingCursor(), 5, space_id=SPACE))
@@ -524,6 +558,28 @@ class CityRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()['code'], 'WIKI_CITY_EXISTS')
 
+    def test_driver_offices_alone_are_a_change(self):
+        """Правка одного списка офисов — тоже правка: не «Нечего обновлять», и
+        дата «Обновлено» сдвигается."""
+        client, cursor = self.build([12])
+        row = [None] * len(wiki_cities._SUMMARY_KEYS) + [None]
+        row[0], row[1], row[13] = 4, 'Алматы', 'active'
+        cursor.fetchone.side_effect = [tuple(row)] + [None] * 10
+        response = client.patch('/api/wiki/cities/4', json={'driver_office_ids': [9, 5]})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        sql = [str(c.args[0]) for c in cursor.execute.call_args_list]
+        self.assertTrue(any('INSERT INTO wiki_city_offices' in q for q in sql))
+        self.assertTrue(any('UPDATE wiki_cities SET updated_at' in q for q in sql))
+
+    def test_driver_offices_in_wrong_shape_are_refused(self):
+        client, cursor = self.build([12])
+        row = [None] * len(wiki_cities._SUMMARY_KEYS) + [None]
+        row[0], row[1], row[13] = 4, 'Алматы', 'active'
+        cursor.fetchone.side_effect = [tuple(row)] + [None] * 10
+        response = client.patch('/api/wiki/cities/4', json={'driver_office_ids': '9,5'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'WIKI_CITY_FIELD')
+
     def test_list_shows_only_live_cities(self):
         cursor = _RecordingCursor()
         wiki_cities.list_cities(cursor, space_id=SPACE)
@@ -539,6 +595,9 @@ class CitySchemaTest(unittest.TestCase):
         self.assertIn('space_id INTEGER NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE', ddl)
         self.assertIn('uq_wiki_cities_space_name ON wiki_cities(space_id, lower(name))', ddl)
         self.assertIn('REFERENCES wiki_offices(id) ON DELETE SET NULL', ddl)
+        # Связь «куда направлять водителя» — с ключами на оба справочника.
+        self.assertIn('city_id INTEGER NOT NULL REFERENCES wiki_cities(id) ON DELETE CASCADE', ddl)
+        self.assertIn('office_id INTEGER NOT NULL REFERENCES wiki_offices(id) ON DELETE CASCADE', ddl)
 
     def test_cities_are_created_before_the_audit_reads_them(self):
         """Формула пространства журнала читает wiki_cities — таблица обязана
