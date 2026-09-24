@@ -922,7 +922,7 @@ class DialListService:
     # Один запрос и для списка, и для карточки: этап (stage) считается в SQL, чтобы
     # фильтр «В очереди» показывал ровно то, что выдаст _POOL_SQL. Номер выбирается
     # только ради маски — наружу уходит phone_masked.
-    _JOURNAL_SQL = """
+    _JOURNAL_BASE_SQL = """
         WITH base AS (
             SELECT l.id, l.department_id, l.full_name, l.phone_norm, l.status, l.attempts_total,
                    l.last_attempt_at, l.answered_at, l.created_at, l.updated_at, l.upload_count,
@@ -979,18 +979,62 @@ class DialListService:
             LEFT JOIN dial_list_outcomes lo ON lo.id = lt.outcome_id
             WHERE {scope}
         )
-        SELECT id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
+    """
+    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[35]).
+    _JOURNAL_COLUMNS = """
+               id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
                answered_at, created_at, updated_at, upload_count, note,
                first_file, first_uploaded_at, last_file, last_uploaded_at,
                open_operator_id, open_operator_name, last_operator_id, last_operator_name,
                last_result, last_done_at, last_call_at, last_call_state, last_disposition,
                last_billsec, last_api_error, last_call_operator_name, activity_at, stage, next_retry_at,
-               period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment,
+               period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment"""
+    _JOURNAL_SQL = _JOURNAL_BASE_SQL + """
+        SELECT""" + _JOURNAL_COLUMNS + """,
                COUNT(*) OVER () AS total
         FROM base
         WHERE {filters}
         ORDER BY {order}
         LIMIT %(limit)s OFFSET %(offset)s
+    """
+    # Страница журнала вместе со сводкой — одним запросом. Числа на полосе этапов
+    # и на чипах итогов считаются по той же выборке, что и список: этапы — со
+    # всеми фильтрами, кроме этапа, итоги — со всеми, кроме итога. Тогда число на
+    # чипе равно числу строк, которые покажет нажатие на него. Итог — последнего
+    # звонка водителя, ровно тот, по которому фильтрует список.
+    #
+    # base с тремя LATERAL на каждого водителя месяца — самая дорогая часть, и
+    # вторым запросом за сводкой она строилась бы дважды. Поэтому выборка по
+    # общим фильтрам материализуется один раз (f), а страница и сводка читают её.
+    # Сводка приходит JSON-колонкой к каждой строке страницы; LEFT JOIN от сводки
+    # отдаёт одну строку и тогда, когда страница пуста.
+    _JOURNAL_PAGE_SQL = _JOURNAL_BASE_SQL.rstrip() + """,
+        f AS MATERIALIZED (
+            SELECT * FROM base WHERE {filters}
+        ),
+        page AS (
+            SELECT""" + _JOURNAL_COLUMNS + """,
+                   COUNT(*) OVER () AS total,
+                   ROW_NUMBER() OVER (ORDER BY {order}) AS rn
+            FROM f
+            WHERE {stage_ok} AND {outcome_ok}
+            ORDER BY rn
+            LIMIT %(limit)s OFFSET %(offset)s
+        ),
+        counts AS (
+            SELECT COALESCE(json_agg(json_build_array(stage, last_outcome_id::text, for_stage, for_outcome)),
+                            '[]'::json) AS summary
+            FROM (
+                SELECT stage, last_outcome_id,
+                       COUNT(*) FILTER (WHERE {outcome_ok}) AS for_stage,
+                       COUNT(*) FILTER (WHERE {stage_ok}) AS for_outcome
+                FROM f
+                GROUP BY stage, last_outcome_id
+            ) g
+        )
+        SELECT page.*, counts.summary
+        FROM counts LEFT JOIN page ON TRUE
+        ORDER BY page.rn
     """
 
     def _journal_row(self, r, max_attempts):
@@ -1051,9 +1095,12 @@ class DialListService:
             params["period"] = period
             scope += " AND l.period = %(period)s"
         filters = ["TRUE"]
+        # Этап и итог — отдельно от остальных фильтров: сводка по полосе этапов и
+        # по чипам итогов считается без «своего» фильтра (см. _JOURNAL_COUNTS_SQL).
+        stage_ok = outcome_ok = "TRUE"
         if outcome_id:
             params["outcome_id"] = str(outcome_id)
-            filters.append("last_outcome_id = %(outcome_id)s::uuid")
+            outcome_ok = "last_outcome_id = %(outcome_id)s::uuid"
         q = str(q or "").strip()
         if q:
             digits = "".join(ch for ch in q if ch.isdigit())
@@ -1069,7 +1116,7 @@ class DialListService:
             if stage not in LEAD_STAGES:
                 raise DialListError("stage: неизвестный этап")
             params["stage"] = stage
-            filters.append("stage = %(stage)s")
+            stage_ok = "stage = %(stage)s"
         if operator_id:
             params["operator_id"] = _to_int(operator_id, 0)
             filters.append("""EXISTS (SELECT 1 FROM dial_list_assignments a
@@ -1086,58 +1133,30 @@ class DialListService:
             params["date_to"] = str(date_to)
             filters.append("(activity_at AT TIME ZONE 'Asia/Almaty')::date <= %(date_to)s::date")
         order = JOURNAL_SORTS.get(str(sort or "activity"), JOURNAL_SORTS["activity"])
-        sql = self._JOURNAL_SQL.format(scope=scope, filters=" AND ".join(filters), order=order)
+        sql = self._JOURNAL_PAGE_SQL.format(scope=scope, filters=" AND ".join(filters), order=order,
+                                            stage_ok=stage_ok, outcome_ok=outcome_ok)
         with self.db._get_cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-            total = int(rows[0][36]) if rows else 0
-            items = [self._journal_row(r, settings["max_attempts"]) for r in rows]
-            cur.execute("""
-                SELECT stage, COUNT(*) FROM (
-                    SELECT CASE
-                        WHEN l.status = 'excluded' THEN 'excluded'
-                        WHEN EXISTS (SELECT 1 FROM dial_list_assignments a
-                                     WHERE a.lead_id = l.id AND a.state = 'issued') THEN 'issued'
-                        WHEN l.status = 'done' AND l.answered_at IS NOT NULL THEN 'answered'
-                        WHEN l.status = 'done' THEN 'exhausted'
-                        WHEN l.attempts_total >= %(max_attempts)s THEN 'exhausted'
-                        WHEN l.last_attempt_at IS NOT NULL
-                             AND l.last_attempt_at >= CURRENT_TIMESTAMP - make_interval(hours => %(retry_hours)s)
-                            THEN 'waiting'
-                        ELSE 'queue' END AS stage
-                    FROM dial_list_leads l WHERE {scope}
-                ) s GROUP BY stage
-            """.format(scope=scope), params)
+            # Последняя колонка — сводка, предпоследняя — rn; пустая страница
+            # приходит одной строкой, где колонки страницы — NULL.
+            summary = (rows[0][-1] if rows else None) or []
+            page = [r for r in rows if r[0] is not None]
+            total = int(page[0][36]) if page else 0
+            items = [self._journal_row(r, settings["max_attempts"]) for r in page]
             by_stage = {k: 0 for k in LEAD_STAGES}
-            for row in cur.fetchall():
-                by_stage[row[0]] = int(row[1])
-            # Сколько разговоров с каждым итогом за этот месяц — цветные чипы над списком.
+            outcome_counts = {}
+            for stage_value, outcome_value, for_stage, for_outcome in summary:
+                by_stage[stage_value] = by_stage.get(stage_value, 0) + int(for_stage or 0)
+                if outcome_value is not None:
+                    outcome_counts[outcome_value] = outcome_counts.get(outcome_value, 0) + int(for_outcome or 0)
             cur.execute("""
-                SELECT o.id, o.name, o.color, o.is_active, COUNT(t.id)
-                FROM dial_list_outcomes o
-                LEFT JOIN dial_list_attempts t ON t.outcome_id = o.id
-                LEFT JOIN dial_list_assignments a ON a.id = t.assignment_id
-                LEFT JOIN dial_list_leads l ON l.id = a.lead_id AND {scope}
-                WHERE o.department_id = %(department_id)s
-                GROUP BY o.id, o.name, o.color, o.is_active, o.position
-                ORDER BY o.is_active DESC, o.position
-            """.format(scope=scope), params)
+                SELECT id, name, color, is_active FROM dial_list_outcomes
+                WHERE department_id = %(department_id)s
+                ORDER BY is_active DESC, position
+            """, params)
             by_outcome = [{"id": _sid(r[0]), "name": r[1], "color": r[2], "is_active": bool(r[3]),
-                           "count": int(r[4] or 0)} for r in cur.fetchall()]
-            # COUNT(t.id) считает попытки и по лидам вне периода (LEFT JOIN с условием
-            # на l не режет t): фильтруем честно вторым проходом только если период задан.
-            if period != "all":
-                cur.execute("""
-                    SELECT t.outcome_id, COUNT(*)
-                    FROM dial_list_attempts t
-                    JOIN dial_list_assignments a ON a.id = t.assignment_id
-                    JOIN dial_list_leads l ON l.id = a.lead_id
-                    WHERE t.outcome_id IS NOT NULL AND {scope}
-                    GROUP BY t.outcome_id
-                """.format(scope=scope), params)
-                counts = {str(r[0]): int(r[1]) for r in cur.fetchall()}
-                for o in by_outcome:
-                    o["count"] = counts.get(o["id"], 0)
+                           "count": outcome_counts.get(_sid(r[0]), 0)} for r in cur.fetchall()]
         return {
             "department_id": department_id, "items": items, "total": total,
             "limit": params["limit"], "offset": params["offset"],

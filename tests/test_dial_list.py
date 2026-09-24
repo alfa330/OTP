@@ -364,6 +364,61 @@ class LeadsJournalTests(unittest.TestCase):
                                                  "_period": dial_service.current_period()}
             svc.leads_journal(1, stage='nope')
 
+    def test_counts_follow_filters_except_their_own(self):
+        # Число на чипе этапа/итога равно числу строк, которые покажет нажатие на
+        # него: сводка считается по тем же фильтрам, что и список, кроме «своего».
+        import contextlib
+        import uuid
+        refusal, callback = uuid.uuid4(), uuid.uuid4()
+        executed = []
+
+        # stage, last_outcome_id, for_stage (без фильтра этапа), for_outcome (без фильтра итога)
+        summary = [['answered', str(refusal), 4, 4], ['answered', str(callback), 0, 2],
+                   ['queue', None, 0, 7], ['exhausted', str(refusal), 1, 0]]
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                executed.append((sql, dict(params or {})))
+
+            def fetchall(self):
+                sql = executed[-1][0]
+                if 'FROM dial_list_outcomes' in sql:
+                    return [(refusal, 'Отказ', '#FF3B30', True), (callback, 'Перезвонить', '#FF9F0A', True)]
+                if 'counts.summary' in sql:
+                    # Пустая страница: одна строка, колонки страницы — NULL, сводка — в последней.
+                    return [(None,) * 38 + (summary,)]
+                return []
+
+        class Db:
+            @contextlib.contextmanager
+            def _get_cursor(self):
+                yield Cursor()
+
+        svc = dial_service.DialListService(db=Db())
+        svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24, "period": "2026-09-01",
+                                             "_period": dial_service.current_period()}
+        res = svc.leads_journal(1, stage='answered', outcome_id=str(refusal), q='Иван')
+
+        sql = executed[0][0]
+        # Общие фильтры — в выборке f, её читают и страница, и сводка.
+        f_part = sql.split('f AS MATERIALIZED', 1)[1].split('page AS', 1)[0]
+        self.assertIn('full_name ILIKE', f_part)
+        self.assertNotIn('stage = %(stage)s', f_part)
+        self.assertNotIn('last_outcome_id = %(outcome_id)s', f_part)
+        # Страница — со всеми фильтрами.
+        page_part = sql.split('page AS', 1)[1].split('counts AS', 1)[0]
+        self.assertIn('stage = %(stage)s AND last_outcome_id = %(outcome_id)s::uuid', page_part)
+        # Сводка: этапы без своего фильтра, итоги без своего.
+        self.assertIn('FILTER (WHERE last_outcome_id = %(outcome_id)s::uuid) AS for_stage', sql)
+        self.assertIn('FILTER (WHERE stage = %(stage)s) AS for_outcome', sql)
+        self.assertEqual(sql.count('FROM dial_list_leads l'), 1)  # base строится один раз
+        self.assertEqual(res['items'], [])
+        self.assertEqual(res['total'], 0)
+        self.assertEqual(res['by_stage']['answered'], 4)
+        self.assertEqual(res['by_stage']['exhausted'], 1)
+        self.assertEqual(res['by_stage']['queue'], 0)
+        self.assertEqual({o['name']: o['count'] for o in res['by_outcome']}, {'Отказ': 4, 'Перезвонить': 2})
+
     def test_manual_actions_are_logged_and_guarded(self):
         ddl = ' '.join(dial_schema.DDL)
         self.assertIn('dial_list_lead_events', ddl)

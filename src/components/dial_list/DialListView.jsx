@@ -343,14 +343,21 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
 
             {selected && (
                 <>
-                    <IosSegmented
-                        value={tab}
-                        onChange={setTab}
-                        options={TABS.map((t) => (t.value === 'leads' ? { ...t, count: dept.summary?.pool_available } : t))}
-                        stretch
-                        size="lg"
-                        ariaLabel="Разделы обзвона"
-                    />
+                    {/* Пять вкладок на телефоне в ширину не помещаются: без прокрутки
+                        «Журнал» и «Настройки» уезжали за край экрана, и попасть в
+                        них было нечем. На широком экране min-w-max ничего не
+                        меняет — полоса и так растянута на всю ширину. */}
+                    <div className="-mx-1 overflow-x-auto px-1" style={{ scrollbarWidth: 'none' }}>
+                        <IosSegmented
+                            value={tab}
+                            onChange={setTab}
+                            options={TABS.map((t) => (t.value === 'leads' ? { ...t, count: dept.summary?.pool_available } : t))}
+                            stretch
+                            size="lg"
+                            className="min-w-max"
+                            ariaLabel="Разделы обзвона"
+                        />
+                    </div>
 
                     {tab === 'operators' && (
                         <section className="space-y-1.5">

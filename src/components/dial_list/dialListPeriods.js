@@ -32,8 +32,24 @@ export const currentMonthIso = () => {
 /**
  * Варианты для CustomSelect: месяцы с базами (с числом водителей), обзваниваемый
  * помечен, при желании — следующий месяц (чтобы загрузить базу заранее) и «Все».
+ *
+ * grouped — обзваниваемый месяц не хвостом «· обзванивается» в подписи, а
+ * отдельной группой списка («Обзванивается» / «Другие месяцы»). Хвост не
+ * помещался в кнопку выбора: в ней оставалось «Сентябрь 2026 · 128 · о…».
  */
-export const buildPeriodOptions = (periods = [], { includeAll = false, includeNext = false, activePeriod = '' } = {}) => {
+export const buildPeriodOptions = (periods = [], { includeAll = false, includeNext = false, activePeriod = '', grouped = false } = {}) => {
+    if (grouped) {
+        const sorted = [...periods].sort((a, b) => String(b.period).localeCompare(String(a.period)));
+        const active = activePeriod || sorted.find((p) => p.active)?.period || '';
+        const label = (p) => `${monthLabel(p.period)}${Number(p.total) ? ` · ${p.total}` : ''}`;
+        const current = sorted.find((p) => p.period === active) || (active ? { period: active, total: 0 } : null);
+        return [
+            ...(includeAll ? [{ value: 'all', label: 'Все месяцы' }] : []),
+            ...(current ? [{ value: current.period, label: label(current), groupLabel: 'Обзванивается' }] : []),
+            ...sorted.filter((p) => p.period !== active)
+                .map((p) => ({ value: p.period, label: label(p), groupLabel: 'Другие месяцы' })),
+        ];
+    }
     const seen = new Set();
     const options = [];
     const push = (value, label) => {

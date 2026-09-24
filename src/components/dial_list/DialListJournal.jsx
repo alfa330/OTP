@@ -1,8 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import FaIcon from '../common/FaIcon';
-import { iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosSegmented } from '../ui/ios';
+import {
+    Ban, ChevronRight, Loader2, PhoneCall, PhoneMissed, PhoneOff, PhoneOutgoing, Play, Plus, RefreshCw,
+    Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
+} from 'lucide-react';
+import {
+    iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosHint, IosModal,
+} from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { IosDateRangePicker } from '../ui/DateRangePicker';
+import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import { OutcomeBadge } from './DialListOutcomesPanel';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 
@@ -10,13 +15,23 @@ import { buildPeriodOptions, monthLabel } from './dialListPeriods';
  * Журнал водителей раздела «Обзвон из телефона» (запрос владельца 23.09.2026).
  *
  * Список всех, кого загрузили для обзвона за месяц: этап, ответственный оператор,
- * сколько было попыток, чем кончился последний звонок и какой итог поставил
- * оператор (с комментарием). Карточка — вся история: каждая попытка с исходом
- * АТС, итогом оператора, длительностью, запись разговора (если дозвонились),
- * ручные действия руководителя. Руководитель может вернуть человека в список
- * (попытки обнуляются) или исключить его из обзвона.
+ * чем кончился последний звонок и какой итог поставил оператор. Карточка — вся
+ * история: каждая попытка с исходом АТС, итогом оператора, длительностью и
+ * записью разговора, ручные действия руководителя. Руководитель может вернуть
+ * человека в список (попытки обнуляются) или исключить его из обзвона.
  *
- * Базы делятся по месяцам: переключатель месяца в тулбаре, «Все месяцы» — сводно.
+ * Раскладка — канон фильтров сайта («Касания», «Посылки», «ИИ-оценка»):
+ *   1) полоса: поиск, месяц базы, кнопка «Фильтры · N», обновить;
+ *   2) чипы отобранного под полосой — видно, что отобрано, не раскрывая панель;
+ *   3) панель редких фильтров (оператор, файл, даты) — только по кнопке;
+ *   4) полоса этапов — она же легенда цвета точек в строках, и чипы итогов.
+ * Числа на полосе этапов и на чипах итогов сервер считает по той же выборке, что
+ * и список (этапы — без фильтра этапа, итоги — без фильтра итога): число на чипе
+ * равно числу строк, которые покажет нажатие.
+ *
+ * Цвет — только со смыслом: точка этапа и цвет итога из справочника. Аватар и
+ * прочее — нейтральные; раньше аватар красился цветом этапа, и тот же смысл
+ * стоял в строке дважды.
  *
  * Номер телефона здесь — только маска (последние 4 цифры), как и везде в
  * разделе: файл с номерами есть у того, кто его загрузил, а сервер номер наружу
@@ -24,10 +39,19 @@ import { buildPeriodOptions, monthLabel } from './dialListPeriods';
  */
 
 const PAGE = 50;
+const MAX_PAGE = 200; // JOURNAL_MAX_LIMIT на сервере
 
-const STAGE_TONE = {
-    queue: 'slate', waiting: 'amber', issued: 'blue', answered: 'green', exhausted: 'red', excluded: 'slate',
-};
+/* Этапы в порядке жизни строки. dot — цвет точки: легенда в полосе и точка в
+   строке берут его отсюда, разойтись им негде. */
+const STAGES = [
+    { value: 'queue', label: 'В очереди', dot: 'bg-slate-400' },
+    { value: 'waiting', label: 'Ждут повтора', dot: 'bg-amber-400' },
+    { value: 'issued', label: 'У операторов', dot: 'bg-blue-500' },
+    { value: 'answered', label: 'Дозвонились', dot: 'bg-emerald-500' },
+    { value: 'exhausted', label: 'Не дозвонились', dot: 'bg-rose-500' },
+    { value: 'excluded', label: 'Исключены', dot: 'bg-slate-300' },
+];
+const STAGE_DOT = Object.fromEntries(STAGES.map((s) => [s.value, s.dot]));
 
 const RESULT_LABEL = {
     answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не ответил', other: 'Не состоялся', failed: 'Ошибка АТС',
@@ -40,195 +64,386 @@ const STATE_LABEL = {
     ended: 'Разговор завершён, ждём исход от АТС',
 };
 
-const EVENT_LABEL = {
-    requeue: 'Вернул(а) в список',
-    restore: 'Вернул(а) из исключённых',
-    exclude: 'Исключил(а) из обзвона',
-    note: 'Заметка',
+const SORT_OPTIONS = [
+    { value: 'activity', label: 'Сначала свежие' },
+    { value: 'name', label: 'По ФИО' },
+    { value: 'created', label: 'По дате загрузки' },
+    { value: 'attempts', label: 'Больше попыток' },
+];
+
+const TONE = {
+    green: 'bg-emerald-50 text-emerald-600',
+    amber: 'bg-amber-50 text-amber-600',
+    red: 'bg-rose-50 text-rose-500',
+    blue: 'bg-blue-50 text-blue-600',
+    slate: 'bg-slate-100 text-slate-500',
 };
+
+// Как у «Посылок»: поле даты в панели фильтров — белый чип на всю ширину колонки.
+const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 '
+    + 'text-left text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:bg-slate-50 '
+    + 'active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
+    + '[&>span]:flex-1 [&>span]:text-left [&>span]:truncate';
+
+// Разрушительное действие: своя строка, а не bg-rose поверх iosBtnPrimary —
+// какой из двух фонов победит, решает порядок правил в CSS, а не в className.
+const BTN_DANGER = 'inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 text-[13.5px] '
+    + 'font-semibold text-white shadow-sm transition-all hover:bg-rose-700 active:scale-[0.98] '
+    + 'disabled:cursor-not-allowed disabled:opacity-50';
+const BTN_DANGER_GHOST = 'inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium '
+    + 'text-rose-600 transition-all hover:bg-rose-50 active:scale-[0.98]';
+
+const shiftDays = (days) => {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return isoDate(d);
+};
+
+const DATE_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: 'Вчера', range: () => ({ from: shiftDays(1), to: shiftDays(1) }) },
+    { label: '7 дней', range: () => ({ from: shiftDays(6), to: isoDate(new Date()) }) },
+];
 
 const readError = async (resp) => {
     const data = await resp.json().catch(() => ({}));
     return data?.error || `HTTP ${resp.status}`;
 };
 
-const pad2 = (n) => String(n).padStart(2, '0');
+/* ─── форматирование ────────────────────────────────────────────────────── */
 
-const fmtDateTime = (iso) => {
-    if (!iso) return '';
+const pad2 = (n) => String(n).padStart(2, '0');
+const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+const toDate = (iso) => {
+    if (!iso) return null;
     const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    const now = new Date();
-    const sameYear = d.getFullYear() === now.getFullYear();
-    const day = `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}${sameYear ? '' : `.${d.getFullYear()}`}`;
-    return `${day}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    return Number.isNaN(d.getTime()) ? null : d;
+};
+
+// Разница в календарных днях: 0 — сегодня, 1 — вчера, -1 — завтра.
+const daysAgo = (d) => {
+    const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    return Math.round((start(new Date()) - start(d)) / 86400000);
+};
+
+/** «сегодня, 14:02», «вчера, 09:10», «завтра, 11:00», «22.09, 18:00», «22.09.2025». */
+const fmtWhen = (iso) => {
+    const d = toDate(iso);
+    if (!d) return '';
+    const clock = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    const ago = daysAgo(d);
+    if (ago === 0) return `сегодня, ${clock}`;
+    if (ago === 1) return `вчера, ${clock}`;
+    if (ago === -1) return `завтра, ${clock}`;
+    if (d.getFullYear() !== new Date().getFullYear()) return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+    return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}, ${clock}`;
+};
+
+const fmtClock = (iso) => {
+    const d = toDate(iso);
+    return d ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}` : '';
 };
 
 const fmtDate = (iso) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
-    return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+    const d = toDate(iso);
+    return d ? `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}` : '';
+};
+
+/** Заголовок дня в истории: «Сегодня», «Вчера», «22 сентября». */
+const fmtDay = (iso) => {
+    const d = toDate(iso);
+    if (!d) return 'Без даты';
+    const ago = daysAgo(d);
+    if (ago === 0) return 'Сегодня';
+    if (ago === 1) return 'Вчера';
+    const year = d.getFullYear() !== new Date().getFullYear() ? ` ${d.getFullYear()}` : '';
+    return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}${year}`;
+};
+
+const dayKey = (iso) => {
+    const d = toDate(iso);
+    return d ? `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}` : '';
 };
 
 const fmtDuration = (sec) => {
     const s = Math.max(0, Number(sec) || 0);
-    if (s === 0) return '';
-    if (s < 60) return `${s} сек`;
-    return `${Math.floor(s / 60)}:${pad2(s % 60)}`;
+    return s ? `${Math.floor(s / 60)}:${pad2(s % 60)}` : '';
 };
+
+const plural = (n, one, few, many) => {
+    const a = Math.abs(n) % 100;
+    const b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b === 1) return one;
+    if (b >= 2 && b <= 4) return few;
+    return many;
+};
+
+const lower = (text) => (text ? text[0].toLowerCase() + text.slice(1) : '');
 
 const initials = (name) => {
     const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
-    if (parts.length === 0) return '•';
-    return parts.slice(0, 2).map((p) => p[0].toUpperCase()).join('');
+    return parts.length ? parts.slice(0, 2).map((p) => p[0].toUpperCase()).join('') : '•';
 };
 
-const resultOf = (call) => {
-    if (!call) return '';
-    if (call.result) return RESULT_LABEL[call.result] || call.result;
-    return STATE_LABEL[call.state] || '';
+/** Что стоит за этапом строки — одна короткая фраза под ним. */
+const stageDetail = (lead) => {
+    const last = lead.last_call;
+    const result = last?.result ? lower(RESULT_LABEL[last.result] || last.result) : '';
+    // «Звонили ли» — по последнему звонку, а не по счётчику: итог «Перезвонить» и
+    // возврат в список обнуляют attempts_total, а история звонков остаётся.
+    const attempt = lead.attempts_total ? `попытка ${lead.attempts_total} из ${lead.max_attempts}` : '';
+    switch (lead.stage) {
+        case 'queue':
+            return last ? [result, attempt].filter(Boolean).join(' · ') : 'ещё не звонили';
+        case 'waiting':
+            return [result, lead.next_retry_at ? `повтор ${fmtWhen(lead.next_retry_at)}` : attempt].filter(Boolean).join(' · ');
+        case 'issued':
+            return last ? [result, attempt].filter(Boolean).join(' · ') : 'в списке, ещё не звонили';
+        case 'answered':
+            return last?.billsec > 0 ? `разговор ${fmtDuration(last.billsec)}` : '';
+        case 'exhausted':
+            return lead.attempts_total
+                ? `${lead.attempts_total} ${plural(lead.attempts_total, 'попытка', 'попытки', 'попыток')} без ответа`
+                : result;
+        default:
+            return '';
+    }
 };
 
-const Avatar = ({ name, tone = 'slate' }) => (
-    <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full text-[12px] font-semibold ${
-        tone === 'green' ? 'bg-emerald-50 text-emerald-700'
-            : tone === 'blue' ? 'bg-blue-50 text-blue-700'
-                : tone === 'amber' ? 'bg-amber-50 text-amber-700'
-                    : tone === 'red' ? 'bg-rose-50 text-rose-600'
-                        : 'bg-slate-100 text-slate-500'}`}>
+/* ─── мелкие детали ─────────────────────────────────────────────────────── */
+
+const Dot = ({ stage, className = '' }) => (
+    <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${STAGE_DOT[stage] || 'bg-slate-300'} ${className}`} />
+);
+
+const Avatar = ({ name, dim = false }) => (
+    <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-[12px] font-semibold ${dim ? 'text-slate-400' : 'text-slate-500'}`}>
         {initials(name)}
     </div>
 );
 
-const StageBadge = ({ lead }) => (
-    <IosBadge tone={STAGE_TONE[lead.stage] || 'slate'}>{lead.stage_label || lead.stage}</IosBadge>
-);
-
-/** Комментарий оператора: одной строкой в списке, целиком в карточке. */
-const Comment = ({ text, clamp = true }) => {
-    if (!text) return null;
-    return (
-        <span className={`inline-flex min-w-0 items-start gap-1 text-[12px] text-slate-500 ${clamp ? 'truncate' : ''}`} title={clamp ? text : undefined}>
-            <FaIcon className="fas fa-comment mt-0.5 shrink-0 text-slate-400" style={{ width: 10, height: 10 }} />
-            <span className={clamp ? 'truncate' : 'whitespace-pre-wrap'}>{text}</span>
-        </span>
-    );
-};
+const Skeleton = ({ className = '' }) => <div className={`animate-pulse rounded-md bg-slate-200/70 ${className}`} />;
 
 /* ─── строка списка ─────────────────────────────────────────────────────── */
 
-const LeadRow = ({ lead, onOpen }) => {
-    const last = lead.last_call;
-    const resultText = resultOf(last);
+/* Широкий экран — колонки (водитель · этап · итог · оператор), узкий — две-три
+   строки как в «Недавних» iOS: имя и время звонка, этап, итог с комментарием.
+   Одна и та же строка, разная подача: колонки на телефоне не помещаются, а
+   стопка на широком экране не даёт пробежать глазами столбец этапов. */
+const GRID = 'lg:grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_minmax(0,1fr)_14px] lg:items-center lg:gap-4';
+
+const LeadRow = ({ lead, onOpen, showMonth }) => {
+    const excluded = lead.stage === 'excluded';
+    const detail = stageDetail(lead);
+    const operatorSub = lead.responsible_is_current ? 'в списке сейчас' : fmtWhen(lead.last_call?.at);
+    const name = lead.full_name || 'Без имени';
     return (
         <button
             type="button"
             onClick={() => onOpen(lead)}
-            className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100"
+            className={`w-full px-4 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100 ${GRID}`}
         >
-            <Avatar name={lead.full_name} tone={STAGE_TONE[lead.stage]} />
-            <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                    <span className={`truncate text-[14px] font-semibold ${lead.stage === 'excluded' ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
-                        {lead.full_name || 'Без имени'}
-                    </span>
-                    {lead.outcome && <OutcomeBadge outcome={lead.outcome} small />}
-                </div>
-                <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-[12px] text-slate-500">
-                    <span className="font-mono tabular-nums">{lead.phone_masked}</span>
-                    <span className="text-slate-300">·</span>
-                    <span>попыток {lead.attempts_total}/{lead.max_attempts}</span>
-                    {lead.comment && (
-                        <>
-                            <span className="text-slate-300">·</span>
-                            <Comment text={lead.comment} />
-                        </>
-                    )}
-                    {!lead.comment && lead.note && (
-                        <>
-                            <span className="text-slate-300">·</span>
-                            <span className="truncate text-slate-400"><FaIcon className="fas fa-pen" style={{ width: 10, height: 10 }} /> {lead.note}</span>
-                        </>
+            {/* Узкий экран */}
+            <div className="flex items-start gap-3 lg:hidden">
+                <Avatar name={lead.full_name} dim={excluded} />
+                <div className="min-w-0 flex-1">
+                    <div className="flex items-baseline gap-2">
+                        <span className={`min-w-0 flex-1 truncate text-[14.5px] font-semibold ${excluded ? 'text-slate-400' : 'text-slate-900'}`}>{name}</span>
+                        {lead.last_call && <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{fmtWhen(lead.last_call.at)}</span>}
+                    </div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12.5px] text-slate-500">
+                        <Dot stage={lead.stage} />
+                        <span className="min-w-0 truncate">
+                            <span className="text-slate-700">{lead.stage_label}</span>{detail ? ` · ${detail}` : ''}
+                        </span>
+                    </div>
+                    {(lead.outcome || lead.comment) && (
+                        <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                            {lead.outcome && <OutcomeBadge outcome={lead.outcome} small className="shrink-0" />}
+                            {lead.comment && <span className="min-w-0 truncate text-[12.5px] text-slate-500">{lead.comment}</span>}
+                        </div>
                     )}
                 </div>
+                <ChevronRight size={16} className="mt-2.5 shrink-0 text-slate-300" />
             </div>
-            <div className="hidden w-44 shrink-0 md:block">
-                <div className="truncate text-[12.5px] text-slate-700">{lead.responsible?.name || '—'}</div>
-                <div className="text-[11px] text-slate-400">
-                    {lead.responsible ? (lead.responsible_is_current ? 'сейчас в его списке' : 'звонил последним') : 'ещё никому не выдавался'}
+
+            {/* Широкий экран: колонки */}
+            <div className="hidden min-w-0 items-center gap-3 lg:flex">
+                <Avatar name={lead.full_name} dim={excluded} />
+                <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                        <span className={`truncate text-[14px] font-semibold ${excluded ? 'text-slate-400' : 'text-slate-900'}`}>{name}</span>
+                        {lead.note && (
+                            <span title={`Заметка: ${lead.note}`} className="shrink-0 text-slate-400">
+                                <StickyNote size={13} />
+                            </span>
+                        )}
+                    </div>
+                    <div className="truncate text-[12px] tabular-nums text-slate-400">
+                        {lead.phone_masked}{showMonth && lead.period_label ? ` · ${lead.period_label}` : ''}
+                    </div>
                 </div>
             </div>
-            <div className="w-36 shrink-0 text-right sm:w-44">
-                <StageBadge lead={lead} />
-                <div className="mt-1 truncate text-[11px] text-slate-400">
-                    {last ? `${fmtDateTime(last.at)}${resultText ? ` · ${resultText}` : ''}` : 'звонков не было'}
+            <div className="hidden min-w-0 lg:block">
+                <div className="flex items-center gap-1.5 text-[13px] text-slate-800">
+                    <Dot stage={lead.stage} />
+                    <span className="truncate">{lead.stage_label}</span>
                 </div>
+                {detail && <div className="truncate pl-3.5 text-[12px] text-slate-500">{detail}</div>}
             </div>
-            <FaIcon className="fas fa-chevron-right shrink-0 text-slate-300" style={{ width: 12, height: 12 }} />
+            {/* Пустая клетка, а не «—»: столбец прочерков у каждой ещё не
+                обзвоненной строки — тот же шум, только ровными рядами. */}
+            <div className="hidden min-w-0 lg:block">
+                {lead.outcome && <OutcomeBadge outcome={lead.outcome} small />}
+                {lead.comment && <div className="mt-0.5 truncate text-[12px] text-slate-500" title={lead.comment}>{lead.comment}</div>}
+            </div>
+            <div className="hidden min-w-0 lg:block">
+                {lead.responsible && <div className="truncate text-[13px] text-slate-800">{lead.responsible.name}</div>}
+                {lead.responsible && operatorSub && <div className="truncate text-[12px] text-slate-500">{operatorSub}</div>}
+            </div>
+            <ChevronRight size={14} className="hidden text-slate-300 lg:block" />
         </button>
     );
 };
 
-/* ─── карточка ──────────────────────────────────────────────────────────── */
+/* ─── полосы этапов и итогов ────────────────────────────────────────────── */
 
-const MetaCell = ({ label, children }) => (
-    <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-        <div className="mt-0.5 text-[13.5px] text-slate-800">{children || '—'}</div>
+/* Полоса этапов — фильтр и легенда разом (как статусы в «Посылках»): точка в
+   ней того же цвета, что точка в строке. Переносится по строкам, а не уезжает
+   вбок: на телефоне прокрутка вбок прятала половину этапов за край. */
+const StageStrip = ({ value, onChange, counts }) => {
+    const all = STAGES.reduce((sum, s) => sum + (Number(counts[s.value]) || 0), 0);
+    const items = [{ value: '', label: 'Все', count: all }, ...STAGES.map((s) => ({ ...s, count: Number(counts[s.value]) || 0 }))];
+    return (
+        <div role="tablist" aria-label="Этап" className="flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 p-1">
+            {items.map((item) => {
+                const active = value === item.value;
+                return (
+                    <button
+                        key={item.value || 'all'}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => onChange(item.value)}
+                        className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[12.5px] transition active:scale-[0.98] ${
+                            active
+                                ? 'bg-white font-semibold text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                : `font-medium hover:bg-white/60 ${item.count ? 'text-slate-600' : 'text-slate-400'}`
+                        }`}
+                    >
+                        {item.dot && <span className={`h-2 w-2 shrink-0 rounded-full ${item.dot} ${item.count || active ? '' : 'opacity-40'}`} />}
+                        {item.label}
+                        <span className={`tabular-nums ${active ? 'text-slate-500' : 'text-slate-400'}`}>{item.count}</span>
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
+
+/* Чипы итогов: белые, цвет — только точка. Итог с нулём не показываем — нажатие
+   на него дало бы пустой список; выбранный остаётся, чтобы его можно было снять. */
+const OutcomeStrip = ({ outcomes, value, onChange }) => {
+    const visible = outcomes.filter((o) => o.count > 0 || o.id === value);
+    if (!visible.length) return null;
+    return (
+        <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-0.5 text-[12px] text-slate-500">Итог оператора</span>
+            {visible.map((o) => {
+                const active = value === o.id;
+                const color = /^#[0-9A-Fa-f]{6}$/.test(o.color || '') ? o.color : '#8E8E93';
+                return (
+                    <button
+                        key={o.id}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => onChange(active ? '' : o.id)}
+                        title={o.is_active === false ? 'Итог выключен, но встречается в истории' : undefined}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] font-medium transition active:scale-[0.97] ${
+                            active ? 'text-white shadow-sm' : 'bg-white text-slate-700 ring-1 ring-slate-200/80 hover:ring-slate-300'
+                        }`}
+                        style={active ? { backgroundColor: color } : undefined}
+                    >
+                        {!active && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />}
+                        <span className={o.is_active === false ? 'line-through decoration-slate-400' : ''}>{o.name}</span>
+                        <span className={`tabular-nums ${active ? 'text-white/80' : 'text-slate-400'}`}>{o.count}</span>
+                        {active && <X size={12} className="text-white/80" />}
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
+
+/* ─── карточка водителя ─────────────────────────────────────────────────── */
+
+/* Сгруппированный список iOS: подпись слева, значение справа, разделитель с
+   отступом слева — как в «Настройках». */
+const InfoRow = ({ label, children, sub, subTitle }) => (
+    <div className="flex items-start justify-between gap-4 py-2.5 pr-4">
+        <div className="shrink-0 text-[13.5px] text-slate-500">{label}</div>
+        <div className="min-w-0 text-right">
+            <div className="text-[13.5px] text-slate-900">{children}</div>
+            {sub && <div className="truncate text-[12px] text-slate-400" title={subTitle}>{sub}</div>}
+        </div>
     </div>
 );
 
-const AttemptItem = ({ attempt, onRecording, recording }) => {
+const Bubble = ({ children }) => (
+    <div className="mt-1.5 whitespace-pre-wrap break-words rounded-xl bg-slate-100/80 px-3 py-2 text-[13px] leading-snug text-slate-700">
+        {children}
+    </div>
+);
+
+const SOURCE_LABEL = { webhook: 'исход прислал вебхук Binotel', poll: 'исход получен опросом Binotel' };
+
+const AttemptItem = ({ attempt, recording, onRecording }) => {
     const result = attempt.result;
     const tone = result === 'answered' ? 'green' : result === 'failed' ? 'red' : result ? 'amber' : 'blue';
-    const icon = result === 'answered' ? 'fa-phone-volume' : result === 'failed' ? 'fa-triangle-exclamation' : result ? 'fa-phone-slash' : 'fa-phone';
-    const title = result ? (RESULT_LABEL[result] || result) : (STATE_LABEL[attempt.state] || 'Попытка');
+    const Icon = result === 'answered' ? PhoneCall : result === 'failed' ? TriangleAlert
+        : result === 'other' ? PhoneOff : result ? PhoneMissed : PhoneOutgoing;
+    const title = result ? (RESULT_LABEL[result] || result) : (STATE_LABEL[attempt.state] || 'Звонок');
     const rec = recording || {};
     return (
-        <li className="flex gap-3 px-4 py-3">
-            <div className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${
-                tone === 'green' ? 'bg-emerald-50 text-emerald-600' : tone === 'red' ? 'bg-rose-50 text-rose-500'
-                    : tone === 'amber' ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-blue-600'}`}>
-                <FaIcon className={`fas ${icon}`} style={{ width: 13, height: 13 }} />
+        <li className="flex gap-3 py-3 pr-4">
+            <div className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${TONE[tone]}`}>
+                <Icon size={14} />
             </div>
             <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-baseline gap-x-2">
-                    <span className="text-[13.5px] font-semibold text-slate-900">{title}</span>
-                    {attempt.billsec > 0 && <span className="text-[12.5px] text-slate-500">разговор {fmtDuration(attempt.billsec)}</span>}
-                    <span className="ml-auto text-[12px] tabular-nums text-slate-400">{fmtDateTime(attempt.requested_at)}</span>
+                <div className="flex items-baseline gap-2">
+                    <span className="text-[14px] font-semibold text-slate-900">{title}</span>
+                    {/* Ответ АТС — служебный текст на английском; нужен, только когда
+                        разбираются, почему звонок не ушёл, поэтому он под «i». */}
+                    {attempt.api_error && <span className="self-center"><IosHint text={attempt.api_error} label="Ответ АТС" /></span>}
+                    {attempt.billsec > 0 && <span className="text-[13px] tabular-nums text-slate-500">{fmtDuration(attempt.billsec)}</span>}
+                    <span className="ml-auto shrink-0 text-[12px] tabular-nums text-slate-400" title={SOURCE_LABEL[attempt.final_source]}>
+                        {fmtClock(attempt.requested_at)}
+                    </span>
                 </div>
-                <div className="mt-0.5 text-[12.5px] text-slate-500">
+                <div className="text-[12.5px] text-slate-500">
                     {attempt.operator?.name || 'Оператор'}
                     {attempt.internal_number && <> · линия {attempt.internal_number}</>}
-                    {attempt.final_source && <> · исход: {attempt.final_source === 'webhook' ? 'вебхук Binotel' : attempt.final_source === 'poll' ? 'опрос Binotel' : attempt.final_source}</>}
                 </div>
-                {(attempt.outcome || attempt.comment) && (
-                    <div className="mt-1.5 flex flex-wrap items-start gap-2">
-                        {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} />}
-                        {attempt.comment && (
-                            <div className="min-w-0 flex-1 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[12.5px] text-slate-700">
-                                <Comment text={attempt.comment} clamp={false} />
-                            </div>
-                        )}
-                    </div>
-                )}
-                {attempt.api_error && (
-                    <div className="mt-1 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[12px] text-rose-600">{attempt.api_error}</div>
-                )}
+                {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
+                {attempt.comment && <Bubble>{attempt.comment}</Bubble>}
                 {attempt.recording_available && (
                     <div className="mt-2">
                         {rec.url ? (
-                            <audio controls preload="none" src={rec.url} className="h-9 w-full max-w-md" />
+                            // autoPlay: запись запросили нажатием, второе нажатие «▶» было бы лишним.
+                            <audio controls autoPlay preload="auto" src={rec.url} className="h-9 w-full max-w-md" aria-label="Запись разговора" />
                         ) : (
                             <button
                                 type="button"
                                 onClick={() => onRecording(attempt.id)}
                                 disabled={rec.loading}
-                                className={`${iosBtnSecondary} py-1.5 text-[12.5px]`}
+                                className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12.5px] font-medium text-slate-700 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-60"
                             >
-                                <FaIcon className={rec.loading ? 'fas fa-spinner fa-spin' : 'fas fa-play'} style={{ width: 11, height: 11 }} />
-                                {rec.loading ? 'Запрашиваем у АТС…' : 'Запись разговора'}
+                                {rec.loading ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} className="fill-current" />}
+                                {rec.loading ? 'Запрашиваем у АТС…' : 'Прослушать запись'}
                             </button>
                         )}
                         {rec.error && <div className="mt-1 text-[12px] text-rose-600">{rec.error}</div>}
@@ -239,206 +454,308 @@ const AttemptItem = ({ attempt, onRecording, recording }) => {
     );
 };
 
-const EventItem = ({ event }) => (
-    <li className="flex gap-3 px-4 py-3">
-        <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500">
-            <FaIcon className={`fas ${event.kind === 'exclude' ? 'fa-ban' : event.kind === 'note' ? 'fa-pen' : 'fa-rotate-left'}`} style={{ width: 12, height: 12 }} />
-        </div>
-        <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-baseline gap-x-2">
-                <span className="text-[13.5px] font-semibold text-slate-900">{EVENT_LABEL[event.kind] || event.kind}</span>
-                <span className="text-[12.5px] text-slate-500">{event.actor?.name || 'руководитель'}</span>
-                <span className="ml-auto text-[12px] tabular-nums text-slate-400">{fmtDateTime(event.at)}</span>
-            </div>
-            {event.note && <div className="mt-0.5 text-[12.5px] text-slate-600">{event.note}</div>}
-        </div>
-    </li>
-);
+const EVENT_META = {
+    requeue: { label: 'Вернули в список', Icon: Undo2 },
+    restore: { label: 'Вернули в обзвон', Icon: Undo2 },
+    exclude: { label: 'Исключили из обзвона', Icon: Ban },
+    note: { label: 'Заметка', Icon: StickyNote },
+};
 
-const LeadCard = ({ lead, loading, error, canEdit, busy, onRequeue, onExclude, onSaveNote, onRecording, recordings }) => {
-    const [confirm, setConfirm] = useState(null); // 'requeue' | 'exclude' | null
-    const [reason, setReason] = useState('');
-    const [note, setNote] = useState(lead?.note || '');
-    useEffect(() => { setNote(lead?.note || ''); setConfirm(null); setReason(''); }, [lead?.id, lead?.note]);
-
-    if (loading && !lead) {
-        return <div className="px-4 py-10 text-center text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>;
-    }
-    if (error && !lead) {
-        return <div className="px-4 py-6 text-[13px] text-rose-600">{error}</div>;
-    }
-    if (!lead) return null;
-
-    const timeline = [
-        ...(lead.attempts || []).map((a) => ({ kind: 'attempt', at: a.requested_at, item: a })),
-        ...(lead.events || []).map((e) => ({ kind: 'event', at: e.at, item: e })),
-    ].sort((x, y) => String(y.at || '').localeCompare(String(x.at || '')));
-
-    const canRequeue = canEdit && ['answered', 'exhausted', 'waiting', 'excluded'].includes(lead.stage);
-    const canExclude = canEdit && lead.stage !== 'excluded';
-    const firstBatch = lead.batches?.[0];
-    const lastBatch = lead.batches?.[lead.batches.length - 1];
-
+const EventItem = ({ event }) => {
+    const meta = EVENT_META[event.kind] || { label: event.kind, Icon: StickyNote };
+    const label = event.kind === 'note' && !event.note ? 'Заметку убрали' : meta.label;
     return (
-        <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                <MetaCell label="Ответственный">
-                    {lead.responsible?.name}
-                    {lead.responsible && (
-                        <div className="text-[11.5px] text-slate-400">{lead.responsible_is_current ? 'сейчас в его списке' : 'звонил последним'}</div>
-                    )}
-                </MetaCell>
-                <MetaCell label="Попыток">
-                    {lead.attempts_total} из {lead.max_attempts}
-                    {lead.next_retry_at && <div className="text-[11.5px] text-slate-400">повтор не раньше {fmtDateTime(lead.next_retry_at)}</div>}
-                </MetaCell>
-                <MetaCell label="Итог оператора">
-                    {lead.outcome ? <OutcomeBadge outcome={lead.outcome} /> : (lead.last_call ? 'не указан' : '—')}
-                    {lead.comment && <div className="mt-1 text-[12px] text-slate-600">{lead.comment}</div>}
-                </MetaCell>
-                <MetaCell label="Последний звонок">
-                    {lead.last_call ? (
-                        <>
-                            {fmtDateTime(lead.last_call.at)}
-                            <div className="text-[11.5px] text-slate-400">{resultOf(lead.last_call)}{lead.last_call.billsec > 0 ? ` · ${fmtDuration(lead.last_call.billsec)}` : ''}</div>
-                        </>
-                    ) : 'не было'}
-                </MetaCell>
-                <MetaCell label="Дозвонились">
-                    {lead.answered_at ? fmtDateTime(lead.answered_at) : 'нет'}
-                </MetaCell>
-                <MetaCell label="База">
-                    {monthLabel(lead.period) || fmtDate(firstBatch?.uploaded_at || lead.created_at)}
-                    <div className="truncate text-[11.5px] text-slate-400" title={firstBatch?.file_name}>
-                        {fmtDate(firstBatch?.uploaded_at || lead.created_at)}{firstBatch?.file_name ? ` · ${firstBatch.file_name}` : ''}{firstBatch?.uploaded_by ? ` · ${firstBatch.uploaded_by}` : ''}
-                        {lead.upload_count > 1 && lastBatch ? ` · в файлах ${lead.upload_count} раза` : ''}
-                    </div>
-                </MetaCell>
+        <li className="flex gap-3 py-3 pr-4">
+            <div className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${TONE.slate}`}>
+                <meta.Icon size={14} />
             </div>
-
-            {canEdit && (
-                <div className="flex items-start gap-2">
-                    <textarea
-                        value={note}
-                        onChange={(e) => setNote(e.target.value)}
-                        rows={2}
-                        maxLength={500}
-                        placeholder="Заметка руководителя (видна только здесь)"
-                        className={`${iosInput} resize-none text-[13px]`}
-                    />
-                    <button
-                        type="button"
-                        onClick={() => onSaveNote(note)}
-                        disabled={busy || note.trim() === (lead.note || '').trim()}
-                        className={`${iosBtnSecondary} shrink-0 py-2`}
-                    >
-                        <FaIcon className="fas fa-floppy-disk" style={{ width: 12, height: 12 }} />
-                    </button>
+            <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2">
+                    <span className="text-[14px] font-semibold text-slate-900">{label}</span>
+                    <span className="ml-auto shrink-0 text-[12px] tabular-nums text-slate-400">{fmtClock(event.at)}</span>
                 </div>
-            )}
-            {!canEdit && lead.note && (
-                <div className="rounded-xl bg-amber-50 px-3 py-2 text-[13px] text-amber-800">{lead.note}</div>
-            )}
-
-            <section>
-                <div className="mb-1.5 flex items-center justify-between px-1">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">История</div>
-                    <div className="text-[11.5px] text-slate-400">{timeline.length ? `${timeline.length} записей` : ''}</div>
-                </div>
-                <div className={`${iosCard} overflow-hidden`}>
-                    {timeline.length === 0 ? (
-                        <div className="px-4 py-6 text-center text-[13px] text-slate-500">Звонков по этому водителю ещё не было.</div>
-                    ) : (
-                        <ul className="divide-y divide-slate-100">
-                            {timeline.map((t) => (t.kind === 'attempt'
-                                ? <AttemptItem key={`a-${t.item.id}`} attempt={t.item} onRecording={onRecording} recording={recordings[t.item.id]} />
-                                : <EventItem key={`e-${t.item.id}`} event={t.item} />))}
-                        </ul>
-                    )}
-                </div>
-            </section>
-
-            {(canRequeue || canExclude) && (
-                <div className={`${iosCard} p-3`}>
-                    {confirm ? (
-                        <div className="space-y-2">
-                            <div className="text-[13px] text-slate-700">
-                                {confirm === 'exclude'
-                                    ? 'Исключить водителя из обзвона? Операторы его больше не получат.'
-                                    : 'Вернуть в список? Счётчик попыток обнулится, водитель попадёт в ближайшую порцию.'}
-                            </div>
-                            <input
-                                value={reason}
-                                onChange={(e) => setReason(e.target.value)}
-                                maxLength={500}
-                                placeholder="Причина (необязательно)"
-                                className={`${iosInput} text-[13px]`}
-                            />
-                            <div className="flex justify-end gap-2">
-                                <button type="button" onClick={() => { setConfirm(null); setReason(''); }} className={iosBtnGhost}>Отмена</button>
-                                <button
-                                    type="button"
-                                    disabled={busy}
-                                    onClick={() => (confirm === 'exclude' ? onExclude(reason) : onRequeue(reason))}
-                                    className={`${iosBtnPrimary} ${confirm === 'exclude' ? 'bg-rose-600 hover:bg-rose-700' : ''}`}
-                                >
-                                    {busy && <FaIcon className="fas fa-spinner fa-spin" style={{ width: 12, height: 12 }} />}
-                                    {confirm === 'exclude' ? 'Исключить' : 'Вернуть в список'}
-                                </button>
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="flex flex-wrap justify-end gap-2">
-                            {canExclude && (
-                                <button type="button" onClick={() => setConfirm('exclude')} className={`${iosBtnSecondary} text-rose-600`}>
-                                    <FaIcon className="fas fa-ban" style={{ width: 12, height: 12 }} /> Исключить из обзвона
-                                </button>
-                            )}
-                            {canRequeue && (
-                                <button type="button" onClick={() => setConfirm('requeue')} className={iosBtnPrimary}>
-                                    <FaIcon className="fas fa-rotate-left" style={{ width: 12, height: 12 }} /> Вернуть в список
-                                </button>
-                            )}
-                        </div>
-                    )}
-                    {lead.stage === 'issued' && (
-                        <div className="mt-2 text-[12px] text-slate-400">Строка сейчас у оператора — вернуть или исключить можно после её обработки.</div>
-                    )}
-                </div>
-            )}
-        </div>
+                <div className="text-[12.5px] text-slate-500">{event.actor?.name || 'Руководитель'}</div>
+                {event.note && <Bubble>{event.note}</Bubble>}
+            </div>
+        </li>
     );
 };
 
-/* ─── чипы итогов ───────────────────────────────────────────────────────── */
+/* История по дням: заголовок дня, под ним события без повторения даты у каждого. */
+const History = ({ lead, recordings, onRecording }) => {
+    const groups = useMemo(() => {
+        const timeline = [
+            ...(lead.attempts || []).map((a) => ({ kind: 'attempt', at: a.requested_at, item: a })),
+            ...(lead.events || []).map((e) => ({ kind: 'event', at: e.at, item: e })),
+        ].sort((x, y) => String(y.at || '').localeCompare(String(x.at || '')));
+        const out = [];
+        timeline.forEach((t) => {
+            const key = dayKey(t.at);
+            if (!out.length || out[out.length - 1].key !== key) out.push({ key, at: t.at, items: [] });
+            out[out.length - 1].items.push(t);
+        });
+        return out;
+    }, [lead.attempts, lead.events]);
 
-const OutcomeChips = ({ outcomes = [], value, onChange }) => {
-    const visible = outcomes.filter((o) => o.is_active !== false || o.count > 0);
-    if (visible.length === 0) return null;
-    return (
-        <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Итоги</span>
-            {visible.map((o) => {
-                const active = value === o.id;
-                const color = /^#[0-9A-Fa-f]{6}$/.test(o.color || '') ? o.color : '#8E8E93';
-                return (
-                    <button
-                        key={o.id}
-                        type="button"
-                        onClick={() => onChange(active ? '' : o.id)}
-                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium transition active:scale-95 ${active ? 'text-white' : 'text-slate-700 hover:bg-slate-50'}`}
-                        style={active
-                            ? { backgroundColor: color }
-                            : { backgroundColor: `${color}14`, boxShadow: `inset 0 0 0 1px ${color}40` }}
-                        title={o.is_active === false ? 'Итог выключен, но встречается в истории' : o.name}
-                    >
-                        {!active && <span className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />}
-                        <span className={o.is_active === false ? 'line-through' : ''}>{o.name}</span>
-                        <span className={`tabular-nums ${active ? 'text-white/80' : 'text-slate-400'}`}>{o.count}</span>
-                    </button>
-                );
-            })}
+    if (!groups.length) {
+        return <div className="px-4 py-6 text-center text-[13px] text-slate-500">Звонков по этому водителю ещё не было.</div>;
+    }
+    return groups.map((g) => (
+        <div key={g.key || 'none'}>
+            <div className="px-4 pb-0.5 pt-3 text-[12px] font-semibold text-slate-500">{fmtDay(g.at)}</div>
+            <ul className="ml-4 divide-y divide-slate-100">
+                {g.items.map((t) => (t.kind === 'attempt'
+                    ? <AttemptItem key={`a-${t.item.id}`} attempt={t.item} recording={recordings[t.item.id]} onRecording={onRecording} />
+                    : <EventItem key={`e-${t.item.id}`} event={t.item} />))}
+            </ul>
         </div>
+    ));
+};
+
+const NoteSection = ({ lead, canEdit, busy, draft, setDraft, onSave }) => {
+    if (!canEdit && !lead.note) return null;
+    const editing = draft !== null;
+    const changed = editing && draft.trim() !== (lead.note || '').trim();
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>Заметка</span>
+                <IosHint text="Заметку видят только руководители в журнале. Оператору в телефоне она не показывается." />
+            </div>
+            <div className={`${iosCard} overflow-hidden`}>
+                {editing ? (
+                    <div className="p-3">
+                        <textarea
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && changed && !busy) onSave();
+                            }}
+                            rows={3}
+                            maxLength={500}
+                            autoFocus
+                            placeholder="Например: просил звонить после 18:00"
+                            className={`${iosInput} resize-none`}
+                        />
+                        <div className="mt-2 flex items-center justify-end gap-2">
+                            <span className="mr-auto text-[11.5px] tabular-nums text-slate-400">{draft.length}/500</span>
+                            <button type="button" onClick={() => setDraft(null)} className={iosBtnGhost}>Отмена</button>
+                            <button type="button" onClick={onSave} disabled={busy || !changed} className={iosBtnPrimary}>
+                                {busy && <Loader2 size={13} className="animate-spin" />}
+                                Сохранить
+                            </button>
+                        </div>
+                    </div>
+                ) : lead.note ? (
+                    <div className="flex items-start gap-3 px-4 py-3">
+                        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[13.5px] leading-snug text-slate-800">{lead.note}</div>
+                        {canEdit && (
+                            <button type="button" onClick={() => setDraft(lead.note || '')} className="shrink-0 text-[13px] font-medium text-blue-600 hover:text-blue-700">
+                                Изменить
+                            </button>
+                        )}
+                    </div>
+                ) : (
+                    <button
+                        type="button"
+                        onClick={() => setDraft('')}
+                        className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13.5px] font-medium text-blue-600 transition hover:bg-slate-50"
+                    >
+                        <Plus size={15} /> Добавить заметку
+                    </button>
+                )}
+            </div>
+        </section>
+    );
+};
+
+const CONFIRM_TEXT = {
+    exclude: 'Исключить водителя из обзвона? Операторы больше его не получат.',
+    requeue: 'Вернуть водителя в список? Попытки обнулятся, он попадёт в ближайшую порцию.',
+    restore: 'Вернуть водителя в обзвон? Попытки обнулятся, он попадёт в ближайшую порцию.',
+};
+
+const LeadSheet = ({
+    open, lead, loading, error, canEdit, busy, recordings,
+    onClose, onRetry, onRequeue, onExclude, onSaveNote, onRecording,
+}) => {
+    const [confirm, setConfirm] = useState(null); // 'requeue' | 'restore' | 'exclude' | null
+    const [reason, setReason] = useState('');
+    const [noteDraft, setNoteDraft] = useState(null); // null — заметку не редактируем
+    const leadId = lead?.id;
+
+    useEffect(() => { setConfirm(null); setReason(''); setNoteDraft(null); }, [leadId, open]);
+
+    /* Набранная, но не сохранённая заметка не должна пропадать от промаха мимо
+       окна, крестика или системного «назад»: спрашиваем. false — окно остаётся
+       (так его понимают и IosModal, и жест «назад» на телефоне). */
+    const noteDirty = noteDraft !== null && noteDraft.trim() !== (lead?.note || '').trim();
+    const requestClose = () => {
+        if (noteDirty && !window.confirm('Заметка не сохранена. Закрыть карточку без неё?')) return false;
+        onClose();
+        return true;
+    };
+
+    /* Escape снимает сперва то, что открыто внутри окна (подтверждение, правку
+       заметки), и только потом закрывает само окно. Нажатие, пришедшее из
+       раскрытого элемента (подсказка «i» и т. п.), — его собственное: оно
+       закрывает подсказку, а не карточку.
+       Слушаем в фазе ЗАХВАТА: на всплытии React уже успевает перерисовать
+       подсказку закрытой, и aria-expanded="true" на ней было бы не застать. */
+    const escRef = useRef(null);
+    escRef.current = (e) => {
+        if (e.target?.closest?.('[aria-expanded="true"]')) return;
+        if (confirm) { setConfirm(null); setReason(''); return; }
+        if (noteDraft !== null) { setNoteDraft(null); return; }
+        requestClose();
+    };
+    useEffect(() => {
+        if (!open) return undefined;
+        const onKey = (e) => { if (e.key === 'Escape') escRef.current?.(e); };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [open]);
+
+    const historyReady = Array.isArray(lead?.attempts);
+    const canRequeue = canEdit && historyReady && ['answered', 'exhausted', 'waiting', 'excluded'].includes(lead.stage);
+    const canExclude = canEdit && historyReady && lead.stage !== 'excluded';
+    const requeueKind = lead?.stage === 'excluded' ? 'restore' : 'requeue';
+
+    const submit = async () => {
+        const ok = await (confirm === 'exclude' ? onExclude(reason) : onRequeue(reason));
+        if (ok) { setConfirm(null); setReason(''); }
+    };
+    const saveNote = async () => {
+        if (await onSaveNote(noteDraft)) setNoteDraft(null);
+    };
+
+    let footer = null;
+    if (lead && (canRequeue || canExclude)) {
+        footer = confirm ? (
+            <div className="w-full space-y-2.5">
+                <div className="text-[13px] leading-snug text-slate-700">
+                    {CONFIRM_TEXT[confirm]}
+                    {confirm === 'exclude' && lead.stage === 'issued' ? ' Строка уйдёт из списка оператора.' : ''}
+                </div>
+                <input
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !busy) submit(); }}
+                    maxLength={500}
+                    autoFocus
+                    placeholder="Причина — необязательно"
+                    className={iosInput}
+                />
+                <div className="flex justify-end gap-2">
+                    <button type="button" onClick={() => { setConfirm(null); setReason(''); }} className={iosBtnSecondary}>Отмена</button>
+                    <button type="button" disabled={busy} onClick={submit} className={confirm === 'exclude' ? BTN_DANGER : iosBtnPrimary}>
+                        {busy && <Loader2 size={14} className="animate-spin" />}
+                        {confirm === 'exclude' ? 'Исключить' : requeueKind === 'restore' ? 'Вернуть в обзвон' : 'Вернуть в список'}
+                    </button>
+                </div>
+            </div>
+        ) : (
+            <>
+                {canExclude && (
+                    <button type="button" onClick={() => setConfirm('exclude')} className={`${BTN_DANGER_GHOST} mr-auto`}>
+                        <Ban size={14} /> Исключить из обзвона
+                    </button>
+                )}
+                {/* Без «i»: подвал окна режет всплывающую подсказку своим краем. */}
+                {lead.stage === 'issued' && (
+                    <span className="text-[12.5px] text-slate-500">Сейчас у оператора — вернуть можно после звонка</span>
+                )}
+                {canRequeue && (
+                    <button type="button" onClick={() => setConfirm(requeueKind)} className={iosBtnPrimary}>
+                        <Undo2 size={15} /> {requeueKind === 'restore' ? 'Вернуть в обзвон' : 'Вернуть в список'}
+                    </button>
+                )}
+            </>
+        );
+    }
+
+    const firstBatch = lead?.batches?.[0];
+    const batchLine = [firstBatch?.file_name, fmtDate(firstBatch?.uploaded_at || lead?.created_at), firstBatch?.uploaded_by]
+        .filter(Boolean).join(' · ');
+
+    return (
+        <IosModal
+            open={open}
+            onClose={requestClose}
+            title={lead?.full_name || (loading ? 'Загрузка…' : 'Водитель')}
+            subtitle={lead ? [lead.phone_masked, monthLabel(lead.period)].filter(Boolean).join(' · ') : undefined}
+            maxWidth="max-w-xl"
+            footer={footer}
+        >
+            {!lead && error ? (
+                <div className="py-8 text-center">
+                    <div className="text-[13.5px] text-rose-600">{error}</div>
+                    <button type="button" onClick={onRetry} className={`${iosBtnSecondary} mt-3`}>Повторить</button>
+                </div>
+            ) : !lead ? (
+                <div className="space-y-3 py-2">
+                    <Skeleton className="h-4 w-1/2" /><Skeleton className="h-4 w-2/3" /><Skeleton className="h-4 w-1/3" />
+                </div>
+            ) : (
+                <div className="space-y-5">
+                    <div className={`${iosCard} overflow-hidden`}>
+                        <div className="ml-4 divide-y divide-slate-100">
+                            <InfoRow
+                                label="Этап"
+                                sub={lead.stage === 'waiting' && lead.next_retry_at ? `повтор ${fmtWhen(lead.next_retry_at)}`
+                                    : lead.stage === 'answered' && lead.answered_at ? fmtWhen(lead.answered_at) : ''}
+                            >
+                                <span className="inline-flex items-center gap-1.5"><Dot stage={lead.stage} />{lead.stage_label}</span>
+                            </InfoRow>
+                            <InfoRow label="Попытки">
+                                <span className="tabular-nums">{lead.attempts_total} из {lead.max_attempts}</span>
+                            </InfoRow>
+                            <InfoRow
+                                label="Ответственный"
+                                sub={lead.responsible ? (lead.responsible_is_current ? 'в списке сейчас' : 'по последнему звонку') : ''}
+                            >
+                                {lead.responsible?.name || <span className="text-slate-400">ещё не выдавался</span>}
+                            </InfoRow>
+                            <InfoRow
+                                label="База"
+                                sub={`${batchLine}${lead.upload_count > 1
+                                    ? ` · в файлах ${lead.upload_count} ${plural(lead.upload_count, 'раз', 'раза', 'раз')}` : ''}`}
+                                subTitle={batchLine}
+                            >
+                                {monthLabel(lead.period) || '—'}
+                            </InfoRow>
+                        </div>
+                    </div>
+
+                    <NoteSection lead={lead} canEdit={canEdit && historyReady} busy={busy} draft={noteDraft} setDraft={setNoteDraft} onSave={saveNote} />
+
+                    <section className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-3">
+                            <span className={iosGroupLabel}>История</span>
+                            {historyReady && lead.attempts.length > 0 && (
+                                <span className="px-1 text-[12px] tabular-nums text-slate-400">
+                                    {lead.attempts.length} {plural(lead.attempts.length, 'звонок', 'звонка', 'звонков')}
+                                </span>
+                            )}
+                        </div>
+                        <div className={`${iosCard} overflow-hidden pb-1`}>
+                            {historyReady ? (
+                                <History lead={lead} recordings={recordings} onRecording={onRecording} />
+                            ) : error ? (
+                                <div className="px-4 py-5 text-center text-[13px] text-rose-600">
+                                    {error}
+                                    <button type="button" onClick={onRetry} className="ml-2 font-medium text-blue-600">Повторить</button>
+                                </div>
+                            ) : (
+                                <div className="space-y-3 p-4">
+                                    <Skeleton className="h-4 w-2/5" /><Skeleton className="h-4 w-3/5" /><Skeleton className="h-4 w-1/3" />
+                                </div>
+                            )}
+                        </div>
+                    </section>
+                </div>
+            )}
+        </IosModal>
     );
 };
 
@@ -456,6 +773,7 @@ const DialListJournal = ({
     const [outcomeId, setOutcomeId] = useState('');
     const [range, setRange] = useState({ from: '', to: '' });
     const [sort, setSort] = useState('activity');
+    const [filtersOpen, setFiltersOpen] = useState(false);
 
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
@@ -474,6 +792,11 @@ const DialListJournal = ({
     const [busy, setBusy] = useState(false);
     const [recordings, setRecordings] = useState({});
     const requestSeq = useRef(0);
+    const summarySeq = useRef(0);
+    const cardSeq = useRef(0);
+    const openIdRef = useRef(null);
+    const itemsCount = useRef(0);
+    itemsCount.current = items.length;
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
@@ -502,8 +825,8 @@ const DialListJournal = ({
     // Месяц: '' — обзваниваемый (сервер знает какой), 'all' — все, иначе ISO первого дня.
     const shownPeriod = period || activePeriod || '';
 
-    const buildQuery = useCallback((offset) => {
-        const qs = new URLSearchParams({ limit: String(PAGE), offset: String(offset), sort });
+    const buildQuery = useCallback((offset, limit) => {
+        const qs = new URLSearchParams({ limit: String(limit), offset: String(offset), sort });
         if (qDebounced) qs.set('q', qDebounced);
         if (stage) qs.set('stage', stage);
         if (operatorId) qs.set('operator_id', operatorId);
@@ -515,21 +838,44 @@ const DialListJournal = ({
         return qs;
     }, [qDebounced, stage, operatorId, batchId, outcomeId, period, range.from, range.to, sort]);
 
-    const load = useCallback(async (offset = 0) => {
+    const applySummary = (data) => {
+        setTotal(Number(data.total) || 0);
+        setByStage(data.by_stage || {});
+        setByOutcome(Array.isArray(data.by_outcome) ? data.by_outcome : []);
+        setMeta({ period: data.period, period_label: data.period_label, active_period: data.active_period });
+    };
+
+    /* keepSize — перечитать столько строк, сколько уже показано: после действия в
+       карточке список не должен схлопываться обратно до первой страницы. Сервер
+       отдаёт за раз не больше MAX_PAGE строк; если показано больше, перечитываем
+       только числа (total и сводку), а саму строку уже поправили на месте. */
+    const load = useCallback(async (offset = 0, { keepSize = false } = {}) => {
+        if (keepSize && itemsCount.current > MAX_PAGE) {
+            const seq = ++summarySeq.current;
+            try {
+                const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads?${buildQuery(0, 1).toString()}`, { credentials: 'include', headers: authHeaders() });
+                if (resp.ok && seq === summarySeq.current) applySummary(await resp.json());
+            } catch { /* числа догонят на следующей загрузке */ }
+            return;
+        }
         const seq = ++requestSeq.current;
+        const limit = keepSize ? Math.max(PAGE, itemsCount.current) : PAGE;
         if (offset === 0) setLoading(true); else setLoadingMore(true);
         setError('');
         try {
-            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads?${buildQuery(offset).toString()}`, { credentials: 'include', headers: authHeaders() });
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads?${buildQuery(offset, limit).toString()}`, { credentials: 'include', headers: authHeaders() });
             if (!resp.ok) throw new Error(await readError(resp));
             const data = await resp.json();
             if (seq !== requestSeq.current) return;
             const list = Array.isArray(data.items) ? data.items : [];
-            setItems((cur) => (offset === 0 ? list : [...cur, ...list]));
-            setTotal(Number(data.total) || 0);
-            setByStage(data.by_stage || {});
-            setByOutcome(Array.isArray(data.by_outcome) ? data.by_outcome : []);
-            setMeta({ period: data.period, period_label: data.period_label, active_period: data.active_period });
+            // При «Сначала свежие» водитель, по которому только что позвонили, между
+            // страницами переезжает вверх и пришёл бы второй раз — с тем же key.
+            setItems((cur) => {
+                if (offset === 0) return list;
+                const seen = new Set(cur.map((it) => it.id));
+                return [...cur, ...list.filter((it) => !seen.has(it.id))];
+            });
+            applySummary(data);
         } catch (e) {
             if (seq !== requestSeq.current) return;
             setError(e.message || 'Не удалось загрузить журнал');
@@ -541,51 +887,67 @@ const DialListJournal = ({
     useEffect(() => { load(0); }, [load]);
 
     const loadCard = useCallback(async (leadId) => {
+        const seq = ++cardSeq.current;
         setCardLoading(true);
         setCardError('');
         try {
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${leadId}`, { credentials: 'include', headers: authHeaders() });
             if (!resp.ok) throw new Error(await readError(resp));
             const data = await resp.json();
-            setCard(data.lead || null);
+            if (seq === cardSeq.current && data.lead) setCard(data.lead);
         } catch (e) {
-            setCardError(e.message || 'Не удалось открыть карточку');
+            if (seq === cardSeq.current) setCardError(e.message || 'Не удалось открыть карточку');
         } finally {
-            setCardLoading(false);
+            if (seq === cardSeq.current) setCardLoading(false);
         }
     }, [apiBaseUrl, authHeaders]);
 
+    // Строку списка показываем сразу, историю догружаем: окно открывается без пустой паузы.
     const openLead = (lead) => {
+        openIdRef.current = lead.id;
         setOpenId(lead.id);
-        setCard(null);
+        setCard({ ...lead, attempts: undefined, events: undefined });
         setRecordings({});
         loadCard(lead.id);
     };
 
-    const closeCard = () => { setOpenId(null); setCard(null); };
-
-    const applyLead = (lead) => {
-        setCard(lead);
-        setItems((cur) => cur.map((it) => (it.id === lead.id ? { ...it, ...lead, attempts: undefined, events: undefined } : it)));
-        load(0);
-        onChanged?.();
-    };
+    /* Карточку при закрытии не обнуляем: на телефоне экран ещё уезжает вправо, и
+       на нём должна остаться та же карточка, а не скелетон «Загрузка…». Следующее
+       открытие всё равно ставит свою. */
+    const closeCard = useCallback(() => {
+        cardSeq.current += 1;
+        openIdRef.current = null;
+        setOpenId(null);
+        setCardLoading(false);
+        setCardError('');
+    }, []);
 
     const act = async (path, method, body, okMessage) => {
-        if (!openId) return;
+        const leadId = openId;
+        if (!leadId) return false;
         setBusy(true);
         try {
-            const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${openId}/${path}`, {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${leadId}/${path}`, {
                 method, credentials: 'include',
                 headers: authHeaders({ 'Content-Type': 'application/json' }),
                 body: JSON.stringify(body || {}),
             });
             if (!resp.ok) throw new Error(await readError(resp));
             const data = await resp.json();
-            if (data.lead) applyLead(data.lead);
+            if (data.lead) {
+                // Пока шёл запрос, карточку могли закрыть и открыть другую: ответ по
+                // прежнему водителю в неё не кладём, иначе кнопки действовали бы на
+                // одного, а на экране был бы другой.
+                if (openIdRef.current === leadId) setCard(data.lead);
+                setItems((cur) => cur.map((it) => (it.id === data.lead.id ? { ...it, ...data.lead, attempts: undefined, events: undefined } : it)));
+                load(0, { keepSize: true });
+                onChanged?.();
+            }
             if (okMessage) toast(okMessage, 'success');
+            return true;
         } catch (e) {
             toast(e.message || 'Не получилось', 'error');
+            return false;
         } finally {
             setBusy(false);
         }
@@ -603,158 +965,241 @@ const DialListJournal = ({
         }
     };
 
-    const stageOptions = useMemo(() => {
-        const all = Object.values(byStage).reduce((s, n) => s + (Number(n) || 0), 0);
-        const mk = (value, label) => ({ value, label, count: value ? Number(byStage[value]) || 0 : all });
-        return [
-            mk('', 'Все'), mk('queue', 'В очереди'), mk('waiting', 'Ждут повтора'), mk('issued', 'У операторов'),
-            mk('answered', 'Дозвонились'), mk('exhausted', 'Не дозвонились'), mk('excluded', 'Исключены'),
-        ];
-    }, [byStage]);
-
     const operatorOptions = useMemo(() => [
         { value: '', label: 'Все операторы' },
         ...users.map((u) => ({ value: String(u.id), label: u.name || u.login || `#${u.id}` })),
     ], [users]);
 
     const batchOptions = useMemo(() => [
-        { value: '', label: 'Все загрузки' },
+        { value: '', label: 'Все файлы' },
         ...batches.map((b) => ({ value: String(b.id), label: `${b.file_name || 'файл'} · ${fmtDate(b.created_at)}` })),
     ], [batches]);
 
     const periodOptions = useMemo(
-        () => buildPeriodOptions(periods, { includeAll: true, activePeriod }),
+        () => buildPeriodOptions(periods, { includeAll: true, activePeriod, grouped: true }),
         [periods, activePeriod],
     );
 
-    const sortOptions = [
-        { value: 'activity', label: 'Сначала свежие' },
-        { value: 'name', label: 'По ФИО' },
-        { value: 'created', label: 'По дате загрузки' },
-        { value: 'attempts', label: 'Больше попыток' },
-    ];
+    /* Отобранное в панели — чипами под полосой. Этап и итог сюда не входят: у них
+       свои полосы, и выбранное там и так видно. */
+    const chips = [
+        operatorId && {
+            key: 'operator', name: 'Оператор',
+            label: operatorOptions.find((o) => o.value === operatorId)?.label || `#${operatorId}`,
+            clear: () => setOperatorId(''),
+        },
+        batchId && {
+            key: 'batch', name: 'Файл',
+            label: batchOptions.find((o) => o.value === batchId)?.label || 'файл',
+            clear: () => setBatchId(''),
+        },
+        (range.from || range.to) && {
+            key: 'range', name: 'Движение', label: rangeLabel(range.from, range.to),
+            clear: () => setRange({ from: '', to: '' }),
+        },
+    ].filter(Boolean);
 
-    const hasFilters = Boolean(qDebounced || stage || operatorId || batchId || outcomeId || range.from || range.to);
-    const resetFilters = () => { setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setOutcomeId(''); setRange({ from: '', to: '' }); };
+    const hasFilters = Boolean(qDebounced || stage || outcomeId || chips.length);
+    const resetFilters = () => {
+        setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setOutcomeId(''); setRange({ from: '', to: '' });
+    };
     const viewingOtherMonth = shownPeriod && shownPeriod !== 'all' && activePeriod && shownPeriod !== activePeriod;
 
     return (
         <section className="space-y-3">
-            <div className={`${iosCard} space-y-3 p-3`}>
-                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+            {/* Полоса: поиск · месяц · фильтры · обновить */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative sm:flex-1">
+                    <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                        type="search"
+                        value={q}
+                        onChange={(e) => setQ(e.target.value)}
+                        placeholder="ФИО или последние цифры номера"
+                        className={`${iosInput} pl-9`}
+                        aria-label="Поиск по журналу"
+                    />
+                </div>
+                <div className="flex items-center gap-2">
                     <CustomSelect
                         value={shownPeriod}
                         onChange={(v) => onPeriodChange?.(v)}
                         options={periodOptions}
-                        className="lg:w-60"
+                        variant="ios"
+                        className="min-w-0 flex-1 sm:w-64 sm:flex-none"
                         ariaLabel="Месяц базы"
                     />
-                    <div className="relative flex-1">
-                        <FaIcon className="fas fa-magnifying-glass pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" style={{ width: 13, height: 13 }} />
-                        <input
-                            value={q}
-                            onChange={(e) => setQ(e.target.value)}
-                            placeholder="ФИО или последние цифры номера"
-                            className={`${iosInput} pl-9`}
-                            aria-label="Поиск по журналу"
-                        />
-                    </div>
-                    <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} className="lg:w-48" ariaLabel="Оператор" searchable={users.length > 8} />
-                    <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} className="lg:w-52" ariaLabel="Файл загрузки" />
-                    <IosDateRangePicker
-                        from={range.from}
-                        to={range.to}
-                        onChange={(next) => setRange({ from: next?.from || '', to: next?.to || '' })}
-                    />
-                    <CustomSelect value={sort} onChange={setSort} options={sortOptions} className="lg:w-44" ariaLabel="Сортировка" />
-                    <button type="button" onClick={() => load(0)} disabled={loading} className={`${iosBtnSecondary} py-2.5`} aria-label="Обновить">
-                        <FaIcon className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
+                    <button
+                        type="button"
+                        onClick={() => setFiltersOpen((v) => !v)}
+                        aria-expanded={filtersOpen}
+                        className={`${chips.length ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
+                    >
+                        <SlidersHorizontal size={15} />
+                        Фильтры{chips.length ? <span className="tabular-nums">· {chips.length}</span> : null}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => load(0, { keepSize: items.length <= MAX_PAGE })}
+                        disabled={loading}
+                        className={`${iosBtnGhost} shrink-0`}
+                        aria-label="Обновить"
+                        title="Обновить"
+                    >
+                        <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
                     </button>
                 </div>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <div className="min-w-0 flex-1 overflow-x-auto">
-                        <IosSegmented value={stage} onChange={setStage} options={stageOptions} size="sm" ariaLabel="Этап" />
-                    </div>
-                    {hasFilters && (
-                        <button type="button" onClick={resetFilters} className={`${iosBtnGhost} shrink-0`}>
-                            <FaIcon className="fas fa-filter-circle-xmark" style={{ width: 12, height: 12 }} /> Сбросить
-                        </button>
-                    )}
-                </div>
-                <OutcomeChips outcomes={byOutcome} value={outcomeId} onChange={setOutcomeId} />
-                {viewingOtherMonth && (
-                    <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
-                        {monthLabel(shownPeriod)} сейчас не обзванивается: операторы получают порции из базы за {monthLabel(activePeriod)}.
-                    </div>
-                )}
             </div>
 
-            <div className={`${iosCard} overflow-hidden`}>
-                <div className="hidden items-center gap-3 border-b border-slate-100 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 md:flex">
-                    <div className="w-9" />
-                    <div className="flex-1">Водитель · итог оператора</div>
-                    <div className="w-44">Ответственный</div>
-                    <div className="w-44 text-right">Этап · последний звонок</div>
-                    <div className="w-3" />
+            {chips.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                    {chips.map((chip) => (
+                        <button
+                            key={chip.key}
+                            type="button"
+                            onClick={chip.clear}
+                            title={`Убрать: ${chip.label}`}
+                            className="group inline-flex max-w-full items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:ring-slate-300 active:scale-[0.98]"
+                        >
+                            <span className="text-slate-400">{chip.name}</span>
+                            <span className="truncate font-medium">{chip.label}</span>
+                            <X size={12} className="shrink-0 text-slate-400 group-hover:text-slate-600" />
+                        </button>
+                    ))}
+                    <button
+                        type="button"
+                        onClick={() => { setOperatorId(''); setBatchId(''); setRange({ from: '', to: '' }); }}
+                        className="px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 transition hover:text-slate-700"
+                    >
+                        сбросить всё
+                    </button>
                 </div>
-                {error ? (
-                    <div className="px-4 py-6 text-[13px] text-rose-600">{error}</div>
-                ) : loading && items.length === 0 ? (
-                    <div className="px-4 py-8 text-center text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>
-                ) : items.length === 0 ? (
-                    <div className="px-4 py-10 text-center">
-                        <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
-                            <FaIcon className="fas fa-address-book" style={{ width: 18, height: 18 }} />
-                        </div>
-                        <div className="mt-3 text-[14px] font-semibold text-slate-800">{hasFilters ? 'Никого не нашли' : `За ${meta.period_label || monthLabel(shownPeriod) || 'этот месяц'} база пуста`}</div>
-                        <div className="mt-1 text-[12.5px] text-slate-500">
-                            {hasFilters ? 'Попробуйте снять часть фильтров.' : 'Загрузите список водителей во вкладке «База водителей» — они появятся здесь.'}
-                        </div>
+            )}
+
+            {filtersOpen && (
+                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-3`}>
+                    <label className="block space-y-1.5">
+                        <span className={iosGroupLabel}>Оператор</span>
+                        <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} variant="ios" searchable={users.length > 8} ariaLabel="Оператор" />
+                    </label>
+                    <label className="block space-y-1.5">
+                        <span className={iosGroupLabel}>Файл загрузки</span>
+                        <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} variant="ios" ariaLabel="Файл загрузки" />
+                    </label>
+                    {/* div, а не label: внутри подсказка «i» и календарь, и label
+                        отдавал бы любой щелчок по подписи или по пустому месту
+                        календаря первой кнопке внутри — то есть «i». */}
+                    <div className="space-y-1.5">
+                        <span className="flex items-center gap-1.5">
+                            <span className={iosGroupLabel}>Движение по водителю</span>
+                            <IosHint align="right" text="День, когда по водителю было последнее движение: звонок или загрузка в базу." />
+                        </span>
+                        <IosDateRangePicker
+                            from={range.from}
+                            to={range.to}
+                            max={isoDate(new Date())}
+                            presets={DATE_PRESETS}
+                            triggerClassName={DATE_TRIGGER}
+                            onChange={(next) => setRange({ from: next?.from || '', to: next?.to || '' })}
+                        />
                     </div>
-                ) : (
-                    <>
-                        <div className="divide-y divide-slate-100">
-                            {items.map((lead) => <LeadRow key={lead.id} lead={lead} onOpen={openLead} />)}
+                </div>
+            )}
+
+            <StageStrip value={stage} onChange={setStage} counts={byStage} />
+            <OutcomeStrip outcomes={byOutcome} value={outcomeId} onChange={setOutcomeId} />
+
+            {viewingOtherMonth && (
+                <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-amber-100">
+                    {monthLabel(shownPeriod)} сейчас не обзванивается: операторы получают порции из базы за {monthLabel(activePeriod)}.
+                </div>
+            )}
+
+            <div className="space-y-1.5 pt-1">
+                <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 px-1 text-[13px] text-slate-500">
+                        <span>
+                            <span className="font-semibold tabular-nums text-slate-900">{total}</span>{' '}
+                            {plural(total, 'водитель', 'водителя', 'водителей')}
+                        </span>
+                        {loading && items.length > 0 && <Loader2 size={13} className="animate-spin text-slate-400" />}
+                    </div>
+                    <CustomSelect value={sort} onChange={setSort} options={SORT_OPTIONS} variant="ios" className="w-44" ariaLabel="Сортировка" />
+                </div>
+
+                <div className={`${iosCard} overflow-hidden`}>
+                    <div className={`hidden border-b border-slate-100 bg-slate-50/70 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 ${GRID}`}>
+                        <div className="pl-12">Водитель</div>
+                        <div>Этап</div>
+                        <div>Итог оператора</div>
+                        <div>Оператор</div>
+                        <div />
+                    </div>
+                    {error ? (
+                        <div className="px-4 py-6 text-center text-[13px] text-rose-600">
+                            {error}
+                            <button type="button" onClick={() => load(0)} className="ml-2 font-medium text-blue-600">Повторить</button>
                         </div>
-                        <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-2.5 text-[12px] text-slate-500">
-                            <span>Показано {items.length} из {total}{meta.period_label ? ` · ${meta.period_label}` : ''}</span>
-                            {items.length < total && (
-                                <button type="button" onClick={() => load(items.length)} disabled={loadingMore} className={`${iosBtnSecondary} py-1.5 text-[12.5px]`}>
-                                    {loadingMore ? <FaIcon className="fas fa-spinner fa-spin" /> : <FaIcon className="fas fa-arrow-down" style={{ width: 11, height: 11 }} />}
-                                    Показать ещё
-                                </button>
+                    ) : loading && items.length === 0 ? (
+                        <div className="divide-y divide-slate-100">
+                            {[0, 1, 2, 3, 4].map((i) => (
+                                <div key={i} className="flex items-center gap-3 px-4 py-3.5">
+                                    <Skeleton className="h-9 w-9 rounded-full" />
+                                    <div className="flex-1 space-y-2"><Skeleton className="h-3.5 w-1/3" /><Skeleton className="h-3 w-1/2" /></div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : items.length === 0 ? (
+                        <div className="px-4 py-12 text-center">
+                            <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                                <Search size={18} />
+                            </div>
+                            <div className="mt-3 text-[14px] font-semibold text-slate-800">
+                                {hasFilters ? 'Никого не нашли' : `В базе за ${meta.period_label || monthLabel(shownPeriod) || 'этот месяц'} пока никого`}
+                            </div>
+                            <div className="mt-1 text-[12.5px] text-slate-500">
+                                {hasFilters ? 'Под выбранные условия никто не подходит.' : 'Загрузите список водителей во вкладке «База водителей» — они появятся здесь.'}
+                            </div>
+                            {hasFilters && (
+                                <button type="button" onClick={resetFilters} className={`${iosBtnSecondary} mt-4`}>Сбросить фильтры</button>
                             )}
                         </div>
-                    </>
-                )}
+                    ) : (
+                        <>
+                            <div className={`divide-y divide-slate-100 transition-opacity ${loading ? 'opacity-60' : ''}`}>
+                                {items.map((lead) => (
+                                    <LeadRow key={lead.id} lead={lead} onOpen={openLead} showMonth={shownPeriod === 'all'} />
+                                ))}
+                            </div>
+                            {items.length < total && (
+                                <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-2.5">
+                                    <span className="text-[12px] tabular-nums text-slate-500">Показано {items.length} из {total}</span>
+                                    <button type="button" onClick={() => load(items.length)} disabled={loadingMore || loading} className={iosBtnSecondary}>
+                                        {loadingMore && <Loader2 size={13} className="animate-spin" />}
+                                        Показать ещё
+                                    </button>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
             </div>
 
-            <IosModal
+            <LeadSheet
                 open={Boolean(openId)}
+                lead={card}
+                loading={cardLoading}
+                error={cardError}
+                canEdit={canEdit}
+                busy={busy}
+                recordings={recordings}
                 onClose={closeCard}
-                title={card?.full_name || (cardLoading ? 'Загрузка…' : 'Водитель')}
-                subtitle={card ? (
-                    <span className="inline-flex flex-wrap items-center gap-2">
-                        <span className="font-mono tabular-nums">{card.phone_masked}</span>
-                        <StageBadge lead={card} />
-                        {card.period && <span className="text-slate-400">{monthLabel(card.period)}</span>}
-                    </span>
-                ) : undefined}
-                maxWidth="max-w-2xl"
-            >
-                <LeadCard
-                    lead={card}
-                    loading={cardLoading}
-                    error={cardError}
-                    canEdit={canEdit}
-                    busy={busy}
-                    onRequeue={(note) => act('requeue', 'POST', { note }, 'Водитель возвращён в список')}
-                    onExclude={(note) => act('exclude', 'POST', { note }, 'Водитель исключён из обзвона')}
-                    onSaveNote={(note) => act('note', 'PUT', { note }, 'Заметка сохранена')}
-                    onRecording={fetchRecording}
-                    recordings={recordings}
-                />
-            </IosModal>
+                onRetry={() => openId && loadCard(openId)}
+                onRequeue={(note) => act('requeue', 'POST', { note }, card?.stage === 'excluded' ? 'Водитель возвращён в обзвон' : 'Водитель возвращён в список')}
+                onExclude={(note) => act('exclude', 'POST', { note }, 'Водитель исключён из обзвона')}
+                onSaveNote={(note) => act('note', 'PUT', { note }, note.trim() ? 'Заметка сохранена' : 'Заметка удалена')}
+                onRecording={fetchRecording}
+            />
         </section>
     );
 };
