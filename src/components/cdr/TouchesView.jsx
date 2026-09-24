@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Download, Filter, Loader2, Phone, PhoneIncoming, PhoneMissed,
+    Download, Filter, Loader2, Phone, PhoneIncoming, PhoneMissed, PhoneOff,
     PhoneOutgoing, PlugZap, RefreshCw, Search, X,
 } from 'lucide-react';
 
@@ -13,7 +13,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
     exportFileName, hms, hours, lineCaption, percent, prettyPhone, resultTone,
-    seconds, shortDay, shortTime, silence,
+    seconds, shortDay, shortTime, silence, TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
 import DealsView from './DealsView';
 
@@ -69,6 +69,7 @@ const TYPE_SEGMENTS = [
     { value: 'Исходящий', label: 'Исходящие', icon: <PhoneOutgoing size={13} /> },
     { value: 'Входящий', label: 'Входящие', icon: <PhoneIncoming size={13} /> },
     { value: 'Входящий (не приняли)', label: 'Не приняли', icon: <PhoneMissed size={13} /> },
+    { value: TYPE_IN_BEFORE_QUEUE, label: 'До очереди', icon: <PhoneOff size={13} /> },
 ];
 
 const TABS = [
@@ -483,7 +484,12 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
 
             {data ? (
             <section className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
-                <Metric label="Касаний" value={(summary.total || 0).toLocaleString('ru-RU')} />
+                {/* Не дошедшие до очереди — строки таблицы, но не касания: оператору они
+                    не поступали. Поэтому числом рядом, а не внутри «Касаний». */}
+                <Metric label="Касаний" value={(summary.total || 0).toLocaleString('ru-RU')}
+                        hint={summary.before_queue
+                            ? `ещё ${summary.before_queue.toLocaleString('ru-RU')} не дошли до очереди`
+                            : null} />
                 <Metric label="Разговоров" value={(summary.talks || 0).toLocaleString('ru-RU')}
                         hint={`${percent(summary.talks || 0, summary.total || 0)}% дозваниваемость`} />
                 <Metric label="Время разговоров" value={`${hours(summary.talk_seconds)} ч`} />
@@ -498,8 +504,11 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
             <div className="mt-4 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
                 <IosSegmented value={tab} options={TABS} onChange={setTab} ariaLabel="Что показывать" />
                 {tab === 'touches' ? (
-                    <IosSegmented value={callType} options={TYPE_SEGMENTS} onChange={applyCallType}
-                                  ariaLabel="Тип звонка" />
+                    /* Пять сегментов на телефоне в ширину не помещаются — прокрутка, а не перенос. */
+                    <div className="-mx-1 max-w-full overflow-x-auto px-1">
+                        <IosSegmented value={callType} options={TYPE_SEGMENTS} onChange={applyCallType}
+                                      ariaLabel="Тип звонка" />
+                    </div>
                 ) : null}
             </div>
 
@@ -523,6 +532,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 что станция этой величины не назвала, а не ноль секунд.
                 «Линия» — номер парка: у входящего его набрал клиент, у исходящего с него
                 позвонили; под номером — таксопарк и очередь звонка.
+                «Не дошёл до очереди» — клиент положил трубку на приветствии: строка есть,
+                но в «Касаний», «Операторы», «По дням» и «Сделки» такие звонки не входят.
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>
@@ -604,7 +615,8 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                 <Td>
                                     <div className="truncate max-w-[220px]">{touch.operator || '—'}</div>
                                     <div className="text-[11.5px] text-slate-400">
-                                        {touch.ext ? `вн. ${touch.ext}` : 'номер не определён'}
+                                        {touch.call_type === TYPE_IN_BEFORE_QUEUE ? 'оператору не поступал'
+                                            : touch.ext ? `вн. ${touch.ext}` : 'номер не определён'}
                                         {touch.direction ? ` · ${touch.direction}` : ''}
                                     </div>
                                 </Td>
@@ -612,7 +624,8 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                     <span className="inline-flex items-center gap-1.5 text-slate-600">
                                         {touch.call_type === 'Исходящий' ? <PhoneOutgoing size={13} className="text-slate-400" />
                                             : touch.call_type === 'Входящий' ? <PhoneIncoming size={13} className="text-slate-400" />
-                                                : <PhoneMissed size={13} className="text-slate-400" />}
+                                                : touch.call_type === TYPE_IN_BEFORE_QUEUE ? <PhoneOff size={13} className="text-slate-400" />
+                                                    : <PhoneMissed size={13} className="text-slate-400" />}
                                         {touch.call_type}
                                     </span>
                                 </Td>

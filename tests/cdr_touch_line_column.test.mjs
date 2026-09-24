@@ -58,3 +58,11 @@ test('подсказка ячейки доходит до <td>', () => {
     assert.ok(/const Td = \(\{ children, className = '', title \}\)/.test(source));
     assert.ok(/<td title=\{title\}/.test(source));
 });
+
+test('не дошедшие до очереди — свой тип в переключателе и отдельная цифра у «Касаний»', () => {
+    /* Решение владельца 24.09.2026: такие звонки видны строками, но не касания. */
+    const source = readFileSync(new URL('../src/components/cdr/TouchesView.jsx', import.meta.url), 'utf8');
+    assert.ok(/value: TYPE_IN_BEFORE_QUEUE, label: 'До очереди'/.test(source), 'нет сегмента «До очереди»');
+    assert.ok(/summary\.before_queue/.test(source), 'число не дошедших не показано рядом с «Касаний»');
+    assert.ok(/оператору не поступал/.test(source));
+});

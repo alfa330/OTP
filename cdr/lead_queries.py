@@ -13,6 +13,8 @@
 
 from datetime import datetime, timedelta
 
+from . import touches as touches_mod
+
 # Сколько дней перед периодом заглядываем в звонки. Окно сделки начинается за две
 # минуты до её создания — сделка в 00:01 может владеть звонком предыдущих суток.
 TOUCH_LOOKBACK_DAYS = 1
@@ -97,6 +99,7 @@ SELECT t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result,
   FROM cdr_touches t
  WHERE t.phone = ANY(%(phones)s)
    AND t.call_day BETWEEN %(day_from)s AND %(day_to)s
+   AND t.call_type <> %(before_queue_type)s
  ORDER BY t.started_at, t.linkedid
 """
 
@@ -114,6 +117,9 @@ def select_touches_for_phones(cursor, phones, day_from, day_to):
         'phones': phones,
         'day_from': day_from - timedelta(days=TOUCH_LOOKBACK_DAYS),
         'day_to': day_to,
+        # Звонок, не дошедший до очереди, сделке не засчитывается: клиент положил трубку
+        # на приветствии, до оператора его не довели (решение владельца 24.09.2026).
+        'before_queue_type': touches_mod.TYPE_IN_BEFORE_QUEUE,
     })
     out = []
     for row in cursor.fetchall():

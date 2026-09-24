@@ -13,12 +13,16 @@
 export const TYPE_OUT = 'Исходящий';
 export const TYPE_IN = 'Входящий';
 export const TYPE_IN_MISSED = 'Входящий (не приняли)';
+/* Клиент положил трубку на приветствии — до очереди и оператора звонок не дошёл.
+   Строкой в таблице виден, в итоги не входит (cdr/touches.py, cdr/queries.py). */
+export const TYPE_IN_BEFORE_QUEUE = 'Входящий (не дошёл до очереди)';
 
 export const RESULT_TALK = 'Разговор';
 export const RESULT_DROPPED = 'Сброс без разговора';
 export const RESULT_NO_ANSWER = 'Не ответил';
 export const RESULT_BUSY = 'Занято';
 export const RESULT_FAILED = 'Не соединился';
+export const RESULT_BEFORE_QUEUE = 'Сброс до очереди';
 
 /* Тон плашки результата. «Сброс без разговора» жёлтый, а не серый: это не
    «не дозвонились», а «дозвонились и бросили», и разница видна руководителю. */
@@ -28,6 +32,7 @@ export const RESULT_TONE = {
     [RESULT_NO_ANSWER]: 'bg-slate-100 text-slate-600 ring-slate-200/70',
     [RESULT_BUSY]: 'bg-slate-100 text-slate-600 ring-slate-200/70',
     [RESULT_FAILED]: 'bg-rose-50 text-rose-600 ring-rose-100',
+    [RESULT_BEFORE_QUEUE]: 'bg-slate-100 text-slate-500 ring-slate-200/70',
 };
 
 export const resultTone = (result) => RESULT_TONE[result] || RESULT_TONE[RESULT_NO_ANSWER];

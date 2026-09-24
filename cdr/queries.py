@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 from psycopg2.extras import Json, execute_values
 
-from . import access, queue_facts, sync
+from . import access, queue_facts, sync, touches as touches_mod
 from .schema import RETENTION_DAYS
 
 # Смещение Алматы от UTC. Render живёт в UTC, и «сегодня» у него до 06:00 по
@@ -501,7 +501,14 @@ def _params(day_from, day_to, filters):
         'park_queues': list(park[0]) if park else [],
         'park_lines': list(park[1]) if park else [],
         'park_known': list(park[2]) if park else [],
+        'before_queue_type': touches_mod.TYPE_IN_BEFORE_QUEUE,
     }
+
+
+# Звонки, не дошедшие до очереди, видны строками таблицы и в файле, но ни в один итог
+# не входят: оператора в них нет, и «Касаний», «Операторы», «По дням» остаются теми же,
+# что до появления этих строк. Условие дописывается к _FILTER_SQL в каждом итоге.
+COUNTED_SQL = " AND t.call_type <> %(before_queue_type)s"
 
 
 # Разговор: точное значение со станции (плечо агента), а без него — billsec строки,
@@ -535,7 +542,10 @@ def _row_to_touch(row):
         # Приветствие (или меню) до очереди и ожидание в самой очереди — две разные
         # величины, которые прежняя колонка «Вызов всего» смешивала в одну.
         'queued_at': queued_at.strftime('%Y-%m-%d %H:%M:%S') if queued_at else '',
-        'ivr_seconds': queue_facts.ivr_seconds(row[10], queued_at),
+        # У не дошедшего до очереди весь звонок и есть приветствие: столько человек его
+        # слушал, прежде чем положить трубку.
+        'ivr_seconds': (int(row[7] or 0) if row[4] == touches_mod.TYPE_IN_BEFORE_QUEUE
+                        else queue_facts.ivr_seconds(row[10], queued_at)),
         'wait_seconds': None if wait is None else int(wait),
         # Разговор без ожидания — им станция называет плечо агента. Пока его нет,
         # раздел показывает прежний talk_seconds (billsec строки очереди).
@@ -583,24 +593,30 @@ def iter_touches(cursor, day_from, day_to, filters=None, chunk=5000):
 
 
 def summary(cursor, day_from, day_to, filters=None):
-    """Сводка периода одним запросом — карточки над таблицей."""
+    """Сводка периода одним запросом — карточки над таблицей.
+
+    Не дошедшие до очереди в «Касаний» и «Клиентов» не входят (разговора, оператора и
+    записи у них нет, так что остальные счётчики их не видят и так) — их число отдельно,
+    `before_queue`. Двойник на Python — touches.summarize."""
     cursor.execute("""
-        SELECT COUNT(*),
+        SELECT COUNT(*) FILTER (WHERE t.call_type <> %(before_queue_type)s),
                COUNT(*) FILTER (WHERE t.talk_seconds > 0),
                COUNT(*) FILTER (WHERE t.call_type = 'Исходящий'),
                COUNT(*) FILTER (WHERE t.call_type = 'Входящий'),
                COUNT(*) FILTER (WHERE t.call_type = 'Входящий (не приняли)'),
                COALESCE(SUM(""" + TALK_SQL + """), 0),
                COUNT(DISTINCT t.ext) FILTER (WHERE t.ext <> ''),
-               COUNT(DISTINCT t.phone),
-               COUNT(*) FILTER (WHERE t.recording_url IS NOT NULL)
+               COUNT(DISTINCT t.phone) FILTER (WHERE t.call_type <> %(before_queue_type)s),
+               COUNT(*) FILTER (WHERE t.recording_url IS NOT NULL),
+               COUNT(*) FILTER (WHERE t.call_type = %(before_queue_type)s)
     """ + _FILTER_SQL, _params(day_from, day_to, filters))
-    row = cursor.fetchone() or (0,) * 9
+    row = cursor.fetchone() or (0,) * 10
     return {
         'total': int(row[0]), 'talks': int(row[1]), 'outgoing': int(row[2]),
         'incoming': int(row[3]), 'incoming_missed': int(row[4]),
         'talk_seconds': int(row[5]), 'operators': int(row[6]),
         'phones': int(row[7]), 'with_recording': int(row[8]),
+        'before_queue': int(row[9]),
     }
 
 
@@ -621,7 +637,7 @@ def operator_stats(cursor, day_from, day_to, filters=None):
                COUNT(*) FILTER (WHERE t.talk_seconds > 0),
                COALESCE(SUM(""" + TALK_SQL + """), 0),
                COUNT(DISTINCT t.phone)
-    """ + _FILTER_SQL + """
+    """ + _FILTER_SQL + COUNTED_SQL + """
          GROUP BY t.ext, t.call_day
          ORDER BY t.ext, t.call_day
     """, _params(day_from, day_to, filters))
@@ -641,7 +657,7 @@ def breakdown(cursor, day_from, day_to, column, filters=None):
     """
     if column not in ('call_type', 'result'):
         raise ValueError('breakdown: неизвестный разрез %r' % column)
-    cursor.execute("SELECT t.%s, COUNT(*) " % column + _FILTER_SQL +
+    cursor.execute("SELECT t.%s, COUNT(*) " % column + _FILTER_SQL + COUNTED_SQL +
                    " GROUP BY t.%s ORDER BY COUNT(*) DESC" % column,
                    _params(day_from, day_to, filters))
     return [(row[0], int(row[1])) for row in cursor.fetchall()]
@@ -653,7 +669,7 @@ def daily_stats(cursor, day_from, day_to, filters=None):
                COUNT(*),
                COUNT(*) FILTER (WHERE t.talk_seconds > 0),
                COALESCE(SUM(""" + TALK_SQL + """), 0)
-    """ + _FILTER_SQL + """
+    """ + _FILTER_SQL + COUNTED_SQL + """
          GROUP BY t.call_day
          ORDER BY t.call_day
     """, _params(day_from, day_to, filters))
@@ -665,14 +681,17 @@ def daily_stats(cursor, day_from, day_to, filters=None):
 def day_touches_compact(cursor, day):
     """Касания одних суток без телефона и ссылки на запись — ровно то, что нужно
     табло для итогов, разрезов по линиям, часам и операторам. Один SELECT по
-    индексу call_day, тысячи строк, считается в памяти за миллисекунды."""
+    индексу call_day, тысячи строк, считается в памяти за миллисекунды.
+
+    Не дошедших до очереди табло не видит вовсе: входящие у него — только дошедшие до
+    очереди (решение владельца 21.09.2026), и строки без оператора ему не нужны."""
     cursor.execute("""
         SELECT started_at, answered_at, ext, call_type, result, talk_seconds,
                dial_seconds, queue, linkedid,
                queued_at, wait_seconds, talk_measured_seconds, hangup_side
           FROM cdr_touches
-         WHERE call_day = %s
-    """, (day,))
+         WHERE call_day = %s AND call_type <> %s
+    """, (day, touches_mod.TYPE_IN_BEFORE_QUEUE))
     return [{
         'started_at': row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else '',
         'answered_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else '',

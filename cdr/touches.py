@@ -71,12 +71,17 @@ RECORDINGS_BASE = "http://192.168.88.251/recordings"
 TYPE_OUT = "Исходящий"
 TYPE_IN = "Входящий"
 TYPE_IN_MISSED = "Входящий (не приняли)"
+# Клиент положил трубку на приветствии или в меню IVR — до очереди звонок не дошёл,
+# оператору не звонили. В разделе такие звонки видны строками, но ни в одном итоге,
+# ни на «Табло ОП», ни в режиме «Сделки» не считаются: работы оператора в них нет.
+TYPE_IN_BEFORE_QUEUE = "Входящий (не дошёл до очереди)"
 
 RESULT_TALK = "Разговор"
 RESULT_DROPPED = "Сброс без разговора"
 RESULT_NO_ANSWER = "Не ответил"
 RESULT_BUSY = "Занято"
 RESULT_FAILED = "Не соединился"
+RESULT_BEFORE_QUEUE = "Сброс до очереди"
 
 _DISPOSITION_RESULT = {
     "ANSWERED": "Отвечен",
@@ -127,6 +132,25 @@ def parse_row(row):
     if not client:
         return None
     return client, kind, agent
+
+
+def parse_before_queue(row):
+    """Строка звонка, не дошедшего до очереди → номер клиента или None.
+
+    Так выглядит клиент, положивший трубку на автоинформаторе или в меню IVR:
+    `dst = 's'` (точка входа диалплана), записи нет, плеча агента нет, в `src` —
+    внешний номер. `parse_row` такие строки не берёт — ни одно его правило на них не
+    срабатывает, — и это правильно для касаний с оператором. За 23.09.2026 таких 69 на
+    304 входящих, медиана 6 секунд: у Jana приветствие 16 с, человек его не дослушал.
+    """
+    if str(row.get("dst") or "") != "s" or row.get("recordingfile"):
+        return None
+    if EXT_RE.search(str(row.get("dstchannel") or "")):
+        return None
+    src = str(row.get("src") or "")
+    if re.fullmatch(r"\d{3,4}", src):
+        return None
+    return norm_phone(src) or None
 
 
 def trunk_number(channel):
@@ -270,6 +294,34 @@ def _line_number(legs, prefix_lines):
     return ""
 
 
+def _before_queue_touch(linkedid, client, legs, prefix_lines=None):
+    """Касание без оператора: номер, наша линия, сколько человек слушал приветствие.
+
+    Разговора в нём нет, хотя станция пишет ANSWERED и billsec в секунды: на звонок
+    ответил автоинформатор, а не человек. Поэтому `_touch` здесь не годится — он
+    назвал бы это «Разговором»."""
+    legs.sort(key=lambda leg: (leg["at"] or "", leg["disposition"] or ""))
+    started = min((leg["at"] for leg in legs if leg["at"]), default=None)
+    return {
+        "started_at": str(started).replace("T", " ") if started else "",
+        "answered_at": "",
+        "phone": client,
+        "operator": "",
+        "ext": "",
+        "direction": "",
+        "call_type": TYPE_IN_BEFORE_QUEUE,
+        "result": RESULT_BEFORE_QUEUE,
+        "talk_seconds": 0,
+        "dial_seconds": max((leg["duration"] for leg in legs), default=0),
+        "queue": "",
+        "line_number": _line_number(legs, prefix_lines),
+        "recording_url": "",
+        "has_recording": False,
+        "linkedid": linkedid,
+        "legs": len(legs),
+    }
+
+
 def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     legs.sort(key=lambda leg: (leg["at"] or "", leg["disposition"] or ""))
     kind = "out" if any(leg["kind"] == "out" for leg in legs) else "in"
@@ -360,10 +412,14 @@ def build_touches(rows, resolve_operator=None, phones=None):
             return ("", "")
 
     groups = defaultdict(list)
+    before_queue = defaultdict(list)
     seen_prefixes = defaultdict(lambda: defaultdict(int))
     for row in rows:
         parsed = parse_row(row)
         if not parsed:
+            client = parse_before_queue(row)
+            if client and (phones is None or client in phones):
+                before_queue[(row.get("linkedid"), client)].append(_leg(row, "in", None, client))
             continue
         client, kind, agent = parsed
         leg = _leg(row, kind, agent, client)
@@ -378,6 +434,12 @@ def build_touches(rows, resolve_operator=None, phones=None):
     prefix_lines = learn_prefix_lines(seen_prefixes)
     touches = [_touch(linkedid, client, legs, resolve_operator, prefix_lines)
                for (linkedid, client), legs in groups.items()]
+    # Звонок, у которого есть хоть одна строка очереди или агента, — обычное касание, и
+    # строки приветствия к нему не подмешиваются: иначе у него сдвинулись бы начало и
+    # число плеч, а на них стоит расчёт ожидания на «Табло ОП».
+    touches.extend(_before_queue_touch(linkedid, client, legs, prefix_lines)
+                   for (linkedid, client), legs in before_queue.items()
+                   if (linkedid, client) not in groups)
     touches.sort(key=lambda touch: (touch["started_at"], touch["phone"]))
     return touches
 
@@ -397,9 +459,14 @@ def learn_prefix_lines(seen):
 
 
 def summarize(touches):
-    """Сводка по списку касаний — то, что показывается карточками над таблицей."""
+    """Сводка по списку касаний — то, что показывается карточками над таблицей.
+
+    Двойник queries.summary: не дошедшие до очереди в итоги не входят, их число — отдельно."""
+    before_queue = sum(1 for t in touches if t["call_type"] == TYPE_IN_BEFORE_QUEUE)
+    touches = [t for t in touches if t["call_type"] != TYPE_IN_BEFORE_QUEUE]
     talk = [t for t in touches if t["talk_seconds"] > 0]
     return {
+        "before_queue": before_queue,
         "total": len(touches),
         "talks": len(talk),
         "outgoing": sum(1 for t in touches if t["call_type"] == TYPE_OUT),
