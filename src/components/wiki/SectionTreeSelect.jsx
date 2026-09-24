@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import {
     selectableSections, sectionAncestors, sectionPathLabel, sectionTreeRows,
 } from './sectionPicker';
@@ -20,10 +20,18 @@ import {
  * Позиционирование и закрытие повторяют CustomSelect (портал + fixed): список
  * обязан переживать overflow модалки редактора, а скролл внутри него самого не
  * должен его закрывать.
+ *
+ * multiple — статья в нескольких разделах сразу. value тогда массив, нажатие
+ * на строку ставит или снимает галочку и список не закрывает, а выбранные
+ * разделы стоят над кнопкой плашками с крестиком. Это ОДНА статья в нескольких
+ * местах, а не копии: у текста один источник. locked — разделы, из которых
+ * человек убирать статью не вправе (сервер спросит can_create и откажет):
+ * их плашка без крестика, строка в списке не снимается.
  */
 
 export default function SectionTreeSelect({
     sections = [], spaces = [], value, onChange, disabled = false,
+    multiple = false, locked = null,
 }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
@@ -36,16 +44,27 @@ export default function SectionTreeSelect({
     const liveSpaces = useMemo(
         () => (spaces || []).filter((sp) => sp.status !== 'archived'), [spaces]);
 
-    const path = useMemo(() => sectionAncestors(sections, value), [sections, value]);
+    const path = useMemo(
+        () => (multiple ? [] : sectionAncestors(sections, value)), [multiple, sections, value]);
+
+    /* Выбор одним списком строк-идентификаторов в обоих режимах: сравнивать
+       строками, как и раньше, — API и форма отдают то числа, то строки. */
+    const chosen = useMemo(() => {
+        if (!multiple) return value === null || value === undefined ? [] : [String(value)];
+        return (value || []).map(String);
+    }, [multiple, value]);
+    const isChosen = (id) => chosen.includes(String(id));
+    const isLocked = (id) => !!locked && locked.map(String).includes(String(id));
 
     // Ветка выбранного раздела раскрыта всегда: открыв список, человек обязан
     // увидеть, где стоит текущий выбор, а не искать его по свёрнутым узлам.
     useEffect(() => {
-        if (!path.length) return;
+        const next = chosen.flatMap((id) => sectionAncestors(sections, id).slice(0, -1));
+        if (!next.length) return;
         setExpanded((prev) => {
-            const next = new Set(prev);
-            path.slice(0, -1).forEach((s) => next.add(s.id));
-            return next;
+            const merged = new Set(prev);
+            next.forEach((s) => merged.add(s.id));
+            return merged;
         });
     }, [value]);   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -115,7 +134,23 @@ export default function SectionTreeSelect({
         return next;
     });
 
+    /* В режиме нескольких разделов нажатие ставит или снимает галочку и список
+       не закрывает: раскладывают статью обычно сразу по двум-трём веткам. */
+    const toggleChosen = (section) => {
+        if (isChosen(section.id)) {
+            if (isLocked(section.id)) return;
+            onChange?.((value || []).filter((id) => String(id) !== String(section.id)));
+        } else {
+            onChange?.([...(value || []), section.id]);
+        }
+    };
+
     const choose = (section, hasChildren) => {
+        if (multiple) {
+            toggleChosen(section);
+            if (hasChildren) setExpanded((prev) => new Set(prev).add(section.id));
+            return;
+        }
         onChange?.(section.id);
         if (!hasChildren) {
             setOpen(false);
@@ -126,19 +161,55 @@ export default function SectionTreeSelect({
         setExpanded((prev) => new Set(prev).add(section.id));
     };
 
-    const label = path.length
-        ? path.map((s) => s.name).join(' › ')
-        : 'Выберите…';
+    const label = multiple
+        ? (chosen.length ? 'Добавить раздел' : 'Выберите…')
+        : path.length
+            ? path.map((s) => s.name).join(' › ')
+            : 'Выберите…';
+
+    /* Выбранные разделы, которых нет в списке, — закрытые от этого человека
+       ветки или соседняя вика. Назвать их нельзя (рассказали бы о чужом
+       разделе), промолчать тоже: он должен знать, что статья лежит где-то ещё
+       и что сохранение эти привязки не тронет. */
+    const known = useMemo(() => new Set((sections || []).map((s) => String(s.id))), [sections]);
+    const chips = multiple ? chosen.filter((id) => known.has(id)) : [];
+    const hiddenCount = multiple ? chosen.length - chips.length : 0;
 
     return (
         <div>
+            {chips.length > 0 && (
+                <div className="mb-1.5 flex flex-wrap gap-1.5">
+                    {chips.map((id) => (
+                        <span
+                            key={id}
+                            className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-lg bg-blue-50 py-1 pl-2.5 pr-1 text-[12px] font-medium text-blue-700 ring-1 ring-blue-100"
+                        >
+                            <span className="truncate">{sectionPathLabel(sections, id)}</span>
+                            {isLocked(id) ? (
+                                <span className="w-1" />
+                            ) : (
+                                <button
+                                    type="button"
+                                    disabled={disabled}
+                                    onClick={() => onChange?.((value || []).filter(
+                                        (x) => String(x) !== id))}
+                                    aria-label={`Убрать из раздела «${sectionPathLabel(sections, id)}»`}
+                                    className="grid h-5 w-5 shrink-0 place-items-center rounded-md text-blue-400 transition hover:bg-blue-100 hover:text-blue-700"
+                                >
+                                    <X size={12} />
+                                </button>
+                            )}
+                        </span>
+                    ))}
+                </div>
+            )}
             <button
                 ref={btnRef}
                 type="button"
                 disabled={disabled}
                 aria-haspopup="tree"
                 aria-expanded={open}
-                aria-label="Раздел статьи"
+                aria-label={multiple ? 'Разделы статьи' : 'Раздел статьи'}
                 onClick={() => { if (!disabled) setOpen((v) => !v); }}
                 className={`flex w-full items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-left text-[12.5px] font-medium ring-1 transition-all ${
                     disabled
@@ -146,7 +217,12 @@ export default function SectionTreeSelect({
                         : 'text-slate-700 ring-slate-200 hover:ring-slate-300'
                 }`}
             >
-                <span className={`truncate ${path.length ? '' : 'text-slate-400'}`}>{label}</span>
+                <span className={`flex min-w-0 items-center gap-1.5 truncate ${
+                    path.length ? '' : multiple && chosen.length ? 'text-blue-600' : 'text-slate-400'
+                }`}>
+                    {multiple && chosen.length > 0 && <Plus size={13} className="shrink-0" />}
+                    <span className="truncate">{label}</span>
+                </span>
                 <ChevronDown size={14} className={`shrink-0 text-slate-400 transition ${open ? 'rotate-180' : ''}`} />
             </button>
 
@@ -185,14 +261,20 @@ export default function SectionTreeSelect({
                                     key={section.id}
                                     type="button"
                                     onClick={() => {
+                                        if (multiple) { toggleChosen(section); return; }
                                         onChange?.(section.id);
                                         setOpen(false);
                                     }}
-                                    className={`block w-full px-3 py-2 text-left text-[12.5px] transition hover:bg-slate-50 ${
-                                        String(section.id) === String(value) ? 'text-blue-600' : 'text-slate-700'
+                                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] transition hover:bg-slate-50 ${
+                                        isChosen(section.id) ? 'text-blue-600' : 'text-slate-700'
                                     }`}
                                 >
-                                    {sectionPathLabel(sections, section.id)}
+                                    <span className="min-w-0 flex-1 truncate">
+                                        {sectionPathLabel(sections, section.id)}
+                                    </span>
+                                    {multiple && isChosen(section.id) && (
+                                        <Check size={13} className="shrink-0 text-blue-600" />
+                                    )}
                                 </button>
                             ))
                         ) : liveSpaces.map((space) => {
@@ -209,7 +291,7 @@ export default function SectionTreeSelect({
                                         <div
                                             key={section.id}
                                             className={`flex items-center gap-1 pr-2 transition hover:bg-slate-50 ${
-                                                String(section.id) === String(value) ? 'bg-blue-50/60' : ''
+                                                isChosen(section.id) ? 'bg-blue-50/60' : ''
                                             }`}
                                             style={{ paddingLeft: `${8 + depth * 16}px` }}
                                         >
@@ -230,14 +312,20 @@ export default function SectionTreeSelect({
                                             <button
                                                 type="button"
                                                 onClick={() => choose(section, hasChildren)}
+                                                title={multiple && isChosen(section.id) && isLocked(section.id)
+                                                    ? 'Убирать статьи из этого раздела вам нельзя'
+                                                    : undefined}
                                                 className={`min-w-0 flex-1 truncate py-1.5 text-left text-[12.5px] ${
-                                                    String(section.id) === String(value)
+                                                    isChosen(section.id)
                                                         ? 'font-medium text-blue-600'
                                                         : 'text-slate-700'
                                                 }`}
                                             >
                                                 {section.name}
                                             </button>
+                                            {multiple && isChosen(section.id) && (
+                                                <Check size={13} className="shrink-0 text-blue-600" />
+                                            )}
                                         </div>
                                     ))}
                                 </div>
@@ -251,6 +339,20 @@ export default function SectionTreeSelect({
             {path.length > 0 && (
                 <div className="mt-1 px-1 text-[11.5px] text-slate-400">
                     Статья ляжет в: {path.map((s) => s.name).join(' › ')}
+                </div>
+            )}
+            {/* Главное, что надо сказать про несколько разделов: это не копии.
+                Иначе статью «на всякий случай» правят в каждом месте отдельно. */}
+            {multiple && chosen.length > 1 && (
+                <div className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                    Одна статья в {chosen.length} разделах, без копий: правка видна везде.
+                </div>
+            )}
+            {hiddenCount > 0 && (
+                <div className="mt-0.5 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                    {hiddenCount === 1
+                        ? 'Ещё в одном разделе, которого нет в этом списке, — он сохранится.'
+                        : `Ещё в ${hiddenCount} разделах, которых нет в этом списке, — они сохранятся.`}
                 </div>
             )}
         </div>

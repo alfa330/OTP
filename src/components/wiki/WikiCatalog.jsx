@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ChevronRight, Eye, FileText, Folder, FolderInput, FolderOpen, Layers,
-    Loader2, PenLine, Pencil, Search, User, X,
+    Archive, ChevronRight, Eye, FileText, Folder, FolderInput, FolderMinus, FolderOpen,
+    FolderPlus, Layers, Loader2, PenLine, Pencil, Search, User, X,
 } from 'lucide-react';
 import { iosCard, IosBadge, IosMenu, IosPager } from '../ui/ios';
 import { fetchArticleIndex } from './articleIndex';
-import { mayMove, moveSources } from './articleMove';
+import {
+    alsoIn, detachSources, mayAdd, mayDetach, mayMove, moveSources,
+} from './articleMove';
 import ArticleMovePanel from './ArticleMovePanel';
+import { sectionPathLabel } from './sectionPicker';
 import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 
 /* Вкладка «Статьи» — каталог: дерево разделов слева, статьи выбранного справа.
@@ -439,7 +442,11 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                          меняется сама выборка. */
                                       page = 1, onPageChange = NOOP }) {
     const [items, setItems] = useState(null);         // null = ещё не ответили
-    /* Открытый перенос: { id статьи, from, to, open }.
+    /* Открытая панель разделов статьи: { id статьи, mode, from, to, open }.
+     *
+     * mode — что делаем: 'move' (перенос), 'add' (та же статья ещё в одном
+     * разделе) или 'detach' (убрать из одного раздела). Панель у всех трёх одна
+     * — ArticleMovePanel.
      *
      * Одна статья за раз, и это не ограничение: панель раскрывается в строке,
      * и вторая открытая панель увела бы первую под сгиб вместе с её выбором.
@@ -537,6 +544,13 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
 
     const whereOf = useCallback(
         (article) => articleWhere(article, sectionNames), [sectionNames]);
+
+    /* Пути разделов — для подписи «также в …». Имени мало: одну статью в
+       нескольких местах держат как раз в ветках-близнецах СЗоВ и ОП, и «Также в
+       «Оператор»» под статьёй из «Оператора» не говорит, в котором. */
+    const sectionPaths = useMemo(
+        () => new Map(sections.map((x) => [x.id, sectionPathLabel(sections, x.id)])),
+        [sections]);
 
     /* Путь до раздела — для шапки правой колонки: «СЗоВ › Супервайзер». В самом
        дереве он не нужен, там положение видно отступом. */
@@ -795,20 +809,33 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
      * присланному: список на экране успевает устареть, и статья, которую
      * коллега минуту назад подключил к своей ветке, отвязалась бы заодно.
      */
+    /* Путём, а не именем: тост «Статья теперь есть и в «Оператор»» не говорит,
+       в котором из двух «Операторов» — СЗоВ или ОП. */
     const moveSectionName = useCallback((id) => {
         const found = moveSections.find((x) => Number(x.id) === Number(id));
-        return found?.name || sectionNames.get(Number(id)) || 'другой раздел';
-    }, [moveSections, sectionNames]);
+        return (found && sectionPathLabel(moveSections, found.id))
+            || sectionPaths.get(Number(id)) || 'другой раздел';
+    }, [moveSections, sectionPaths]);
 
-    const openMove = (article) => {
+    const openMove = (article, mode = 'move') => {
         /* Откуда переносим по умолчанию. Выбранный в дереве раздел — это и есть
            тот раздел, из-за которого строка на экране, поэтому он идёт первым.
-           Иначе — первый раздел статьи, откуда её вправе забрать. */
-        const sources = moveSources(article, moveSections, sectionNames);
+           Иначе — первый раздел статьи, откуда её вправе забрать.
+
+           У «убрать» догадка осторожнее: чужой раздел по умолчанию не
+           подставляем — только выбранный в дереве или единственный доступный.
+           Иначе подтверждение с первого кадра предлагало бы убрать статью из
+           раздела, о котором человек не думал. Добавление ниоткуда не забирает. */
+        const sources = (mode === 'detach' ? detachSources : moveSources)(
+            article, moveSections, sectionNames);
+        const allowed = sources.filter((x) => x.allowed);
         const inSelected = selected && selected.id !== ORPHANS_ID
-            && sources.find((x) => x.id === selected.id && x.allowed);
-        const from = inSelected || sources.find((x) => x.allowed) || null;
-        setMove({ id: article.id, from: from ? from.id : null, to: null, open: false });
+            && allowed.find((x) => x.id === selected.id);
+        const from = mode === 'add' ? null
+            : inSelected
+                || (mode === 'detach' ? (allowed.length === 1 ? allowed[0] : null) : allowed[0])
+                || null;
+        setMove({ id: article.id, mode, from: from ? from.id : null, to: null, open: false });
         // Раскрытие — следующим кадром: см. комментарий у самого состояния.
         window.requestAnimationFrame(() => setMove(
             (prev) => (prev && prev.id === article.id ? { ...prev, open: true } : prev)));
@@ -827,7 +854,36 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     };
 
     const submitMove = (article) => {
-        if (!move || move.id !== article.id || !move.to) return;
+        if (!move || move.id !== article.id) return;
+        /* Добавление и снятие зовут свои двери, а не PATCH с набором разделов:
+           набор на экране успевает устареть, и статья, которую коллега минуту
+           назад подключил к своей ветке, отвязалась бы заодно. Сервер трогает
+           ровно одну привязку. */
+        if (move.mode === 'add') {
+            if (!move.to) return;
+            const target = moveSectionName(move.to);
+            act(
+                article,
+                () => axios.post(`${base}/articles/${article.id}/adopt`,
+                                 { section_id: move.to }, { headers }),
+                `Статья теперь есть и в «${target}»`,
+                'Не удалось добавить статью в раздел',
+                closeMove);
+            return;
+        }
+        if (move.mode === 'detach') {
+            if (!move.from) return;
+            const source = moveSectionName(move.from);
+            act(
+                article,
+                () => axios.post(`${base}/articles/${article.id}/detach`,
+                                 { section_id: move.from }, { headers }),
+                `Статья убрана из «${source}»`,
+                'Не удалось убрать статью из раздела',
+                closeMove);
+            return;
+        }
+        if (!move.to) return;
         const target = moveSectionName(move.to);
         act(
             article,
@@ -854,10 +910,16 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
            только неотличимый от поломки. Статью вне дерева переносить можно
            всегда: забирать её не из чего. */
         const canMove = !!rights.can_edit && mayMove(article, moveSections, sectionNames);
+        /* Добавить и убрать — распоряжение содержимым РАЗДЕЛА, а не правка
+           статьи: сервер спрашивает только can_create в разделе (/adopt,
+           /detach). Супервайзер вправе показать в своей ветке чужой регламент,
+           не получая права его править, — и вправе это отменить. */
+        const canAdd = mayAdd(article, moveSections);
+        const canDetach = mayDetach(article, moveSections, sectionNames);
         /* Что стоит выше черты. Пункты бывают условными, и «separatorBefore:
            true» у первого же доступного пункта повесило бы волосяную линию под
            самой крышкой меню. */
-        const hasTop = canEdit || canMove;
+        const hasTop = canEdit || canMove || canAdd || canDetach;
         return [
             canEdit && {
                 key: 'edit', label: 'Редактировать', icon: Pencil,
@@ -865,6 +927,14 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
             canMove && {
                 key: 'move', label: 'Переместить', icon: FolderInput,
                 onSelect: () => openMove(article) },
+            /* Одна статья в нескольких местах — без копий: у текста один
+               источник, правка видна во всех разделах сразу. */
+            canAdd && {
+                key: 'add', label: 'Добавить в раздел', icon: FolderPlus,
+                onSelect: () => openMove(article, 'add') },
+            canDetach && {
+                key: 'detach', label: 'Убрать из раздела', icon: FolderMinus,
+                onSelect: () => openMove(article, 'detach') },
             /* Черновику этот пункт не нужен — он уже черновик. Зато нужен
                АРХИВНОЙ статье: из архива иначе нет пути назад. */
             canDraft && {
@@ -1302,9 +1372,14 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                     key={article.id}
                                     article={article}
                                     showStatus={bucket !== 'published'}
-                                    /* Раздел подписываем только в полном
-                                       списке: в списке раздела он уже в шапке. */
-                                    where={viewingAll ? whereOf(article) : null}
+                                    /* В полном списке — где лежит статья. В
+                                       списке раздела сам раздел уже в шапке, и
+                                       подписываем другие места той же статьи:
+                                       без подписи она выглядит отдельной, и её
+                                       правят дважды или заводят третью. */
+                                    where={viewingAll
+                                        ? whereOf(article)
+                                        : alsoIn(article, sectionPaths, selected?.id)}
                                     onOpen={() => onOpenArticle(article.slug)}
                                     menu={menuFor(article)}
                                     busy={acting === article.id}
@@ -1331,6 +1406,7 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                                 <div className="border-t border-slate-100 bg-slate-50/70 px-3 py-2.5">
                                                     <ArticleMovePanel
                                                         article={article}
+                                                        mode={move.mode}
                                                         sections={moveSections}
                                                         spaces={moveSpaces}
                                                         names={sectionNames}

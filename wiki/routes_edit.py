@@ -198,13 +198,76 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             return error
 
         added = wiki_edit.attach_section(cursor, article_id, section['id'])
+        # Индекс помощника зависит от разделов статьи так же, как при переносе:
+        # раздел решает, кому её показывают и не попадает ли она под отказ от ИИ.
+        indexed = _sync_ai_index(cursor, article_id) if added else {}
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.adopt',
                            entity_type='article', entity_id=article_id,
-                           details={'section_id': section['id'],
+                           details={'title': article['title'],
+                                    'section_id': section['id'],
                                     'section_name': section['name'],
-                                    'already_there': not added},
+                                    'already_there': not added,
+                                    'ai_index': indexed.get('action')},
                            ip_address=log_ip())
-        return jsonify({"id": article_id, "section_id": section['id'], "added": added})
+        return jsonify({"id": article_id, "section_id": section['id'],
+                        "section_name": section['name'], "added": added})
+
+    # Обратное подключению: статья перестаёт показываться в одном разделе и
+    # остаётся во всех прочих. Сама статья не трогается — ни текст, ни статус.
+    #
+    # Право — то же, что у подключения: can_create в ЭТОМ разделе, то есть
+    # право распоряжаться его содержимым. Правка статьи не нужна намеренно:
+    # подключить чужую статью к своей ветке можно без неё (/adopt), и без неё же
+    # обязано быть можно подключение отменить — иначе ошибку исправлял бы
+    # только владелец статьи.
+    #
+    # Последний раздел не снимается: статья без раздела не видна никому, кроме
+    # автора. Для «убрать отовсюду» есть архив, для «положить в другое место» —
+    # перенос.
+    @wiki_route('/articles/<int:article_id>/detach', methods=('POST',))
+    def wiki_article_detach(cursor, ctx, article_id):
+        """Убрать статью из одного её раздела, оставив в остальных."""
+        article, _permissions, error = _load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+
+        section_id = _int_or_none(_body().get('section_id'))
+        if not section_id:
+            return jsonify({"error": "Не выбран раздел"}), 400
+
+        current = [int(s) for s in (article.get('section_ids') or ())]
+        # Статью уже убрали отсюда, пока человек смотрел на список. Честный
+        # ответ — «обновите список», а не молчаливое «готово».
+        if section_id not in current:
+            return jsonify({
+                "error": "Статьи уже нет в этом разделе — обновите список",
+                "code": "WIKI_SOURCE_CHANGED",
+            }), 409
+
+        denied = _forbidden_sections(cursor, ctx, [section_id])
+        if denied:
+            return _section_forbidden(denied, 'убирать статьи из')
+
+        if len(current) < 2 or not wiki_edit.detach_section(cursor, article_id, section_id):
+            return jsonify({
+                "error": "Это единственный раздел статьи. Перенесите её в другой "
+                         "раздел или уберите в архив",
+                "code": "WIKI_LAST_SECTION",
+            }), 409
+
+        cursor.execute('SELECT name FROM wiki_sections WHERE id = %s', (section_id,))
+        row = cursor.fetchone()
+        section_name = row[0] if row else None
+        indexed = _sync_ai_index(cursor, article_id)
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='article.detach',
+                           entity_type='article', entity_id=article_id,
+                           details={'title': article['title'],
+                                    'section_id': section_id,
+                                    'section_name': section_name,
+                                    'ai_index': indexed.get('action')},
+                           ip_address=log_ip())
+        return jsonify({"status": "detached", "id": article_id,
+                        "section_id": section_id, "section_name": section_name})
 
     @wiki_route('/articles/<int:article_id>/fork', methods=('POST',))
     def wiki_article_fork(cursor, ctx, article_id):

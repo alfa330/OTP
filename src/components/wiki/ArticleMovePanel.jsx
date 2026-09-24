@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-    ArrowRightLeft, Check, ChevronRight, Folder, FolderOpen, Layers, Loader2, Search, X,
+    ArrowRightLeft, Check, ChevronRight, Folder, FolderMinus, FolderOpen, FolderPlus, Layers,
+    Loader2, Search, X,
 } from 'lucide-react';
 import { iosBtnPrimary, iosBtnSecondary } from '../ui/ios';
 import { sectionAncestors, sectionPathLabel, sectionTreeRows } from './sectionPicker';
 import {
-    SEARCH_FROM, currentSectionIds, keptNote, mayPutArticle, movePlan, moveSources,
-    rightsAreKnown,
+    SEARCH_FROM, addPlan, currentSectionIds, detachPlan, detachSources, keptNote,
+    mayPutArticle, movePlan, moveSources, rightsAreKnown,
 } from './articleMove';
 
 /* Перенос статьи в другой раздел — панель прямо в строке каталога.
@@ -37,7 +38,41 @@ import {
  * сложила бы его в неправду — ровно тот дефект, который уже чинили в
  * «Структуре». Почему строка бледная, сказано словами под деревом: намёк
  * цветом читается как «сломалось».
+ *
+ * ── Три действия в одной панели ────────────────────────────────────────────
+ *
+ * mode = 'move' — перенос: из одного раздела в другой.
+ * mode = 'add' — та же статья ещё в одном разделе, без копии: у текста один
+ *   источник, правка видна везде. Источник не выбирают — ниоткуда не забираем.
+ * mode = 'detach' — убрать статью из одного её раздела, оставив в остальных.
+ *   Дерево не нужно: выбирают только из разделов самой статьи.
+ * Панель одна, потому что вопрос у всех трёх один — «где лежит статья», — и
+ * отвечать на него разными экранами значило бы учить человека трём.
  */
+
+/* Что говорит панель в каждом из трёх действий. */
+const MODES = {
+    move: {
+        icon: ArrowRightLeft,
+        title: 'Куда переместить статью',
+        button: 'Переместить',
+        busy: 'Переносим…',
+    },
+    add: {
+        icon: FolderPlus,
+        title: 'Где ещё показать статью',
+        button: 'Добавить',
+        busy: 'Добавляем…',
+    },
+    detach: {
+        icon: FolderMinus,
+        title: 'Из какого раздела убрать статью',
+        button: 'Убрать',
+        busy: 'Убираем…',
+    },
+};
+
+const quoted = (names) => names.map((name) => `«${name}»`).join(', ');
 
 /* Высота дерева. Ограничена намеренно: под панелью лежат остальные строки
    списка, и дерево из сорока разделов уводило бы полосу подтверждения под
@@ -131,16 +166,22 @@ const TargetRow = ({ section, depth, hasChildren, open, chosen, here, already, a
 );
 
 export default function ArticleMovePanel({
-    article, sections = [], spaces = [], names = null,
+    article, sections = [], spaces = [], names = null, mode = 'move',
     fromId = null, toId = null, busy = false,
     onFrom = () => {}, onTo = () => {}, onConfirm = () => {}, onClose = () => {},
 }) {
+    const copy = MODES[mode] || MODES.move;
+    const adding = mode === 'add';
+    const detaching = mode === 'detach';
     const [query, setQuery] = useState('');
     /* Ветка, в которой статья лежит сейчас, раскрыта с первого кадра: переносят
        почти всегда по соседству, и начинать с закрытого дерева значило бы
-       заставить человека заново искать то место, откуда он пришёл. */
-    const [expanded, setExpanded] = useState(
-        () => new Set(sectionAncestors(sections, fromId).map((s) => s.id)));
+       заставить человека заново искать то место, откуда он пришёл. У добавления
+       источника нет — раскрываем ветку первого раздела статьи: «показать ещё
+       и здесь» тоже чаще всего ищут рядом. */
+    const [expanded, setExpanded] = useState(() => new Set(
+        sectionAncestors(sections, fromId || currentSectionIds(article)[0])
+            .map((s) => s.id)));
     const rootRef = useRef(null);
     const confirmRef = useRef(null);
 
@@ -156,8 +197,14 @@ export default function ArticleMovePanel({
     const known = rightsAreKnown(sections);
     const current = currentSectionIds(article);
     const sources = useMemo(
-        () => moveSources(article, sections, names), [article, sections, names]);
-    const plan = movePlan(sections, article, fromId, toId);
+        () => (detaching ? detachSources : moveSources)(article, sections, names),
+        [detaching, article, sections, names]);
+    /* У «убрать» выбирают раздел-источник, у двух других — раздел-цель. */
+    const planFor = (pick) => (adding ? addPlan(sections, article, pick)
+        : detaching ? detachPlan(sections, article, pick)
+            : movePlan(sections, article, fromId, pick));
+    const pick = detaching ? fromId : toId;
+    const plan = planFor(pick);
 
     /* Текст полосы подтверждения пишется по ПОСЛЕДНЕМУ выбранному разделу, а
        решение о кнопке — по текущему (plan). Разница нужна ровно на время
@@ -165,10 +212,20 @@ export default function ArticleMovePanel({
        она текущий выбор, на этих трёх десятых доли секунды в ней было бы
        «Переместить в «undefined»?» — сложившийся пустой прямоугольник вместо
        уезжающего вопроса. */
-    const [lastTo, setLastTo] = useState(toId);
-    useEffect(() => { if (toId) setLastTo(toId); }, [toId]);
-    const shown = plan.ready ? plan : movePlan(sections, article, fromId, lastTo);
-    const note = keptNote(shown);
+    const [lastPick, setLastPick] = useState(pick);
+    useEffect(() => { if (pick) setLastPick(pick); }, [pick]);
+    const shown = plan.ready ? plan : planFor(lastPick);
+
+    /* Разделы называем ПУТЁМ, а не именем: у СЗоВ и у ОП ветки называются
+       одинаково, а одну статью в нескольких местах держат как раз в таких
+       ветках-близнецах — «Сейчас в «Супервайзер», «Супервайзер»» не говорит
+       ничего, а «Добавить в «Оператор»?» не говорит, в который. */
+    const where = (id, fallback) => (sectionAncestors(sections, id).length
+        ? sectionPathLabel(sections, id) : fallback);
+    const note = keptNote({
+        ...shown, kept: shown.kept.map((s) => ({ ...s, name: where(s.id, s.name) })) });
+    const toName = shown.to ? where(shown.to.id, shown.to.name) : '';
+    const fromName = shown.from ? where(shown.from.id, shown.from.name) : '';
 
     /* Показываем ли строки, в которые нельзя. Считаем по дереву, а не «есть ли
        вообще такие разделы»: пояснение под деревом обязано появляться только
@@ -195,7 +252,7 @@ export default function ArticleMovePanel({
     };
 
     const rowProps = (section, depth, hasChildren) => {
-        const here = Number(section.id) === Number(fromId);
+        const here = !adding && Number(section.id) === Number(fromId);
         const already = current.includes(Number(section.id));
         return {
             section, depth, hasChildren,
@@ -216,11 +273,11 @@ export default function ArticleMovePanel({
              className="rounded-2xl bg-white p-2.5 shadow-sm ring-1 ring-slate-200/70">
             <div className="flex items-start gap-2">
                 <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-500">
-                    <ArrowRightLeft size={13} />
+                    <copy.icon size={13} />
                 </span>
                 <div className="min-w-0 flex-1">
                     <div className="text-[12.5px] font-bold tracking-[-0.01em] text-slate-900">
-                        Куда переместить статью
+                        {copy.title}
                     </div>
                     {/* Откуда переносим. У статьи в одном разделе это просто
                         строка; у статьи в нескольких — выбор, и без него
@@ -231,15 +288,21 @@ export default function ArticleMovePanel({
                             Статья не привязана ни к одному разделу — выберите, куда её положить.
                         </div>
                     )}
-                    {sources.length === 1 && (
+                    {(sources.length === 1 || (adding && sources.length > 1)) && (
+                        /* Добавление ниоткуда не забирает, поэтому выбора
+                           источника у него нет, — только где статья уже есть:
+                           туда её и не предлагаем. */
                         <div className="mt-0.5 truncate text-[11.5px] text-slate-500">
-                            Сейчас в разделе «{sources[0].name}»
+                            {sources.length === 1
+                                ? `Сейчас в разделе «${where(sources[0].id, sources[0].name)}»`
+                                : `Сейчас в разделах ${quoted(sources.map((x) => where(x.id, x.name)))}`}
                         </div>
                     )}
-                    {sources.length > 1 && (
+                    {!adding && sources.length > 1 && (
                         <div className="mt-1">
                             <div className="text-[11.5px] text-slate-500">
-                                Статья лежит в {sources.length} разделах — из какого переносим:
+                                Статья лежит в {sources.length} разделах — {detaching
+                                    ? 'из какого убрать:' : 'из какого переносим:'}
                             </div>
                             <div className="mt-1 flex flex-wrap gap-1">
                                 {sources.map((source) => {
@@ -253,7 +316,9 @@ export default function ArticleMovePanel({
                                             onClick={() => onFrom(source.id)}
                                             title={source.allowed
                                                 ? undefined
-                                                : 'Забирать статьи из этого раздела вам нельзя'}
+                                                : detaching && current.length < 2
+                                                    ? 'Это единственный раздел статьи'
+                                                    : 'Забирать статьи из этого раздела вам нельзя'}
                                             className={`wiki-move-row max-w-full truncate rounded-full px-2.5 py-1 text-[11.5px] font-medium transition ${
                                                 !source.allowed
                                                     ? 'cursor-default bg-slate-100/70 text-slate-400'
@@ -262,7 +327,7 @@ export default function ArticleMovePanel({
                                                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                                             }`}
                                         >
-                                            {source.name}
+                                            {where(source.id, source.name)}
                                         </button>
                                     );
                                 })}
@@ -273,7 +338,7 @@ export default function ArticleMovePanel({
                 <button
                     type="button"
                     onClick={onClose}
-                    aria-label="Закрыть перенос"
+                    aria-label="Закрыть панель"
                     className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
                 >
                     <X size={13} />
@@ -282,7 +347,7 @@ export default function ArticleMovePanel({
 
             {/* Поиск появляется только у большого дерева: над десятком строк
                 поле занимает место, ничего не решая. */}
-            {sections.length >= SEARCH_FROM && (
+            {!detaching && sections.length >= SEARCH_FROM && (
                 <div className="mt-2 flex items-center gap-2 rounded-lg bg-slate-100 px-2.5 py-1.5 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70">
                     <Search size={13} className="shrink-0 text-slate-400" />
                     <input
@@ -304,6 +369,9 @@ export default function ArticleMovePanel({
                 </div>
             )}
 
+            {/* Убирают только из разделов самой статьи — они уже выбраны
+                кнопками выше, и дерево всей вики здесь было бы лишним. */}
+            {!detaching && (
             <div className={`mt-2 ${TREE_MAX} overflow-y-auto overscroll-contain rounded-xl bg-slate-50/70 p-1`}>
                 {hits ? (
                     hits.length === 0 ? (
@@ -343,8 +411,9 @@ export default function ArticleMovePanel({
                     );
                 })}
             </div>
+            )}
 
-            {dimmed && (
+            {!detaching && dimmed && (
                 /* Одной фразой. Куда идти за правом, здесь не рассказываем:
                    строк объяснений под каждой панелью набирается больше, чем
                    самой панели, а этот экран принадлежит тому, кто и так знает
@@ -368,31 +437,72 @@ export default function ArticleMovePanel({
             >
                 <div className="overflow-hidden">
                     <div className="rounded-xl bg-amber-50/80 px-3 py-2.5 ring-1 ring-amber-200/70">
-                        <div className="text-[12.5px] font-semibold leading-snug text-amber-900">
-                            {shown.to ? `Переместить в «${shown.to.name}»?` : 'Переместить?'}
-                        </div>
-                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-amber-900/80">
-                            {shown.from && shown.to
-                                ? `Статья «${article?.title}» пропадёт из «${shown.from.name}» и появится в «${shown.to.name}».`
-                                : shown.to
-                                    ? `Статья «${article?.title}» появится в «${shown.to.name}».`
-                                    : ''}
-                            {' '}
-                            {/* Про доступ говорим прямо: раздел решает, кто
-                                статью видит, и перенос меняет круг читателей —
-                                это главное последствие, а не подробность. */}
-                            Кому она видна, решают правила нового раздела.
-                            {note ? ` ${note}` : ''}
-                        </p>
+                        {adding ? (
+                            <>
+                                <div className="text-[12.5px] font-semibold leading-snug text-amber-900">
+                                    {shown.to ? `Добавить в «${toName}»?` : 'Добавить?'}
+                                </div>
+                                {/* Главное — что это НЕ копия: иначе статью
+                                    «на всякий случай» правят в двух местах или
+                                    ждут, что правка в одном не тронет другое. */}
+                                <p className="mt-0.5 text-[11.5px] leading-relaxed text-amber-900/80">
+                                    {shown.to
+                                        ? `Статья «${article?.title}» появится ещё и в «${toName}» — это она же, а не копия: правка видна во всех разделах сразу.`
+                                        : ''}
+                                    {' '}
+                                    {shown.kept.length + shown.keptHidden > 0
+                                        ? 'Там, где она лежит сейчас, она остаётся. '
+                                        : ''}
+                                    Читатели нового раздела тоже смогут её открыть.
+                                </p>
+                            </>
+                        ) : detaching ? (
+                            <>
+                                <div className="text-[12.5px] font-semibold leading-snug text-amber-900">
+                                    {shown.from ? `Убрать из «${fromName}»?` : 'Убрать?'}
+                                </div>
+                                <p className="mt-0.5 text-[11.5px] leading-relaxed text-amber-900/80">
+                                    {shown.from
+                                        ? `Статья «${article?.title}» пропадёт только из «${fromName}» — сама она не удаляется и не меняется.`
+                                        : ''}
+                                    {' '}
+                                    {/* Круг читателей сужается — это и есть
+                                        последствие, о котором надо сказать. */}
+                                    Кто видел её лишь через этот раздел, больше её не увидит.
+                                    {note ? ` ${note}` : ''}
+                                </p>
+                            </>
+                        ) : (
+                            <>
+                                <div className="text-[12.5px] font-semibold leading-snug text-amber-900">
+                                    {shown.to ? `Переместить в «${toName}»?` : 'Переместить?'}
+                                </div>
+                                <p className="mt-0.5 text-[11.5px] leading-relaxed text-amber-900/80">
+                                    {shown.from && shown.to
+                                        ? `Статья «${article?.title}» пропадёт из «${fromName}» и появится в «${toName}».`
+                                        : shown.to
+                                            ? `Статья «${article?.title}» появится в «${toName}».`
+                                            : ''}
+                                    {' '}
+                                    {/* Про доступ говорим прямо: раздел решает, кто
+                                        статью видит, и перенос меняет круг читателей —
+                                        это главное последствие, а не подробность. */}
+                                    Кому она видна, решают правила нового раздела.
+                                    {note ? ` ${note}` : ''}
+                                </p>
+                            </>
+                        )}
                         <div className="mt-2 flex items-center justify-end gap-2">
                             <button
                                 type="button"
                                 /* Погашена вместе со всей полосой: свёрнутая
                                    полоса остаётся в разметке ради плавного
                                    раскрытия, и живая кнопка внутри неё ловила
-                                   бы Tab у скрытого от глаз блока. */
+                                   бы Tab у скрытого от глаз блока.
+                                   У «убрать» отмена закрывает панель целиком:
+                                   кроме этого вопроса, в ней нечего делать. */
                                 disabled={busy || !plan.ready}
-                                onClick={() => onTo(null)}
+                                onClick={detaching ? onClose : () => onTo(null)}
                                 className={iosBtnSecondary}
                             >
                                 Отмена
@@ -404,8 +514,8 @@ export default function ArticleMovePanel({
                                 className={iosBtnPrimary}
                             >
                                 {busy
-                                    ? <><Loader2 size={13} className="animate-spin" /> Переносим…</>
-                                    : <><ArrowRightLeft size={13} /> Переместить</>}
+                                    ? <><Loader2 size={13} className="animate-spin" /> {copy.busy}</>
+                                    : <><copy.icon size={13} /> {copy.button}</>}
                             </button>
                         </div>
                     </div>

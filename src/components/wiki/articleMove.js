@@ -141,3 +141,106 @@ export function keptNote(plan) {
     }
     return `Статья останется ещё в ${total} разделах.`;
 }
+
+/* ── Одна статья в нескольких разделах ────────────────────────────────────
+ *
+ * Статью показывают в нескольких местах не копиями, а привязками: у текста один
+ * источник, правка видна везде, картинки грузятся один раз. «Добавить в раздел»
+ * кладёт ещё одну привязку (POST /articles/<id>/adopt), «Убрать из раздела»
+ * снимает одну (POST /articles/<id>/detach). Сама статья ни там, ни там не
+ * трогается, и последнюю привязку снять нельзя: статья без раздела не видна
+ * никому, кроме автора. Права те же, что у переноса, — can_create в разделе.
+ */
+
+/** Есть ли хоть один раздел, куда статью можно ДОБАВИТЬ: разрешённый и не её. */
+export function mayAdd(article, sections) {
+    const known = rightsAreKnown(sections);
+    const current = currentSectionIds(article);
+    return (sections || []).some((s) => s.status !== 'archived'
+        && !current.includes(Number(s.id))
+        && mayPutArticle(s, known));
+}
+
+/**
+ * Что будет при добавлении: куда, и где статья остаётся.
+ *
+ * kept здесь — ВСЕ нынешние разделы статьи: добавление ничего не забирает, и
+ * сказать об этом надо прямо — иначе «добавить» читается как «переложить».
+ */
+export function addPlan(sections, article, toId) {
+    const byId = new Map((sections || []).map((s) => [Number(s.id), s]));
+    const known = rightsAreKnown(sections);
+    const current = currentSectionIds(article);
+    const to = toId ? byId.get(Number(toId)) || null : null;
+    const kept = current.map((id) => byId.get(id)).filter(Boolean);
+    return {
+        from: null,
+        to,
+        kept,
+        keptHidden: current.length - kept.length,
+        ready: !!to && mayPutArticle(to, known) && !current.includes(Number(toId)),
+    };
+}
+
+/**
+ * Разделы, из которых статью можно УБРАТЬ, — источники переноса с одной оговоркой.
+ *
+ * Статья в единственном разделе не убирается ниоткуда: для «убрать отовсюду»
+ * есть архив. Считаем по ВСЕМ её разделам, включая те, что человеку не
+ * показывают: статья в «Клиенте» и в закрытой ветке соседнего отдела лежит в
+ * двух местах, и убрать её из «Клиента» можно — она останется там.
+ */
+export function detachSources(article, sections, names = null) {
+    const several = currentSectionIds(article).length > 1;
+    return moveSources(article, sections, names)
+        .map((source) => ({ ...source, allowed: several && source.allowed }));
+}
+
+/** Есть ли смысл предлагать «Убрать из раздела». */
+export function mayDetach(article, sections, names = null) {
+    return detachSources(article, sections, names).some((source) => source.allowed);
+}
+
+/**
+ * Что будет при снятии с раздела: откуда, и где статья остаётся.
+ *
+ * ready — только если раздел выбран, он всё ещё раздел статьи и человек вправе
+ * из него убирать. Остаток считается так же, как у переноса (keptNote).
+ */
+export function detachPlan(sections, article, fromId) {
+    const byId = new Map((sections || []).map((s) => [Number(s.id), s]));
+    const known = rightsAreKnown(sections);
+    const current = currentSectionIds(article);
+    const from = fromId ? byId.get(Number(fromId)) || null : null;
+    const others = current.filter((id) => id !== Number(fromId));
+    const kept = others.map((id) => byId.get(id)).filter(Boolean);
+    return {
+        from,
+        to: null,
+        kept,
+        keptHidden: others.length - kept.length,
+        ready: !!from
+            && current.length > 1
+            && current.includes(Number(fromId))
+            && mayPutArticle(from, known),
+    };
+}
+
+/**
+ * Подпись «также в …» у строки внутри раздела.
+ *
+ * Без неё одна и та же статья в двух разделах выглядит как две одинаковые — и
+ * её «на всякий случай» правят дважды или заводят третью. Называем только
+ * видимые человеку разделы (names), как и подпись «где лежит»: чужую закрытую
+ * ветку называть нельзя.
+ */
+export function alsoIn(article, names, hereId) {
+    const others = currentSectionIds(article)
+        .filter((id) => id !== Number(hereId))
+        .map((id) => names?.get(id))
+        .filter(Boolean);
+    if (others.length === 0) return null;
+    return others.length > 1
+        ? `Также в «${others[0]}» и ещё ${others.length - 1}`
+        : `Также в «${others[0]}»`;
+}

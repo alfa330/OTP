@@ -502,3 +502,236 @@ class MoveScreenSourceTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Одна статья в нескольких разделах: добавить (/adopt) и убрать (/detach)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Статью показывают в нескольких местах привязками, а не копиями: у текста один
+# источник, правка видна везде. Сторожится здесь то, что ломается тихо:
+# последняя привязка (статья без раздела не видна никому, кроме автора), гонка
+# двух одновременных снятий и права на РАЗДЕЛ, а не на статью.
+
+class DetachSectionSqlTest(unittest.TestCase):
+    """wiki_edit.detach_section: блокировка, потом адресный DELETE с оговоркой."""
+
+    def test_the_article_is_locked_before_the_link_is_cut(self):
+        """Без блокировки двое, снимающие статью с двух её разделов разом,
+        оставили бы её без раздела: снимок каждого не видит чужой DELETE."""
+        cursor = RecordingCursor()
+        wiki_edit.detach_section(cursor, 7, 3)
+        self.assertEqual(len(cursor.calls), 2)
+        self.assertIn('FOR UPDATE', cursor.calls[0][0])
+        self.assertIn('FROM wiki_articles', cursor.calls[0][0])
+        self.assertTrue(cursor.calls[1][0].startswith('DELETE'))
+
+    def test_the_last_link_is_never_cut(self):
+        cursor = RecordingCursor()
+        wiki_edit.detach_section(cursor, 7, 3)
+        delete, params = cursor.calls[1]
+        self.assertIn('article_id = %s AND section_id = %s', delete)
+        self.assertIn('EXISTS', delete)
+        self.assertIn('other.section_id <> %s', delete)
+        self.assertEqual(params, (7, 3, 7, 3))
+
+    def test_nothing_cut_is_reported(self):
+        cursor = RecordingCursor()
+        cursor.rowcount = 0
+        self.assertFalse(wiki_edit.detach_section(cursor, 7, 3))
+
+
+# Правило «класть в раздел можно, править статью — нет»: так выглядит
+# супервайзер, показывающий в своей ветке чужой регламент.
+CREATE_ONLY_RULE = {'can_read': True, 'can_create': True, 'can_edit': False,
+                    'can_delete': False, 'can_publish': False, 'can_approve': False}
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class PlacementRouteTest(unittest.TestCase):
+    """Двери /adopt и /detach на том же каркасе, что и перенос."""
+
+    def build(self, **kwargs):
+        client = MoveRouteTest.build(self, **kwargs)
+        self.attached, self.detached, self.reindexed = [], [], []
+        self.detach_result = True
+
+        def _attach(_cursor, article_id, section_id):
+            self.attached.append((article_id, section_id))
+            return True
+
+        def _detach(_cursor, article_id, section_id):
+            self.detached.append((article_id, section_id))
+            return self.detach_result
+
+        def _reindex(_cursor, article_id, *a, **k):
+            self.reindexed.append(article_id)
+            return {'action': 'indexed'}
+
+        for module, name, replacement in ((wiki_edit, 'attach_section', _attach),
+                                          (wiki_edit, 'detach_section', _detach),
+                                          (ai_index, 'reindex_article', _reindex)):
+            original = getattr(module, name)
+            setattr(module, name, replacement)
+            self.addCleanup(setattr, module, name, original)
+        return client
+
+    def adopt(self, client, **body):
+        return client.post('/api/wiki/articles/7/adopt', json=body)
+
+    def detach(self, client, **body):
+        return client.post('/api/wiki/articles/7/detach', json=body)
+
+    # ── Добавить ─────────────────────────────────────────────────────────
+
+    def test_adopt_adds_one_link_and_reindexes(self):
+        """Раздел решает, кому статью показывает помощник, — индекс обязан
+        узнать о новом разделе так же, как при переносе."""
+        client = self.build(rules_by_section={3: [FULL_RULE], 9: [FULL_RULE]},
+                            wiki_roles=(EDITOR_ROLE,))
+        response = self.adopt(client, section_id=9)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.attached, [(7, 9)])
+        self.assertEqual(self.moved, [])
+        self.assertTrue(self.reindexed)
+        record = next(r for r in self.logged if r['action'] == 'article.adopt')
+        self.assertEqual(record['details']['title'], 'Прощание')
+        self.assertEqual(record['details']['section_name'], 'Клиент')
+
+    def test_adopt_needs_the_section_right_not_the_article_one(self):
+        """Показать чужой регламент в своей ветке можно без права его править."""
+        client = self.build(rules_by_section={3: [{'can_read': True}],
+                                              9: [CREATE_ONLY_RULE]},
+                            wiki_roles=())
+        response = self.adopt(client, section_id=9)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.attached, [(7, 9)])
+
+    def test_adopt_into_a_closed_section_is_refused(self):
+        client = self.build(rules_by_section={3: [FULL_RULE], 9: [NO_CREATE_RULE]},
+                            wiki_roles=(EDITOR_ROLE,))
+        response = self.adopt(client, section_id=9)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.attached, [])
+
+    # ── Убрать ───────────────────────────────────────────────────────────
+
+    def test_detach_cuts_one_link_and_is_written_down(self):
+        client = self.build(rules_by_section={3: [FULL_RULE], 9: [FULL_RULE]},
+                            article=dict(ARTICLE, section_ids=[3, 9]),
+                            wiki_roles=(EDITOR_ROLE,))
+        response = self.detach(client, section_id=9)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.detached, [(7, 9)])
+        self.assertTrue(self.reindexed)
+        record = next(r for r in self.logged if r['action'] == 'article.detach')
+        self.assertEqual(record['entity_type'], 'article')
+        self.assertEqual(record['details']['section_name'], 'Клиент')
+        self.assertEqual(record['details']['title'], 'Прощание')
+
+    def test_detach_undoes_an_adopt_without_the_article_right(self):
+        """Кто вправе показать статью в своём разделе, вправе и перестать."""
+        client = self.build(rules_by_section={3: [{'can_read': True}],
+                                              9: [CREATE_ONLY_RULE]},
+                            article=dict(ARTICLE, section_ids=[3, 9]),
+                            wiki_roles=())
+        response = self.detach(client, section_id=9)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.detached, [(7, 9)])
+
+    def test_detach_from_a_closed_section_is_refused(self):
+        client = self.build(rules_by_section={3: [FULL_RULE], 9: [NO_CREATE_RULE]},
+                            article=dict(ARTICLE, section_ids=[3, 9]),
+                            wiki_roles=(EDITOR_ROLE,))
+        response = self.detach(client, section_id=9)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('убирать статьи из', response.get_json().get('error'))
+        self.assertEqual(self.detached, [])
+
+    def test_the_only_section_is_not_detached(self):
+        """Для «убрать отовсюду» есть архив; без раздела статью не видит никто."""
+        client = self.build(rules_by_section={3: [FULL_RULE]},
+                            wiki_roles=(EDITOR_ROLE,))
+        response = self.detach(client, section_id=3)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_LAST_SECTION')
+        self.assertEqual(self.detached, [])
+        self.assertFalse(any(r['action'] == 'article.detach' for r in self.logged))
+
+    def test_a_race_that_leaves_one_section_is_refused(self):
+        """Второй раздел сняли параллельно: запрос ничего не удалил — это
+        отказ, а не «готово», и журнал о несделанном молчит."""
+        client = self.build(rules_by_section={3: [FULL_RULE], 9: [FULL_RULE]},
+                            article=dict(ARTICLE, section_ids=[3, 9]),
+                            wiki_roles=(EDITOR_ROLE,))
+        self.detach_result = False
+        response = self.detach(client, section_id=9)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_LAST_SECTION')
+        self.assertFalse(any(r['action'] == 'article.detach' for r in self.logged))
+
+    def test_a_section_the_article_is_not_in(self):
+        client = self.build(rules_by_section={3: [FULL_RULE], 9: [FULL_RULE]},
+                            wiki_roles=(EDITOR_ROLE,))
+        response = self.detach(client, section_id=9)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_SOURCE_CHANGED')
+        self.assertEqual(self.detached, [])
+
+    def test_the_section_is_required(self):
+        client = self.build(rules_by_section={3: [FULL_RULE]},
+                            wiki_roles=(EDITOR_ROLE,))
+        self.assertEqual(self.detach(client).status_code, 400)
+
+
+class PlacementInTheJournalTest(unittest.TestCase):
+
+    def test_detach_is_in_the_articles_chip(self):
+        self.assertIn('article.detach', wiki_structure.AUDIT_GROUPS['articles'])
+
+    def test_detach_names_the_section(self):
+        source = _source(SRC, 'auditEvents.js')
+        self.assertIn("'article.detach': { label: 'Статья убрана из раздела'", source)
+        case = source[source.index("case 'article.detach':"):]
+        case = case[:case.index('break;')]
+        self.assertIn('details.section_name', case)
+
+
+class PlacementScreenSourceTest(unittest.TestCase):
+    """Решения экрана, которые видно только в исходнике фронта."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.catalog = _source(SRC, 'WikiCatalog.jsx')
+        cls.editor = _source(SRC, 'WikiEditor.jsx')
+
+    def test_the_row_menu_offers_add_and_detach(self):
+        self.assertIn("label: 'Добавить в раздел'", self.catalog)
+        self.assertIn("openMove(article, 'add')", self.catalog)
+        self.assertIn("label: 'Убрать из раздела'", self.catalog)
+        self.assertIn("openMove(article, 'detach')", self.catalog)
+
+    def test_add_and_detach_touch_one_link_not_the_whole_set(self):
+        """Набор разделов на экране успевает устареть — клиент называет один."""
+        submit = self.catalog[self.catalog.index('const submitMove'):
+                              self.catalog.index('const menuFor')]
+        self.assertIn('/adopt`', submit)
+        self.assertIn('/detach`', submit)
+        self.assertIn('section_id: move.to', submit)
+        self.assertIn('section_id: move.from', submit)
+        self.assertNotIn('section_ids', submit)
+
+    def test_the_editor_field_holds_several_sections(self):
+        """Поле «Раздел» показывало первый раздел и переписывало набор целиком:
+        тронул его у статьи в двух разделах — вторая привязка пропадала."""
+        self.assertIn('multiple', self.editor[self.editor.index('<SectionTreeSelect'):])
+        self.assertNotIn('setSectionIds(id ? [id] : [])', self.editor)
+        self.assertNotIn('sectionIds[0]', self.editor)
+
+    def test_an_edit_sends_sections_only_when_they_were_touched(self):
+        """Иначе сохранение текста отвязало бы статью от ветки, куда коллега
+        добавил её из каталога, пока форма была открыта."""
+        self.assertRegex(
+            self.editor,
+            r'\.\.\.\(isNew \|\| sectionsTouched\s*\?\s*\{ section_ids:')
+        self.assertIn('setSectionsTouched(true)', self.editor)

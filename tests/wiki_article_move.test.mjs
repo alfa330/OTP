@@ -215,7 +215,7 @@ test('у статьи в нескольких разделах спрашива�
 
 test('у статьи в одном разделе выбора нет — только строка «сейчас в…»', () => {
   const html = render();
-  assert.match(html, /Сейчас в разделе «Стандарты ведения диалога»/);
+  assert.match(html, /Сейчас в разделе «Супервайзер › Оператор › Стандарты ведения диалога»/);
   assert.doesNotMatch(html, /из какого переносим/);
 });
 
@@ -236,8 +236,8 @@ test('подтверждения нет, пока раздел не выбран
 test('выбрали раздел — полоса раскрылась и назвала оба раздела', () => {
   const html = render({ toId: 15 });
   assert.match(html, /grid-rows-\[1fr\]/);
-  assert.match(html, /Переместить в «Водитель»\?/);
-  assert.match(html, /пропадёт из «Стандарты ведения диалога»/);
+  assert.match(html, /Переместить в «Супервайзер › Оператор › Водитель»\?/);
+  assert.match(html, /пропадёт из «Супервайзер › Оператор › Стандарты ведения диалога»/);
   assert.match(html, /правила нового раздела/);
 });
 
@@ -265,4 +265,154 @@ test('архивный раздел в дерево не попадает', () =
     }],
   });
   assert.doesNotMatch(html, /Старая ветка/);
+});
+
+// ── Одна статья в нескольких разделах: добавить и убрать ────────────────────
+//
+// Статью показывают в нескольких местах привязками, а не копиями. Тихая ошибка
+// здесь та же, что у переноса: не та привязка — и у соседнего отдела пропадает
+// регламент. Плюс своя: последняя привязка, снятая по ошибке, делает статью
+// невидимой всем, кроме автора.
+
+const { addPlan, alsoIn, detachPlan, detachSources, mayAdd, mayDetach } = logic;
+
+test('добавить можно, пока есть разрешённый раздел, где статьи ещё нет', () => {
+  assert.equal(mayAdd(ONE, SECTIONS), true);
+  // Всё разрешённое уже занято, остался лишь закрытый на запись «ФРОД».
+  const everywhere = { id: 1, section_ids: [10, 11, 12, 13, 15] };
+  assert.equal(mayAdd(everywhere, SECTIONS), false);
+});
+
+test('добавление ничего не забирает — и все нынешние разделы остаются', () => {
+  const plan = addPlan(SECTIONS, TWO, 15);
+  assert.equal(plan.ready, true);
+  assert.equal(plan.from, null);
+  assert.deepEqual(plan.kept.map((s) => s.id), [12, 13]);
+});
+
+test('добавить туда, где статья уже лежит, или в закрытый раздел — нельзя', () => {
+  assert.equal(addPlan(SECTIONS, TWO, 13).ready, false);
+  assert.equal(addPlan(SECTIONS, ONE, 14).ready, false);
+  assert.equal(addPlan(SECTIONS, ONE, null).ready, false);
+});
+
+test('из единственного раздела статью не убрать — для этого есть архив', () => {
+  assert.equal(mayDetach(ONE, SECTIONS, NAMES), false);
+  assert.equal(detachPlan(SECTIONS, ONE, 12).ready, false);
+  assert.deepEqual(detachSources(ONE, SECTIONS, NAMES).map((s) => s.allowed), [false]);
+});
+
+test('из одного из двух разделов убрать можно, второй остаётся и назван', () => {
+  assert.equal(mayDetach(TWO, SECTIONS, NAMES), true);
+  const plan = detachPlan(SECTIONS, TWO, 13);
+  assert.equal(plan.ready, true);
+  assert.equal(plan.from.name, 'Клиент');
+  assert.equal(keptNote(plan), 'Статья останется ещё в разделе «Стандарты ведения диалога».');
+});
+
+test('закрытый на запись раздел не снимается, даже если разделов два', () => {
+  const inFrod = { id: 3, title: 'Мошенники', section_ids: [12, 14] };
+  assert.equal(detachPlan(SECTIONS, inFrod, 14).ready, false);
+  assert.deepEqual(
+    detachSources(inFrod, SECTIONS, NAMES).map((s) => [s.id, s.allowed]),
+    [[12, true], [14, false]]);
+});
+
+test('второй раздел может быть скрыт от человека — убрать из видимого всё равно можно', () => {
+  // Раздел 99 — чужая закрытая ветка: назвать нельзя, но статья там лежит.
+  const hidden = { id: 4, title: 'Общий регламент', section_ids: [12, 99] };
+  assert.equal(mayDetach(hidden, SECTIONS, NAMES), true);
+  const plan = detachPlan(SECTIONS, hidden, 12);
+  assert.equal(plan.ready, true);
+  assert.equal(keptNote(plan), 'Статья останется ещё в одном разделе.');
+});
+
+test('подпись «также в …» называет другие видимые разделы статьи', () => {
+  assert.equal(alsoIn(ONE, NAMES, 12), null);
+  assert.equal(alsoIn(TWO, NAMES, 12), 'Также в «Клиент»');
+  assert.equal(alsoIn({ section_ids: [12, 13, 15] }, NAMES, 12), 'Также в «Клиент» и ещё 1');
+  // Закрытую ветку в подпись не выдаём.
+  assert.equal(alsoIn({ section_ids: [12, 99] }, NAMES, 12), null);
+});
+
+test('панель добавления: без выбора источника, занятые разделы помечены', () => {
+  const html = render({ article: TWO, mode: 'add', fromId: null });
+  assert.match(html, /Где ещё показать статью/);
+  assert.match(html, /Сейчас в разделах «Супервайзер › Оператор › Стандарты ведения диалога», «Супервайзер › Оператор › Клиент»/);
+  assert.doesNotMatch(html, /из какого/);
+  assert.match(html, /уже там/);
+  assert.doesNotMatch(html, /здесь сейчас/);
+});
+
+test('подтверждение добавления говорит, что это не копия', () => {
+  const html = render({ mode: 'add', fromId: null, toId: 15 });
+  assert.match(html, /Добавить в «Супервайзер › Оператор › Водитель»\?/);
+  assert.match(html, /а не копия/);
+  assert.match(html, /остаётся/);
+  assert.match(html, /Добавить<\/button>/);
+});
+
+test('панель снятия: без дерева, с выбором раздела и остатком', () => {
+  const html = render({ article: TWO, mode: 'detach', fromId: 13 });
+  assert.match(html, /Из какого раздела убрать статью/);
+  assert.match(html, /из какого убрать/);
+  assert.doesNotMatch(html, /Бледные разделы/);
+  assert.doesNotMatch(html, /Водитель/);   // дерева всей вики нет
+  assert.match(html, /Убрать из «Супервайзер › Оператор › Клиент»\?/);
+  assert.match(html, /пропадёт только из «Супервайзер › Оператор › Клиент»/);
+  assert.match(html, /не удаляется/);
+  assert.match(html, /Статья останется ещё в разделе «Супервайзер › Оператор › Стандарты ведения диалога»/);
+});
+
+test('ветки-близнецы СЗоВ и ОП различаются путём, а не одним именем', () => {
+  // Одну статью в двух местах держат как раз в одноимённых ветках: «Сейчас в
+  // «Супервайзер», «Супервайзер»» не сказало бы ничего.
+  const twins = [
+    { id: 40, space_id: 1, parent_section_id: null, name: 'СЗоВ', status: 'active',
+      permissions: { can_create: true } },
+    { id: 41, space_id: 1, parent_section_id: 40, name: 'Супервайзер', status: 'active',
+      permissions: { can_create: true } },
+    { id: 50, space_id: 1, parent_section_id: null, name: 'ОП', status: 'active',
+      permissions: { can_create: true } },
+    { id: 51, space_id: 1, parent_section_id: 50, name: 'Супервайзер', status: 'active',
+      permissions: { can_create: true } },
+  ];
+  const names = new Map(twins.map((x) => [x.id, x.name]));
+  const both = { id: 216, title: 'Инструкция для супервайзера', section_ids: [41, 51] };
+  const html = render({ article: both, sections: twins, names, mode: 'detach', fromId: 51 });
+  assert.match(html, /СЗоВ › Супервайзер/);
+  assert.match(html, /Убрать из «ОП › Супервайзер»\?/);
+  assert.match(html, /останется ещё в разделе «СЗоВ › Супервайзер»/);
+});
+
+// ── Выбор нескольких разделов в редакторе ───────────────────────────────────
+
+const TreeSelect = (await loadModule('SectionTreeSelect.jsx')).default;
+const renderSelect = (props = {}) => renderToStaticMarkup(React.createElement(TreeSelect, {
+  sections: SECTIONS, spaces: [SPACE], multiple: true, value: [], ...props,
+}));
+
+test('выбранные разделы стоят плашками с путём, кнопка зовёт добавить ещё', () => {
+  const html = renderSelect({ value: [12, 13] });
+  assert.match(html, /Супервайзер › Оператор › Стандарты ведения диалога/);
+  assert.match(html, /Супервайзер › Оператор › Клиент/);
+  assert.match(html, /Добавить раздел/);
+  assert.match(html, /без копий: правка видна везде/);
+});
+
+test('раздел, откуда убирать нельзя, — плашка без крестика', () => {
+  const html = renderSelect({ value: [12, 14], locked: [14] });
+  assert.match(html, /aria-label="Убрать из раздела «Супервайзер › Оператор › Стандарты ведения диалога»"/);
+  assert.doesNotMatch(html, /aria-label="Убрать из раздела «Супервайзер › Оператор › ФРОД»"/);
+});
+
+test('разделы вне списка не называются, но о них сказано', () => {
+  const html = renderSelect({ value: [12, 98, 99] });
+  assert.match(html, /Ещё в 2 разделах, которых нет в этом списке, — они сохранятся/);
+});
+
+test('пустой выбор — приглашение выбрать, без плашек', () => {
+  const html = renderSelect();
+  assert.match(html, /Выберите…/);
+  assert.doesNotMatch(html, /Убрать из раздела/);
 });

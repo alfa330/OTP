@@ -989,7 +989,7 @@ AUDIT_GROUPS = {
                   'section.move'),
     'articles': ('article.create', 'article.update', 'article.archive',
                  'article.restore', 'article.adopt', 'article.fork',
-                 'article.move',
+                 'article.move', 'article.detach',
                  'article.import', 'article.ai_draft', 'article.ai_update',
                  'article.ai_edit',
                  'article.migrate', 'article.migrate_review',

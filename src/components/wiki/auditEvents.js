@@ -17,7 +17,7 @@
 
 import {
     Archive, ArrowRightLeft, Building2, CalendarClock, CheckCircle2, Copy, FileDown,
-    FilePlus2, FileText, FolderPlus, Globe, KeyRound, Layers, MapPin, Megaphone, PenLine,
+    FilePlus2, FileText, FolderMinus, FolderPlus, Globe, KeyRound, Layers, MapPin, Megaphone, PenLine,
     RefreshCw, RotateCcw, ShieldAlert, ShieldOff, Sparkles, Star, Trash2, UserCheck, UserPlus,
 } from 'lucide-react';
 
@@ -61,6 +61,9 @@ export const ACTION_META = {
     'article.archive': { label: 'Статья в архиве', tone: REMOVED, icon: Archive },
     'article.restore': { label: 'Статья восстановлена из версии', tone: CHANGED, icon: RotateCcw },
     'article.adopt': { label: 'Статья добавлена в раздел', tone: CHANGED, icon: FileText },
+    /* Не «в архиве» и не «удалена»: статья жива и лежит в остальных своих
+       разделах, из этого пропала только ссылка на неё. */
+    'article.detach': { label: 'Статья убрана из раздела', tone: CHANGED, icon: FolderMinus },
     /* Перенос — не правка статьи: текст остался тот же, сменился раздел, то
        есть круг людей, которые статью видят. Отсюда и отдельная подпись, и
        стрелка вместо пера — та же, что у перемещённого раздела. */
@@ -284,6 +287,7 @@ const CONSUMED = {
     'article.create': ['status'],
     'article.restore': ['version_id'],
     'article.adopt': ['section_id', 'section_name', 'already_there'],
+    'article.detach': ['section_id', 'section_name'],
     'article.move': ['section_id', 'section_name', 'from_section_id', 'from_section_name'],
     'article.fork': ['section_id', 'section_name', 'source_article_id'],
     'article.import': ['file', 'kind', 'images'],
@@ -509,6 +513,10 @@ export function auditFacts(item, nameOf = null) {
         case 'article.adopt':
             if (details.section_name) facts.push(`в раздел «${details.section_name}»`);
             if (details.already_there) facts.push('статья уже была там');
+            break;
+        case 'article.detach':
+            if (details.section_name) facts.push(`из «${details.section_name}»`);
+            facts.push('в остальных разделах осталась');
             break;
         /* «Откуда» — первое, что спрашивают у этой записи: ищут её вопросом
            «кто увёз регламент из моего раздела». У статьи вне дерева источника

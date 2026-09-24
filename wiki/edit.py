@@ -491,6 +491,32 @@ def move_section(cursor, article_id, *, from_section_id, to_section_id):
     return added or removed
 
 
+def detach_section(cursor, article_id, section_id):
+    """Убрать статью из ОДНОГО раздела, не трогая остальные. Обратное attach_section.
+
+    Последнюю привязку не рвёт: статья без раздела не видна никому, кроме
+    автора (см. шапку default_section_id).
+
+    Сначала — блокировка строки статьи. Двое, убирающие одну статью из двух её
+    разделов одновременно, иначе по отдельности увидели бы «есть ещё раздел»
+    (в READ COMMITTED снимок каждого запроса не видит чужой незакоммиченный
+    DELETE) и вместе оставили бы документ без раздела. С блокировкой второй
+    ждёт первого, и его DELETE — уже новый запрос с новым снимком.
+
+    Возвращает True, если связь снята; False — её не было или она последняя.
+    """
+    cursor.execute('SELECT id FROM wiki_articles WHERE id = %s FOR UPDATE',
+                   (article_id,))
+    cursor.execute(
+        'DELETE FROM wiki_article_sections '
+        ' WHERE article_id = %s AND section_id = %s '
+        '   AND EXISTS (SELECT 1 FROM wiki_article_sections other '
+        '                WHERE other.article_id = %s AND other.section_id <> %s)',
+        (article_id, section_id, article_id, section_id),
+    )
+    return cursor.rowcount > 0
+
+
 def fork_article(cursor, source_id, *, section_id, author_id, slug, title):
     """Своя копия чужой статьи: дальше расходится независимо от источника.
 

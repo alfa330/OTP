@@ -178,6 +178,11 @@ export default function WikiEditor({
             || article?.article_type === TRAINER_TYPE,
     ), [features, article]);
     const [sectionIds, setSectionIds] = useState(article?.section_ids || []);
+    /* Трогали ли разделы в этой форме. Правка шлёт набор разделов ТОЛЬКО тогда:
+       PATCH заменяет его целиком, а список в форме успевает устареть, пока
+       статью правят, — коллега тем временем добавляет её в свою ветку из
+       каталога, и сохранение текста молча отвязало бы статью оттуда. */
+    const [sectionsTouched, setSectionsTouched] = useState(false);
     const [saving, setSaving] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [importing, setImporting] = useState(false);
@@ -226,17 +231,30 @@ export default function WikiEditor({
     /* В выпадашке — только разделы, куда этот человек ВПРАВЕ положить статью.
        Сервер проверяет ровно это (can_create в правиле раздела, routes_edit),
        и предлагать ветку, на которой он ответит 403, значит выдавать отказ за
-       поломку. Раздел самой статьи остаётся в списке всегда: иначе поле
-       опустело бы у того, кто правит чужую статью, и сохранение молча увезло
-       бы её в другое место. Ответ без прав (структура ещё не пришла) не
-       фильтруем вовсе — пустая выпадашка хуже лишней строки. */
+       поломку. Разделы самой статьи остаются в списке всегда — ВСЕ, а не
+       первый: статья лежит в нескольких разделах сразу, и поле, показывавшее
+       один из них, при первой же правке молча отвязывало её от остальных.
+       Ответ без прав (структура ещё не пришла) не фильтруем вовсе — пустая
+       выпадашка хуже лишней строки. */
+    const originalSections = useMemo(
+        () => (article?.section_ids || []).map(String), [article]);
     const creatableSections = useMemo(() => {
         const list = sections || [];
         if (!list.some((s) => s.permissions)) return list;
-        const current = String(sectionIds[0] ?? '');
         return list.filter(
-            (s) => s.permissions?.can_create || String(s.id) === current);
-    }, [sections, sectionIds]);
+            (s) => s.permissions?.can_create || originalSections.includes(String(s.id)));
+    }, [sections, originalSections]);
+    /* Разделы статьи, откуда этот человек убирать её не вправе: сервер спросит
+       can_create и на них (симметричная разность в routes_edit). Плашка такого
+       раздела остаётся без крестика — иначе снятие кончилось бы отказом уже
+       после нажатия «Сохранить», вместе со всем набранным текстом. */
+    const lockedSections = useMemo(() => {
+        const list = sections || [];
+        if (isNew || !list.some((s) => s.permissions)) return [];
+        return list
+            .filter((s) => originalSections.includes(String(s.id)) && !s.permissions?.can_create)
+            .map((s) => s.id);
+    }, [sections, originalSections, isNew]);
 
     /* «Опубликовать» — это ПРАВО, а не просто кнопка. У существующей статьи его
        уже посчитал сервер (article.permissions), у новой оно берётся из правила
@@ -399,7 +417,9 @@ export default function WikiEditor({
             // статьи не должно зависеть от домена API.
             content: relativizeFileUrls(editor.getHTML()),
             article_type: articleType,
-            section_ids: sectionIds.map(Number).filter(Boolean),
+            // У правки — только если разделы трогали: см. sectionsTouched.
+            ...(isNew || sectionsTouched
+                ? { section_ids: sectionIds.map(Number).filter(Boolean) } : {}),
             ai_support: aiSupport,
             copy_protected: copyProtected,
             historical,
@@ -417,6 +437,7 @@ export default function WikiEditor({
         request
             .then((r) => {
                 setDirty(false);
+                setSectionsTouched(false);
                 // Говорим о том, ЧТО получилось, а не о том, что просили: у
                 // создания статус может не примениться, если нет права
                 // публикации в выбранном разделе.
@@ -453,9 +474,9 @@ export default function WikiEditor({
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
-    }, [editor, title, summary, articleType, sectionIds, aiSupport, copyProtected,
-        historical, isNew, base, headers, article, showToast, onSaved, alsoNews,
-        onPublishAsNews]);
+    }, [editor, title, summary, articleType, sectionIds, sectionsTouched, aiSupport,
+        copyProtected, historical, isNew, base, headers, article, showToast, onSaved,
+        alsoNews, onPublishAsNews]);
 
     const importDocument = (file) => {
         if (!file) return;
@@ -742,16 +763,25 @@ export default function WikiEditor({
                         </div>
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                Раздел
+                                Разделы
                             </label>
                             {/* Дерево, а не плоский список: ветки СЗоВ и ОП
                                 называются одинаково, и в общей выпадашке статья
-                                уезжала не туда. */}
+                                уезжала не туда.
+                                Разделов несколько: одна и та же статья может
+                                стоять и у СЗоВ, и у ОП — без копий, правка
+                                видна везде. */}
                             <SectionTreeSelect
+                                multiple
                                 sections={creatableSections}
                                 spaces={spaces}
-                                value={sectionIds[0] || null}
-                                onChange={(id) => { setSectionIds(id ? [id] : []); setDirty(true); }}
+                                value={sectionIds}
+                                locked={lockedSections}
+                                onChange={(ids) => {
+                                    setSectionIds(ids);
+                                    setSectionsTouched(true);
+                                    setDirty(true);
+                                }}
                             />
                             {/* Куда уедет статья, если раздел не выбрать.
                                 Раньше она оставалась вообще без раздела и
@@ -759,7 +789,7 @@ export default function WikiEditor({
                                 автора; теперь сервер кладёт её в общий отдел, и
                                 человек должен узнать об этом ДО сохранения, а
                                 не обнаружить статью в чужой ветке потом. */}
-                            {!sectionIds[0] && fallbackSection && (
+                            {!sectionIds.length && fallbackSection && (
                                 <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
                                     Не выбран — статья попадёт в «{fallbackSection}».
                                 </p>
