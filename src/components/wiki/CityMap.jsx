@@ -33,6 +33,14 @@ import {
  */
 
 const ASPECT = MAP_HEIGHT / MAP_WIDTH;
+
+/* Выбранный город — синим сайта (blue-600: им отмечено выбранное и действия,
+   тем же цветом подсвечена строка города в списке слева). Цвет зоны у точки
+   на это время уходит: выбранный должен находиться одним взглядом, а зона
+   выбранного и так написана в его карточке. Подпись — blue-700, как текст
+   выбранной строки списка. */
+const SELECTED_COLOR = '#2563eb';
+const SELECTED_LABEL = '#1d4ed8';
 const DRAG_SLOP = 4;          // px: меньше — это нажатие, а не перетаскивание
 const ANIMATION_MS = 240;
 
@@ -379,7 +387,8 @@ export default function CityMap({ cities, selectedId, onSelect, compact = false 
                     <path d={LAKES_PATH} fill="#d3e4f5" stroke="#bcd7f1" strokeWidth={0.7 * unit} />
 
                     {ordered.map(({ city, point, zone }) => {
-                        const color = palette[zone] || NO_ZONE_COLOR;
+                        const color = city.id === selectedId
+                            ? SELECTED_COLOR : palette[zone] || NO_ZONE_COLOR;
                         const big = !!city.has_office;
                         const selected = city.id === selectedId;
                         const hovered = city.id === hoverId;
@@ -435,7 +444,7 @@ export default function CityMap({ cities, selectedId, onSelect, compact = false 
                                         {...label}
                                         fontSize={labelSize}
                                         fontWeight={big || selected || hovered ? 600 : 450}
-                                        fill={selected ? '#0f172a' : big ? '#334155' : '#64748b'}
+                                        fill={selected ? SELECTED_LABEL : big ? '#334155' : '#64748b'}
                                         stroke="#fff"
                                         strokeWidth={3.2 * unit}
                                         strokeLinejoin="round"
