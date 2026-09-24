@@ -54,6 +54,17 @@ IN_REC = re.compile(r"^in-(\d{9,15})-\+?(\d{9,15})-")
 QUEUE_ANSWER_RE = re.compile(r"Local/(\d{3,4})@from-queue")
 QUEUE_OUT_RE = re.compile(r"Local/(3\d{3})@ext-to-queue")
 
+# Наш номер — линия таксопарка: его набрал клиент или с него позвонили клиенту.
+# Живёт в трёх местах, по доле касаний суток 23.09.2026:
+#   входящий   `did` — номер, который набрал клиент (у всех 304 входящих);
+#   исходящий  транк в канале назначения: PJSIP/+77475777778-00066790 (1589 из 1696);
+#   заявка автообзвона (dst 3322*…, канал Local/3034@ext-to-queue, 104 из 1696) —
+#              транка нет, но префикс набора тот же, что у звонков через транк.
+# Внутренний номер в канале (PJSIP/6687-…) — не транк: десяти цифр в нём нет.
+TRUNK_CHANNEL_RE = re.compile(r"^(?:PJSIP|SIP)/([^/]+?)-[0-9a-f]{8}$")
+TRUNK_NUMBER_RE = re.compile(r"\d{10,12}")
+DIAL_PREFIX_RE = re.compile(r"^(\d{3,6})\*")
+
 # Куда сложены записи разговоров, когда CDR не отдал готовую ссылку.
 RECORDINGS_BASE = "http://192.168.88.251/recordings"
 
@@ -118,7 +129,32 @@ def parse_row(row):
     return client, kind, agent
 
 
-def _leg(row, kind, agent):
+def trunk_number(channel):
+    """Номер из имени транка в канале: `PJSIP/87470939675_jana_olx-000667a7` → 7470939675.
+
+    У транка без номера в имени (`PJSIP/Beeline-…`) и у внутреннего номера
+    (`PJSIP/6687-…`) — пусто: десяти цифр подряд там нет."""
+    matched = TRUNK_CHANNEL_RE.match(str(channel or ""))
+    if not matched:
+        return ""
+    digits = TRUNK_NUMBER_RE.search(matched.group(1))
+    return norm_phone(digits.group(0)) if digits else ""
+
+
+def _leg_line(row, kind, client):
+    """Наш номер на плече: у входящего — набранный клиентом, у исходящего — с которого
+    звонили. `src` исходящего — это номер, показанный клиенту, но только когда в нём
+    десять цифр: у заявки автообзвона там внутренний номер оператора."""
+    if kind == "in":
+        return norm_phone(row.get("did")) or trunk_number(row.get("channel"))
+    number = trunk_number(row.get("dstchannel"))
+    if number:
+        return number
+    src = norm_phone(row.get("src"))
+    return src if src and src != client else ""
+
+
+def _leg(row, kind, agent, client=""):
     """Строка CDR → плечо вызова: только то, что нужно для склейки."""
     src = str(row.get("src") or "")
     dst = str(row.get("dst") or "")
@@ -154,6 +190,8 @@ def _leg(row, kind, agent):
     for matched in QUEUE_OUT_RE.finditer(str(row.get("channel") or "")):
         queues.add(matched.group(1))
 
+    prefix = DIAL_PREFIX_RE.match(dst) if kind == "out" else None
+
     return {
         "at": row.get("calldate"),
         "kind": kind,
@@ -166,6 +204,8 @@ def _leg(row, kind, agent):
         "recordingfile": str(row.get("recordingfile") or ""),
         "recording_url": row.get("recording_url"),
         "queue_leg": queue_leg,
+        "line": _leg_line(row, kind, client),
+        "dial_prefix": prefix.group(1) if prefix else "",
     }
 
 
@@ -216,7 +256,21 @@ def recording_belongs_to(url, ext, phone, linkedid):
     return False
 
 
-def _touch(linkedid, client, legs, resolve_operator):
+def _line_number(legs, prefix_lines):
+    """Наш номер звонка: первое плечо, которое его назвало; у заявки автообзвона — по
+    префиксу набора. Плечи уже отсортированы по времени, так что у входящего первым
+    идёт приход звонка с набранным номером."""
+    for leg in legs:
+        if leg["line"]:
+            return leg["line"]
+    for leg in legs:
+        number = (prefix_lines or {}).get(leg["dial_prefix"]) if leg["dial_prefix"] else ""
+        if number:
+            return number
+    return ""
+
+
+def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     legs.sort(key=lambda leg: (leg["at"] or "", leg["disposition"] or ""))
     kind = "out" if any(leg["kind"] == "out" for leg in legs) else "in"
 
@@ -282,6 +336,7 @@ def _touch(linkedid, client, legs, resolve_operator):
         "talk_seconds": billsec,
         "dial_seconds": max((leg["duration"] for leg in legs), default=0),
         "queue": ",".join(sorted({q for leg in legs for q in leg["queues"]})),
+        "line_number": _line_number(legs, prefix_lines),
         "recording_url": url,
         "has_recording": bool(url),
         "linkedid": linkedid,
@@ -305,19 +360,40 @@ def build_touches(rows, resolve_operator=None, phones=None):
             return ("", "")
 
     groups = defaultdict(list)
+    seen_prefixes = defaultdict(lambda: defaultdict(int))
     for row in rows:
         parsed = parse_row(row)
         if not parsed:
             continue
         client, kind, agent = parsed
+        leg = _leg(row, kind, agent, client)
+        # Префикс набора учим по ВСЕМ строкам, а не только по отобранным номерам:
+        # заявке автообзвона номер подсказывает чужой звонок через тот же транк.
+        if leg["dial_prefix"] and leg["line"]:
+            seen_prefixes[leg["dial_prefix"]][leg["line"]] += 1
         if phones is not None and client not in phones:
             continue
-        groups[(row.get("linkedid"), client)].append(_leg(row, kind, agent))
+        groups[(row.get("linkedid"), client)].append(leg)
 
-    touches = [_touch(linkedid, client, legs, resolve_operator)
+    prefix_lines = learn_prefix_lines(seen_prefixes)
+    touches = [_touch(linkedid, client, legs, resolve_operator, prefix_lines)
                for (linkedid, client), legs in groups.items()]
     touches.sort(key=lambda touch: (touch["started_at"], touch["phone"]))
     return touches
+
+
+def learn_prefix_lines(seen):
+    """{префикс набора: {номер: сколько раз}} → {префикс: номер}.
+
+    Префикс — это исходящий маршрут станции (`7778*` уходит через транк +77475777778),
+    поэтому у одного префикса один номер. Если в сутках их встретилось несколько
+    (маршрут перенастроили посреди дня), берётся самый частый; ничья — меньший номер,
+    чтобы повторная склейка тех же суток давала то же самое."""
+    out = {}
+    for prefix, numbers in seen.items():
+        if numbers:
+            out[prefix] = min(numbers, key=lambda number: (-numbers[number], number))
+    return out
 
 
 def summarize(touches):

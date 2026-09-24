@@ -12,7 +12,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
-    exportFileName, hms, hours, percent, prettyPhone, resultTone,
+    exportFileName, hms, hours, lineCaption, percent, prettyPhone, resultTone,
     seconds, shortDay, shortTime, silence,
 } from './touchMeta';
 import DealsView from './DealsView';
@@ -86,7 +86,7 @@ const MODES = [
     { value: 'deals', label: 'Сделки' },
 ];
 
-const EMPTY_FILTERS = { result: '', ext: '', queue: '', talkedOnly: false };
+const EMPTY_FILTERS = { result: '', ext: '', queue: '', park: '', talkedOnly: false };
 
 const Metric = ({ label, value, hint }) => (
     <div className={`${iosCard} px-3.5 py-3`}>
@@ -102,8 +102,10 @@ const Th = ({ children, className = '' }) => (
     </th>
 );
 
-const Td = ({ children, className = '' }) => (
-    <td className={`px-3 py-2 align-middle text-[13px] text-slate-700 ${className}`}>{children}</td>
+/* title пробрасывается в ячейку: без него подсказки у «IVR», «Ожид. в очереди» и
+   «Линии» молча терялись — проп принимался и никуда не шёл. */
+const Td = ({ children, className = '', title }) => (
+    <td title={title} className={`px-3 py-2 align-middle text-[13px] text-slate-700 ${className}`}>{children}</td>
 );
 
 export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToast }) {
@@ -186,6 +188,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
         if (filters.result) params.result = filters.result;
         if (filters.ext) params.ext = filters.ext;
         if (filters.queue) params.queue = filters.queue;
+        if (filters.park) params.park = filters.park;
         if (filters.talkedOnly) params.talked_only = 1;
         if (phone) params.phone = phone;
         return params;
@@ -285,6 +288,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
            но фильтром быть от этого не перестаёт: без него счётчик «Фильтры · N»
            врал, а «сбросить» его не снимал. */
         callType && { key: 'callType', label: callType },
+        filters.park && { key: 'park', label: filters.park },
         filters.result && { key: 'result', label: filters.result },
         filters.ext && { key: 'ext', label: `Номер ${filters.ext}` },
         filters.queue && { key: 'queue', label: `Очередь ${filters.queue}` },
@@ -306,6 +310,11 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const queueOptions = useMemo(() => [
         { value: '', label: 'Любая очередь' },
         ...(data?.filter_values?.queues || []).map((value) => ({ value, label: value })),
+    ], [data]);
+
+    const parkOptions = useMemo(() => [
+        { value: '', label: 'Любой парк' },
+        ...(data?.filter_values?.parks || []).map((value) => ({ value, label: value })),
     ], [data]);
 
     /* Состояние моста берём из ответа периода, а не из меты: мета грузится один
@@ -401,7 +410,12 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
             </section>
 
             {filtersOpen ? (
-                <section className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-4`}>
+                <section className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-5`}>
+                    <label className="block space-y-1.5">
+                        <span className={iosGroupLabel}>Таксопарк</span>
+                        <CustomSelect variant="ios" value={filters.park} options={parkOptions}
+                                      onChange={(value) => applyFilters((prev) => ({ ...prev, park: value }))} />
+                    </label>
                     <label className="block space-y-1.5">
                         <span className={iosGroupLabel}>Результат</span>
                         <CustomSelect variant="ios" value={filters.result} options={resultOptions}
@@ -507,6 +521,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 «IVR» — сколько человек слушал приветствие или меню до очереди, «Ожид. в очереди» —
                 от входа в очередь до ответа оператора (у потерянных — до отбоя). Прочерк значит,
                 что станция этой величины не назвала, а не ноль секунд.
+                «Линия» — номер парка: у входящего его набрал клиент, у исходящего с него
+                позвонили; под номером — таксопарк и очередь звонка.
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>
@@ -556,7 +572,7 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
     return (
         <>
             <div className={`${iosCard} mt-3 hidden overflow-x-auto md:block`}>
-                <table className="w-full min-w-[1120px] border-collapse">
+                <table className="w-full min-w-[1200px] border-collapse">
                     <thead className="bg-slate-50">
                         <tr>
                             <Th>Когда</Th>
@@ -567,7 +583,7 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                             <Th className="text-right">Разговор</Th>
                             <Th className="text-right">IVR</Th>
                             <Th className="text-right">Ожид. в очереди</Th>
-                            <Th>Очередь</Th>
+                            <Th>Линия</Th>
                             <Th>Запись</Th>
                         </tr>
                     </thead>
@@ -619,7 +635,20 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                     title="Сколько ждал в очереди: от входа в очередь до ответа оператора, а у потерянных — до отбоя">
                                     {seconds(touch.wait_seconds)}
                                 </Td>
-                                <Td className="whitespace-nowrap tabular-nums text-slate-500">{touch.queue || '—'}</Td>
+                                {/* Номер парка, а под ним парк и очередь. Раньше здесь была
+                                    одна очередь — «3034» человеку ничего не говорит, а
+                                    вопрос был «на какой номер, какого парка звонили». */}
+                                <Td className="whitespace-nowrap"
+                                    title={touch.call_type === 'Исходящий'
+                                        ? 'Номер, с которого позвонили клиенту'
+                                        : 'Номер, который набрал клиент'}>
+                                    <div className="tabular-nums text-slate-700">{prettyPhone(touch.line_number)}</div>
+                                    {lineCaption(touch.line_park, touch.queue) ? (
+                                        <div className="text-[11.5px] text-slate-400">
+                                            {lineCaption(touch.line_park, touch.queue)}
+                                        </div>
+                                    ) : null}
+                                </Td>
                                 <Td>
                                     {touch.recording_url ? (
                                         /* Ссылка внутрисетевая, поэтому открывается новой вкладкой и
@@ -652,6 +681,12 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                         <div className="mt-1 text-[12.5px] text-slate-500">
                             {touch.operator || '—'}{touch.ext ? ` · вн. ${touch.ext}` : ''}
                         </div>
+                        {touch.line_number || touch.line_park ? (
+                            <div className="mt-0.5 text-[12px] tabular-nums text-slate-400">
+                                {[touch.line_park, touch.line_number ? prettyPhone(touch.line_number) : '']
+                                    .filter(Boolean).join(' · ')}
+                            </div>
+                        ) : null}
                         <div className="mt-2 flex flex-wrap items-center gap-1.5">
                             <span className={`inline-flex rounded-full px-2.5 py-1 text-[11.5px] font-medium ring-1 ${
                                 resultTone(touch.result)}`}>

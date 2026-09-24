@@ -95,6 +95,12 @@ CREATE TABLE IF NOT EXISTS cdr_touches (
     talk_measured_seconds INTEGER,     -- разговор без ожидания (COMPLETE*)
     hangup_side           VARCHAR(16) NOT NULL DEFAULT '',  -- client | operator | ''
 
+    -- Наш номер, десять цифр: входящему его набрал клиент, исходящему с него
+    -- позвонили. Парк по нему выводится при чтении (cdr/lines.py), а не хранится:
+    -- у парка десятки номеров, и подпись поправится без пересборки касаний.
+    -- Пусто — станция номера не назвала (или сутки собраны мостом до 1.3.0).
+    line_number   VARCHAR(16)  NOT NULL DEFAULT '',
+
     PRIMARY KEY (linkedid, phone)
 );
 
@@ -221,6 +227,9 @@ CDR_SCHEMA_MIGRATIONS = (
     "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS wait_seconds INTEGER",
     "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS talk_measured_seconds INTEGER",
     "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS hangup_side VARCHAR(16) NOT NULL DEFAULT ''",
+    # Номер линии таксопарка (24.09.2026). Постоянный DEFAULT — колонка добавляется без
+    # переписывания таблицы; старые касания получают его при перечитке суток мостом.
+    "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS line_number VARCHAR(16) NOT NULL DEFAULT ''",
 )
 
 

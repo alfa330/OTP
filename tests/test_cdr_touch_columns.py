@@ -31,7 +31,7 @@ def row(queued_at=QUEUED_AT, answered_at=ANSWERED_AT, wait=1, talk_measured=9,
     """Строка ровно в порядке queries._COLUMNS."""
     return (datetime(2026, 9, 21, 19, 29, 12), answered_at, '7773714269', '6656',
             'Входящий', 'Разговор', 9, 9, '3041', 'http://rec/q-3041.wav',
-            linkedid, 1, queued_at, wait, talk_measured, hangup)
+            linkedid, 1, queued_at, wait, talk_measured, hangup, '7009214242')
 
 
 def select_columns(sql):

@@ -75,6 +75,19 @@ export const prettyPhone = (value) => {
     return `+7 ${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 8)} ${digits.slice(8)}`;
 };
 
+/** Подпись под номером линии: парк и очередь, куда пришёл звонок.
+ *
+ *  Парк сервер выводит по номеру (cdr/lines.py); очередь — та, что у самого звонка.
+ *  Они разные у заявки автообзвона: номер «Центра регистрации», а очередь кампании.
+ *  Парк без подписи сервер называет «очередь 3016» — тогда не повторяем её дважды. */
+export const lineCaption = (park, queue) => {
+    const name = String(park || '').trim();
+    const line = String(queue || '').split(',').filter(Boolean).join(', ');
+    if (!name) return line ? `очередь ${line}` : '';
+    if (name.startsWith('очередь ')) return line ? `очередь ${line}` : name;
+    return line ? `${name} · ${line}` : name;
+};
+
 /** «2026-08-24 09:00:00» → «09:00:00». */
 export const shortTime = (value) => (value ? String(value).slice(11, 19) : '—');
 

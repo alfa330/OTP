@@ -65,11 +65,16 @@ _FINGERPRINT_FIELDS = ('started_at', 'answered_at', 'ext', 'call_type', 'result'
                        'talk_seconds', 'dial_seconds', 'queue', 'legs', 'recording_url',
                        # Точные поля журнала очередей: ответ приходит позже входа, и
                        # касание обязано доехать до портала второй раз, когда он известен.
-                       'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side')
+                       'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side',
+                       # Номер линии: у заявки автообзвона он выводится из префикса
+                       # набора, а префикс учится по всему дню — номер может появиться
+                       # на следующем цикле, и касание обязано доехать ещё раз.
+                       'line_number')
 
 TOUCH_FIELDS = ('linkedid', 'phone', 'started_at', 'answered_at', 'ext', 'call_type', 'result',
                 'talk_seconds', 'dial_seconds', 'queue', 'recording_url', 'legs',
-                'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side')
+                'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side',
+                'line_number')
 
 
 def _row_key(row):

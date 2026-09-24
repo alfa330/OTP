@@ -95,7 +95,7 @@ from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: 
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -363,6 +363,9 @@ class Bridge:
                 'talk_seconds': t['talk_seconds'], 'dial_seconds': t['dial_seconds'],
                 'queue': t['queue'], 'recording_url': t['recording_url'],
                 'legs': t['legs'],
+                # Наш номер — линия таксопарка (cdr/touches.py). Старый портал поле
+                # не знает и молча пропускает, поэтому порядок выкладки любой.
+                'line_number': t.get('line_number') or '',
                 # Точные поля журнала очередей станции; нет журнала — пусто, и портал
                 # оставит эти колонки незаполненными (см. cdr/queue_facts.py).
                 'queued_at': t.get('queued_at') or '',

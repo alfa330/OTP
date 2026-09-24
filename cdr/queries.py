@@ -258,7 +258,8 @@ def replace_day_touches(cursor, day, touches):
             legs = EXCLUDED.legs, queued_at = EXCLUDED.queued_at,
             wait_seconds = EXCLUDED.wait_seconds,
             talk_measured_seconds = EXCLUDED.talk_measured_seconds,
-            hangup_side = EXCLUDED.hangup_side
+            hangup_side = EXCLUDED.hangup_side,
+            line_number = EXCLUDED.line_number
     """, payload, page_size=1000)
     return len(payload)
 
@@ -271,7 +272,7 @@ _TOUCH_INSERT_SQL = """
         INSERT INTO cdr_touches (
             linkedid, phone, call_day, started_at, answered_at, ext, call_type,
             result, talk_seconds, dial_seconds, queue, recording_url, legs,
-            queued_at, wait_seconds, talk_measured_seconds, hangup_side)
+            queued_at, wait_seconds, talk_measured_seconds, hangup_side, line_number)
         VALUES %s
 """
 
@@ -293,7 +294,9 @@ _TOUCH_UPSERT_SQL = _TOUCH_INSERT_SQL + """
             talk_measured_seconds = COALESCE(EXCLUDED.talk_measured_seconds,
                                              cdr_touches.talk_measured_seconds),
             hangup_side = CASE WHEN EXCLUDED.hangup_side <> '' THEN EXCLUDED.hangup_side
-                               ELSE cdr_touches.hangup_side END
+                               ELSE cdr_touches.hangup_side END,
+            line_number = CASE WHEN EXCLUDED.line_number <> '' THEN EXCLUDED.line_number
+                               ELSE cdr_touches.line_number END
 """
 
 
@@ -320,6 +323,7 @@ def _touch_values(day, touches):
         _int_or_none(touch.get('wait_seconds')),
         _int_or_none(touch.get('talk_measured_seconds')),
         (touch.get('hangup_side') or '')[:16],
+        (touch.get('line_number') or '')[:16],
     ) for touch in touches]
 
 
@@ -471,11 +475,20 @@ _FILTER_SQL = """
    AND (%(queue)s     IS NULL OR t.queue LIKE '%%' || %(queue)s || '%%')
    AND (%(phone)s     IS NULL OR t.phone LIKE '%%' || %(phone)s || '%%')
    AND (NOT %(talked_only)s OR t.talk_seconds > 0)
+   AND (NOT %(park_on)s OR CASE
+          WHEN t.line_number = ANY(%(park_known)s)
+               AND (t.call_type = 'Исходящий' OR t.queue = '')
+          THEN t.line_number = ANY(%(park_lines)s)
+          ELSE split_part(t.queue, ',', 1) = ANY(%(park_queues)s) END)
 """
+# Условие по парку — то же правило, что cdr/lines.py:park_queue: входящий называется
+# по своей очереди, исходящий и бесочередный — по очереди своего номера. Списки
+# готовит lines.park_filter; пустой список — `= ANY('{}')`, то есть «ни одного».
 
 
 def _params(day_from, day_to, filters):
     filters = filters or {}
+    park = filters.get('park_filter')
     return {
         'day_from': day_from, 'day_to': day_to,
         'call_type': filters.get('call_type') or None,
@@ -484,6 +497,10 @@ def _params(day_from, day_to, filters):
         'queue': filters.get('queue') or None,
         'phone': filters.get('phone') or None,
         'talked_only': bool(filters.get('talked_only')),
+        'park_on': park is not None,
+        'park_queues': list(park[0]) if park else [],
+        'park_lines': list(park[1]) if park else [],
+        'park_known': list(park[2]) if park else [],
     }
 
 
@@ -497,7 +514,7 @@ TALK_SQL = "COALESCE(t.talk_measured_seconds, t.talk_seconds)"
 _COLUMNS = ("t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result, "
             + TALK_SQL + ", t.dial_seconds, t.queue, t.recording_url, "
             "t.linkedid, t.legs, t.queued_at, t.wait_seconds, t.talk_measured_seconds, "
-            "t.hangup_side")
+            "t.hangup_side, t.line_number")
 
 
 def _row_to_touch(row):
@@ -524,6 +541,7 @@ def _row_to_touch(row):
         # раздел показывает прежний talk_seconds (billsec строки очереди).
         'talk_measured_seconds': None if row[14] is None else int(row[14]),
         'hangup_side': row[15] or '',
+        'line_number': row[16] or '',
     }
 
 
@@ -688,6 +706,35 @@ def filter_values(cursor, day_from, day_to):
     queues = sorted({part for row in cursor.fetchall()
                      for part in str(row[0]).split(',') if part})
     return {'results': results, 'queues': queues}
+
+
+def park_keys(cursor, day_from, day_to):
+    """Что определяет парк касаний периода — номер, первая очередь и тип. Из этих
+    сочетаний (их сотни, а не тысячи касаний) раздел собирает список парков для
+    фильтра тем же правилом, что подписывает строки (cdr/lines.py:park)."""
+    cursor.execute("""
+        SELECT DISTINCT line_number, split_part(queue, ',', 1), call_type
+          FROM cdr_touches
+         WHERE call_day BETWEEN %s AND %s
+    """, (day_from, day_to))
+    return [{'line_number': row[0] or '', 'queue': row[1] or '', 'call_type': row[2] or ''}
+            for row in cursor.fetchall()]
+
+
+def line_queue_rows(cursor, since_day):
+    """Куда уходили входящие на каждый наш номер: (номер, очередь, сколько звонков).
+
+    Сырьё для lines.line_queues — по нему исходящему касанию достаётся парк номера,
+    с которого звонили. Только входящие: у исходящего очередь — это очередь кампании
+    автообзвона, а не парка номера."""
+    cursor.execute("""
+        SELECT line_number, split_part(queue, ',', 1), COUNT(*)
+          FROM cdr_touches
+         WHERE call_day >= %s AND call_type <> 'Исходящий'
+           AND line_number <> '' AND queue <> ''
+         GROUP BY 1, 2
+    """, (since_day,))
+    return [(row[0], row[1], int(row[2])) for row in cursor.fetchall()]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

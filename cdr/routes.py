@@ -57,7 +57,8 @@ from io import BytesIO
 from flask import Blueprint, g, jsonify, request, send_file
 
 from . import (access, agent_auth, config, directory as directory_mod, lead_queries, lead_report,
-               leads as leads_mod, queries, report, schema, sync, touches as touches_mod)
+               leads as leads_mod, lines as lines_mod, queries, report, schema, sync,
+               touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +87,12 @@ MAX_EXPORT_ROWS = 500000
 
 # Насколько долго справочник номеров считается свежим.
 DIRECTORY_TTL_HOURS = 12
+
+# Парк исходящего касания — по очереди, куда уходят входящие на тот же номер
+# (cdr/lines.py). Берём входящие за столько суток и держим ответ столько минут:
+# номера между парками переводят раз в месяцы, а запрос — GROUP BY по двум месяцам.
+LINE_PARKS_WINDOW_DAYS = 60
+LINE_PARKS_TTL_MINUTES = 10
 
 # Заказов записей за один опрос моста. Файл разговора — единицы мегабайт, и три за
 # заход укладываются в один цикл моста, не задерживая сутки.
@@ -133,6 +140,10 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
     приписать. Своего хранилища у раздела нет; без этого аргумента ручка приёма
     записей отвечает отказом, а заказы остаются в очереди."""
     bp = Blueprint('cdr', __name__, url_prefix='/api/cdr')
+
+    # {номер: очередь} для подписи парка и момент, когда его собрали. Экземпляр портала
+    # один, поэтому кэш в памяти процесса честный; перезапуск просто соберёт его заново.
+    line_parks = {'map': None, 'at': None}
 
     # ── каркас пользовательского роута ───────────────────────────────────────
 
@@ -256,21 +267,39 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
     def _filters():
         def clean(name, limit=48):
             return (str(request.args.get(name) or '').strip()[:limit]) or None
-        return {
+        filters = {
             'call_type': clean('call_type'),
             'result': clean('result'),
             'ext': clean('ext', 8),
             'queue': clean('queue', 8),
+            'park': clean('park', 64),
             # Телефон ищем по вхождению: человек помнит четыре последние цифры.
             'phone': ''.join(ch for ch in str(request.args.get('phone') or '')
                              if ch.isdigit())[:16] or None,
             'talked_only': str(request.args.get('talked_only') or '').lower()
                            in ('1', 'true', 'yes'),
         }
+        if filters['park']:
+            # Парк не колонка, а вывод из номера и очереди: SQL получает готовые списки.
+            filters['park_filter'] = lines_mod.park_filter(filters['park'], _known_lines())
+        return filters
+
+    def _known_lines():
+        """{наш номер: очередь парка} по входящим последних двух месяцев, из кэша."""
+        now = queries.now_almaty()
+        at = line_parks['at']
+        if line_parks['map'] is not None and at is not None \
+                and now - at < timedelta(minutes=LINE_PARKS_TTL_MINUTES):
+            return line_parks['map']
+        since = queries.today_almaty() - timedelta(days=LINE_PARKS_WINDOW_DAYS)
+        with db._get_cursor() as cursor:
+            known = lines_mod.line_queues(queries.line_queue_rows(cursor, since))
+        line_parks.update({'map': known, 'at': now})
+        return known
 
     def _filters_note(filters):
         labels = {'call_type': 'тип', 'result': 'результат', 'ext': 'внутренний номер',
-                  'queue': 'очередь', 'phone': 'телефон'}
+                  'queue': 'очередь', 'park': 'таксопарк', 'phone': 'телефон'}
         parts = ['%s = %s' % (labels[key], filters[key])
                  for key in labels if filters.get(key)]
         if filters.get('talked_only'):
@@ -369,14 +398,20 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
         coverage = _coverage(day_from, day_to, enqueue, ctx['user_id'])
         resolve = _resolver()
+        known = _known_lines()
         with db._get_cursor() as cursor:
             total = queries.count_touches(cursor, day_from, day_to, filters)
             rows = queries.select_touches(cursor, day_from, day_to, filters,
                                           limit=page_size, offset=(page - 1) * page_size)
             summary = queries.summary(cursor, day_from, day_to, filters)
             values = queries.filter_values(cursor, day_from, day_to)
+            park_keys = queries.park_keys(cursor, day_from, day_to)
         for row in rows:
             row['operator'], row['direction'] = resolve(row['ext'], row['started_at'])
+            row['line_park'] = lines_mod.park(row, known)
+        # Парки — по тому же правилу, что подписывает строки: фильтр не обещает парк,
+        # которого в таблице не окажется.
+        values['parks'] = sorted({lines_mod.park(key, known) for key in park_keys} - {''})
         return jsonify({
             'period': {'from': day_from.isoformat(), 'to': day_to.isoformat()},
             'coverage': coverage,
@@ -420,6 +455,7 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         day_from, day_to = _period()
         filters = _filters()
         resolve = _resolver()
+        known = _known_lines()
         with db._get_cursor() as cursor:
             total = queries.count_touches(cursor, day_from, day_to, filters)
             if total > MAX_EXPORT_ROWS:
@@ -439,6 +475,7 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 for touch in queries.iter_touches(cursor, day_from, day_to, filters):
                     touch['operator'], touch['direction'] = resolve(
                         touch['ext'], touch['started_at'])
+                    touch['line_park'] = lines_mod.park(touch, known)
                     yield touch
 
             days_total = (day_to - day_from).days + 1
@@ -1179,6 +1216,9 @@ def _clean_touch(item, day_value):
         'wait_seconds': _seconds_or_none(item.get('wait_seconds')),
         'talk_measured_seconds': _seconds_or_none(item.get('talk_measured_seconds')),
         'hangup_side': str(item.get('hangup_side') or '')[:16],
+        # Наш номер. Тем же правилом, что номер клиента: не десять цифр — пусто, и
+        # мусор из тела запроса в колонку не попадёт. Старый мост поля не шлёт.
+        'line_number': touches_mod.norm_phone(item.get('line_number')),
         'ext': str(item.get('ext') or '')[:8],
         'call_type': str(item.get('call_type') or '')[:32] or 'Исходящий',
         'result': str(item.get('result') or '')[:32] or 'неизвестно',
