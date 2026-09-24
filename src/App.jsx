@@ -42,6 +42,8 @@ import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';
 import FaIcon from './components/common/FaIcon';
 import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
+import MyDataCard from './components/profile/MyDataCard';
+import { canEditOwnData } from './components/profile/myData';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
 import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/schedule/shiftHistoryFormat';
@@ -56759,6 +56761,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                           </div>
                                         </div>
+
+                                        {/* «Мои данные» (задача #357): оператор СЗоВ, ОП и Тез сам
+                                            правит телефон, Telegram, карту и учёбу. Кому блок
+                                            положен, решает canEditOwnData, окончательно — сервер. */}
+                                        {canEditOwnData(user) && (
+                                          <MyDataCard
+                                            apiBaseUrl={API_BASE_URL}
+                                            userId={user?.id}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            showToast={showToast}
+                                          />
+                                        )}
 
                                         {/* Quick actions. У бэк-офиса обе кнопки вели бы в разделы,
                                             которых ему не выдали: гард видимости вернул бы его обратно

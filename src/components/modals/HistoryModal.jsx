@@ -3,6 +3,7 @@ import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import FaIcon from '../common/FaIcon';
 import './history-mobile.css';
+import { historyFieldLabel } from './historyFieldLabels';
 
 const HistoryModal = ({ isOpen, onClose, history = [], subjectName = "" }) => {
     const isMobileShell = useIsMobileShell();
@@ -64,7 +65,7 @@ const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return history;
     return history.filter((e) =>
-    [e.field, e.old_value, e.new_value, e.changed_by, e.changed_at]
+    [historyFieldLabel(e.field), e.field, e.old_value, e.new_value, e.changed_by, e.changed_at]
         .map((v) => (v == null ? "" : String(v).toLowerCase()))
         .some((s) => s.includes(q))
     );
@@ -122,7 +123,7 @@ if (isMobileShell) {
                 {filtered.map((entry, i) => (
                 <li key={i} className="hist-m-item">
                     <div className="hist-m-line">
-                    <span className="hist-m-field">{entry.field}</span>
+                    <span className="hist-m-field">{historyFieldLabel(entry.field)}</span>
                     <span className="hist-m-when">{formatDate(entry.changed_at)}</span>
                     </div>
                     <div className="hist-m-change">
@@ -218,7 +219,7 @@ return (
                 <tbody className="bg-white divide-y divide-gray-200">
                     {filtered.map((entry, i) => (
                     <tr key={i} className="group hover:bg-gray-50">
-                        <td className="px-6 py-3 whitespace-nowrap align-top">{entry.field}</td>
+                        <td className="px-6 py-3 whitespace-nowrap align-top">{historyFieldLabel(entry.field)}</td>
                         <td className="px-6 py-3 whitespace-pre-line align-top text-sm text-gray-700">{entry.old_value ?? "-"}</td>
                         <td className="px-6 py-3 whitespace-pre-line align-top text-sm text-gray-700">{entry.new_value ?? "-"}</td>
                         <td className="px-6 py-3 whitespace-nowrap align-top">{entry.changed_by ?? "-"}</td>

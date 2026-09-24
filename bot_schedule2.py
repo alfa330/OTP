@@ -63174,6 +63174,26 @@ except Exception:
     logging.exception("Раздел «Ссылка на подписание»: Blueprint НЕ подключён")
 
 
+# ── «Мои данные» в «Профиле» оператора (задача #357) ─────────────────────────
+# Оператор СЗоВ, ОП и Тез сам правит телефон, ник в Telegram, номер карты и
+# учёбу; каждая правка — строка user_history, её читают СВ и выше в «Учете
+# сотрудников». Чей кабинет — только из сессии: номера сотрудника ручка не берёт.
+try:
+    from my_data.routes import build_my_data_blueprint  # noqa: E402
+
+    app.register_blueprint(build_my_data_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        normalize_role=_normalize_user_role,
+        department_code_of=_department_code_of_user,
+    ))
+    logging.info("«Мои данные»: Blueprint подключён на /api/my_data")
+except Exception:
+    logging.exception("«Мои данные»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Лиды OLX» (робот переноса откликов из чатов OLX в amoCRM) ────────
 # Задача #223. Раздел показывает журнал обращений, сводку за день и состояние
 # девяти кабинетов; сам перенос делает фоновая джоба olx_amo_poll_job ниже.
