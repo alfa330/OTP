@@ -97,6 +97,11 @@ const OperatorRow = ({ row, showDepartment }) => {
                 </IosBadge>
                 <IosBadge tone="slate" title="Разговоры">{fmtTalk(row.talk_sec)}</IosBadge>
                 {row.failed > 0 && <IosBadge tone="red" title="Отказы АТС">АТС {row.failed}</IosBadge>}
+                {row.cancelled > 0 && (
+                    <IosBadge tone="slate" title="Оператор завершил звонок до ответа водителя — попытки не засчитаны">
+                        отменено {row.cancelled}
+                    </IosBadge>
+                )}
             </div>
         </div>
     );
@@ -227,7 +232,8 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
         answered: acc.answered + (r.answered || 0),
         talk_sec: acc.talk_sec + (r.talk_sec || 0),
         failed: acc.failed + (r.failed || 0),
-    }), { issued: 0, done: 0, attempts: 0, answered: 0, talk_sec: 0, failed: 0 }), [rows]);
+        cancelled: acc.cancelled + (r.cancelled || 0),
+    }), { issued: 0, done: 0, attempts: 0, answered: 0, talk_sec: 0, failed: 0, cancelled: 0 }), [rows]);
 
     const sortedRows = useMemo(() => [...rows].sort((a, b) => (b.done - a.done) || (b.attempts - a.attempts)
         || String(a.operator_name || '').localeCompare(String(b.operator_name || ''), 'ru')), [rows]);

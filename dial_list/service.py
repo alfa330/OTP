@@ -14,6 +14,13 @@
     ended         телефон сообщил, что разговор кончился; ждём исход от Binotel
     finished      исход подтверждён Binotel (webhook / poll) либо истёк таймаут
 
+Флаг `cancelled` (при state=finished): оператор САМ завершил звонок (событие
+телефона `operator_hangup` / `ended by_operator`), а Binotel сообщил, что
+водитель не ответил. Такая попытка не считается ни строке выдачи, ни лиду
+(решение владельца 24.09.2026): строка остаётся в работе, итог по ней
+поставить нельзя. Если же водитель ответил и оператор сам положил трубку —
+это обычный разговор, итог обязателен.
+
 Строка выдачи (assignment) считается обработанной после ПЕРВОЙ попытки с
 подтверждённым исходом — любым: дозвонились, занято, не ответил. Не
 дозвонились — лид вернётся в общий пул через retry_after_hours, пока попыток
@@ -92,7 +99,11 @@ WEBHOOK_PAYLOAD_MAX_CHARS = 20000
 DEFAULT_BINOTEL_COMPANY = binotel.COMPANY_REMOTE_CC
 COMPANY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
-PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg")
+# operator_hangup — оператор сам нажал «Завершить» (телефон шлёт до BYE);
+# ended может нести by_operator/leg_sec — страховка, если operator_hangup не дошёл.
+PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg", "operator_hangup")
+# Для SQL `UPPER(disposition) IN %s` (psycopg2 разворачивает tuple в список).
+ANSWERED_SQL = tuple(sorted(ANSWERED_DISPOSITIONS))
 
 # Итоги звонка: стартовый набор отдела (руководитель правит в разделе), цвет —
 # hex как в системной палитре iOS, requeue — «перезвонить»: водитель снова
@@ -850,16 +861,24 @@ class DialListService:
 
     def _pending_outcome(self, cur, user_id):
         """Последняя попытка оператора, где телефон принял плечо (разговор был), а итог
-        ещё не указан. Попытки до появления итогов (leg_answered_at пуст) не считаются."""
+        ещё не указан. Попытки до появления итогов (leg_answered_at пуст) не считаются.
+
+        Если оператор сам положил трубку (operator_hangup_at), долг возникает только
+        когда Binotel подтвердил, что водитель ответил: до финального исхода — не
+        известно, был ли разговор; не ответил — попытка отменена (cancelled) и итога
+        по ней не будет."""
         cur.execute("""
             SELECT t.id, l.full_name, COALESCE(t.phone_ended_at, t.finished_at, t.updated_at), t.requested_at
             FROM dial_list_attempts t
             JOIN dial_list_assignments a ON a.id = t.assignment_id
             JOIN dial_list_leads l ON l.id = a.lead_id
             WHERE t.operator_id = %s AND t.outcome_id IS NULL AND t.leg_answered_at IS NOT NULL
-              AND t.state IN ('ended', 'finished')
+              AND NOT t.cancelled
+              AND ((t.operator_hangup_at IS NULL AND t.state IN ('ended', 'finished'))
+                   OR (t.operator_hangup_at IS NOT NULL AND t.state = 'finished'
+                       AND UPPER(t.disposition) IN %s))
             ORDER BY t.requested_at DESC LIMIT 1
-        """, (int(user_id),))
+        """, (int(user_id), ANSWERED_SQL))
         r = cur.fetchone()
         if not r:
             return None
@@ -884,13 +903,23 @@ class DialListService:
             raise DialListError("Выберите итог звонка")
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT t.state, a.lead_id, t.outcome_id FROM dial_list_attempts t
+                SELECT t.state, a.lead_id, t.outcome_id, t.cancelled, t.operator_hangup_at, t.disposition
+                FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 WHERE t.id = %s AND t.operator_id = %s FOR UPDATE OF t
             """, (attempt_id, ctx["user_id"]))
             row = cur.fetchone()
             if not row:
                 raise DialListError("Попытка не найдена", 404)
+            # Оператор сам положил трубку: итог только по состоявшемуся разговору.
+            # Отменённая попытка (водитель не ответил) итога не имеет — и не
+            # засчитывается; до финального исхода от АТС итог тоже не принимаем,
+            # иначе «повесил трубку на гудках и поставил итог» прошло бы.
+            if row[3]:
+                raise DialListError("Звонок завершён до ответа водителя — итог не ставится", 409)
+            if row[4] is not None and not (row[0] == "finished" and map_disposition(row[5]) == "answered"):
+                raise DialListError("Вы завершили звонок сами: итог можно указать только по "
+                                    "состоявшемуся разговору. Дождитесь исхода от АТС", 409)
             cur.execute("""
                 SELECT id, name, color, requeue FROM dial_list_outcomes
                 WHERE id = %s AND department_id = %s AND is_active
@@ -930,6 +959,7 @@ class DialListService:
                    l.period,
                    lo.id AS last_outcome_id, lo.name AS last_outcome_name, lo.color AS last_outcome_color,
                    COALESCE(lt.operator_comment, '') AS last_comment,
+                   COALESCE(lt.cancelled, FALSE) AS last_cancelled,
                    fb.file_name AS first_file, fb.created_at AS first_uploaded_at,
                    lb.file_name AS last_file, lb.created_at AS last_uploaded_at,
                    oa.operator_id AS open_operator_id, ou.name AS open_operator_name,
@@ -969,7 +999,7 @@ class DialListService:
             LEFT JOIN users lu ON lu.id = la.operator_id
             LEFT JOIN LATERAL (
                 SELECT t.requested_at, t.state, t.disposition, t.billsec, t.api_error, t.operator_id,
-                       t.outcome_id, t.operator_comment
+                       t.outcome_id, t.operator_comment, t.cancelled
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a2 ON a2.id = t.assignment_id
                 WHERE a2.lead_id = l.id
@@ -980,7 +1010,7 @@ class DialListService:
             WHERE {scope}
         )
     """
-    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[35]).
+    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[36]).
     _JOURNAL_COLUMNS = """
                id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
                answered_at, created_at, updated_at, upload_count, note,
@@ -988,7 +1018,8 @@ class DialListService:
                open_operator_id, open_operator_name, last_operator_id, last_operator_name,
                last_result, last_done_at, last_call_at, last_call_state, last_disposition,
                last_billsec, last_api_error, last_call_operator_name, activity_at, stage, next_retry_at,
-               period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment"""
+               period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment,
+               last_cancelled"""
     _JOURNAL_SQL = _JOURNAL_BASE_SQL + """
         SELECT""" + _JOURNAL_COLUMNS + """,
                COUNT(*) OVER () AS total
@@ -1048,9 +1079,13 @@ class DialListService:
             result = map_disposition(disposition) if state == "finished" else ("failed" if state == "failed" else "")
             if state == "finished" and not result:
                 result = "other"
+            if r[36]:
+                # Оператор сам завершил звонок до ответа водителя — попытка не в счёт.
+                result = "cancelled"
             last_call = {
                 "at": _iso(r[22]), "state": state, "disposition": disposition, "result": result,
                 "billsec": int(r[25] or 0), "api_error": (r[26] or "")[:200], "operator_name": r[27] or "",
+                "cancelled": bool(r[36]),
             }
         return {
             "id": _sid(r[0]), "department_id": int(r[1]), "full_name": r[2] or "",
@@ -1150,7 +1185,7 @@ class DialListService:
             # приходит одной строкой, где колонки страницы — NULL.
             summary = (rows[0][-1] if rows else None) or []
             page = [r for r in rows if r[0] is not None]
-            total = int(page[0][36]) if page else 0
+            total = int(page[0][37]) if page else 0
             items = [self._journal_row(r, settings["max_attempts"]) for r in page]
             by_stage = {k: 0 for k in LEAD_STAGES}
             outcome_counts = {}
@@ -1217,7 +1252,8 @@ class DialListService:
                        t.phone_event_at, t.phone_ended_at,
                        (t.general_call_id IS NOT NULL AND t.general_call_id <> ''),
                        a.id, a.result, a.state, a.created_at,
-                       o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at
+                       o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at,
+                       t.cancelled, t.operator_hangup_at, t.leg_sec
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 LEFT JOIN users u ON u.id = t.operator_id
@@ -1232,7 +1268,12 @@ class DialListService:
                 result = map_disposition(disposition) if state == "finished" else ("failed" if state == "failed" else "")
                 if state == "finished" and not result:
                     result = "other"
+                if r[24]:
+                    result = "cancelled"
                 attempts.append({
+                    # Оператор сам завершил звонок (когда — operator_hangup_at); cancelled —
+                    # водитель при этом не ответил, попытка не засчитана.
+                    "cancelled": bool(r[24]), "operator_hangup_at": _iso(r[25]), "leg_sec": int(r[26] or 0),
                     "id": _sid(r[0]), "requested_at": _iso(r[1]),
                     "operator": {"id": r[2], "name": r[3]}, "internal_number": r[4] or "",
                     "state": state, "disposition": disposition, "result": result,
@@ -1447,17 +1488,30 @@ class DialListService:
             ORDER BY issued_at DESC LIMIT 1
         """, (int(user_id),))
         row = cur.fetchone()
-        return {"id": str(row[0]), "size": int(row[1]), "issued_at": row[2]} if row else None
+        return {"id": str(row[0]), "size": int(row[1]), "issued_at": row[2], "closed_at": None} if row else None
+
+    def _last_portion(self, cur, user_id):
+        """Последняя выдача оператора, открытая или уже закрытая. Закрытую телефон
+        показывает целиком с итогами, пока оператор не возьмёт следующую: иначе после
+        последней строки список исчезал, и итоги пачки никто не видел (владелец, 24.09.2026)."""
+        cur.execute("""
+            SELECT id, size, issued_at, closed_at FROM dial_list_portions
+            WHERE operator_id = %s
+            ORDER BY closed_at IS NULL DESC, issued_at DESC LIMIT 1
+        """, (int(user_id),))
+        row = cur.fetchone()
+        return {"id": str(row[0]), "size": int(row[1]), "issued_at": row[2], "closed_at": row[3]} if row else None
 
     def _portion_items(self, cur, portion_id):
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
                    t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
-                   o.name, o.color
+                   o.name, o.color, t.cancelled, t.operator_hangup_at
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
-                SELECT id, state, disposition, requested_at, general_call_id, outcome_id
+                SELECT id, state, disposition, requested_at, general_call_id, outcome_id,
+                       cancelled, operator_hangup_at
                 FROM dial_list_attempts WHERE assignment_id = a.id
                 ORDER BY requested_at DESC LIMIT 1
             ) t ON TRUE
@@ -1479,6 +1533,9 @@ class DialListService:
                     "attempt_id": str(r[7]), "state": r[8], "disposition": r[9] or "",
                     "requested_at": _iso(r[10]), "general_call_id": r[11],
                     "outcome_name": r[12] or "", "outcome_color": r[13] or "",
+                    # Оператор сам завершил звонок; cancelled — до ответа водителя,
+                    # попытка не засчитана и строка осталась в работе.
+                    "cancelled": bool(r[14]), "operator_hangup": r[15] is not None,
                 },
             })
         return items
@@ -1505,7 +1562,9 @@ class DialListService:
         self.reconcile(ctx)
         settings = ctx["settings"]
         with self.db._get_cursor() as cur:
-            portion = self._open_portion(cur, user_id)
+            # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
+            # экране с итогами, пока оператор не возьмёт следующую («Ещё»).
+            portion = self._last_portion(cur, user_id)
             items = self._portion_items(cur, portion["id"]) if portion else []
             active = self._active_attempt(cur, user_id)
             cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
@@ -1524,6 +1583,7 @@ class DialListService:
             "portion": None if not portion else {
                 "id": portion["id"], "size": portion["size"], "issued_at": _iso(portion["issued_at"]),
                 "pending": pending, "items": items,
+                "closed": portion["closed_at"] is not None, "closed_at": _iso(portion["closed_at"]),
             },
             "can_request_next": pending == 0 and pool > 0 and pending_outcome is None,
             "pool_available": pool,
@@ -1673,27 +1733,50 @@ class DialListService:
                 self._close_assignment(cur, assignment_id, lead_id, "failed", answered=False, count_attempt=True)
 
     # ------------------------------------------------------------ исходы
-    def phone_event(self, user_id, attempt_id, event, at=None):
-        """Подсказка телефона: плечо пришло / принято / разговор кончился / плеча не было."""
+    def phone_event(self, user_id, attempt_id, event, at=None, by_operator=False, leg_sec=0):
+        """Подсказка телефона: плечо пришло / принято / разговор кончился / плеча не было /
+        оператор сам нажал «Завершить».
+
+        В ответе телефон получает решение по итогу: `outcome_required` — true (открывать
+        окно итога), false (итог не нужен: попытка отменена или разговора не было),
+        None (исход АТС ещё не известен — телефон ждёт `pending_outcome` из состояния);
+        `cancelled` — попытка отменена и не засчитана."""
         event = str(event or "").strip().lower()
         if event not in PHONE_EVENTS:
             raise DialListError(f"Неизвестное событие: {event!r}")
         ctx = self.operator_context(user_id)
         attempt_id = str(attempt_id)
+        by_operator = bool(by_operator) or event == "operator_hangup"
+        leg_sec = max(0, min(_to_int(leg_sec, 0), 24 * 3600))
         with self.db._get_cursor() as cur:
             cur.execute("""
-                SELECT state, general_call_id, assignment_id FROM dial_list_attempts
+                SELECT state, general_call_id, assignment_id, cancelled, disposition FROM dial_list_attempts
                 WHERE id = %s AND operator_id = %s FOR UPDATE
             """, (attempt_id, ctx["user_id"]))
             row = cur.fetchone()
             if not row:
                 raise DialListError("Попытка не найдена", 404)
             state, general_call_id = row[0], row[1]
+            if by_operator:
+                # Отбой оператора запоминаем всегда — даже по уже закрытой попытке:
+                # вебхук Binotel мог обогнать телефон и досчитать попытку как «не
+                # ответил». Тогда её надо откатить здесь же (см. _cancel_attempt).
+                cur.execute("""
+                    UPDATE dial_list_attempts
+                    SET operator_hangup_at = COALESCE(operator_hangup_at, CURRENT_TIMESTAMP),
+                        leg_sec = CASE WHEN %s > 0 THEN %s ELSE leg_sec END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (leg_sec, leg_sec, attempt_id))
+                if state == "finished" and not row[3] and map_disposition(row[4]) not in ("", "answered"):
+                    self._cancel_attempt(cur, attempt_id, str(row[2]), late=True)
             if state in ("finished", "failed"):
-                return {"attempt_id": attempt_id, "state": state, "final": True}
+                cancelled, required = self._outcome_decision(cur, attempt_id)
+                return {"attempt_id": attempt_id, "state": state, "final": True,
+                        "cancelled": cancelled, "outcome_required": required}
             new_state = {
                 "ringing": "leg_ringing", "answered": "leg_answered",
-                "ended": "ended", "no_leg": state,
+                "ended": "ended", "no_leg": state, "operator_hangup": state,
             }[event]
             # Назад по цепочке не ходим: «ringing» после «answered» ничего не значит.
             order = ["requested", "leg_ringing", "leg_answered", "ended"]
@@ -1722,6 +1805,9 @@ class DialListService:
             if call and map_disposition(call.get("disposition")):
                 self._finish_by_call(attempt_id, call, "poll")
                 result.update({"state": "finished", "final": True, "disposition": call.get("disposition")})
+        with self.db._get_cursor() as cur:
+            cancelled, required = self._outcome_decision(cur, attempt_id)
+        result.update({"cancelled": cancelled, "outcome_required": required})
         return result
 
     def reconcile(self, ctx_or_user_id, limit=POLL_MAX_PER_REQUEST):
@@ -1792,6 +1878,14 @@ class DialListService:
                       PROVISIONAL_DISPOSITIONS))
                 late = cur.fetchone()
                 if late and result == "answered":
+                    cur.execute("SELECT cancelled FROM dial_list_attempts WHERE id = %s", (str(attempt_id),))
+                    was_cancelled = cur.fetchone()
+                    if was_cancelled and was_cancelled[0]:
+                        # Попытку отменили по провизорному исходу (таймаут UNKNOWN), а
+                        # теперь Binotel говорит: водитель ответил. Разговор был — итог
+                        # обязателен, попытка снова в счёт.
+                        self._uncancel_attempt(cur, str(attempt_id), str(late[0]))
+                        return True
                     cur.execute("""
                         UPDATE dial_list_leads l
                         SET answered_at = COALESCE(l.answered_at, CURRENT_TIMESTAMP),
@@ -1802,6 +1896,14 @@ class DialListService:
                     """, (str(late[0]),))
                 return bool(late)
             assignment_id = str(row[0])
+            # Оператор сам положил трубку, а водитель так и не ответил: попытка
+            # отменяется — не считается ни строке, ни лиду, строка остаётся в работе.
+            # (Решение владельца 24.09.2026: «повесил трубку до ответа — не засчитывать».)
+            cur.execute("SELECT operator_hangup_at FROM dial_list_attempts WHERE id = %s", (str(attempt_id),))
+            hung = cur.fetchone()
+            if hung and hung[0] is not None and result != "answered":
+                self._cancel_attempt(cur, str(attempt_id), assignment_id, late=False)
+                return True
             # Оператор мог успеть выбрать итог «перезвонить» раньше, чем приехал исход
             # от АТС: тогда лид не закрываем, а оставляем на повтор.
             cur.execute("""
@@ -1868,6 +1970,93 @@ class DialListService:
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
         """, (attempts_total, bool(answered), status, lead_id))
+
+    # ------------------------------------------------------------ отмена до ответа
+    def _cancel_attempt(self, cur, attempt_id, assignment_id, late=False):
+        """Оператор сам завершил звонок, водитель не ответил: попытка не в счёт.
+
+        late=False — попытка закрывается сейчас (строка ещё `issued`, лид не трогали):
+        достаточно снять её со счётчика строки. late=True — исход от Binotel обогнал
+        событие телефона и попытку уже досчитали как «не ответил»: откатываем закрытие
+        строки, повторное открытие выдачи и счётчик лида. Всё — в транзакции вызывающего."""
+        cur.execute("""
+            UPDATE dial_list_attempts SET cancelled = TRUE, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND NOT cancelled RETURNING id
+        """, (str(attempt_id),))
+        if not cur.fetchone():
+            return False
+        cur.execute("UPDATE dial_list_assignments SET attempts = GREATEST(attempts - 1, 0) WHERE id = %s",
+                    (str(assignment_id),))
+        if late:
+            cur.execute("""
+                SELECT a.state, a.lead_id, a.portion_id,
+                       (SELECT t.id FROM dial_list_attempts t WHERE t.assignment_id = a.id
+                        ORDER BY t.requested_at DESC LIMIT 1)
+                FROM dial_list_assignments a WHERE a.id = %s FOR UPDATE
+            """, (str(assignment_id),))
+            a = cur.fetchone()
+            if a and a[0] == "done" and str(a[3]) == str(attempt_id):
+                # Строку закрыла именно эта попытка. Вернуть её в работу можно, только
+                # если лид не успел уйти в другую открытую выдачу (уникальный индекс).
+                cur.execute("SELECT 1 FROM dial_list_assignments WHERE lead_id = %s AND state = 'issued'",
+                            (str(a[1]),))
+                if not cur.fetchone():
+                    cur.execute("""
+                        UPDATE dial_list_assignments SET state = 'issued', result = '', done_at = NULL
+                        WHERE id = %s
+                    """, (str(assignment_id),))
+                    cur.execute("UPDATE dial_list_portions SET closed_at = NULL WHERE id = %s", (str(a[2]),))
+                cur.execute("""
+                    UPDATE dial_list_leads
+                    SET attempts_total = GREATEST(attempts_total - 1, 0),
+                        status = CASE WHEN status = 'done' AND answered_at IS NULL THEN 'in_progress' ELSE status END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (str(a[1]),))
+        log.info("dial_list: попытка %s отменена оператором до ответа водителя (%s)",
+                 attempt_id, "с откатом закрытия строки" if late else "строка осталась в работе")
+        return True
+
+    def _uncancel_attempt(self, cur, attempt_id, assignment_id):
+        """Отменённую по провизорному исходу попытку Binotel позже признал отвеченной:
+        разговор был, попытка снова в счёт, итог обязателен."""
+        cur.execute("""
+            UPDATE dial_list_attempts SET cancelled = FALSE, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND cancelled RETURNING id
+        """, (str(attempt_id),))
+        if not cur.fetchone():
+            return False
+        cur.execute("UPDATE dial_list_assignments SET attempts = attempts + 1 WHERE id = %s", (str(assignment_id),))
+        cur.execute("SELECT lead_id, state FROM dial_list_assignments WHERE id = %s FOR UPDATE", (str(assignment_id),))
+        a = cur.fetchone()
+        if a and a[1] == "issued":
+            self._close_assignment(cur, str(assignment_id), str(a[0]), "answered", answered=True, count_attempt=True)
+        elif a:
+            self._touch_lead(cur, str(a[0]), answered=True, count_attempt=True)
+        log.info("dial_list: попытка %s снова в счёте — Binotel подтвердил ответ водителя", attempt_id)
+        return True
+
+    def _outcome_decision(self, cur, attempt_id):
+        """(cancelled, outcome_required) по попытке — что телефону делать после разговора.
+        outcome_required: True — открыть окно итога; False — итог не нужен; None — исход
+        от АТС ещё не известен (оператор сам положил трубку, ждём Binotel)."""
+        cur.execute("""
+            SELECT state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id
+            FROM dial_list_attempts WHERE id = %s
+        """, (str(attempt_id),))
+        r = cur.fetchone()
+        if not r:
+            return False, False
+        state, disposition, cancelled, hung_up, leg_answered, outcome_id = r
+        if cancelled:
+            return True, False
+        if outcome_id is not None or leg_answered is None or state == "failed":
+            return False, False
+        if hung_up is None:
+            return False, True
+        if state == "finished":
+            return False, map_disposition(disposition) == "answered"
+        return False, None
 
     # ------------------------------------------------------------ вебхук
     def webhook_allowed(self, token, remote_addr):
@@ -1946,7 +2135,8 @@ class DialListService:
                            COUNT(*) FILTER (WHERE t.state = 'finished'
                                             AND UPPER(t.disposition) IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS')) AS answered,
                            COALESCE(SUM(t.billsec) FILTER (WHERE t.state = 'finished'), 0) AS talk_sec,
-                           COUNT(*) FILTER (WHERE t.state = 'failed') AS failed
+                           COUNT(*) FILTER (WHERE t.state = 'failed') AS failed,
+                           COUNT(*) FILTER (WHERE t.cancelled) AS cancelled
                     FROM dial_list_attempts t
                     WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %s
                     GROUP BY t.operator_id
@@ -1961,7 +2151,7 @@ class DialListService:
                 SELECT u.id, u.name, u.department_id, dep.name,
                        COALESCE(asg.issued, 0), COALESCE(asg.done, 0),
                        COALESCE(att.attempts, 0), COALESCE(att.answered, 0),
-                       COALESCE(att.talk_sec, 0), COALESCE(att.failed, 0)
+                       COALESCE(att.talk_sec, 0), COALESCE(att.failed, 0), COALESCE(att.cancelled, 0)
                 FROM users u
                 LEFT JOIN departments dep ON dep.id = u.department_id
                 LEFT JOIN att ON att.operator_id = u.id
@@ -1973,6 +2163,8 @@ class DialListService:
                 "operator_id": r[0], "operator_name": r[1] or "", "department_id": r[2],
                 "department_name": r[3] or "", "issued": int(r[4]), "done": int(r[5]),
                 "attempts": int(r[6]), "answered": int(r[7]), "talk_sec": int(r[8]), "failed": int(r[9]),
+                # Отменённые оператором до ответа водителя — в attempts входят, но не в счёт лидам.
+                "cancelled": int(r[10]),
             } for r in cur.fetchall()]
         return rows
 

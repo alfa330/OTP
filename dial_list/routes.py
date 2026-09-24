@@ -9,7 +9,9 @@
     POST /api/operator/dial_list/next                        выдать следующую порцию
     POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке
     POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
-                                                             {event: ringing|answered|ended|no_leg}
+                                                             {event: ringing|answered|ended|no_leg|operator_hangup,
+                                                              by_operator?, leg_sec?} → в ответе outcome_required /
+                                                             cancelled — нужен ли итог после разговора
     POST /api/operator/dial_list/attempts/<attempt_id>/outcome
                                                              {outcome_id, comment} — итог разговора
                                                              (обязателен перед следующим звонком)
@@ -140,7 +142,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_phone_event(attempt_id):
         user_id, _ = _operator()
         payload = request.get_json(silent=True) or {}
-        result = svc.phone_event(user_id, attempt_id, payload.get('event'), payload.get('at'))
+        # by_operator/leg_sec — у события ended: оператор ли положил трубку и сколько
+        # секунд плечо было принято телефоном (см. service.phone_event).
+        result = svc.phone_event(user_id, attempt_id, payload.get('event'), payload.get('at'),
+                                 by_operator=bool(payload.get('by_operator')), leg_sec=payload.get('leg_sec', 0))
         return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/outcome', methods=['POST', 'OPTIONS'])

@@ -216,6 +216,13 @@ DDL = [
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_comment TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS outcome_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS leg_answered_at TIMESTAMP WITH TIME ZONE",
+    # Отбой оператором (решение владельца 24.09.2026): когда оператор сам нажал
+    # «Завершить» (operator_hangup_at) и Binotel сообщил, что водитель не ответил,
+    # попытка отменяется (cancelled) — не считается строке и лиду, итог по ней не
+    # ставится. leg_sec — сколько секунд плечо было принято телефоном (для журнала).
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_hangup_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS leg_sec INTEGER NOT NULL DEFAULT 0",
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """

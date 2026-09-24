@@ -538,5 +538,95 @@ class LeadsJournalTests(unittest.TestCase):
         self.assertNotIn('/api/operator/', journal_part)
 
 
+class OperatorHangupTests(unittest.TestCase):
+    """Решение владельца 24.09.2026: оператор сам положил трубку до ответа водителя —
+    итог не ставится, попытка не засчитывается."""
+
+    def test_phone_reports_operator_hangup(self):
+        self.assertIn('operator_hangup', dial_service.PHONE_EVENTS)
+        src = inspect.getsource(dial_service.DialListService.phone_event)
+        # Отбой оператора запоминается всегда (и по закрытой попытке — откат), ответ
+        # несёт решение по итогу для телефона.
+        self.assertIn('operator_hangup_at = COALESCE(operator_hangup_at, CURRENT_TIMESTAMP)', src)
+        self.assertIn('"outcome_required"', src)
+        self.assertIn('"cancelled"', src)
+        self.assertIn('late=True', src)
+        route = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        self.assertIn("by_operator=bool(payload.get('by_operator'))", route)
+
+    def test_schema_has_cancellation_columns(self):
+        ddl = dial_schema.DDL
+        for column in ('operator_hangup_at', 'cancelled', 'leg_sec'):
+            self.assertTrue(any(f'ADD COLUMN IF NOT EXISTS {column}' in s for s in ddl), column)
+
+    def test_cancelled_attempt_is_not_counted(self):
+        finish = inspect.getsource(dial_service.DialListService._finish_attempt)
+        # Отмена решается ДО закрытия строки и не доходит до _close_assignment/_touch_lead.
+        cancel_at = finish.index('self._cancel_attempt(')
+        self.assertLess(cancel_at, finish.index('self._close_assignment('))
+        self.assertIn('result != "answered"', finish[:cancel_at + 200])
+        cancel = inspect.getsource(dial_service.DialListService._cancel_attempt)
+        self.assertIn('SET cancelled = TRUE', cancel)
+        self.assertIn('GREATEST(attempts - 1, 0)', cancel)
+        self.assertNotIn('_touch_lead', cancel)
+        # Поздний откат: строку и выдачу открываем обратно, лид — минус попытка.
+        self.assertIn("SET state = 'issued', result = '', done_at = NULL", cancel)
+        self.assertIn('SET closed_at = NULL', cancel)
+        self.assertIn('GREATEST(attempts_total - 1, 0)', cancel)
+        # Отвеченный позже разговор возвращает попытку в счёт.
+        self.assertIn('_uncancel_attempt', finish)
+
+    def test_cancelled_attempt_takes_no_outcome(self):
+        src = inspect.getsource(dial_service.DialListService.set_attempt_outcome)
+        self.assertIn('t.cancelled, t.operator_hangup_at', src)
+        self.assertIn('итог не ставится', src)
+        self.assertIn('Дождитесь исхода от АТС', src)
+        pending = inspect.getsource(dial_service.DialListService._pending_outcome)
+        self.assertIn('NOT t.cancelled', pending)
+        self.assertIn('t.operator_hangup_at IS NOT NULL AND t.state = \'finished\'', pending)
+        self.assertIn('ANSWERED_SQL', pending)
+
+    def test_outcome_decision_rules(self):
+        svc = dial_service.DialListService(db=None)
+
+        class _Cur:
+            def __init__(self, row):
+                self.row = row
+
+            def execute(self, *_a, **_k):
+                pass
+
+            def fetchone(self):
+                return self.row
+
+        # (state, disposition, cancelled, operator_hangup_at, leg_answered_at, outcome_id)
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'CANCEL', True, 't', 't', None)), 'x'), (True, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, None, 't', None)), 'x'), (False, True))
+        self.assertEqual(svc._outcome_decision(_Cur(('ended', '', False, 't', 't', None)), 'x'), (False, None))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWERED', False, 't', 't', None)), 'x'), (False, True))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'NOANSWER', False, 't', 't', None)), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('finished', 'ANSWERED', False, None, 't', 'o')), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(('failed', '', False, None, None, None)), 'x'), (False, False))
+        self.assertEqual(svc._outcome_decision(_Cur(None), 'x'), (False, False))
+
+
+class PortionStaysVisibleTests(unittest.TestCase):
+    """Обработанная пачка остаётся на экране с итогами, пока не взята следующая."""
+
+    def test_state_falls_back_to_last_closed_portion(self):
+        state = inspect.getsource(dial_service.DialListService.get_state)
+        self.assertIn('_last_portion', state)
+        self.assertIn('"closed"', state)
+        last = inspect.getsource(dial_service.DialListService._last_portion)
+        self.assertIn('ORDER BY closed_at IS NULL DESC, issued_at DESC', last)
+        self.assertNotIn('phone_norm', last)
+        # Выдача следующей — по-прежнему только через открытую порцию без issued.
+        nxt = inspect.getsource(dial_service.DialListService.issue_next_portion)
+        self.assertIn('_open_portion', nxt)
+        self.assertIn("state = 'issued'", nxt)
+        items = inspect.getsource(dial_service.DialListService._portion_items)
+        self.assertIn('"cancelled"', items)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -55,6 +55,8 @@ const STAGE_DOT = Object.fromEntries(STAGES.map((s) => [s.value, s.dot]));
 
 const RESULT_LABEL = {
     answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не ответил', other: 'Не состоялся', failed: 'Ошибка АТС',
+    // Оператор сам завершил звонок до ответа водителя — попытка не засчитана.
+    cancelled: 'Отменён до ответа',
 };
 
 const STATE_LABEL = {
@@ -405,10 +407,15 @@ const SOURCE_LABEL = { webhook: 'исход прислал вебхук Binotel'
 
 const AttemptItem = ({ attempt, recording, onRecording }) => {
     const result = attempt.result;
-    const tone = result === 'answered' ? 'green' : result === 'failed' ? 'red' : result ? 'amber' : 'blue';
+    const tone = result === 'answered' ? 'green' : result === 'failed' ? 'red'
+        : result === 'cancelled' ? 'slate' : result ? 'amber' : 'blue';
     const Icon = result === 'answered' ? PhoneCall : result === 'failed' ? TriangleAlert
-        : result === 'other' ? PhoneOff : result ? PhoneMissed : PhoneOutgoing;
+        : result === 'other' || result === 'cancelled' ? PhoneOff : result ? PhoneMissed : PhoneOutgoing;
     const title = result ? (RESULT_LABEL[result] || result) : (STATE_LABEL[attempt.state] || 'Звонок');
+    // Отмена — оператор положил трубку, пока АТС набирала водителя: такая попытка
+    // не идёт в счёт ни строке, ни водителю, поэтому подпись объясняет это явно.
+    const cancelledHint = result === 'cancelled'
+        ? ' · оператор завершил звонок до ответа водителя, попытка не засчитана' : '';
     const rec = recording || {};
     return (
         <li className="flex gap-3 py-3 pr-4">
@@ -429,6 +436,7 @@ const AttemptItem = ({ attempt, recording, onRecording }) => {
                 <div className="text-[12.5px] text-slate-500">
                     {attempt.operator?.name || 'Оператор'}
                     {attempt.internal_number && <> · линия {attempt.internal_number}</>}
+                    {cancelledHint}
                 </div>
                 {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
                 {attempt.comment && <Bubble>{attempt.comment}</Bubble>}
