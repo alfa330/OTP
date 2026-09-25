@@ -285,9 +285,15 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
         setPolish(null);
     }, [departmentId]);
 
+    // showToast в App объявлена внутри компонента и меняет идентичность при каждом
+    // рендере — то есть при каждом тосте. Если завязать на неё load/aiRequest, любой
+    // тост перезапускал бы загрузку и панель «перемонтировалась» (25.09.2026). Берём
+    // актуальную функцию через ref, а сам toast держим стабильным.
+    const toastRef = useRef(showToast);
+    useEffect(() => { toastRef.current = showToast; }, [showToast]);
     const toast = useCallback((msg, kind = 'success') => {
-        if (typeof showToast === 'function') showToast(msg, kind);
-    }, [showToast]);
+        if (typeof toastRef.current === 'function') toastRef.current(msg, kind);
+    }, []);
 
     // keepIds — вопросы, которые остаются в списке даже выключенными: те, что
     // человек только что выключил переключателем, не должны прыгать в «Убранные»
