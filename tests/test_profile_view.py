@@ -150,10 +150,19 @@ class ProfileLayoutTests(unittest.TestCase):
         for rule in rules:
             self.assertTrue(rule.startswith('body.mobile-shell '), rule)
 
-    def test_quick_actions_only_on_desktop_and_only_to_granted_views(self):
-        self.assertNotIn('quickActions', self.phone)
-        self.assertIn('quickActions.map((action) =>', self.desktop)
-        self.assertIn(".filter((action) => departmentAllowsView(user, action.key))", self.app)
+    def test_score_and_hours_cards_open_their_sections(self):
+        # Отдельных кнопок «Мои часы» / «Мои оценки» нет (владелец 25.09.2026:
+        # «кнопки нужно встроить в Ср. балл и Часов»): нажимаются эти две
+        # карточки, и только в раздел, выданный отделу.
+        self.assertNotIn('quickActions', self.app)
+        self.assertNotIn('quickActions', self.view)
+        self.assertIn("const NAV_STAT_KEYS = new Set(['score', 'hours']);", self.desktop)
+        self.assertIn("const opens = NAV_STAT_KEYS.has(stat.key) && typeof stat.onClick === 'function';", self.desktop)
+        # Карточка-кнопка видна как кнопка (синяя ссылка «Мои часы ›») и не
+        # центрирует содержимое по вертикали — иначе она съезжала вниз рядом с
+        # соседкой, у которой есть строка «Осталось 59».
+        self.assertIn("const NAV_STAT_LINK = { score: 'Мои оценки', hours: 'Мои часы' };", self.desktop)
+        self.assertIn('flex flex-col justify-start p-6 text-left', self.desktop)
         builder = self.app.partition('const buildProfileStats = () => {')[2].partition('const fetchProfileData = async () => {')[0]
         self.assertIn("departmentAllowsView(user, viewKey) ? () => setView(viewKey) : null", builder)
         self.assertIn("openProfileView('hours')", builder)

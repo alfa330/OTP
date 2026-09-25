@@ -57316,12 +57316,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                   return (
                                     <ProfileView
                                       {...profileViewProps}
-                                      // «Быстрые действия» на компьютере — прежние две кнопки в
-                                      // прежних цветах, и только в разделы, выданные отделу.
-                                      quickActions={profileHidesOperatorBlocks ? [] : [
-                                        { key: 'hours', label: 'Мои часы', icon: 'fas fa-clock', tone: 'blue', onClick: () => setView('hours') },
-                                        { key: 'evaluation', label: 'Мои оценки', icon: 'fas fa-chart-bar', tone: 'green', onClick: () => setView('evaluation') },
-                                      ].filter((action) => departmentAllowsView(user, action.key))}
                                       // «Повторить» — тот же набор запросов, что при входе в раздел
                                       // (эффект view === 'profile'): один профиль оставил бы полосу
                                       // показателей пустой, а ОП TEZ — с ячейками чужой модели.

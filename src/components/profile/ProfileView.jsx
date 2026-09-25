@@ -18,9 +18,9 @@ import { DeskGroup, DeskRow, IconSquare, RowSkeleton, RowValue, pillButton } fro
  *
  * КОМПЬЮТЕР — в духе «Системных настроек» macOS: белые карточки на сером
  * полотне, цвет — в маленьких квадратных значках, числа тёмные. Раскладка на
- * трёхколоночной сетке: шапка во всю ширину (аватар, имя, «Основа · стаж»,
- * справа «Мои часы» и «Мои оценки»), три карточки показателей (у ОП TEZ
- * четыре), ниже «Работа» и «Мои данные» строками «значок — подпись — значение»:
+ * трёхколоночной сетке: шапка во всю ширину (аватар, имя, «Основа · стаж»),
+ * три карточки показателей (у ОП TEZ четыре; «Ср. балл» ведёт в «Мои оценки»,
+ * «Часов» — в «Мои часы»), ниже «Работа» и «Мои данные» строками «значок — подпись — значение»:
  * «Работа» — колонка из трёх строк, «Мои данные» — две такие же колонки, и все
  * девять строк стоят на трёх общих горизонталях. Владелец 25.09.2026 отверг и
  * узкую колонку «как на телефоне», и градиентные плитки — «мультяшно».
@@ -239,21 +239,56 @@ const NOTE_TONE = {
     muted: 'text-slate-400',
 };
 
+// Кнопок «Мои часы» и «Мои оценки» на компьютере нет — владелец 25.09.2026:
+// «кнопки нужно встроить в Ср. балл и Часов, чтобы при нажатии переходил в
+// нужный раздел». Поэтому нажимаются ровно эти две карточки (и только если
+// раздел выдан отделу — иначе onClick из buildProfileStats пустой).
+const NAV_STAT_KEYS = new Set(['score', 'hours']);
+// Подпись-ссылка в углу нажимаемой карточки: бледного шеврона было мало, чтобы
+// карточку читали как кнопку (владелец 25.09.2026: «активной пусть будет кнопка
+// часов»), — синяя ссылка «Мои часы ›» говорит, куда она ведёт.
+const NAV_STAT_LINK = { score: 'Мои оценки', hours: 'Мои часы' };
+
 const StatCards = ({ stats }) => (
     <div className={`xl:col-span-3 grid gap-6 ${stats.length === 4 ? 'grid-cols-2 xl:grid-cols-4' : 'grid-cols-3'}`}>
         {stats.map((stat) => {
             const meta = STAT_ICON[stat.key] || { icon: 'fa-chart-bar', tone: 'blue' };
-            return (
-                <div key={stat.key} className={`${iosCard} p-6`}>
+            const opens = NAV_STAT_KEYS.has(stat.key) && typeof stat.onClick === 'function';
+            const content = (
+                <>
                     <div className="flex items-center gap-3">
                         <IconSquare icon={meta.icon} tone={meta.tone} size="stat" />
                         <span className="text-[15px] font-medium text-slate-500">{stat.label}</span>
+                        {opens && (
+                            <span className="ml-auto inline-flex items-center gap-1 text-[14px] font-medium text-blue-600">
+                                {NAV_STAT_LINK[stat.key]}
+                                <FaIcon className="fas fa-chevron-right text-[12px]" />
+                            </span>
+                        )}
                     </div>
                     <div className={`mt-4 text-[40px] font-semibold leading-[44px] tracking-tight tabular-nums ${STAT_TONE[stat.tone] || 'text-slate-900'}`}>
                         {stat.value}
                     </div>
                     {stat.note && <div className={`mt-1.5 text-[14px] ${NOTE_TONE[stat.noteTone] || 'text-slate-400'}`}>{stat.note}</div>}
-                </div>
+                </>
+            );
+            return opens ? (
+                <button
+                    key={stat.key}
+                    type="button"
+                    onClick={stat.onClick}
+                    title={stat.hint}
+                    aria-label={`${stat.label}: ${stat.value}. ${stat.hint}`}
+                    // flex-col и justify-start: кнопка по умолчанию центрирует
+                    // содержимое по вертикали, а ряд растягивает её до высоты
+                    // соседки со строкой «Осталось 59» — значок, подпись и число
+                    // «Часов» съезжали ниже соседних карточек.
+                    className={`${iosCard} flex flex-col justify-start p-6 text-left transition hover:bg-blue-50/40 hover:shadow-md hover:ring-blue-200 active:scale-[0.99] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60`}
+                >
+                    {content}
+                </button>
+            ) : (
+                <div key={stat.key} className={`${iosCard} p-6`}>{content}</div>
             );
         })}
     </div>
@@ -288,7 +323,6 @@ function DesktopTop({
     onChangeRate = null,
     onRetry = null,
     myData = null,
-    quickActions = [],
 }) {
     if (firstLoad) return <DesktopSkeleton />;
     if (failed) {
@@ -355,16 +389,6 @@ function DesktopTop({
                     <h2 className="truncate text-[28px] font-semibold leading-9 tracking-tight text-slate-900">{profile.name || 'Без имени'}</h2>
                     {subtitle && <p className="mt-1 text-[16px] text-slate-500">{subtitle}</p>}
                 </div>
-                {quickActions.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-3">
-                        {quickActions.map((action) => (
-                            <button key={action.key} type="button" onClick={action.onClick} className={pillButton}>
-                                <FaIcon className={`${action.icon} ${action.tone === 'green' ? 'text-green-600' : 'text-blue-600'}`} />
-                                <span>{action.label}</span>
-                            </button>
-                        ))}
-                    </div>
-                )}
             </section>
 
             {!hidesOperatorBlocks && Array.isArray(stats) && stats.length > 0 && <StatCards stats={stats} />}
