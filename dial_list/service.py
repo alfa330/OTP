@@ -432,6 +432,45 @@ class DialListService:
         ep = record.get("endpointData") if isinstance(record, dict) else None
         return ep if isinstance(ep, dict) and str(ep.get("internalNumber") or "").strip() else None
 
+    def _line_status_hint(self, department_id, internal_number):
+        """Что Binotel сам думает о линии оператора — для текста ошибки при коде 150.
+
+        Код 150 «Can't call to the ext» приходит и у ЗАРЕГИСТРИРОВАННОГО телефона:
+        Binotel помечает линию «не в сети» при снятии регистрации (смена сети,
+        перерегистрация) и возвращает в сеть только своим обходом — до 30–40 минут
+        (25.09.2026, линия 904: не в сети 16:43–17:17 при живом REGISTER и ответах на
+        OPTIONS). Оператору нужно знать, ждать или чинить: «проверьте регистрацию» в
+        первом случае отправляет его чинить исправное. Статус читаем из
+        settings/list-of-employees → endpointData.status; не получили — прежняя
+        подсказка про регистрацию. Подсказка, не условие: любая ошибка здесь гасится.
+        """
+        def hhmm(unix_ts):
+            try:
+                ts = int(unix_ts or 0)
+            except (TypeError, ValueError):
+                return "?"
+            return datetime.fromtimestamp(ts, PERIOD_TZ).strftime("%H:%M") if ts > 0 else "?"
+
+        number = str(internal_number or "").strip()
+        try:
+            for rec in self._binotel_employees(department_id):
+                ep = self._endpoint_of(rec)
+                if not ep or str(ep.get("internalNumber") or "").strip() != number:
+                    continue
+                st = ep.get("status") if isinstance(ep.get("status"), dict) else {}
+                sip = st.get("sip") if isinstance(st.get("sip"), dict) else {}
+                state = str(st.get("preparedStatus") or sip.get("status") or "").strip().lower()
+                if state in ("online", "inuse"):
+                    return "Binotel при этом видит линию в сети — повторите через минуту."
+                return (f"Binotel считает линию не в сети с {hhmm(sip.get('updatedAt'))} "
+                        f"(последний раз в сети {hhmm(ep.get('wasOnlineAt'))}). Так бывает после "
+                        "смены сети или перерегистрации: Binotel обновляет статус линии сам, обычно "
+                        "за 30–40 минут. Телефон зарегистрирован — подождите и повторите; нет — "
+                        "проверьте регистрацию.")
+        except Exception as exc:
+            log.warning("dial_list: статус линии %s у Binotel не получен: %s", number, exc)
+        return "Телефон не зарегистрирован в Binotel — проверьте регистрацию и повторите"
+
     def department_users(self, department_id):
         """Сотрудники отдела (все роли: тест ведёт и сам владелец) с их SIP-номером и
         персональным включением обзвона (None — как у отдела)."""
@@ -2083,9 +2122,9 @@ class DialListService:
                                count_for_lead=not ext_unreachable)
             log.warning("dial_list: Binotel отказал оператору %s: %s", ctx["user_id"], message)
             if ext_unreachable:
+                hint = self._line_status_hint(ctx["department_id"], ctx["internal_number"])
                 raise DialListError(
-                    f"Линия {ctx['internal_number']} не на связи: АТС не смогла до неё дозвониться. "
-                    "Телефон не зарегистрирован в Binotel — проверьте регистрацию и повторите", 409)
+                    f"Линия {ctx['internal_number']} не на связи: АТС не смогла до неё дозвониться. {hint}", 409)
             status = 429 if "too frequent" in lowered or "часто" in lowered else 502
             raise DialListError(f"АТС не приняла звонок: {message}", status)
 
