@@ -238,6 +238,30 @@ class CityFieldTest(unittest.TestCase):
         with self.assertRaises(wiki_cities.CityFieldError):
             wiki_cities.clean_services('строка')
 
+    def test_option_without_percent_is_refused_not_dropped(self):
+        """Комиссия за доп. опции (#368): кроме процента в строке ничего нет —
+        опция без него отказывает, а не исчезает молча."""
+        clean = wiki_cities.clean_option_commissions
+        self.assertEqual(clean([{'name': ' По делам / Домой / Мой район ', 'commission': '9,3'},
+                                {'name': ' ', 'commission': 5}]),
+                         [{'name': 'По делам / Домой / Мой район', 'commission': 9.3}])
+        self.assertEqual(clean(None), [])
+        for bad in ([{'name': 'Отсутствие термокороба', 'commission': ''}],
+                    [{'name': 'Мой район', 'commission': 'много'}],
+                    [{'name': 'x%d' % i, 'commission': 1} for i in range(25)],
+                    'строка'):
+            with self.assertRaises(wiki_cities.CityFieldError):
+                clean(bad)
+
+    def test_options_are_read_as_a_list_even_before_they_are_filled(self):
+        row = [None] * len(wiki_cities._SUMMARY_KEYS)
+        row[0], row[1] = 4, 'Алматы'
+        self.assertEqual(wiki_cities._city_row(tuple(row))['option_commissions'], [])
+        # В конце сводки: поля до неё берутся по номеру (row[13] — статус).
+        self.assertEqual(wiki_cities._SUMMARY_KEYS[-1], 'option_commissions')
+        self.assertEqual(wiki_cities._SUMMARY_KEYS[13], 'status')
+        self.assertTrue(wiki_cities._SUMMARY_COLUMNS.rstrip().endswith('c.option_commissions'))
+
 
 # ── Граница пространства ─────────────────────────────────────────────────────
 
@@ -571,6 +595,28 @@ class CityRouteTest(unittest.TestCase):
         self.assertTrue(any('INSERT INTO wiki_city_offices' in q for q in sql))
         self.assertTrue(any('UPDATE wiki_cities SET updated_at' in q for q in sql))
 
+    def test_option_commissions_are_saved_and_checked_before_writing(self):
+        client, cursor = self.build([12])
+        row = [None] * len(wiki_cities._SUMMARY_KEYS) + [None]
+        row[0], row[1], row[13] = 4, 'Алматы', 'active'
+        cursor.fetchone.side_effect = [tuple(row)] + [None] * 10
+        response = client.patch('/api/wiki/cities/4', json={'option_commissions': [
+            {'name': 'Отсутствие термокороба', 'commission': '7,2'}]})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        updates = [c for c in cursor.execute.call_args_list if 'UPDATE wiki_cities' in str(c.args[0])]
+        self.assertIn('option_commissions = %s', str(updates[0].args[0]))
+        # Пишется только присланное: опции не задевают свои тарифы соседним полем.
+        self.assertNotIn('extra_tariffs', str(updates[0].args[0]))
+
+        client, cursor = self.build([12])
+        cursor.fetchone.side_effect = [tuple(row)] + [None] * 10
+        response = client.patch('/api/wiki/cities/4', json={'option_commissions': [
+            {'name': 'Мой район', 'commission': ''}]})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'WIKI_CITY_FIELD')
+        self.assertFalse([c for c in cursor.execute.call_args_list
+                          if 'UPDATE wiki_cities' in str(c.args[0])])
+
     def test_driver_offices_in_wrong_shape_are_refused(self):
         client, cursor = self.build([12])
         row = [None] * len(wiki_cities._SUMMARY_KEYS) + [None]
@@ -598,6 +644,10 @@ class CitySchemaTest(unittest.TestCase):
         # Связь «куда направлять водителя» — с ключами на оба справочника.
         self.assertIn('city_id INTEGER NOT NULL REFERENCES wiki_cities(id) ON DELETE CASCADE', ddl)
         self.assertIn('office_id INTEGER NOT NULL REFERENCES wiki_offices(id) ON DELETE CASCADE', ddl)
+        # Комиссия за доп. опции (#368) — дописана к живой таблице, поэтому
+        # ADD COLUMN IF NOT EXISTS и не NULL: старые строки читаются пустым списком.
+        self.assertIn("ALTER TABLE wiki_cities ADD COLUMN IF NOT EXISTS option_commissions "
+                      "JSONB NOT NULL DEFAULT '[]'::jsonb", ddl)
 
     def test_cities_are_created_before_the_audit_reads_them(self):
         """Формула пространства журнала читает wiki_cities — таблица обязана

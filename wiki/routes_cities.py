@@ -59,6 +59,9 @@ def _fields(cursor, data, *, partial, space_id):
         fields['tariff_meta'] = wiki_cities.clean_tariff_meta(data.get('tariff_meta'))
     if sent('extra_tariffs'):
         fields['extra_tariffs'] = wiki_cities.clean_extra_tariffs(data.get('extra_tariffs'))
+    if sent('option_commissions'):
+        fields['option_commissions'] = wiki_cities.clean_option_commissions(
+            data.get('option_commissions'))
     if sent('services'):
         fields['services'] = wiki_cities.clean_services(data.get('services'))
     if sent('note'):

@@ -254,6 +254,7 @@ export default function CityCard({
 
     const region = regionOfCity(city.name);
     const updated = cityUpdatedAt(city);
+    const options = city.option_commissions || [];
     const phone = city.yandex_data?.phone || city.order_phone;
     const neverSynced = city.yandex_url && !city.yandex_checked_at;
     const hasParkCommission = city.park_commission !== null && city.park_commission !== undefined;
@@ -321,8 +322,10 @@ export default function CityCard({
 
             {/* Комиссии — плитками, как на макете: это первое, о чём
                 спрашивает водитель, и искать цифру в тексте не нужно. */}
+            {/* На телефоне — одна плитка в строку: в половине ширины
+                диапазон «15,1–19,2%» рвался на две строки посередине. */}
             {hasTiles && (
-                <div className="grid grid-cols-2 gap-2.5">
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                     {range && (
                         <div className="rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/70">
                             <div className="text-[12px] text-slate-500">Комиссия Яндекса</div>
@@ -376,6 +379,25 @@ export default function CityCard({
                                         : 'Тарифы по городу ещё не заполнены.'}
                         </div>
                     )}
+                </Section>
+            )}
+
+            {/* Опции — отдельно от тарифов (задача #368): это не тариф, и в
+                плитку «Комиссия Яндекса» они не входят. Под тарифами, а не
+                внизу: вопрос тот же — сколько берут. */}
+            {!loading && options.length > 0 && (
+                <Section title="Комиссия за доп. опции">
+                    <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70 divide-y divide-slate-100">
+                        {options.map((option, index) => (
+                            // eslint-disable-next-line react/no-array-index-key
+                            <div key={index} className="flex items-center gap-3 px-4 py-2.5">
+                                <div className="min-w-0 flex-1 text-[14.5px] font-medium text-slate-900">
+                                    {option.name}
+                                </div>
+                                <CommissionPill value={option.commission} />
+                            </div>
+                        ))}
+                    </div>
                 </Section>
             )}
 

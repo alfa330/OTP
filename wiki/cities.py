@@ -14,9 +14,10 @@ routes_structure.request_space. Исключение одно — ночная �
     Слепок перезаписывается ТОЛЬКО когда изменилось содержимое (отпечаток
     yandex_hash), поэтому «Обновлено» в карточке — дата настоящего изменения,
     а не ночного прогона;
-  * комиссия Яндекса по тарифу, требования к авто, комиссия парка, услуги
-    парка, обслуживающий офис и заметка — руками в редакторе: на публичных
-    страницах Яндекса этого нет (проверено по всем 24 городам постановки).
+  * комиссия Яндекса по тарифу и за доп. опции, требования к авто, комиссия
+    парка, услуги парка, обслуживающий офис и заметка — руками в редакторе: на
+    публичных страницах Яндекса этого нет (проверено по всем 24 городам
+    постановки).
 
 Ручные поля по тарифу (tariff_meta) привязаны к КОДУ тарифа Яндекса
 («econom», «business»), а не к названию: у Яндекса «Комфорт» внутри называется
@@ -70,6 +71,7 @@ DEFAULT_CITIES = (
 MAX_EXTRA_TARIFFS = 20
 MAX_SERVICES = 20
 MAX_TARIFF_META = 60
+MAX_OPTION_COMMISSIONS = 20
 
 # Ночная сверка: город, сверенный меньше этого срока назад, не трогаем.
 # Прогон после каждого деплоя (bot_schedule2) иначе перекачивал бы все
@@ -173,6 +175,34 @@ def clean_extra_tariffs(value):
     return result
 
 
+def clean_option_commissions(value):
+    """Комиссия за доп. опции (задача #368): [{name, commission}].
+
+    Комиссия у опции обязательна — кроме неё в строке ничего нет. Опцию без
+    процента не выбрасываем молча, а отказываем: человек её вписывал, и
+    карточка без неё показала бы пустоту там, где заполняли (то же правило,
+    что у parse_percent).
+    """
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise CityFieldError('Список опций пришёл в неверном виде')
+    result = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        name = _text(raw.get('name'), 80)
+        if not name:
+            continue
+        commission = parse_percent(raw.get('commission'), 'Комиссия опции «%s»' % name)
+        if commission is None:
+            raise CityFieldError('Укажите комиссию опции «%s»' % name)
+        result.append({'name': name, 'commission': commission})
+    if len(result) > MAX_OPTION_COMMISSIONS:
+        raise CityFieldError('Опций — не больше %d' % MAX_OPTION_COMMISSIONS)
+    return result
+
+
 def clean_services(value):
     """Услуги парка в городе: [{title, note}]. Название обязательно."""
     if value in (None, ''):
@@ -214,7 +244,8 @@ _SUMMARY_COLUMNS = """
     EXISTS (SELECT 1 FROM wiki_offices o
              WHERE o.space_id = c.space_id AND o.status = 'active'
                AND NOT o.no_office AND o.kind = 'park'
-               AND lower(o.city) = lower(c.name))
+               AND lower(o.city) = lower(c.name)),
+    c.option_commissions
 """
 
 _SUMMARY_KEYS = (
@@ -227,6 +258,9 @@ _SUMMARY_KEYS = (
     'serving_office_name', 'serving_office_city',
     'driver_office_ids',
     'has_office',
+    # В конце, а не рядом с tariff_meta: выборки и тесты берут поля сводки по
+    # номеру, вставка в середину сдвинула бы их.
+    'option_commissions',
 )
 
 # Обслуживающий офис — только своего пространства. Условие в самом JOIN, а не
@@ -252,6 +286,7 @@ def _city_row(row):
                                if city['park_commission'] is not None else None)
     city['tariff_meta'] = city['tariff_meta'] or {}
     city['extra_tariffs'] = city['extra_tariffs'] or []
+    city['option_commissions'] = city['option_commissions'] or []
     city['services'] = city['services'] or []
     city['driver_office_ids'] = list(city['driver_office_ids'] or [])
     if not city['serving_office_name']:
@@ -381,8 +416,9 @@ def set_city_offices(cursor, city_id, office_ids, *, space_id):
     return cursor.rowcount
 
 _WRITABLE = ('name', 'yandex_url', 'serving_office_id', 'park_commission',
-             'tariff_meta', 'extra_tariffs', 'services', 'note', 'status', 'position')
-_JSON_FIELDS = ('tariff_meta', 'extra_tariffs', 'services')
+             'tariff_meta', 'extra_tariffs', 'option_commissions', 'services', 'note',
+             'status', 'position')
+_JSON_FIELDS = ('tariff_meta', 'extra_tariffs', 'option_commissions', 'services')
 
 
 def _param(key, value):

@@ -13,9 +13,9 @@ import { Field } from './formField';
  * для того, чего у Яндекса нет вовсе (у пространства Тез ссылки на Яндекс
  * может не быть совсем).
  *
- * На виду — обязательное и главное; свои тарифы, услуги парка и заметка
- * открываются кнопками, пока пусты (требование владельца к формам: не выкладывать все
- * поля сразу).
+ * На виду — обязательное и главное; свои тарифы, комиссия за доп. опции,
+ * услуги парка и заметка открываются кнопками, пока пусты (требование
+ * владельца к формам: не выкладывать все поля сразу).
  */
 
 /* Геометрия триггера CustomSelect под соседний iosInput — тот же приём, что у
@@ -39,6 +39,7 @@ const chip = 'inline-flex items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1
     + 'font-medium text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]';
 
 const EMPTY_EXTRA = { name: '', commission: '', requirement: '', price: '' };
+const EMPTY_OPTION = { name: '', commission: '' };
 const EMPTY_SERVICE = { title: '', note: '' };
 
 const Group = ({ title, hint, children, right = null }) => (
@@ -76,12 +77,17 @@ export const draftFromCity = (city) => {
             requirement: item.requirement || '',
             price: item.price || '',
         })),
+        option_commissions: (city?.option_commissions || []).map((item) => ({
+            name: item.name || '',
+            commission: item.commission ?? '',
+        })),
         services: (city?.services || []).map((item) => ({ title: item.title || '', note: item.note || '' })),
         note: city?.note || '',
         yandexTariffs: (city?.yandex_data?.tariffs || []).map((tariff) => ({
             code: tariff.class, name: tariff.name, from: tariff.from,
         })),
         showExtra: (city?.extra_tariffs || []).length > 0,
+        showOptions: (city?.option_commissions || []).length > 0,
         showServices: (city?.services || []).length > 0,
         showNote: !!city?.note,
     };
@@ -108,6 +114,12 @@ export const payloadFromDraft = (draft) => ({
             commission: String(item.commission ?? '').trim() || null,
             requirement: item.requirement.trim() || null,
             price: item.price.trim() || null,
+        })),
+    option_commissions: (draft.option_commissions || [])
+        .filter((item) => item.name.trim())
+        .map((item) => ({
+            name: item.name.trim(),
+            commission: String(item.commission ?? '').trim() || null,
         })),
     services: (draft.services || [])
         .filter((item) => item.title.trim())
@@ -473,6 +485,46 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
             </Group>
             )}
 
+            {draft.showOptions && (
+                <Group
+                    title="Комиссия за доп. опции"
+                    hint="Например, режимы «По делам», «Домой», «Мой район» или работа без термокороба. В плитку «Комиссия Яндекса» опции не входят."
+                    right={(
+                        <button type="button" className={`${iosBtnGhost} !py-1`} onClick={() => addListItem('option_commissions', EMPTY_OPTION)}>
+                            <Plus size={14} /> Опция
+                        </button>
+                    )}
+                >
+                    <div className="space-y-2">
+                        {draft.option_commissions.map((item, index) => (
+                            // eslint-disable-next-line react/no-array-index-key
+                            <div key={index} className="flex items-center gap-2 rounded-2xl bg-slate-50 p-2.5 ring-1 ring-slate-200/70">
+                                <input
+                                    className={`${compactInput} min-w-0 flex-1`}
+                                    value={item.name}
+                                    onChange={(e) => setListItem('option_commissions', index, { name: e.target.value })}
+                                    placeholder="Опция, например «Мой район»"
+                                    aria-label="Опция"
+                                />
+                                <input
+                                    className={`${compactInput} w-[72px] tabular-nums`}
+                                    inputMode="decimal"
+                                    value={item.commission}
+                                    onChange={(e) => setListItem('option_commissions', index, { commission: e.target.value })}
+                                    placeholder="%"
+                                    aria-label="Комиссия опции, %"
+                                />
+                                <button type="button" className={iconButton}
+                                        onClick={() => removeListItem('option_commissions', index)}
+                                        aria-label="Убрать опцию">
+                                    <Trash2 size={15} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </Group>
+            )}
+
             {draft.showServices && (
                 <Group
                     title="Услуги нашего парка"
@@ -524,7 +576,7 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
 
             {/* Незаполненные необязательные блоки — кнопками, а не пустыми
                 полями на виду. */}
-            {(!draft.showExtra || !draft.showServices || !draft.showNote) && (
+            {(!draft.showExtra || !draft.showOptions || !draft.showServices || !draft.showNote) && (
                 <div className="flex flex-wrap gap-2">
                     {!draft.showExtra && (
                         <button
@@ -538,6 +590,20 @@ export default function CityEditor({ draft, setDraft, offices = [], takenNames =
                             }))}
                         >
                             <Plus size={13} /> Свой тариф
+                        </button>
+                    )}
+                    {!draft.showOptions && (
+                        <button
+                            type="button"
+                            className={chip}
+                            onClick={() => setDraft((current) => ({
+                                ...current,
+                                showOptions: true,
+                                option_commissions: current.option_commissions.length
+                                    ? current.option_commissions : [{ ...EMPTY_OPTION }],
+                            }))}
+                        >
+                            <Plus size={13} /> Комиссия за доп. опции
                         </button>
                     )}
                     {!draft.showServices && (

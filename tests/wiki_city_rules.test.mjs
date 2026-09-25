@@ -80,6 +80,24 @@ test('комиссия: диапазон только по показанным 
     assert.equal(formatPercent(null), '');
 });
 
+test('комиссия за доп. опции — не тариф: в список и в диапазон не попадает', () => {
+    // #368: «Мой район» 9,3% и «без термокороба» 7,2% в плитке тарифов
+    // превратили бы «15–19%» в «7–19%».
+    const withOptions = { ...almaty, option_commissions: [{ name: 'Мой район', commission: 7.2 }] };
+    assert.equal(cityTariffs(withOptions).length, cityTariffs(almaty).length);
+    assert.equal(commissionRange(cityTariffs(withOptions)), '9–14%');
+});
+
+test('редактор возит комиссию за доп. опции туда и обратно', () => {
+    // Форма собирается из карточки и отправляется целиком: забытое в одной
+    // из двух функций поле молча терялось бы при каждом сохранении.
+    const source = readFileSync(new URL('../src/components/wiki/CityEditor.jsx', import.meta.url), 'utf8');
+    const draft = /export const draftFromCity[\s\S]*?\n};/.exec(source)?.[0] || '';
+    const payload = /export const payloadFromDraft[\s\S]*?\n}\);/.exec(source)?.[0] || '';
+    assert.match(draft, /option_commissions: \(city\?\.option_commissions/);
+    assert.match(payload, /option_commissions: \(draft\.option_commissions/);
+});
+
 test('услуги Яндекса: только платные опции показанных тарифов, без повторов', () => {
     const extras = yandexExtras(cityTariffs(almaty));
     assert.deepEqual(extras, ['Детское кресло', 'Перевозка домашнего животного']);

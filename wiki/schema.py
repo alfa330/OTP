@@ -1194,6 +1194,12 @@ _CITY_STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_city_offices_office ON wiki_city_offices(office_id);",
+    # Комиссия за доп. опции (задача #368): режимы «По делам», «Домой»,
+    # «Мой район», работа без термокороба. Отдельно от тарифов, а не «своим
+    # тарифом»: это не тариф, и в диапазон «Комиссия Яндекса» над списком
+    # тарифов попадать не должна.
+    "ALTER TABLE wiki_cities ADD COLUMN IF NOT EXISTS option_commissions "
+    "JSONB NOT NULL DEFAULT '[]'::jsonb;",
 ]
 
 
