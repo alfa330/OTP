@@ -40,6 +40,13 @@ def _at(minutes):
     return datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc) + timedelta(minutes=minutes)
 
 
+# Правила живого конкурса — до итогового протокола: места по счёту, три приза
+# в «Линии». Ранжирование проверяем на них, а не на боевом CONTEST: после
+# итогов у него есть final, и призы там решает протокол, а не место.
+LIVE_RULES = dict(reg_contest.CONTEST, final=None,
+                  prizes={"chat": [40000, 20000], "line": [40000, 25000, 10000]})
+
+
 class FoldNameTests(unittest.TestCase):
     def test_kazakh_letters_fold_to_russian(self):
         # CRM и наша база пишут одно имя разными алфавитами.
@@ -260,7 +267,7 @@ class LeaderboardTests(unittest.TestCase):
         return entries
 
     def test_tie_break_by_earlier_reached_at(self):
-        chat = reg_contest.build_leaderboards(self._entries())["chat"]
+        chat = reg_contest.build_leaderboards(self._entries(), LIVE_RULES)["chat"]
         self.assertEqual([item["name"] for item in chat], ["Чатовый Второй", "Чатовый Первый"])
         self.assertEqual(chat[0]["place"], 1)
         self.assertEqual(chat[0]["drivers"], 2)
@@ -268,18 +275,18 @@ class LeaderboardTests(unittest.TestCase):
     def test_registrations_do_not_outrank_successful(self):
         # У «Первого» регистраций меньше, но тай-брейк смотрит только на время:
         # общее число регистраций на место не влияет вовсе.
-        chat = reg_contest.build_leaderboards(self._entries())["chat"]
+        chat = reg_contest.build_leaderboards(self._entries(), LIVE_RULES)["chat"]
         self.assertEqual(chat[0]["registrations"], 9)
         self.assertEqual(chat[1]["registrations"], 4)
 
     def test_prizes_follow_places(self):
-        boards = reg_contest.build_leaderboards(self._entries())
+        boards = reg_contest.build_leaderboards(self._entries(), LIVE_RULES)
         self.assertEqual(boards["chat"][0]["prize"], 40000)
         self.assertEqual(boards["chat"][1]["prize"], 20000)
         self.assertEqual(boards["line"][0]["prize"], 40000)
 
     def test_off_bucket_keeps_unmatched_and_other_departments(self):
-        boards = reg_contest.build_leaderboards(self._entries())
+        boards = reg_contest.build_leaderboards(self._entries(), LIVE_RULES)
         off_names = {item["name"] for item in boards["off"]}
         self.assertEqual(off_names, {"Верификатор Оп", "Призрак Пропавший"})
         ghost = next(i for i in boards["off"] if i["name"] == "Призрак Пропавший")
@@ -294,7 +301,7 @@ class LeaderboardTests(unittest.TestCase):
         entries = reg_contest.resolve_operators(operators, self._directory())
         for entry in entries:
             entry["reached_at"] = _at(1)
-        chat = reg_contest.build_leaderboards(entries)["chat"]
+        chat = reg_contest.build_leaderboards(entries, LIVE_RULES)["chat"]
         self.assertEqual([i["name"] for i in chat], ["Чатовый Второй", "Чатовый Первый"])
         self.assertEqual(chat[0]["prize"], 40000)
         self.assertIsNone(chat[1]["prize"])
@@ -309,7 +316,7 @@ class LeaderboardTests(unittest.TestCase):
         entries = reg_contest.resolve_operators(operators, self._directory())
         entries[0]["reached_at"] = None
         entries[1]["reached_at"] = _at(99)
-        chat = reg_contest.build_leaderboards(entries)["chat"]
+        chat = reg_contest.build_leaderboards(entries, LIVE_RULES)["chat"]
         self.assertEqual([i["name"] for i in chat], ["Чатовый Второй", "Чатовый Первый"])
 
     def test_counters_survive_string_values_from_crm(self):
@@ -318,8 +325,85 @@ class LeaderboardTests(unittest.TestCase):
                       "operator_name": "Чатовый Первый", "operator_group": None,
                       "registrations_count": "7", "successful_registrations_count": "3"}]
         entries = reg_contest.resolve_operators(operators, self._directory())
-        item = reg_contest.build_leaderboards(entries)["chat"][0]
+        item = reg_contest.build_leaderboards(entries, LIVE_RULES)["chat"][0]
         self.assertEqual((item["drivers"], item["registrations"]), (3, 7))
+
+
+class FinalProtocolTests(unittest.TestCase):
+    """Итоги подведены: рейтинг подчиняется протоколу, а не живому счёту CRM."""
+
+    RULES = dict(LIVE_RULES, prizes={"chat": [40000, 20000], "line": [25000, 10000]},
+                 final={"excluded": ["601"],
+                        "winners": {"chat": [{"crm_operator_id": "441", "drivers": 70},
+                                             {"crm_operator_id": "205", "drivers": 69}],
+                                    "line": [{"crm_operator_id": "138", "drivers": 14},
+                                             {"crm_operator_id": "493", "drivers": 9}]}})
+
+    @staticmethod
+    def _entry(crm_id, group, successful, minutes):
+        return {"crm_operator_id": crm_id, "contest_group": group, "user_id": int(crm_id),
+                "user_name": f"Оператор {crm_id}", "operator_login": None,
+                "match_method": "email", "successful": successful,
+                "registrations": successful * 2, "reached_at": _at(minutes)}
+
+    def _boards(self):
+        return reg_contest.build_leaderboards([
+            self._entry("441", "chat", 70, 5),
+            # Последний синк видел 67 — в протоколе 69.
+            self._entry("205", "chat", 67, 6),
+            self._entry("540", "chat", 34, 1),
+            # Исключённый набрал больше всех в «Линии».
+            self._entry("601", "line", 18, 1),
+            self._entry("138", "line", 14, 2),
+            self._entry("493", "line", 9, 3),
+            # Поздняя правка CRM подняла соседа выше победителя по счёту.
+            self._entry("403", "line", 10, 4),
+        ], self.RULES)
+
+    def test_excluded_operator_is_gone_from_every_group(self):
+        boards = self._boards()
+        ids = {i["crm_operator_id"] for items in boards.values() for i in items}
+        self.assertNotIn("601", ids)
+
+    def test_winners_keep_protocol_places_and_prizes(self):
+        line = self._boards()["line"]
+        self.assertEqual([(i["crm_operator_id"], i["place"], i["prize"]) for i in line],
+                         [("138", 1, 25000), ("493", 2, 10000), ("403", 3, None)])
+
+    def test_protocol_count_wins_over_last_sync(self):
+        chat = self._boards()["chat"]
+        self.assertEqual([(i["crm_operator_id"], i["drivers"], i["prize"]) for i in chat],
+                         [("441", 70, 40000), ("205", 69, 20000), ("540", 34, None)])
+
+    def test_is_finished_follows_protocol(self):
+        self.assertTrue(reg_contest.is_finished(self.RULES))
+        self.assertFalse(reg_contest.is_finished(LIVE_RULES))
+
+    def test_live_contest_protocol_is_coherent(self):
+        # Страж боевого конфига: у каждого победителя есть приз, один
+        # человек не побеждает дважды и не числится исключённым.
+        contest = reg_contest.CONTEST
+        final = contest.get("final") or {}
+        excluded = set(final.get("excluded") or ())
+        seen = set()
+        for group, winners in (final.get("winners") or {}).items():
+            self.assertIn(group, reg_contest.GROUP_LABELS)
+            self.assertLessEqual(len(winners), len(contest["prizes"].get(group) or []))
+            for winner in winners:
+                crm_id = winner["crm_operator_id"]
+                self.assertNotIn(crm_id, seen)
+                self.assertNotIn(crm_id, excluded)
+                seen.add(crm_id)
+                self.assertGreater(winner["drivers"], 0)
+
+    def test_results_api_reports_finished_and_hides_sync(self):
+        # Фронт включает церемонию по contest.finished, а синк после итогов
+        # только сбил бы с толку: кнопку «Обновить из CRM» прячем.
+        source = source_cache.read(str(BOT_PATH))
+        route = source[source.index("def api_reg_contest_results"):
+                       source.index("def api_reg_contest_sync")]
+        self.assertIn('"finished": finished', route)
+        self.assertIn('"can_sync": is_admin and not finished', route)
 
 
 class GroupSplitTests(unittest.TestCase):
@@ -455,7 +539,7 @@ class GroupSplitTests(unittest.TestCase):
         entries = self._split({"registrations": 18, "successful": 8})["entries"]
         for entry in entries:
             entry["reached_at"] = _at(10)
-        boards = reg_contest.build_leaderboards(entries)
+        boards = reg_contest.build_leaderboards(entries, LIVE_RULES)
         self.assertEqual([(i["crm_operator_id"], i["drivers"]) for i in boards["chat"]],
                          [("7#chat", 8)])
         self.assertEqual(boards["chat"][0]["prize"], 40000)

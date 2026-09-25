@@ -100,8 +100,24 @@ CONTEST = {
     "registered_to": "2026-09-07",     # включительно
     "trip_deadline": "2026-09-11",     # завершённая поездка до этой даты включительно
     "results_date": "2026-09-11",      # день подведения итогов
-    # Призовые: индекс = место - 1.
-    "prizes": {"chat": [40000, 20000], "line": [40000, 25000, 10000]},
+    # Призовые: индекс = место - 1. До итогов в «Линии» было три приза
+    # (40 000 / 25 000 / 10 000); в итоговом протоколе — два, см. final.
+    "prizes": {"chat": [40000, 20000], "line": [25000, 10000]},
+    # Итоговый протокол: конкурс закрыт, места и призы утверждены владельцем
+    # 25.09.2026 и дальше живым счётом CRM не пересчитываются. Победители
+    # закреплены по id CRM в порядке мест — поздняя правка CRM или ручной
+    # синк не переставят их и не отдадут приз другому. Счёт — из протокола.
+    "final": {
+        # Исключён из конкурса (решение владельца): ни места, ни приза.
+        "excluded": ["601"],
+        "winners": {
+            "chat": [{"crm_operator_id": "441", "drivers": 70},
+                     # В протоколе 69; последний синк (13.09) видел 67.
+                     {"crm_operator_id": "205", "drivers": 69}],
+            "line": [{"crm_operator_id": "138", "drivers": 14},
+                     {"crm_operator_id": "493", "drivers": 9}],
+        },
+    },
     # Операторы, сменившие направление ПОСРЕДИ конкурса. CRM про наши
     # направления ничего не знает и держит все регистрации человека одной
     # строкой, а конкурс идёт по группам — поэтому счёт делим сами, по ДАТЕ
@@ -536,7 +552,12 @@ def apply_group_splits(entries, before_by_date, splits):
 # Рейтинг
 # ---------------------------------------------------------------------------
 
-def build_leaderboards(entries):
+def is_finished(contest=None):
+    """Итоги подведены: в конфиге конкурса есть итоговый протокол."""
+    return bool((contest or CONTEST).get("final"))
+
+
+def build_leaderboards(entries, contest=None):
     """Раскладывает счётчики операторов по группам конкурса и расставляет места.
 
     Правила из условий конкурса: место — по числу ЗАСЧИТАННЫХ регистраций
@@ -548,9 +569,23 @@ def build_leaderboards(entries):
     Возвращает {"chat": [...], "line": [...], "off": [...]} — off отдельным
     списком, чтобы регистрации других отделов и несопоставленных операторов
     не пропадали молча (наружу off не отдаём — только для диагностики).
+
+    Если у конкурса есть итоговый протокол (final), он главнее живого счёта:
+    исключённых в рейтинге нет вовсе, победители стоят первыми в порядке
+    протокола и с его счётом, призы получают только они.
     """
+    contest = contest or CONTEST
+    final = contest.get("final") or {}
+    excluded = {str(crm_id) for crm_id in final.get("excluded") or ()}
+    # {группа: {id CRM: (индекс в протоколе, строка протокола)}}
+    pinned = {
+        group: {str(w["crm_operator_id"]): (idx, w) for idx, w in enumerate(winners)}
+        for group, winners in (final.get("winners") or {}).items()
+    }
     result = {"chat": [], "line": [], "off": []}
     for entry in entries:
+        if str(entry.get("crm_operator_id")) in excluded:
+            continue
         group = entry.get("contest_group") or "off"
         result.setdefault(group, []).append({
             "user_id": entry.get("user_id"),
@@ -565,14 +600,30 @@ def build_leaderboards(entries):
         })
 
     for group, items in result.items():
+        group_pins = pinned.get(group) or {}
+        for item in items:
+            pin = group_pins.get(str(item["crm_operator_id"]))
+            if pin and pin[1].get("drivers") is not None:
+                item["drivers"] = _int_or_zero(pin[1]["drivers"])
+
+        def pin_rank(item):
+            pin = group_pins.get(str(item["crm_operator_id"]))
+            return pin[0] if pin else len(group_pins)
+
         # reached_at — datetime из БД; None бывает только у строки, которую
         # ещё ни разу не переписывал синк, поэтому страхуем сортировку флагом,
         # чтобы не сравнивать None с датой.
-        items.sort(key=lambda a: (-a["drivers"], a["reached_at"] is None,
+        items.sort(key=lambda a: (pin_rank(a), -a["drivers"], a["reached_at"] is None,
                                   a["reached_at"] or 0, fold_name(a["name"])))
-        prizes = CONTEST["prizes"].get(group) or []
+        prizes = contest["prizes"].get(group) or []
         for idx, item in enumerate(items):
             item["place"] = idx + 1
+            if final:
+                # По протоколу приз только у победителей — у остальных нет,
+                # даже если призовых мест больше, чем названо победителей.
+                rank = pin_rank(item)
+                item["prize"] = prizes[rank] if rank < min(len(group_pins), len(prizes)) else None
+                continue
             # Приз только за засчитанные регистрации: одни «ожидающие поездку»
             # призового места не занимают.
             item["prize"] = (prizes[idx]

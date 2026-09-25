@@ -15191,6 +15191,8 @@ def api_reg_contest_results():
     try:
         is_admin = _is_admin_role(_normalize_user_role(requester[3]))
         contest = reg_contest.CONTEST
+        # Итоги подведены: места и призы из протокола, синк больше не нужен.
+        finished = reg_contest.is_finished(contest)
         entries = db.get_reg_contest_operators(contest["code"])
         boards = reg_contest.build_leaderboards(entries)
         # Аватарки участников одной выборкой; подписанные URL кэшируются.
@@ -15218,6 +15220,7 @@ def api_reg_contest_results():
                 "results_date": contest["results_date"],
                 "prizes": contest["prizes"],
                 "group_labels": reg_contest.GROUP_LABELS,
+                "finished": finished,
             },
             "sync": {
                 "synced_at": _reg_contest_iso((sync_state or {}).get("synced_at")),
@@ -15234,7 +15237,7 @@ def api_reg_contest_results():
                                  for row in db.get_reg_contest_recent_decreases(
                                      contest["code"])] if is_admin else [],
             "groups": groups,
-            "can_sync": is_admin,
+            "can_sync": is_admin and not finished,
             # CRM отдаёт оба счётчика, поэтому под числом засчитанных фронт
             # показывает «из N рег.» — сколько всего водителей оператор привёл.
             "registrations_supported": True,
