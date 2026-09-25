@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { formatHireDate, formatTenure, pluralRu, toneClass } from '../src/components/profile/profileFormat.js';
+import { usesRedesignedProfile } from '../src/components/profile/profileScope.js';
 
 test('окончания: год/года/лет, месяц/месяца/месяцев', () => {
     const years = (n) => pluralRu(n, 'год', 'года', 'лет');
@@ -33,4 +34,14 @@ test('цвет числа — только у значимого тона, ин�
     assert.equal(toneClass('bad'), 'text-rose-600');
     assert.equal(toneClass(null), 'text-slate-900');
     assert.equal(toneClass(undefined, 'text-slate-400'), 'text-slate-400');
+});
+
+test('новый «Профиль» — только СЗоВ, ОП и Тез КЦ, по отделу, а не по роли', () => {
+    for (const code of ['szov', 'op', 'tez', 'TEZ']) {
+        assert.equal(usesRedesignedProfile({ role: 'operator', department_code: code }), true, code);
+    }
+    assert.equal(usesRedesignedProfile({ role: 'trainee', department_code: 'szov' }), true);
+    for (const code of ['front_office', 'hr', 'accounting', 'marketing', 'remote_cc', null]) {
+        assert.equal(usesRedesignedProfile({ role: 'operator', department_code: code }), false, String(code));
+    }
 });

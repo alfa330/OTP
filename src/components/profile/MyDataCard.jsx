@@ -3,6 +3,7 @@ import axios from 'axios';
 import CustomSelect from '../ui/CustomSelect';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { ProfileEmpty, ProfileGroup, ProfileRow, ProfileSkeletonValue, ProfileValue, textSize } from './profileUi';
+import { DeskGroup, DeskRow, RowSkeleton, RowValue, ghostButton, primaryButton, textButton } from './profileDesktop';
 import {
     CARD_INPUT_MAX_DIGITS,
     COURSE_OPTIONS,
@@ -31,13 +32,16 @@ import {
  * сотрудников», оператору она не показывается (решение владельца 24.09.2026).
  */
 
+// Значок и цвет — для строк на компьютере, как у пунктов «Настроек»: зелёный
+// телефон, голубой Telegram, тёмный «кошелёк»… (profileDesktop.jsx). Первые три
+// строки — левая колонка группы, последние три — правая. На телефоне значков нет.
 const ROWS = [
-    { field: 'phone', label: 'Телефон' },
-    { field: 'telegram_nick', label: 'Telegram' },
-    { field: 'card_number', label: 'Номер карты' },
-    { field: 'study_place', label: 'Университет' },
-    { field: 'study_specialty', label: 'Специальность' },
-    { field: 'study_course', label: 'Курс' },
+    { field: 'phone', label: 'Телефон', icon: 'fa-phone', tone: 'green' },
+    { field: 'telegram_nick', label: 'Telegram', icon: 'fa-telegram', tone: 'sky' },
+    { field: 'card_number', label: 'Номер карты', icon: 'fa-credit-card', tone: 'slate' },
+    { field: 'study_place', label: 'Университет', icon: 'fa-university', tone: 'blue' },
+    { field: 'study_specialty', label: 'Специальность', icon: 'fa-graduation-cap', tone: 'purple' },
+    { field: 'study_course', label: 'Курс', icon: 'fa-book', tone: 'orange' },
 ];
 
 const displayValue = (data, field) => {
@@ -54,16 +58,21 @@ const displayValue = (data, field) => {
     }
 };
 
-// Поле правки — того же вида, что кнопка списка курсов (CustomSelect ios):
-// белое, с тонкой обводкой и мягкой тенью, синее кольцо в фокусе. Кегль — как у
-// строк группы, чтобы правка не мельчила текст. Одинаковые поля и список — одна
-// форма, а не набор разнородных деталей.
-const inputClass = (hasError, isMobileShell) => (
+// Поле правки — того же вида, что кнопка списка курсов рядом: на телефоне
+// CustomSelect ios (белое, тонкая обводка, мягкая тень), на компьютере — его
+// обычный вид (серая рамка, скругление lg). Кегль — как у значений вокруг.
+// Одинаковые поля и список — одна форма, а не набор разнородных деталей.
+const inputClass = (hasError, isMobileShell) => (isMobileShell ? (
     `w-full min-w-0 rounded-xl bg-white px-3 py-2 ${textSize(isMobileShell)} text-slate-900 `
     + 'placeholder-slate-400 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 transition '
     + 'focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:opacity-70 '
     + (hasError ? 'ring-rose-300 focus:ring-rose-400' : 'ring-slate-200/70 focus:ring-blue-500/60')
-);
+) : (
+    'w-full min-w-0 rounded-lg bg-white px-3 py-2 text-[16px] text-slate-900 placeholder-slate-400 '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 transition focus:outline-none focus:ring-2 '
+    + 'disabled:cursor-not-allowed disabled:bg-slate-50 disabled:opacity-70 '
+    + (hasError ? 'ring-rose-300 focus:ring-rose-400' : 'ring-slate-200/70 focus:ring-blue-500/60')
+));
 
 export default function MyDataCard({ apiBaseUrl, userId, withAccessTokenHeader, showToast }) {
     const isMobileShell = useIsMobileShell();
@@ -252,7 +261,7 @@ export default function MyDataCard({ apiBaseUrl, userId, withAccessTokenHeader, 
                         variant="ios"
                         className="w-full"
                         ariaLabel="Курс"
-                        textClassName={`${textSize(isMobileShell)} text-slate-900`}
+                        textClassName={isMobileShell ? `${textSize(isMobileShell)} text-slate-900` : 'text-[16px] text-slate-900'}
                         placeholder="Не указан"
                         disabled={saving}
                         options={courseOptions}
@@ -311,6 +320,50 @@ export default function MyDataCard({ apiBaseUrl, userId, withAccessTokenHeader, 
             Изменить
         </button>
     );
+
+    // Компьютер: группа «Мои данные» на две колонки сетки корня, рядом с
+    // «Работой» — две колонки по три строки (контакты слева, учёба справа), и все
+    // строки стоят на тех же горизонталях, что и строки «Работы». Правка — полями
+    // прямо в строках; кнопки — в шапке группы.
+    if (!isMobileShell) {
+        const accessoryDesktop = state.status !== 'ready' ? null : editing ? (
+            <div className="flex items-center gap-1.5">
+                <button type="button" onClick={cancelEditing} disabled={saving} className={ghostButton}>Отмена</button>
+                <button type="submit" disabled={saving} className={primaryButton}>{saving ? 'Сохраняю…' : 'Сохранить'}</button>
+            </div>
+        ) : (
+            <button type="button" onClick={startEditing} className={textButton}>Изменить</button>
+        );
+        const renderRow = ({ field, label, icon, tone }, index) => {
+            const [note, noteTone] = rowNote(field);
+            const value = state.status === 'ready' ? displayValue(data, field) : '';
+            // Сетка по строкам: ячейки чередуются «левая, правая», и у пары одна
+            // высота — длинное название вуза, перенесённое на две строки, не
+            // разводит горизонтали колонок. Линии — по положению ячейки.
+            const edges = `${index % 2 === 0 ? 'border-r' : ''} ${index < 4 ? 'border-b' : ''} border-slate-100`;
+            return (
+                <DeskRow key={field} icon={icon} tone={tone} label={label} note={editing ? note : null} noteTone={noteTone} className={edges}>
+                    {editing ? (
+                        <span className="block w-full max-w-[22rem] text-left">{renderEditor(field)}</span>
+                    ) : state.status === 'loading' ? <RowSkeleton /> : <RowValue>{value}</RowValue>}
+                </DeskRow>
+            );
+        };
+        return (
+            <DeskGroup as="form" id="my-data-title" title="Мои данные" accessory={accessoryDesktop} className="xl:col-span-2" onSubmit={save} noValidate>
+                {state.status === 'error' ? (
+                    <div className="flex items-center justify-between gap-3 px-5 py-4">
+                        <span className="text-[16px] text-slate-500">Не удалось загрузить данные</span>
+                        <button type="button" onClick={load} className={textButton}>Повторить</button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-2">
+                        {[0, 1, 2].flatMap((i) => [ROWS[i], ROWS[i + 3]]).map(renderRow)}
+                    </div>
+                )}
+            </DeskGroup>
+        );
+    }
 
     // Вся группа — форма: Enter в любом поле сохраняет, а «Сохранить» в
     // шапке группы — её же кнопка отправки. Отмены по Esc нет намеренно: Esc

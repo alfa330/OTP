@@ -784,10 +784,12 @@ class ProfileSectionTests(unittest.TestCase):
         )
         # Показатели оценок/часов, смена ставки и её строка — всё, что ведёт в
         # разделы, которых у бэк-офиса нет, — App.jsx не отдаёт вовсе.
-        self.assertIn("hidesOperatorBlocks={profileHidesOperatorBlocks}", app)
-        self.assertIn("stats={profileHidesOperatorBlocks ? null : buildProfileStats()}", app)
-        self.assertIn("rateBanner={!profileHidesOperatorBlocks && (\n", app)
-        self.assertIn("onChangeRate={!profileHidesOperatorBlocks && user?.role === 'operator'", app)
+        # Одни и те же пропсы для обоих видов «Профиля» (новый — СЗоВ, ОП и
+        # Тез КЦ; прежний — остальным), собраны в profileViewProps.
+        self.assertIn("hidesOperatorBlocks: profileHidesOperatorBlocks,", app)
+        self.assertIn("stats: profileHidesOperatorBlocks ? null : buildProfileStats(),", app)
+        self.assertIn("rateBanner: profileHidesOperatorBlocks ? null : (", app)
+        self.assertIn("onChangeRate: !profileHidesOperatorBlocks && user?.role === 'operator'", app)
 
         view = _read(self.PROFILE_VIEW)
         # Полоса показателей — только при открытых операторских блоках.
@@ -800,6 +802,17 @@ class ProfileSectionTests(unittest.TestCase):
         self.assertIn("workRow('Супервайзер', profile?.supervisor_name)", operator)
         self.assertIn("workRow('Ставка', rateLabel", operator)
         self.assertIn("const subtitle = hidesOperatorBlocks ? profile?.job_title : profile?.direction;", view)
+
+        # Компьютер (стиль macOS, 25.09.2026): те же решения строками «Работы».
+        desktop = view.partition("function DesktopTop(")[2]
+        self.assertIn("{!hidesOperatorBlocks && Array.isArray(stats) && stats.length > 0 && <StatCards", desktop)
+        rows = desktop.partition("const workRows = hidesOperatorBlocks ? [")[2]
+        back_office, _, operator = rows.partition("] : [")
+        self.assertIn("label: 'Должность'", back_office)
+        self.assertIn("label: 'Отдел'", back_office)
+        self.assertIn("label: 'Супервайзер'", operator.partition("label: 'Дата найма'")[0])
+        self.assertIn("label: 'Ставка'", operator.partition("label: 'Дата найма'")[0])
+        self.assertIn("hidesOperatorBlocks ? profile.job_title : profile.direction,", desktop)
 
     def test_backend_sends_job_title_and_department(self):
         endpoint = _function_source(BOT_PATH, "get_user_profile")

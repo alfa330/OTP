@@ -43,6 +43,8 @@ import FaIcon from './components/common/FaIcon';
 import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import ProfileView from './components/profile/ProfileView';
+import LegacyProfileView from './components/profile/LegacyProfileView';
+import { usesRedesignedProfile } from './components/profile/profileScope';
 import MyDataCard from './components/profile/MyDataCard';
 import { canEditOwnData } from './components/profile/myData';
 import OrazAitSplash from './components/common/OrazAitSplash';
@@ -57270,28 +57272,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                                 {view === 'profile' && (() => {
                                   const profileRateLabel = profileData ? formatRateValue(profileData.rate) : '';
+                                  // Общее для обоих видов «Профиля»: одни данные, один расчёт
+                                  // показателей (buildProfileStats), одно окно смены ставки.
+                                  const profileViewProps = {
+                                    loading: isLoading,
+                                    profile: profileData,
+                                    isMobileShell,
+                                    AvatarImage,
+                                    hidesOperatorBlocks: profileHidesOperatorBlocks,
+                                    stats: profileHidesOperatorBlocks ? null : buildProfileStats(),
+                                    rateBanner: profileHidesOperatorBlocks ? null : (
+                                      <RateSelfChangeCard
+                                        user={user}
+                                        currentRate={profileData?.rate ?? user?.rate}
+                                        showToast={showToast}
+                                        onChanged={(r) => setProfileData((prev) => (prev ? { ...prev, rate: r } : prev))}
+                                      />
+                                    ),
+                                    rateLabel: profileRateLabel === '-' ? '' : profileRateLabel,
+                                    // Окно смены ставки открывает RateSelfChangeCard и только
+                                    // оператору — карточка «Ставка» зовёт его же и тем же условием.
+                                    onChangeRate: !profileHidesOperatorBlocks && user?.role === 'operator' && isFirstOfMonthAlmaty()
+                                      ? () => window.dispatchEvent(new CustomEvent('open-self-rate-modal'))
+                                      : null,
+                                  };
+                                  // Переделанный «Профиль» — только СЗоВ, ОП и Тез КЦ (владелец
+                                  // 25.09.2026); остальным отделам — прежний вид.
+                                  if (!usesRedesignedProfile(user)) {
+                                    return <LegacyProfileView {...profileViewProps} onOpenView={setView} />;
+                                  }
                                   return (
                                     <ProfileView
-                                      loading={isLoading}
-                                      profile={profileData}
-                                      isMobileShell={isMobileShell}
-                                      AvatarImage={AvatarImage}
-                                      hidesOperatorBlocks={profileHidesOperatorBlocks}
-                                      stats={profileHidesOperatorBlocks ? null : buildProfileStats()}
-                                      rateBanner={!profileHidesOperatorBlocks && (
-                                        <RateSelfChangeCard
-                                          user={user}
-                                          currentRate={profileData?.rate ?? user?.rate}
-                                          showToast={showToast}
-                                          onChanged={(r) => setProfileData((prev) => (prev ? { ...prev, rate: r } : prev))}
-                                        />
-                                      )}
-                                      rateLabel={profileRateLabel === '-' ? '' : profileRateLabel}
-                                      // Окно смены ставки открывает RateSelfChangeCard и только
-                                      // оператору — строка «Ставка» зовёт его же и тем же условием.
-                                      onChangeRate={!profileHidesOperatorBlocks && user?.role === 'operator' && isFirstOfMonthAlmaty()
-                                        ? () => window.dispatchEvent(new CustomEvent('open-self-rate-modal'))
-                                        : null}
+                                      {...profileViewProps}
+                                      // «Быстрые действия» на компьютере — прежние две кнопки в
+                                      // прежних цветах, и только в разделы, выданные отделу.
+                                      quickActions={profileHidesOperatorBlocks ? [] : [
+                                        { key: 'hours', label: 'Мои часы', icon: 'fas fa-clock', tone: 'blue', onClick: () => setView('hours') },
+                                        { key: 'evaluation', label: 'Мои оценки', icon: 'fas fa-chart-bar', tone: 'green', onClick: () => setView('evaluation') },
+                                      ].filter((action) => departmentAllowsView(user, action.key))}
                                       // «Повторить» — тот же набор запросов, что при входе в раздел
                                       // (эффект view === 'profile'): один профиль оставил бы полосу
                                       // показателей пустой, а ОП TEZ — с ячейками чужой модели.

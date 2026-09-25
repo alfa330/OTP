@@ -36,6 +36,7 @@ import {
     Code2,
     Banknote,
     Coins,
+    CreditCard,
     Coffee,
     Compass,
     Copy,
@@ -178,6 +179,7 @@ import {
     FolderOpen,
     PhoneOff,
     Unlink,
+    Landmark,
     Zap
 } from 'lucide-react';
 
@@ -196,6 +198,9 @@ const TOKEN_TO_ICON = {
     'fa-bell': 'Bell',
     'fa-bolt': 'Zap',
     'fa-book': 'BookOpen',
+    // «Мои данные» в «Профиле»: номер карты и университет.
+    'fa-credit-card': 'CreditCard',
+    'fa-university': 'Landmark',
     'fa-briefcase': 'Briefcase',
     'fa-building': 'Building2',
     'fa-bullseye': 'Target',
@@ -485,6 +490,7 @@ const ICON_COMPONENTS = {
     Code2,
     Banknote,
     Coins,
+    CreditCard,
     Coffee,
     Compass,
     Copy,
@@ -626,6 +632,7 @@ const ICON_COMPONENTS = {
     FolderOpen,
     PhoneOff,
     Unlink,
+    Landmark,
     Zap
 };
 
