@@ -61,12 +61,20 @@ class SalaryDepartmentScopeTests(unittest.TestCase):
     def setUp(self):
         self.src = _read(APP_PATH)
 
-    def test_only_global_admin_picks_department(self):
+    def test_only_global_admin_and_trainer_pick_department(self):
         # isAdminLikeRole в App.jsx уже исключает главу отдела (scoped head).
-        self.assertIn("const canPickSalaryDepartment = isAdminLikeRole;", self.src)
+        # Тренер выбирает тоже, но из СЗоВ и ОП (задача #360, 25.09.2026);
+        # остальным каталога для выбора нет вовсе.
+        self.assertIn(
+            "const salaryPickerCatalog = isAdminLikeRole\n"
+            "                ? SALARY_CALCULATOR_CATALOG\n"
+            "                : (isPlainTrainer ? TRAINER_SALARY_CALCULATOR_CATALOG : null);",
+            self.src,
+        )
+        self.assertIn("const canPickSalaryDepartment = Boolean(salaryPickerCatalog);", self.src)
         self.assertIn(
             "const salaryDeptOptions = canPickSalaryDepartment\n"
-            "                ? SALARY_CALCULATOR_CATALOG\n"
+            "                ? salaryPickerCatalog\n"
             "                : (activeSalaryCatalogEntry ? [activeSalaryCatalogEntry] : []);",
             self.src,
         )
