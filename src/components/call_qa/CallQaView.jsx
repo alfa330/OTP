@@ -49,7 +49,12 @@ const TABS = [
 /* Где под панелью фильтров есть список, который она сужает. У обзора,
  * классификации критериев и базы разборов своей выборки по сотрудникам нет —
  * панель там была бы кнопкой, которая ни на что не влияет. */
-const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
+/* Панель фильтров стоит там, где под ней выборка разговоров: очередь, чаты,
+   звонки и «Обзор» (его метрики считаются по тому же отбору). В «Базе
+   разборов» — только оси сделки (ТЗ #317, п. 2.1): правило отбирается по
+   сделке разговора, из которого его вывели. */
+const FILTERABLE_TABS = ['queue', 'chats', 'evals', 'overview', 'rag'];
+const EXPORT_TABS = ['chats', 'evals'];
 
 function Segmented({ tabs = TABS, tab, setTab }) {
     const refs = useRef([]);
@@ -577,13 +582,17 @@ export default function CallQaView(props) {
                     apiBaseUrl={apiBaseUrl}
                     withAccessTokenHeader={withAccessTokenHeader}
                     department={department}
-                    subject={tab === 'chats' ? SUBJECT_FAMILY_CHATS : SUBJECT_FAMILY_CALLS}
+                    /* «Обзор» и «База разборов» охватывают и звонки, и чаты,
+                       поэтому справочники панели там — без вида субъекта. */
+                    subject={tab === 'chats' ? SUBJECT_FAMILY_CHATS
+                        : (tab === 'overview' || tab === 'rag') ? undefined : SUBJECT_FAMILY_CALLS}
                     showScoreFilters={tab !== 'queue'}
                     showReviewedFilter={tab !== 'queue'}
                     /* Выгрузка — по списку оценённых (та же выборка, что у
-                       «Звонков» и «Чатов»); очередь ревью живёт другим списком,
-                       и кнопка на ней обещала бы не то, что лежит на экране. */
-                    canExport={tab !== 'queue'}
+                       «Звонков» и «Чатов»); у очереди, «Обзора» и базы разборов
+                       своя выборка, и кнопка там обещала бы не то, что на экране. */
+                    canExport={EXPORT_TABS.includes(tab)}
+                    marketingOnly={tab === 'rag'}
                     showToast={showToast}
                 />
             )}
@@ -696,7 +705,7 @@ export default function CallQaView(props) {
                            onFind={() => setFindOpen(true)} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                             department={department} />
+                             department={department} filters={filters} />
             ) : tab === 'evals' ? (
                 /* Семейство, а не один вид: у СЗоВ и Тез КЦ звонок раздела приходит
                    из АТС и лежит в imported_calls, поэтому запрос одним `call`
@@ -716,7 +725,7 @@ export default function CallQaView(props) {
             ) : (
                 <AdjudicationsRag apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                                    showToast={showToast} canManage={canManageRag}
-                                   department={department}
+                                   department={department} filters={filters}
                                    onInteractionChange={setSectionInteraction} />
             )}
                 </div>

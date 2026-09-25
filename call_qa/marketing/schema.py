@@ -72,6 +72,13 @@ CREATE TABLE IF NOT EXISTS qa_subject_deals (
 CREATE INDEX IF NOT EXISTS idx_qa_subject_deals_lead
     ON qa_subject_deals (source, lead_key);
 
+-- Какой редакцией правил посчитана связь (linker.LINK_RULES_VERSION). Связь
+-- старой редакции связыватель пересчитывает сам при ближайшем прогоне: так
+-- исправление правила доезжает до уже связанных разговоров без ручного
+-- «пересчитать всё». Редакция 2 (24.09.2026) — момент звонка из АТС и
+-- загруженного звонка больше не сдвигается на пять часов.
+ALTER TABLE qa_subject_deals ADD COLUMN IF NOT EXISTS rules_version SMALLINT NOT NULL DEFAULT 1;
+
 -- ── СЛОВАРЬ ПАРКОВ И КАНАЛОВ ───────────────────────────────────────────────
 -- Пополняется САМ (новое написание заводится строкой при связывании), а человек
 -- правит подпись и склейку. `aliases` — сырые написания, которые сводятся к
@@ -144,12 +151,13 @@ PARK_SEED = (
 
 # Каналы — перечень ФТ-06 плюс то, чем их называет наша же нормализация
 # (`op_funnel.sources.amo_source_norm`): она сводит «fb»/«ig» к facebook, а
-# «seo»/«youtube»/«chatgpt.com» — к google. Разводить их обратно здесь нельзя:
-# в базе уже лежит нормализованное значение, и «YouTube» отдельным каналом
-# показывал бы ноль всегда. Строка ТЗ про YouTube поэтому уходит в вопрос
-# заказчику, а не в мёртвый пункт списка.
+# «seo»/«youtube»/«chatgpt.com» — к google. YouTube ТЗ требует отдельным
+# каналом, а нормализатор воронки трогать нельзя (по нему сходятся отчёты
+# «Воронки ОП» с выгрузкой маркетинга), поэтому модуль разводит его сам — по
+# СЫРОМУ utm_source сделки из amo_leads и по тегу (filters.CHANNEL_RAW).
 CHANNEL_SEED = (
     ('google',   'Google',     10, ('google', 'googleban', 'google444', 'seo', 'sait')),
+    ('youtube',  'YouTube',    15, ('youtube', 'yt')),
     ('facebook', 'Facebook',   20, ('facebook', 'fb', 'ig', 'instagram')),
     ('tiktok',   'TikTok',     30, ('tiktok', 'tik tok')),
     ('yandex',   'Yandex',     40, ('yandex', 'ya', 'yataxi', 'yaitaxi')),

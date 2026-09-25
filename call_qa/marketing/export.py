@@ -41,8 +41,10 @@ COLUMNS = (
     ("deal_id", "№ сделки", 12),
     ("channel", "Канал", 14),
     ("campaign", "Кампания", 24),
+    ("lead_type", "Тип лида", 10),
     ("park", "Таксопарк", 16),
     ("stage", "Этап сделки", 26),
+    ("stage_at_call", "Этап на момент разговора", 26),
     ("reason", "Причина отказа", 32),
     ("responsible", "Ответственный в CRM", 26),
 )
@@ -64,8 +66,10 @@ def _flat(item):
         "deal_id": deal.get("id") or "",
         "channel": deal.get("channel_title") or "",
         "campaign": deal.get("campaign") or "",
+        "lead_type": deal.get("lead_type") or "",
         "park": deal.get("park_title") or "",
         "stage": deal.get("stage") or "",
+        "stage_at_call": deal.get("stage_at_call") or "",
         "reason": deal.get("reason") or "",
         "responsible": deal.get("responsible") or "",
     }

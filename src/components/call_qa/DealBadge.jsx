@@ -33,6 +33,7 @@ export default function DealBadge({ deal, full = false, className = '' }) {
     }
     const rows = [
         ['Канал', [deal.channel_title, deal.campaign].filter(Boolean).join(' / ')],
+        ['Тип лида', deal.lead_type],
         ['Таксопарк', deal.park_title],
         ['Этап сейчас', deal.stage],
         /* Пустой «на момент разговора» — не поломка: журнал этапов ведётся с

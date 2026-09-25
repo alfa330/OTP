@@ -300,7 +300,7 @@ def _load_imported_call(imported_call_id: int) -> dict:
         cur.execute("SET client_encoding TO 'UTF8'")
         cur.execute(
             """SELECT ic.id, u.direction_id, d.name, COALESCE(u.name, ic.operator_name),
-                      TO_CHAR(ic.datetime_raw AT TIME ZONE 'Asia/Almaty', 'DD.MM.YYYY, HH24:MI'),
+                      TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC', 'DD.MM.YYYY, HH24:MI'),
                       ic.audio_path, ic.operator_id, ic.phone_number, ic.duration_sec,
                       ic.status, dep.code, hc.score
                  FROM imported_calls ic

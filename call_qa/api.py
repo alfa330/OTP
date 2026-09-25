@@ -265,9 +265,15 @@ _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
 # восемь минут назад, показывался «пять часов назад»: ровно на разницу поясов.
 #
 # Переводов ДВА, и путать их нельзя:
-#   * timestamptz (ai_review_cache.created_at, episodes.ended_at,
-#     imported_calls.datetime_raw) — момент известен, нужен только показ:
-#     `AT TIME ZONE 'Asia/Almaty'`;
+#   * timestamptz (ai_review_cache.created_at, episodes.ended_at) — момент
+#     известен, нужен только показ: `AT TIME ZONE 'Asia/Almaty'`;
+#   * исключение — imported_calls.datetime_raw: колонка timestamptz, но АТС
+#     кладёт в неё стенные часы Алматы строкой «dd.mm.yyyy hh:mm:ss», и база
+#     подписывает их ярлыком UTC. Перевод в Алматы добавлял ещё пять часов —
+#     звонок 14:41 показывался как 19:42 (проверено по uniqueid Asterisk, ТЗ
+#     #317). Здесь снимается только ярлык: `AT TIME ZONE 'UTC'` — ровно так
+#     поле читает и журнал оценок (`ic.datetime_raw AT TIME ZONE 'UTC' =
+#     c.appeal_date` в database.py);
 #   * naive timestamp СТАРЫХ таблиц (calls.created_at с `DEFAULT
 #     CURRENT_TIMESTAMP`) — там лежит стенное время сервера, то есть UTC: его
 #     надо сперва объявить UTC и лишь потом перевести.
@@ -330,8 +336,8 @@ def _deal_row(values, offset):
     разъехаться им нельзя: канал в очереди ревью обязан означать то же, что во
     вкладке «Звонки».
     """
-    deal_id, park, park_title, channel, channel_title, campaign, stage, reason, dup = (
-        values[offset:offset + 9])
+    (deal_id, park, park_title, channel, channel_title, campaign, stage, reason, dup,
+     responsible, lead_type, stage_at_call) = values[offset:offset + _DEAL_COLUMN_COUNT]
     if not deal_id:
         return None
     return {
@@ -343,6 +349,10 @@ def _deal_row(values, offset):
         # Сколько заявок делят этот номер. Связь по телефону у повторной заявки
         # всегда спорна, и человек должен видеть это, а не верить ей вслепую.
         "shared_phone": int(dup or 1),
+        # Ответственный, тип лида и этап на момент разговора — для выгрузки:
+        # она строится из этой же строки, и без них столбцы файла были пусты.
+        "responsible": responsible or "", "lead_type": lead_type or "",
+        "stage_at_call": stage_at_call or "",
     }
 
 
@@ -350,11 +360,13 @@ def _deal_row(values, offset):
 _DEAL_COLUMNS = (f", {mkt.DEAL_ID}, {mkt.PARK_CODE}, {mkt.PARK_TITLE},"
                  f" {mkt.CHANNEL_CODE}, {mkt.CHANNEL_TITLE}, {mkt.CAMPAIGN},"
                  f" {mkt.STAGE_CURRENT}, {mkt.REASON_CURRENT},"
-                 " COALESCE(sd.dup_total, 1)")
+                 " COALESCE(sd.dup_total, 1),"
+                 f" {mkt.RESPONSIBLE_NAME}, {mkt.LEAD_TYPE}, {mkt.STAGE_AT_CALL}")
+_DEAL_COLUMN_COUNT = 12
 
-# Пустой хвост тех же девяти колонок — когда схемы модуля нет. Так запрос и
-# разбор строки остаются одной формы, а не двумя ветками на каждый список.
-_DEAL_COLUMNS_EMPTY = ", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+# Пустой хвост тех же колонок — когда схемы модуля нет. Так запрос и разбор
+# строки остаются одной формы, а не двумя ветками на каждый список.
+_DEAL_COLUMNS_EMPTY = ", NULL" * _DEAL_COLUMN_COUNT
 
 
 def _local_from_utc(expr: str) -> str:
@@ -364,7 +376,7 @@ def _local_from_utc(expr: str) -> str:
 
 _SUBJECT_DATETIME = (f"COALESCE(TO_CHAR({_local_from_utc('c.created_at')},'DD.MM HH24:MI'),"
                      " TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),"
-                     " TO_CHAR(ic.datetime_raw AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),"
+                     " TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC','DD.MM HH24:MI'),"
                      " TO_CHAR(cs.day,'DD.MM'),"
                      " TO_CHAR(ce.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'))")
 
@@ -404,7 +416,7 @@ _SUBJECT_OPERATOR_ID = ("COALESCE(c.operator_id, e.operator_user_id, ic.operator
 # Особенно у границы суток: по UTC разговор в 03:00 по Алматы — ещё вчерашний.
 _SUBJECT_DAY = (f"COALESCE({_local_from_utc('c.created_at')}::date,"
                 " (e.ended_at AT TIME ZONE 'Asia/Almaty')::date,"
-                " (ic.datetime_raw AT TIME ZONE 'Asia/Almaty')::date,"
+                " (ic.datetime_raw AT TIME ZONE 'UTC')::date,"
                 " cs.day,"
                 " (ce.ended_at AT TIME ZONE 'Asia/Almaty')::date)")
 
@@ -2390,10 +2402,40 @@ def criteria_config_set(direction_id: int, items: list[dict]) -> int:
     return len(requested)
 
 
+def _rules_of_deals_predicate(cur, marketing):
+    """(sql, params): правило каталога выведено из разговора, чья сделка подходит.
+
+    Путь: версия правила → исходный разбор (qa_adjudication_cases) → разговор →
+    связка со сделкой. Подзапрос НЕкоррелированный (IN по id версии): внутри
+    него живут те же псевдонимы, что у списков (rc, c, e, ic…), а снаружи
+    каталог тоже назван `c` — коррелированный EXISTS путал бы их.
+    Модуль не развернулся — правило не подходит ни одно (пусто, а не всё).
+    """
+    if not _marketing_ready(cur):
+        return "FALSE", []
+    mkt_sql, mkt_params = mkt.predicate(
+        marketing,
+        operator_id_sql=_SUBJECT_OPERATOR_ID,
+        group_of_person=lambda person: _SUBJECT_GROUP_ID.format(op=person, day=_SUBJECT_DAY),
+    )
+    return ("c.rule_version_id IN (SELECT rc.version_id::text FROM ("
+            " SELECT v.id AS version_id, COALESCE(ac.subject_kind, 'call') AS subject_kind,"
+            " ac.call_id FROM qa_policy_rule_versions v"
+            " JOIN qa_adjudication_cases ac ON ac.id = v.source_case_id) rc"
+            + _SUBJECT_JOIN + mkt.JOIN_SQL + " WHERE TRUE" + mkt_sql + ")",
+            list(mkt_params))
+
+
 def adjudications_list(direction=None, q=None, *, status=None, index_status=None,
                        page=1, page_size=20, allowed_direction_ids=None,
-                       department=None) -> dict:
-    """Server-paginated policy catalog with explicit health/degraded states."""
+                       department=None, filters=None) -> dict:
+    """Server-paginated policy catalog with explicit health/degraded states.
+
+    `filters` — отбор панели «ИИ-оценки». Из него здесь действуют ТОЛЬКО
+    маркетинговые оси (ТЗ #317, п. 2.1: новый набор фильтров доступен и в
+    «Базе разборов»): правило попадает в выдачу, если разговор, из которого
+    его вывели, связан со сделкой нужного канала, парка, этапа… Период,
+    сотрудник и балл к правилу не относятся — у каталога свои фильтры."""
     # Переиндексацию НЕ пинаем из GET-каталога: она дёргается при постановке задачи
     # (queue_reindex_adjudication) и сама себя перезапускает по Timer, пока очередь не
     # опустеет. Иначе каждый показ страницы/буква в поиске открывали бы RW-соединение
@@ -2449,6 +2491,11 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
             where.append("(c.criterion_name ILIKE %s OR c.situation ILIKE %s OR "
                          "c.excerpt ILIKE %s OR c.reason ILIKE %s OR c.not_covered ILIKE %s)")
             params.extend([pattern] * 5)
+        marketing = (filters or {}).get('marketing')
+        if marketing:
+            rule_sql, rule_params = _rules_of_deals_predicate(cur, marketing)
+            where.append(rule_sql)
+            params.extend(rule_params)
         predicate = " AND ".join(where)
         cur.execute(
             f"""SELECT c.rule_id,c.direction_id,c.direction_name,c.criterion_name,
@@ -3849,7 +3896,7 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
         # запросом проверяется ОБРАТНОЕ (звонки без записи), и вырезать условие
         # из готовой строки было бы миной — молча сломается от любой правки SQL.
         imported = """SELECT ic.id, d.name, COALESCE(u.name, ic.operator_name),
-                             TO_CHAR(ic.datetime_raw AT TIME ZONE 'Asia/Almaty',
+                             TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC',
                                      'DD.MM HH24:MI')
                         FROM imported_calls ic
                         JOIN users u ON u.id = ic.operator_id
@@ -3866,7 +3913,7 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
         # рядом с кнопкой выглядит как настройка, которую кнопка игнорирует.
         imported_pick, imported_pick_params = _pick_filters_predicate(
             filters, operator_col="ic.operator_id",
-            day_expr="(ic.datetime_raw AT TIME ZONE 'Asia/Almaty')::date",
+            day_expr="(ic.datetime_raw AT TIME ZONE 'UTC')::date",
             direction_expr="COALESCE(d.canonical_id, d.id)")
         imported = imported + imported_pick
         cur.execute(imported + with_audio + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
@@ -4042,7 +4089,7 @@ def _find_journal_calls(cur, family, suffix, operator_id, date_from, date_to, li
 
 
 def _find_imported_calls(cur, family, suffix, operator_id, date_from, date_to, limit):
-    when = "(ic.datetime_raw AT TIME ZONE 'Asia/Almaty')"
+    when = "(ic.datetime_raw AT TIME ZONE 'UTC')"
     where, params = _find_predicates(
         phone_col=f"COALESCE(ic.phone_normalized, {_DIGITS_SQL.format(col='ic.phone_number')})",
         operator_col="ic.operator_id", day_expr=f"{when}::date", suffix=suffix,
@@ -4875,10 +4922,13 @@ def _verdict_metrics(rows) -> dict:
     }
 
 
-def _reviewed_metrics(cur):
+def _reviewed_metrics(cur, subject_keys=None):
     """«Чистый» эталон: только звонки, где человек нажал «Подтвердить»/«Сохранить разбор».
     confirmed — все вердикты ИИ одобрены; adjudicated — исправленные критерии берём из
-    qa_adjudications, неисправленные считаются одобренными. None — миграции меты ещё нет."""
+    qa_adjudications, неисправленные считаются одобренными. None — миграции меты ещё нет.
+
+    `subject_keys` — множество (вид, id) из отбора панели: с ним считаются только
+    эти разговоры. None — без отбора, как прежде."""
     try:
         cur.execute("""SELECT call_id, review_outcome, per_criterion, subject_kind
                          FROM ai_evaluation_meta
@@ -4889,6 +4939,8 @@ def _reviewed_metrics(cur):
                 for r in cur.fetchall()]
     except Exception:
         return None  # колонок ещё нет — появятся после деплоя (миграция на старте)
+    if subject_keys is not None:
+        rows = [r for r in rows if (r[3] or config.SUBJECT_CALL, r[0]) in subject_keys]
     out = {"confirmed": 0, "adjudicated": 0, "endorsed": 0, "corrected": 0, "alarm_precision": None}
     if not rows:
         return out
@@ -5005,64 +5057,15 @@ def _rag_observability(cur) -> dict:
     return out
 
 
-def stats(allowed_direction_ids=None, department=None) -> dict:
-    """Метрики доверия для дашборда. Два эталона: «сырой» (человеческие оценки из
-    calls.scores — много данных, но Correct в форме — дефолт) и «чистый» (итоги ревью —
-    мало, но человек реально смотрел). Пустые места — честно null/[], без выдуманных цифр.
-    При заданном скоупе (СВ) или выбранном в селекторе отделе очередь/оценённые/сырой
-    эталон считаются только по их направлениям; операционные метрики reviewed/rag
-    остаются общесистемными."""
-    out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": [], "focus": [],
-           "alarm_precision": None, "recall": None, "correct_reliability": None,
-           "matrix": None, "deficiency": 0, "reviewed": None, "rag": None}
-    conn = None
-    try:
-        conn = config.connect_ro()
-        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        scope_family = None
-        if allowed_direction_ids is not None or department:
-            scope_family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
-        if scope_family is not None:
-            cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN
-                        + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)",
-                        (scope_family or [-1],))
-        else:
-            cur.execute("SELECT COUNT(*) FROM ai_review_cache")
-        out["evaluated"] = cur.fetchone()[0]
-        try:  # реальный размер очереди ревью; до миграции — свежие звонки, как раньше
-            meta_join = """
-                 LEFT JOIN ai_evaluation_meta m
-                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
-                           AND m.model = rc.model"""
-            if scope_family is not None:
-                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + meta_join
-                            + " WHERE rc.model = %s AND m.review_outcome IS NULL"
-                            + _SUBJECT_EXISTS + f" AND {_SUBJECT_DIRECTION} = ANY(%s)",
-                            (config.CLAUDE_MODEL, scope_family or [-1]))
-            else:
-                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + meta_join
-                            + " WHERE rc.model = %s AND m.review_outcome IS NULL",
-                            (config.CLAUDE_MODEL,))
-            out["queue"] = cur.fetchone()[0]
-        except Exception:
-            family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
-            cur.execute(
-                """SELECT COUNT(*) FROM calls
-                    WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
-                      AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
-                (family or [-1],))
-            out["queue"] = cur.fetchone()[0]
-
-        # Сырой эталон: последняя оценка каждого субъекта (без дублей по тегам
-        # моделей), сопоставленная с оценкой ЧЕЛОВЕКА.
-        #
-        # Человеческая оценка лежит у каждого вида субъекта в своём месте, и
-        # перечислять надо ВСЕ: вид, забытый здесь, просто не попадает в согласие
-        # ИИ↔человек — молча, без ошибки. Так и было со звонками из АТС и
-        # перепиской СЗоВ/ТЭЗ: оценка человека появлялась позже, но в метрику
-        # не входила никогда.
-        cur.execute(
-            """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.scores,
+# Сырой эталон: последняя оценка каждого субъекта (без дублей по тегам
+# моделей), сопоставленная с оценкой ЧЕЛОВЕКА.
+#
+# Человеческая оценка лежит у каждого вида субъекта в своём месте, и
+# перечислять надо ВСЕ: вид, забытый здесь, просто не попадает в согласие
+# ИИ↔человек — молча, без ошибки. Так и было со звонками из АТС и
+# перепиской СЗоВ/ТЭЗ: оценка человека появлялась позже, но в метрику
+# не входила никогда.
+_RAW_BENCHMARK_SQL = """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.scores,
                                            hc2d.scores, hca.scores, hrv.scores), t.direction
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                               rc.subject_kind, rc.call_id,
@@ -5127,31 +5130,151 @@ def stats(allowed_direction_ids=None, department=None) -> dict:
                  ) hrv ON true
                 WHERE COALESCE(c.scores, hwz.scores, himp.scores,
                                hc2d.scores, hca.scores, hrv.scores) IS NOT NULL"""
+
+
+def _fill_verdict_stats(cur, out, m):
+    """Метрики сырого эталона и «где отрабатывать» — в ответ дашборда."""
+    for k in ("agreement", "alarm_precision", "recall", "correct_reliability", "matrix", "deficiency"):
+        out[k] = m[k]
+    out["by_criterion"] = sorted([r for r in m["by_criterion"] if r["n"] >= 3], key=lambda x: x["v"])
+    # «Где отрабатывать»: критерии, генерирующие ложные тревоги и пропуски.
+    out["focus"] = sorted([r for r in m["by_criterion"] if r["false_alarms"] or r["misses"]],
+                          key=lambda x: -(x["false_alarms"] + x["misses"]))[:10]
+    try:  # сколько правил (разборов) уже накоплено по каждому проблемному критерию
+        cur.execute("""SELECT COALESCE(direction_name, '—'),criterion_name,COUNT(*)
+                         FROM qa_active_policy_rules GROUP BY 1,2""")
+        rules = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+        for r in out["focus"]:
+            r["rules"] = rules.get((r["direction"], r["name"]), 0)
+    except Exception:
+        pass
+
+
+def _fill_rag_stats(cur, out):
+    try:
+        out["rag"] = _rag_observability(cur)
+    except Exception:
+        logging.exception("ai-qa RAG observability unavailable")
+        out["rag"] = {"status": "error"}
+
+
+def _filtered_stats(cur, out, allowed_direction_ids, department, filters):
+    """Дашборд по отбору панели: те же разговоры, что показал бы список.
+
+    Набор субъектов считается ОДНИМ подзапросом — тем же предикатом, что у
+    списков (`_list_filters_predicate`), — и к нему прикладывается каждая
+    метрика. Свой разбор фильтров здесь дал бы «на Обзоре 12, во вкладке 14»
+    на одном и том же отборе.
+    """
+    scope_sql, scope_params = _direction_predicate(
+        cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+    filter_sql, filter_params = (_list_filters_predicate(
+        cur, filters, allowed_direction_ids, department) if scope_sql is not None else (None, ()))
+    if scope_sql is None or filter_sql is None:
+        # Отбор заведомо пуст (чужое направление, модуль не развернулся):
+        # нули, а не общесистемные цифры под чужим фильтром.
+        out["reviewed"] = _reviewed_metrics(cur, subject_keys=set())
+        _fill_rag_stats(cur, out)
+        return out
+    subjects_sql = ("SELECT DISTINCT rc.subject_kind, rc.call_id FROM ai_review_cache rc"
+                    + _SUBJECT_JOIN + _marketing_join(cur, filters)
+                    + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + filter_sql)
+    subjects_params = (*scope_params, *filter_params)
+
+    cur.execute(subjects_sql, subjects_params)
+    keys = {(row[0] or config.SUBJECT_CALL, row[1]) for row in cur.fetchall()}
+    cur.execute("SELECT COUNT(*) FROM ai_review_cache rc"
+                f" WHERE (rc.subject_kind, rc.call_id) IN ({subjects_sql})", subjects_params)
+    out["evaluated"] = cur.fetchone()[0]
+    try:
+        cur.execute(
+            """SELECT COUNT(*) FROM ai_review_cache rc
+                 LEFT JOIN ai_evaluation_meta m
+                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                           AND m.model = rc.model
+                WHERE rc.model = %s AND m.review_outcome IS NULL"""
+            f" AND (rc.subject_kind, rc.call_id) IN ({subjects_sql})",
+            (config.CLAUDE_MODEL, *subjects_params))
+        out["queue"] = cur.fetchone()[0]
+    except Exception as exc:
+        # До миграции меты очереди по отбору не посчитать; ноль честнее, чем
+        # «последние звонки» без фильтра под выставленным отбором.
+        if not runtime_store.is_schema_compat_error(exc):
+            raise
+        cur.connection.rollback()
+        cur.execute("SET client_encoding TO 'UTF8'")
+    cur.execute(_RAW_BENCHMARK_SQL
+                + f" AND (t.subject_kind, t.call_id) IN ({subjects_sql})", subjects_params)
+    _fill_verdict_stats(cur, out, _verdict_metrics(cur.fetchall()))
+    out["reviewed"] = _reviewed_metrics(cur, subject_keys=keys)
+    _fill_rag_stats(cur, out)
+    return out
+
+
+def stats(allowed_direction_ids=None, department=None, filters=None) -> dict:
+    """Метрики доверия для дашборда. Два эталона: «сырой» (человеческие оценки из
+    calls.scores — много данных, но Correct в форме — дефолт) и «чистый» (итоги ревью —
+    мало, но человек реально смотрел). Пустые места — честно null/[], без выдуманных цифр.
+    При заданном скоупе (СВ) или выбранном в селекторе отделе очередь/оценённые/сырой
+    эталон считаются только по их направлениям; операционные метрики reviewed/rag
+    остаются общесистемными.
+
+    `filters` — отбор панели (ТЗ #317, п. 2.1: фильтры доступны и на «Обзоре»).
+    С ним оценённые, очередь, сырой эталон и «проверено человеком» считаются
+    ровно по тем разговорам, что показал бы список с тем же отбором; блок RAG
+    остаётся общесистемным — это здоровье базы знаний, а не разговоров."""
+    out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": [], "focus": [],
+           "alarm_precision": None, "recall": None, "correct_reliability": None,
+           "matrix": None, "deficiency": 0, "reviewed": None, "rag": None}
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        if filters:
+            return _filtered_stats(cur, out, allowed_direction_ids, department, filters)
+        scope_family = None
+        if allowed_direction_ids is not None or department:
+            scope_family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
+        if scope_family is not None:
+            cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN
+                        + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)",
+                        (scope_family or [-1],))
+        else:
+            cur.execute("SELECT COUNT(*) FROM ai_review_cache")
+        out["evaluated"] = cur.fetchone()[0]
+        try:  # реальный размер очереди ревью; до миграции — свежие звонки, как раньше
+            meta_join = """
+                 LEFT JOIN ai_evaluation_meta m
+                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                           AND m.model = rc.model"""
+            if scope_family is not None:
+                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + meta_join
+                            + " WHERE rc.model = %s AND m.review_outcome IS NULL"
+                            + _SUBJECT_EXISTS + f" AND {_SUBJECT_DIRECTION} = ANY(%s)",
+                            (config.CLAUDE_MODEL, scope_family or [-1]))
+            else:
+                cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + meta_join
+                            + " WHERE rc.model = %s AND m.review_outcome IS NULL",
+                            (config.CLAUDE_MODEL,))
+            out["queue"] = cur.fetchone()[0]
+        except Exception:
+            family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
+            cur.execute(
+                """SELECT COUNT(*) FROM calls
+                    WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
+                      AND COALESCE(is_draft, FALSE) = FALSE AND created_at > NOW() - INTERVAL '7 days'""",
+                (family or [-1],))
+            out["queue"] = cur.fetchone()[0]
+
+        cur.execute(
+            _RAW_BENCHMARK_SQL
             + (" AND COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
                " us.direction_id, ua.direction_id) = ANY(%s)"
                if scope_family is not None else ""),
             ((scope_family or [-1],) if scope_family is not None else ()))
-        m = _verdict_metrics(cur.fetchall())
-        for k in ("agreement", "alarm_precision", "recall", "correct_reliability", "matrix", "deficiency"):
-            out[k] = m[k]
-        out["by_criterion"] = sorted([r for r in m["by_criterion"] if r["n"] >= 3], key=lambda x: x["v"])
-        # «Где отрабатывать»: критерии, генерирующие ложные тревоги и пропуски.
-        out["focus"] = sorted([r for r in m["by_criterion"] if r["false_alarms"] or r["misses"]],
-                              key=lambda x: -(x["false_alarms"] + x["misses"]))[:10]
-        try:  # сколько правил (разборов) уже накоплено по каждому проблемному критерию
-            cur.execute("""SELECT COALESCE(direction_name, '—'),criterion_name,COUNT(*)
-                             FROM qa_active_policy_rules GROUP BY 1,2""")
-            rules = {(r[0], r[1]): r[2] for r in cur.fetchall()}
-            for r in out["focus"]:
-                r["rules"] = rules.get((r["direction"], r["name"]), 0)
-        except Exception:
-            pass
+        _fill_verdict_stats(cur, out, _verdict_metrics(cur.fetchall()))
         out["reviewed"] = _reviewed_metrics(cur)
-        try:
-            out["rag"] = _rag_observability(cur)
-        except Exception:
-            logging.exception("ai-qa RAG observability unavailable")
-            out["rag"] = {"status": "error"}
+        _fill_rag_stats(cur, out)
         cur.close(); conn.close()
     except Exception:
         logging.exception("ai-qa stats failed")
@@ -5171,22 +5294,26 @@ def marketing_options(allowed_direction_ids=None, department=None,
                       subject_kind=None) -> dict:
     """Что предложить в маркетинговых фильтрах: парки, каналы, этапы, причины, люди.
 
-    Рядом с каждым значением стоит ЧИСЛО разборов — по той же причине, по
-    которой оно стоит рядом с фамилией в соседнем справочнике: список из
-    двадцати девяти парков, у двадцати из которых ноль разговоров, — это не
-    фильтр, а угадайка. Значение с нулём здесь вообще не появляется.
+    Списки — ПОЛНЫЕ справочники, как требует ТЗ (ФТ-05: «значения из
+    справочника», ФТ-08: «полный список этапов воронки», ФТ-09: «справочник
+    причин из amoCRM»): парки и каналы — из словаря модуля, этапы, причины и
+    ответственные — из всех сделок воронки. Прежняя редакция показывала лишь
+    то, что уже встретилось у связанных разборов, и при семи связях на проде
+    список этапов состоял из трёх строк из шестнадцати.
 
-    Скоуп тот же, что у списков: направления зрителя ∩ выбранный отдел.
-    Предложить фильтр, который покажет чужие строки, ручка физически не может.
+    Рядом с каждым значением — ЧИСЛО разборов в скоупе зрителя (направления ∩
+    отдел): по нему видно, что выбирать имеет смысл. Значения с нулём идут
+    ниже, но в списке остаются.
 
     Пустой ответ (`available: false`) — законное состояние: схема модуля могла
-    не развернуться, а связей могло ещё не быть. Панель тогда не рисует
-    маркетинговый блок вовсе, вместо того чтобы показывать пять пустых
-    селекторов.
+    не развернуться, а у отдела могло не быть сделок вовсе (СЗоВ, Тез КЦ).
+    Панель тогда не рисует маркетинговый блок, вместо пяти пустых селекторов.
     """
     conn = None
     empty = {"available": False, "parks": [], "channels": [], "stages": [],
              "reasons": [], "handlers": [], "stage_history_since": None}
+    if department and department not in mkt.DEAL_DEPARTMENTS:
+        return empty
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
@@ -5194,13 +5321,10 @@ def marketing_options(allowed_direction_ids=None, department=None,
             cur.close(); conn.close()
             return empty
         family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
-        if not family:
-            cur.close(); conn.close()
-            return empty
         kind_sql, kind_params = _subject_kind_predicate(subject_kind)
 
-        # Основание для всех пяти выборок — последняя оценка субъекта, ровно та,
-        # что показывает список. Считать по всем строкам кэша нельзя: звонок,
+        # Основание счётчиков — последняя оценка субъекта, ровно та, что
+        # показывает список. Считать по всем строкам кэша нельзя: звонок,
         # переоценённый трижды, прибавил бы к своему каналу три разбора.
         base = ("""FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                                rc.subject_kind, rc.call_id, rc.created_at, rc.payload
@@ -5208,64 +5332,134 @@ def marketing_options(allowed_direction_ids=None, department=None,
                          ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
                 + _SUBJECT_JOIN + mkt.JOIN_SQL
                 + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)"
-                + kind_sql)
-        base_params = (family, *kind_params)
+                + kind_sql + f" AND {mkt.DEAL_LINKED}")
+        base_params = (family or [-1], *kind_params)
 
-        def grouped(expression, title_expression):
-            cur.execute(
-                f"SELECT {expression}, {title_expression}, COUNT(*) {base}"
-                f" AND {mkt.DEAL_LINKED} GROUP BY 1, 2 ORDER BY 3 DESC", base_params)
+        def counted(columns, extra="", extra_params=()):
+            """Число связанных разборов по сочетанию выражений `columns`."""
+            groups = ", ".join(str(index + 1) for index in range(len(columns)))
+            cur.execute(f"SELECT {', '.join(columns)}, COUNT(*) {base}{extra}"
+                        f" GROUP BY {groups}", (*base_params, *extra_params))
             return cur.fetchall()
 
-        parks = [{"code": code or mkt.NONE_BUCKET,
-                  "title": title or "Не определено", "calls": int(count)}
-                 for code, title, count in grouped(mkt.PARK_CODE, mkt.PARK_TITLE)]
+        def by_value(expression, extra="", extra_params=()):
+            return {row[0]: int(row[1]) for row in counted([expression], extra, extra_params)}
 
-        channels = [{"code": code or mkt.NONE_BUCKET,
-                     "title": title or "Не определено", "calls": int(count),
-                     "campaigns": []}
-                    for code, title, count in grouped(mkt.CHANNEL_CODE, mkt.CHANNEL_TITLE)]
+        def ordered(items):
+            """Сначала то, что есть в разборах, по убыванию; дальше — справочник."""
+            return sorted(items, key=lambda item: (-item["calls"], item.get("_rank", 0)))
+
+        def strip(items):
+            for item in items:
+                item.pop("_rank", None)
+            return items
+
+        # ── Парки и каналы — словарь модуля ────────────────────────────────
+        def dictionary(kind, code_expr):
+            calls = by_value(code_expr)
+            cur.execute("""SELECT code, title FROM qa_marketing_dict
+                            WHERE kind = %s AND NOT is_hidden
+                            ORDER BY sort_order, lower(title)""", (kind,))
+            items = [{"code": code, "title": title or code, "calls": calls.get(code, 0),
+                      "_rank": rank} for rank, (code, title) in enumerate(cur.fetchall())]
+            known = {item["code"] for item in items}
+            # Код связки, которого нет в словаре (строка скрыта), — всё равно
+            # значение: иначе разборы с ним не нашлись бы ни одним фильтром.
+            items += [{"code": code, "title": code, "calls": count, "_rank": 10 ** 6}
+                      for code, count in calls.items() if code and code not in known]
+            items = ordered(items)
+            # «Не определено» — последней строкой, как в перечне ФТ-05/ФТ-06.
+            items.append({"code": mkt.NONE_BUCKET, "title": "Не определено",
+                          "calls": calls.get('', 0)})
+            return strip(items)
+
+        parks = dictionary('park', mkt.PARK_CODE)
+        channels = dictionary('channel', mkt.CHANNEL_CODE)
+        for channel in channels:
+            channel["campaigns"] = []
 
         # Кампания — ВТОРОЙ уровень канала, а не самостоятельный список: одно и
         # то же имя кампании встречается у разных каналов, и плоский перечень
-        # «utm_campaign» ничего не отвечает на вопрос «что дал TikTok».
-        cur.execute(
-            f"SELECT {mkt.CHANNEL_CODE}, {mkt.CAMPAIGN}, COUNT(*) {base}"
-            f" AND {mkt.CAMPAIGN} <> '' GROUP BY 1, 2 ORDER BY 3 DESC", base_params)
+        # «utm_campaign» ничего не отвечает на вопрос «что дал TikTok». Здесь
+        # только кампании с разборами: у amoCRM их тысячи, и почти все — числа.
         by_channel = {item["code"]: item for item in channels}
-        for channel_code, campaign, count in cur.fetchall():
+        for channel_code, campaign, count in counted(
+                [mkt.CHANNEL_CODE, mkt.CAMPAIGN], f" AND {mkt.CAMPAIGN} <> ''"):
             owner = by_channel.get(channel_code or mkt.NONE_BUCKET)
             if owner is not None:
                 owner["campaigns"].append({"value": campaign, "calls": int(count)})
+        for channel in channels:
+            channel["campaigns"].sort(key=lambda item: (-item["calls"], item["value"]))
 
-        # Этапы: и текущий, и «на момент разговора» — из одного справочника.
-        # Отдельных списков быть не должно: переключатель режима не меняет
-        # перечень этапов воронки, он меняет только то, откуда берётся ответ.
+        # ── Этапы — все этапы воронок отдела ───────────────────────────────
+        # Перечень один на оба режима: переключатель «сейчас / на момент
+        # разговора» меняет не перечень этапов, а то, откуда берётся ответ.
+        stage_calls = by_value(mkt.STAGE_CURRENT)
         cur.execute(
-            f"SELECT {mkt.STAGE_CURRENT}, COUNT(*) {base}"
-            f" AND {mkt.STAGE_CURRENT} <> '' GROUP BY 1 ORDER BY 2 DESC", base_params)
-        stages = [{"value": value, "calls": int(count), "lost": mkt.is_lost_stage(value)}
-                  for value, count in cur.fetchall()]
+            """SELECT stage, SUM(n) FROM (
+                   SELECT btrim(stage_raw) AS stage, COUNT(*) AS n FROM op_funnel_leads
+                    WHERE btrim(COALESCE(stage_raw, '')) <> '' GROUP BY 1
+                   UNION ALL
+                   SELECT btrim(stage_raw), 0 FROM op_funnel_lead_stages
+                    WHERE btrim(COALESCE(stage_raw, '')) <> '' GROUP BY 1
+               ) s GROUP BY stage""")
+        stages = ordered([{"value": value, "calls": stage_calls.get(value, 0),
+                           "lost": mkt.is_lost_stage(value), "_rank": -int(freq or 0)}
+                          for value, freq in cur.fetchall()])
+        strip(stages)
 
-        cur.execute(
-            f"SELECT {mkt.REASON_CURRENT}, COUNT(*) {base}"
-            f" AND {mkt.DEAL_LINKED} GROUP BY 1 ORDER BY 2 DESC", base_params)
-        reasons = [{"value": value or mkt.NONE_BUCKET,
-                    "title": value or "Причина не указана", "calls": int(count)}
-                   for value, count in cur.fetchall()]
+        # ── Причины отказа — справочник из сделок + «Причина не указана» ───
+        # Счётчик — только у сделок в этапе «Закрыто-нереализовано»: причина
+        # выбирается лишь вместе с ним (ФТ-09), и «не указана» у открытой
+        # сделки — это не пропуск менеджера, а отсутствие отказа.
+        lost_sql, lost_params = mkt.lost_stage_sql(mkt.STAGE_CURRENT)
+        reason_calls = by_value(mkt.REASON_CURRENT, f" AND {lost_sql}", lost_params)
+        cur.execute("""SELECT btrim(reason_raw), COUNT(*) FROM op_funnel_leads
+                        WHERE btrim(COALESCE(reason_raw, '')) <> '' AND source = ANY(%s)
+                        GROUP BY 1""", (list(mkt.REASON_SOURCES),))
+        reasons = ordered([{"value": value, "title": value,
+                            "calls": reason_calls.get(value, 0), "_rank": -int(freq)}
+                           for value, freq in cur.fetchall()])
+        strip(reasons)
+        reasons.append({"value": mkt.NONE_BUCKET, "title": "Причина не указана",
+                        "calls": reason_calls.get('', 0)})
 
-        # «Ответственный» в CRM: человек портала, если сопоставление уже сделано,
-        # иначе имя строкой из amoCRM. Несопоставленных показываем отдельно —
-        # это не мусор, а подсказка «кого ещё не связали», и без них сумма по
-        # людям не сходилась бы с общим числом разборов.
+        # ── Ответственные в CRM — все владельцы сделок воронки ─────────────
+        # Сопоставленный со штатом — сотрудник портала (одна строка, даже если
+        # у него учётки в двух CRM). Несопоставленный — учётка CRM со своим
+        # ключом: её тоже можно выбрать, фильтр пойдёт по ключу. Прежде такие
+        # строки были серыми и невыбираемыми, а это половина учёток amoCRM.
+        handler_calls = {}
+        for user_id, key, count in counted([mkt.RESPONSIBLE_ID, mkt.RESPONSIBLE_KEY]):
+            slot = ('u', int(user_id)) if user_id is not None else ('k', key)
+            handler_calls[slot] = handler_calls.get(slot, 0) + int(count)
         cur.execute(
-            f"SELECT {mkt.RESPONSIBLE_ID}, {mkt.RESPONSIBLE_RAW}, COUNT(*) {base}"
-            f" AND {mkt.DEAL_LINKED} AND {mkt.RESPONSIBLE_RAW} <> ''"
-            " GROUP BY 1, 2 ORDER BY 3 DESC", base_params)
-        handlers = [{"id": int(user_id) if user_id is not None else None,
-                     "name": name, "calls": int(count),
-                     "matched": user_id is not None}
-                    for user_id, name, count in cur.fetchall()]
+            f"""SELECT l.source, l.owner_raw, omap.user_id,
+                       {mkt.RESPONSIBLE_NAME}, COUNT(*)
+                  FROM op_funnel_leads l
+                  LEFT JOIN op_funnel_operator_map omap
+                         ON omap.source = l.source AND omap.external_key = l.owner_raw
+                  LEFT JOIN users hu ON hu.id = omap.user_id
+                  LEFT JOIN op_funnel_operator_map wmap
+                         ON wmap.source = 'wazzup' AND wmap.external_key = l.owner_raw
+                 WHERE btrim(COALESCE(l.owner_raw, '')) <> ''
+                   AND NOT COALESCE(omap.is_ignored, FALSE)
+                 GROUP BY 1, 2, 3, 4""")
+        people = {}
+        for source, owner, user_id, name, freq in cur.fetchall():
+            if user_id is not None:
+                slot = ('u', int(user_id))
+                entry = people.setdefault(slot, {"id": int(user_id), "key": None,
+                                                 "name": name, "matched": True, "_rank": 0})
+            else:
+                key = f"{source}:{owner}"
+                slot = ('k', key)
+                entry = people.setdefault(slot, {"id": None, "key": key, "name": name,
+                                                 "matched": False, "_rank": 0})
+            entry["_rank"] -= int(freq)
+        handlers = ordered([{**entry, "calls": handler_calls.get(slot, 0)}
+                            for slot, entry in people.items()])
+        strip(handlers)
 
         # С какого момента вообще есть история этапов. Нужно показать словами:
         # до этой даты «этап на момент разговора» физически пуст, и пустой
@@ -5275,7 +5469,7 @@ def marketing_options(allowed_direction_ids=None, department=None,
         history_since = row[0].isoformat(sep=' ', timespec='minutes') if row and row[0] else None
 
         cur.close(); conn.close()
-        return {"available": bool(parks or channels or stages),
+        return {"available": True,
                 "parks": parks, "channels": channels, "stages": stages,
                 "reasons": reasons, "handlers": handlers,
                 "stage_history_since": history_since}
@@ -5309,7 +5503,8 @@ def deal_for_subject(subject_kind: str, call_id: int) -> dict | None:
                        {mkt.CHANNEL_CODE}, {mkt.CHANNEL_TITLE}, {mkt.CAMPAIGN},
                        {mkt.STAGE_CURRENT}, {mkt.STAGE_AT_CALL}, {mkt.REASON_CURRENT},
                        {mkt.RESPONSIBLE_RAW}, {mkt.RESPONSIBLE_ID},
-                       sd.matched_phone, sd.dup_total, sd.dup_index, l.city
+                       sd.matched_phone, sd.dup_total, sd.dup_index, l.city,
+                       {mkt.LEAD_TYPE}
                   FROM ai_review_cache rc"""
             + mkt.JOIN_SQL
             + """ WHERE rc.subject_kind = %s AND rc.call_id = %s AND sd.call_id IS NOT NULL
@@ -5330,6 +5525,7 @@ def deal_for_subject(subject_kind: str, call_id: int) -> dict | None:
             "responsible_id": int(row[10]) if row[10] is not None else None,
             "matched_phone": row[11], "shared_phone": int(row[12] or 1),
             "shared_index": int(row[13] or 1), "city": row[14] or "",
+            "lead_type": row[15] or "",
         }
     except Exception:
         logging.exception("ai-qa deal for subject failed")

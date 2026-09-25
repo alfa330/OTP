@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { marketingParams } from './filters';
 import {
     Search, Database, Check, X, Minus, ArrowRight, Quote, Repeat, Loader2,
     Pencil, Trash2, Save, RefreshCw, AlertTriangle, Activity, Layers3,
@@ -312,6 +313,15 @@ function RolloutPanel({ apiBaseUrl, headers, showToast, onInteractionChange }) {
         return () => { loadRequest.current += 1; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiBaseUrl]);
+    // Новый отбор по сделке — с первой страницы: на пятой странице узкой
+    // выборки обычно пусто, и это читалось бы как «ничего не нашлось».
+    const dealSignatureRef = useRef(dealSignature);
+    useEffect(() => {
+        if (dealSignatureRef.current === dealSignature) return;
+        dealSignatureRef.current = dealSignature;
+        setPage(1);
+    }, [dealSignature]);
+
     useEffect(() => {
         onInteractionChange?.({ editing: dirtyIds.size > 0, busy: savingId !== null });
     }, [dirtyIds, savingId, onInteractionChange]);
@@ -470,7 +480,12 @@ function Pagination({ page, pageSize, total, onPageChange, disabled }) {
 
 export default function AdjudicationsRag(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast, canManage, department,
-            onInteractionChange } = props;
+            onInteractionChange, filters } = props;
+    /* Отбор по сделке из панели раздела (ТЗ #317): правило попадает в выдачу,
+       если разговор, из которого его вывели, связан с подходящей сделкой.
+       Остальной отбор панели к каталогу не относится и сюда не уходит. */
+    const dealParams = marketingParams(filters);
+    const dealSignature = JSON.stringify(dealParams);
     const [queryInput, setQueryInput] = useState('');
     const [query, setQuery] = useState('');
     const [view, setView] = useState('catalog');
@@ -533,6 +548,7 @@ export default function AdjudicationsRag(props) {
                 ...(direction !== 'all' ? { direction } : {}),
                 ...(effectiveStatus !== 'all' ? { status: effectiveStatus } : {}),
                 ...(indexStatus !== 'all' ? { index_status: indexStatus } : {}),
+                ...dealParams,
             },
             headers: headers(),
             signal: controller.signal,
@@ -550,7 +566,8 @@ export default function AdjudicationsRag(props) {
         return () => controller.abort();
         // Access-token headers are intentionally read at request time.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, department, query, view, direction, status, indexStatus, page, pageSize, reloadKey]);
+    }, [apiBaseUrl, department, query, view, direction, status, indexStatus, page, pageSize, reloadKey,
+        dealSignature]);
 
     const refresh = () => setReloadKey((value) => value + 1);
     const items = result?.items || [];

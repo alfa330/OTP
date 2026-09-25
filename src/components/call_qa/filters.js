@@ -35,6 +35,9 @@ export const EMPTY_FILTERS = {
     reasons: [],
     handler_ids: [],
     handler_group_ids: [],
+    /* Учётки CRM без сотрудника портала — «amo:8303491». Только в режиме
+       «Ответственный»: у того, кто говорил, учётки CRM нет. */
+    handler_keys: [],
     handler_mode: '',   // '' (говорил) | 'crm' — ответственный в amoCRM
     deal_id: '',
 };
@@ -48,7 +51,21 @@ export const NONE_BUCKET = 'none';
    параметры, и чипы понимают, что относится к маркетингу, — а не по
    перечислению имён в трёх местах. */
 export const MARKETING_LIST_KEYS = ['parks', 'channels', 'campaigns', 'stages', 'reasons',
-                                    'handler_ids', 'handler_group_ids'];
+                                    'handler_ids', 'handler_group_ids', 'handler_keys'];
+
+/* Все поля маркетинговой части отбора, включая режимы и номер сделки. */
+const MARKETING_KEYS = [...MARKETING_LIST_KEYS, 'stage_mode', 'handler_mode', 'deal_id'];
+
+/** Снять только маркетинговые оси, остальной отбор оставить. */
+export const clearMarketing = (filters) => {
+    const next = { ...(filters || EMPTY_FILTERS) };
+    MARKETING_KEYS.forEach((key) => { next[key] = EMPTY_FILTERS[key]; });
+    return next;
+};
+
+/* Ключи чипов маркетинговых осей — по ним «Базе разборов» показываются только
+   они: остальной отбор к правилам каталога не относится. */
+export const MARKETING_CHIP_KEYS = ['parks', 'channels', 'stages', 'reasons', 'handlers', 'deal'];
 
 /* Этап группы «Закрыто-нереализовано» — по нему ФТ-09 включает причину отказа.
    Маркеры те же, что в call_qa/marketing/filters.py (LOST_STAGE_MARKERS): гашение
@@ -96,10 +113,15 @@ export const countActiveFilters = (filters) => {
     if (listOf(f.channels).length || listOf(f.campaigns).length) count += 1;
     if (listOf(f.stages).length) count += 1;
     if (listOf(f.reasons).length) count += 1;
-    if (listOf(f.handler_ids).length || listOf(f.handler_group_ids).length) count += 1;
+    if (listOf(f.handler_ids).length || listOf(f.handler_group_ids).length
+        || listOf(f.handler_keys).length) count += 1;
     if (isSet(f.deal_id)) count += 1;
     return count;
 };
+
+/** Сколько маркетинговых осей отобрано — число на кнопке в «Базе разборов». */
+export const countMarketingFilters = (filters) => countActiveFilters(
+    { ...EMPTY_FILTERS, ...Object.fromEntries(MARKETING_KEYS.map((key) => [key, (filters || EMPTY_FILTERS)[key]])) });
 
 export const hasActiveFilters = (filters) => countActiveFilters(filters) > 0;
 
@@ -125,10 +147,17 @@ export const filtersToParams = (filters) => {
     });
     // Режимы имеют смысл только при выбранных значениях — как и на сервере.
     if (listOf(f.stages).length && f.stage_mode === 'at_call') params.stage_mode = 'at_call';
-    if ((listOf(f.handler_ids).length || listOf(f.handler_group_ids).length)
+    if ((listOf(f.handler_ids).length || listOf(f.handler_group_ids).length
+         || listOf(f.handler_keys).length)
         && f.handler_mode === 'crm') params.handler_mode = 'crm';
     if (isSet(f.deal_id)) params.deal_id = String(f.deal_id).trim();
     return params;
+};
+
+/** Параметры только маркетинговых осей — для «Базы разборов». */
+export const marketingParams = (filters) => {
+    const params = filtersToParams(filters);
+    return Object.fromEntries(Object.entries(params).filter(([key]) => MARKETING_KEYS.includes(key)));
 };
 
 /* Ключ отбора для зависимостей эффекта. Объект фильтров пересоздаётся на каждом
@@ -241,13 +270,21 @@ export const activeFilterChips = (filters, options = {}) => {
     }
     const handlers = listOf(f.handler_ids);
     const handlerGroups = listOf(f.handler_group_ids);
-    if (handlers.length || handlerGroups.length) {
-        const people = handlers.map((id) => titleOf(marketing.handlers, id, '')
-            || nameOf(operators, id) || `#${id}`);
+    const handlerKeys = listOf(f.handler_keys);
+    if (handlers.length || handlerGroups.length || handlerKeys.length) {
+        const crm = f.handler_mode === 'crm';
+        /* В режиме «Ответственный» имя берём из справочника ответственных, а не
+           из списка операторов: id там — сотрудник портала, сопоставленный с
+           учёткой CRM, и у операторов раздела его может не быть вовсе. */
+        const people = handlers.map((id) => (crm
+            ? (marketing.handlers || []).find((item) => String(item.id) === String(id))?.name
+            : null) || nameOf(operators, id) || `#${id}`);
+        const accounts = handlerKeys.map((key) => (marketing.handlers || [])
+            .find((item) => item.key === key)?.name || key);
         const groupNames = handlerGroups.map((id) => nameOf(groups, id) || `#${id}`);
-        add('handlers', f.handler_mode === 'crm' ? 'Ответственный' : 'Говорил',
-            joined([...people, ...groupNames]),
-            patch({ handler_ids: [], handler_group_ids: [], handler_mode: '' }));
+        add('handlers', crm ? 'Ответственный' : 'Говорил',
+            joined([...people, ...accounts, ...groupNames]),
+            patch({ handler_ids: [], handler_group_ids: [], handler_keys: [], handler_mode: '' }));
     }
     if (isSet(f.deal_id)) {
         add('deal', 'Сделка', `№ ${f.deal_id}`, patch({ deal_id: '' }));

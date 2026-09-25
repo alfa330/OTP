@@ -129,3 +129,16 @@ test('мусор в значении не роняет рендер', () => {
     assert.doesNotThrow(() => render({ multiple: Array.isArray(value), value }));
   }
 });
+
+test('вложенный уровень: выбранная кампания подписана в кнопке, а рендер не падает', () => {
+  const options = [
+    { value: 'ch:google', label: 'Google' },
+    { value: 'cp:spring', label: 'spring', parent: 'ch:google' },
+    { value: 'ch:tiktok', label: 'TikTok' },
+  ];
+  const html = renderToStaticMarkup(React.createElement(CustomSelect, {
+    multiple: true, value: ['cp:spring'], options, expandLabel: 'кампании',
+    renderValue: (values) => values.join(','),
+  }));
+  assert.ok(html.includes('cp:spring'));
+});

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
+import { filtersKey, filtersToParams } from './filters';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell } from 'recharts';
 import {
     ClipboardCheck, ListChecks, Loader2, Siren, Crosshair, ShieldCheck,
@@ -199,7 +200,11 @@ function ReviewedBlock({ r }) {
 }
 
 export default function QaDashboard(props) {
-    const { apiBaseUrl, withAccessTokenHeader, department } = props;
+    const { apiBaseUrl, withAccessTokenHeader, department, filters } = props;
+    /* Отбор панели (ТЗ #317): метрики считаются по тем же разговорам, что показал
+       бы список. Зависимость — строка, а не объект: объект фильтров новый на
+       каждом рендере, и в deps он давал бы бесконечный перезапрос. */
+    const filterSignature = filtersKey(filters);
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [s, setS] = useState(null);
     const [error, setError] = useState(null);
@@ -216,7 +221,7 @@ export default function QaDashboard(props) {
             return;
         }
         axios.get(`${apiBaseUrl}/api/ai-qa/stats`,
-            { params: { ...(department ? { department } : {}) },
+            { params: { ...(department ? { department } : {}), ...filtersToParams(filters) },
               headers: headers(), signal: controller.signal })
             .then((response) => {
                 if (requestId === requestRef.current.id) setS(response.data);
@@ -232,7 +237,7 @@ export default function QaDashboard(props) {
         load();
         return () => requestRef.current.controller?.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, department]);
+    }, [apiBaseUrl, department, filterSignature]);
 
     if (!s && !error) {
         return (

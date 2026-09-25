@@ -5669,6 +5669,7 @@ def _ai_qa_list_filters():
             'reasons': many('reasons'),
             'handler_ids': many('handler_ids'),
             'handler_group_ids': many('handler_group_ids'),
+            'handler_keys': many('handler_keys'),
             'handler_mode': request.args.get('handler_mode'),
             'deal_id': request.args.get('deal_id'),
         }
@@ -6183,12 +6184,18 @@ def api_ai_qa_adjudications():
         department, dept_err = _ai_qa_requested_department(requester_id)
         if dept_err:
             return dept_err
+        # Из отбора панели здесь действуют только маркетинговые оси (ТЗ #317):
+        # правило отбирается по сделке разговора, из которого его вывели.
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
         result = adjudications_list(
             direction=request.args.get('direction'), q=request.args.get('q'),
             status=request.args.get('status'), index_status=request.args.get('index_status'),
             page=request.args.get('page', 1), page_size=request.args.get('page_size', 20),
             allowed_direction_ids=_ai_qa_direction_scope(requester_id),
-            department=department)
+            department=department,
+            filters={'marketing': filters['marketing']} if filters.get('marketing') else None)
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -7400,9 +7407,15 @@ def api_ai_qa_stats():
         department, dept_err = _ai_qa_requested_department(requester_id)
         if dept_err:
             return dept_err
+        # Отбор панели (ТЗ #317, п. 2.1: фильтры доступны и на «Обзоре»). Разбор
+        # тот же, что у списков, — иначе «Обзор» и «Звонки» на одном отборе
+        # расходились бы в числах.
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
         return jsonify({"status": "success", "department": department,
                         **stats(allowed_direction_ids=_ai_qa_direction_scope(requester_id),
-                                department=department)}), 200
+                                department=department, filters=filters)}), 200
     except Exception as error:
         logging.exception("ai-qa stats failed")
         return jsonify({"error": str(error)}), 500

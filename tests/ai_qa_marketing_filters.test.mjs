@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
     EMPTY_FILTERS, NONE_BUCKET, MARKETING_LIST_KEYS, countActiveFilters, filtersToParams,
     activeFilterChips, hasMarketingFilters, isLostStage, reasonsAllowed,
+    clearMarketing, marketingParams, countMarketingFilters, MARKETING_CHIP_KEYS,
 } from '../src/components/call_qa/filters.js';
 
 /**
@@ -95,4 +96,55 @@ test('оси, режимы и маркеры совпадают с сервер�
 test('сервер читает и parks, и parks[] — форма массива у axios', () => {
     const src = readLf('bot_schedule2.py');
     assert.ok(src.includes("request.args.getlist(key + '[]')"));
+});
+
+test('учётка CRM без сотрудника: уходит ключом и только в режиме «Ответственный»', () => {
+    const f = { ...EMPTY_FILTERS, handler_keys: ['amo:8303491'], handler_mode: 'crm' };
+    assert.equal(countActiveFilters(f), 1);
+    const params = filtersToParams(f);
+    assert.deepEqual(params.handler_keys, ['amo:8303491']);
+    assert.equal(params.handler_mode, 'crm');
+    const chips = activeFilterChips(f, { marketing: { handlers: [
+        { id: null, key: 'amo:8303491', name: 'Администратор', matched: false },
+    ] } });
+    const chip = chips.find((item) => item.key === 'handlers');
+    assert.equal(chip.name, 'Ответственный');
+    assert.equal(chip.label, 'Администратор');
+    // Крестик снимает и учётки, и режим.
+    assert.deepEqual(chip.next.handler_keys, []);
+    assert.equal(chip.next.handler_mode, '');
+});
+
+test('в режиме «Ответственный» имя сотрудника берётся из справочника ответственных', () => {
+    const f = { ...EMPTY_FILTERS, handler_ids: [368], handler_mode: 'crm' };
+    const chips = activeFilterChips(f, {
+        operators: [],
+        marketing: { handlers: [{ id: 368, key: null, name: 'Айтжанулы Динмухаммет', matched: true }] },
+    });
+    assert.equal(chips.find((item) => item.key === 'handlers').label, 'Айтжанулы Динмухаммет');
+});
+
+test('«База разборов»: считаются, уходят и снимаются только оси сделки', () => {
+    const f = { ...EMPTY_FILTERS, date_from: '2026-09-01', date_to: '2026-09-30', operator_id: 5,
+                parks: ['itaxi'], deal_id: '123' };
+    assert.equal(countMarketingFilters(f), 2);
+    assert.equal(countActiveFilters(f), 4);
+    assert.deepEqual(marketingParams(f), { parks: ['itaxi'], deal_id: '123' });
+    const cleared = clearMarketing(f);
+    // Период и сотрудник, выставленные во «Звонках», не теряются.
+    assert.equal(cleared.date_from, '2026-09-01');
+    assert.equal(cleared.operator_id, 5);
+    assert.deepEqual(cleared.parks, []);
+    assert.equal(cleared.deal_id, '');
+    // Чипы маркетинга узнаются по ключам — те же ключи и отдаёт activeFilterChips.
+    const keys = activeFilterChips(f).map((chip) => chip.key);
+    assert.deepEqual(keys.filter((key) => MARKETING_CHIP_KEYS.includes(key)), ['parks', 'deal']);
+});
+
+test('панель берёт значение причины из поля value ответа сервера', () => {
+    // Сервер (call_qa.api.marketing_options) отдаёт причины как {value, title, calls}.
+    const api = readLf('call_qa/api.py');
+    assert.ok(api.includes('reasons = ordered([{"value": value, "title": value,'));
+    const panel = readLf('src/components/call_qa/QaFilters.jsx');
+    assert.ok(panel.includes('value: item.value, label: withCount(item.title, item.calls)'));
 });

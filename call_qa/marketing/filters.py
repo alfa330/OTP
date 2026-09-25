@@ -49,6 +49,30 @@ MAX_VALUES = 50
 STAGE_MODES = ('current', 'at_call')
 HANDLER_MODES = ('spoke', 'crm')
 
+# Откуда берётся справочник причин отказа (ФТ-09: «справочник причин из
+# amoCRM»). Причина выбирается только вместе с этапом «Закрыто-нереализовано»,
+# а такой этап есть лишь у воронки amoCRM: 137 свободных формулировок «Потока»
+# и 14 «Яндекс Регистрации» в этом списке были бы невыбираемым шумом.
+REASON_SOURCES = ('amo',)
+
+# Отделы, у разговоров которых бывает сделка. Воронка amoCRM и CRM-выгрузки
+# (`op_funnel_leads`) есть только у отдела продаж; у СЗоВ и Тез КЦ маркетинговый
+# блок не рисуется вовсе — пять пустых селекторов были бы шумом.
+DEAL_DEPARTMENTS = ('op',)
+
+# Канал сделки ДО словаря. Нормализатор воронки сводит YouTube в google (по
+# его правилам сходятся отчёты «Воронки ОП» с выгрузкой маркетинга, трогать их
+# нельзя), а ФТ-06 требует YouTube отдельным каналом. Поэтому здесь: если
+# сырой utm_source сделки в amoCRM — youtube, или поле пустое, а в тегах есть
+# токен youtube, канал — youtube; иначе нормализованное значение воронки.
+# Условие на google/пусто не даёт перебить явный рекламный источник другого
+# канала: у сделки с tiktok в поле тег youtube ничего не меняет.
+CHANNEL_RAW = ("(CASE WHEN COALESCE(l.utm_source, '') IN ('', 'google')"
+               " AND (lower(btrim(COALESCE(al.utm_source, ''))) = 'youtube'"
+               " OR (btrim(COALESCE(al.utm_source, '')) = ''"
+               " AND COALESCE(l.tags, '') ~* '(^|[^[:alnum:]])youtube([^[:alnum:]]|$)'))"
+               " THEN 'youtube' ELSE lower(btrim(COALESCE(l.utm_source, ''))) END)")
+
 # ── Как модуль прицепляется к запросу списка ────────────────────────────────
 #
 # Все JOIN'ы левые: субъект без сделки обязан остаться в списке (их большинство —
@@ -64,14 +88,17 @@ JOIN_SQL = """
                  LEFT JOIN qa_marketing_dict mpark
                         ON mpark.kind = 'park'
                        AND mpark.aliases ? lower(btrim(COALESCE(l.park_name, '')))
-                 LEFT JOIN qa_marketing_dict mchan
-                        ON mchan.kind = 'channel'
-                       AND mchan.aliases ? lower(btrim(COALESCE(l.utm_source, '')))
                  LEFT JOIN amo_leads al
                         ON sd.source = 'amo' AND l.lead_key ~ '^[0-9]+$'
                        AND al.lead_id = NULLIF(l.lead_key, '')::bigint
+                 LEFT JOIN qa_marketing_dict mchan
+                        ON mchan.kind = 'channel'
+                       AND mchan.aliases ? {channel_raw}
                  LEFT JOIN op_funnel_operator_map omap
                         ON omap.source = sd.source AND omap.external_key = l.owner_raw
+                 LEFT JOIN users hu ON hu.id = omap.user_id
+                 LEFT JOIN op_funnel_operator_map wmap
+                        ON wmap.source = 'wazzup' AND wmap.external_key = l.owner_raw
                  LEFT JOIN LATERAL (
                      SELECT ls.stage_raw, ls.reason_raw
                        FROM op_funnel_lead_stages ls
@@ -87,7 +114,7 @@ JOIN_SQL = """
                       ORDER BY ls.seen_at DESC
                       LIMIT 1
                  ) slast ON TRUE
-"""
+""".format(channel_raw=CHANNEL_RAW)
 
 # «Текущий этап» — ПОСЛЕДНЯЯ запись журнала, а снимок op_funnel_leads — только
 # запасной вариант, пока журнала у сделки нет. Снимок здесь не годится в
@@ -101,7 +128,7 @@ JOIN_SQL = """
 PARK_CODE = "COALESCE(mpark.code, '')"
 PARK_TITLE = "COALESCE(mpark.title, NULLIF(btrim(l.park_name), ''), '')"
 CHANNEL_CODE = "COALESCE(mchan.code, '')"
-CHANNEL_TITLE = "COALESCE(mchan.title, NULLIF(btrim(l.utm_source), ''), '')"
+CHANNEL_TITLE = f"COALESCE(mchan.title, NULLIF({CHANNEL_RAW}, ''), '')"
 CAMPAIGN = "COALESCE(NULLIF(btrim(al.utm_campaign), ''), '')"
 # btrim(NULL) = NULL, поэтому COALESCE переходит к снимку ТОЛЬКО когда строки
 # журнала нет. Пустая причина в журнале — это законный ответ «сделка вышла из
@@ -110,7 +137,24 @@ STAGE_CURRENT = "COALESCE(btrim(slast.stage_raw), btrim(l.stage_raw), '')"
 STAGE_AT_CALL = "COALESCE(btrim(shist.stage_raw), '')"
 REASON_CURRENT = "COALESCE(btrim(slast.reason_raw), btrim(l.reason_raw), '')"
 RESPONSIBLE_ID = "omap.user_id"
-RESPONSIBLE_RAW = "COALESCE(NULLIF(btrim(omap.external_name), ''), COALESCE(l.owner_raw, ''))"
+# Ответственный в CRM ПО ИМЕНИ. У amoCRM владелец сделки приходит номером
+# учётки («14110950»), и в сопоставлении воронки имя тоже номер — показывать его
+# в фильтре и выгрузке нельзя. Порядок: сотрудник портала, если сопоставлен;
+# имя из сопоставления, если это не номер; имя той же учётки из справочника
+# Wazzup (он знает учётки amoCRM по номеру и с именами: «Алмас Ешан»,
+# «Отток группа»); и лишь потом сам номер.
+RESPONSIBLE_NAME = ("COALESCE(NULLIF(btrim(hu.name), ''),"
+                    " CASE WHEN btrim(COALESCE(omap.external_name, '')) !~ '^[0-9]*$'"
+                    " THEN btrim(omap.external_name) END,"
+                    " NULLIF(btrim(wmap.external_name), ''),"
+                    " COALESCE(l.owner_raw, ''))")
+# Прежнее имя выражения: на него ссылаются выгрузка и карточка.
+RESPONSIBLE_RAW = RESPONSIBLE_NAME
+# Учётка CRM как значение фильтра, когда сотрудника портала у неё нет:
+# «amo:8303491». Источник в ключе обязателен — номера учёток разных CRM могут
+# совпасть.
+RESPONSIBLE_KEY = "(COALESCE(l.source, '') || ':' || COALESCE(l.owner_raw, ''))"
+LEAD_TYPE = "COALESCE(l.lead_type, '')"
 DEAL_ID = "COALESCE(l.lead_key, '')"
 DEAL_LINKED = "(sd.call_id IS NOT NULL)"
 
@@ -126,6 +170,16 @@ def is_lost_stage(stage):
     """Этап из группы «Закрыто-нереализовано»? По нему ФТ-09 включает причину."""
     text = str(stage or '').strip().lower()
     return any(marker in text for marker in LOST_STAGE_MARKERS)
+
+
+def lost_stage_sql(expression):
+    """(sql, params): этап-выражение из группы «Закрыто-нереализовано».
+
+    Шаблоны уходят параметрами, а не литералом: знак процента в тексте запроса
+    psycopg2 принимает за плейсхолдер, и запрос падал бы на ровном месте.
+    """
+    return (f"lower({expression}) LIKE ANY(%s)",
+            ([f"%{marker}%" for marker in LOST_STAGE_MARKERS],))
 
 
 def _codes(raw, field):
@@ -165,6 +219,29 @@ def _labels(raw, field):
             continue
         if len(text) > 300:
             raise ValueError(f"{field}: значение длиннее 300 символов")
+        if text not in out:
+            out.append(text)
+    if len(out) > MAX_VALUES:
+        raise ValueError(f"{field}: за раз можно выбрать не больше {MAX_VALUES} значений")
+    return out
+
+
+# Учётка CRM без сотрудника портала: «источник:ключ». Источник — код из
+# op_funnel_leads.source, ключ — номер учётки amoCRM или имя из CRM-выгрузки.
+_KEY_RE = re.compile(r'^[a-z_]{1,24}:[^\x00-\x1f]{1,200}$')
+
+
+def _keys(raw, field):
+    if raw in (None, '', []):
+        return []
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    out = []
+    for value in values:
+        text = str(value or '').strip()
+        if not text:
+            continue
+        if not _KEY_RE.match(text):
+            raise ValueError(f"{field}: недопустимое значение «{value}»")
         if text not in out:
             out.append(text)
     if len(out) > MAX_VALUES:
@@ -246,7 +323,15 @@ def normalise(raw):
     handler_mode = str(raw.get('handler_mode') or '').strip().lower()
     if handler_mode and handler_mode not in HANDLER_MODES:
         raise ValueError("handler_mode: допустимы spoke или crm")
-    if (handlers or handler_groups) and handler_mode == 'crm':
+    # Учётка CRM без сотрудника портала выбирается только как «Ответственный»:
+    # у того, кто говорил, учётки CRM нет вовсе. Отказ, а не молча снятое
+    # значение — иначе список выглядел бы отобранным, не будучи им.
+    handler_keys = _keys(raw.get('handler_keys'), 'handler_keys')
+    if handler_keys:
+        if handler_mode != 'crm':
+            raise ValueError("Учётку CRM можно выбрать только в режиме «Ответственный»")
+        out['handler_keys'] = handler_keys
+    if (handlers or handler_groups or handler_keys) and handler_mode == 'crm':
         out['handler_mode'] = 'crm'
 
     deal_id = str(raw.get('deal_id') or '').strip()
@@ -275,14 +360,20 @@ def predicate(filters, *, operator_id_sql, group_of_person):
     params = []
 
     def bucketed(expression, codes):
-        """Условие по оси со своей корзиной «Не определено»."""
+        """Условие по оси со своей корзиной «Не определено».
+
+        Корзина — это СДЕЛКА без значения («парк в CRM не указан»), а не
+        разговор без сделки: у несвязанного разговора пусты все оси, и без
+        условия на связь «Не определено» возвращало почти весь раздел (559 из
+        563 разборов ОП), хотя справочник рядом писал «Не определено · 4».
+        """
         real = [code for code in codes if code != NONE_BUCKET]
         clauses = []
         if real:
             clauses.append(f"{expression} = ANY(%s)")
             params.append(real)
         if NONE_BUCKET in codes:
-            clauses.append(f"{expression} = ''")
+            clauses.append(f"({DEAL_LINKED} AND {expression} = '')")
         return "(" + " OR ".join(clauses) + ")"
 
     if filters.get('parks'):
@@ -305,7 +396,8 @@ def predicate(filters, *, operator_id_sql, group_of_person):
 
     handlers = filters.get('handler_ids') or []
     groups = filters.get('handler_group_ids') or []
-    if handlers or groups:
+    keys = filters.get('handler_keys') or []
+    if handlers or groups or keys:
         if filters.get('handler_mode') == 'crm':
             # «Ответственный»: тот, за кем сделка закреплена в amoCRM. Имя
             # оттуда приходит строкой и сопоставляется вручную
@@ -321,6 +413,9 @@ def predicate(filters, *, operator_id_sql, group_of_person):
         if groups:
             clauses.append(f"{group_of_person(person_sql)} = ANY(%s)")
             params.append(groups)
+        if keys:
+            clauses.append(f"{RESPONSIBLE_KEY} = ANY(%s)")
+            params.append(keys)
         sql += " AND (" + " OR ".join(clauses) + ")"
 
     if filters.get('deal_id'):

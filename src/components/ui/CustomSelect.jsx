@@ -41,6 +41,14 @@ import { APPLE_FONT } from './ios';
  *                       списком. При строке поиска «Выбрать» берёт найденные,
  *                       а не весь список: набрал «Астана» — отметил Астану.
  *                       С maxSelected не сочетается: «все» там не бывает.
+ *
+ *   Вложенный уровень — у опции поле `parent` (значение родительской опции).
+ *   Такие строки скрыты, пока родителя не раскрыли стрелкой справа (или
+ *   клавишей →): так канал и его кампании живут в одном списке, но кампании
+ *   не заваливают его сотней строк (ТЗ #317, ФТ-06: «раскрывается по клику»).
+ *   Выбранная вложенная строка видна всегда, а поиск ищет и по вложенным —
+ *   иначе отмеченное пряталось бы за свёрнутым родителем.
+ *   expandLabel       — что лежит внутри, для подписи стрелки («кампании»).
  */
 export default function CustomSelect({
   value,
@@ -59,8 +67,10 @@ export default function CustomSelect({
   maxSelected = 0,
   bulkActions = false,
   textClassName = '',
+  expandLabel = 'вложенные',
 }) {
   const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(() => new Set());
   const [coords, setCoords] = useState(null);
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -163,11 +173,46 @@ export default function CustomSelect({
   const selectedSetRef = useRef(selectedSet);
   selectedSetRef.current = selectedSet;
 
+  /* Сколько вложенных строк у каждого родителя: по нему рисуется стрелка. */
+  const childCount = useMemo(() => {
+    const counts = new Map();
+    options.forEach((o) => {
+      if (o.parent == null) return;
+      const key = String(o.parent);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    return counts;
+  }, [options]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!showSearch || !q) return options;
-    return options.filter((o) => String(o.label ?? '').toLowerCase().includes(q));
-  }, [options, query, showSearch]);
+    if (showSearch && q) return options.filter((o) => String(o.label ?? '').toLowerCase().includes(q));
+    if (!childCount.size) return options;
+    return options.filter((o) => o.parent == null
+      || expanded.has(String(o.parent))
+      || selectedSetRef.current.has(String(o.value)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options, query, showSearch, childCount, expanded]);
+
+  const toggleExpanded = (value) => setExpanded((current) => {
+    const next = new Set(current);
+    const key = String(value);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  /* → раскрывает, ← сворачивает активного родителя. В строке поиска — только
+     пока она пуста: там стрелки двигают курсор по тексту. */
+  const expandByKey = (event) => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return false;
+    const option = filtered[activeIndex];
+    if (!option || !childCount.has(String(option.value))) return false;
+    const isOpen = expanded.has(String(option.value));
+    if ((event.key === 'ArrowRight') === isOpen) return false;
+    event.preventDefault();
+    toggleExpanded(option.value);
+    return true;
+  };
 
   useEffect(() => {
     if (!open) {
@@ -249,7 +294,9 @@ export default function CustomSelect({
           if ((event.key === 'Enter' || event.key === ' ') && open && !showSearch && activeIndex >= 0) {
             event.preventDefault();
             pick(filtered[activeIndex]);
+            return;
           }
+          if (open && !showSearch) expandByKey(event);
         }}
         className={isIos
           ? `flex w-full items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-left ${textClassName || 'text-[12.5px] font-medium text-slate-700'} ring-1 transition-all ${
@@ -309,6 +356,8 @@ export default function CustomSelect({
                   } else if (e.key === 'Enter') {
                     e.preventDefault();
                     if (activeIndex >= 0) pick(filtered[activeIndex]);
+                  } else if (!query) {
+                    expandByKey(e);
                   }
                 }}
                 placeholder={searchPlaceholder}
@@ -368,7 +417,10 @@ export default function CustomSelect({
                 const isBlocked = o.disabled || (!isSel && limitReached);
                 const groupLabel = o.groupLabel || '';
                 const startsGroup = groupLabel && groupLabel !== (filtered[index - 1]?.groupLabel || '');
-                const option = (
+                const children = childCount.get(String(o.value)) || 0;
+                const isChild = o.parent != null;
+                const isExpanded = expanded.has(String(o.value));
+                const row = (
                   <button
                     key={String(o.value)}
                     id={`${listboxId}-option-${index}`}
@@ -380,12 +432,12 @@ export default function CustomSelect({
                     onMouseEnter={() => setActiveIndex(index)}
                     onClick={() => pick(o)}
                     className={isIos
-                      ? `flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left text-[12.5px] font-medium transition-colors ${
+                      ? `flex w-full min-w-0 items-center justify-between gap-2 ${isChild ? 'pl-7 pr-3' : 'px-3'} py-2.5 text-left text-[12.5px] font-medium transition-colors ${
                         isSel
                           ? 'bg-blue-50 text-blue-700'
                           : isActive ? 'bg-slate-100 text-slate-800' : 'text-slate-700 hover:bg-slate-50'
                       } ${isBlocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`
-                      : `flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                      : `flex w-full min-w-0 items-center justify-between gap-2 ${isChild ? 'pl-7 pr-3' : 'px-3'} py-2 text-left text-sm transition-colors ${
                         isSel
                           ? 'bg-blue-50 text-blue-700'
                           : isActive ? 'bg-gray-100 text-gray-900' : 'text-gray-700 hover:bg-gray-50'
@@ -398,6 +450,30 @@ export default function CustomSelect({
                       </svg>
                     )}
                   </button>
+                );
+                /* Стрелка — отдельная кнопка рядом со строкой, а не внутри неё:
+                   кнопка в кнопке недопустима, а щелчок по самой строке обязан
+                   по-прежнему выбирать родителя. */
+                const option = !children ? row : (
+                  <div key={String(o.value)} className="flex items-stretch">
+                    <div className="min-w-0 flex-1">{row}</div>
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      aria-expanded={isExpanded}
+                      aria-label={`${isExpanded ? 'Скрыть' : 'Показать'} ${expandLabel}: ${o.label}`}
+                      title={`${isExpanded ? 'Скрыть' : 'Показать'} ${expandLabel} · ${children}`}
+                      onClick={() => toggleExpanded(o.value)}
+                      className={`flex shrink-0 items-center px-2.5 transition-colors ${isIos
+                        ? 'text-slate-400 hover:bg-slate-50 hover:text-slate-700'
+                        : 'text-gray-400 hover:bg-gray-50 hover:text-gray-700'}`}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true"
+                        className={`transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`}>
+                        <path d="M8 5l5 5-5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                  </div>
                 );
                 if (!startsGroup) return option;
                 return (

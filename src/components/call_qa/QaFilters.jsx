@@ -9,7 +9,8 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker, { isoDate } from '../ui/DateRangePicker';
 import {
     EMPTY_FILTERS, NO_GROUP, countActiveFilters, activeFilterChips, operatorsMatching,
-    clampScore, reasonsAllowed, filtersToParams,
+    clampScore, reasonsAllowed, filtersToParams, countMarketingFilters, clearMarketing,
+    MARKETING_CHIP_KEYS,
 } from './filters';
 
 /* Панель фильтров раздела «ИИ-оценка»: период, направление, группа, сотрудник,
@@ -86,13 +87,16 @@ const decodeChannelValues = (values) => ({
 });
 const U = 'u:';
 const G = 'g:';
+const K = 'k:';   // учётка CRM без сотрудника портала: «k:amo:8303491»
 const encodeHandlerValues = (filters) => [
     ...(filters.handler_ids || []).map((id) => U + id),
     ...(filters.handler_group_ids || []).map((id) => G + id),
+    ...(filters.handler_keys || []).map((key) => K + key),
 ];
 const decodeHandlerValues = (values) => ({
     handler_ids: values.filter((v) => v.startsWith(U)).map((v) => v.slice(U.length)),
     handler_group_ids: values.filter((v) => v.startsWith(G)).map((v) => v.slice(G.length)),
+    handler_keys: values.filter((v) => v.startsWith(K)).map((v) => v.slice(K.length)),
 });
 
 const withCount = (label, count) => (count ? `${label} · ${count}` : label);
@@ -107,6 +111,11 @@ export default function QaFilters(props) {
         showReviewedFilter = true,
         canExport = false,
         showToast,
+        /* «База разборов»: из отбора к правилам каталога относятся только оси
+           сделки (ТЗ #317, п. 2.1). Период, поиск, пресеты и выгрузка там не
+           действуют, поэтому и не показываются — панель без них честнее, чем
+           с органами, которые ничего не меняют. */
+        marketingOnly = false,
     } = props;
 
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
@@ -193,7 +202,7 @@ export default function QaFilters(props) {
     }, [apiBaseUrl, department, subject]);
 
     const loadPresets = () => {
-        if (!apiBaseUrl || !department) return;
+        if (!apiBaseUrl || !department || marketingOnly) return;
         axios.get(`${apiBaseUrl}/api/ai-qa/presets`, { params: { department }, headers: headers() })
             .then((r) => setPresets({ items: r.data?.items || [], can_share: !!r.data?.can_share }))
             .catch(() => setPresets({ items: [], can_share: false }));
@@ -299,9 +308,12 @@ export default function QaFilters(props) {
     const directions = options?.directions || [];
     const groups = options?.groups || [];
     const operators = options?.operators || [];
-    const activeCount = countActiveFilters(value);
-    const chips = activeFilterChips(value, { directions, groups, operators,
-                                            marketing: marketing || {} });
+    const activeCount = marketingOnly ? countMarketingFilters(value) : countActiveFilters(value);
+    const allChips = activeFilterChips(value, { directions, groups, operators,
+                                               marketing: marketing || {} });
+    const chips = marketingOnly
+        ? allChips.filter((chip) => MARKETING_CHIP_KEYS.includes(chip.key))
+        : allChips;
     const marketingReady = !!marketing?.available;
     const set = (fields) => onChange?.({ ...value, ...fields });
 
@@ -332,6 +344,67 @@ export default function QaFilters(props) {
         ...directions.map((item) => ({ value: item.id, label: item.name })),
     ];
 
+    /* «Сбросить» в «Базе разборов» снимает только оси сделки: остальной отбор
+       там не виден, и молча стирать его — значит потерять период, выставленный
+       во «Звонках». */
+    const resetAll = () => onChange?.(marketingOnly ? clearMarketing(value) : EMPTY_FILTERS);
+    const chipsRow = chips.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            {chips.map((chip) => (
+                <button
+                    key={chip.key}
+                    type="button"
+                    onClick={() => onChange?.(chip.next)}
+                    title={`Убрать: ${chip.name || chip.label}`}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:bg-slate-50"
+                >
+                    {/* Имени может не быть: у групп с названием «Группа
+                        Тестбаевой» оно дублировало бы значение (см.
+                        chipName в filters.js), и тогда чип — одно значение. */}
+                    {chip.name && <span className="text-slate-400">{chip.name}</span>}
+                    <span className="truncate font-medium">{chip.label}</span>
+                    <X size={12} className="shrink-0 text-slate-400" />
+                </button>
+            ))}
+            <button
+                type="button"
+                onClick={resetAll}
+                className="px-1.5 text-[12.5px] font-medium text-slate-500 hover:text-slate-800"
+            >
+                сбросить
+            </button>
+        </div>
+    );
+    const toggleButton = (label) => (
+        <button
+            type="button"
+            onClick={() => setOpen((state) => !state)}
+            aria-expanded={open}
+            className={`${activeCount ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
+        >
+            <SlidersHorizontal size={14} />
+            {label}{activeCount ? ` · ${activeCount}` : ''}
+        </button>
+    );
+
+    if (marketingOnly) {
+        // У отдела без сделок (СЗоВ, Тез КЦ) отбирать правила по сделке нечем.
+        if (!marketingReady) return null;
+        return (
+            <div>
+                <section className="flex items-center gap-2.5">{toggleButton('Отбор по сделке')}</section>
+                {chipsRow}
+                {open && (
+                    <section className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3`}>
+                        <MarketingFilters value={value} set={set} marketing={marketing}
+                                          groups={groups} operators={operators}
+                                          draft={draft} setDraft={setDraft} />
+                    </section>
+                )}
+            </div>
+        );
+    }
+
     return (
         <div>
             {/* Полоса, с которой начинают: период и поиск. Остальное — за кнопкой. */}
@@ -353,15 +426,7 @@ export default function QaFilters(props) {
                         placeholder="Сотрудник или номер — хватит фамилии"
                     />
                 </div>
-                <button
-                    type="button"
-                    onClick={() => setOpen((state) => !state)}
-                    aria-expanded={open}
-                    className={`${activeCount ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
-                >
-                    <SlidersHorizontal size={14} />
-                    Фильтры{activeCount ? ` · ${activeCount}` : ''}
-                </button>
+                {toggleButton('Фильтры')}
                 {/* Пресеты и выгрузка — рядом с «Фильтрами», а не внутри панели:
                     сохранённый отбор применяют, не раскрывая её. Меню, а не два
                     ряда кнопок: пресетов бывает десяток, и в полосе им не место. */}
@@ -435,33 +500,7 @@ export default function QaFilters(props) {
             {/* Чипы СРАЗУ под полосой, до панели: так они не прыгают вниз при её
                 раскрытии и видны, даже когда панель свёрнута — иначе снаружи
                 торчит только число, и человек не помнит, что именно отобрано. */}
-            {chips.length > 0 && (
-                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                    {chips.map((chip) => (
-                        <button
-                            key={chip.key}
-                            type="button"
-                            onClick={() => onChange?.(chip.next)}
-                            title={`Убрать: ${chip.name || chip.label}`}
-                            className="inline-flex max-w-full items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:bg-slate-50"
-                        >
-                            {/* Имени может не быть: у групп с названием «Группа
-                                Тестбаевой» оно дублировало бы значение (см.
-                                chipName в filters.js), и тогда чип — одно значение. */}
-                            {chip.name && <span className="text-slate-400">{chip.name}</span>}
-                            <span className="truncate font-medium">{chip.label}</span>
-                            <X size={12} className="shrink-0 text-slate-400" />
-                        </button>
-                    ))}
-                    <button
-                        type="button"
-                        onClick={() => onChange?.(EMPTY_FILTERS)}
-                        className="px-1.5 text-[12.5px] font-medium text-slate-500 hover:text-slate-800"
-                    >
-                        сбросить
-                    </button>
-                </div>
-            )}
+            {chipsRow}
             {/* Три колонки, а не четыре: фильтров пять, и в ряду по четыре
                 «Балл ИИ» повисал один во втором ряду, а панель выглядела
                 оборванной. По три ряды складываются осмысленно — «кого смотрим»
@@ -581,10 +620,12 @@ export default function QaFilters(props) {
  * «Сделка» один на весь ряд: пять подряд подписей с «CRM» в каждой — это шум.
  *
  * Где спрятана каждая ловушка ТЗ:
- *   ФТ-06 — кампания вторым уровнем: один список с заголовками по каналам.
+ *   ФТ-06 — кампания вторым уровнем: строки кампаний лежат под своим каналом
+ *           и раскрываются стрелкой (CustomSelect, поле `parent`).
  *   ФТ-07 — «Говорил / Ответственный» переключает КРУГ ЛЮДЕЙ в списке, а не
- *           только режим: у ответственного в CRM это учётки amoCRM, и
- *           несопоставленные показываются, но не выбираются.
+ *           только режим: у ответственного в CRM это владельцы сделок. Учётка
+ *           без сотрудника портала тоже выбирается — фильтр идёт по её ключу
+ *           в CRM, иначе половина учёток amoCRM была бы мёртвыми строками.
  *   ФТ-08 — режим этапа стоит РЯДОМ со списком; «на момент разговора» подписан
  *           датой, с которой вообще есть история.
  *   ФТ-09 — причина гаснет без этапа «Закрыто-нереализовано», и подсказка
@@ -597,21 +638,27 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
 
     const channelOptions = [];
     (marketing.channels || []).forEach((channel) => {
-        channelOptions.push({ value: CH + channel.code, label: withCount(channel.title, channel.calls),
-                              groupLabel: channel.title });
+        channelOptions.push({ value: CH + channel.code, label: withCount(channel.title, channel.calls) });
         (channel.campaigns || []).forEach((campaign) => {
-            channelOptions.push({ value: CP + campaign.value, label: withCount(`↳ ${campaign.value}`, campaign.calls),
-                                  groupLabel: channel.title });
+            channelOptions.push({ value: CP + campaign.value, label: withCount(campaign.value, campaign.calls),
+                                  parent: CH + channel.code });
         });
     });
 
     const crmMode = value.handler_mode === 'crm';
     const handlerOptions = [];
     if (crmMode) {
-        (marketing.handlers || []).forEach((person) => handlerOptions.push({
-            value: person.id != null ? U + person.id : `x:${person.name}`,
-            label: withCount(person.name, person.calls) + (person.matched ? '' : ' · не сопоставлен'),
-            disabled: !person.matched, groupLabel: 'Ответственные в CRM',
+        /* Сначала сотрудники портала, затем учётки CRM без сотрудника — двумя
+           группами: заголовок рисуется при смене группы, и вперемешку их было
+           бы не различить. */
+        const people = marketing.handlers || [];
+        people.filter((person) => person.matched).forEach((person) => handlerOptions.push({
+            value: U + person.id, label: withCount(person.name, person.calls),
+            groupLabel: 'Ответственные в CRM',
+        }));
+        people.filter((person) => !person.matched).forEach((person) => handlerOptions.push({
+            value: K + person.key, label: withCount(person.name, person.calls),
+            groupLabel: 'Учётки CRM без сотрудника в портале',
         }));
     } else {
         operatorsMatching(operators, EMPTY_FILTERS).forEach((person) => handlerOptions.push({
@@ -622,11 +669,18 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
         value: G + group.id, label: `${group.name} · ${group.operators}`, groupLabel: 'Группы',
     }));
 
+    /* Число рядом с этапом — разборы с этим этапом СЕЙЧАС. В режиме «на момент
+       разговора» оно отвечало бы на другой вопрос, поэтому там его нет. */
+    const atCall = value.stage_mode === 'at_call';
     const stageOptions = (marketing.stages || []).map((item) => ({
-        value: item.value, label: withCount(item.value, item.calls),
+        value: item.value, label: atCall ? item.value : withCount(item.value, item.calls),
     }));
+    /* Значение причины — поле `value` ответа: сервер отдаёт сырой текст
+       причины (или «none»), и именно его сравнивает предикат. Прежде здесь
+       читалось несуществующее `code`, у всех строк выходило undefined, и
+       выбранная причина молча не уходила в запрос. */
     const reasonOptions = (marketing.reasons || []).map((item) => ({
-        value: item.code, label: withCount(item.title, item.calls),
+        value: item.value, label: withCount(item.title, item.calls),
     }));
     const reasonsOn = reasonsAllowed(value);
     const historySince = marketing.stage_history_since
@@ -646,7 +700,7 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
             </label>
             <label className="block space-y-1.5">
                 <span className={iosGroupLabel}>Канал и кампания</span>
-                <CustomSelect multiple searchable variant="ios" ariaLabel="Канал"
+                <CustomSelect multiple searchable variant="ios" ariaLabel="Канал" expandLabel="кампании"
                     value={encodeChannelValues(value)} options={channelOptions} placeholder="Все каналы"
                     onChange={(next) => set(decodeChannelValues(next))} />
             </label>
@@ -657,7 +711,7 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
                         id оператора портала в режиме CRM означал бы не того человека. */}
                     <IosSegmented stretch ariaLabel="Режим «кто обрабатывал»"
                         value={value.handler_mode || ''} options={HANDLER_MODE_OPTIONS}
-                        onChange={(next) => set({ handler_mode: next, handler_ids: [], handler_group_ids: [] })} />
+                        onChange={(next) => set({ handler_mode: next, handler_ids: [], handler_group_ids: [], handler_keys: [] })} />
                     <CustomSelect multiple searchable variant="ios" ariaLabel="Кто обрабатывал"
                         value={encodeHandlerValues(value)} options={handlerOptions}
                         placeholder={crmMode ? 'Все ответственные' : 'Все сотрудники и группы'}
