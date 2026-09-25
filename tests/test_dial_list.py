@@ -295,27 +295,31 @@ class WiringTests(unittest.TestCase):
             pass
         svc = dial_service.DialListService(_DB())
         svc.list_departments = lambda ids=None: [{"department_id": i} for i in (ids or []) if i != 99]
-        pilot = next(iter(dial_service.DIAL_LIST_PILOT_LOGINS))
-        self.assertIsNone(svc.manager_scope(True, [], login=pilot))          # админ без отдела — всё
-        self.assertEqual(svc.manager_scope(False, [], login=pilot), [])      # обычная роль — ничего
-        self.assertEqual(svc.manager_scope(False, [5, 99], login=pilot), [5])  # глава — свои отделы из периметра
+        svc._heads_overseer = lambda ids: 7 in set(ids)   # отдел 7 — СЗоВ
+        self.assertIsNone(svc.manager_scope(True, [], login='admin'))          # админ — всё
+        self.assertIsNone(svc.manager_scope(True, [5], login='admin'))         # админ с отделом — тоже всё
+        self.assertEqual(svc.manager_scope(False, [], login='user'), [])       # обычная роль — ничего
+        self.assertEqual(svc.manager_scope(False, [5, 99], login='head'), [5])  # глава — свои отделы из периметра
+        self.assertIsNone(svc.manager_scope(False, [7], login='szov_head'))    # глава СЗоВ — весь раздел
+        overseer = inspect.getsource(dial_service.DialListService._heads_overseer)
+        self.assertIn('DIAL_LIST_OVERSEER_DEPARTMENT_CODES', overseer)
+        self.assertIn('szov', dial_service.DIAL_LIST_OVERSEER_DEPARTMENT_CODES)
 
-    def test_pilot_restricts_everyone_else(self):
-        # Решение владельца 22.09.2026: раздел пока виден только ему (alfa330).
-        self.assertIn('alfa330', dial_service.DIAL_LIST_PILOT_LOGINS)
-        self.assertTrue(dial_service.pilot_allows('alfa330'))
-        self.assertTrue(dial_service.pilot_allows(' Alfa330 '))
-        self.assertFalse(dial_service.pilot_allows('someone'))
-        self.assertFalse(dial_service.pilot_allows(None))
+    def test_pilot_is_over_and_section_is_open(self):
+        # Пилот (только alfa330, 22.09.2026) снят 25.09.2026: раздел открыт админам и главам.
+        self.assertEqual(len(dial_service.DIAL_LIST_PILOT_LOGINS), 0)
+        self.assertTrue(dial_service.pilot_allows('anyone'))
+        self.assertTrue(dial_service.pilot_allows(None))
 
         class _DB:
             pass
         svc = dial_service.DialListService(_DB())
         svc.list_departments = lambda ids=None: [{"department_id": 1}]
-        self.assertEqual(svc.manager_scope(True, [], login='other_admin'), [])
+        self.assertIsNone(svc.manager_scope(True, [], login='other_admin'))
         app_src = self._read(os.path.join('src', 'App.jsx'))
-        self.assertIn("DIAL_LIST_PILOT_LOGINS = new Set(['alfa330'])", app_src)
-        self.assertIn('dialListPilotAllows(user) &&', app_src)
+        self.assertIn("DIAL_LIST_PILOT_LOGINS = new Set();", app_src)
+        self.assertIn("DIAL_LIST_OVERSEER_DEPARTMENT_CODES = new Set(['szov'])", app_src)
+        self.assertIn('DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code)', app_src)
 
     def test_binotel_client_has_call_methods(self):
         from binotel import client as binotel_client

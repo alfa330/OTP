@@ -140,10 +140,14 @@ PERIOD_TZ = timezone(timedelta(hours=5))  # Asia/Almaty
 DIAL_LIST_DEPARTMENT_CODES = frozenset({"remote_cc"})
 
 # Пилот: пока список не пуст, раздел руководителя открыт ТОЛЬКО этим логинам —
-# даже админам его не показываем (решение владельца 22.09.2026: сначала смотрит
-# сам). Опустошить список = открыть раздел по обычным правилам (админы и главы).
+# даже админам его не показываем. Был {"alfa330"} с 22.09.2026 (владелец смотрел
+# сам); 25.09.2026 пилот снят — раздел открыт админам и главам по общим правилам.
 # Ручек телефона это не касается: там свои включатели у отдела и оператора.
-DIAL_LIST_PILOT_LOGINS = frozenset({"alfa330"})
+DIAL_LIST_PILOT_LOGINS = frozenset()
+
+# Главы этих отделов видят весь раздел, как админы: удалённый КЦ работает под
+# крылом СЗоВ (решение владельца 25.09.2026). Код отдела — в карточке отдела.
+DIAL_LIST_OVERSEER_DEPARTMENT_CODES = frozenset({"szov"})
 
 
 def pilot_allows(login):
@@ -354,17 +358,29 @@ class DialListService:
         return self.department_settings(department_id)
 
     def manager_scope(self, is_admin, headed_department_ids, login=None):
-        """Что видит руководитель: None — всё (админ без своего отдела); список id —
-        только свои отделы из периметра раздела; [] — раздел не его.
-        Пока идёт пилот (DIAL_LIST_PILOT_LOGINS), всем, кроме списка, — []."""
+        """Что видит руководитель: None — всё (админ; глава отдела из
+        DIAL_LIST_OVERSEER_DEPARTMENT_CODES, то есть СЗоВ); список id — глава отдела
+        периметра видит свои отделы; [] — раздел не его. Пилот (DIAL_LIST_PILOT_LOGINS)
+        снят 25.09.2026: список пуст, правило общее для всех."""
         if not pilot_allows(login):
             return []
-        headed = sorted({int(x) for x in (headed_department_ids or [])})
-        if is_admin and not headed:
+        if is_admin:
             return None
+        headed = sorted({int(x) for x in (headed_department_ids or [])})
         if not headed:
             return []
+        if self._heads_overseer(headed):
+            return None
         return [d["department_id"] for d in self.list_departments(headed)]
+
+    def _heads_overseer(self, department_ids):
+        """Возглавляет ли человек отдел-куратор раздела (код из DIAL_LIST_OVERSEER_DEPARTMENT_CODES)."""
+        if not department_ids or not DIAL_LIST_OVERSEER_DEPARTMENT_CODES:
+            return False
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT LOWER(COALESCE(code, '')) FROM departments WHERE id = ANY(%s)",
+                        ([int(x) for x in department_ids],))
+            return any((r[0] or "") in DIAL_LIST_OVERSEER_DEPARTMENT_CODES for r in cur.fetchall())
 
     # ------------------------------------------------------------ линии Binotel
     # Официальный API компании отдаёт по каждой внутренней линии SIP-логин и

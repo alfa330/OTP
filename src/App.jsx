@@ -386,8 +386,13 @@ const SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES = new Set(['tez']);
 const DIAL_LIST_DEPARTMENT_CODES = new Set(['remote_cc']);
 // Пилот раздела: пока список не пуст, пункт меню видят только эти логины (даже
 // админы не видят). Тот же список — на бэкенде (dial_list.service.DIAL_LIST_PILOT_LOGINS),
-// и решающий он: без логина из списка сервер отвечает 403.
-const DIAL_LIST_PILOT_LOGINS = new Set(['alfa330']);
+// и решающий он: без логина из списка сервер отвечает 403. Пилот снят 25.09.2026
+// (был ['alfa330']): раздел открыт админам и главам по общим правилам.
+const DIAL_LIST_PILOT_LOGINS = new Set();
+// Главы этих отделов видят весь раздел, как админы: удалённый КЦ работает под
+// крылом СЗоВ (решение владельца 25.09.2026). Тот же список на бэкенде —
+// dial_list.service.DIAL_LIST_OVERSEER_DEPARTMENT_CODES, и решающий он.
+const DIAL_LIST_OVERSEER_DEPARTMENT_CODES = new Set(['szov']);
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
@@ -42186,9 +42191,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // к Тез не относится): админы и глава отдела с кодом из
             // DIAL_LIST_DEPARTMENT_CODES. Периметр отделов и права на бэкенде
             // считает сам раздел (dial_list.service.manager_scope).
+            // Плюс главы отделов-кураторов (СЗоВ, DIAL_LIST_OVERSEER_DEPARTMENT_CODES) —
+            // им сервер отдаёт весь раздел, как админам.
             const canAccessDialListSection = dialListPilotAllows(user) && (isAdminLikeRole
                 || (isDepartmentHead(user)
-                    && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_DEPARTMENT_CODES.has(code))));
+                    && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_DEPARTMENT_CODES.has(code)
+                        || DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code))));
             // Раздел один, провайдер выбирается внутри. Порядок важен: первым
             // открывается первый доступный, и главе ТЭЗ это должен быть Binotel.
             const sipSettingsProviders = [
