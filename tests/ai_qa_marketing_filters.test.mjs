@@ -146,5 +146,13 @@ test('панель берёт значение причины из поля valu
     const api = readLf('call_qa/api.py');
     assert.ok(api.includes('reasons = ordered([{"value": value, "title": value,'));
     const panel = readLf('src/components/call_qa/QaFilters.jsx');
-    assert.ok(panel.includes('value: item.value, label: withCount(item.title, item.calls)'));
+    assert.ok(panel.includes('valueOf: (item) => item.value, titleOf: (item) => item.title, countOf: (item) => item.calls'));
+});
+
+test('чип кампании называет её канал, если сам канал не выбран', () => {
+    const marketing = { channels: [{ code: 'google', title: 'Google' }, { code: 'tiktok', title: 'TikTok' }] };
+    const only = activeFilterChips({ ...EMPTY_FILTERS, campaigns: ['google|весна'] }, { marketing });
+    assert.equal(only.find((chip) => chip.key === 'channels').label, 'Google / весна');
+    const both = activeFilterChips({ ...EMPTY_FILTERS, channels: ['google'], campaigns: ['google|весна'] }, { marketing });
+    assert.equal(both.find((chip) => chip.key === 'channels').label, 'Google, весна');
 });

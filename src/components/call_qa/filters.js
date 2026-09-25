@@ -253,11 +253,18 @@ export const activeFilterChips = (filters, options = {}) => {
     const campaigns = listOf(f.campaigns);
     if (channels.length || campaigns.length) {
         const parts = channels.map((code) => titleOf(marketing.channels, code, 'не определён'));
-        // Кампания хранится парой «канал|кампания»; в чипе — только её имя.
+        /* Кампания хранится парой «канал|кампания». В чипе — «Google / весна»,
+           а если этот канал и так выбран целиком — только имя кампании: иначе
+           вышло бы «Google, Google / весна». */
         if (campaigns.length) {
             parts.push(...campaigns.map((pair) => {
-                const cut = String(pair).indexOf('|');
-                return cut >= 0 ? String(pair).slice(cut + 1) : String(pair);
+                const text = String(pair);
+                const cut = text.indexOf('|');
+                if (cut < 0) return text;
+                const channel = text.slice(0, cut);
+                const name = text.slice(cut + 1);
+                return channels.includes(channel)
+                    ? name : `${titleOf(marketing.channels, channel, 'не определён')} / ${name}`;
             }));
         }
         add('channels', 'Канал', joined(parts), patch({ channels: [], campaigns: [] }));

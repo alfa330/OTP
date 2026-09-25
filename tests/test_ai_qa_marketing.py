@@ -514,10 +514,10 @@ class TabWiringTests(unittest.TestCase):
         self.assertIn('...dealParams', _read('src', 'components', 'call_qa', 'AdjudicationsRag.jsx'))
         panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
         # ФТ-09: значение причины — поле value ответа сервера.
-        self.assertIn('value: item.value, label: withCount(item.title, item.calls)', panel)
+        self.assertIn('valueOf: (item) => item.value, titleOf: (item) => item.title, countOf: (item) => item.calls', panel)
         self.assertNotIn('disabled: !person.matched', panel)
         self.assertIn('parent: CH + channel.code', panel)
-        self.assertIn('expandLabel="кампании"', panel)
+        self.assertIn("expandLabel: 'кампании'", panel)
         self.assertIn('parent', _read('src', 'components', 'ui', 'CustomSelect.jsx'))
 
 
@@ -643,6 +643,36 @@ class MarketingAccessTests(unittest.TestCase):
         self.assertIn('if (!apiBaseUrl || !department || !marketingAccess) {', panel)
         self.assertIn('marketingOnly || !marketingAccess) return;', panel)
         self.assertIn('{marketingAccess && (', panel)
+
+
+class DealBlockLookTests(unittest.TestCase):
+    """Вид блока «Сделка в amoCRM» (25.09.2026): группа как раздел настроек macOS,
+    ровные ряды, число разборов колонкой справа, пустые значения — серым ниже."""
+
+    def test_panel_layout(self):
+        panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
+        # Переключатели режимов — маленьким сегментом в строке подписи.
+        self.assertEqual(panel.count('<IosSegmented size="sm"'), 2)
+        self.assertIn('function DealField(', panel)
+        # Значения без разборов — отдельной частью списка, серым.
+        self.assertIn("const ZERO_GROUP = 'Без разборов';", panel)
+        self.assertIn('muted: true, groupLabel: ZERO_GROUP', panel)
+        # В кнопке — названия выбранного, а не «Выбрано: N».
+        self.assertIn('renderValue={(values) => pickedLabel(values, props.options)}', panel)
+        # Сетка не распирает карточку на телефоне.
+        self.assertIn('grid grid-cols-1 gap-x-3 gap-y-3.5 sm:grid-cols-2 lg:grid-cols-3', panel)
+        # Блок сделки — последним в панели, после обычных фильтров.
+        body = panel.split('export default function QaFilters', 1)[1].split('\nfunction ', 1)[0]
+        self.assertLess(body.index('Балл ИИ'), body.rindex('<MarketingFilters'))
+
+    def test_shared_primitives_stay_backward_compatible(self):
+        select = _read('src', 'components', 'ui', 'CustomSelect.jsx')
+        # meta/muted — необязательные поля опции: без них строка прежняя.
+        self.assertIn("o.meta != null && o.meta !== ''", select)
+        self.assertIn('o.muted && !isSel', select)
+        ios = _read('src', 'components', 'ui', 'ios.jsx')
+        self.assertIn("const small = size === 'sm';", ios)
+        self.assertIn(": 'rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium'", ios)
 
 if __name__ == '__main__':
     unittest.main()

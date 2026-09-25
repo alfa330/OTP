@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { SlidersHorizontal, X, Search, Bookmark, BookmarkPlus, Download, Trash2, Users2 } from 'lucide-react';
+import { SlidersHorizontal, X, Search, Bookmark, BookmarkPlus, Download, Trash2, Users2, Tag, Info } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosSegmented, IosMenu,
     IosModal, IosToggle,
@@ -10,7 +10,7 @@ import IosDateRangePicker, { isoDate } from '../ui/DateRangePicker';
 import {
     EMPTY_FILTERS, NO_GROUP, countActiveFilters, activeFilterChips, operatorsMatching,
     clampScore, reasonsAllowed, filtersToParams, countMarketingFilters, clearMarketing,
-    MARKETING_CHIP_KEYS,
+    MARKETING_CHIP_KEYS, NONE_BUCKET,
 } from './filters';
 
 /* Панель фильтров раздела «ИИ-оценка»: период, направление, группа, сотрудник,
@@ -100,7 +100,6 @@ const decodeHandlerValues = (values) => ({
     handler_keys: values.filter((v) => v.startsWith(K)).map((v) => v.slice(K.length)),
 });
 
-const withCount = (label, count) => (count ? `${label} · ${count}` : label);
 
 export default function QaFilters(props) {
     const {
@@ -410,11 +409,11 @@ export default function QaFilters(props) {
                 <section className="flex items-center gap-2.5">{toggleButton('Отбор по сделке')}</section>
                 {chipsRow}
                 {open && (
-                    <section className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3`}>
+                    <div className="mt-3">
                         <MarketingFilters value={value} set={set} marketing={marketing}
                                           groups={groups} operators={operators}
-                                          draft={draft} setDraft={setDraft} />
-                    </section>
+                                          draft={draft} setDraft={setDraft} standalone />
+                    </div>
                 )}
             </div>
         );
@@ -447,6 +446,7 @@ export default function QaFilters(props) {
                     ряда кнопок: пресетов бывает десяток, и в полосе им не место. */}
                 {marketingAccess && (
                 <IosMenu
+                    trigger={{ icon: <Bookmark size={14} />, text: 'Пресеты' }}
                     label="Пресеты"
                     disabled={busy === 'save' || busy === 'delete'}
                     items={[
@@ -476,6 +476,7 @@ export default function QaFilters(props) {
                 )}
                 {canExport && marketingAccess && (
                     <IosMenu
+                        trigger={{ icon: <Download size={14} />, text: busy === 'export' ? 'Выгружаем…' : 'Выгрузить' }}
                         label={busy === 'export' ? 'Выгружаем…' : 'Выгрузить'}
                         disabled={busy === 'export'}
                         items={[
@@ -524,7 +525,7 @@ export default function QaFilters(props) {
                 и «какие оценки», — а на вкладке «Очередь ревью», где последних
                 двух нет, выходит ровно один полный ряд. */}
             {open && (
-                <section className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3`}>
+                <section className={`${iosCard} mt-3 grid grid-cols-1 gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3`}>
                     <label className="block space-y-1.5">
                         <span className={iosGroupLabel}>Направление</span>
                         <CustomSelect
@@ -582,11 +583,6 @@ export default function QaFilters(props) {
                             />
                         </div>
                     )}
-                    {marketingReady && (
-                        <MarketingFilters value={value} set={set} marketing={marketing}
-                                          groups={groups} operators={operators}
-                                          draft={draft} setDraft={setDraft} />
-                    )}
                     {showScoreFilters && (
                         <div className="block space-y-1.5">
                             <span className={iosGroupLabel}>Балл ИИ</span>
@@ -624,6 +620,13 @@ export default function QaFilters(props) {
                             </div>
                         </div>
                     )}
+                    {/* Сделка — последней, во всю ширину: обычные фильтры идут
+                        вместе, а блок другой предметной области не рвёт их ряды. */}
+                    {marketingReady && (
+                        <MarketingFilters value={value} set={set} marketing={marketing}
+                                          groups={groups} operators={operators}
+                                          draft={draft} setDraft={setDraft} />
+                    )}
                 </section>
             )}
 
@@ -632,9 +635,19 @@ export default function QaFilters(props) {
 }
 
 
-/* Маркетинговые оси (ТЗ #317, раздел 6.1). Те же три колонки и подписи, что у
- * основного ряда: блок — продолжение панели, а не вторая панель. Заголовок
- * «Сделка» один на весь ряд: пять подряд подписей с «CRM» в каждой — это шум.
+/* Маркетинговые оси (ТЗ #317, раздел 6.1) — отдельной группой, как раздел в
+ * «Системных настройках» macOS: сделка — другая предметная область, чем
+ * «кто и как оценён», и сливаться с соседними полями блок не должен.
+ *
+ * Раскладка — два ровных ряда по три поля (на планшете — по два): переключатели
+ * режима («Говорил / Ответственный», «Сейчас / На момент разговора») стоят в
+ * строке подписи маленьким сегментом, а не отдельной строкой над списком —
+ * иначе ряды получались разной высоты и под соседними полями зияли дыры.
+ *
+ * В списках число разборов стоит справа колонкой (как сочетание клавиш в меню
+ * macOS), значения без разборов — ниже, серым, под заголовком «Без разборов»:
+ * полный справочник по ТЗ остаётся, но сразу видно, где выбирать есть смысл.
+ * В кнопке — названия выбранного, а не «Выбрано: N».
  *
  * Где спрятана каждая ловушка ТЗ:
  *   ФТ-06 — кампания вторым уровнем: строки кампаний лежат под своим каналом
@@ -643,133 +656,182 @@ export default function QaFilters(props) {
  *           только режим: у ответственного в CRM это владельцы сделок. Учётка
  *           без сотрудника портала тоже выбирается — фильтр идёт по её ключу
  *           в CRM, иначе половина учёток amoCRM была бы мёртвыми строками.
- *   ФТ-08 — режим этапа стоит РЯДОМ со списком; «на момент разговора» подписан
- *           датой, с которой вообще есть история.
+ *   ФТ-08 — «на момент разговора» подписан датой, с которой вообще есть история.
  *   ФТ-09 — причина гаснет без этапа «Закрыто-нереализовано», и подсказка
  *           говорит, что именно выбрать, а не просто серый селектор.
  */
-function MarketingFilters({ value, set, marketing, groups, operators, draft, setDraft }) {
-    const parkOptions = (marketing.parks || []).map((item) => ({
-        value: item.code, label: withCount(item.title, item.calls),
-    }));
+const ZERO_GROUP = 'Без разборов';
 
-    const channelOptions = [];
-    (marketing.channels || []).forEach((channel) => {
-        channelOptions.push({ value: CH + channel.code, label: withCount(channel.title, channel.calls) });
-        (channel.campaigns || []).forEach((campaign) => {
-            /* Значение кампании — пара «канал|кампания»: одно имя бывает у
-               разных каналов, и без канала две строки выбирались бы разом. */
-            channelOptions.push({ value: `${CP}${channel.code}|${campaign.value}`,
-                                  label: withCount(campaign.value, campaign.calls),
-                                  parent: CH + channel.code });
-        });
+/* Строки списка: сначала значения с разборами (число справа), затем без них —
+   серым под заголовком. «Не определено» — последней в своей части, как в
+   перечне ФТ-05/ФТ-06. Если разборов нет ни у одного значения, делить нечего:
+   список обычный, без серого и без заголовка. */
+const countedOptions = (items, { valueOf, titleOf, countOf, extra = () => ({}) }) => {
+    const isNone = (item) => valueOf(item) === NONE_BUCKET || valueOf(item) === CH + NONE_BUCKET;
+    const noneLast = (list) => [...list.filter((item) => !isNone(item)), ...list.filter(isNone)];
+    const counted = noneLast(items.filter((item) => countOf(item) > 0));
+    const zero = noneLast(items.filter((item) => !(countOf(item) > 0)));
+    const split = counted.length > 0;
+    return [
+        ...counted.flatMap((item) => [{ value: valueOf(item), label: titleOf(item), meta: String(countOf(item)) },
+                                      ...(extra(item).children || [])]),
+        ...zero.flatMap((item) => [{ value: valueOf(item), label: titleOf(item),
+                                     ...(split ? { muted: true, groupLabel: ZERO_GROUP } : {}) },
+                                   ...(extra(item).children || []).map((child) => (
+                                       split ? { ...child, groupLabel: ZERO_GROUP } : child))]),
+    ];
+};
+
+/* Подпись кнопки мультивыбора: «iTaxi, Jana» или «iTaxi, Jana +3». */
+const pickedLabel = (values, options) => {
+    const labelOf = new Map(options.map((option) => [String(option.value), option.label]));
+    const names = values.map((value) => labelOf.get(String(value))).filter(Boolean);
+    if (!names.length) return `Выбрано: ${values.length}`;
+    return names.length <= 2 ? names.join(', ') : `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
+};
+
+function DealField({ label, accessory, children }) {
+    return (
+        <div className="min-w-0 space-y-1.5">
+            <div className="flex min-h-[28px] flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                <span className={iosGroupLabel}>{label}</span>
+                {accessory}
+            </div>
+            {children}
+        </div>
+    );
+}
+
+function MarketingFilters({ value, set, marketing, groups, operators, draft, setDraft, standalone = false }) {
+    const parkOptions = countedOptions(marketing.parks || [], {
+        valueOf: (item) => item.code, titleOf: (item) => item.title, countOf: (item) => item.calls,
+    });
+
+    const channelOptions = countedOptions(marketing.channels || [], {
+        valueOf: (channel) => CH + channel.code, titleOf: (channel) => channel.title,
+        countOf: (channel) => channel.calls,
+        /* Значение кампании — пара «канал|кампания»: одно имя бывает у
+           разных каналов, и без канала две строки выбирались бы разом. */
+        extra: (channel) => ({ children: (channel.campaigns || []).map((campaign) => ({
+            value: `${CP}${channel.code}|${campaign.value}`, label: campaign.value,
+            meta: campaign.calls ? String(campaign.calls) : undefined, parent: CH + channel.code,
+        })) }),
     });
 
     const crmMode = value.handler_mode === 'crm';
-    const handlerOptions = [];
+    let handlerOptions;
     if (crmMode) {
         /* Сначала сотрудники портала, затем учётки CRM без сотрудника — двумя
            группами: заголовок рисуется при смене группы, и вперемешку их было
            бы не различить. */
         const people = marketing.handlers || [];
-        people.filter((person) => person.matched).forEach((person) => handlerOptions.push({
-            value: U + person.id, label: withCount(person.name, person.calls),
-            groupLabel: 'Ответственные в CRM',
-        }));
-        people.filter((person) => !person.matched).forEach((person) => handlerOptions.push({
-            value: K + person.key, label: withCount(person.name, person.calls),
-            groupLabel: 'Учётки CRM без сотрудника в портале',
-        }));
+        const row = (person, value, groupLabel) => ({
+            value, label: person.name, groupLabel,
+            ...(person.calls ? { meta: String(person.calls) } : { muted: true }),
+        });
+        handlerOptions = [
+            ...people.filter((person) => person.matched)
+                .map((person) => row(person, U + person.id, 'Ответственные в CRM')),
+            ...people.filter((person) => !person.matched)
+                .map((person) => row(person, K + person.key, 'Учётки CRM без сотрудника')),
+        ];
     } else {
-        operatorsMatching(operators, EMPTY_FILTERS).forEach((person) => handlerOptions.push({
-            value: U + person.id, label: withCount(person.name, person.evaluations), groupLabel: 'Сотрудники',
+        handlerOptions = operatorsMatching(operators, EMPTY_FILTERS).map((person) => ({
+            value: U + person.id, label: person.name, groupLabel: 'Сотрудники',
+            ...(person.evaluations ? { meta: String(person.evaluations) } : {}),
         }));
     }
     (groups || []).forEach((group) => handlerOptions.push({
-        value: G + group.id, label: `${group.name} · ${group.operators}`, groupLabel: 'Группы',
+        value: G + group.id, label: group.name, meta: `${group.operators} чел.`, groupLabel: 'Группы',
     }));
 
     /* Число рядом с этапом — разборы с этим этапом СЕЙЧАС. В режиме «на момент
-       разговора» оно отвечало бы на другой вопрос, поэтому там его нет. */
+       разговора» оно отвечало бы на другой вопрос, поэтому там список обычный. */
     const atCall = value.stage_mode === 'at_call';
-    const stageOptions = (marketing.stages || []).map((item) => ({
-        value: item.value, label: atCall ? item.value : withCount(item.value, item.calls),
-    }));
+    const stageOptions = atCall
+        ? (marketing.stages || []).map((item) => ({ value: item.value, label: item.value }))
+        : countedOptions(marketing.stages || [], {
+            valueOf: (item) => item.value, titleOf: (item) => item.value, countOf: (item) => item.calls,
+        });
     /* Значение причины — поле `value` ответа: сервер отдаёт сырой текст
-       причины (или «none»), и именно его сравнивает предикат. Прежде здесь
-       читалось несуществующее `code`, у всех строк выходило undefined, и
-       выбранная причина молча не уходила в запрос. */
-    const reasonOptions = (marketing.reasons || []).map((item) => ({
-        value: item.value, label: withCount(item.title, item.calls),
-    }));
+       причины (или «none»), и именно его сравнивает предикат. */
+    const reasonOptions = countedOptions(marketing.reasons || [], {
+        valueOf: (item) => item.value, titleOf: (item) => item.title, countOf: (item) => item.calls,
+    });
     const reasonsOn = reasonsAllowed(value);
-    const historySince = marketing.stage_history_since
-        ? `история ведётся с ${marketing.stage_history_since.slice(8, 10)}.${marketing.stage_history_since.slice(5, 7)}`
-        : 'истории этапов ещё нет';
+    const since = marketing.stage_history_since;
+    const historyNote = since
+        ? `История этапов ведётся с ${since.slice(8, 10)}.${since.slice(5, 7)} — у разговоров до этой даты этап на момент разговора пуст.`
+        : 'Истории этапов ещё нет — этап на момент разговора появится у новых разговоров.';
+
+    const select = (props) => (
+        <CustomSelect multiple searchable variant="ios"
+            renderValue={(values) => pickedLabel(values, props.options)} {...props} />
+    );
 
     return (
-        <>
-            <div className="sm:col-span-2 lg:col-span-3 -mb-1 mt-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                Сделка в amoCRM
-            </div>
-            <label className="block space-y-1.5">
-                <span className={iosGroupLabel}>Таксопарк</span>
-                <CustomSelect multiple searchable variant="ios" ariaLabel="Таксопарк"
-                    value={value.parks || []} options={parkOptions} placeholder="Все парки"
-                    onChange={(next) => set({ parks: next })} />
-            </label>
-            <label className="block space-y-1.5">
-                <span className={iosGroupLabel}>Канал и кампания</span>
-                <CustomSelect multiple searchable variant="ios" ariaLabel="Канал" expandLabel="кампании"
-                    value={encodeChannelValues(value)} options={channelOptions} placeholder="Все каналы"
-                    onChange={(next) => set(decodeChannelValues(next))} />
-            </label>
-            <div className="block space-y-1.5">
-                <span className={iosGroupLabel}>Кто обрабатывал</span>
-                <div className="space-y-1.5">
-                    {/* Смена режима сбрасывает выбранных: список людей другой, и
-                        id оператора портала в режиме CRM означал бы не того человека. */}
-                    <IosSegmented stretch ariaLabel="Режим «кто обрабатывал»"
+        <section className={standalone
+            ? `${iosCard} p-3.5`
+            : 'sm:col-span-2 lg:col-span-3 rounded-2xl bg-slate-50/80 p-3.5 ring-1 ring-slate-200/60'}>
+            <header className="mb-3 flex items-center gap-1.5 px-1">
+                <Tag size={13} className="text-slate-400" aria-hidden="true" />
+                <h3 className="text-[13px] font-semibold text-slate-700">Сделка в amoCRM</h3>
+            </header>
+            <div className="grid grid-cols-1 gap-x-3 gap-y-3.5 sm:grid-cols-2 lg:grid-cols-3">
+                <DealField label="Таксопарк">
+                    {select({ ariaLabel: 'Таксопарк', value: value.parks || [], options: parkOptions,
+                              placeholder: 'Все парки', onChange: (next) => set({ parks: next }) })}
+                </DealField>
+                <DealField label="Канал и кампания">
+                    {select({ ariaLabel: 'Канал', expandLabel: 'кампании', value: encodeChannelValues(value),
+                              options: channelOptions, placeholder: 'Все каналы',
+                              onChange: (next) => set(decodeChannelValues(next)) })}
+                </DealField>
+                <DealField label="Номер сделки">
+                    <div className="relative">
+                        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[12.5px] text-slate-400">№</span>
+                        <input type="text" inputMode="numeric" aria-label="Номер сделки"
+                            className="w-full rounded-xl bg-white py-2 pl-8 pr-3 text-[12.5px] font-medium tabular-nums text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70 transition placeholder:font-normal placeholder:text-slate-400 hover:bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+                            value={draft.deal_id} placeholder="34210987"
+                            onChange={(event) => setDraft((state) => ({ ...state, deal_id: event.target.value }))} />
+                    </div>
+                </DealField>
+                <DealField label="Кто обрабатывал" accessory={(
+                    /* Смена режима сбрасывает выбранных: список людей другой, и
+                       id оператора портала в режиме CRM означал бы не того человека. */
+                    <IosSegmented size="sm" ariaLabel="Режим «кто обрабатывал»"
                         value={value.handler_mode || ''} options={HANDLER_MODE_OPTIONS}
                         onChange={(next) => set({ handler_mode: next, handler_ids: [], handler_group_ids: [], handler_keys: [] })} />
-                    <CustomSelect multiple searchable variant="ios" ariaLabel="Кто обрабатывал"
-                        value={encodeHandlerValues(value)} options={handlerOptions}
-                        placeholder={crmMode ? 'Все ответственные' : 'Все сотрудники и группы'}
-                        onChange={(next) => set(decodeHandlerValues(next))} />
-                </div>
-            </div>
-            <div className="block space-y-1.5">
-                <span className={iosGroupLabel}>Этап сделки</span>
-                <div className="space-y-1.5">
-                    <IosSegmented stretch ariaLabel="Режим этапа"
+                )}>
+                    {select({ ariaLabel: 'Кто обрабатывал', value: encodeHandlerValues(value), options: handlerOptions,
+                              placeholder: crmMode ? 'Все ответственные' : 'Все сотрудники и группы',
+                              onChange: (next) => set(decodeHandlerValues(next)) })}
+                </DealField>
+                <DealField label="Этап сделки" accessory={(
+                    <IosSegmented size="sm" ariaLabel="Режим этапа"
                         value={value.stage_mode || ''} options={STAGE_MODE_OPTIONS}
                         onChange={(next) => set({ stage_mode: next })} />
-                    <CustomSelect multiple searchable variant="ios" ariaLabel="Этап сделки"
-                        value={value.stages || []} options={stageOptions} placeholder="Все этапы"
-                        /* Снятые этапы уносят и причину — иначе отбор станет
-                           недопустимым (ФТ-09), и сервер ответит 400. */
-                        onChange={(next) => set({ stages: next,
-                                                  reasons: next.some((v) => reasonsAllowed({ stages: [v] })) ? value.reasons : [] })} />
-                    {value.stage_mode === 'at_call' && (
-                        <p className="text-[11.5px] text-slate-400">{historySince}; до неё этап на момент разговора пуст</p>
-                    )}
-                </div>
+                )}>
+                    {select({ ariaLabel: 'Этап сделки', value: value.stages || [], options: stageOptions,
+                              placeholder: 'Все этапы',
+                              /* Снятые этапы уносят и причину — иначе отбор станет
+                                 недопустимым (ФТ-09), и сервер ответит 400. */
+                              onChange: (next) => set({ stages: next,
+                                                        reasons: next.some((v) => reasonsAllowed({ stages: [v] })) ? value.reasons : [] }) })}
+                </DealField>
+                <DealField label="Причина отказа">
+                    {select({ ariaLabel: 'Причина отказа', disabled: !reasonsOn, value: value.reasons || [],
+                              options: reasonOptions,
+                              placeholder: reasonsOn ? 'Все причины' : 'Сначала этап «Закрыто и не реализовано»',
+                              onChange: (next) => set({ reasons: next }) })}
+                </DealField>
             </div>
-            <label className="block space-y-1.5">
-                <span className={iosGroupLabel}>Причина отказа</span>
-                <CustomSelect multiple searchable variant="ios" ariaLabel="Причина отказа"
-                    disabled={!reasonsOn}
-                    value={value.reasons || []} options={reasonOptions}
-                    placeholder={reasonsOn ? 'Все причины' : 'Сначала этап «Закрыто и не реализовано»'}
-                    onChange={(next) => set({ reasons: next })} />
-            </label>
-            <label className="block space-y-1.5">
-                <span className={iosGroupLabel}>Номер сделки</span>
-                <input type="text" inputMode="numeric" className={iosInput}
-                    value={draft.deal_id} placeholder="Например, 34210987"
-                    aria-label="Номер сделки"
-                    onChange={(event) => setDraft((state) => ({ ...state, deal_id: event.target.value }))} />
-            </label>
-        </>
+            {atCall && (
+                <p className="mt-3 flex items-start gap-1.5 px-1 text-[11.5px] leading-snug text-slate-500">
+                    <Info size={13} className="mt-px shrink-0 text-slate-400" aria-hidden="true" />
+                    {historyNote}
+                </p>
+            )}
+        </section>
     );
 }

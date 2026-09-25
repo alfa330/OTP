@@ -303,14 +303,17 @@ export const IosPager = ({ page, pageCount, total, from, to, onPage, unit = 'с�
  *
  * options: [{ value, label, icon?, count? }]
  */
+/* size: 'sm' — компактный переключатель режима в строке подписи поля (как
+   маленький NSSegmentedControl в настройках macOS), 'md' — обычный, 'lg' — крупный. */
 export const IosSegmented = ({ value, options = [], onChange, size = 'md', stretch = false, className = '', ariaLabel }) => {
     const large = size === 'lg';
+    const small = size === 'sm';
     const wide = stretch || large;
     return (
         <div
             role="tablist"
             aria-label={ariaLabel}
-            className={`${wide ? 'flex w-full' : 'inline-flex'} ${large ? 'gap-1 rounded-[12px] p-[4px]' : 'rounded-[10px] p-[3px]'} bg-slate-100 ${className}`}
+            className={`${wide ? 'flex w-full' : 'inline-flex'} ${large ? 'gap-1 rounded-[12px] p-[4px]' : small ? 'rounded-[8px] p-[2px]' : 'rounded-[10px] p-[3px]'} bg-slate-100 ${className}`}
         >
             {options.filter(Boolean).map((option) => {
                 const active = option.value === value;
@@ -326,7 +329,9 @@ export const IosSegmented = ({ value, options = [], onChange, size = 'md', stret
                         } ${
                             large
                                 ? 'rounded-[9px] px-3.5 py-2 text-[13.5px] font-semibold'
-                                : 'rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium'
+                                : small
+                                    ? 'rounded-[6px] px-2 py-[3px] text-[11.5px] font-medium'
+                                    : 'rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium'
                         } ${
                             active
                                 ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
@@ -499,7 +504,10 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
  *
  * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore? }]
  */
-export const IosMenu = ({ items = [], label = 'Действия', align = 'right', disabled = false }) => {
+/* trigger — необязательная видимая подпись кнопки ({ icon, text }): рядом с
+   другими кнопками два одинаковых «···» не различить («Пресеты» и «Выгрузить»
+   в панели фильтров). Без неё — прежняя круглая кнопка «···». */
+export const IosMenu = ({ items = [], label = 'Действия', align = 'right', disabled = false, trigger = null }) => {
     const [open, setOpen] = React.useState(false);
     const [coords, setCoords] = React.useState(null);
     const btnRef = React.useRef(null);
@@ -571,13 +579,22 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                 aria-haspopup="menu"
                 aria-expanded={open}
                 onClick={() => setOpen((v) => !v)}
-                className={`grid h-8 w-8 shrink-0 place-items-center rounded-full transition active:scale-95 disabled:opacity-40 ${
-                    open ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'
-                }`}
+                className={trigger
+                    ? `${iosBtnSecondary} shrink-0 ${open ? '!bg-slate-200' : ''}`
+                    : `grid h-8 w-8 shrink-0 place-items-center rounded-full transition active:scale-95 disabled:opacity-40 ${
+                        open ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'
+                    }`}
             >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                    <circle cx="3" cy="8" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="13" cy="8" r="1.5" />
-                </svg>
+                {trigger ? (
+                    <>
+                        {trigger.icon}
+                        {trigger.text}
+                    </>
+                ) : (
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        <circle cx="3" cy="8" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="13" cy="8" r="1.5" />
+                    </svg>
+                )}
             </button>
 
             {open && coords && createPortal(

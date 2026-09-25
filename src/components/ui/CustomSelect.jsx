@@ -49,6 +49,13 @@ import { APPLE_FONT } from './ios';
  *   Выбранная вложенная строка видна всегда, а поиск ищет и по вложенным —
  *   иначе отмеченное пряталось бы за свёрнутым родителем.
  *   expandLabel       — что лежит внутри, для подписи стрелки («кампании»).
+ *
+ *   У опции ещё два необязательных поля:
+ *   meta              — приглушённый текст справа, как сочетание клавиш в меню
+ *                       macOS (число разборов, счётчик): цифры в колонке, а не
+ *                       приклеены к названию через точку.
+ *   muted             — приглушённая строка: выбрать можно, но видно, что за ней
+ *                       ничего нет (значение без разборов).
  */
 export default function CustomSelect({
   value,
@@ -464,7 +471,12 @@ export default function CustomSelect({
                           : isActive ? 'bg-gray-100 text-gray-900' : 'text-gray-700 hover:bg-gray-50'
                       } ${isBlocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
                   >
-                    <span className="truncate">{o.label}</span>
+                    <span className={`truncate ${o.muted && !isSel ? (isIos ? 'text-slate-400' : 'text-gray-400') : ''}`}>{o.label}</span>
+                    {o.meta != null && o.meta !== '' && (
+                      <span className={`ml-auto shrink-0 tabular-nums ${isIos ? 'text-[11.5px]' : 'text-xs'} ${isSel ? 'text-blue-500' : 'text-slate-400'}`}>
+                        {o.meta}
+                      </span>
+                    )}
                     {isSel && (
                       <svg width="14" height="14" viewBox="0 0 20 20" fill="none" className="shrink-0">
                         <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -475,7 +487,15 @@ export default function CustomSelect({
                 /* Стрелка — отдельная кнопка рядом со строкой, а не внутри неё:
                    кнопка в кнопке недопустима, а щелчок по самой строке обязан
                    по-прежнему выбирать родителя. */
-                const option = !children ? row : (
+                /* В списке с раскрываемыми строками у остальных строк справа
+                   пустое место в ширину стрелки: иначе число у строки со
+                   стрелкой уезжает влево, и колонка чисел ломается. */
+                const option = !children ? (childCount.size ? (
+                  <div key={String(o.value)} className="flex items-stretch">
+                    <div className="min-w-0 flex-1">{row}</div>
+                    <span className="w-[34px] shrink-0" aria-hidden="true" />
+                  </div>
+                ) : row) : (
                   <div key={String(o.value)} className="flex items-stretch">
                     <div className="min-w-0 flex-1">{row}</div>
                     <button
