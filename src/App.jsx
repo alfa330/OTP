@@ -40,6 +40,7 @@ import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 // «поверх всех» браузер даёт только по свежему жесту пользователя.
 import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';
 import FaIcon from './components/common/FaIcon';
+import RegLaurelWreath from './components/contests/RegLaurelWreath';
 import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import ProfileView from './components/profile/ProfileView';
@@ -225,6 +226,7 @@ const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModa
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
+const RegContestCeremony = lazyWithRetry(() => import('./components/contests/RegContestCeremony'));
 const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
 const HoursAccountingMobileView = lazyWithRetry(() => import('./components/hours/HoursAccountingMobile'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
@@ -39502,36 +39504,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Сколько мест показываем в группе (Линия может дорасти до ~60
         // операторов СЗоВ — весь хвост не нужен ни на телефоне, ни админу).
         const REG_LIST_COLLAPSE = 10;
-        // Тона лаврового венка по призовым местам: золото, серебро, бронза.
-        const REG_WREATH_TONES = {
-            1: { leaf: '#E8B10E', leafAlt: '#C98F06', berry: '#F6CE53' },
-            2: { leaf: '#A8B2BD', leafAlt: '#8B96A3', berry: '#CBD3DB' },
-            3: { leaf: '#C4854E', leafAlt: '#A76B39', berry: '#DFAC7C' },
-        };
-
-        // Лавровый венок призёра: две зеркальные ветви обнимают аватарку снизу
-        // и по бокам, сверху разрыв — лицо не перекрывается. Рисуется слоем ПОД
-        // аватаркой, наружу выглядывают только кончики листьев.
-        const RegLaurelWreath = ({ place, className = '' }) => {
-            const tone = REG_WREATH_TONES[place];
-            if (!tone) return null;
-            const leaves = [78, 100, 122, 143, 162, 176];
-            return (
-                <svg viewBox="0 0 100 100" className={className} aria-hidden="true">
-                    {[false, true].map((mirrored) => (
-                        <g key={mirrored ? 'left' : 'right'} transform={mirrored ? 'scale(-1 1) translate(-100 0)' : undefined}>
-                            {leaves.map((angle, i) => (
-                                <path key={angle}
-                                      d="M50 3 C57 9 57 21 50 27 C43 21 43 9 50 3"
-                                      fill={i % 2 ? tone.leafAlt : tone.leaf}
-                                      transform={`rotate(${angle} 50 50) rotate(-22 50 15)`} />
-                            ))}
-                            <circle cx="50" cy="7" r="3" fill={tone.berry} transform="rotate(168 50 50)" />
-                        </g>
-                    ))}
-                </svg>
-            );
-        };
+        // Лавровый венок призёра — общий с церемонией итогов: components/contests/RegLaurelWreath.
 
         // Аватарка участника: фото или инициалы на нейтральной подложке.
         const RegContestAvatar = ({ item, sizeClass = 'h-9 w-9', textClass = 'text-xs' }) => (
@@ -39713,7 +39686,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Карточка группы: подиум призовых мест + полный список участников.
         // На модульном уровне (а не внутри панели), иначе каждый setState
         // панели пересоздавал бы тип компонента и ремоунтил обе карточки.
-        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, showRegistrations }) => {
+        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, showRegistrations, showPodium = true }) => {
             // В группе показываем строго топ-10 — всем, включая админов: хвост
             // из полусотни строк с одинаковым счётом ничего не сообщает.
             // Исключение одно — своя строка: её видно даже из хвоста, с
@@ -39762,7 +39735,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <h3 className="text-[16px] font-bold text-slate-900 sm:text-[17px]">{groupLabel}</h3>
                         {items.length > 0 && <p className="text-[12px] text-slate-400">Участников: {items.length}</p>}
                     </div>
-                    {prizes.length > 0 && (
+                    {showPodium && prizes.length > 0 && (
                         <div className="mb-5 flex items-end justify-center gap-2 sm:mb-6 sm:gap-5">
                             {podiumPlaces.map((place) => {
                                 const candidate = items[place - 1];
@@ -39852,6 +39825,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [loading, setLoading] = useState(true);
             const [syncing, setSyncing] = useState(false);
             const [showRules, setShowRules] = useState(false);
+            // После итогов полный рейтинг свёрнут: главное на вкладке — победители.
+            const [showBoard, setShowBoard] = useState(false);
 
             // silent — фоновое автообновление: без скелетона и тостов об ошибке.
             const fetchResults = async (silent = false) => {
@@ -39892,6 +39867,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const groups = data?.groups || {};
             const sync = data?.sync || {};
             const groupLabels = contest?.group_labels || { chat: 'Чаты', line: 'Линия' };
+            // Итоги подведены (итоговый протокол на сервере): вместо шапки-афиши —
+            // церемония победителей, призы и места — из протокола.
+            const finished = !!contest?.finished;
             // CRM пока отдаёт только засчитанных водителей; как только начнёт
             // присылать и регистрации без поездки, бэкенд поднимет флаг и тут
             // появятся счётчики «регистраций всего».
@@ -39943,7 +39921,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             return (
                 <div className="space-y-2.5 sm:space-y-5" style={{ fontFamily: APPLE_FONT }}>
-                    {/* Шапка-афиша: призовой фонд, сроки, прогресс периода. */}
+                    {finished ? (
+                        // Пока едет чанк церемонии — скелетон той же высоты, как у рейтинга.
+                        <Suspense fallback={<div className={`${iosCard} h-[820px] animate-pulse lg:h-[690px]`} />}>
+                            <RegContestCeremony contest={contest} groups={groups} currentUserId={currentUser?.id} />
+                        </Suspense>
+                    ) : (
+                    /* Шапка-афиша: призовой фонд, сроки, прогресс периода. */
                     <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-teal-600 sm:rounded-3xl via-emerald-600 to-emerald-800 text-white shadow-lg">
                         <div className="pointer-events-none absolute -right-16 -top-24 h-72 w-72 rounded-full bg-white/10 blur-2xl"></div>
                         <div className="pointer-events-none absolute -bottom-28 -left-12 h-64 w-64 rounded-full bg-cyan-300/20 blur-3xl"></div>
@@ -39994,6 +39978,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
                         </div>
                     </div>
+                    )}
 
                     {myEntry && (
                         <div className={`${iosCard} grid grid-cols-2 items-center gap-x-3 gap-y-3.5 p-3.5 sm:flex sm:flex-wrap sm:gap-x-8 sm:gap-y-3 sm:p-5`} style={{ fontFamily: APPLE_FONT }}>
@@ -40016,10 +40001,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
                             {myEntry.prize != null ? (
                                 <div>
-                                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Текущий приз</p>
+                                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{finished ? 'Приз' : 'Текущий приз'}</p>
                                     <p className="text-base font-bold leading-tight text-emerald-600 sm:text-lg">{regFmtTenge(myEntry.prize)}</p>
                                 </div>
-                            ) : (() => {
+                            ) : finished ? null : (() => {
                                 const board = groups[myEntry.group] || [];
                                 const prizeCount = (contest?.prizes?.[myEntry.group] || []).length;
                                 const lastPrize = board[prizeCount - 1];
@@ -40035,6 +40020,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     )}
 
+                    {finished && (
+                        <div className="flex flex-wrap items-center justify-center gap-2">
+                            <button type="button" className={iosBtnSecondary} aria-expanded={showBoard}
+                                    onClick={() => setShowBoard((open) => !open)}>
+                                <FaIcon className="fas fa-list-ol" /> {showBoard ? 'Скрыть рейтинг' : 'Весь рейтинг'}
+                            </button>
+                            <button type="button" className={iosBtnSecondary} onClick={() => setShowRules(true)}>
+                                <FaIcon className="fas fa-book" /> Правила
+                            </button>
+                        </div>
+                    )}
+
+                    {(!finished || showBoard) && (
                     <div className="grid grid-cols-1 gap-2.5 sm:gap-5 lg:grid-cols-2">
                         {['chat', 'line'].map((groupKey) => (
                             <RegLeaderboardCard key={groupKey} groupKey={groupKey}
@@ -40042,9 +40040,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 prizes={contest?.prizes?.[groupKey] || []}
                                                 groupLabel={groupLabels[groupKey]}
                                                 currentUserId={currentUser?.id}
-                                                showRegistrations={showRegistrations} />
+                                                showRegistrations={showRegistrations}
+                                                showPodium={!finished} />
                         ))}
                     </div>
+                    )}
 
                     {isAdmin && (data?.recent_decreases || []).length > 0 && (
                         <RegContestDecreases items={data.recent_decreases} />

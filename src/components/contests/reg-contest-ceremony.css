@@ -1,0 +1,614 @@
+/*
+ * Церемония итогов «Топ по регистрациям» — раскладка и хореография.
+ *
+ * Цветов здесь нет: сцена — обычная iosCard, текст и тумбы красятся
+ * утилитами Tailwind в разметке, и тёмную тему церемония получает из общего
+ * слоя theme-dark.css, как любой другой экран портала. Исключения — мягкое
+ * золотое свечение за кубком и тонкие линии у подписи группы: они
+ * полупрозрачные и одинаково ложатся на светлую и тёмную карточку.
+ *
+ * Состояния задаёт компонент (data-state), здесь — как они выглядят и как
+ * между ними переезжать. Каждое промежуточное положение — transform от
+ * финального места в сетке, поэтому в финале все transform нулевые.
+ *
+ * Две раскладки по ширине самой сцены (container query, а не окна: у сцены
+ * слева может стоять сайдбар):
+ *   узкая — группы столбиком, «Чаты» сверху;
+ *   широкая (от 720 px) — группы рядом, «Чаты» слева, «Линия» справа.
+ */
+
+.rcc-stage {
+    --rcc-gap: 26px;
+    --rcc-slot-gap: 10px;
+    --rcc-ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --rcc-spring: cubic-bezier(0.34, 1.45, 0.64, 1);
+    --rcc-move: 950ms;
+    /* Высота тумб: разница и есть «первое место выше второго». */
+    --rcc-pedestal-1: 84px;
+    --rcc-pedestal-2: 54px;
+    --rcc-pedestal-3: 40px;
+    --rcc-photo: 76px;
+
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    container-type: inline-size;
+    container-name: rcc;
+    padding: 22px 14px 20px;
+}
+
+@media (min-width: 640px) {
+    .rcc-stage {
+        padding: 28px 24px 24px;
+    }
+}
+
+/* Мягкое золотое свечение за кубком. */
+.rcc-glow {
+    position: absolute;
+    left: 50%;
+    top: 70px;
+    z-index: -1;
+    width: 420px;
+    height: 300px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(251, 191, 36, 0.2), rgba(251, 191, 36, 0));
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 1.4s ease 200ms;
+}
+
+.rcc-stage.is-open .rcc-glow {
+    opacity: 1;
+}
+
+/* ── Кнопка «Пропустить» / «Показать ещё раз» ─────────────────────────── */
+
+.rcc-control {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.15s ease;
+}
+
+.rcc-control:active {
+    transform: scale(0.96);
+}
+
+.rcc-control:focus-visible {
+    outline: 2px solid rgba(59, 130, 246, 0.6);
+    outline-offset: 2px;
+}
+
+.rcc-control-icon {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    justify-content: center;
+}
+
+/* ── Шапка: кубок, надзаголовок, «Победители», даты ───────────────────── */
+
+.rcc-header {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+.rcc-trophy {
+    position: relative;
+    width: 88px;
+    height: 88px;
+    opacity: 0;
+    transform: translateY(16px) scale(0.55);
+    transition: opacity 700ms ease, transform 1150ms var(--rcc-spring);
+}
+
+.rcc-stage.is-open .rcc-trophy {
+    opacity: 1;
+    transform: none;
+}
+
+.rcc-trophy-float {
+    position: absolute;
+    inset: 0;
+    animation: rcc-float 6s ease-in-out 1.4s infinite;
+}
+
+.rcc-trophy-img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 8px 12px rgba(180, 120, 20, 0.22));
+}
+
+/* Блик по металлу: полоса света пробегает по форме кубка раз в 7 секунд. */
+.rcc-trophy-shine {
+    position: absolute;
+    inset: 0;
+    -webkit-mask-size: contain;
+    mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    background: linear-gradient(105deg, transparent 40%, rgba(255, 255, 255, 0.85) 50%, transparent 60%);
+    background-size: 300% 100%;
+    background-position: 130% 0;
+    mix-blend-mode: overlay;
+    animation: rcc-shine 7s ease-in-out 1.8s infinite;
+}
+
+@keyframes rcc-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+}
+
+@keyframes rcc-shine {
+    0% { background-position: 130% 0; }
+    24%, 100% { background-position: -30% 0; }
+}
+
+.rcc-eyebrow,
+.rcc-title,
+.rcc-period {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(6px);
+    transition: opacity 700ms ease, transform 900ms var(--rcc-ease), filter 700ms ease;
+}
+
+.rcc-stage.is-open .rcc-eyebrow,
+.rcc-stage.is-open .rcc-title,
+.rcc-stage.is-open .rcc-period {
+    opacity: 1;
+    transform: none;
+    filter: none;
+}
+
+.rcc-stage.is-open .rcc-eyebrow { transition-delay: 220ms; }
+.rcc-stage.is-open .rcc-title { transition-delay: 320ms; }
+.rcc-stage.is-open .rcc-period { transition-delay: 420ms; }
+
+.rcc-eyebrow {
+    margin: 12px 0 0;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+}
+
+.rcc-title {
+    margin: 2px 0 0;
+    font-size: 28px;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+}
+
+.rcc-period {
+    margin: 6px 0 0;
+    font-size: 13px;
+}
+
+/* ── Группы ───────────────────────────────────────────────────────────── */
+
+.rcc-groups {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--rcc-gap);
+    margin-top: 22px;
+}
+
+.rcc-col {
+    position: relative;
+    min-width: 0;
+    transition:
+        transform var(--rcc-move) var(--rcc-ease),
+        opacity 800ms ease,
+        filter 800ms ease;
+}
+
+.rcc-col[data-state="hidden"] {
+    opacity: 0;
+}
+
+.rcc-col[data-state="spot"] {
+    z-index: 2;
+}
+
+/* «В стороне»: группа уступает свет следующей — притухает и уходит в глубину. */
+.rcc-col[data-state="aside"] {
+    opacity: 0.35;
+    filter: blur(1.5px) saturate(0.8);
+    transform: scale(0.96);
+}
+
+/* Узкая раскладка: «Линия» (нижний слот) выходит на месте верхнего — там,
+   куда смотрит глаз, — а когда выходят «Чаты», опускается на своё место. */
+.rcc-col[data-slot="end"][data-state="hidden"] {
+    transform: translateY(calc(-100% - var(--rcc-gap) + 18px)) scale(0.97);
+}
+
+.rcc-col[data-slot="end"][data-state="spot"] {
+    transform: translateY(calc(-100% - var(--rcc-gap)));
+}
+
+.rcc-col[data-slot="start"][data-state="hidden"],
+.rcc-col[data-slot="single"][data-state="hidden"] {
+    transform: translateY(18px) scale(0.97);
+}
+
+.rcc-group-label {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 14px;
+    font-size: 15px;
+    line-height: 1.2;
+}
+
+.rcc-group-label::before,
+.rcc-group-label::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(148, 163, 184, 0), rgba(148, 163, 184, 0.45));
+}
+
+.rcc-group-label::after {
+    background: linear-gradient(90deg, rgba(148, 163, 184, 0.45), rgba(148, 163, 184, 0));
+}
+
+/* ── Пьедестал ────────────────────────────────────────────────────────── */
+
+/* Столбцы выровнены по низу: тумба первого места выше, поэтому и сам
+   победитель стоит выше. */
+.rcc-podium {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+    gap: var(--rcc-slot-gap);
+}
+
+.rcc-podium.is-single {
+    grid-template-columns: minmax(0, 1fr);
+    width: 50%;
+    margin: 0 auto;
+}
+
+.rcc-slot {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+    transition:
+        transform var(--rcc-move) var(--rcc-ease),
+        opacity 700ms ease,
+        filter 700ms ease;
+}
+
+.rcc-slot[data-state="hidden"] {
+    opacity: 0;
+    transform: translateY(22px) scale(0.92);
+    filter: blur(8px);
+}
+
+/* Место ниже выходит первым и стоит по центру группы, пока не выйдет место
+   выше, — потом сдвигается на своё (вправо). */
+.rcc-slot:not(:first-child)[data-state="hidden"] {
+    transform: translateX(calc(-50% - var(--rcc-slot-gap) / 2)) translateY(22px) scale(0.92);
+}
+
+.rcc-slot[data-state="center"] {
+    transform: translateX(calc(-50% - var(--rcc-slot-gap) / 2));
+}
+
+.rcc-person {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    padding: 0 4px 12px;
+    text-align: center;
+}
+
+.rcc-photo {
+    position: relative;
+    width: var(--rcc-photo);
+    height: var(--rcc-photo);
+    flex-shrink: 0;
+}
+
+.rcc-avatar {
+    position: absolute;
+    inset: 15%;
+}
+
+.rcc-initials {
+    font-size: 18px;
+}
+
+.rcc-medal {
+    position: absolute;
+    left: 50%;
+    bottom: -2px;
+    width: 22px;
+    height: 22px;
+    transform: translateX(-50%);
+    font-size: 11.5px;
+}
+
+/* Место под ФИО — всегда две строки, чтобы столбцы группы отличались ровно
+   на разницу тумб; короткое ФИО стоит посередине этого места. */
+.rcc-name-box {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: calc(2 * 1.25em);
+    margin: 10px 0 0;
+    font-size: 13.5px;
+    line-height: 1.25;
+}
+
+.rcc-name {
+    display: -webkit-box;
+    width: 100%;
+    margin: 0;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+}
+
+.rcc-count {
+    margin: 3px 0 0;
+    font-size: 12px;
+}
+
+.rcc-pedestal {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    border-radius: 14px;
+    transform-origin: bottom center;
+}
+
+.rcc-slot[data-place="1"] .rcc-pedestal { height: var(--rcc-pedestal-1); }
+.rcc-slot[data-place="2"] .rcc-pedestal { height: var(--rcc-pedestal-2); }
+.rcc-slot[data-place="3"] .rcc-pedestal { height: var(--rcc-pedestal-3); }
+
+.rcc-prize {
+    margin: 0;
+    font-size: 19px;
+    line-height: 1.1;
+    white-space: nowrap;
+}
+
+.rcc-prize-currency {
+    margin-left: 3px;
+    font-size: 0.72em;
+    opacity: 0.8;
+}
+
+.rcc-place {
+    margin: 4px 0 0;
+}
+
+/* Внутри столбца — по очереди: тумба вырастает из пола, на неё выходит
+   человек, потом ФИО, регистрации и приз. */
+.rcc-pedestal {
+    transform: scaleY(0.2);
+    opacity: 0;
+    transition: transform 800ms var(--rcc-ease), opacity 400ms ease;
+}
+
+.rcc-photo,
+.rcc-name-box,
+.rcc-count,
+.rcc-prize,
+.rcc-place {
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 600ms ease, transform 800ms var(--rcc-ease);
+}
+
+.rcc-photo {
+    transform: translateY(14px) scale(0.7);
+    transition: opacity 500ms ease 160ms, transform 900ms var(--rcc-spring) 160ms;
+}
+
+.rcc-name-box { transition-delay: 300ms; }
+.rcc-count { transition-delay: 380ms; }
+.rcc-prize { transition-delay: 440ms; }
+.rcc-place { transition-delay: 500ms; }
+
+.rcc-slot:not([data-state="hidden"]) .rcc-pedestal,
+.rcc-slot:not([data-state="hidden"]) .rcc-photo,
+.rcc-slot:not([data-state="hidden"]) .rcc-name-box,
+.rcc-slot:not([data-state="hidden"]) .rcc-count,
+.rcc-slot:not([data-state="hidden"]) .rcc-prize,
+.rcc-slot:not([data-state="hidden"]) .rcc-place {
+    opacity: 1;
+    transform: none;
+}
+
+/* Первое место: золотая волна от фото — два раза, когда столбец встал. */
+.rcc-slot[data-place="1"]:not([data-state="hidden"]) .rcc-photo::after {
+    content: "";
+    position: absolute;
+    inset: 12%;
+    border-radius: 50%;
+    animation: rcc-pulse 1.5s ease-out 0.6s 2;
+}
+
+@keyframes rcc-pulse {
+    from { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.55); }
+    to { box-shadow: 0 0 0 18px rgba(251, 191, 36, 0); }
+}
+
+/* ── Благодарность внизу ──────────────────────────────────────────────── */
+
+.rcc-thanks {
+    max-width: 560px;
+    margin: 20px auto 0;
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: center;
+    transition: opacity 900ms ease, transform 900ms var(--rcc-ease);
+}
+
+.rcc-thanks[data-state="hidden"] {
+    opacity: 0;
+    transform: translateY(8px);
+}
+
+/* ── Широкая сцена: группы рядом ──────────────────────────────────────── */
+
+@container rcc (min-width: 720px) {
+    /* Сам контейнер запросу недоступен — переменные тумб задаём на потомке. */
+    .rcc-groups {
+        --rcc-pedestal-1: 108px;
+        --rcc-pedestal-2: 68px;
+        --rcc-pedestal-3: 48px;
+    }
+
+    .rcc-glow {
+        top: 84px;
+    }
+
+    .rcc-trophy {
+        width: 108px;
+        height: 108px;
+    }
+
+    .rcc-title {
+        font-size: 36px;
+    }
+
+    .rcc-period {
+        font-size: 14px;
+    }
+
+    .rcc-groups {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: 28px;
+        --rcc-gap: 36px;
+    }
+
+    .rcc-groups.is-single {
+        grid-template-columns: minmax(0, 560px);
+        justify-content: center;
+    }
+
+    .rcc-podium {
+        --rcc-slot-gap: 14px;
+        --rcc-photo: 96px;
+    }
+
+    /* «Линия» (правый слот) выходит первой — одна, по центру сцены. Уступая
+       свет, уезжает вправо на своё место и притухает. «Чаты» (левый слот)
+       выходят рядом, чуть ближе к центру, и в финале уходят влево.
+       Группы не перекрываются ни в один момент: сдвиг «Чатов» (зазор + 4 %
+       ширины) меньше, чем зазор плюс то, на что «Линия» ужалась масштабом
+       0.9 (по 5 % ширины с каждого края), — при любой ширине сцены. */
+    .rcc-col[data-slot="end"][data-state="hidden"] {
+        transform: translateX(calc(-50% - var(--rcc-gap) / 2)) translateY(18px) scale(0.97);
+    }
+
+    .rcc-col[data-slot="end"][data-state="spot"] {
+        transform: translateX(calc(-50% - var(--rcc-gap) / 2));
+    }
+
+    .rcc-col[data-slot="end"][data-state="aside"] {
+        transform: scale(0.9);
+    }
+
+    .rcc-col[data-slot="start"][data-state="hidden"] {
+        transform: translateX(calc(var(--rcc-gap) + 4%)) translateY(18px) scale(0.97);
+    }
+
+    .rcc-col[data-slot="start"][data-state="spot"] {
+        transform: translateX(calc(var(--rcc-gap) + 4%));
+    }
+
+    .rcc-col[data-slot="start"][data-state="aside"] {
+        transform: scale(0.9);
+    }
+
+    .rcc-group-label {
+        margin-bottom: 18px;
+        font-size: 17px;
+    }
+
+    .rcc-initials {
+        font-size: 24px;
+    }
+
+    .rcc-medal {
+        width: 26px;
+        height: 26px;
+        font-size: 13px;
+    }
+
+    .rcc-name-box {
+        margin-top: 12px;
+        font-size: 15px;
+    }
+
+    .rcc-count {
+        font-size: 12.5px;
+    }
+
+    .rcc-pedestal {
+        border-radius: 16px;
+    }
+
+    .rcc-prize {
+        font-size: 24px;
+    }
+
+    .rcc-thanks {
+        margin-top: 24px;
+        font-size: 13.5px;
+    }
+}
+
+/* ── Режимы ───────────────────────────────────────────────────────────── */
+
+/* «Пропустить»: всё доезжает до финала разом и быстро. */
+.rcc-stage.is-fast,
+.rcc-stage.is-fast * {
+    transition-duration: var(--rcc-fast, 420ms) !important;
+    transition-delay: 0ms !important;
+}
+
+/* Кадр сброса перед повтором: прячемся мгновенно, без обратной анимации. */
+.rcc-stage.is-reset,
+.rcc-stage.is-reset * {
+    transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .rcc-stage,
+    .rcc-stage * {
+        transition: none !important;
+        animation: none !important;
+    }
+}
