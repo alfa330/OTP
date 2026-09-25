@@ -27163,7 +27163,8 @@ class Database:
             })
         return marks, replaced
 
-    def recalculate_supervisor_clockster_hours(self, date_from, date_to, user_ids=None, keep_break_before=None):
+    def recalculate_supervisor_clockster_hours(self, date_from, date_to, user_ids=None, keep_break_before=None,
+                                               fresh_marks=None, fresh_days=None):
         """Пересчитать часы СВ по отметкам Clockster за период и записать в учёт часов.
 
         Пишутся только дни, которые кэш «Отметок» собрал вместе с Clockster, и
@@ -27176,7 +27177,11 @@ class Database:
 
         keep_break_before — дни раньше этой даты (закрытый прошлый месяц) берут
         уже вычтенный перерыв из строки, а не нынешнюю настройку: правка перерыва
-        не переписывает задним числом месяц, который уже закрыт."""
+        не переписывает задним числом месяц, который уже закрыт.
+
+        fresh_marks/fresh_days — кнопка «Синхронизация с Clockster»: отметки,
+        только что взятые из Clockster ({карточка: [отметка]}), и дни, за которые
+        они получены. Тогда кэш «Отметок» не читается, и считаются ровно эти дни."""
         start = self._normalize_schedule_date(date_from)
         end = self._normalize_schedule_date(date_to)
         if end < start:
@@ -27217,6 +27222,8 @@ class Database:
                 day for day in built_with_clockster
                 if start <= day <= end and (day + timedelta(days=1)) not in built_without_clockster
             }
+            if fresh_marks is not None:
+                countable_days = {day for day in (fresh_days or ()) if start <= day <= end}
             if not countable_days:
                 return summary
 
@@ -27224,7 +27231,9 @@ class Database:
             # полуночи на краю окна стало бы новым приходом и первый день получил
             # бы смену, уже учтённую накануне.
             marks_by_card = {}
-            if linked:
+            if fresh_marks is not None:
+                marks_by_card = {ext_id: list(fresh_marks.get(ext_id) or []) for ext_id in set(linked.values())}
+            elif linked:
                 cursor.execute("""
                     SELECT employee_id, marks FROM glb_attendance_rows
                     WHERE employee_id = ANY(%s) AND day BETWEEN %s AND %s

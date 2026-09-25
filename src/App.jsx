@@ -3840,14 +3840,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // NEW: filter active/fired + counters
         const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'fired'
+
+        // Группы: выбор группы для учёта часов + локальный реестр групп/метрик моделей.
+        const [selectedGroupId, setSelectedGroupId] = useState(''); // '' = legacy-режим по СВ
+        const [groupsList, setGroupsList] = useState([]);
+        const [calcModelMetrics, setCalcModelMetrics] = useState(null); // null = реестр не загружен → legacy
+        // Отделы, где у СВ есть часы по Clockster (приходят с /api/groups).
+        const [supervisorHoursDeptIds, setSupervisorHoursDeptIds] = useState([]);
+
         // Кого показывает таблица (задача #352): операторов, СВ или всех. СВ приходят
         // отдельным запросом (people=supervisors) в той же форме строк; их часы
         // считаются из отметок Clockster, поэтому ячейки СВ руками не правятся.
         // Видят: РОП, СВ отдела продаж (только себя) и те, кто выше, — глобальные
-        // админы. Главы других отделов — нет (как и на сервере).
-        const showSupervisorHoursTabs = headsSupervisorHoursDepartment(user)
+        // админы. Главы других отделов — нет (как и на сервере). Выбрана группа
+        // другого отдела — переключателя нет: там этой функции нет.
+        const selectedHoursGroup = selectedGroupId
+            ? (groupsList || []).find(group => String(group?.id) === String(selectedGroupId))
+            : null;
+        const selectedGroupHasSupervisorHours = !selectedHoursGroup
+            || supervisorHoursDeptIds.includes(Number(selectedHoursGroup?.department_id ?? selectedHoursGroup?.departmentId));
+        const showSupervisorHoursTabs = selectedGroupHasSupervisorHours && (
+            headsSupervisorHoursDepartment(user)
             || isGlobalAdminUser(user)
-            || (isSupervisorRole(user?.role) && !isHoursDepartmentHead && departmentHasSupervisorHours(user));
+            || (isSupervisorRole(user?.role) && !isHoursDepartmentHead && departmentHasSupervisorHours(user))
+        );
         const [hoursPeopleKind, setHoursPeopleKind] = useState('operators'); // 'operators' | 'supervisors' | 'all'
         const [supervisorHoursRows, setSupervisorHoursRows] = useState([]);
         const [supervisorHoursReloadKey, setSupervisorHoursReloadKey] = useState(0);
@@ -3866,11 +3882,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }, [showSupervisorHoursTabs, hoursPeopleKind, operators, supervisorHoursRows]);
 
         const [selectedDirections, setSelectedDirections] = useState(['all']); // multi-select directions for filtering
-
-        // Группы: выбор группы для учёта часов + локальный реестр групп/метрик моделей.
-        const [selectedGroupId, setSelectedGroupId] = useState(''); // '' = legacy-режим по СВ
-        const [groupsList, setGroupsList] = useState([]);
-        const [calcModelMetrics, setCalcModelMetrics] = useState(null); // null = реестр не загружен → legacy
 
         // cell modal
         const [selectedCell, setSelectedCell] = useState(null);
@@ -3918,6 +3929,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         };
         const [showOktellCallsSyncDialog, setShowOktellCallsSyncDialog] = useState(false);
+        // «Синхронизация с Clockster» на вкладке «Супервайзеры» (задача #352): РОП
+        // и те, кто выше, подтягивают отметки СВ из Clockster, не дожидаясь ночи.
+        const canSyncSupervisorHours = headsSupervisorHoursDepartment(user) || isGlobalAdminUser(user);
+        const [clocksterSync, setClocksterSync] = useState({ open: false, start: '', end: '', loading: false });
         const [oktellCallsSyncStart, setOktellCallsSyncStart] = useState(_oktellCallsYesterday);
         const [oktellCallsSyncEnd, setOktellCallsSyncEnd] = useState(_oktellCallsYesterday);
         const [oktellCallsSyncLoading, setOktellCallsSyncLoading] = useState(false);
@@ -4138,6 +4153,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             ? nextGroups.filter((group) => Number(group?.department_id ?? group?.departmentId) === Number(hoursDepartmentScopeId))
                             : nextGroups;
                         setGroupsList(scopedGroups);
+                        setSupervisorHoursDeptIds(
+                            (Array.isArray(groupsResp.data.supervisor_hours_department_ids) ? groupsResp.data.supervisor_hours_department_ids : [])
+                                .map(Number).filter(Number.isFinite)
+                        );
                         // Для СВ по умолчанию открываем ЕГО собственную группу (а не плоский
                         // режим «по СВ»). Группы отдела остаются в селекторе для переключения.
                         if (user?.role === 'sv') {
@@ -4369,6 +4388,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const closeOktellCallsSyncDialog = () => {
             if (oktellCallsSyncLoading) return;
             setShowOktellCallsSyncDialog(false);
+        };
+
+        const openClocksterSyncDialog = () => {
+            if (clocksterSync.loading) return;
+            // По умолчанию — просматриваемый месяц до сегодняшнего дня.
+            const todayIso = new Date(Date.now() + 5 * 3600 * 1000).toISOString().slice(0, 10);
+            const monthStart = `${month}-01`;
+            const monthEnd = `${month}-${String(daysInMonth).padStart(2, '0')}`;
+            const end = monthEnd < todayIso ? monthEnd : todayIso;
+            setClocksterSync({ open: true, start: monthStart <= end ? monthStart : end, end, loading: false });
+        };
+
+        const closeClocksterSyncDialog = () => {
+            if (clocksterSync.loading) return;
+            setClocksterSync(prev => ({ ...prev, open: false }));
+        };
+
+        const syncSupervisorHoursFromClockster = async () => {
+            if (!clocksterSync.start || !clocksterSync.end) {
+                fallbackToast('Укажите период синхронизации', 'error');
+                return;
+            }
+            setClocksterSync(prev => ({ ...prev, loading: true }));
+            try {
+                const resp = await axios.post(`${API_BASE_URL}/api/sv/supervisor_hours/sync`, {
+                    date_from: clocksterSync.start,
+                    date_to: clocksterSync.end,
+                }, { headers: { 'X-User-Id': user.id } });
+                const updated = Number(resp?.data?.updated_days || 0);
+                fallbackToast(updated ? `Отметки Clockster подтянуты, обновлено дней: ${updated}` : 'Отметки Clockster подтянуты, изменений нет', 'success');
+                setClocksterSync(prev => ({ ...prev, open: false, loading: false }));
+                setSupervisorHoursReloadKey(key => key + 1);
+            } catch (error) {
+                fallbackToast(error?.response?.data?.error || 'Не удалось синхронизировать с Clockster', 'error');
+                setClocksterSync(prev => ({ ...prev, loading: false }));
+            }
         };
 
         const syncOktellCalls = async (startDate = oktellCallsSyncStart, endDate = oktellCallsSyncEnd) => {
@@ -5851,6 +5906,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Направления у операторов и у СВ разные (у СВ — склейка направлений их
         // групп): выбор, оставшийся от другого вида, спрятал бы все строки.
+        // Переключатель пропал (выбрана группа другого отдела) — таблица снова об операторах.
+        useEffect(() => {
+            if (!showSupervisorHoursTabs && hoursPeopleKind !== 'operators') setHoursPeopleKind('operators');
+        }, [showSupervisorHoursTabs, hoursPeopleKind]);
         const hoursPeopleKindRef = useRef(hoursPeopleKind);
         useEffect(() => {
             if (hoursPeopleKindRef.current === hoursPeopleKind) return;
@@ -6183,7 +6242,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             return tezPlanDeptId;
         }, [selectedGroupId, groupsList, tezPlanDeptId]);
-        const showTezPlanColumn = isTezOpContext;
+        // «План успешек» — про операторов Тез КЦ; на вкладке СВ колонка всегда пустая.
+        const showTezPlanColumn = isTezOpContext && hoursPeopleKind !== 'supervisors';
 
         useEffect(() => {
             if (!isTezOpContext || tezOpDeptId == null || !user?.id) {
@@ -7517,6 +7577,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ======= RENDER =======
         const isAdminWithoutSupervisorSelected = isAdminLikeRoleFn(user?.role) && !isHoursDepartmentHead && !selectedSvId;
+        // Заглушка «Выберите группу» — только про операторов: строки СВ приходят
+        // своим запросом и группы не требуют.
+        const hoursNeedGroupChoice = isAdminWithoutSupervisorSelected
+            && !(showSupervisorHoursTabs && hoursPeopleKind !== 'operators');
         const isDayUploadDisabled = isChatModel || isAdminWithoutSupervisorSelected;
         // Разделители колонок — волосяные, как в таблицах macOS: серые рамки
         // по умолчанию делали сетку тяжелее самих чисел.
@@ -7559,7 +7623,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         month={month}
                         onMonthChange={setMonth}
                         isLoading={isLoading}
-                        emptyText={isAdminWithoutSupervisorSelected ? 'Выберите группу' : 'Операторы не найдены'}
+                        emptyText={hoursNeedGroupChoice ? 'Выберите группу' : 'Операторы не найдены'}
                         scope={{
                             reportScope,
                             onReportScope: setReportScope,
@@ -7944,6 +8008,80 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </div>
             )}
+            {clocksterSync.open && (
+                <div className="fixed inset-0 z-[125] flex items-center justify-center bg-slate-950/30 p-4 backdrop-blur-sm" onClick={closeClocksterSyncDialog}>
+                    <div
+                        className="w-full max-w-sm overflow-hidden rounded-[28px] border border-white/70 bg-white/95 shadow-[0_24px_80px_rgba(15,23,42,0.22)] ring-1 ring-slate-900/5 backdrop-blur-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200/70 px-5 py-4">
+                            <div className="flex min-w-0 items-start gap-3">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 ring-1 ring-sky-200/80">
+                                    <FaIcon className="fas fa-cloud-arrow-down" aria-hidden="true" />
+                                </span>
+                                <div className="min-w-0">
+                                    <h3 className="text-base font-semibold text-slate-900">Синхронизация с Clockster</h3>
+                                    <p className="mt-1 text-xs leading-5 text-slate-500">Отметки супервайзеров за период и их часы.</p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={closeClocksterSyncDialog}
+                                disabled={clocksterSync.loading}
+                                aria-label="Закрыть синхронизацию Clockster"
+                            >
+                                <FaIcon className="fas fa-xmark" aria-hidden="true" />
+                            </button>
+                        </div>
+                        <div className="px-5 py-4">
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                <label className="block">
+                                    <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">С</span>
+                                    <input
+                                        type="date"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                                        value={clocksterSync.start || ''}
+                                        onChange={(e) => {
+                                            const next = e.target.value;
+                                            setClocksterSync(prev => ({ ...prev, start: next, end: (!prev.end || prev.end < next) ? next : prev.end }));
+                                        }}
+                                    />
+                                </label>
+                                <label className="block">
+                                    <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">По</span>
+                                    <input
+                                        type="date"
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 outline-none transition focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                                        value={clocksterSync.end || ''}
+                                        onChange={(e) => setClocksterSync(prev => ({ ...prev, end: e.target.value }))}
+                                    />
+                                </label>
+                            </div>
+                            <div className="mt-2 text-[11px] text-slate-400">Максимум 31 день. Ручные отметки и перерывы РОП сохраняются.</div>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-slate-50/80 px-5 py-4">
+                            <button
+                                type="button"
+                                className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                onClick={closeClocksterSyncDialog}
+                                disabled={clocksterSync.loading}
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                type="button"
+                                className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white shadow-sm transition ${clocksterSync.loading ? 'cursor-wait bg-sky-400' : 'bg-sky-600 hover:bg-sky-700'}`}
+                                onClick={syncSupervisorHoursFromClockster}
+                                disabled={clocksterSync.loading}
+                            >
+                                <FaIcon className={`fas ${clocksterSync.loading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`} aria-hidden="true" />
+                                {clocksterSync.loading ? 'Синхронизируем...' : 'Синхронизировать'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             {showOktellCallsSyncDialog && (
                 <div className="fixed inset-0 z-[125] flex items-center justify-center bg-slate-950/30 p-4 backdrop-blur-sm" onClick={closeOktellCallsSyncDialog}>
                     <div
@@ -8287,6 +8425,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 );
                                             })}
+                                            {group.label === 'Работа' && canSyncSupervisorHours && showSupervisorHoursTabs && hoursPeopleKind !== 'operators' && (
+                                                <div className="mt-1 flex flex-col border-t border-slate-100 pt-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            openClocksterSyncDialog();
+                                                            closeMenus();
+                                                        }}
+                                                        disabled={clocksterSync.loading}
+                                                        className={`${hoursMenuRowClass(false)} disabled:cursor-not-allowed disabled:opacity-50`}
+                                                        title="Подтянуть отметки супервайзеров из Clockster за период и пересчитать их часы"
+                                                    >
+                                                        <span className="flex items-center gap-2.5">
+                                                            <FaIcon className={`fas ${clocksterSync.loading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'} w-4 text-slate-400`} />
+                                                            Синхронизация с Clockster
+                                                        </span>
+                                                    </button>
+                                                </div>
+                                            )}
                                             {isChatModel && isIndicatorsGroup && (
                                                 <div className="mt-1 flex flex-col border-t border-slate-100 pt-1">
                                                     <button
@@ -9295,7 +9453,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div>
                     {isLoading ? (
                     <div className="px-4 py-12 text-[13px] text-slate-400"><FaIcon className="fas fa-spinner fa-spin mr-2" />Загрузка данных…</div>
-                    ) : isAdminWithoutSupervisorSelected ? (
+                    ) : hoursNeedGroupChoice ? (
                     <div className="px-4 py-12 text-[13px] text-slate-400">Выберите группу.</div>
                     ) : filteredOperators.length === 0 ? (
                     <div className="px-4 py-12 text-[13px] text-slate-400">Операторы не найдены.</div>

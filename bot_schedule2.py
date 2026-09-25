@@ -22052,6 +22052,9 @@ def list_groups_endpoint():
             "status": "success",
             "groups": groups,
             "calculation_models": get_calculation_model_catalog(),
+            # Отделы, где у СВ есть часы по Clockster (задача #352): «Учёт часов»
+            # показывает переключатель «Операторы | Супервайзеры» только для них.
+            "supervisor_hours_department_ids": db.clockster_hours_department_ids(),
         }), 200
     except Exception as e:
         logging.error(f"Error listing groups: {e}", exc_info=True)
@@ -49548,6 +49551,85 @@ def supervisor_hours_settings():
     except Exception as e:
         logging.error(f"Error in supervisor_hours_settings: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS = 31
+
+
+@app.route('/api/sv/supervisor_hours/sync', methods=['POST'])
+@require_api_key
+def sync_supervisor_hours_from_clockster():
+    """«Синхронизация с Clockster» на вкладке «Супервайзеры» (задача #352).
+
+    Берёт отметки прямо из Clockster за период (не дожидаясь ночной сборки кэша
+    «Отметок») и пересчитывает часы СВ отделов requester'а. Один запрос /schedules
+    отдаёт весь период по 50 человек, поэтому месяц тянется за секунды.
+    Body: {"date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD"} — не длиннее
+    SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS, конец не позже сегодня."""
+    try:
+        requester_id, user_data, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        scope = _supervisor_hours_settings_scope(requester_id, _normalize_user_role(user_data[3]))
+        if not scope:
+            return jsonify({"error": "Синхронизацию часов супервайзеров запускает руководитель отдела"}), 403
+        from group_late import clockster as _clockster
+        from group_late import config as _group_late_config
+        if not _group_late_config.is_clockster_configured():
+            return jsonify({"error": "Clockster не подключён"}), 400
+        payload = request.get_json(silent=True) or {}
+        try:
+            date_from = db._normalize_schedule_date(payload.get('date_from'))
+            date_to = db._normalize_schedule_date(payload.get('date_to') or payload.get('date_from'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Укажите период: даты в формате ГГГГ-ММ-ДД"}), 400
+        if date_to < date_from:
+            date_from, date_to = date_to, date_from
+        today = datetime.now(group_late.TZ).date()
+        if date_to > today:
+            date_to = today
+        if date_from > date_to:
+            return jsonify({"error": "Период ещё не наступил"}), 400
+        if (date_to - date_from).days + 1 > SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS:
+            return jsonify({"error": f"Период — не больше {SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS} дней"}), 400
+
+        # День накануне и следующий — ради ночных смен: уход после полуночи
+        # закрывает смену, а утренний уход — смену вчерашнего дня.
+        rows = _clockster.clockster_client.get_schedules(
+            date_from - timedelta(days=1), min(date_to + timedelta(days=1), today))
+        _records, marks = _clockster.to_records(rows)
+        fresh_marks = {}
+        for mark in marks:
+            fresh_marks.setdefault(mark.get('employeeId'), []).append({
+                'at': mark.get('markDate'),
+                'kind': 'in' if mark.get('markType') == 0 else 'out',
+            })
+        supervisors = [row['user_id'] for row in db.get_supervisor_hours_settings(scope)['supervisors']]
+        fresh_days = set()
+        cursor_day = date_from
+        while cursor_day <= date_to:
+            fresh_days.add(cursor_day)
+            cursor_day += timedelta(days=1)
+        summary = db.recalculate_supervisor_clockster_hours(
+            date_from, date_to, supervisors,
+            keep_break_before=today.replace(day=1),
+            fresh_marks=fresh_marks, fresh_days=fresh_days)
+        return jsonify({"status": "success", "date_from": date_from.isoformat(),
+                        "date_to": date_to.isoformat(), **summary}), 200
+    except _clockster_error_types() as e:
+        logging.warning("Синхронизация часов СВ: Clockster недоступен: %s", e)
+        return jsonify({"error": "Clockster не ответил — попробуйте позже"}), 502
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in sync_supervisor_hours_from_clockster: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _clockster_error_types():
+    from group_late.clockster import ClocksterError
+    return (ClocksterError,)
 
 
 def _supervisor_marks_access(requester_id, role, target_user_id):

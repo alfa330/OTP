@@ -525,6 +525,30 @@ class SupervisorClocksterFrontendTests(unittest.TestCase):
             with self.subTest(anchor=anchor):
                 self.assertIn('setSupervisorDayMarks({ operator, dateStr: dayToDateStr(day) });', APP[start:start + 900])
 
+    def test_clockster_sync_is_for_the_head_and_above_and_uses_fresh_marks(self):
+        route = function_source(BOT, 'sync_supervisor_hours_from_clockster')
+        self.assertIn('_supervisor_hours_settings_scope(requester_id', route)
+        self.assertIn('SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS', route)
+        self.assertIn('fresh_marks=fresh_marks, fresh_days=fresh_days', route)
+        # День накануне и следующий — ради ночных смен.
+        self.assertIn('date_from - timedelta(days=1), min(date_to + timedelta(days=1), today)', route)
+        body = method_source('recalculate_supervisor_clockster_hours')
+        self.assertIn('if fresh_marks is not None:', body)
+        self.assertIn('countable_days = {day for day in (fresh_days or ()) if start <= day <= end}', body)
+        # Кнопка — только РОП и те, кто выше, и только на вкладке СВ.
+        self.assertIn("group.label === 'Работа' && canSyncSupervisorHours && showSupervisorHoursTabs && hoursPeopleKind !== 'operators'", APP)
+
+    def test_supervisor_rows_do_not_need_a_group_choice(self):
+        self.assertIn("&& !(showSupervisorHoursTabs && hoursPeopleKind !== 'operators');", APP)
+        self.assertIn(') : hoursNeedGroupChoice ? (', APP)
+
+    def test_segment_is_hidden_for_groups_of_other_departments(self):
+        route = function_source(BOT, 'list_groups_endpoint')
+        self.assertIn('"supervisor_hours_department_ids": db.clockster_hours_department_ids()', route)
+        start = APP.index('const showSupervisorHoursTabs = selectedGroupHasSupervisorHours && (')
+        self.assertLess(APP.index('const selectedGroupHasSupervisorHours = !selectedHoursGroup'), start)
+        self.assertIn("if (!showSupervisorHoursTabs && hoursPeopleKind !== 'operators') setHoursPeopleKind('operators');", APP)
+
     def test_day_marks_window_is_rendered_on_desktop_and_phone(self):
         self.assertEqual(APP.count('<SupervisorDayMarksModal'), 2)
 
