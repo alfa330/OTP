@@ -5890,9 +5890,14 @@ def api_ai_qa_export():
         fmt = (request.args.get('format') or 'xlsx').strip().lower()
         if fmt not in ('xlsx', 'csv'):
             return jsonify({"error": "format: xlsx или csv"}), 400
-        items = evaluations_list(limit=_export.MAX_ROWS, offset=0,
+        # На строку больше потолка: так видно, что отбор в файл не поместился,
+        # и фронт честно скажет «выгружены первые N», а не «выгружено N».
+        items = evaluations_list(limit=_export.MAX_ROWS + 1, offset=0,
                                  allowed_direction_ids=scope, subject_kind=subject,
-                                 department=department, filters=filters)
+                                 department=department, filters=filters,
+                                 max_limit=_export.MAX_ROWS + 1)
+        truncated = len(items) > _export.MAX_ROWS
+        items = items[:_export.MAX_ROWS]
         if fmt == 'csv':
             payload, mime = _export.build_csv(items), 'text/csv; charset=utf-8'
         else:
@@ -5904,6 +5909,10 @@ def api_ai_qa_export():
             "attachment; filename=export.%s; filename*=UTF-8''%s"
             % (fmt, quote(name)))
         response.headers['X-Rows'] = str(len(items))
+        response.headers['X-Truncated'] = '1' if truncated else '0'
+        # Без Expose-Headers браузер не отдаст фронту свои заголовки ответа.
+        response.headers['Access-Control-Expose-Headers'] = (
+            'Content-Disposition, X-Rows, X-Truncated')
         return response
     except Exception as error:
         logging.exception("ai-qa export failed")

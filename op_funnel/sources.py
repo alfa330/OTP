@@ -61,6 +61,7 @@ AMO_SALES_PIPELINE_ID = metrics.AMO_SALES_PIPELINE_ID
 AMO_FIELD_PARK = 915311        # «Таксопарк привлечения»
 AMO_FIELD_CITY = 1073351       # «Город привлечения»
 AMO_FIELD_UTM_SOURCE = 892237  # utm_source
+AMO_FIELD_UTM_CAMPAIGN = 892235  # utm_campaign (тот же id, что в amocrm/leads.py)
 AMO_FIELD_REGISTERED = 1074667 # «Зарегистрирован» (флажок)
 
 # Страница сделок. Раньше стояло 250, но вместе с `with=contacts` такая страница
@@ -255,6 +256,8 @@ def _base_row(direction_code, source, stream_type, lead_key, work_day, owner_raw
         'phones': '',
         'tags': '',
         'utm_source': '',
+        'utm_source_raw': '',
+        'utm_campaign': '',
         'lead_type': '',
         'registered': 0,
         'created_at': None,
@@ -438,7 +441,8 @@ def amo_rows(leads, stage_names, direction_code, responsible_to_user=None,
             raw_phones.extend(contact_phones.get(contact_id) or [])
         phones = phones_text(raw_phones)
         tags = _amo_tags(lead)
-        source = amo_source_norm(_amo_custom_field(lead, AMO_FIELD_UTM_SOURCE), tags)
+        raw_source = _amo_custom_field(lead, AMO_FIELD_UTM_SOURCE)
+        source = amo_source_norm(raw_source, tags)
         row.update({
             'stage_raw': _text(stage, 300),
             'reason_raw': loss_name[:500],
@@ -449,6 +453,8 @@ def amo_rows(leads, stage_names, direction_code, responsible_to_user=None,
             'city': _amo_custom_field(lead, AMO_FIELD_CITY)[:200],
             'tags': tags[:1000],
             'utm_source': source[:100],
+            'utm_source_raw': raw_source[:200],
+            'utm_campaign': _amo_custom_field(lead, AMO_FIELD_UTM_CAMPAIGN)[:300],
             'lead_type': amo_lead_type(source),
             'registered': 1 if _amo_custom_field(lead, AMO_FIELD_REGISTERED).lower()
                           in ('true', '1', 'да') else 0,

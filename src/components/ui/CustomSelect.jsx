@@ -214,10 +214,36 @@ export default function CustomSelect({
     return true;
   };
 
+  /* Подсвеченная строка — по ЗНАЧЕНИЮ: раскрытие родителя меняет список, и
+     без этого подсветка прыгала бы на первую строку, а следующая ↓ уходила
+     не к кампании под раскрытым каналом. Держим её, только пока строка поиска
+     та же: набранный текст по-прежнему ставит подсветку на первое найденное. */
+  const activeValueRef = useRef(undefined);
+  const activeQueryRef = useRef('');
+  /* Запоминаем при смене ПОДСВЕТКИ, а не на каждом рендере: в рендере после
+     раскрытия список уже новый, а индекс старый, и под ним стоит другая
+     строка. Эффект объявлен раньше сброса ниже и потому идёт перед ним. */
+  useEffect(() => {
+    if (activeIndex >= 0 && filtered[activeIndex]) {
+      activeValueRef.current = String(filtered[activeIndex].value);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex]);
+
   useEffect(() => {
     if (!open) {
       setActiveIndex(-1);
+      activeValueRef.current = undefined;
       return;
+    }
+    const sameQuery = activeQueryRef.current === query;
+    activeQueryRef.current = query;
+    if (sameQuery && activeValueRef.current !== undefined) {
+      const keep = filtered.findIndex((option) => String(option.value) === activeValueRef.current);
+      if (keep >= 0) {
+        setActiveIndex(keep);
+        return;
+      }
     }
     const selectedIndex = filtered.findIndex((option) =>
       !option.disabled && selectedSetRef.current.has(String(option.value)));

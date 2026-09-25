@@ -253,7 +253,13 @@ export const activeFilterChips = (filters, options = {}) => {
     const campaigns = listOf(f.campaigns);
     if (channels.length || campaigns.length) {
         const parts = channels.map((code) => titleOf(marketing.channels, code, 'не определён'));
-        if (campaigns.length) parts.push(...campaigns);
+        // Кампания хранится парой «канал|кампания»; в чипе — только её имя.
+        if (campaigns.length) {
+            parts.push(...campaigns.map((pair) => {
+                const cut = String(pair).indexOf('|');
+                return cut >= 0 ? String(pair).slice(cut + 1) : String(pair);
+            }));
+        }
         add('channels', 'Канал', joined(parts), patch({ channels: [], campaigns: [] }));
     }
     const stages = listOf(f.stages);

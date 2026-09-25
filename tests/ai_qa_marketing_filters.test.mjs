@@ -37,7 +37,7 @@ test('списки уходят массивами, а не строкой че�
 });
 
 test('канал с кампанией — ОДИН фильтр, сотрудник с группой — один, этап с режимом — один', () => {
-    const f = { ...EMPTY_FILTERS, channels: ['tiktok'], campaigns: ['spring'],
+    const f = { ...EMPTY_FILTERS, channels: ['tiktok'], campaigns: ['tiktok|spring'],
                 handler_ids: [5], handler_group_ids: [7], handler_mode: 'crm',
                 stages: ['Закрыто и не реализовано'], stage_mode: 'at_call' };
     assert.equal(countActiveFilters(f), 3);
@@ -55,7 +55,7 @@ test('причина отказа допустима только при эта�
 });
 
 test('чипы: одна ось — один чип с подписями из справочника; снятие этапов уносит причину', () => {
-    const f = { ...EMPTY_FILTERS, parks: ['itaxi', NONE_BUCKET], channels: ['tiktok'], campaigns: ['spring'],
+    const f = { ...EMPTY_FILTERS, parks: ['itaxi', NONE_BUCKET], channels: ['tiktok'], campaigns: ['tiktok|spring'],
                 stages: ['Закрыто и не реализовано'], stage_mode: 'at_call', reasons: ['Нет авто (не цел)', NONE_BUCKET],
                 handler_ids: [5], handler_mode: 'crm', deal_id: '123' };
     const chips = activeFilterChips(f, { marketing: {

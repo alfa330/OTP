@@ -182,6 +182,12 @@ CREATE TABLE IF NOT EXISTS op_funnel_leads (
     -- переписке), у других источников он пуст.
     tags           TEXT         NOT NULL DEFAULT '',
     utm_source     TEXT         NOT NULL DEFAULT '',
+    -- СЫРЫЕ utm_source и utm_campaign сделки amoCRM. Нормализованный utm_source
+    -- выше сводит YouTube в google, а «Маркетинговому мониторингу» (ТЗ #317)
+    -- нужны и YouTube отдельно, и кампания — не реже раза в 15 минут (п. 4 ТЗ),
+    -- тогда как amo_leads с этими полями обновляется раз в три часа.
+    utm_source_raw TEXT         NOT NULL DEFAULT '',
+    utm_campaign   TEXT         NOT NULL DEFAULT '',
     lead_type      VARCHAR(16)  NOT NULL DEFAULT '',
     registered     SMALLINT     NOT NULL DEFAULT 0,
 
@@ -534,6 +540,8 @@ OP_FUNNEL_SCHEMA_MIGRATIONS = (
     "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS utm_source TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS lead_type VARCHAR(16) NOT NULL DEFAULT ''",
     "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS registered SMALLINT NOT NULL DEFAULT 0",
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS utm_source_raw TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS utm_campaign TEXT NOT NULL DEFAULT ''",
 )
 
 

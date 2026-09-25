@@ -101,14 +101,14 @@ class PredicateTests(unittest.TestCase):
 
     def test_placeholders_match_params_in_order(self):
         sql, params = self._sql({
-            'parks': 'itaxi,none', 'channels': 'tiktok', 'campaigns': ['spring'],
+            'parks': 'itaxi,none', 'channels': 'tiktok', 'campaigns': ['google|spring'],
             'stages': ['Закрыто и не реализовано'], 'stage_mode': 'at_call',
             'reasons': ['Нет авто (не цел)', 'none'],
             'handler_ids': '5', 'handler_group_ids': '7', 'handler_mode': 'crm',
             'handler_keys': ['amo:8303491'],
             'deal_id': '123'})
         self.assertEqual(sql.count('%s'), len(params))
-        self.assertEqual(list(params), [['itaxi'], ['tiktok'], ['spring'],
+        self.assertEqual(list(params), [['itaxi'], ['tiktok'], ['google'], ['spring'],
                                         ['Закрыто и не реализовано'], ['Нет авто (не цел)'],
                                         [5], [7], ['amo:8303491'], '123'])
         # Учётка CRM без сотрудника — по ключу «источник:учётка».
@@ -214,8 +214,8 @@ class WiringTests(unittest.TestCase):
         self.assertIn('from .marketing import filters as mkt', src)
         # Списки — с колонками сделки, счётчики — с той же связкой при отборе.
         self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=True)'), 2)
-        # Счётчик очереди, фильтр подтяжки и набор субъектов «Обзора».
-        self.assertEqual(src.count('_marketing_join(cur, filters)'), 3)
+        # Счётчик очереди, фильтр подтяжки, набор субъектов и очередь «Обзора».
+        self.assertEqual(src.count('_marketing_join(cur, filters)'), 4)
         self.assertIn("marketing = filters.get('marketing')", src)
         self.assertIn('def marketing_options(', src)
         self.assertIn('def deal_for_subject(', src)
@@ -332,6 +332,9 @@ class DictionaryCleanupTests(unittest.TestCase):
         ('dostoynyy_astana', 'достойный астана', ['dostoynyy_astana', 'достойный астана'], 900, None),
         ('chestnyy', 'честный', ['chestnyy', 'честный'], 900, None),
         ('global', 'global', ['global'], 900, None),
+        ('global_astana', 'global астана', ['global_astana', 'global астана'], 900, None),
+        # Транслит-код рядом с настоящим написанием не заводит бренд-призрак.
+        ('zhanataksi', 'жанатакси', ['zhanataksi', 'жанатакси'], 900, None),
         ('ust_kamenogorsk', 'усть-каменогорск', ['ust_kamenogorsk', 'усть-каменогорск'], 900, None),
         # Правленная человеком строка — неприкосновенна.
         ('itaxi_karaganda', 'Караганда (вручную)', ['itaxi караганда'], 900, 7),
@@ -350,6 +353,9 @@ class DictionaryCleanupTests(unittest.TestCase):
         self.assertEqual(rows['chestnyy']['title'], 'Честный')
         # Однословный код — это и настоящее написание: сделки «global» не теряются.
         self.assertIn('global', rows['global']['aliases'])
+        self.assertIn('global астана', rows['global']['aliases'])
+        self.assertNotIn('zhanataksi', rows)
+        self.assertIn('жанатакси', rows['jana']['aliases'])
         # Один город — не парк: строка уходит, сделка остаётся «Не определено».
         self.assertNotIn('ust_kamenogorsk', rows)
         self.assertEqual(rows['itaxi_karaganda']['title'], 'Караганда (вручную)')
@@ -508,6 +514,77 @@ class TabWiringTests(unittest.TestCase):
         self.assertIn('parent: CH + channel.code', panel)
         self.assertIn('expandLabel="кампании"', panel)
         self.assertIn('parent', _read('src', 'components', 'ui', 'CustomSelect.jsx'))
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Замечания независимого разбора коммита (сверка 24.09.2026)."""
+
+    def test_stage_at_call_compares_in_utc(self):
+        # Журнал этапов пишется в UTC, момент разговора — часы Алматы.
+        shist = mkt.JOIN_SQL.split(') shist ON TRUE', 1)[0].rsplit('LEFT JOIN LATERAL', 1)[1]
+        self.assertIn("(sd.happened_at AT TIME ZONE 'Asia/Almaty') AT TIME ZONE 'UTC'", shist)
+        self.assertNotIn("ls.seen_at <= COALESCE(sd.happened_at, NOW())", shist)
+
+    def test_campaign_is_a_channel_pair_ored_with_channels(self):
+        with self.assertRaises(ValueError):
+            mkt.normalise({'campaigns': ['spring']})
+        sql, params = mkt.predicate(
+            mkt.normalise({'channels': 'tiktok', 'campaigns': ['google|brand_kz', 'none|x']}),
+            operator_id_sql='OP', group_of_person=lambda p: p)
+        # «Весь TikTok» ИЛИ «Google → brand_kz», а не их пересечение.
+        self.assertIn(' OR ', sql)
+        self.assertEqual(sql.count(' AND ('), 1)
+        self.assertEqual(list(params), [['tiktok'], ['google', ''], ['brand_kz', 'x']])
+
+    def test_overview_counts_subjects_by_latest_evaluation(self):
+        src = _read('call_qa', 'api.py')
+        body = src.split('def _filtered_stats(', 1)[1].split('\ndef ', 1)[0]
+        self.assertIn('SELECT DISTINCT ON (rc.subject_kind, rc.call_id)', body)
+        self.assertIn('out["evaluated"] = len(keys)', body)
+        self.assertIn('_QUEUE_FETCH_CAP', body)
+
+    def test_export_is_not_capped_at_list_page(self):
+        src = _read('bot_schedule2.py')
+        route = src.split("@app.route('/api/ai-qa/export'", 1)[1].split('@app.route', 1)[0]
+        self.assertIn('max_limit=_export.MAX_ROWS + 1', route)
+        self.assertIn("response.headers['X-Truncated']", route)
+        self.assertIn('Access-Control-Expose-Headers', route)
+        self.assertIn('max_limit=500', _read('call_qa', 'api.py'))
+        self.assertIn("'x-truncated'", _read('src', 'components', 'call_qa', 'QaFilters.jsx'))
+
+    def test_utm_fresh_every_15_minutes(self):
+        from op_funnel import queries, schema, sources
+        for column in ('utm_source_raw', 'utm_campaign'):
+            self.assertIn(column, queries._LEAD_COLUMNS)
+            self.assertIn(f'ADD COLUMN IF NOT EXISTS {column}', ' '.join(schema.OP_FUNNEL_SCHEMA_MIGRATIONS))
+        # Строка без сырых UTM (другая CRM) не роняет вставку NOT NULL.
+        self.assertEqual(queries._lead_value({}, 'utm_campaign'), '')
+        self.assertIsNone(queries._lead_value({}, 'phone'))
+        self.assertEqual(sources.AMO_FIELD_UTM_CAMPAIGN, 892235)
+        self.assertTrue(mkt.CAMPAIGN.startswith("COALESCE(NULLIF(btrim(l.utm_campaign)"))
+        self.assertIn('l.utm_source_raw', mkt.CHANNEL_RAW)
+
+    def test_amo_row_carries_raw_utm(self):
+        from op_funnel import sources
+        lead = {'id': 1, 'created_at': 1789983704, 'status_id': 1, 'responsible_user_id': 5,
+                'custom_fields_values': [
+                    {'field_id': sources.AMO_FIELD_UTM_SOURCE, 'values': [{'value': 'youtube'}]},
+                    {'field_id': sources.AMO_FIELD_UTM_CAMPAIGN, 'values': [{'value': 'noltaxi_youtube_ki'}]},
+                ]}
+        rows, _seen = sources.amo_rows([lead], {1: 'Новая заявка'}, 'op_osnova')
+        self.assertEqual(rows[0]['utm_source'], 'google')          # нормализатор не тронут
+        self.assertEqual(rows[0]['utm_source_raw'], 'youtube')
+        self.assertEqual(rows[0]['utm_campaign'], 'noltaxi_youtube_ki')
+
+    def test_cached_card_refreshes_conversation_time(self):
+        self.assertIn('cached["datetime"] = subject.get("datetime")', _read('call_qa', 'api.py'))
+
+    def test_presets_reload_after_rule_catalog(self):
+        panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
+        self.assertIn('useEffect(loadPresets, [apiBaseUrl, department, marketingOnly]);', panel)
+        rag = _read('src', 'components', 'call_qa', 'AdjudicationsRag.jsx')
+        rollout = rag.split('function RolloutPanel(', 1)[1].split('export default function AdjudicationsRag', 1)[0]
+        self.assertNotIn('dealSignature', rollout)
 
 if __name__ == '__main__':
     unittest.main()

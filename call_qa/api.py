@@ -2091,6 +2091,11 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             for key, value in (source.get("extra") or {}).items():
                 cached[key] = value
             cached["eligibility"] = subjects_mod.eligibility(subject)["detail"]
+            # Момент разговора — тоже «на сейчас», а не из снимка оценки: у
+            # звонков из АТС, оценённых до исправления пояса (ТЗ #317, сверка
+            # 24.09), в снимке застыло время на пять часов позже настоящего.
+            if subject.get("datetime"):
+                cached["datetime"] = subject.get("datetime")
             if rollout["shadow_enabled"] and not serving_stale:
                 _schedule_shadow_variant(
                     call_id=call_id, subject_kind=subject_kind,
@@ -4798,14 +4803,17 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=
 
 
 def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
-                     subject_kind=None, department=None, filters=None) -> list[dict]:
+                     subject_kind=None, department=None, filters=None,
+                     max_limit=500) -> list[dict]:
     """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
     Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
     версиями модели, дублировались в списке. Сортировка — сначала новые; поддержана
     постраничная выдача (limit/offset)."""
     conn = None
     try:
-        limit = max(1, min(int(limit), 500))
+        # Потолок страницы списка — 500; выгрузка просит больше явно (max_limit),
+        # иначе файл молча обрывался на 500 строках при потолке выгрузки 5000.
+        limit = max(1, min(int(limit), int(max_limit)))
         offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
@@ -4929,18 +4937,33 @@ def _reviewed_metrics(cur, subject_keys=None):
 
     `subject_keys` — множество (вид, id) из отбора панели: с ним считаются только
     эти разговоры. None — без отбора, как прежде."""
+    if subject_keys is not None and not subject_keys:
+        return {"confirmed": 0, "adjudicated": 0, "endorsed": 0, "corrected": 0,
+                "alarm_precision": None}
     try:
-        cur.execute("""SELECT call_id, review_outcome, per_criterion, subject_kind
-                         FROM ai_evaluation_meta
-                        WHERE review_outcome IS NOT NULL AND model = %s""",
-                    (config.CLAUDE_MODEL,))
+        if subject_keys is None:
+            cur.execute("""SELECT call_id, review_outcome, per_criterion, subject_kind
+                             FROM ai_evaluation_meta
+                            WHERE review_outcome IS NOT NULL AND model = %s""",
+                        (config.CLAUDE_MODEL,))
+        else:
+            # Отбор — в самом запросе: per_criterion тяжёлый, и тащить его по
+            # всем проверенным разговорам ради десятка из отбора — секунды
+            # передачи (замер 24.09: 6–10 с из Алматы до базы во Франкфурте).
+            kinds = sorted(subject_keys)
+            cur.execute("""SELECT m.call_id, m.review_outcome, m.per_criterion, m.subject_kind
+                             FROM ai_evaluation_meta m
+                             JOIN unnest(%s::text[], %s::bigint[]) AS k(subject_kind, call_id)
+                               ON k.call_id = m.call_id
+                              AND k.subject_kind = COALESCE(m.subject_kind, %s)
+                            WHERE m.review_outcome IS NOT NULL AND m.model = %s""",
+                        ([kind for kind, _ in kinds], [int(call_id) for _, call_id in kinds],
+                         config.SUBJECT_CALL, config.CLAUDE_MODEL))
         # Совместимость с БД до миграции subject_kind: строка без типа = звонок.
         rows = [tuple(r) + (config.SUBJECT_CALL,) if len(r) == 3 else tuple(r)
                 for r in cur.fetchall()]
     except Exception:
         return None  # колонок ещё нет — появятся после деплоя (миграция на старте)
-    if subject_keys is not None:
-        rows = [r for r in rows if (r[3] or config.SUBJECT_CALL, r[0]) in subject_keys]
     out = {"confirmed": 0, "adjudicated": 0, "endorsed": 0, "corrected": 0, "alarm_precision": None}
     if not rows:
         return out
@@ -5176,26 +5199,36 @@ def _filtered_stats(cur, out, allowed_direction_ids, department, filters):
         out["reviewed"] = _reviewed_metrics(cur, subject_keys=set())
         _fill_rag_stats(cur, out)
         return out
-    subjects_sql = ("SELECT DISTINCT rc.subject_kind, rc.call_id FROM ai_review_cache rc"
+    # Набор разговоров — как у «Звонков»: отбор проверяется на ПОСЛЕДНЕЙ оценке
+    # субъекта (DISTINCT ON), а не на любой строке кэша. Иначе звонок, который
+    # старая модель оценила на 40, а новая на 85, попадал бы в «Обзор» при
+    # «балл до 50», хотя список его не показывает.
+    subjects_sql = ("""SELECT rc.subject_kind, rc.call_id
+                         FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                                      rc.subject_kind, rc.call_id, rc.created_at, rc.payload
+                                 FROM ai_review_cache rc
+                                ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
                     + _SUBJECT_JOIN + _marketing_join(cur, filters)
                     + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + filter_sql)
     subjects_params = (*scope_params, *filter_params)
 
     cur.execute(subjects_sql, subjects_params)
     keys = {(row[0] or config.SUBJECT_CALL, row[1]) for row in cur.fetchall()}
-    cur.execute("SELECT COUNT(*) FROM ai_review_cache rc"
-                f" WHERE (rc.subject_kind, rc.call_id) IN ({subjects_sql})", subjects_params)
-    out["evaluated"] = cur.fetchone()[0]
+    # «Оценено» — разговоров, а не строк кэша: столько же покажет «Звонки» и
+    # «Чаты» с тем же отбором («Показано N из M»).
+    out["evaluated"] = len(keys)
     try:
+        # Очередь — тем же запросом, что счётчик вкладки «Очередь ревью»
+        # (review_queue_count): отбор на строке текущей модели.
         cur.execute(
-            """SELECT COUNT(*) FROM ai_review_cache rc
-                 LEFT JOIN ai_evaluation_meta m
-                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
-                           AND m.model = rc.model
-                WHERE rc.model = %s AND m.review_outcome IS NULL"""
-            f" AND (rc.subject_kind, rc.call_id) IN ({subjects_sql})",
+            "SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + _marketing_join(cur, filters)
+            + """ LEFT JOIN ai_evaluation_meta m
+                         ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                            AND m.model = rc.model
+                 WHERE rc.model = %s AND m.review_outcome IS NULL"""
+            + _SUBJECT_EXISTS + scope_sql + filter_sql,
             (config.CLAUDE_MODEL, *subjects_params))
-        out["queue"] = cur.fetchone()[0]
+        out["queue"] = min(int(cur.fetchone()[0] or 0), _QUEUE_FETCH_CAP)
     except Exception as exc:
         # До миграции меты очереди по отбору не посчитать; ноль честнее, чем
         # «последние звонки» без фильтра под выставленным отбором.
@@ -5464,7 +5497,9 @@ def marketing_options(allowed_direction_ids=None, department=None,
         # С какого момента вообще есть история этапов. Нужно показать словами:
         # до этой даты «этап на момент разговора» физически пуст, и пустой
         # список в панели человек иначе прочтёт как поломку.
-        cur.execute("SELECT MIN(seen_at) FROM op_funnel_lead_stages")
+        # Журнал пишется в UTC, а панель показывает дату по Алматы.
+        cur.execute("""SELECT MIN(seen_at) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Almaty'
+                         FROM op_funnel_lead_stages""")
         row = cur.fetchone()
         history_since = row[0].isoformat(sep=' ', timespec='minutes') if row and row[0] else None
 

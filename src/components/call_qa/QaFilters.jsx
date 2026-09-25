@@ -73,8 +73,9 @@ const HANDLER_MODE_OPTIONS = [
 ];
 
 /* Значения двухуровневого селектора канала: канал и его кампании в одном
-   списке с заголовками-разделителями. Префикс отличает уровень, потому что имя
-   кампании может совпасть с кодом канала («olx»). */
+   списке, кампании — под своим каналом. Префикс отличает уровень, потому что
+   имя кампании может совпасть с кодом канала («olx»); кампания хранится парой
+   «канал|кампания». */
 const CH = 'ch:';
 const CP = 'cp:';
 const encodeChannelValues = (filters) => [
@@ -207,8 +208,11 @@ export default function QaFilters(props) {
             .then((r) => setPresets({ items: r.data?.items || [], can_share: !!r.data?.can_share }))
             .catch(() => setPresets({ items: [], can_share: false }));
     };
+    /* marketingOnly в зависимостях: панель одна на все вкладки, и после
+       «Базы разборов» (где пресеты не грузятся) при смене там отдела
+       «Звонки» показывали бы пресеты прежнего отдела. */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(loadPresets, [apiBaseUrl, department]);
+    useEffect(loadPresets, [apiBaseUrl, department, marketingOnly]);
 
     /* Пресет восстанавливает отбор ЦЕЛИКОМ и заменяет текущий, а не дополняет:
        «TikTok за неделю» поверх уже выставленного сотрудника дал бы отбор,
@@ -268,7 +272,11 @@ export default function QaFilters(props) {
             document.body.appendChild(link); link.click(); link.remove();
             URL.revokeObjectURL(url);
             const rows = Number(response.headers?.['x-rows']);
-            if (Number.isFinite(rows)) showToast?.(`Выгружено строк: ${rows}`, 'success');
+            if (response.headers?.['x-truncated'] === '1') {
+                showToast?.(`Выгружены первые ${rows} строк — отбор больше, сузьте период`, 'warning');
+            } else if (Number.isFinite(rows)) {
+                showToast?.(`Выгружено строк: ${rows}`, 'success');
+            }
         } catch (error) {
             showToast?.('Не удалось выгрузить файл', 'error');
         } finally {
@@ -640,7 +648,10 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
     (marketing.channels || []).forEach((channel) => {
         channelOptions.push({ value: CH + channel.code, label: withCount(channel.title, channel.calls) });
         (channel.campaigns || []).forEach((campaign) => {
-            channelOptions.push({ value: CP + campaign.value, label: withCount(campaign.value, campaign.calls),
+            /* Значение кампании — пара «канал|кампания»: одно имя бывает у
+               разных каналов, и без канала две строки выбирались бы разом. */
+            channelOptions.push({ value: `${CP}${channel.code}|${campaign.value}`,
+                                  label: withCount(campaign.value, campaign.calls),
                                   parent: CH + channel.code });
         });
     });

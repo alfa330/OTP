@@ -313,15 +313,6 @@ function RolloutPanel({ apiBaseUrl, headers, showToast, onInteractionChange }) {
         return () => { loadRequest.current += 1; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiBaseUrl]);
-    // Новый отбор по сделке — с первой страницы: на пятой странице узкой
-    // выборки обычно пусто, и это читалось бы как «ничего не нашлось».
-    const dealSignatureRef = useRef(dealSignature);
-    useEffect(() => {
-        if (dealSignatureRef.current === dealSignature) return;
-        dealSignatureRef.current = dealSignature;
-        setPage(1);
-    }, [dealSignature]);
-
     useEffect(() => {
         onInteractionChange?.({ editing: dirtyIds.size > 0, busy: savingId !== null });
     }, [dirtyIds, savingId, onInteractionChange]);
@@ -514,6 +505,15 @@ export default function AdjudicationsRag(props) {
         return () => window.clearTimeout(timer);
     }, [queryInput]);
 
+    // Новый отбор по сделке — с первой страницы: на пятой странице узкой
+    // выборки обычно пусто, и это читалось бы как «ничего не нашлось».
+    const dealSignatureRef = useRef(dealSignature);
+    useEffect(() => {
+        if (dealSignatureRef.current === dealSignature) return;
+        dealSignatureRef.current = dealSignature;
+        setPage(1);
+    }, [dealSignature]);
+
     useEffect(() => {
         onInteractionChange?.({
             editing: editId !== null || rolloutInteraction.editing,
@@ -653,6 +653,9 @@ export default function AdjudicationsRag(props) {
         setQueryInput(''); setQuery(''); setDirection('all'); setStatus('all'); setIndexStatus('all'); setPage(1);
     };
     const hasFilters = Boolean(query || direction !== 'all' || status !== 'all' || indexStatus !== 'all');
+    /* Отбор по сделке снимается в панели над вкладкой, а не здесь, но пустой
+       каталог под ним — это «ничего не нашлось», а не «правил пока нет». */
+    const hasDealFilters = Object.keys(dealParams).length > 0;
     const totalPages = Math.max(1, Math.ceil((result?.total || 0) / (result?.pageSize || pageSize)));
 
     useEffect(() => {
@@ -803,12 +806,12 @@ export default function AdjudicationsRag(props) {
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <Database size={28} className="text-slate-300" />
                     <p className="text-[14px] font-semibold text-slate-700">
-                        {view === 'deleted' ? 'Удалённых разборов нет' : hasFilters ? 'Ничего не найдено' : 'Правил пока нет'}
+                        {view === 'deleted' ? 'Удалённых разборов нет' : (hasFilters || hasDealFilters) ? 'Ничего не найдено' : 'Правил пока нет'}
                     </p>
                     <p className="max-w-lg text-[12.5px] text-slate-400">
                         {view === 'deleted'
                             ? 'Удалённые из каталога разборы будут храниться здесь и не будут участвовать в оценках.'
-                            : hasFilters ? 'Измените запрос или сбросьте фильтры.' : 'После проверки исправление станет черновиком и появится здесь для дальнейшей модерации.'}
+                            : hasFilters ? 'Измените запрос или сбросьте фильтры.' : hasDealFilters ? 'Под этот отбор по сделке правил нет — измените его в панели выше.' : 'После проверки исправление станет черновиком и появится здесь для дальнейшей модерации.'}
                     </p>
                     {view !== 'deleted' && hasFilters && <button type="button" onClick={resetFilters} className={iosBtnSecondary}>Сбросить фильтры</button>}
                 </div>

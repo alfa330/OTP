@@ -463,8 +463,17 @@ _LEAD_COLUMNS = (
     'reason_code', 'sub_reason_raw', 'reach_outcome', 'dialog_outcome',
     'reason_bucket', 'full_name', 'phone', 'park_name', 'city', 'base_title',
     'comment', 'phones', 'tags', 'utm_source', 'lead_type', 'registered',
-    'created_at', 'taken_at', 'updated_at',
+    'created_at', 'taken_at', 'updated_at', 'utm_source_raw', 'utm_campaign',
 )
+
+# Колонки NOT NULL, которых у строки может не быть вовсе: сырые UTM есть только
+# у amoCRM, и строка другой CRM без этих ключей не должна ронять вставку.
+_LEAD_TEXT_DEFAULTS = {'utm_source_raw': '', 'utm_campaign': ''}
+
+
+def _lead_value(row, name):
+    value = row.get(name)
+    return _LEAD_TEXT_DEFAULTS[name] if value is None and name in _LEAD_TEXT_DEFAULTS else value
 
 
 def delete_leads_for_days(cursor, direction_code, source, stream_type, days):
@@ -525,7 +534,7 @@ def upsert_leads(cursor, rows, page=1000):
         args = []
         for row in chunk:
             values.append(placeholders)
-            args.extend(row.get(name) for name in _LEAD_COLUMNS)
+            args.extend(_lead_value(row, name) for name in _LEAD_COLUMNS)
         cursor.execute(
             "INSERT INTO op_funnel_leads (%s) VALUES %s "
             "ON CONFLICT (direction_code, source, stream_type, lead_key) "

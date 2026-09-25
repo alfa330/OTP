@@ -357,16 +357,27 @@ def normalise_park_dictionary(cur):
     learned = [row for row in rows
                if int(row[3] or 0) >= LEARNED_SORT_ORDER and row[4] is None]
     # Код строки лежит в её же алиасах. Составной код («itaxi_2_astana») — не
-    # написание из CRM, переносить его незачем; однословный («global»,
-    # «ipartner») может совпадать с настоящим написанием, и выбросить его
-    # значило бы потерять эти сделки. Но подпись бренда берём из настоящих
-    # написаний в первую очередь: «честный» даёт «Честный», а транслит кода —
+    # написание из CRM. Однословный («global», «ipartner») бывает и настоящим
+    # написанием — его сохраняем, но лишь если он ведёт к тому же бренду, что
+    # и написания самой строки: иначе это транслит, и он завёл бы бренд-
+    # призрак без сделок («zhanataksi» при «жанатакси» → Jana). Подпись бренда
+    # берётся из написаний в первую очередь: «честный» даёт «Честный», а не
     # «Chestnyy». Поэтому два прохода: сперва написания, затем коды.
+    def code_is_spelling(code, aliases):
+        if '_' in code or code not in aliases:
+            return False
+        own = brands.park_brand(code)
+        if not own:
+            return False
+        others = {brand[0] for brand in (brands.park_brand(alias)
+                                         for alias in aliases if alias != code) if brand}
+        return not others or own[0] in others
+
     passes = (
         [(spelling, code) for code, _t, aliases, _o, _b in learned
          for spelling in (aliases or []) if spelling != code],
         [(code, code) for code, _t, aliases, _o, _b in learned
-         if '_' not in code and code in (aliases or [])],
+         if code_is_spelling(code, list(aliases or []))],
     )
     for items in passes:
         for spelling, _row in items:

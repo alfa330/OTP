@@ -67,9 +67,15 @@ DEAL_DEPARTMENTS = ('op',)
 # токен youtube, канал — youtube; иначе нормализованное значение воронки.
 # Условие на google/пусто не даёт перебить явный рекламный источник другого
 # канала: у сделки с tiktok в поле тег youtube ничего не меняет.
+#
+# Сырой utm_source берётся из выгрузки воронки (раз в 15 минут, п. 4 ТЗ), а
+# amo_leads (раз в три часа) — лишь запасной для сделок, которые с тех пор не
+# менялись и сырого поля в воронке ещё не получили.
+RAW_UTM_SOURCE = ("lower(btrim(COALESCE(NULLIF(btrim(l.utm_source_raw), ''),"
+                  " al.utm_source, '')))")
 CHANNEL_RAW = ("(CASE WHEN COALESCE(l.utm_source, '') IN ('', 'google')"
-               " AND (lower(btrim(COALESCE(al.utm_source, ''))) = 'youtube'"
-               " OR (btrim(COALESCE(al.utm_source, '')) = ''"
+               f" AND ({RAW_UTM_SOURCE} = 'youtube'"
+               f" OR ({RAW_UTM_SOURCE} = ''"
                " AND COALESCE(l.tags, '') ~* '(^|[^[:alnum:]])youtube([^[:alnum:]]|$)'))"
                " THEN 'youtube' ELSE lower(btrim(COALESCE(l.utm_source, ''))) END)")
 
@@ -103,7 +109,9 @@ JOIN_SQL = """
                      SELECT ls.stage_raw, ls.reason_raw
                        FROM op_funnel_lead_stages ls
                       WHERE ls.source = sd.source AND ls.lead_key = sd.lead_key
-                        AND ls.seen_at <= COALESCE(sd.happened_at, NOW())
+                        AND ls.seen_at <= COALESCE(
+                                (sd.happened_at AT TIME ZONE 'Asia/Almaty') AT TIME ZONE 'UTC',
+                                NOW() AT TIME ZONE 'UTC')
                       ORDER BY ls.seen_at DESC
                       LIMIT 1
                  ) shist ON TRUE
@@ -116,6 +124,12 @@ JOIN_SQL = """
                  ) slast ON TRUE
 """.format(channel_raw=CHANNEL_RAW)
 
+# «Этап на момент разговора» (shist) сравнивает два разных пояса: журнал
+# `op_funnel_lead_stages.seen_at` пишется DEFAULT NOW() базой в UTC, а момент
+# разговора `qa_subject_deals.happened_at` — часы Алматы. Сравнивать напрямую
+# значило принимать этап, выставленный до пяти часов ПОСЛЕ разговора; поэтому
+# момент разговора переводится в UTC (сторона с индексом остаётся нетронутой).
+#
 # «Текущий этап» — ПОСЛЕДНЯЯ запись журнала, а снимок op_funnel_leads — только
 # запасной вариант, пока журнала у сделки нет. Снимок здесь не годится в
 # первоисточники: «Воронка ОП» намеренно не переписывает лиды зафиксированных
@@ -129,7 +143,9 @@ PARK_CODE = "COALESCE(mpark.code, '')"
 PARK_TITLE = "COALESCE(mpark.title, NULLIF(btrim(l.park_name), ''), '')"
 CHANNEL_CODE = "COALESCE(mchan.code, '')"
 CHANNEL_TITLE = f"COALESCE(mchan.title, NULLIF({CHANNEL_RAW}, ''), '')"
-CAMPAIGN = "COALESCE(NULLIF(btrim(al.utm_campaign), ''), '')"
+# Кампания — из выгрузки воронки (15 минут), amo_leads — запасной (три часа).
+CAMPAIGN = ("COALESCE(NULLIF(btrim(l.utm_campaign), ''),"
+            " NULLIF(btrim(al.utm_campaign), ''), '')")
 # btrim(NULL) = NULL, поэтому COALESCE переходит к снимку ТОЛЬКО когда строки
 # журнала нет. Пустая причина в журнале — это законный ответ «сделка вышла из
 # отказа», и NULLIF здесь превращал бы его обратно в устаревшую причину снимка.
@@ -285,7 +301,14 @@ def normalise(raw):
     if channels:
         out['channels'] = channels
 
+    # Кампания — второй уровень канала и живёт ПАРОЙ «канал|кампания»: одно и
+    # то же имя кампании встречается у разных каналов, и без канала выбор
+    # «Google → brand» отбирал бы и одноимённую кампанию TikTok.
     campaigns = _labels(raw.get('campaigns'), 'campaigns')
+    for pair in campaigns:
+        channel, _sep, name = pair.partition('|')
+        if not _sep or not name.strip() or not _CODE_RE.match(channel):
+            raise ValueError(f"campaigns: ожидается «канал|кампания», пришло «{pair}»")
     if campaigns:
         out['campaigns'] = campaigns
 
@@ -378,12 +401,21 @@ def predicate(filters, *, operator_id_sql, group_of_person):
 
     if filters.get('parks'):
         sql += " AND " + bucketed(PARK_CODE, filters['parks'])
-    if filters.get('channels'):
-        sql += " AND " + bucketed(CHANNEL_CODE, filters['channels'])
 
+    # Канал целиком и кампании каналов — ОДНО условие через ИЛИ, как отметки в
+    # дереве: «весь TikTok» + «Google → brand» — это TikTok и ещё та кампания
+    # Google, а не их пересечение (оно почти всегда пусто).
+    channel_parts = []
+    if filters.get('channels'):
+        channel_parts.append(bucketed(CHANNEL_CODE, filters['channels']))
     if filters.get('campaigns'):
-        sql += f" AND {CAMPAIGN} = ANY(%s)"
-        params.append(filters['campaigns'])
+        pairs = [pair.partition('|') for pair in filters['campaigns']]
+        channel_parts.append(
+            f"({CHANNEL_CODE}, {CAMPAIGN}) IN (SELECT * FROM unnest(%s::text[], %s::text[]))")
+        params.append(['' if channel == NONE_BUCKET else channel for channel, _s, _n in pairs])
+        params.append([name for _c, _s, name in pairs])
+    if channel_parts:
+        sql += " AND (" + " OR ".join(channel_parts) + ")"
 
     if filters.get('stages'):
         stage_sql = (STAGE_AT_CALL if filters.get('stage_mode') == 'at_call'
