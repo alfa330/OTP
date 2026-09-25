@@ -179,7 +179,11 @@ def _sent_total(detail):
 
 
 def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                                    resolve_requester):
+                                    resolve_requester, sensitive_access_granted):
+    """sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ сессия
+    QR-кодом (bot_schedule2._sensitive_access_granted_for_user). Параметр
+    обязательный намеренно: со значением «по умолчанию» забытая передача молча
+    сняла бы гейт с рядового сотрудника."""
     bp = Blueprint('driver_mailings', __name__, url_prefix='/api/driver_mailings')
 
     # Кэш справочников: (парк, '') → общие справочники парка, (парк, сегмент) →
@@ -214,6 +218,14 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                     if not access.can_view_section(requester):
                         return jsonify({"error": "Раздел «Рассылки» вам не открыт",
                                         "code": "MAILINGS_SECTION_CLOSED"}), 403
+                    # Второй гейт — QR-подтверждение сессии у рядового. Стоит
+                    # ПОСЛЕ первого: предлагать подтвердить доступ к тому, чего
+                    # человеку не выдавали, — тупик.
+                    if (access.requires_sensitive_qr(requester)
+                            and not sensitive_access_granted(requester_id)):
+                        return jsonify({"error": "Раздел «Рассылки» откроется после "
+                                                 "QR-подтверждения доступа",
+                                        "code": "SENSITIVE_ACCESS_REQUIRED"}), 403
                     if sending and not access.can_send(requester):
                         return jsonify({"error": "Отправлять рассылки вам не разрешено",
                                         "code": "MAILINGS_READ_ONLY"}), 403

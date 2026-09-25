@@ -51508,12 +51508,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                // «Обращения», «Вики», «Посылки» и «Чаты водителей» закрыты тем
-                // же ключом. Статус спрашиваем до отрисовки раздела: иначе замок
-                // мигнёт тому, кто доступ уже подтвердил, а сам раздел успеет
-                // получить 403.
+                // «Обращения», «Вики», «Посылки», «Чаты водителей» и «Рассылки»
+                // закрыты тем же ключом. Статус спрашиваем до отрисовки раздела:
+                // иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
+                // раздел успеет получить 403.
                 if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
-                        || view === 'driver_chats' || view === 'sign_links') {
+                        || view === 'driver_chats' || view === 'sign_links'
+                        || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -56300,7 +56301,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {( view === "driver_mailings" && canAccessDriverMailings && (
+                        {/* У рядового «Рассылки» открываются после QR-подтверждения
+                            сессии, как «Посылки» и «Вики» (владелец, 25.09.2026);
+                            двойник правила — requires_sensitive_qr в
+                            driver_mailings/access.py. */}
+                        {( view === "driver_mailings" && canAccessDriverMailings && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Рассылки"
+                                description="Отсюда сообщение уходит водителям в приложение Pro. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <DriverMailingsView
                                     showToast={showToast}
@@ -56308,7 +56320,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                 />
                             </Suspense>
-                        ))}
+                        )))}
                         {( view === "payments" && canAccessPaymentsSection && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <PaymentsView

@@ -92,9 +92,50 @@ class AccessTests(unittest.TestCase):
 
     def test_capabilities_carry_every_key_the_front_reads(self):
         caps = access.capabilities({'id': 476, 'role': 'admin'})
-        self.assertEqual(set(caps), {'can_view', 'can_send', 'can_manage_templates'})
-        self.assertTrue(all(caps.values()))
+        self.assertEqual(set(caps), {'can_view', 'can_send', 'can_manage_templates', 'requires_qr'})
+        self.assertTrue(caps['can_view'] and caps['can_send'] and caps['can_manage_templates'])
+        # Админу подтверждать доступ не у кого.
+        self.assertFalse(caps['requires_qr'])
         self.assertFalse(any(access.capabilities({'id': 1, 'role': 'sv'}).values()))
+
+
+class SensitiveQrAccessTests(unittest.TestCase):
+    """Рядовой открывает раздел после QR-подтверждения сессии (владелец,
+    25.09.2026). Ключ общий с «Вики» и «Посылками»."""
+
+    def test_rank_and_file_needs_qr(self):
+        # 523 — сотрудник ООЗ с ролью оператора (задача #359).
+        self.assertTrue(access.requires_sensitive_qr({'id': 523, 'role': 'operator'}))
+        self.assertTrue(access.capabilities({'id': 523, 'role': 'operator'})['requires_qr'])
+
+    def test_super_admin_and_department_head_do_not(self):
+        self.assertFalse(access.requires_sensitive_qr({'id': 1, 'role': 'super_admin'}))
+        # Глава ООЗ сама подтверждает своих сотрудников — ей подтверждать не у кого.
+        for head in (
+            {'id': 476, 'role': 'admin', 'is_department_head': True},
+            {'id': 476, 'role': 'admin', 'headed_department_code': 'request_processing_department'},
+            {'id': 99, 'role': 'operator', 'is_department_head': True},
+        ):
+            self.assertFalse(access.requires_sensitive_qr(head), head)
+        self.assertFalse(access.requires_sensitive_qr({'id': 476, 'role': 'admin'}))
+
+    def test_role_list_is_the_portal_one(self):
+        # Своей копии списка нет: иначе замок на экране (SENSITIVE_QR_GATED_ROLES
+        # в App.jsx) и отказ сервера спрашивали бы разных людей.
+        from wiki.access import QR_GATED_ROLES
+        self.assertIs(access.QR_GATED_ROLES, QR_GATED_ROLES)
+        for role in QR_GATED_ROLES:
+            self.assertTrue(access.requires_sensitive_qr({'id': 5, 'role': role}), role)
+
+    def test_access_module_still_imports_without_flask_and_database(self):
+        import subprocess
+        import sys
+        code = ("import sys; import driver_mailings.access; "
+                "print(any(m in sys.modules for m in ('flask', 'database', 'psycopg2')))")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run([sys.executable, '-c', code], cwd=root, capture_output=True,
+                             text=True, check=True).stdout.strip()
+        self.assertEqual(out, 'False')
 
 
 class FiltersTests(unittest.TestCase):
@@ -680,12 +721,21 @@ class _RouteHarness(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+        # QR-подтверждение сессии: кого спросили и что ответили.
+        self.qr_granted = False
+        self.qr_checks = []
+
+        def sensitive_access_granted(user_id):
+            self.qr_checks.append(user_id)
+            return self.qr_granted
+
         app = Flask(__name__)
         app.register_blueprint(routes.build_driver_mailings_blueprint(
             db=_FakeDb(),
             require_api_key=lambda handler: handler,
             build_cors_preflight_response=lambda: ('', 204),
             resolve_requester=lambda: (self.requester['id'], None, None),
+            sensitive_access_granted=sensitive_access_granted,
         ))
         self.http = app.test_client()
 
@@ -774,6 +824,54 @@ class SessionRouteTests(_RouteHarness):
         body = self.http.get('/api/driver_mailings/session').get_json()
         self.assertEqual(body['session']['source'], self.routes.SESSION_OWN)
         self.assertEqual(body['session']['account'], 'mailings@example.com')
+
+
+class SensitiveQrRouteTests(_RouteHarness):
+    """Гейт QR стоит в общем декораторе: закрыт КАЖДЫЙ маршрут раздела, а не
+    только экран. Спрятанный замком экран доступом не является."""
+
+    ROUTES = (
+        ('get', '/api/driver_mailings/overview'),
+        ('get', '/api/driver_mailings/filters'),
+        ('post', '/api/driver_mailings/recipients/count'),
+        ('post', '/api/driver_mailings/send'),
+        ('get', '/api/driver_mailings/journal'),
+        ('post', '/api/driver_mailings/journal/5/revoke'),
+        ('get', '/api/driver_mailings/templates'),
+        ('post', '/api/driver_mailings/parks/refresh'),
+    )
+
+    def test_rank_and_file_without_qr_is_refused_everywhere(self):
+        self.requester = {'id': 523, 'name': 'Сотрудник ООЗ', 'role': 'operator'}
+        for method, path in self.ROUTES:
+            with self.subTest(path=path):
+                response = getattr(self.http, method)(path, json={})
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.get_json()['code'], 'SENSITIVE_ACCESS_REQUIRED')
+        # До кабинета и базы раздела дело не дошло ни разу.
+        self.assertEqual(self.names(), [])
+        self.assertEqual(_FakeCabinet.events, [])
+
+    def test_confirmed_session_opens_the_section(self):
+        self.requester = {'id': 523, 'name': 'Сотрудник ООЗ', 'role': 'operator'}
+        self.qr_granted = True
+        response = self.http.post('/api/driver_mailings/parks/refresh')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.qr_checks, [523])
+
+    def test_not_listed_person_hears_about_the_section_not_about_qr(self):
+        # Первый гейт — именной список: предлагать QR тому, кому раздел не
+        # выдавали, — тупик, из которого он не выйдет.
+        self.requester = {'id': 524, 'name': 'Коллега', 'role': 'operator'}
+        response = self.http.get('/api/driver_mailings/overview')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'MAILINGS_SECTION_CLOSED')
+        self.assertEqual(self.qr_checks, [])
+
+    def test_super_admin_is_not_asked(self):
+        response = self.http.post('/api/driver_mailings/parks/refresh')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.qr_checks, [])
 
 
 class SendRouteTests(_RouteHarness):
@@ -950,6 +1048,31 @@ class FrontendWiringTests(unittest.TestCase):
         rank_menu = rank_menu.split("\n" + " " * 40 + "</>\n" + " " * 36 + ")}")[0]
         self.assertIn("{canAccessDriverMailings && (", rank_menu)
         self.assertIn("handleSidebarViewNavigation(e, 'driver_mailings')", rank_menu)
+
+    def test_screen_is_locked_until_qr_for_rank_and_file(self):
+        # Замок — тот же, что у «Посылок» и «Вики»: предикат портала, а не своя
+        # копия правила.
+        render = self.app.split('{( view === "driver_mailings" && canAccessDriverMailings && (', 1)[1]
+        render = render.split('{( view === "payments"', 1)[0]
+        self.assertTrue(render.startswith('sensitiveSectionsLocked ? ('), render[:80])
+        self.assertIn('<SensitiveSectionGate', render)
+        self.assertIn('sectionTitle="Рассылки"', render)
+        self.assertIn('checking={sensitiveSectionsChecking}', render)
+        self.assertIn('onRequestQr={requestSensitiveQrAccess}', render)
+        self.assertIn('<DriverMailingsView', render)
+        # Статус спрашивается при входе в раздел — иначе замок мигнёт тому,
+        # кто доступ уже подтвердил.
+        self.assertIn("|| view === 'driver_mailings') {\n                    fetchSensitiveAccessStatus();",
+                      self.app)
+
+    def test_backend_blueprint_gets_the_qr_check(self):
+        # Без аргумента сборка blueprint падает TypeError, а bot_schedule2 ловит
+        # это и пишет в лог — раздел молча пропал бы целиком.
+        bot_path = os.path.join(os.path.dirname(APP_JSX), '..', 'bot_schedule2.py')
+        with open(bot_path, encoding='utf-8') as handle:
+            bot = handle.read()
+        block = bot.split('app.register_blueprint(build_driver_mailings_blueprint(', 1)[1].split('))', 1)[0]
+        self.assertIn('sensitive_access_granted=_sensitive_access_granted_for_user,', block)
 
     def test_view_opens_by_url_and_is_not_bounced(self):
         self.assertIn("(requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings)",

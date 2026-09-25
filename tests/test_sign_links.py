@@ -819,7 +819,10 @@ class FrontendWiringTests(unittest.TestCase):
                       self.source)
 
     def test_qr_status_is_requested_before_the_section_is_drawn(self):
-        self.assertIn("|| view === 'driver_chats' || view === 'sign_links') {", self.source)
+        # Без «) {» на конце: следом в том же условии стоят «Рассылки».
+        self.assertIn("|| view === 'driver_chats' || view === 'sign_links'", self.source)
+        self.assertIn("|| view === 'driver_mailings') {\n                    fetchSensitiveAccessStatus();",
+                      self.source.replace('\r\n', '\n'))
 
     def test_the_same_departments_are_named_on_both_sides(self):
         """Двойники обязаны совпадать: иначе пункт меню ведёт в 403 или раздел

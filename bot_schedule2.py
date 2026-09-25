@@ -63678,6 +63678,9 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Ключ тот же, что у вики, обращений и посылок: рядовой открывает
+        # раздел после QR-подтверждения сессии (владелец, 25.09.2026).
+        sensitive_access_granted=_sensitive_access_granted_for_user,
     ))
     logging.info("Раздел «Рассылки»: Blueprint подключён на /api/driver_mailings")
 except Exception:
