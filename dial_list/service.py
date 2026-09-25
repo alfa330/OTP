@@ -132,6 +132,13 @@ SCRIPT_QUESTIONS_MAX = 50
 # в столько секунд на попытку — телефон опрашивает каждые 3 с, Binotel не любит частых.
 LIVE_MIN_INTERVAL_SEC = 4
 PERIOD_TZ = timezone(timedelta(hours=5))  # Asia/Almaty
+# Отработанные водители на телефоне (владелец, 25.09.2026): вкладка на каждый итог
+# и «Не дозвонились» — строки, которые АТС закрыла без разговора. На вкладку уходит
+# не больше стольких последних: телефону хватает, а ответ не раздувается к концу месяца.
+WORKED_NO_ANSWER = "no_answer"
+WORKED_NO_ANSWER_NAME = "Не дозвонились"
+WORKED_NO_ANSWER_COLOR = "#8E8E93"
+WORKED_TAB_LIMIT = 300
 
 # Отделы, чья работа — этот обзвон (удалённый колл-центр). Глава такого отдела
 # управляет разделом без роли админа. Отдел считается «своим» для раздела также,
@@ -244,6 +251,32 @@ def parse_period(value, allow_all=False):
         except ValueError:
             continue
     raise DialListError("period: ожидается месяц в виде YYYY-MM")
+
+
+def worked_tab(state, result, outcome_id, attempt_state):
+    """На какую вкладку телефона попадает строка выдачи; None — её там нет.
+
+    Правило зеркальное к очереди на телефоне (DialList::InQueue): строка в очереди,
+    пока она issued и по ней нет итога, ждущего исхода от АТС. Итог оператора важнее
+    исхода АТС. Строку, которую руководитель вернул в список, выдаёт issued при уже
+    завершённой попытке с итогом — она снова в очереди, а не на вкладке итога.
+    Разговор без итога (answered) на вкладки не попадает: пока итог ждут
+    (pending_outcome), телефон держит его в очереди.
+    """
+    if outcome_id and (state == "done" or attempt_state != "finished"):
+        return str(outcome_id)
+    if state == "done" and result != "answered":
+        return WORKED_NO_ANSWER
+    return None
+
+
+def at_label(value, today):
+    """«сегодня, 14:05» / «24.09, 14:05» по Алматы — телефону не нужно разбирать даты."""
+    if not isinstance(value, datetime):
+        return ""
+    local = value.astimezone(PERIOD_TZ)
+    day = "сегодня" if local.date() == today else local.strftime("%d.%m")
+    return f"{day}, {local:%H:%M}"
 
 
 def period_label(day):
@@ -1573,7 +1606,7 @@ class DialListService:
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
                    t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
-                   o.name, o.color, t.cancelled, t.operator_hangup_at
+                   o.name, o.color, t.cancelled, t.operator_hangup_at, a.lead_id
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
@@ -1590,6 +1623,8 @@ class DialListService:
         for r in cur.fetchall():
             items.append({
                 "assignment_id": str(r[0]),
+                # По нему телефон узнаёт того же водителя на вкладке итога (не номер).
+                "lead_id": str(r[16]),
                 "position": int(r[1]),
                 "full_name": r[2] or "Без имени",
                 "state": r[3],
@@ -1861,6 +1896,95 @@ class DialListService:
                 "answered": int(r[6] or 0), "talk_sec": int(r[8] or 0),
             },
             "outcomes": outcomes,
+        }
+
+    # Отработанные за месяц: по каждому водителю — ПОСЛЕДНЯЯ строка этого оператора
+    # (пере-выданный водитель уходит туда, куда его отнесла последняя обработка) и её
+    # последняя попытка. Месяц — строки, выданные или обработанные с 1-го числа, плюс
+    # открытые: пачка живёт до «Ещё», и выданная 30-го, а обработанная 1-го строка иначе
+    # ушла бы из очереди телефона, не появившись ни на одной вкладке.
+    _WORKED_SQL = """
+        WITH latest AS (
+            SELECT DISTINCT ON (a.lead_id)
+                   a.id, a.lead_id, a.state, a.result, a.done_at, a.created_at
+            FROM dial_list_assignments a
+            WHERE a.operator_id = %(operator_id)s
+              AND (a.created_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+                   OR a.done_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+                   OR a.state = 'issued')
+            ORDER BY a.lead_id, a.created_at DESC
+        )
+        SELECT s.id, s.lead_id, l.full_name, s.state, s.result, s.done_at, s.created_at,
+               t.outcome_id, t.outcome_at, t.operator_comment, t.state,
+               o.name, o.color, o.position, l.status
+        FROM latest s
+        JOIN dial_list_leads l ON l.id = s.lead_id
+        LEFT JOIN LATERAL (
+            SELECT outcome_id, outcome_at, operator_comment, state
+            FROM dial_list_attempts WHERE assignment_id = s.id
+            ORDER BY requested_at DESC LIMIT 1
+        ) t ON TRUE
+        LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
+    """
+
+    def operator_worked(self, user_id):
+        """Вкладки итогов на телефоне: кого оператор отработал за месяц и с каким итогом.
+
+        Вкладка на каждый включённый итог отдела (в порядке справочника, даже пустая —
+        набор вкладок не прыгает), выключенный — только если по нему кто-то есть, и
+        последней «Не дозвонились». Только ФИО, время и свой комментарий — номера нет.
+        """
+        ctx = self.operator_context(user_id)
+        month = current_period()
+        today = datetime.now(PERIOD_TZ).date()
+        with self.db._get_cursor() as cur:
+            outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
+            cur.execute(self._WORKED_SQL, {"operator_id": ctx["user_id"], "month": month})
+            rows = cur.fetchall()
+        tabs = {o["id"]: {"key": o["id"], "name": o["name"], "color": o["color"], "position": o["position"],
+                          "count": 0} for o in outcomes}
+        extra = {}
+        items = []
+        for r in rows:
+            tab = worked_tab(r[3], r[4], r[7], r[10])
+            if tab is None:
+                continue
+            if tab == WORKED_NO_ANSWER and r[4] == "other" and r[14] == "excluded":
+                # Строку закрыл руководитель («Исключить»), а не АТС: это не недозвон.
+                continue
+            if tab != WORKED_NO_ANSWER and tab not in tabs:
+                # Итог выключили уже после звонка — вкладка живёт, пока по ней кто-то есть.
+                extra.setdefault(tab, {"key": tab, "name": r[11] or "Итог", "color": r[12] or WORKED_NO_ANSWER_COLOR,
+                                       "position": int(r[13] or 0), "count": 0})
+            at = (r[8] or r[5] or r[6]) if tab != WORKED_NO_ANSWER else (r[5] or r[6])
+            items.append({
+                "assignment_id": str(r[0]), "lead_id": str(r[1]),
+                "full_name": r[2] or "Без имени",
+                "tab": tab,
+                "result": r[4] or "",
+                "comment": (r[9] or "") if tab != WORKED_NO_ANSWER else "",
+                "at": _iso(at), "at_label": at_label(at, today), "_sort": at,
+            })
+        no_answer = {"key": WORKED_NO_ANSWER, "name": WORKED_NO_ANSWER_NAME, "color": WORKED_NO_ANSWER_COLOR,
+                     "count": 0}
+        ordered = list(tabs.values()) + sorted(extra.values(), key=lambda t: (t["position"], t["name"])) + [no_answer]
+        by_key = {t["key"]: t for t in ordered}
+        # Свежие сверху: только что отработанный водитель — первая строка своей вкладки.
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        items.sort(key=lambda i: i["_sort"] or oldest, reverse=True)
+        shown = []
+        for item in items:
+            del item["_sort"]
+            tab = by_key[item["tab"]]
+            tab["count"] += 1
+            if tab["count"] <= WORKED_TAB_LIMIT:
+                shown.append(item)
+        return {
+            "period": month.isoformat(),
+            "period_label": period_label(month),
+            "limit": WORKED_TAB_LIMIT,
+            "tabs": [{"key": t["key"], "name": t["name"], "color": t["color"], "count": t["count"]} for t in ordered],
+            "items": shown,
         }
 
     def issue_next_portion(self, user_id):

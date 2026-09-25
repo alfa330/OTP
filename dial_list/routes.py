@@ -135,6 +135,14 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         user_id, _ = _operator()
         return jsonify({"status": "success", **svc.operator_progress(user_id)}), 200
 
+    @bp.route('/api/operator/dial_list/worked', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_worked():
+        """Вкладки итогов на телефоне: отработанные за месяц водители по итогам оператора."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.operator_worked(user_id)}), 200
+
     @bp.route('/api/operator/dial_list/script', methods=['GET', 'OPTIONS'])
     @require_api_key
     @_guard

@@ -121,7 +121,7 @@ class NumberNeverReachesOperatorTests(unittest.TestCase):
     """Телефон не должен получить номер водителя ни в одном ответе."""
 
     def test_operator_facing_queries_do_not_select_phone(self):
-        for name in ('_portion_items', '_active_attempt', 'get_state', 'issue_next_portion'):
+        for name in ('_portion_items', '_active_attempt', 'get_state', 'issue_next_portion', 'operator_worked'):
             src = inspect.getsource(getattr(dial_service.DialListService, name))
             self.assertNotIn('phone_norm', src, f'{name} выбирает номер — он уедет в телефон')
 
@@ -805,6 +805,122 @@ class ScriptAITests(unittest.TestCase):
         module = inspect.getsource(script_ai)
         self.assertNotIn('phone_norm', module)
         self.assertNotIn('x-goog-api-key', module)              # секрет остаётся в ai_feedback.service
+
+
+class WorkedTabsTests(unittest.TestCase):
+    """Вкладки итогов на телефоне (владелец, 25.09.2026): очередь остаётся очередью,
+    обработанный водитель сразу уходит на вкладку своего итога, недозвон — на
+    «Не дозвонились». Срок — текущий месяц."""
+
+    def test_row_lands_on_exactly_one_place(self):
+        tab = dial_service.worked_tab
+        # Итог оператора — его вкладка, и важнее исхода АТС.
+        self.assertEqual(tab('done', 'answered', 'o1', 'finished'), 'o1')
+        self.assertEqual(tab('done', 'no_answer', 'o1', 'finished'), 'o1')
+        # Итог поставлен, АТС исход ещё не прислала: строка уже не в очереди.
+        self.assertEqual(tab('issued', '', 'o1', 'ended'), 'o1')
+        # Руководитель вернул в список: строка issued при завершённой попытке с итогом — это очередь.
+        self.assertIsNone(tab('issued', '', 'o1', 'finished'))
+        # Разговор без итога ждёт окна итога — ни в «Не дозвонились», ни в очереди списка.
+        self.assertIsNone(tab('done', 'answered', None, 'finished'))
+        for result in ('busy', 'no_answer', 'other', 'failed'):
+            self.assertEqual(tab('done', result, None, 'finished'), dial_service.WORKED_NO_ANSWER)
+        # Не обработанная строка — в очереди.
+        self.assertIsNone(tab('issued', '', None, None))
+        self.assertIsNone(tab('issued', '', None, 'failed'))
+
+    def test_route_is_operator_only_and_carries_no_phone(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
+        self.assertIn("/api/operator/dial_list/worked", operator_part)
+        self.assertNotIn('phone_norm', dial_service.DialListService._WORKED_SQL)
+        self.assertIn('current_period()', inspect.getsource(dial_service.DialListService.operator_worked))
+        # По водителю — последняя строка этого оператора за месяц, как «Мой прогресс».
+        sql = dial_service.DialListService._WORKED_SQL
+        self.assertIn('DISTINCT ON (a.lead_id)', sql)
+        self.assertIn('ORDER BY a.lead_id, a.created_at DESC', sql)
+        self.assertIn("a.created_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'", sql)
+        # Стык месяцев: пачка живёт до «Ещё», выданная 30-го и обработанная 1-го строка
+        # не должна пропасть ни из очереди, ни с вкладок.
+        self.assertIn("OR a.done_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'", sql)
+        self.assertIn("OR a.state = 'issued'", sql)
+
+    def test_portion_rows_name_the_driver_for_the_phone(self):
+        items = inspect.getsource(dial_service.DialListService._portion_items)
+        self.assertIn('"lead_id"', items)
+        self.assertIn('a.lead_id', items)
+
+    def test_operator_index_for_month_queries(self):
+        ddl = ' '.join(dial_schema.DDL)
+        self.assertIn('ON dial_list_assignments(operator_id, created_at)', ddl)
+
+    def _worked(self, rows, outcomes, limit=None):
+        import contextlib
+
+        class Cursor:
+            def __init__(self):
+                self.sql = ''
+
+            def execute(self, sql, params=None):
+                self.sql = sql
+
+            def fetchall(self):
+                if 'FROM dial_list_outcomes o' in self.sql and 'DISTINCT ON' not in self.sql:
+                    return outcomes
+                return rows
+
+        class Db:
+            @contextlib.contextmanager
+            def _get_cursor(self):
+                yield Cursor()
+
+        svc = dial_service.DialListService(db=Db())
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1}
+        with unittest.mock.patch.object(dial_service, 'WORKED_TAB_LIMIT', limit or 300):
+            return svc.operator_worked(7)
+
+    def test_tabs_follow_directory_and_newest_first(self):
+        from datetime import datetime as dt, timezone as tz
+        at = lambda h: dt(2026, 9, 24, h, 0, tzinfo=tz.utc)
+        outcomes = [('o1', 'Заинтересован', '#34C759', 1, False, True, 0),
+                    ('o2', 'Отказ', '#FF3B30', 2, False, True, 0)]
+        # s.id, lead, name, state, result, done_at, created_at, outcome_id, outcome_at, comment, t.state, o.name, o.color, o.pos
+        rows = [
+            ('a1', 'l1', 'Иванов', 'done', 'answered', at(9), at(8), 'o2', at(9), 'дорого', 'finished', 'Отказ', '#FF3B30', 2, 'done'),
+            ('a2', 'l2', 'Петров', 'done', 'answered', at(10), at(8), 'o2', at(11), '', 'finished', 'Отказ', '#FF3B30', 2, 'done'),
+            ('a3', 'l3', '', 'done', 'busy', at(12), at(8), None, None, 'старый', 'finished', None, None, None, 'in_progress'),
+            ('a4', 'l4', 'Сидоров', 'done', 'answered', at(13), at(8), 'old', at(13), '', 'finished', 'Думает', '#AF52DE', 9, 'done'),
+            # Исключил руководитель: строка закрыта без звонка — это не недозвон.
+            ('a6', 'l6', 'Исключённый', 'done', 'other', at(14), at(8), None, None, '', None, None, None, None, 'excluded'),
+            ('a5', 'l5', 'В очереди', 'issued', '', None, at(8), None, None, '', None, None, None, None, 'in_progress'),
+        ]
+        res = self._worked(rows, outcomes)
+        # Включённые — в порядке справочника, даже пустые; выключенный — пока по нему есть люди; недозвон — последний.
+        self.assertEqual([(t['name'], t['count']) for t in res['tabs']],
+                         [('Заинтересован', 0), ('Отказ', 2), ('Думает', 1), ('Не дозвонились', 1)])
+        self.assertEqual([i['full_name'] for i in res['items']], ['Сидоров', 'Без имени', 'Петров', 'Иванов'])
+        busy = next(i for i in res['items'] if i['tab'] == dial_service.WORKED_NO_ANSWER)
+        self.assertEqual(busy['comment'], '')                  # комментарий — только к итогу оператора
+        self.assertEqual(busy['result'], 'busy')
+        self.assertEqual(res['items'][2]['at_label'], '24.09, 16:00')   # время итога по Алматы
+        self.assertNotIn('В очереди', [i['full_name'] for i in res['items']])
+        self.assertNotIn('Исключённый', [i['full_name'] for i in res['items']])
+
+    def test_tab_is_capped_but_count_is_true(self):
+        from datetime import datetime as dt, timezone as tz
+        outcomes = [('o1', 'Отказ', '#FF3B30', 1, False, True, 0)]
+        rows = [(f'a{n}', f'l{n}', f'Водитель {n}', 'done', 'answered', None, dt(2026, 9, 2, tzinfo=tz.utc),
+                 'o1', dt(2026, 9, 2, n % 24, tzinfo=tz.utc), '', 'finished', 'Отказ', '#FF3B30', 1, 'done') for n in range(5)]
+        res = self._worked(rows, outcomes, limit=3)
+        self.assertEqual(res['tabs'][0]['count'], 5)
+        self.assertEqual(len(res['items']), 3)
+
+    def test_at_label_today_and_other_days(self):
+        from datetime import date, datetime as dt, timezone as tz
+        now = dt(2026, 9, 25, 9, 5, tzinfo=tz.utc)             # 14:05 по Алматы
+        self.assertEqual(dial_service.at_label(now, date(2026, 9, 25)), 'сегодня, 14:05')
+        self.assertEqual(dial_service.at_label(now, date(2026, 9, 26)), '25.09, 14:05')
+        self.assertEqual(dial_service.at_label(None, date(2026, 9, 25)), '')
 
 
 if __name__ == '__main__':

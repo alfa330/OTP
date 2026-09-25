@@ -257,6 +257,8 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_pool ON dial_list_leads(department_id, status, attempts_total, last_attempt_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_assignments_portion ON dial_list_assignments(portion_id)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_assignments_lead ON dial_list_assignments(lead_id, state)",
+    # Выдачи оператора за месяц: «Мой прогресс» и вкладки итогов на телефоне.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_assignments_operator_created ON dial_list_assignments(operator_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_portions_operator_open ON dial_list_portions(operator_id, closed_at)",
     """
     CREATE UNIQUE INDEX IF NOT EXISTS uq_dial_list_attempts_general_call
