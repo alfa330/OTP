@@ -38,6 +38,15 @@ KNOWN_BRANDS = (
 )
 KNOWN_CODES = frozenset(code for code, _, _ in KNOWN_BRANDS)
 
+_TRANSLIT = {
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e', 'ж': 'zh',
+    'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
+    'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'c',
+    'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu',
+    'я': 'ya', 'і': 'i', 'ғ': 'g', 'қ': 'q', 'ң': 'n', 'ө': 'o', 'ұ': 'u', 'ү': 'u',
+    'һ': 'h', 'ә': 'a',
+}
+
 # Города, которые пишут рядом с брендом. И кириллицей, и транслитом: код
 # записи словаря строится транслитом, и он тоже встречается как написание.
 CITIES = frozenset((
@@ -50,6 +59,11 @@ CITIES = frozenset((
     'kostanay', 'kyzylorda', 'pavlodar', 'petropavlovsk', 'semey', 'taldykorgan', 'taraz',
     'uralsk', 'turkestan', 'zhanaozen', 'ust-kamenogorsk', 'ust_kamenogorsk', 'kaskelen',
 ))
+
+# Латинская форма каждого города — тем же транслитом, что и коды словаря:
+# строка «ekibastuz» — это город, а не парк.
+CITIES = CITIES | frozenset(
+    ''.join(_TRANSLIT.get(char, char) for char in city) for city in CITIES)
 
 # Слова услуги, а не бренда: «itaxi (доставка)», «жана межгород».
 SERVICE_WORDS = frozenset(('доставка', 'dostavka', 'курьер', 'kurer', 'vip', 'межгород',
@@ -87,15 +101,6 @@ def _generic(part):
         words = words[:-1]
     return ' '.join(words).strip(' -,.')
 
-
-_TRANSLIT = {
-    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e', 'ж': 'zh',
-    'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
-    'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'c',
-    'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu',
-    'я': 'ya', 'і': 'i', 'ғ': 'g', 'қ': 'q', 'ң': 'n', 'ө': 'o', 'ұ': 'u', 'ү': 'u',
-    'һ': 'h', 'ә': 'a',
-}
 
 
 def code_of(text):

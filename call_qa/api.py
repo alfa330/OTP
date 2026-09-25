@@ -5218,8 +5218,9 @@ def _filtered_stats(cur, out, allowed_direction_ids, department, filters):
     # «Чаты» с тем же отбором («Показано N из M»).
     out["evaluated"] = len(keys)
     try:
-        # Очередь — тем же запросом, что счётчик вкладки «Очередь ревью»
-        # (review_queue_count): отбор на строке текущей модели.
+        # Очередь — тем же отбором, что счётчик вкладки «Очередь ревью»
+        # (review_queue_count): на строке текущей модели. Без его потолка:
+        # «Обзор» показывает настоящий размер очереди, как и без отбора.
         cur.execute(
             "SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN + _marketing_join(cur, filters)
             + """ LEFT JOIN ai_evaluation_meta m
@@ -5228,7 +5229,7 @@ def _filtered_stats(cur, out, allowed_direction_ids, department, filters):
                  WHERE rc.model = %s AND m.review_outcome IS NULL"""
             + _SUBJECT_EXISTS + scope_sql + filter_sql,
             (config.CLAUDE_MODEL, *subjects_params))
-        out["queue"] = min(int(cur.fetchone()[0] or 0), _QUEUE_FETCH_CAP)
+        out["queue"] = int(cur.fetchone()[0] or 0)
     except Exception as exc:
         # До миграции меты очереди по отбору не посчитать; ноль честнее, чем
         # «последние звонки» без фильтра под выставленным отбором.
@@ -5268,12 +5269,14 @@ def stats(allowed_direction_ids=None, department=None, filters=None) -> dict:
         scope_family = None
         if allowed_direction_ids is not None or department:
             scope_family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
-        if scope_family is not None:
-            cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN
-                        + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)",
-                        (scope_family or [-1],))
-        else:
-            cur.execute("SELECT COUNT(*) FROM ai_review_cache")
+        # «Оценено» — РАЗГОВОРОВ, как в списках «Звонки»/«Чаты», а не строк кэша:
+        # разговор, оценённый двумя версиями модели, лежит в кэше дважды. Так же
+        # считает и «Обзор» под отбором (_filtered_stats) — иначе выставленный
+        # фильтр «уменьшал» бы число, даже ничего не отсекая.
+        cur.execute("SELECT COUNT(DISTINCT (rc.subject_kind, rc.call_id)) FROM ai_review_cache rc"
+                    + _SUBJECT_JOIN + f" WHERE TRUE{_SUBJECT_EXISTS}"
+                    + (f" AND {_SUBJECT_DIRECTION} = ANY(%s)" if scope_family is not None else ""),
+                    ((scope_family or [-1],) if scope_family is not None else ()))
         out["evaluated"] = cur.fetchone()[0]
         try:  # реальный размер очереди ревью; до миграции — свежие звонки, как раньше
             meta_join = """

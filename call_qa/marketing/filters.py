@@ -304,10 +304,15 @@ def normalise(raw):
     # Кампания — второй уровень канала и живёт ПАРОЙ «канал|кампания»: одно и
     # то же имя кампании встречается у разных каналов, и без канала выбор
     # «Google → brand» отбирал бы и одноимённую кампанию TikTok.
+    #
+    # Имя БЕЗ канала — прежний формат (редакция 22.09): так лежат уже
+    # сохранённые пресеты и так шлёт вкладка, открытая до выкладки нового
+    # фронта. Отказывать ему — значит ронять 400 каждый запрос такого отбора,
+    # поэтому оно значит «эта кампания в любом канале».
     campaigns = _labels(raw.get('campaigns'), 'campaigns')
     for pair in campaigns:
-        channel, _sep, name = pair.partition('|')
-        if not _sep or not name.strip() or not _CODE_RE.match(channel):
+        channel, sep, name = pair.partition('|')
+        if sep and (not name.strip() or not _CODE_RE.match(channel)):
             raise ValueError(f"campaigns: ожидается «канал|кампания», пришло «{pair}»")
     if campaigns:
         out['campaigns'] = campaigns
@@ -409,11 +414,16 @@ def predicate(filters, *, operator_id_sql, group_of_person):
     if filters.get('channels'):
         channel_parts.append(bucketed(CHANNEL_CODE, filters['channels']))
     if filters.get('campaigns'):
-        pairs = [pair.partition('|') for pair in filters['campaigns']]
-        channel_parts.append(
-            f"({CHANNEL_CODE}, {CAMPAIGN}) IN (SELECT * FROM unnest(%s::text[], %s::text[]))")
-        params.append(['' if channel == NONE_BUCKET else channel for channel, _s, _n in pairs])
-        params.append([name for _c, _s, name in pairs])
+        pairs = [pair.partition('|') for pair in filters['campaigns'] if '|' in pair]
+        bare = [pair for pair in filters['campaigns'] if '|' not in pair]
+        if pairs:
+            channel_parts.append(
+                f"({CHANNEL_CODE}, {CAMPAIGN}) IN (SELECT * FROM unnest(%s::text[], %s::text[]))")
+            params.append(['' if channel == NONE_BUCKET else channel for channel, _s, _n in pairs])
+            params.append([name for _c, _s, name in pairs])
+        if bare:
+            channel_parts.append(f"{CAMPAIGN} = ANY(%s)")
+            params.append(bare)
     if channel_parts:
         sql += " AND (" + " OR ".join(channel_parts) + ")"
 

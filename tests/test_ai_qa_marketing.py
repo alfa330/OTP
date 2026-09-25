@@ -288,7 +288,8 @@ class BrandTests(unittest.TestCase):
         self.assertEqual(brands.park_brand('salam taxi алматы')[0], 'salam_taxi')
 
     def test_city_alone_is_not_a_park(self):
-        for raw in ('усть-каменогорск', 'жанаозен', 'алматы', '', '   ', None):
+        for raw in ('усть-каменогорск', 'жанаозен', 'алматы', 'ekibastuz', 'temirtau',
+                    '', '   ', None):
             self.assertIsNone(brands.park_brand(raw), raw)
 
 
@@ -335,6 +336,8 @@ class DictionaryCleanupTests(unittest.TestCase):
         ('global_astana', 'global астана', ['global_astana', 'global астана'], 900, None),
         # Транслит-код рядом с настоящим написанием не заводит бренд-призрак.
         ('zhanataksi', 'жанатакси', ['zhanataksi', 'жанатакси'], 900, None),
+        # Транслит города рядом с самим городом — не парк.
+        ('ekibastuz', 'экибастуз', ['ekibastuz', 'экибастуз'], 900, None),
         ('ust_kamenogorsk', 'усть-каменогорск', ['ust_kamenogorsk', 'усть-каменогорск'], 900, None),
         # Правленная человеком строка — неприкосновенна.
         ('itaxi_karaganda', 'Караганда (вручную)', ['itaxi караганда'], 900, 7),
@@ -355,6 +358,7 @@ class DictionaryCleanupTests(unittest.TestCase):
         self.assertIn('global', rows['global']['aliases'])
         self.assertIn('global астана', rows['global']['aliases'])
         self.assertNotIn('zhanataksi', rows)
+        self.assertNotIn('ekibastuz', rows)
         self.assertIn('жанатакси', rows['jana']['aliases'])
         # Один город — не парк: строка уходит, сделка остаётся «Не определено».
         self.assertNotIn('ust_kamenogorsk', rows)
@@ -525,9 +529,19 @@ class ReviewFixTests(unittest.TestCase):
         self.assertIn("(sd.happened_at AT TIME ZONE 'Asia/Almaty') AT TIME ZONE 'UTC'", shist)
         self.assertNotIn("ls.seen_at <= COALESCE(sd.happened_at, NOW())", shist)
 
-    def test_campaign_is_a_channel_pair_ored_with_channels(self):
+    def test_legacy_campaign_without_channel_is_any_channel(self):
+        # Так лежат пресеты 22.09 и так шлёт вкладка со старым фронтом:
+        # отказ ронял бы 400 каждый запрос этого отбора.
+        sql, params = mkt.predicate(mkt.normalise({'campaigns': ['brand', 'google|x']}),
+                                    operator_id_sql='OP', group_of_person=lambda p: p)
+        self.assertIn(f"{mkt.CAMPAIGN} = ANY(%s)", sql)
+        self.assertEqual(list(params), [['google'], ['x'], ['brand']])
         with self.assertRaises(ValueError):
-            mkt.normalise({'campaigns': ['spring']})
+            mkt.normalise({'campaigns': ['bad code|x']})
+        with self.assertRaises(ValueError):
+            mkt.normalise({'campaigns': ['google|']})
+
+    def test_campaign_is_a_channel_pair_ored_with_channels(self):
         sql, params = mkt.predicate(
             mkt.normalise({'channels': 'tiktok', 'campaigns': ['google|brand_kz', 'none|x']}),
             operator_id_sql='OP', group_of_person=lambda p: p)
@@ -541,7 +555,8 @@ class ReviewFixTests(unittest.TestCase):
         body = src.split('def _filtered_stats(', 1)[1].split('\ndef ', 1)[0]
         self.assertIn('SELECT DISTINCT ON (rc.subject_kind, rc.call_id)', body)
         self.assertIn('out["evaluated"] = len(keys)', body)
-        self.assertIn('_QUEUE_FETCH_CAP', body)
+        # Без отбора — тоже разговоры, а не строки кэша.
+        self.assertIn('COUNT(DISTINCT (rc.subject_kind, rc.call_id)) FROM ai_review_cache rc', src)
 
     def test_export_is_not_capped_at_list_page(self):
         src = _read('bot_schedule2.py')

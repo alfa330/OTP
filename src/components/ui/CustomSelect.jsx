@@ -194,12 +194,15 @@ export default function CustomSelect({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options, query, showSearch, childCount, expanded]);
 
-  const toggleExpanded = (value) => setExpanded((current) => {
-    const next = new Set(current);
-    const key = String(value);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    return next;
-  });
+  const toggleExpanded = (value) => {
+    if (activeIndex >= 0 && filtered[activeIndex]) keepActiveRef.current = String(filtered[activeIndex].value);
+    setExpanded((current) => {
+      const next = new Set(current);
+      const key = String(value);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
 
   /* → раскрывает, ← сворачивает активного родителя. В строке поиска — только
      пока она пуста: там стрелки двигают курсор по тексту. */
@@ -214,34 +217,26 @@ export default function CustomSelect({
     return true;
   };
 
-  /* Подсвеченная строка — по ЗНАЧЕНИЮ: раскрытие родителя меняет список, и
-     без этого подсветка прыгала бы на первую строку, а следующая ↓ уходила
-     не к кампании под раскрытым каналом. Держим её, только пока строка поиска
-     та же: набранный текст по-прежнему ставит подсветку на первое найденное. */
-  const activeValueRef = useRef(undefined);
-  const activeQueryRef = useRef('');
-  /* Запоминаем при смене ПОДСВЕТКИ, а не на каждом рендере: в рендере после
-     раскрытия список уже новый, а индекс старый, и под ним стоит другая
-     строка. Эффект объявлен раньше сброса ниже и потому идёт перед ним. */
-  useEffect(() => {
-    if (activeIndex >= 0 && filtered[activeIndex]) {
-      activeValueRef.current = String(filtered[activeIndex].value);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIndex]);
+  /* Раскрытие родителя меняет список, и подсветка без этого прыгала бы на
+     первую строку, а следующая ↓ уходила бы не к кампании под раскрытым
+     каналом. Поэтому ТОЛЬКО при раскрытии/сворачивании подсвеченная строка
+     запоминается по значению (toggleExpanded) и находится в новом списке.
+     Любая другая смена списка — поиск, подгрузка вариантов — ведёт себя как
+     прежде: подсветка на выбранном или на первом. */
+  const keepActiveRef = useRef(undefined);
 
   useEffect(() => {
     if (!open) {
       setActiveIndex(-1);
-      activeValueRef.current = undefined;
+      keepActiveRef.current = undefined;
       return;
     }
-    const sameQuery = activeQueryRef.current === query;
-    activeQueryRef.current = query;
-    if (sameQuery && activeValueRef.current !== undefined) {
-      const keep = filtered.findIndex((option) => String(option.value) === activeValueRef.current);
-      if (keep >= 0) {
-        setActiveIndex(keep);
+    const keep = keepActiveRef.current;
+    keepActiveRef.current = undefined;
+    if (keep !== undefined) {
+      const kept = filtered.findIndex((option) => String(option.value) === keep);
+      if (kept >= 0) {
+        setActiveIndex(kept);
         return;
       }
     }

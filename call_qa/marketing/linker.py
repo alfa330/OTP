@@ -369,9 +369,12 @@ def normalise_park_dictionary(cur):
         own = brands.park_brand(code)
         if not own:
             return False
-        others = {brand[0] for brand in (brands.park_brand(alias)
-                                         for alias in aliases if alias != code) if brand}
-        return not others or own[0] in others
+        rest = [alias for alias in aliases if alias != code]
+        others = {brand[0] for brand in (brands.park_brand(alias) for alias in rest) if brand}
+        # Одинокий код — сам и есть написание. Код рядом с написанием, у
+        # которого бренда нет (один город: «ekibastuz» при «экибастуз»), —
+        # транслит города, а не парк.
+        return own[0] in others if rest else True
 
     passes = (
         [(spelling, code) for code, _t, aliases, _o, _b in learned
