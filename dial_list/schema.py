@@ -110,6 +110,31 @@ DDL = [
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    # Скрипт разговора отдела (владелец, 25.09.2026): основной текст с лёгкой
+    # разметкой и быстрые вопросы с ответами — оператор читает их на телефоне
+    # прямо во время звонка. Версия растёт при каждом сохранении: по ней телефон
+    # понимает, что пора перечитать. Вопросы не удаляются, а выключаются.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_scripts (
+        department_id INTEGER PRIMARY KEY REFERENCES departments(id) ON DELETE CASCADE,
+        body TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_script_questions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        position SMALLINT NOT NULL DEFAULT 0,
+        question VARCHAR(200) NOT NULL,
+        answer TEXT NOT NULL DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS dial_list_portions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -247,6 +272,7 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_period ON dial_list_leads(department_id, period)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_outcomes_department ON dial_list_outcomes(department_id, position)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_outcome ON dial_list_attempts(outcome_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_script_questions_department ON dial_list_script_questions(department_id, position)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_pending_outcome ON dial_list_attempts(operator_id) WHERE outcome_id IS NULL AND leg_answered_at IS NOT NULL",
 ]
 

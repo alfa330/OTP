@@ -664,5 +664,51 @@ class OperatorProgressTests(unittest.TestCase):
         self.assertIn('current_period()', progress)
 
 
+class ScriptAndLiveTests(unittest.TestCase):
+    """Скрипт разговора (владелец 25.09.2026) и живое состояние попытки для карточки звонка."""
+
+    def test_script_routes_split_between_manager_and_operator(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
+        manager_part = src[src.index('# ── руководитель'):]
+        self.assertIn("/api/operator/dial_list/script", operator_part)
+        self.assertIn("/api/operator/dial_list/attempts/<attempt_id>/live", operator_part)
+        self.assertIn("/api/dial_list/departments/<int:department_id>/script", manager_part)
+        script_chunk = manager_part[manager_part.index("departments/<int:department_id>/script"):]
+        self.assertIn('_manager(department_id)', script_chunk[:600])
+        for name in ('operator_script', 'attempt_live', '_script_rows', 'save_script'):
+            body = inspect.getsource(getattr(dial_service.DialListService, name))
+            self.assertNotIn('phone_norm', body, name)
+            self.assertNotIn('dial_list_leads', body, name)
+
+    def test_script_schema_and_limits(self):
+        ddl = ' '.join(dial_schema.DDL)
+        self.assertIn('CREATE TABLE IF NOT EXISTS dial_list_scripts', ddl)
+        self.assertIn('CREATE TABLE IF NOT EXISTS dial_list_script_questions', ddl)
+        self.assertIn('version INTEGER NOT NULL DEFAULT 1', ddl)
+        save = inspect.getsource(dial_service.DialListService.save_script)
+        self.assertIn('version = dial_list_scripts.version + 1', save)   # телефон перечитывает по версии
+        self.assertIn('SET is_active = FALSE', save)                     # вопросы выключаются, не удаляются
+        svc = dial_service.DialListService(db=None)
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_script(1, "not a dict")
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_script(1, {"body": "x" * (dial_service.SCRIPT_BODY_MAX + 1)})
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_script(1, {"body": "", "questions": [{"question": "", "answer": "a"}]})
+        with self.assertRaises(dial_service.DialListError):
+            svc.save_script(1, {"body": "", "questions": [{"question": "q"}] * (dial_service.SCRIPT_QUESTIONS_MAX + 1)})
+        state = inspect.getsource(dial_service.DialListService.get_state)
+        self.assertIn('"script_version"', state)
+
+    def test_live_status_is_throttled_and_uses_binotel(self):
+        live = inspect.getsource(dial_service.DialListService.attempt_live)
+        self.assertIn('LIVE_MIN_INTERVAL_SEC', live)
+        self.assertIn('call_details(', live)
+        self.assertIn('"talking": live == "ONLINE"', live)
+        self.assertIn('_finish_by_call', live)     # известный финал закрывает попытку, как phone_event
+        self.assertGreaterEqual(dial_service.LIVE_MIN_INTERVAL_SEC, 3)
+
+
 if __name__ == '__main__':
     unittest.main()

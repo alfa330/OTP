@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import hmac
@@ -118,6 +119,18 @@ OUTCOME_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 OUTCOME_NAME_MAX = 64
 OUTCOMES_MAX = 30
 COMMENT_MAX = 500
+# Скрипт разговора отдела (владелец, 25.09.2026): основной текст с лёгкой разметкой
+# («# заголовок», «**жирный**», «==выделение==», «- пункт», «> примечание») и быстрые
+# вопросы с ответами — их оператор открывает прямо во время звонка. Хранится по
+# отделу, версия растёт при каждом сохранении: телефон по ней понимает, что пора
+# перечитать.
+SCRIPT_BODY_MAX = 20000
+SCRIPT_QUESTION_MAX = 200
+SCRIPT_ANSWER_MAX = 8000
+SCRIPT_QUESTIONS_MAX = 50
+# Живое состояние попытки (карточка звонка на телефоне): call-details не чаще раза
+# в столько секунд на попытку — телефон опрашивает каждые 3 с, Binotel не любит частых.
+LIVE_MIN_INTERVAL_SEC = 4
 PERIOD_TZ = timezone(timedelta(hours=5))  # Asia/Almaty
 
 # Отделы, чья работа — этот обзвон (удалённый колл-центр). Глава такого отдела
@@ -1610,6 +1623,10 @@ class DialListService:
             pool = len(cur.fetchall())
             outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
             pending_outcome = self._pending_outcome(cur, ctx["user_id"]) if outcomes else None
+            # Версия скрипта отдела: телефон перечитывает скрипт, когда она меняется.
+            cur.execute("SELECT version FROM dial_list_scripts WHERE department_id = %s", (ctx["department_id"],))
+            sv = cur.fetchone()
+            script_version = int(sv[0]) if sv else 0
         pending = sum(1 for i in items if i["state"] == "issued")
         return {
             "enabled": True,
@@ -1631,7 +1648,109 @@ class DialListService:
             "outcomes": [{"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"]}
                          for o in outcomes],
             "pending_outcome": pending_outcome,
+            "script_version": script_version,
         }
+
+    # ------------------------------------------------------------ скрипт разговора
+    def _script_rows(self, cur, department_id, active_only=False):
+        cur.execute("""
+            SELECT body, version, updated_at FROM dial_list_scripts WHERE department_id = %s
+        """, (int(department_id),))
+        s = cur.fetchone()
+        cur.execute("""
+            SELECT id, position, question, answer, is_active
+            FROM dial_list_script_questions
+            WHERE department_id = %s {active}
+            ORDER BY is_active DESC, position, created_at
+        """.format(active="AND is_active" if active_only else ""), (int(department_id),))
+        questions = [{"id": _sid(r[0]), "position": int(r[1]), "question": r[2], "answer": r[3] or "",
+                      "is_active": bool(r[4])} for r in cur.fetchall()]
+        return {
+            "body": (s[0] if s else "") or "",
+            "version": int(s[1]) if s else 0,
+            "updated_at": _iso(s[2]) if s else None,
+            "questions": questions,
+        }
+
+    def script(self, department_id):
+        """Скрипт отдела для редактора руководителя (включая выключенные вопросы)."""
+        with self.db._get_cursor() as cur:
+            return self._script_rows(cur, department_id)
+
+    def save_script(self, department_id, payload, changed_by=None):
+        """Полный скрипт из редактора: текст + список вопросов (с id — обновить, без id —
+        добавить, отсутствующие — выключить, не удалить). Версия растёт при каждом
+        сохранении — телефон перечитывает скрипт по ней."""
+        department_id = int(department_id)
+        if not isinstance(payload, dict):
+            raise DialListError("Ожидается объект {body, questions}")
+        body = str(payload.get("body") or "").replace("\r\n", "\n").strip()
+        if len(body) > SCRIPT_BODY_MAX:
+            raise DialListError(f"Текст скрипта не длиннее {SCRIPT_BODY_MAX} символов")
+        items = payload.get("questions")
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            raise DialListError("questions: ожидается список вопросов")
+        if len(items) > SCRIPT_QUESTIONS_MAX:
+            raise DialListError(f"Вопросов не больше {SCRIPT_QUESTIONS_MAX}")
+        cleaned = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise DialListError("Каждый вопрос — объект {id?, question, answer, is_active}")
+            question = str(raw.get("question") or "").strip()[:SCRIPT_QUESTION_MAX]
+            answer = str(raw.get("answer") or "").replace("\r\n", "\n").strip()
+            if not question:
+                raise DialListError("У вопроса должен быть текст")
+            if len(answer) > SCRIPT_ANSWER_MAX:
+                raise DialListError(f"Ответ «{question[:40]}» длиннее {SCRIPT_ANSWER_MAX} символов")
+            cleaned.append({"id": _sid(raw.get("id")) or None, "question": question, "answer": answer,
+                            "is_active": raw.get("is_active", True) is not False})
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO dial_list_scripts (department_id, body, version, updated_by, updated_at)
+                VALUES (%s, %s, 1, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (department_id) DO UPDATE
+                SET body = EXCLUDED.body, version = dial_list_scripts.version + 1,
+                    updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP
+            """, (department_id, body, changed_by))
+            cur.execute("SELECT id FROM dial_list_script_questions WHERE department_id = %s", (department_id,))
+            existing = {str(r[0]) for r in cur.fetchall()}
+            kept = set()
+            for position, q in enumerate(cleaned, start=1):
+                if q["id"] and q["id"] in existing:
+                    cur.execute("""
+                        UPDATE dial_list_script_questions
+                        SET question = %s, answer = %s, position = %s, is_active = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s AND department_id = %s
+                    """, (q["question"], q["answer"], position, q["is_active"], q["id"], department_id))
+                    kept.add(q["id"])
+                else:
+                    cur.execute("""
+                        INSERT INTO dial_list_script_questions (department_id, position, question, answer, is_active)
+                        VALUES (%s, %s, %s, %s, %s) RETURNING id
+                    """, (department_id, position, q["question"], q["answer"], q["is_active"]))
+                    kept.add(str(cur.fetchone()[0]))
+            gone = existing - kept
+            if gone:
+                cur.execute("""
+                    UPDATE dial_list_script_questions SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                    WHERE department_id = %s AND id = ANY(%s::uuid[])
+                """, (department_id, list(gone)))
+            result = self._script_rows(cur, department_id)
+        log.info("dial_list: скрипт отдела %s сохранён (версия %s, вопросов %d, пользователь %s)",
+                 department_id, result["version"], len(cleaned), changed_by)
+        return result
+
+    def operator_script(self, user_id):
+        """Скрипт для телефона: текст и только включённые вопросы. Без ФИО и номеров."""
+        ctx = self.operator_context(user_id)
+        with self.db._get_cursor() as cur:
+            data = self._script_rows(cur, ctx["department_id"], active_only=True)
+        return {"body": data["body"], "version": data["version"], "updated_at": data["updated_at"],
+                "questions": [{"id": q["id"], "question": q["question"], "answer": q["answer"]}
+                              for q in data["questions"]]}
 
     # Счётчики оператора для вкладки «Мой прогресс»: за месяц (первый день — %(month)s)
     # и за сегодня (%(today)s), дни — по Алматы. Отменённые оператором попытки в
@@ -1920,6 +2039,65 @@ class DialListService:
             cancelled, required = self._outcome_decision(cur, attempt_id)
         result.update({"cancelled": cancelled, "outcome_required": required})
         return result
+
+    # Живое состояние попытки для карточки звонка. Телефон принимает плечо от АТС
+    # сразу, а водителя АТС набирает после — «разговор» на карточке появлялся, когда
+    # его ещё не было (владелец, 25.09.2026). Знает про ответ водителя только Binotel:
+    # call-details отдаёт CALLING (набор) → ONLINE (разговор) → финал. Кэш на попытку
+    # с LIVE_MIN_INTERVAL_SEC, чтобы опрос телефона каждые 3 с не превращался в
+    # столько же запросов к АТС.
+    _live_cache = {}
+
+    def attempt_live(self, user_id, attempt_id):
+        ctx = self.operator_context(user_id)
+        attempt_id = str(attempt_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT state, general_call_id, disposition, cancelled FROM dial_list_attempts
+                WHERE id = %s AND operator_id = %s
+            """, (attempt_id, ctx["user_id"]))
+            row = cur.fetchone()
+        if not row:
+            raise DialListError("Попытка не найдена", 404)
+        state, general_call_id, disposition, cancelled = row
+        if state in ("finished", "failed"):
+            result = map_disposition(disposition) or ("failed" if state == "failed" else "other")
+            return {"attempt_id": attempt_id, "state": state, "disposition": disposition or "",
+                    "talking": False, "final": True, "result": result, "cancelled": bool(cancelled)}
+        live = ""
+        call = None
+        if general_call_id:
+            now = time.monotonic()
+            cached = self._live_cache.get(attempt_id)
+            if cached and now - cached[0] < LIVE_MIN_INTERVAL_SEC:
+                live = cached[1]
+            else:
+                try:
+                    details = self._client(ctx["department_id"]).call_details(general_call_id)
+                    call = details.get(str(general_call_id)) or None
+                    live = str((call or {}).get("disposition") or "").strip().upper()
+                except Exception as exc:
+                    log.info("dial_list: live call-details не удались: %s", exc)
+                    live = cached[1] if cached else ""
+                    call = None
+                if len(self._live_cache) > 500:
+                    for key in [k for k, v in self._live_cache.items() if now - v[0] > 600]:
+                        self._live_cache.pop(key, None)
+                self._live_cache[attempt_id] = (now, live)
+        final = bool(map_disposition(live))
+        if final and call:
+            # Финал уже известен — закрываем попытку здесь же, как делает phone_event.
+            self._finish_by_call(attempt_id, call, "poll")
+            self._live_cache.pop(attempt_id, None)
+        return {
+            "attempt_id": attempt_id,
+            "state": "finished" if final else state,
+            "disposition": live,
+            "talking": live == "ONLINE",
+            "final": final,
+            "result": map_disposition(live) if final else "",
+            "cancelled": False,
+        }
 
     def reconcile(self, ctx_or_user_id, limit=POLL_MAX_PER_REQUEST):
         """Добрать исходы незавершённых попыток оператора через call-details.

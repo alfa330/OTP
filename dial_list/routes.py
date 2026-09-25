@@ -7,6 +7,8 @@
 Ручки телефона (bearer оператора, как /api/operator/sip_settings):
     GET  /api/operator/dial_list                             текущая порция и состояние
     GET  /api/operator/dial_list/progress                    «Мой прогресс»: счётчики за месяц и сегодня
+    GET  /api/operator/dial_list/script                      скрипт разговора отдела (текст + вопросы)
+    GET  /api/operator/dial_list/attempts/<attempt_id>/live  набираем / разговор / финал по Binotel
     POST /api/operator/dial_list/next                        выдать следующую порцию
     POST /api/operator/dial_list/items/<assignment_id>/call  позвонить по строке
     POST /api/operator/dial_list/attempts/<attempt_id>/phone_event
@@ -130,6 +132,22 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """«Мой прогресс» на телефоне: счётчики оператора за месяц и за сегодня, без ФИО и номеров."""
         user_id, _ = _operator()
         return jsonify({"status": "success", **svc.operator_progress(user_id)}), 200
+
+    @bp.route('/api/operator/dial_list/script', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_script():
+        """Скрипт разговора отдела для телефона: текст и включённые вопросы с ответами."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.operator_script(user_id)}), 200
+
+    @bp.route('/api/operator/dial_list/attempts/<attempt_id>/live', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_attempt_live(attempt_id):
+        """Живое состояние попытки для карточки звонка: набираем / разговор / финал (по Binotel)."""
+        user_id, _ = _operator()
+        return jsonify({"status": "success", **svc.attempt_live(user_id, attempt_id)}), 200
 
     @bp.route('/api/operator/dial_list/next', methods=['POST', 'OPTIONS'])
     @require_api_key
@@ -334,6 +352,19 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             return jsonify({"status": "success",
                             "outcomes": svc.save_outcomes(department_id, items, changed_by=requester_id)}), 200
         return jsonify({"status": "success", "outcomes": svc.outcomes(department_id)}), 200
+
+    # ── скрипт разговора ────────────────────────────────────────────────────
+    @bp.route('/api/dial_list/departments/<int:department_id>/script', methods=['GET', 'PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def script(department_id):
+        """Основной текст с лёгкой разметкой и быстрые вопросы с ответами (редактор руководителя)."""
+        requester_id, _scope = _manager(department_id)
+        if request.method == 'PUT':
+            payload = request.get_json(silent=True) or {}
+            return jsonify({"status": "success",
+                            "script": svc.save_script(department_id, payload, changed_by=requester_id)}), 200
+        return jsonify({"status": "success", "script": svc.script(department_id)}), 200
 
     # ── журнал водителей ────────────────────────────────────────────────────
     # Номер водителя и здесь не отдаётся (только маска): руководитель удалённого
