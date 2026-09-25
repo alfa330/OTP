@@ -35,11 +35,20 @@
     container-type: inline-size;
     container-name: rcc;
     padding: 22px 14px 20px;
+    /* Докрутка к сцене при старте: до 768 px сверху висят фиксированные
+       кнопки оболочки (гамбургер, колокольчик) — отступ под них. */
+    scroll-margin-top: 72px;
 }
 
 @media (min-width: 640px) {
     .rcc-stage {
         padding: 28px 24px 24px;
+    }
+}
+
+@media (min-width: 769px) {
+    .rcc-stage {
+        scroll-margin-top: 16px;
     }
 }
 

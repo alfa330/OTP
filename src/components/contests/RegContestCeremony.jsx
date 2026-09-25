@@ -205,6 +205,7 @@ const RegContestCeremony = ({ contest, groups, currentUserId = null }) => {
     const [reduced] = useState(prefersReducedMotion);
     const [runId, setRunId] = useState(0);
 
+    const stageRef = useRef(null);
     const confettiRef = useRef(null);
     const timersRef = useRef([]);
     // «Пропустить» и «Показать ещё раз» — одна и та же кнопка на одном месте:
@@ -247,6 +248,17 @@ const RegContestCeremony = ({ contest, groups, currentUserId = null }) => {
         const raf1 = requestAnimationFrame(() => {
             raf2 = requestAnimationFrame(() => {
                 setResetting(false);
+                // Сцена под шапкой раздела и вкладками: на ноутбуке 1366×768 и
+                // на телефоне тумбы с призами оказывались ниже края экрана, и
+                // всё раскрытие шло там. Докручиваем к сцене, только если она
+                // не видна целиком (отступ сверху — scroll-margin-top в CSS).
+                const stage = stageRef.current;
+                if (stage) {
+                    const rect = stage.getBoundingClientRect();
+                    if (rect.top < 0 || rect.bottom > window.innerHeight) {
+                        stage.scrollIntoView({ block: 'start', behavior: 'smooth' });
+                    }
+                }
                 confetti.rain(2800);
                 timeline.forEach((step) => {
                     timersRef.current.push(setTimeout(() => {
@@ -316,7 +328,7 @@ const RegContestCeremony = ({ contest, groups, currentUserId = null }) => {
         : '';
 
     return (
-        <section className={`rcc-stage ${iosCard}${fast ? ' is-fast' : ''}${resetting ? ' is-reset' : ''}${reached.has('header') ? ' is-open' : ''}`}
+        <section ref={stageRef} className={`rcc-stage ${iosCard}${fast ? ' is-fast' : ''}${resetting ? ' is-reset' : ''}${reached.has('header') ? ' is-open' : ''}`}
                  style={{ fontFamily: APPLE_FONT, '--rcc-fast': `${FAST_MS}ms` }}
                  aria-label="Итоги конкурса">
             <div className="rcc-glow" aria-hidden="true" />
