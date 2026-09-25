@@ -7,6 +7,7 @@ import { DialListLeadsPanel, DialListOperatorsPanel, DialListSettingsPanel, useD
 import DialListLinesPanel from './DialListLinesPanel';
 import DialListJournal from './DialListJournal';
 import DialListOutcomesPanel from './DialListOutcomesPanel';
+import DialListScriptPanel from './DialListScriptPanel';
 import { monthLabel } from './dialListPeriods';
 
 /*
@@ -28,6 +29,7 @@ const TABS = [
     { value: 'leads', label: 'База водителей', icon: <FaIcon className="fas fa-address-book" /> },
     { value: 'journal', label: 'Журнал', icon: <FaIcon className="fas fa-clock-rotate-left" /> },
     { value: 'settings', label: 'Настройки', icon: <FaIcon className="fas fa-sliders" /> },
+    { value: 'script', label: 'Скрипт', icon: <FaIcon className="fas fa-file-lines" /> },
 ];
 
 const todayIso = () => {
@@ -442,6 +444,16 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             period={period}
                             onPeriodChange={setPeriod}
                             onChanged={dept.reload}
+                            canEdit={canEdit}
+                            showToast={showToast}
+                        />
+                    )}
+
+                    {tab === 'script' && (
+                        <DialListScriptPanel
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
                             canEdit={canEdit}
                             showToast={showToast}
                         />
