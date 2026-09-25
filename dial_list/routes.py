@@ -28,6 +28,8 @@
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО+телефон (+period=YYYY-MM)
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле (?period=)
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка
+    GET/PUT /api/dial_list/departments/<id>/script           скрипт разговора и быстрые вопросы
+    POST    /api/dial_list/departments/<id>/script/ai        ИИ: создать скрипт (generate) / оформить текст (polish)
     GET     /api/dial_list/departments/<id>/leads            журнал водителей (фильтры:
                                                              q, stage, operator_id, batch_id, outcome_id,
                                                              date_from/date_to — дни звонков, period,
@@ -365,6 +367,16 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             return jsonify({"status": "success",
                             "script": svc.save_script(department_id, payload, changed_by=requester_id)}), 200
         return jsonify({"status": "success", "script": svc.script(department_id)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/script/ai', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def script_ai(department_id):
+        """ИИ в редакторе: {mode: generate, brief} → {body, questions}; {mode: polish, text, target} → {text}.
+        Ничего не сохраняет — руководитель смотрит результат и применяет сам."""
+        _manager(department_id)
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", "result": svc.script_ai(department_id, payload)}), 200
 
     # ── журнал водителей ────────────────────────────────────────────────────
     # Номер водителя и здесь не отдаётся (только маска): руководитель удалённого

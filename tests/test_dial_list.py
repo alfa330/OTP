@@ -6,6 +6,7 @@
 выбирает phone_norm, а маршруты телефона не читают лид напрямую.
 """
 import inspect
+import json
 import os
 import sys
 import unittest
@@ -708,6 +709,98 @@ class ScriptAndLiveTests(unittest.TestCase):
         self.assertIn('"talking": live == "ONLINE"', live)
         self.assertIn('_finish_by_call', live)     # известный финал закрывает попытку, как phone_event
         self.assertGreaterEqual(dial_service.LIVE_MIN_INTERVAL_SEC, 3)
+
+
+class ScriptAITests(unittest.TestCase):
+    """«Создать с ИИ» / «Оформить с ИИ» (владелец 25.09.2026): ручка руководителя, наша разметка,
+    без данных водителей; сеть подменяется."""
+
+    def _fake_post(self, answer):
+        calls = []
+
+        def post(url, headers, payload):
+            calls.append((url, headers, payload))
+            text = json.dumps(answer, ensure_ascii=False)
+            return 200, {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+        return post, calls
+
+    @staticmethod
+    def _load_ai_service():
+        """ai_feedback.service тянет database (time.tzset — только Linux, плюс пул к базе):
+        подменяем зависимость заглушкой, как в test_birthday_greeting_ai_request."""
+        import importlib
+        import types
+        if 'ai_feedback.service' in sys.modules:
+            return sys.modules['ai_feedback.service']
+        stub = types.ModuleType('database')
+        stub.db = unittest.mock.MagicMock()
+        stub.IT_TICKET_CATALOG = {}
+        with unittest.mock.patch.dict(sys.modules, {'database': stub}):
+            module = importlib.import_module('ai_feedback.service')
+        # patch.dict на выходе возвращает sys.modules как было — вместе с только что
+        # загруженным модулем. Кладём обратно, иначе dial_list.ai импортирует его заново
+        # уже без заглушки.
+        sys.modules['ai_feedback.service'] = module
+        import ai_feedback
+        ai_feedback.service = module
+        return module
+
+    def setUp(self):
+        ai = self._load_ai_service()
+        self._patch = unittest.mock.patch.object(ai, "GEMINI_API_KEY", "test-key")
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_generate_returns_body_and_questions_with_markup_rules_in_prompt(self):
+        from dial_list import ai as script_ai
+        post, calls = self._fake_post({"body": "# Приветствие\n**Здравствуйте**", "questions": [
+            {"question": "Сколько платят?", "answer": "==от 300 000=="}, {"question": "", "answer": "x"}]})
+        result = script_ai.generate_script("Звоним водителям, приглашаем в парк", post=post)
+        self.assertEqual(result["body"], "# Приветствие\n**Здравствуйте**")
+        self.assertEqual(len(result["questions"]), 1)          # вопрос без текста отброшен
+        prompt = calls[0][2]["contents"][0]["parts"][0]["text"]
+        for marker in ("# Заголовок", "**жирный**", "==выделение==", "- пункт", "> текст", "---"):
+            self.assertIn(marker, prompt)
+        self.assertIn("responseSchema", calls[0][2]["generationConfig"])
+        self.assertNotIn("phone", prompt.lower())
+
+    def test_polish_keeps_text_and_rejects_empty(self):
+        from dial_list import ai as script_ai
+        post, calls = self._fake_post({"text": "# Скрипт\nТекст"})
+        self.assertEqual(script_ai.polish_text("просто текст без разметки", post=post), "# Скрипт\nТекст")
+        with self.assertRaises(script_ai.ScriptAIError) as ctx:
+            script_ai.polish_text("", post=post)
+        self.assertEqual(ctx.exception.status, 400)
+        with self.assertRaises(script_ai.ScriptAIError):
+            script_ai.generate_script("мало", post=post)
+
+    def test_model_chain_falls_through_on_overload(self):
+        from dial_list import ai as script_ai
+        seen = []
+
+        def post(url, headers, payload):
+            seen.append(url)
+            if len(seen) == 1:
+                return 503, {}
+            return 200, {"candidates": [{"content": {"parts": [{"text": '{"text": "ok"}'}]}}]}
+        self.assertEqual(script_ai.polish_text("текст для оформления", post=post), "ok")
+        self.assertEqual(len(seen), 2)                          # первая модель перегружена → вторая
+
+    def test_ai_route_is_manager_only_and_saves_nothing(self):
+        src = inspect.getsource(dial_routes.build_dial_list_blueprint)
+        manager_part = src[src.index('# ── руководитель'):]
+        chunk = manager_part[manager_part.index("departments/<int:department_id>/script/ai"):]
+        self.assertIn('_manager(department_id)', chunk[:500])
+        self.assertNotIn("/api/operator/", chunk[:500])
+        service = inspect.getsource(dial_service.DialListService.script_ai)
+        for forbidden in ('phone_norm', 'dial_list_leads', 'INSERT', 'UPDATE'):
+            self.assertNotIn(forbidden, service)
+        from dial_list import ai as script_ai
+        module = inspect.getsource(script_ai)
+        self.assertNotIn('phone_norm', module)
+        self.assertNotIn('x-goog-api-key', module)              # секрет остаётся в ai_feedback.service
 
 
 if __name__ == '__main__':

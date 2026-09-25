@@ -1752,6 +1752,28 @@ class DialListService:
                 "questions": [{"id": q["id"], "question": q["question"], "answer": q["answer"]}
                               for q in data["questions"]]}
 
+    def script_ai(self, department_id, payload):
+        """ИИ в редакторе скрипта: mode=generate — скрипт и вопросы по описанию кампании
+        (brief); mode=polish — оформить текст (text; target=body|answer) по нашей разметке.
+        Ничего не сохраняет: результат руководитель смотрит и применяет сам."""
+        from . import ai as script_ai
+        payload = payload if isinstance(payload, dict) else {}
+        mode = str(payload.get("mode") or "").strip().lower()
+        try:
+            if mode == "generate":
+                result = script_ai.generate_script(payload.get("brief"))
+                log.info("dial_list: ИИ собрал скрипт для отдела %s (%d симв., вопросов %d)",
+                         department_id, len(result["body"]), len(result["questions"]))
+                return {"mode": mode, **result}
+            if mode == "polish":
+                what = "ответ оператора на вопрос клиента" if payload.get("target") == "answer" else "скрипт разговора"
+                text = script_ai.polish_text(payload.get("text"), what=what)
+                log.info("dial_list: ИИ оформил %s для отдела %s (%d симв.)", what, department_id, len(text))
+                return {"mode": mode, "text": text}
+        except script_ai.ScriptAIError as exc:
+            raise DialListError(str(exc), exc.status)
+        raise DialListError("mode: generate или polish")
+
     # Счётчики оператора для вкладки «Мой прогресс»: за месяц (первый день — %(month)s)
     # и за сегодня (%(today)s), дни — по Алматы. Отменённые оператором попытки в
     # попытки не входят (они не в счёт). Только числа: ни ФИО, ни номеров.
