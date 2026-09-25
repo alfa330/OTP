@@ -602,6 +602,36 @@ class TaskComposerTests(unittest.TestCase):
         base = int(re.search(r"\.tv-modal \{\n.*?max-width: (\d+)px;", self.src, re.S).group(1))
         self.assertGreater(wide, base, "окно составителя должно быть шире общего")
 
+    def test_long_task_keeps_its_submit_button_on_screen(self):
+        """
+        Задача #361: длинный чек-лист уводил «Поставить задачу» за край окна.
+
+        Окно ограничено 90vh и режет всё, что не влезло (overflow: hidden), а
+        прокручиваться должно тело. Но между окном и телом стоит <form>: без
+        своей flex-колонки она растёт по содержимому, тело предела высоты не
+        получает, и подвал с кнопкой обрезается вместе с хвостом формы.
+        """
+        base = re.search(r"  \.tv-modal \{\n(.*?)\n  \}", self.src, re.S).group(1)
+        self.assertIn("max-height: 90vh", base)
+        self.assertIn("overflow: hidden", base)
+        self.assertIn("display: flex; flex-direction: column;", base)
+
+        form_rule = re.search(r"  \.tv-modal > form \{\n(.*?)\n  \}", self.src, re.S)
+        self.assertIsNotNone(form_rule, "у формы в окне задачи нет своей flex-колонки")
+        self.assertIn("display: flex; flex-direction: column;", form_rule.group(1))
+        self.assertIn("min-height: 0;", form_rule.group(1))
+
+        self.assertIn(".tv-modal-body { padding: 20px 22px; overflow-y: auto; flex: 1; }", self.src)
+        footer = re.search(r"  \.tv-modal-footer \{\n(.*?)\n  \}", self.src, re.S).group(1)
+        self.assertIn("flex-shrink: 0", footer)
+
+        # Форма в каждом из пяти окон стоит сразу за шапкой, то есть прямым
+        # потомком полотна, — иначе правило `> form` её не заденет.
+        forms = self.src.count("<form onSubmit=")
+        self.assertEqual(forms, 5)
+        self.assertEqual(len(re.findall(
+            r"<ModalCloseButton [^\n]*/>\n\s*</div>\n\s*<form onSubmit=", self.src)), forms)
+
     def test_files_chip_only_when_uploads_supported(self):
         start = self.src.index("const supportsFiles = typeof onFilesChange === 'function';")
         block = self.src[start:start + 320]

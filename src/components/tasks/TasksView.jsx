@@ -1752,6 +1752,15 @@ styleTag.textContent = `
     font-size: 15px; font-weight: 600; color: var(--ink); margin: 0;
   }
   .tv-modal-body { padding: 20px 22px; overflow-y: auto; flex: 1; }
+  /* Форма-обёртка между окном и телом (новая задача, правка, сдача, возврат).
+     Без этого правила она росла по содержимому: окно упиралось в 90vh и
+     обрезало всё ниже, тело не получало предела высоты и не прокручивалось,
+     а подвал с «Поставить задачу» уходил за край — задача #361, длинный
+     чек-лист. Рост пропускаем сквозь форму, как на телефоне (mobile-shell.css). */
+  .tv-modal > form {
+    display: flex; flex-direction: column;
+    flex: 1 1 auto; min-height: 0;
+  }
   .tv-modal-footer {
     padding: 13px 22px; border-top: 1px solid var(--border);
     display: flex; justify-content: flex-end; gap: 8px;
