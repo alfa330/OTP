@@ -5673,7 +5673,12 @@ def _ai_qa_list_filters():
             'handler_mode': request.args.get('handler_mode'),
             'deal_id': request.args.get('deal_id'),
         }
-        return normalise_list_filters(raw), None
+        filters = normalise_list_filters(raw)
+        # Оси сделки — только тем, кому открыт модуль (ТЗ #317, раздел 3).
+        # Отказ, а не молча снятые оси: иначе список выглядел бы отобранным.
+        if filters.get('marketing') and not _ai_qa_can_use_marketing(getattr(g, 'user_id', None)):
+            return None, _ai_qa_marketing_denied()
+        return filters, None
     except ValueError as error:
         # Молча снятый фильтр страшнее отказа: список выглядел бы рабочим, только
         # показывал бы чужие строки.
@@ -5727,6 +5732,31 @@ def _ai_qa_can_share_presets(requester_id) -> bool:
     return 'marketing' in set(_headed_department_codes(requester_id))
 
 
+def _ai_qa_can_use_marketing(requester_id) -> bool:
+    """Кому открыт «Маркетинговый мониторинг» (ТЗ #317, раздел 3): отбор по
+    сделке, метка и блок сделки, пресеты и выгрузка.
+
+    Раздел 3 ТЗ называет две роли — аналитика маркетинга (наблюдатель отдела
+    «Маркетинг») и руководителя маркетинга (глава отдела); по решению владельца
+    (25.09.2026) модуль видят ещё глобальные админы. Остальным зрителям раздела
+    (главы и СВ ОП, СЗоВ, Тез КЦ) раздел остаётся ровно таким, каким был до
+    модуля: ни блока «Сделка в amoCRM», ни сделки в строках.
+    """
+    if requester_id is None:
+        return False
+    user = db.get_user(id=requester_id)
+    role = _normalize_user_role(user[3]) if user else None
+    if _is_global_admin_requester(role, requester_id):
+        return True
+    if _is_marketing_observer(requester_id, role):
+        return True
+    return 'marketing' in set(_headed_department_codes(requester_id))
+
+
+def _ai_qa_marketing_denied():
+    return jsonify({"error": "Отбор по сделке доступен маркетингу и администраторам"}), 403
+
+
 def _ai_qa_presets_guard():
     """Гард пресетов: как у раздела, но наблюдателю «Маркетинга» открыта запись.
 
@@ -5737,6 +5767,8 @@ def _ai_qa_presets_guard():
     _ai_qa_can_share_presets."""
     requester_id, err = _ai_qa_guard()
     if not err:
+        if not _ai_qa_can_use_marketing(requester_id):
+            return None, _ai_qa_marketing_denied()
         return requester_id, None
     candidate = getattr(g, 'user_id', None)
     if candidate is not None and _is_marketing_observer(candidate):
@@ -5759,6 +5791,12 @@ def api_ai_qa_marketing_options():
         department, dept_err = _ai_qa_requested_department(requester_id)
         if dept_err:
             return dept_err
+        if not _ai_qa_can_use_marketing(requester_id):
+            # Не 403: панель спрашивает справочник у всех и по «available:
+            # false» просто не рисует блок — без ошибки в консоли.
+            return jsonify({"status": "success", "department": department, "available": False,
+                            "parks": [], "channels": [], "stages": [], "reasons": [],
+                            "handlers": [], "stage_history_since": None}), 200
         subject = _ai_qa_subject_filter(request.args.get('subject'))
         scope = _ai_qa_direction_scope(requester_id)
         return jsonify({"status": "success", "department": department,
@@ -5876,6 +5914,8 @@ def api_ai_qa_export():
     requester_id, err = _ai_qa_guard()
     if err:
         return err
+    if not _ai_qa_can_use_marketing(requester_id):
+        return _ai_qa_marketing_denied()
     try:
         from call_qa.api import evaluations_list
         from call_qa.marketing import export as _export
@@ -5981,7 +6021,8 @@ def api_ai_qa_review_queue():
             return filters_err
         items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                   subject_kind=subject, department=department,
-                                  filters=filters)
+                                  filters=filters,
+                                  with_deals=_ai_qa_can_use_marketing(requester_id))
         total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject,
                                    department=department, filters=filters)
         return jsonify({"status": "success", "items": items, "subject": subject,
@@ -6063,7 +6104,9 @@ def api_ai_qa_call(call_id):
         # оценка и без того тяжёлая, а сделка ей не нужна ни для чего.
         try:
             from call_qa.api import deal_for_subject
-            payload["deal"] = deal_for_subject(subject, call_id)
+            # Сделка в карточке — часть модуля маркетинга (ТЗ #317, раздел 3).
+            payload["deal"] = (deal_for_subject(subject, call_id)
+                               if _ai_qa_can_use_marketing(requester_id) else None)
         except Exception:
             logging.exception("ai-qa: сделка для карточки не загрузилась")
             payload["deal"] = None
@@ -7001,7 +7044,10 @@ def api_ai_qa_departments():
             return dept_err
         return jsonify({"status": "success", "items": items,
                         "current": current or (items[0]['code'] if items else None),
-                        "can_switch": len(items) > 1}), 200
+                        "can_switch": len(items) > 1,
+                        # Показывать ли модуль маркетинга (ТЗ #317, раздел 3):
+                        # решает сервер, фронт лишь прячет то, чего не дадут.
+                        "marketing": _ai_qa_can_use_marketing(requester_id)}), 200
     except Exception:
         logging.exception("ai-qa departments failed")
         return jsonify({"error": "не удалось получить список отделов"}), 500
@@ -7029,7 +7075,8 @@ def api_ai_qa_evaluations():
             return filters_err
         items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                  subject_kind=subject, department=department,
-                                 filters=filters)
+                                 filters=filters,
+                                 with_deals=_ai_qa_can_use_marketing(requester_id))
         total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject,
                                   department=department, filters=filters)
         return jsonify({"status": "success", "items": items, "subject": subject,

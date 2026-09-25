@@ -49,11 +49,12 @@ const TABS = [
 /* Где под панелью фильтров есть список, который она сужает. У обзора,
  * классификации критериев и базы разборов своей выборки по сотрудникам нет —
  * панель там была бы кнопкой, которая ни на что не влияет. */
-/* Панель фильтров стоит там, где под ней выборка разговоров: очередь, чаты,
-   звонки и «Обзор» (его метрики считаются по тому же отбору). В «Базе
-   разборов» — только оси сделки (ТЗ #317, п. 2.1): правило отбирается по
-   сделке разговора, из которого его вывели. */
-const FILTERABLE_TABS = ['queue', 'chats', 'evals', 'overview', 'rag'];
+/* Панель фильтров стоит там, где под ней выборка разговоров: очередь, чаты и
+   звонки. Модулю маркетинга (ТЗ #317) — ещё «Обзор» (метрики по тому же
+   отбору) и «База разборов» (только оси сделки: правило отбирается по сделке
+   разговора, из которого его вывели). Кому открыт модуль, говорит сервер. */
+const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
+const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];
 const EXPORT_TABS = ['chats', 'evals'];
 
 function Segmented({ tabs = TABS, tab, setTab }) {
@@ -133,6 +134,9 @@ export default function CallQaView(props) {
      * До ответа сервера department = null, и запросы уходят БЕЗ параметра —
      * тогда бэкенд сам подставит единственный доступный отдел. */
     const [departments, setDepartments] = useState(null);   // null = загрузка
+    /* Модуль маркетинга (ТЗ #317, раздел 3): маркетинг и глобальные админы.
+       Остальным раздел ровно такой, каким был до модуля. */
+    const [marketingAccess, setMarketingAccess] = useState(false);
     const [departmentsErr, setDepartmentsErr] = useState(false);
     const [department, setDepartment] = useState(null);
 
@@ -226,6 +230,7 @@ export default function CallQaView(props) {
                 if (!alive) return;
                 const items = r.data?.items || [];
                 setDepartments(items);
+                setMarketingAccess(!!r.data?.marketing);
                 setDepartment(r.data?.current || items[0]?.code || null);
                 setDepartmentsErr(!items.length);
             })
@@ -575,7 +580,8 @@ export default function CallQaView(props) {
                 сотруднику к ним отношения не имеет. В очереди ревью каждая
                 карточка по определению не проверена человеком, поэтому балл и
                 «есть оценка человека» там не показываем — они дали бы пусто. */}
-            {!selected && FILTERABLE_TABS.includes(tab) && (
+            {!selected && (FILTERABLE_TABS.includes(tab)
+                || (marketingAccess && MARKETING_FILTERABLE_TABS.includes(tab))) && (
                 <QaFilters
                     filters={filters}
                     onChange={setFilters}
@@ -591,7 +597,8 @@ export default function CallQaView(props) {
                     /* Выгрузка — по списку оценённых (та же выборка, что у
                        «Звонков» и «Чатов»); у очереди, «Обзора» и базы разборов
                        своя выборка, и кнопка там обещала бы не то, что на экране. */
-                    canExport={EXPORT_TABS.includes(tab)}
+                    canExport={marketingAccess && EXPORT_TABS.includes(tab)}
+                    marketingAccess={marketingAccess}
                     marketingOnly={tab === 'rag'}
                     showToast={showToast}
                 />
@@ -705,7 +712,8 @@ export default function CallQaView(props) {
                            onFind={() => setFindOpen(true)} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                             department={department} filters={filters} />
+                             department={department}
+                             filters={marketingAccess ? filters : undefined} />
             ) : tab === 'evals' ? (
                 /* Семейство, а не один вид: у СЗоВ и Тез КЦ звонок раздела приходит
                    из АТС и лежит в imported_calls, поэтому запрос одним `call`
@@ -725,7 +733,8 @@ export default function CallQaView(props) {
             ) : (
                 <AdjudicationsRag apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                                    showToast={showToast} canManage={canManageRag}
-                                   department={department} filters={filters}
+                                   department={department}
+                                   filters={marketingAccess ? filters : undefined}
                                    onInteractionChange={setSectionInteraction} />
             )}
                 </div>

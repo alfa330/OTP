@@ -57,9 +57,17 @@ test('«База разборов» рисуется и у супер-админ
 
 test('панель фильтров: обычный режим и режим «только сделка»', () => {
   const base = { filters: EMPTY_FILTERS, onChange() {}, apiBaseUrl: 'http://stub', department: 'op' };
-  assert.ok(render(QaFilters, base).includes('Фильтры'));
+  // Без доступа к модулю маркетинга — прежняя панель: ни пресетов, ни выгрузки.
+  const plain = render(QaFilters, { ...base, canExport: true });
+  assert.ok(plain.includes('Фильтры'));
+  assert.ok(!plain.includes('Пресеты'));
+  assert.ok(!plain.includes('Выгрузить'));
+  // Меню пресетов без сохранённых пресетов и без отбора пусто и не рисуется;
+  // выгрузка — всегда два пункта, по ней и видно, что модуль включён.
+  const marketing = render(QaFilters, { ...base, canExport: true, marketingAccess: true });
+  assert.ok(marketing.includes('Выгрузить'));
   // Справочник сделки ещё не пришёл — в «Базе разборов» панели нет вовсе.
-  assert.equal(render(QaFilters, { ...base, marketingOnly: true }), '');
+  assert.equal(render(QaFilters, { ...base, marketingOnly: true, marketingAccess: true }), '');
 });
 
 test('«Обзор» принимает отбор панели', () => {

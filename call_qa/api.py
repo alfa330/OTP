@@ -626,7 +626,8 @@ def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department
 
 
 def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
-                      subject_kind=None, department=None, filters=None) -> list[dict]:
+                      subject_kind=None, department=None, filters=None,
+                      with_deals=True) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
     внутри — свежее; постранично (limit/offset) поверх глобального порядка. stale=True —
@@ -654,7 +655,9 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
         # Сделка показывается в строке очереди, а не только фильтрует: маркетолог
         # выбирает, что смотреть, именно по каналу и парку, и открывать карточку
         # ради этих двух слов — лишний шаг на каждой строке.
-        deal_join = _marketing_join(cur, filters, need_columns=True)
+        # Сделка в строке — только тем, кому открыт модуль маркетинга
+        # (`with_deals`, решает маршрут): остальным ни колонок, ни семи JOIN'ов.
+        deal_join = _marketing_join(cur, filters, need_columns=with_deals)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
@@ -4804,7 +4807,7 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=
 
 def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
                      subject_kind=None, department=None, filters=None,
-                     max_limit=500) -> list[dict]:
+                     max_limit=500, with_deals=True) -> list[dict]:
     """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
     Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
     версиями модели, дублировались в списке. Сортировка — сначала новые; поддержана
@@ -4828,7 +4831,8 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
         if filter_sql is None:
             cur.close(); conn.close()
             return []
-        deal_join = _marketing_join(cur, filters, need_columns=True)
+        # Сделка в строке — только тем, кому открыт модуль маркетинга.
+        deal_join = _marketing_join(cur, filters, need_columns=with_deals)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
                       TO_CHAR({_local('rc.created_at')},'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},

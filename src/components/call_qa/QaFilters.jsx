@@ -117,6 +117,10 @@ export default function QaFilters(props) {
            действуют, поэтому и не показываются — панель без них честнее, чем
            с органами, которые ничего не меняют. */
         marketingOnly = false,
+        /* Кому открыт модуль маркетинга (ТЗ #317, раздел 3) — решает сервер.
+           Без доступа: ни блока сделки, ни пресетов, ни выгрузки, и их
+           справочники даже не запрашиваются. */
+        marketingAccess = false,
     } = props;
 
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
@@ -186,7 +190,10 @@ export default function QaFilters(props) {
        не должна ждать его отказа. Отдел и вкладка те же, что у справочника
        людей: значения считаются по той же выборке, что и списки. */
     useEffect(() => {
-        if (!apiBaseUrl || !department) return undefined;
+        if (!apiBaseUrl || !department || !marketingAccess) {
+            setMarketing(null);
+            return undefined;
+        }
         const controller = new AbortController();
         setMarketing(null);
         axios.get(`${apiBaseUrl}/api/ai-qa/marketing-options`, {
@@ -200,10 +207,10 @@ export default function QaFilters(props) {
             });
         return () => controller.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, department, subject]);
+    }, [apiBaseUrl, department, subject, marketingAccess]);
 
     const loadPresets = () => {
-        if (!apiBaseUrl || !department || marketingOnly) return;
+        if (!apiBaseUrl || !department || marketingOnly || !marketingAccess) return;
         axios.get(`${apiBaseUrl}/api/ai-qa/presets`, { params: { department }, headers: headers() })
             .then((r) => setPresets({ items: r.data?.items || [], can_share: !!r.data?.can_share }))
             .catch(() => setPresets({ items: [], can_share: false }));
@@ -212,7 +219,7 @@ export default function QaFilters(props) {
        «Базы разборов» (где пресеты не грузятся) при смене там отдела
        «Звонки» показывали бы пресеты прежнего отдела. */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(loadPresets, [apiBaseUrl, department, marketingOnly]);
+    useEffect(loadPresets, [apiBaseUrl, department, marketingOnly, marketingAccess]);
 
     /* Пресет восстанавливает отбор ЦЕЛИКОМ и заменяет текущий, а не дополняет:
        «TikTok за неделю» поверх уже выставленного сотрудника дал бы отбор,
@@ -438,6 +445,7 @@ export default function QaFilters(props) {
                 {/* Пресеты и выгрузка — рядом с «Фильтрами», а не внутри панели:
                     сохранённый отбор применяют, не раскрывая её. Меню, а не два
                     ряда кнопок: пресетов бывает десяток, и в полосе им не место. */}
+                {marketingAccess && (
                 <IosMenu
                     label="Пресеты"
                     disabled={busy === 'save' || busy === 'delete'}
@@ -465,7 +473,8 @@ export default function QaFilters(props) {
                             })),
                     ]}
                 />
-                {canExport && (
+                )}
+                {canExport && marketingAccess && (
                     <IosMenu
                         label={busy === 'export' ? 'Выгружаем…' : 'Выгрузить'}
                         disabled={busy === 'export'}

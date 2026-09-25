@@ -213,7 +213,7 @@ class WiringTests(unittest.TestCase):
         src = _read('call_qa', 'api.py')
         self.assertIn('from .marketing import filters as mkt', src)
         # Списки — с колонками сделки, счётчики — с той же связкой при отборе.
-        self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=True)'), 2)
+        self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=with_deals)'), 2)
         # Счётчик очереди, фильтр подтяжки, набор субъектов и очередь «Обзора».
         self.assertEqual(src.count('_marketing_join(cur, filters)'), 4)
         self.assertIn("marketing = filters.get('marketing')", src)
@@ -231,7 +231,7 @@ class WiringTests(unittest.TestCase):
         # Обе формы массива: axios шлёт со скобками, curl — без.
         self.assertIn("request.args.getlist(key + '[]')", src)
         # Карточка несёт сделку.
-        self.assertIn('payload["deal"] = deal_for_subject(subject, call_id)', src)
+        self.assertIn('payload["deal"] = (deal_for_subject(subject, call_id)', src)
 
     def test_stage_journal_written_by_both_syncs(self):
         src = _read('op_funnel', 'sync.py')
@@ -506,9 +506,10 @@ class TabWiringTests(unittest.TestCase):
 
     def test_frontend(self):
         view = _read('src', 'components', 'call_qa', 'CallQaView.jsx')
-        self.assertIn("const FILTERABLE_TABS = ['queue', 'chats', 'evals', 'overview', 'rag'];", view)
+        self.assertIn("const FILTERABLE_TABS = ['queue', 'chats', 'evals'];", view)
+        self.assertIn("const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];", view)
         self.assertIn("marketingOnly={tab === 'rag'}", view)
-        self.assertIn('department={department} filters={filters} />', view)
+        self.assertIn('filters={marketingAccess ? filters : undefined}', view)
         self.assertIn('filtersToParams(filters)', _read('src', 'components', 'call_qa', 'QaDashboard.jsx'))
         self.assertIn('...dealParams', _read('src', 'components', 'call_qa', 'AdjudicationsRag.jsx'))
         panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
@@ -596,10 +597,52 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_presets_reload_after_rule_catalog(self):
         panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
-        self.assertIn('useEffect(loadPresets, [apiBaseUrl, department, marketingOnly]);', panel)
+        self.assertIn('useEffect(loadPresets, [apiBaseUrl, department, marketingOnly, marketingAccess]);', panel)
         rag = _read('src', 'components', 'call_qa', 'AdjudicationsRag.jsx')
         rollout = rag.split('function RolloutPanel(', 1)[1].split('export default function AdjudicationsRag', 1)[0]
         self.assertNotIn('dealSignature', rollout)
+
+
+class MarketingAccessTests(unittest.TestCase):
+    """Модуль видят маркетинг (раздел 3 ТЗ) и глобальные админы; остальным раздел
+    такой, каким был до модуля (решение владельца 25.09.2026)."""
+
+    def test_single_server_rule(self):
+        src = _read('bot_schedule2.py')
+        rule = src.split('def _ai_qa_can_use_marketing(', 1)[1].split('\ndef ', 1)[0]
+        self.assertIn('_is_global_admin_requester(role, requester_id)', rule)
+        self.assertIn('_is_marketing_observer(requester_id, role)', rule)
+        self.assertIn("'marketing' in set(_headed_department_codes(requester_id))", rule)
+
+    def test_every_entry_point_is_gated(self):
+        src = _read('bot_schedule2.py')
+
+        def route(path):
+            return src.split(f"@app.route('{path}'", 1)[1].split('@app.route', 1)[0]
+        self.assertIn('"marketing": _ai_qa_can_use_marketing(requester_id)', route('/api/ai-qa/departments'))
+        self.assertIn('if not _ai_qa_can_use_marketing(requester_id):', route('/api/ai-qa/marketing-options'))
+        self.assertIn('if not _ai_qa_can_use_marketing(requester_id):', route('/api/ai-qa/export'))
+        self.assertIn('with_deals=_ai_qa_can_use_marketing(requester_id)', route('/api/ai-qa/evaluations'))
+        self.assertIn('with_deals=_ai_qa_can_use_marketing(requester_id)', route('/api/ai-qa/review-queue'))
+        self.assertIn('if _ai_qa_can_use_marketing(requester_id) else None',
+                      route('/api/ai-qa/call/<int:call_id>'))
+        guard = src.split('def _ai_qa_presets_guard(', 1)[1].split('\ndef ', 1)[0]
+        self.assertIn('_ai_qa_can_use_marketing(requester_id)', guard)
+        parser = src.split('def _ai_qa_list_filters(', 1)[1].split('\n@app.route', 1)[0]
+        self.assertIn("filters.get('marketing') and not _ai_qa_can_use_marketing", parser)
+
+    def test_lists_skip_deals_without_access(self):
+        api = _read('call_qa', 'api.py')
+        self.assertEqual(api.count('deal_join = _marketing_join(cur, filters, need_columns=with_deals)'), 2)
+
+    def test_frontend_follows_server_flag(self):
+        view = _read('src', 'components', 'call_qa', 'CallQaView.jsx')
+        self.assertIn('setMarketingAccess(!!r.data?.marketing)', view)
+        self.assertIn('canExport={marketingAccess && EXPORT_TABS.includes(tab)}', view)
+        panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
+        self.assertIn('if (!apiBaseUrl || !department || !marketingAccess) {', panel)
+        self.assertIn('marketingOnly || !marketingAccess) return;', panel)
+        self.assertIn('{marketingAccess && (', panel)
 
 if __name__ == '__main__':
     unittest.main()
