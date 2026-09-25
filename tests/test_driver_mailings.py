@@ -936,13 +936,20 @@ class FrontendWiringTests(unittest.TestCase):
         # Роль admin сама по себе пускать не должна — как и на бэкенде.
         self.assertNotIn("'admin'", gate.replace("'super_admin'", ''))
 
-    def test_menu_item_lives_in_both_role_branches(self):
+    def test_menu_item_lives_in_every_role_branch(self):
         # Право именное: если этого человека назначат главой отдела, он уйдёт из
-        # админской ветки меню, а бэкенд по-прежнему будет его пускать.
+        # админской ветки меню, а бэкенд по-прежнему будет его пускать. Третья
+        # копия — у рядового: с задачи #359 в списке есть сотрудник ООЗ с
+        # ролью оператора.
         self.assertEqual(
-            self.app.count("handleSidebarViewNavigation(e, 'driver_mailings')"), 2)
+            self.app.count("handleSidebarViewNavigation(e, 'driver_mailings')"), 3)
         self.assertEqual(
-            self.app.count('<span className="sidebar-text">Рассылки</span>'), 2)
+            self.app.count('<span className="sidebar-text">Рассылки</span>'), 3)
+        rank_marker = "{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && ("
+        rank_menu = self.app.split(rank_marker)[1].split(rank_marker)[0]
+        rank_menu = rank_menu.split("\n" + " " * 40 + "</>\n" + " " * 36 + ")}")[0]
+        self.assertIn("{canAccessDriverMailings && (", rank_menu)
+        self.assertIn("handleSidebarViewNavigation(e, 'driver_mailings')", rank_menu)
 
     def test_view_opens_by_url_and_is_not_bounced(self):
         self.assertIn("(requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings)",

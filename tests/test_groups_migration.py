@@ -733,9 +733,10 @@ class SupervisorGroupChangeTests(unittest.TestCase):
             edit_block,
         )
         # направление в карточке — не для обычного СВ (и не для бэк-офиса,
-        # где направлений нет вовсе: showOperatorLineFields)
+        # где направлений нет вовсе, и не для ООЗ: showDirectionField выводится
+        # из showOperatorLineFields)
         self.assertIn(
-            "{isOperatorDraft(editedUser) && !isPureSupervisorRequester && showOperatorLineFields && (",
+            "{isOperatorDraft(editedUser) && !isPureSupervisorRequester && showDirectionField && (",
             edit_block,
         )
         # СВ не может оставить оператора без группы

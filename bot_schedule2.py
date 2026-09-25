@@ -21385,6 +21385,8 @@ def add_user():
         # бэк-офис это не влияет — групп у него нет.
         # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
         line_fields_hidden = _department_hides_operator_line_fields(department_id)
+        # У ООЗ группа есть, а направления нет — только его и снимаем.
+        direction_hidden = line_fields_hidden or _department_hides_employee_direction(department_id)
 
         # Роль бэк-офиса действительна только в СВОЁМ отделе. Иначе это дыра
         # в правах, а не опечатка: такой роли нет в конфиге чужого отдела
@@ -21416,12 +21418,12 @@ def add_user():
                     supervisor_id = int(supervisor_raw)
                 except (TypeError, ValueError):
                     return jsonify({"error": "Invalid supervisor_id"}), 400
-            if role == 'operator' and not line_fields_hidden and not data.get('direction_id'):
+            if role == 'operator' and not direction_hidden and not data.get('direction_id'):
                 return jsonify({"error": "Missing required field: direction_id"}), 400
             if role == 'operator' and not data.get('rate'):
                 return jsonify({"error": "Missing required field: rate"}), 400
             if role == 'operator':
-                if line_fields_hidden:
+                if direction_hidden:
                     direction_id = None
                 else:
                     try:
@@ -21461,7 +21463,7 @@ def add_user():
                 supervisor_id = requester_id
             # Направление берём выбранное в модалке (оно ограничено отделом СВ);
             # если не выбрано — наследуем направление самого СВ.
-            if role == 'operator' and not direction_id and not line_fields_hidden:
+            if role == 'operator' and not direction_id and not direction_hidden:
                 requester_direction_name = str(requester[4] or '').strip()
                 if requester_direction_name:
                     requester_direction_id = next(
@@ -28719,6 +28721,13 @@ SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
 # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
 OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})
 
+# Отделы, где у оператора нет направления, хотя группа есть. ООЗ (отдел
+# обработки запросов, задача #359): сотрудник зачисляется в группу, но на
+# линию не выходит, и направлений у отдела нет ни одного (прод, 25.09.2026) —
+# обязательный direction_id не давал завести в нём никого.
+# Зеркалит EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
+EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department'})
+
 # Рядовой сотрудник отдела без линии заводится не оператором: 'operator' в этой
 # системе означает человека на линии — с направлением, группой, часами и
 # оценками. «Маркетинг» добавлен по решению владельца (04.09.2026) — отдел
@@ -28766,6 +28775,19 @@ def _department_hides_operator_line_fields(department_id):
     except Exception:
         return False
     return str(department.get('code') or '').strip().lower() in OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES
+
+
+def _department_hides_employee_direction(department_id):
+    """Отдел, где оператору не выбирают направление (см.
+    EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES). Неизвестный отдел проверку не
+    снимает — как и у _department_hides_operator_line_fields."""
+    if department_id is None:
+        return False
+    try:
+        department = db.get_department_by_id(int(department_id)) or {}
+    except Exception:
+        return False
+    return str(department.get('code') or '').strip().lower() in EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES
 
 
 def _is_sip_settings_department_head(requester_id):

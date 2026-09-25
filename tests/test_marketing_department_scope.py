@@ -198,7 +198,8 @@ class EmployeeCardTests(unittest.TestCase):
     def test_job_title_and_hidden_operator_fields(self):
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
+            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = "
+            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department']);",
             views,
         )
         self.assertIn(

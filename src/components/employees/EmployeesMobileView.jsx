@@ -548,7 +548,7 @@ export default function EmployeesMobileView({
                             {bulk.showGroupAndDirection && (
                                 <PickRow label="Группа" value={draft.group_id} options={bulk.groups} onChange={setDraftField('group_id')} disabled={bulkSaving} />
                             )}
-                            {bulk.showGroupAndDirection && (
+                            {bulk.showGroupAndDirection && bulk.showDirection !== false && (
                                 <PickRow label="Направление" value={draft.direction_id} options={bulk.directions} onChange={setDraftField('direction_id')} disabled={bulkSaving} />
                             )}
                             <PickRow label="Ставка" value={draft.rate} options={RATE_OPTIONS} onChange={setDraftField('rate')} disabled={bulkSaving} />

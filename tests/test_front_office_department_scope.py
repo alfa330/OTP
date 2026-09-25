@@ -185,11 +185,15 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
 
         self.assertIn(
             "import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole,"
+            " departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship,"
             " departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor,"
+            " departmentCodeHidesEmployeeTaxiproId,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
             " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
             " departmentEmployeeRole, departmentHidesColleagueSchedules,"
+            " departmentHidesEmployeeDirection, departmentHidesEmployeeInternship,"
             " departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor,"
+            " departmentHidesEmployeeTaxiproId,"
             " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
             " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
             " departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole,"
@@ -270,11 +274,11 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
             source,
         )
 
-        # Множество растёт вместе с бэк-офисом (Бухгалтерия, HR): они на линию
-        # не выходят, см. test_back_office_department_scope.
+        # Множество растёт вместе с бэк-офисом (Бухгалтерия, HR) и ООЗ (#359):
+        # они на линию не выходят, см. test_back_office_department_scope.
         self.assertIn(
             "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department']);", source
         )
         self.assertIn("export const departmentCodeHidesFrontOfficeTraining = (code) => {", source)
         self.assertIn(
@@ -287,7 +291,9 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         modal = _read(MODAL_PATH)
 
         self.assertIn(
-            "import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
+            "import { departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship,"
+            " departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId,"
+            " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
             " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
             " managesEmployeeAccounting }"
             " from '../../utils/departmentViews';",
@@ -384,7 +390,7 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
             "new Set(['front_office', 'accounting', 'hr', 'marketing']);", views)
         self.assertIn(
             "const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'marketing']);", views)
+            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department']);", views)
         self.assertIn(
             "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
             views)

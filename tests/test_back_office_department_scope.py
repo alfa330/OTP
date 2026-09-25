@@ -145,7 +145,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department']);", source
         )
 
     def test_modal_hides_group_direction_and_sip(self):
@@ -154,11 +154,24 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
             "const showOperatorLineFields = !departmentCodeHidesOperatorFields(effectiveDeptCode);",
             modal,
         )
+        # Направление и SIP у ООЗ гаснут отдельно (задача #359), но у
+        # бэк-офиса оба по-прежнему выводятся из showOperatorLineFields.
+        self.assertIn(
+            "const showDirectionField = showOperatorLineFields && "
+            "!departmentCodeHidesEmployeeDirection(effectiveDeptCode);",
+            modal,
+        )
+        self.assertIn(
+            "const showSipField = showOperatorLineFields && "
+            "!departmentCodeHidesEmployeeSipInput(effectiveDeptCode);",
+            modal,
+        )
         # Оба режима модалки: создание и редактирование. Поле, забытое в одной
         # из веток, всплыло бы только у того, кто открыл карточку уже
         # заведённого сотрудника.
-        self.assertEqual(modal.count("{showOperatorLineFields && ("), 2)   # SIP-номер
-        self.assertEqual(modal.count("&& showOperatorLineFields && ("), 4)  # группа и направление
+        self.assertEqual(modal.count("{showSipField && ("), 2)             # SIP-номер
+        self.assertEqual(modal.count("&& showOperatorLineFields && ("), 2)  # группа
+        self.assertEqual(modal.count("&& showDirectionField && ("), 2)      # направление
 
     def test_group_and_direction_are_not_required_for_back_office(self):
         # Без этого глава бэк-офиса не смог бы завести человека вовсе:
@@ -169,7 +182,9 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
             modal,
         )
         self.assertIn(
-            "if (isOperatorUser && showOperatorLineFields && !editedUser.direction_id) {",
+            # showDirectionField выводится из showOperatorLineFields (см. выше),
+            # поэтому бэк-офис по-прежнему не обязан выбирать направление.
+            "if (isOperatorUser && showDirectionField && !editedUser.direction_id) {",
             modal,
         )
 
@@ -449,7 +464,8 @@ class EmployeeJobTitleFieldTests(unittest.TestCase):
     def test_frontend_helper_and_card(self):
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
+            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = "
+            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department']);",
             views,
         )
         self.assertIn("export const departmentCodeUsesEmployeeJobTitle = (code) => {", views)
@@ -556,16 +572,25 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
 
     def test_direction_is_optional_only_for_back_office(self):
         endpoint = _function_source(BOT_PATH, "add_user")
+        # direction_hidden = бэк-офис ИЛИ отдел без направлений (ООЗ, #359):
+        # первое слагаемое — ровно прежнее условие, бэк-офис не потерян.
         self.assertIn(
-            "if role == 'operator' and not line_fields_hidden and not data.get('direction_id'):",
+            "direction_hidden = line_fields_hidden or _department_hides_employee_direction(department_id)",
             endpoint,
         )
-        self.assertIn("                if line_fields_hidden:\n                    direction_id = None", endpoint)
+        self.assertIn(
+            "if role == 'operator' and not direction_hidden and not data.get('direction_id'):",
+            endpoint,
+        )
+        self.assertIn("                if direction_hidden:\n                    direction_id = None", endpoint)
         # Фолбэк «СВ наследует своё направление» бэк-офису тоже не нужен.
         self.assertIn(
-            "if role == 'operator' and not direction_id and not line_fields_hidden:",
+            "if role == 'operator' and not direction_id and not direction_hidden:",
             endpoint,
         )
+        # Старое условие не должно остаться нигде: иначе один из трёх
+        # переходов снова требовал бы направление у ООЗ.
+        self.assertNotIn("not line_fields_hidden", endpoint)
 
     def test_helper_matches_the_frontend_set(self):
         source = _read(BOT_PATH)
@@ -874,6 +899,9 @@ class EmployeeSectionDeptScopedColumnsTests(unittest.TestCase):
             "                jobTitle: departmentUsesEmployeeJobTitle(user),\n"
             "                city: departmentUsesEmployeeCity(user),\n"
             "                frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),\n"
+            "                direction: !departmentHidesEmployeeDirection(user),\n"
+            "                internship: !departmentHidesEmployeeInternship(user),\n"
+            "                taxiproId: !departmentHidesEmployeeTaxiproId(user),\n"
             "            });",
             app,
         )
@@ -992,14 +1020,17 @@ class EmployeeSectionWordingTests(unittest.TestCase):
         # смотрящего: при «Все отделы» одна группа с одним направлением
         # подошли бы не всем, и селекты уходят вместе с колонками.
         app = _read(APP_PATH)
+        # Три колонки — у ООЗ (#359): группа есть, направления нет.
         self.assertIn(
             "<div className={`grid grid-cols-1 gap-3 ${!manageUsersDeptFields.operatorFields "
-            "? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>",
+            "? 'md:grid-cols-2' : (manageUsersDeptFields.direction ? 'md:grid-cols-4' : 'md:grid-cols-3')}`}>",
             app,
         )
         bulk = app.split("Зажмите <span className=\"font-semibold\">Ctrl</span>", 1)[1]
         bulk = bulk.split("Применить массово", 1)[0]
-        self.assertEqual(2, bulk.count("{manageUsersDeptFields.operatorFields && ("))
+        self.assertEqual(1, bulk.count("{manageUsersDeptFields.operatorFields && ("))
+        self.assertEqual(
+            1, bulk.count("{manageUsersDeptFields.operatorFields && manageUsersDeptFields.direction && ("))
         # Ставка остаётся — она есть у всех.
         self.assertIn("Ставка: не менять", bulk)
 

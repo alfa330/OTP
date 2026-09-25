@@ -115,6 +115,18 @@ const MARKETING_EMPLOYEE_VIEWS = [
     'call_division',
 ];
 
+// ООЗ — отдел обработки запросов (код request_processing_department). Задача
+// #359 от главы отдела: сотруднику открыт ТОЛЬКО раздел «Рассылки» — ни
+// профиля, ни часов, ни смен. «Ивенты» остаются, как у всех ролей: это
+// UNIVERSAL_VIEWS ниже, а не строка отдела.
+//
+// Саму кнопку отправки эта строка НЕ выдаёт: периметр «Рассылок» именной
+// (driver_mailings/access.py), потому что одно нажатие уходит тысяче водителей.
+// Сотрудник отдела, которого нет в именном списке, увидит пустой портал, а не
+// чужую рассылку. Строка отвечает на другой вопрос — что ЕЩЁ показать
+// сотруднику отдела помимо рассылок: ничего.
+const REQUEST_PROCESSING_EMPLOYEE_VIEWS = ['driver_mailings'];
+
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
     manage_users: 'manage_operators',
@@ -183,6 +195,12 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
     // ограничений (роль отсутствует в конфиге => allowlistFor вернёт null).
     marketing: {
         marketing_manager: MARKETING_EMPLOYEE_VIEWS,
+    },
+    // ООЗ: ограничены только рядовые. Ключа 'head' нет намеренно — глава
+    // отдела (админ портала) остаётся без ограничений, и её меню не меняется.
+    request_processing_department: {
+        operator: REQUEST_PROCESSING_EMPLOYEE_VIEWS,
+        trainee: REQUEST_PROCESSING_EMPLOYEE_VIEWS,
     },
 };
 
@@ -289,8 +307,11 @@ export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCi
 // человека определяет именно она: направления и группы, которыми
 // различают людей на линии, там не заведены вовсе (см.
 // OPERATOR_FIELDS_HIDDEN_DEPARTMENTS — те же коды с другой стороны).
+// ООЗ — по просьбе владельца 25.09.2026: там у сотрудника есть группа, но
+// направлений нет, и должность («менеджер отдела обработки запросов»)
+// указывают при заведении.
 // В базе колонка называется job_title: position — ключевое слово Postgres.
-const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);
+const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'request_processing_department']);
 
 export const departmentCodeUsesEmployeeJobTitle = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -301,10 +322,10 @@ export const departmentUsesEmployeeJobTitle = (user) => departmentCodeUsesEmploy
 
 // Отделы, у сотрудников которых не спрашиваем «Был во фронт офисе на обучении»:
 // сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна, а
-// бухгалтерия и HR на линию не выходят вовсе — обучать их работе в офисе
-// продаж незачем. Скрываем только ввод — уже сохранённое значение сохраняется
-// как есть.
-const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr']);
+// бухгалтерия, HR и ООЗ на линию не выходят вовсе — обучать их работе в офисе
+// продаж незачем (ООЗ — решение владельца 25.09.2026). Скрываем только ввод —
+// уже сохранённое значение сохраняется как есть.
+const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'request_processing_department']);
 
 export const departmentCodeHidesFrontOfficeTraining = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -363,8 +384,8 @@ export const departmentHidesEmployeeSupervisor = (user) => departmentCodeHidesEm
 // CRM yataxi, а их статистика приходит из region-call-stats, а не из Oktell
 // (задача #159). Список тот же, что у супервайзеров, но набор ОТДЕЛЬНЫЙ: это
 // два независимых свойства отдела, и телефонию фронт-офисам могут завести, не
-// заводя супервайзеров.
-const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing']);
+// заводя супервайзеров. ООЗ телефонии тоже не имеет (владелец, 25.09.2026).
+const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department']);
 
 export const departmentCodeHidesEmployeeSip = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -372,6 +393,43 @@ export const departmentCodeHidesEmployeeSip = (code) => {
 };
 
 export const departmentHidesEmployeeSip = (user) => departmentCodeHidesEmployeeSip(departmentCodeOf(user));
+
+/* Поля карточки, которых нет у ООЗ (решение владельца 25.09.2026: «у ООЗ нет
+   SIP номера, практики в компании, обучения во фронт офисе и ID таксипро»).
+   Сотрудник ООЗ заводится оператором и зачисляется в группу — группа в
+   карточке остаётся, — но на линию не выходит.
+
+   «Направление» здесь же, хотя владелец его не называл: у отдела нет ни
+   одного направления (прод, 25.09.2026), а форма и сервер требовали выбрать
+   его у каждого оператора — завести сотрудника ООЗ было нельзя вовсе.
+
+   «SIP номер» — ОТДЕЛЬНЫЙ набор от EMPLOYEE_SIP_HIDDEN_DEPARTMENTS выше: тот
+   решает про колонку в списке сотрудников, а фронт-офисам ввод номера в
+   карточке оставлен — владелец его не убирал, и снимать поле у чужого
+   отдела заодно значило бы менять не своё. Бэк-офис не перечислен ни в
+   одном из наборов: у него все операторские поля гасит
+   departmentCodeHidesOperatorFields.
+
+   Скрываем только ввод: уже сохранённое значение (человека перевели из
+   отдела с линией) остаётся как есть. */
+const EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
+const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
+const EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
+const EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
+
+const departmentCodeIn = (set) => (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && set.has(normalized));
+};
+
+export const departmentCodeHidesEmployeeDirection = departmentCodeIn(EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS);
+export const departmentCodeHidesEmployeeSipInput = departmentCodeIn(EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS);
+export const departmentCodeHidesEmployeeInternship = departmentCodeIn(EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS);
+export const departmentCodeHidesEmployeeTaxiproId = departmentCodeIn(EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS);
+
+export const departmentHidesEmployeeDirection = (user) => departmentCodeHidesEmployeeDirection(departmentCodeOf(user));
+export const departmentHidesEmployeeInternship = (user) => departmentCodeHidesEmployeeInternship(departmentCodeOf(user));
+export const departmentHidesEmployeeTaxiproId = (user) => departmentCodeHidesEmployeeTaxiproId(departmentCodeOf(user));
 
 // Отделы, чья телефония — кабинет Oktell, а не наш SIP-телефон. У СЗоВ оператор
 // работает в клиенте Oktell: регистрации по SIP там нет, а автодозвона, очередей

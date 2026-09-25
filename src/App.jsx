@@ -107,7 +107,7 @@ import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting } from './utils/departmentViews';
 // Отдельной строкой: общий импорт выше тесты держат дословно.
 import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
 import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
@@ -43681,6 +43681,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 jobTitle: Boolean(code) && departmentCodeUsesEmployeeJobTitle(code),
                 city: Boolean(code) && departmentCodeUsesEmployeeCity(code),
                 frontOfficeTraining: Boolean(code) && !departmentCodeHidesFrontOfficeTraining(code),
+                // У ООЗ группа есть, а направления, практики и ID таксипро —
+                // нет. Практика и таксипро — общие поля, при «Все отделы» они
+                // остаются: отдел не выбран — значит и не ООЗ.
+                direction: !departmentCodeHidesEmployeeDirection(code),
+                internship: !departmentCodeHidesEmployeeInternship(code),
+                taxiproId: !departmentCodeHidesEmployeeTaxiproId(code),
             });
 
             // Набор полей по отделу СМОТРЯЩЕГО — для экранов без фильтра по
@@ -43695,6 +43701,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 jobTitle: departmentUsesEmployeeJobTitle(user),
                 city: departmentUsesEmployeeCity(user),
                 frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),
+                direction: !departmentHidesEmployeeDirection(user),
+                internship: !departmentHidesEmployeeInternship(user),
+                taxiproId: !departmentHidesEmployeeTaxiproId(user),
             });
 
             // Колонки ОДНОГО набора («Общее», «Данные», «Контакты»,
@@ -43849,11 +43858,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             label: 'Оформлен как',
                             render: (employee) => formatEmployeeEmploymentTypeLabel(employee?.employment_type)
                         },
+                        ...(employeeDeptFields.internship ? [
                         {
                             key: 'internship_in_company',
                             label: 'Практика',
                             render: (employee) => formatEmployeeBoolLabel(employee?.internship_in_company)
-                        },
+                        }
+                        ] : []),
                         ...(employeeDeptFields.frontOfficeTraining ? [
                         {
                             key: 'front_office_training',
@@ -43866,11 +43877,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             render: (employee) => formatEmployeeTableDate(employee?.front_office_training_date)
                         }
                         ] : []),
+                        ...(employeeDeptFields.taxiproId ? [
                         {
                             key: 'taxipro_id',
                             label: 'ID таксипро',
                             render: (employee) => employee?.taxipro_id || '-'
                         }
+                        ] : [])
                     ];
                 }
 
@@ -43887,7 +43900,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         render: (employee) => employee?.supervisor_name || '-'
                     },
                     ] : []),
-                    ...(isOperatorVariant ? [
+                    ...(isOperatorVariant && employeeDeptFields.direction ? [
                     {
                         key: 'direction',
                         label: 'Направление',
@@ -53256,6 +53269,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
                                             )}
+                                            {/* «Рассылки» у рядового — третья копия пункта, после веток
+                                                админа и руководителя. Право именное (id в
+                                                DRIVER_MAILINGS_ALLOWED_USER_IDS), и с задачи #359 в списке
+                                                есть сотрудник ООЗ с ролью оператора: без этой копии раздел
+                                                открывался бы только прямым адресом. Экран объявлен вне
+                                                ролевых веток, отдельного рендера здесь не нужно. */}
+                                            {canAccessDriverMailings && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {renderDividerIfInner(
                                                 departmentAllowsView(user, 'profile'),
                                                 departmentAllowsView(user, 'hours'),
@@ -55231,6 +55260,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onSelectAll: (ids) => setSelectedManageUsersIds(new Set(ids)),
                                         bulk: {
                                             showGroupAndDirection: manageUsersDeptFields.operatorFields,
+                                            // У ООЗ группа есть, направлений нет вовсе.
+                                            showDirection: manageUsersDeptFields.direction,
                                             groups: (userModalGroups || []).filter((group) => group?.status !== 'archived').map((group) => ({
                                                 value: String(group.id),
                                                 label: (group.supervisors || []).length
@@ -55411,7 +55442,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             нет: в выборке лежат люди из разных отделов, и одна
                                                             группа с одним направлением подошли бы не всем. Ставка
                                                             остаётся — она есть у каждого. */}
-                                                        <div className={`grid grid-cols-1 gap-3 ${!manageUsersDeptFields.operatorFields ? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>
+                                                        <div className={`grid grid-cols-1 gap-3 ${!manageUsersDeptFields.operatorFields ? 'md:grid-cols-2' : (manageUsersDeptFields.direction ? 'md:grid-cols-4' : 'md:grid-cols-3')}`}>
                                                             {manageUsersDeptFields.operatorFields && (
                                                             <select
                                                                 value={bulkManageUsersChanges.group_id}
@@ -55429,7 +55460,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </select>
                                                             )}
 
-                                                            {manageUsersDeptFields.operatorFields && (
+                                                            {manageUsersDeptFields.operatorFields && manageUsersDeptFields.direction && (
                                                             <select
                                                                 value={bulkManageUsersChanges.direction_id}
                                                                 onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, direction_id: e.target.value }))}

@@ -3,7 +3,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
@@ -337,6 +337,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // завести сотрудника вовсе. Отдел берём у СОТРУДНИКА, не у того, кто его
     // заводит.
     const showOperatorLineFields = !departmentCodeHidesOperatorFields(effectiveDeptCode);
+    // ООЗ: группа у сотрудника есть, а направления, SIP-номера, практики и
+    // ID таксипро — нет (см. EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS). Направление
+    // гасит и свою обязательность в handleSave: у отдела нет ни одного.
+    const showDirectionField = showOperatorLineFields && !departmentCodeHidesEmployeeDirection(effectiveDeptCode);
+    const showSipField = showOperatorLineFields && !departmentCodeHidesEmployeeSipInput(effectiveDeptCode);
+    const showInternshipField = !departmentCodeHidesEmployeeInternship(effectiveDeptCode);
+    const showTaxiproIdField = !departmentCodeHidesEmployeeTaxiproId(effectiveDeptCode);
     // Город раньше вводили текстом: значение вне справочника не выбрасываем,
     // а подмешиваем отдельной опцией — иначе сохранение стёрло бы его.
     const currentCity = String(editedUser?.city ?? '').trim();
@@ -810,7 +817,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isOperatorUser && showOperatorLineFields && !editedUser.direction_id) {
+        if (isOperatorUser && showDirectionField && !editedUser.direction_id) {
         setModalError("Направление обязательно.");
         return;
         }
@@ -1535,6 +1542,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         />
                     </div>
 
+                    {showInternshipField && (
                     <div>
                         <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                         <input
@@ -1547,6 +1555,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <span>Проходил практику в компании</span>
                         </label>
                     </div>
+                    )}
 
                     {showFrontOfficeTraining && (
                     <>
@@ -1582,6 +1591,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </>
                     )}
 
+                    {showTaxiproIdField && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">ID таксипро</label>
                         <input
@@ -1592,6 +1602,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={fieldsLocked}
                         />
                     </div>
+                    )}
                     </>
                 )}
 
@@ -1792,7 +1803,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {isOperatorDraft(editedUser) && showOperatorLineFields && (
+                    {isOperatorDraft(editedUser) && showDirectionField && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Направление</label>
                         <CustomSelect
@@ -1864,7 +1875,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <span>Наличие водительских прав</span>
                         </label>
                     </div>
-                    {showOperatorLineFields && (
+                    {showSipField && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">SIP номер</label>
                         <input
@@ -2244,6 +2255,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </select>
                         </div>
 
+                        {showInternshipField && (
                         <div>
                             <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                             <input
@@ -2256,6 +2268,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <span>Проходил практику в компании</span>
                             </label>
                         </div>
+                        )}
 
                         {showFrontOfficeTraining && (
                         <>
@@ -2291,6 +2304,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </>
                         )}
 
+                        {showTaxiproIdField && (
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">ID таксипро</label>
                             <input
@@ -2301,6 +2315,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={fieldsLocked}
                             />
                         </div>
+                        )}
                         </>
                     )}
 
@@ -2530,7 +2545,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                             {/* Направление сотрудника меняют админ и глава отдела; у СВ
                                 вместо него смена группы (задача #228). */}
-                            {isOperatorDraft(editedUser) && !isPureSupervisorRequester && showOperatorLineFields && (
+                            {isOperatorDraft(editedUser) && !isPureSupervisorRequester && showDirectionField && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Направление</label>
                                 <select
@@ -2631,7 +2646,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <span>Наличие водительских прав</span>
                                 </label>
                             </div>
-                            {showOperatorLineFields && (
+                            {showSipField && (
                             <div>
                                 <div className="flex items-end justify-between gap-2 mb-1">
                                     <label className="block text-sm font-medium text-gray-700">SIP номер</label>
