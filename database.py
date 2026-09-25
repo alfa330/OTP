@@ -3729,6 +3729,27 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_supervisor_manual_marks_user_at
                     ON supervisor_manual_marks(user_id, mark_at) WHERE deleted_at IS NULL;
             """)
+            # Отметки Clockster для часов СВ (задача #352), взятые синхронизацией прямо из
+            # Clockster: кнопкой «Синхронизация с Clockster» и ночной задачей. Хранятся
+            # у нас, чтобы окно дня показывало те же отметки, по которым посчитаны
+            # часы, — кэш раздела «Отметки» собирается не за все дни. Дни, за которые
+            # синхронизация прошла целиком, — в supervisor_clockster_sync_days: за них
+            # отметки берутся отсюда, за остальные — из кэша «Отметок».
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS supervisor_clockster_marks (
+                    ext_id TEXT NOT NULL,
+                    mark_at TIMESTAMPTZ NOT NULL,
+                    kind VARCHAR(8) NOT NULL CHECK (kind IN ('in', 'out')),
+                    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (ext_id, mark_at, kind)
+                );
+                CREATE INDEX IF NOT EXISTS idx_supervisor_clockster_marks_at
+                    ON supervisor_clockster_marks(mark_at);
+                CREATE TABLE IF NOT EXISTS supervisor_clockster_sync_days (
+                    day DATE PRIMARY KEY,
+                    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
             # Разовые задачи старта: строка появляется один раз, и задача с её ключом
             # больше не выполняется. Нужна там, где повторный запуск на каждом старте
             # стёр бы уже новые, правильные данные.
@@ -27094,6 +27115,102 @@ class Database:
             )
         return cards
 
+    SUPERVISOR_CLOCKSTER_MARKS_RETENTION_DAYS = 150
+
+    def store_supervisor_clockster_marks(self, marks_by_card, date_from, date_to):
+        """Сохранить отметки, только что взятые из Clockster за дни [date_from, date_to].
+
+        Замена, а не доливка: за эти дни синхронизация получила ВСЕХ людей
+        Clockster, поэтому всё прежнее за период стирается — отметку, которую в
+        Clockster убрали или поправили, иначе нельзя было бы забыть. Дни
+        помечаются синхронизированными: окно дня и пересчёт берут отметки за них
+        отсюда, а не из кэша «Отметок». Заодно — чистка старше срока хранения."""
+        start = self._normalize_schedule_date(date_from)
+        end = self._normalize_schedule_date(date_to)
+        if end < start:
+            start, end = end, start
+        start_at = datetime.combine(start, dt_time.min, tzinfo=supervisor_hours.TZ)
+        end_at = datetime.combine(end + timedelta(days=1), dt_time.min, tzinfo=supervisor_hours.TZ)
+        rows = set()
+        for ext_id, marks in (marks_by_card or {}).items():
+            if not ext_id:
+                continue
+            for mark in marks or []:
+                key = supervisor_hours.mark_key(mark.get('at'), mark.get('kind'))
+                if key and key[1] in (supervisor_hours.MARK_IN, supervisor_hours.MARK_OUT) and start_at <= key[0] < end_at:
+                    rows.add((str(ext_id), key[0], key[1]))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM supervisor_clockster_marks WHERE mark_at >= %s AND mark_at < %s",
+                (start_at, end_at),
+            )
+            if rows:
+                execute_values(cursor, """
+                    INSERT INTO supervisor_clockster_marks (ext_id, mark_at, kind) VALUES %s
+                    ON CONFLICT (ext_id, mark_at, kind) DO NOTHING
+                """, sorted(rows), page_size=1000)
+            execute_values(cursor, """
+                INSERT INTO supervisor_clockster_sync_days (day) VALUES %s
+                ON CONFLICT (day) DO UPDATE SET synced_at = NOW()
+            """, [(day,) for day in supervisor_hours.iter_days(start, end)])
+            cursor.execute(
+                "DELETE FROM supervisor_clockster_marks WHERE mark_at < NOW() - make_interval(days => %s)",
+                (self.SUPERVISOR_CLOCKSTER_MARKS_RETENTION_DAYS,),
+            )
+        return len(rows)
+
+    def _supervisor_card_marks_multi_tx(self, cursor, ext_ids, date_from, date_to):
+        """Отметки карточек Clockster за дни [date_from, date_to]:
+        ({карточка: [отметка]}, дни с известными отметками, дни без них).
+
+        День, который прошла синхронизация с Clockster, берётся из
+        supervisor_clockster_marks; иначе — из кэша «Отметок», если он собран с
+        Clockster. «Без них» — день кэша, собранный без Clockster (сбой), и не
+        синхронизированный: такой день не считается, а день перед ним тоже
+        (уход ночной смены лежит в нём)."""
+        cursor.execute(
+            "SELECT day FROM supervisor_clockster_sync_days WHERE day BETWEEN %s AND %s",
+            (date_from, date_to),
+        )
+        synced = {row[0] for row in cursor.fetchall()}
+        cursor.execute("""
+            SELECT day, COALESCE(sources, '') LIKE %s
+            FROM glb_attendance_days
+            WHERE day BETWEEN %s AND %s
+        """, ('%clockster%', date_from, date_to))
+        cache_ok, cache_bad = set(), set()
+        for day, has_clockster in cursor.fetchall():
+            (cache_ok if has_clockster else cache_bad).add(day)
+        known_days = synced | cache_ok
+        unknown_days = cache_bad - synced
+        ids = sorted({str(v) for v in (ext_ids or []) if v})
+        marks = {}
+        if ids:
+            start_at = datetime.combine(date_from, dt_time.min, tzinfo=supervisor_hours.TZ)
+            end_at = datetime.combine(date_to + timedelta(days=1), dt_time.min, tzinfo=supervisor_hours.TZ)
+            if synced:
+                cursor.execute("""
+                    SELECT ext_id, mark_at, kind FROM supervisor_clockster_marks
+                    WHERE ext_id = ANY(%s) AND mark_at >= %s AND mark_at < %s
+                """, (ids, start_at, end_at))
+                for ext_id, mark_at, kind in cursor.fetchall():
+                    local = mark_at.astimezone(supervisor_hours.TZ)
+                    if local.date() in synced:
+                        marks.setdefault(ext_id, []).append({'at': local.isoformat(), 'kind': kind})
+            cache_days = sorted(cache_ok - synced)
+            if cache_days:
+                cursor.execute("""
+                    SELECT employee_id, marks FROM glb_attendance_rows
+                    WHERE employee_id = ANY(%s) AND day = ANY(%s)
+                """, (ids, cache_days))
+                for ext_id, row_marks in cursor.fetchall():
+                    for mark in row_marks or []:
+                        when = supervisor_hours.parse_mark_time((mark or {}).get('at'))
+                        # Отметка дня кэша, который синхронизация уже перекрыла, — не дублируем.
+                        if when is not None and when.date() not in synced:
+                            marks.setdefault(ext_id, []).append(mark)
+        return marks, known_days, unknown_days
+
     def _fill_supervisor_norm_hours_tx(self, cursor, month, user_ids):
         """Норма СВ за месяц — та же формула, что у операторов (auto_fill_norm_hours):
         рабочие дни × 8 × ставка. Пишется только там, где норма ещё ноль, чтобы
@@ -27163,8 +27280,7 @@ class Database:
             })
         return marks, replaced
 
-    def recalculate_supervisor_clockster_hours(self, date_from, date_to, user_ids=None, keep_break_before=None,
-                                               fresh_marks=None, fresh_days=None):
+    def recalculate_supervisor_clockster_hours(self, date_from, date_to, user_ids=None, keep_break_before=None):
         """Пересчитать часы СВ по отметкам Clockster за период и записать в учёт часов.
 
         Пишутся только дни, которые кэш «Отметок» собрал вместе с Clockster, и
@@ -27179,9 +27295,9 @@ class Database:
         уже вычтенный перерыв из строки, а не нынешнюю настройку: правка перерыва
         не переписывает задним числом месяц, который уже закрыт.
 
-        fresh_marks/fresh_days — кнопка «Синхронизация с Clockster»: отметки,
-        только что взятые из Clockster ({карточка: [отметка]}), и дни, за которые
-        они получены. Тогда кэш «Отметок» не читается, и считаются ровно эти дни."""
+        Отметки — из _supervisor_card_marks_multi_tx: за дни, которые прошла
+        синхронизация с Clockster, — из supervisor_clockster_marks, за остальные —
+        из кэша «Отметок»."""
         start = self._normalize_schedule_date(date_from)
         end = self._normalize_schedule_date(date_to)
         if end < start:
@@ -27210,36 +27326,17 @@ class Database:
             linked = {uid: card['ext_id'] for uid, card in cards.items() if card and card.get('ext_id')}
             summary['unlinked'] = sorted(uid for uid, _ in people if uid not in linked)
 
-            cursor.execute("""
-                SELECT day, COALESCE(sources, '') LIKE %s
-                FROM glb_attendance_days
-                WHERE day BETWEEN %s AND %s
-            """, ('%clockster%', start, end + timedelta(days=1)))
-            built_with_clockster, built_without_clockster = set(), set()
-            for day, has_clockster in cursor.fetchall():
-                (built_with_clockster if has_clockster else built_without_clockster).add(day)
-            countable_days = {
-                day for day in built_with_clockster
-                if start <= day <= end and (day + timedelta(days=1)) not in built_without_clockster
-            }
-            if fresh_marks is not None:
-                countable_days = {day for day in (fresh_days or ()) if start <= day <= end}
-            if not countable_days:
-                return summary
-
             # Отметки читаются с дня накануне: иначе повторное касание после
             # полуночи на краю окна стало бы новым приходом и первый день получил
-            # бы смену, уже учтённую накануне.
-            marks_by_card = {}
-            if fresh_marks is not None:
-                marks_by_card = {ext_id: list(fresh_marks.get(ext_id) or []) for ext_id in set(linked.values())}
-            elif linked:
-                cursor.execute("""
-                    SELECT employee_id, marks FROM glb_attendance_rows
-                    WHERE employee_id = ANY(%s) AND day BETWEEN %s AND %s
-                """, (sorted(set(linked.values())), start - timedelta(days=1), end + timedelta(days=1)))
-                for ext_id, marks in cursor.fetchall():
-                    marks_by_card.setdefault(ext_id, []).extend(marks or [])
+            # бы смену, уже учтённую накануне. И на день вперёд: уход ночной смены.
+            marks_by_card, known_days, unknown_days = self._supervisor_card_marks_multi_tx(
+                cursor, set(linked.values()), start - timedelta(days=1), end + timedelta(days=1))
+            countable_days = {
+                day for day in known_days
+                if start <= day <= end and (day + timedelta(days=1)) not in unknown_days
+            }
+            if not countable_days:
+                return summary
 
             cursor.execute("""
                 SELECT operator_id, day, break_time FROM daily_hours
@@ -27297,17 +27394,11 @@ class Database:
         return summary
 
     def _supervisor_card_marks_tx(self, cursor, user_id, name, settings, date_from, date_to):
-        """(карточка Clockster СВ, её отметки из кэша «Отметок» за дни периода)."""
+        """(карточка Clockster СВ, её отметки за дни периода, дни с известными отметками)."""
         card = self._supervisor_clockster_cards_tx(cursor, [(user_id, name)], settings).get(user_id)
-        raw = []
-        if card and card.get('ext_id'):
-            cursor.execute("""
-                SELECT marks FROM glb_attendance_rows
-                WHERE employee_id = %s AND day BETWEEN %s AND %s
-            """, (card['ext_id'], date_from, date_to))
-            for (marks,) in cursor.fetchall():
-                raw.extend(marks or [])
-        return card, raw
+        ext_ids = [card['ext_id']] if card and card.get('ext_id') else []
+        marks, known_days, _unknown = self._supervisor_card_marks_multi_tx(cursor, ext_ids, date_from, date_to)
+        return card, (marks.get(ext_ids[0], []) if ext_ids else []), known_days
 
     def get_supervisor_clockster_day(self, user_id, day):
         """Окно дня СВ в «Учёте часов»: отметки Clockster и ручные, какие вошли в
@@ -27320,16 +27411,12 @@ class Database:
             cursor.execute("SELECT name FROM users WHERE id = %s", (user_id,))
             name = (cursor.fetchone() or [None])[0]
             settings = self._supervisor_hours_settings_tx(cursor, [user_id])
-            card, raw = self._supervisor_card_marks_tx(
+            card, raw, known_days = self._supervisor_card_marks_tx(
                 cursor, user_id, name, settings, day - timedelta(days=1), day + timedelta(days=1))
             manual_by_user, replaced_by_user = self._supervisor_manual_marks_tx(
                 cursor, [user_id], day - timedelta(days=1), day + timedelta(days=1))
             manual = manual_by_user.get(user_id, [])
             raw.extend(manual)
-            cursor.execute("""
-                SELECT COALESCE(sources, '') LIKE %s FROM glb_attendance_days WHERE day = %s
-            """, ('%clockster%', day))
-            built_row = cursor.fetchone()
             cursor.execute("""
                 SELECT work_time, break_time FROM daily_hours WHERE operator_id = %s AND day = %s
             """, (user_id, day))
@@ -27349,7 +27436,7 @@ class Database:
             'name': name,
             'date': day.isoformat(),
             'card': card,
-            'day_built': bool(built_row and built_row[0]),
+            'day_built': day in known_days,
             'operator_day': operator_day,
             'break_minutes': break_minutes,
             # schedule — перерывы, поставленные на смене; settings — общий перерыв СВ.
@@ -27425,7 +27512,7 @@ class Database:
                 name = (cursor.fetchone() or [None])[0]
                 settings = self._supervisor_hours_settings_tx(cursor, [user_id])
                 original_day = original[0].date()
-                _card, raw = self._supervisor_card_marks_tx(
+                _card, raw, _known = self._supervisor_card_marks_tx(
                     cursor, user_id, name, settings, original_day - timedelta(days=1), original_day + timedelta(days=1))
                 if original not in {supervisor_hours.mark_key(m.get('at'), m.get('kind')) for m in raw}:
                     raise ValueError('Исходной отметки нет среди отметок Clockster этого сотрудника')
@@ -62275,22 +62362,6 @@ class Database:
                 WHERE day BETWEEN %s AND %s
             """, (start, end))
             return {row[0] for row in cursor.fetchall()}
-
-    def glb_attendance_days_without_clockster(self, day_from, day_to):
-        """Дни периода, собранные в кэш без Clockster (он падал при сборке).
-
-        Досбор такие дни считает собранными и не трогает, а часы СВ (задача #352)
-        по ним не считаются — ночная джоба пересобирает их отдельно."""
-        start, end = self._glb_day(day_from), self._glb_day(day_to)
-        if not start or not end:
-            return []
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT day FROM glb_attendance_days
-                WHERE day BETWEEN %s AND %s AND COALESCE(sources, '') NOT LIKE %s
-                ORDER BY day
-            """, (start, end, '%clockster%'))
-            return [row[0] for row in cursor.fetchall()]
 
     def glb_store_attendance_day(self, day, rows, sources=None):
         """Кладёт в кэш ОДИН день целиком, заменяя всё, что там было.

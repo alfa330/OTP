@@ -270,14 +270,29 @@ class SupervisorClocksterWiringTests(unittest.TestCase):
         self.assertIn('self._operator_membership_days_tx(', body)
         self.assertIn('key in supervisor_operator_days', body)
 
-    def test_recalculation_touches_only_supervisor_days_built_with_clockster(self):
+    def test_recalculation_touches_only_supervisor_days_with_known_marks(self):
         body = method_source('recalculate_supervisor_clockster_hours')
-        self.assertIn('FROM glb_attendance_days', body)
-        self.assertIn("'%clockster%'", body)
-        # Уход ночной смены лежит в следующем дне: он собран без Clockster — день не трогаем.
-        self.assertIn('(day + timedelta(days=1)) not in built_without_clockster', body)
+        self.assertIn('self._supervisor_card_marks_multi_tx(', body)
+        # Уход ночной смены лежит в следующем дне: он без отметок — день не трогаем.
+        self.assertIn('(day + timedelta(days=1)) not in unknown_days', body)
         self.assertIn('if (user_id, day) in operator_days:', body)
         self.assertIn('keep_before and day < keep_before', body)
+
+    def test_synced_days_take_marks_from_the_store_others_from_the_cache(self):
+        loader = method_source('_supervisor_card_marks_multi_tx')
+        self.assertIn('FROM supervisor_clockster_sync_days', loader)
+        self.assertIn('FROM supervisor_clockster_marks', loader)
+        self.assertIn("'%clockster%'", loader)
+        self.assertIn('cache_days = sorted(cache_ok - synced)', loader)
+        self.assertIn('unknown_days = cache_bad - synced', loader)
+        store = method_source('store_supervisor_clockster_marks')
+        # Замена за период: убранная в Clockster отметка не должна остаться.
+        self.assertLess(store.index('DELETE FROM supervisor_clockster_marks WHERE mark_at >= %s AND mark_at < %s'),
+                        store.index('INSERT INTO supervisor_clockster_marks'))
+        self.assertIn('INSERT INTO supervisor_clockster_sync_days', store)
+        # Окно дня и проверка исправлений читают тот же источник.
+        self.assertIn('self._supervisor_card_marks_multi_tx(', method_source('_supervisor_card_marks_tx'))
+        self.assertIn("'day_built': day in known_days,", method_source('get_supervisor_clockster_day'))
 
     def test_startup_cleanup_spares_operator_days(self):
         start = DATABASE.index('DELETE FROM shift_breaks sb')
@@ -379,12 +394,11 @@ class SupervisorClocksterWiringTests(unittest.TestCase):
         self.assertNotIn('_is_supervisor_role', scope)
         self.assertIn('_headed_department_ids(requester_id)', scope)
 
-    def test_nightly_job_recalculates_after_the_attendance_cache(self):
+    def test_nightly_job_syncs_clockster_then_recalculates(self):
         job = function_source(BOT, 'group_late_nightly_job')
         recalc = job.index('db.recalculate_supervisor_clockster_hours(')
         self.assertLess(job.index('_attendance_cache.backfill(db, days=7)'), recalc)
-        # Дни, собранные при сбое Clockster, досбор не трогает — их пересобираем сами.
-        self.assertLess(job.index('db.glb_attendance_days_without_clockster('), recalc)
+        self.assertLess(job.index('_sync_supervisor_clockster_marks(start - timedelta(days=1), today)'), recalc)
         self.assertIn('keep_break_before=today.replace(day=1)', job[recalc:recalc + 200])
 
     def test_general_excel_report_keeps_supervisors(self):
@@ -525,16 +539,15 @@ class SupervisorClocksterFrontendTests(unittest.TestCase):
             with self.subTest(anchor=anchor):
                 self.assertIn('setSupervisorDayMarks({ operator, dateStr: dayToDateStr(day) });', APP[start:start + 900])
 
-    def test_clockster_sync_is_for_the_head_and_above_and_uses_fresh_marks(self):
+    def test_clockster_sync_is_for_the_head_and_above_and_stores_marks(self):
         route = function_source(BOT, 'sync_supervisor_hours_from_clockster')
         self.assertIn('_supervisor_hours_settings_scope(requester_id', route)
         self.assertIn('SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS', route)
-        self.assertIn('fresh_marks=fresh_marks, fresh_days=fresh_days', route)
-        # День накануне и следующий — ради ночных смен.
-        self.assertIn('date_from - timedelta(days=1), min(date_to + timedelta(days=1), today)', route)
-        body = method_source('recalculate_supervisor_clockster_hours')
-        self.assertIn('if fresh_marks is not None:', body)
-        self.assertIn('countable_days = {day for day in (fresh_days or ()) if start <= day <= end}', body)
+        # Отметки сохраняются (окно дня их покажет), день накануне и следующий — ради ночных смен.
+        self.assertIn('_sync_supervisor_clockster_marks(date_from - timedelta(days=1), min(date_to + timedelta(days=1), today))', route)
+        self.assertLess(route.index('_sync_supervisor_clockster_marks('), route.index('db.recalculate_supervisor_clockster_hours('))
+        helper = function_source(BOT, '_sync_supervisor_clockster_marks')
+        self.assertIn('db.store_supervisor_clockster_marks(by_card, date_from, date_to)', helper)
         # Кнопка — только РОП и те, кто выше, и только на вкладке СВ.
         self.assertIn("group.label === 'Работа' && canSyncSupervisorHours && showSupervisorHoursTabs && hoursPeopleKind !== 'operators'", APP)
 

@@ -49574,7 +49574,6 @@ def sync_supervisor_hours_from_clockster():
         scope = _supervisor_hours_settings_scope(requester_id, _normalize_user_role(user_data[3]))
         if not scope:
             return jsonify({"error": "Синхронизацию часов супервайзеров запускает руководитель отдела"}), 403
-        from group_late import clockster as _clockster
         from group_late import config as _group_late_config
         if not _group_late_config.is_clockster_configured():
             return jsonify({"error": "Clockster не подключён"}), 400
@@ -49596,25 +49595,11 @@ def sync_supervisor_hours_from_clockster():
 
         # День накануне и следующий — ради ночных смен: уход после полуночи
         # закрывает смену, а утренний уход — смену вчерашнего дня.
-        rows = _clockster.clockster_client.get_schedules(
-            date_from - timedelta(days=1), min(date_to + timedelta(days=1), today))
-        _records, marks = _clockster.to_records(rows)
-        fresh_marks = {}
-        for mark in marks:
-            fresh_marks.setdefault(mark.get('employeeId'), []).append({
-                'at': mark.get('markDate'),
-                'kind': 'in' if mark.get('markType') == 0 else 'out',
-            })
+        stored = _sync_supervisor_clockster_marks(date_from - timedelta(days=1), min(date_to + timedelta(days=1), today))
         supervisors = [row['user_id'] for row in db.get_supervisor_hours_settings(scope)['supervisors']]
-        fresh_days = set()
-        cursor_day = date_from
-        while cursor_day <= date_to:
-            fresh_days.add(cursor_day)
-            cursor_day += timedelta(days=1)
         summary = db.recalculate_supervisor_clockster_hours(
-            date_from, date_to, supervisors,
-            keep_break_before=today.replace(day=1),
-            fresh_marks=fresh_marks, fresh_days=fresh_days)
+            date_from, date_to, supervisors, keep_break_before=today.replace(day=1))
+        summary['marks'] = stored
         return jsonify({"status": "success", "date_from": date_from.isoformat(),
                         "date_to": date_to.isoformat(), **summary}), 200
     except _clockster_error_types() as e:
@@ -49625,6 +49610,23 @@ def sync_supervisor_hours_from_clockster():
     except Exception as e:
         logging.error(f"Error in sync_supervisor_hours_from_clockster: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+
+def _sync_supervisor_clockster_marks(date_from, date_to):
+    """Взять отметки всех людей Clockster за дни [date_from, date_to] и сохранить
+    их для часов СВ (supervisor_clockster_marks). Один запрос /schedules отдаёт
+    весь период по 50 человек. Возвращает число сохранённых отметок."""
+    from group_late import clockster as _clockster
+    rows = _clockster.clockster_client.get_schedules(date_from, date_to)
+    _records, marks = _clockster.to_records(rows)
+    by_card = {}
+    for mark in marks:
+        by_card.setdefault(mark.get('employeeId'), []).append({
+            'at': mark.get('markDate'),
+            # to_records приводит коды к соглашению Workpace: 0 — вход.
+            'kind': 'in' if mark.get('markType') == 0 else 'out',
+        })
+    return db.store_supervisor_clockster_marks(by_card, date_from, date_to)
 
 
 def _clockster_error_types():
@@ -66548,14 +66550,15 @@ def group_late_nightly_job():
         today = datetime.now(group_late.TZ).date()
         yesterday = today - timedelta(days=1)
         start = min(today.replace(day=1), today - timedelta(days=8))
-        # День, собранный при сбое Clockster, досбор больше не трогает, а часы СВ
-        # по нему не считаются. Пересобираем такие дни недели здесь.
+        # Отметки СВ берём прямо из Clockster за всё окно (как кнопка
+        # «Синхронизация с Clockster»): кэш «Отметок» собирается не за все дни,
+        # а окно дня СВ должно показывать ровно те отметки, по которым часы.
         if _group_late_config.is_clockster_configured():
-            for day in db.glb_attendance_days_without_clockster(today - timedelta(days=8), yesterday):
-                try:
-                    _attendance_cache.build_day(db, day)
-                except Exception:
-                    logging.exception("Отметки: пересборка дня %s с Clockster не удалась", day)
+            try:
+                stored = _sync_supervisor_clockster_marks(start - timedelta(days=1), today)
+                logging.info("Часы СВ: из Clockster сохранено отметок — %s", stored)
+            except Exception:
+                logging.exception("Часы СВ: синхронизация с Clockster не удалась, считаем по кэшу «Отметок»")
         # Прошлый месяц уже закрыт: его дни берут прежний вычет перерыва, чтобы
         # правка перерыва в первые дни месяца не переписала закрытый месяц.
         summary = db.recalculate_supervisor_clockster_hours(
