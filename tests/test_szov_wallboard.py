@@ -112,6 +112,7 @@ class SzovWallboardBackendGuardTests(unittest.TestCase):
             'SZOV_BROADCAST_DIRECTION_LINE': 'osnova',
             'SZOV_BROADCAST_DIRECTION_OP': 'op',
             'SZOV_BROADCAST_DIRECTION_TEZ': 'tez',
+            'SZOV_BROADCAST_DIRECTION_OP_CHAT': 'op_chat',
             '_szov_broadcast_direction_arg': lambda payload=None: 'osnova',
         }
         _load_names(source, {
@@ -1813,11 +1814,11 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova'",
                       self.db)
         self.assertIn("ADD PRIMARY KEY (direction, chat_id)", self.db)
-        # Направления прибывают («Табло ОП» 16.09.2026, «Тез КЦ» 22.09.2026): список в
-        # ограничении растёт, и прежнее ограничение на проде снимается миграцией, а не
-        # остаётся навсегда. Ищет она старое по отсутствию САМОГО СВЕЖЕГО ключа.
-        self.assertIn("CHECK (direction IN ('osnova', 'chat', 'op', 'tez'))", self.db)
-        self.assertIn("position('''tez''' IN pg_get_constraintdef(oid)) = 0", self.db)
+        # Направления прибывают («Табло ОП» 16.09.2026, «Тез КЦ» 22.09.2026, «Табло ОП · Чат»
+        # 25.09.2026): список в ограничении растёт, и прежнее ограничение на проде снимается
+        # миграцией, а не остаётся навсегда. Ищет она старое по отсутствию САМОГО СВЕЖЕГО ключа.
+        self.assertIn("CHECK (direction IN ('osnova', 'chat', 'op', 'tez', 'op_chat'))", self.db)
+        self.assertIn("position('''op_chat''' IN pg_get_constraintdef(oid)) = 0", self.db)
         self.assertIn("DROP CONSTRAINT szov_wallboard_broadcast_chats_direction", self.db)
         # Под SAVEPOINT: весь _init_db — одна транзакция, и упавшая смена ключа откатила бы
         # инициализацию всей схемы, то есть уронила бы приложение ради одной таблицы.

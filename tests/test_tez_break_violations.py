@@ -336,9 +336,9 @@ class TezBreakWiringTests(unittest.TestCase):
     def test_direction_is_allowed_everywhere_it_is_checked(self):
         """Список направлений лежит в четырёх местах, и разъехаться им нельзя."""
         self.assertIn("SZOV_BROADCAST_DIRECTION_TEZ = 'tez'", SOURCE)
-        self.assertIn('SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ)', SOURCE)
-        self.assertIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op', 'tez')", DB_SOURCE)
-        self.assertIn("CHECK (direction IN ('osnova', 'chat', 'op', 'tez'))", DB_SOURCE)
+        self.assertIn('SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ,', SOURCE)
+        self.assertIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op', 'tez', 'op_chat')", DB_SOURCE)
+        self.assertIn("CHECK (direction IN ('osnova', 'chat', 'op', 'tez', 'op_chat'))", DB_SOURCE)
         self.assertIn("CHECK (direction IN ('line', 'chat', 'tez'))", DB_SOURCE)
 
     def test_broadcast_settings_belong_to_the_tez_department_head(self):

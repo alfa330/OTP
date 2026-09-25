@@ -15,6 +15,7 @@ import {
     formatDuration,
     formatInt,
     formatMinutes,
+    pluralRu,
     readWallboardMetric,
     useSzovChatWallboardSnapshot,
     useSzovWallboardSnapshot,
@@ -1067,6 +1068,13 @@ const rangeDays = (from, to) => {
     return Math.round((new Date(to) - new Date(from)) / 864e5) + 1;
 };
 
+// Подсказка под «Подтвердить»: у СЗоВ прошедшие дни качаются из Chat2Desk, и о времени ожидания
+// говорим до нажатия. Другое табло (чаты «Табло ОП») передаёт свои слова.
+const CHAT_EXPORT_HINTS = {
+    single: 'Сводка, по часам, люди на линии и состав смены',
+    multi: 'Прошедшие дни качаются из Chat2Desk по дню — это займёт до минуты',
+};
+
 /*
  * Выгрузка показателей направления «Чат» в Excel за выбранный период. Календарь — тот же, что в
  * «Чатах ChatApp», но раскрывается из самой кнопки «Выгрузить», а под ним стоит «Подтвердить»
@@ -1076,7 +1084,14 @@ const rangeDays = (from, to) => {
  * запроса к Chat2Desk), прошедшие дни качает по дню на день — поэтому долгий период честно
  * предупреждает о времени под кнопкой.
  */
-const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapshot }) => {
+/*
+ * Экспортируется: чаты «Табло ОП» (#367) ставят ту же кнопку со своей ручкой, именем файла,
+ * потолком периода и подсказками — календарь и поведение у выгрузок не должны разъезжаться.
+ */
+export const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapshot,
+                                     exportPath = '/api/szov_wallboard/chat_export',
+                                     fileName = chatExportFileName, maxDays = CHAT_EXPORT_MAX_DAYS,
+                                     presets = chatExportPresets, hints = CHAT_EXPORT_HINTS }) => {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
     const [range, setRange] = useState(() => ({ from: isoDate(new Date()), to: isoDate(new Date()) }));
@@ -1104,7 +1119,7 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
     }, [open]);
 
     const days = rangeDays(range.from, range.to);
-    const tooLong = days > CHAT_EXPORT_MAX_DAYS;
+    const tooLong = days > maxDays;
 
     const download = useCallback(async (from, to) => {
         setOpen(false);
@@ -1115,7 +1130,7 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
             if (from) query.set('date_from', from);
             if (to) query.set('date_to', to);
             const response = await fetch(
-                `${apiBaseUrl}/api/szov_wallboard/chat_export?${query.toString()}`,
+                `${apiBaseUrl}${exportPath}?${query.toString()}`,
                 { credentials: 'include', headers: build ? build() : {} },
             );
             if (!response.ok) {
@@ -1126,7 +1141,7 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
             const url = window.URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
-            link.download = chatExportFileName(snapshotRef.current, from, to);
+            link.download = fileName(snapshotRef.current, from, to);
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -1136,15 +1151,13 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
         } finally {
             setBusy(false);
         }
-    }, [apiBaseUrl, withAccessTokenHeader]);
+    }, [apiBaseUrl, exportPath, fileName, withAccessTokenHeader]);
 
     // Сколько ждать, говорим ДО нажатия: сегодня отдаётся из кэша мгновенно, а каждый прошедший
     // день — это отдельная выкачка из Chat2Desk, то есть десятки секунд на неделю.
     const hint = tooLong
-        ? `Максимум ${CHAT_EXPORT_MAX_DAYS} суток за раз — выберите период короче`
-        : (days > 1
-            ? 'Прошедшие дни качаются из Chat2Desk по дню — это займёт до минуты'
-            : 'Сводка, по часам, люди на линии и состав смены');
+        ? `Максимум ${maxDays} ${pluralRu(maxDays, 'сутки', 'суток', 'суток')} за раз — выберите период короче`
+        : (days > 1 ? hints.multi : hints.single);
 
     return (
         <div ref={ref} className="relative">
@@ -1162,7 +1175,7 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
                         from={range.from}
                         to={range.to}
                         max={isoDate(new Date())}
-                        presets={chatExportPresets}
+                        presets={presets}
                         onChange={(next) => setRange({ from: next.from || next.to, to: next.to || next.from })}
                         footer={(
                             <div className="mt-2.5 border-t border-slate-100 pt-2.5">

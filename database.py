@@ -5012,7 +5012,7 @@ class Database:
                     CONSTRAINT szov_wallboard_broadcast_chats_mode
                         CHECK (mode IN ('always', 'deviations')),
                     CONSTRAINT szov_wallboard_broadcast_chats_direction
-                        CHECK (direction IN ('osnova', 'chat', 'op', 'tez'))
+                        CHECK (direction IN ('osnova', 'chat', 'op', 'tez', 'op_chat'))
                 );
             """)
             # Группа, по которой чат получает отбивку «Табло ОП» (владелец 23.09.2026): чату
@@ -5062,7 +5062,8 @@ class Database:
                                 ADD PRIMARY KEY (direction, chat_id);
                         END IF;
                         -- Список направлений растёт («Табло ОП» — третье, 16.09.2026;
-                        -- «Тез КЦ» — четвёртое, 22.09.2026). Ограничение, заведённое старым
+                        -- «Тез КЦ» — четвёртое, 22.09.2026; «Табло ОП · Чат» — пятое,
+                        -- 25.09.2026). Ограничение, заведённое старым
                         -- кодом с коротким списком, снимаем и заводим заново; ищем старое по
                         -- отсутствию САМОГО СВЕЖЕГО ключа в его определении, а не по имени
                         -- версии. Добавляешь направление — меняй и ключ поиска здесь, иначе
@@ -5071,7 +5072,7 @@ class Database:
                             SELECT 1 FROM pg_constraint
                             WHERE conrelid = 'szov_wallboard_broadcast_chats'::regclass
                               AND conname = 'szov_wallboard_broadcast_chats_direction'
-                              AND position('''tez''' IN pg_get_constraintdef(oid)) = 0
+                              AND position('''op_chat''' IN pg_get_constraintdef(oid)) = 0
                         ) THEN
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 DROP CONSTRAINT szov_wallboard_broadcast_chats_direction;
@@ -5083,7 +5084,7 @@ class Database:
                         ) THEN
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD CONSTRAINT szov_wallboard_broadcast_chats_direction
-                                CHECK (direction IN ('osnova', 'chat', 'op', 'tez'));
+                                CHECK (direction IN ('osnova', 'chat', 'op', 'tez', 'op_chat'));
                         END IF;
                     END $$;
                 """)
@@ -28948,11 +28949,11 @@ class Database:
     # расписание. 'osnova' — историческое имя направления «Линия» (на экране подпись
     # сменили, ключ остался: по нему лежат строки на проде). 'op' — «Табло ОП»,
     # 'tez' — «Табло Тез КЦ» (там отбивка одна на оба направления отдела и пишет
-    # только о перерывах вне графика).
+    # только о перерывах вне графика), 'op_chat' — чаты верификаторов «Табло ОП» (#367).
     # Список ОБЯЗАН совпадать с SZOV_BROADCAST_DIRECTIONS в bot_schedule2 и с CHECK
     # на szov_wallboard_broadcast_chats: 16.09.2026 'op' добавили в ручку и в CHECK, а
     # здесь забыли — кнопка «Отбивка» на табло ОП отвечала 500 из этого ValueError.
-    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op', 'tez')
+    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op', 'tez', 'op_chat')
     SZOV_BROADCAST_DIRECTION_DEFAULT = 'osnova'
 
     def _szov_broadcast_direction(self, value) -> str:

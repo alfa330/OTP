@@ -39242,7 +39242,7 @@ def _szov_broadcast_guard():
             request.get_json(silent=True) if request.method == 'POST' else None)
     except ValueError:
         pass
-    if direction == SZOV_BROADCAST_DIRECTION_OP:
+    if direction in (SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_OP_CHAT):
         resolver = globals().get('_op_wallboard_department_id')
         department_id = resolver() if resolver else None
     elif direction == SZOV_BROADCAST_DIRECTION_TEZ:
@@ -39755,8 +39755,12 @@ SZOV_BROADCAST_DIRECTION_OP = 'op'
 # предупреждения о перерывах вне графика (возврат #292 18.09.2026), и сообщение уходит,
 # только когда такие перерывы есть. Получатели, ручки настройки и таблица — общие.
 SZOV_BROADCAST_DIRECTION_TEZ = 'tez'
+# «Табло ОП · Чат» — пятое (задача #367): чаты верификаторов в Wazzup. Хозяин тот же, что у
+# «Табло ОП», — глава отдела продаж.
+SZOV_BROADCAST_DIRECTION_OP_CHAT = 'op_chat'
 SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT,
-                             SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ)
+                             SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ,
+                             SZOV_BROADCAST_DIRECTION_OP_CHAT)
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
@@ -45803,6 +45807,237 @@ async def op_broadcast_job():
         group_of=lambda chat: chat.get('group_id'))
 
 
+# === Отбивка «Табло ОП · Чат» (задача #367) =====================================================
+# Пятое направление той же отбивки: чаты верификаторов в Wazzup. Как у «Чата» СЗоВ — одна
+# картинка плиток и строки отклонений, почасовой таблицы нет. Цифры — из того же снимка, что на
+# стене (op_wallboard: bp.chat_snapshot), своих запросов отбивка не делает, поэтому предпросмотр
+# и тестовая отправка бесплатны.
+OP_CHAT_BROADCAST_SEND_TIMES = (os.getenv('OP_CHAT_BROADCAST_SEND_TIMES') or OP_BROADCAST_SEND_TIMES).strip()
+# Сколько чатов должно накопиться за сутки, чтобы средним временем ответа можно было будить
+# людей: в 01:00 оно стоит на двух-трёх диалогах. Норму не меняет — плитка на табло краснеет
+# как обычно; ниже порога мы лишь не считаем цифру поводом написать в чат. Тот же порог, что
+# у «Чата» СЗоВ.
+OP_CHAT_BROADCAST_MIN_CHATS = _env_int('OP_CHAT_BROADCAST_MIN_CHATS', 5, minimum=1, maximum=1000)
+
+
+def _op_chat_broadcast_send_times():
+    """[(час, минута), ...] из OP_CHAT_BROADCAST_SEND_TIMES; по умолчанию — как у «Табло ОП»."""
+    return _szov_broadcast_parse_times(OP_CHAT_BROADCAST_SEND_TIMES, "Отбивка табло ОП (чат)")
+
+
+def _op_chat_broadcast_collect(scheduled=False, now=None):
+    """Показатели отбивки — снимок табло «Чат», тот же, что на стене.
+
+    Плановая отбивка в полночь — про вчерашние сутки целиком: снимок в 00:00 уже живёт новыми
+    сутками, и без этого итог дня (и час 23–24) не уходил бы никому — ровно та дыра, что
+    закрыта у «Чата» СЗоВ. «Сейчас» (в работе, ждут) при этом текущее.
+    Табло не подключилось (блюпринт упал на старте) — честная ошибка, а не письмо из прочерков."""
+    snapshot_of = globals().get('_op_chat_wallboard_snapshot')
+    if snapshot_of is None:
+        raise RuntimeError("Табло ОП (чат) не подключено")
+    snapshot = snapshot_of() or {}
+    now = now or datetime.now(ZoneInfo(OP_BROADCAST_TIMEZONE))
+    today, period_label = snapshot.get('today') or {}, None
+    day_of = globals().get('_op_chat_wallboard_day')
+    if scheduled and now.hour == 0 and day_of is not None:
+        yesterday = (now - timedelta(days=1)).date()
+        today = (day_of(yesterday) or {}).get('today') or {}
+        period_label = yesterday.strftime('%d.%m')
+    return {
+        'generated_at': now.strftime('%d.%m.%Y %H:%M'),
+        'period_label': period_label,
+        'now': snapshot.get('now') or {},
+        'today': today,
+        'stream': snapshot.get('stream') or {},
+        'first_target_seconds': _szov_wallboard_int(snapshot.get('first_target_seconds')),
+        'inner_target_seconds': _szov_wallboard_int(snapshot.get('inner_target_seconds')),
+        'waiting_max_minutes': _szov_wallboard_int(snapshot.get('waiting_max_minutes')),
+        'snapshot_stale': bool(snapshot.get('stale')),
+        'snapshot_age_seconds': _szov_wallboard_int(snapshot.get('age_seconds')),
+    }
+
+
+def _op_chat_broadcast_duration(seconds):
+    """Время ответа для сообщения: прочерк, а не ноль, когда ответов не было."""
+    return '—' if seconds is None else _szov_format_seconds_mmss(seconds)
+
+
+def _op_chat_broadcast_stream_note(data):
+    """Wazzup перестал присылать сообщения — цифры на стене замерли. None — поток жив."""
+    stream = data.get('stream') or {}
+    if not stream.get('silent'):
+        return None
+    silent = stream.get('silent_seconds')
+    if silent is None:
+        return "Wazzup не присылал сообщений — цифры на табло могут быть неполными."
+    return (f"Также Wazzup не присылает сообщения уже {_szov_format_age_ru(silent)} — "
+            f"цифры на табло замерли.")
+
+
+def _op_chat_broadcast_deviations(data):
+    """Отклонения направления «Чат» ОП. Пустой список — всё в норме.
+
+    Норма ровно та, что красит плитки на табло: первый ответ и ответ внутри чата против норм
+    владельца (минута и четыре). Второго порога нет — иначе одна цифра была бы отклонением в
+    Telegram и нормой на экране. Поправка одна — выборка (OP_CHAT_BROADCAST_MIN_CHATS).
+    Замерший поток Wazzup и замерший снимок — тоже отклонения: знать о них надо."""
+    notes = []
+    today = data.get('today') or {}
+    chats = _szov_wallboard_int(today.get('chats'))
+    if chats >= OP_CHAT_BROADCAST_MIN_CHATS:
+        for key, target_key, label in (('first_reply_seconds', 'first_target_seconds', 'первый ответ'),
+                                       ('inner_reply_seconds', 'inner_target_seconds',
+                                        'ответ внутри чата')):
+            value, target = today.get(key), _szov_wallboard_int(data.get(target_key))
+            if target and value is not None and value > target:
+                notes.append(
+                    f"Обратите внимание: {label} дольше нормы ({_szov_format_seconds_mmss(target)}) — "
+                    f"{_szov_format_seconds_mmss(value)} на {chats} "
+                    f"{_szov_plural(chats, 'чате', 'чатах', 'чатах')} "
+                    f"{'за ' + data['period_label'] if data.get('period_label') else 'за сутки'}.")
+    for note in (_op_chat_broadcast_stream_note(data), _szov_broadcast_stale_note(data, 'базы iCORE')):
+        if note:
+            notes.append(note)
+    return notes
+
+
+def _op_chat_broadcast_notes(data):
+    """Отклонения плюс дежурные строки (сколько в работе и ждут, время ответа).
+
+    Дежурные строки отклонениями НЕ считаются — иначе чат «только при отклонениях» получал бы
+    письмо каждый раз. Замершие данные — последними, после дежурных строк."""
+    tail = [note for note in (_op_chat_broadcast_stream_note(data),
+                              _szov_broadcast_stale_note(data, 'базы iCORE')) if note]
+    notes = [note for note in _op_chat_broadcast_deviations(data) if note not in tail]
+    now = data.get('now') or {}
+    today = data.get('today') or {}
+    in_work = _szov_wallboard_int(now.get('chats_in_work'))
+    waiting = _szov_wallboard_int(now.get('chats_waiting'))
+    line = f"{in_work} {_szov_plural(in_work, 'чат', 'чата', 'чатов')} в работе"
+    if waiting:
+        line += (f", {waiting} {_szov_plural(waiting, 'ждёт', 'ждут', 'ждут')} ответа — дольше всех "
+                 f"{_op_chat_broadcast_duration(now.get('longest_wait_seconds'))}")
+    notes.append(line + '.')
+    if _szov_wallboard_int(today.get('chats')):
+        chats = _szov_wallboard_int(today.get('chats'))
+        prefix = (f"За {data['period_label']}: {chats} {_szov_plural(chats, 'чат', 'чата', 'чатов')}, "
+                  if data.get('period_label') else '')
+        notes.append(
+            f"{prefix}{'первый' if prefix else 'Первый'} ответ — "
+            f"{_op_chat_broadcast_duration(today.get('first_reply_seconds'))}, "
+            f"внутри чата {_op_chat_broadcast_duration(today.get('inner_reply_seconds'))}.")
+    else:
+        notes.append(f"За {data['period_label']} чатов не было." if data.get('period_label')
+                     else "Чатов за сутки пока не было.")
+    notes.extend(tail)
+    return notes
+
+
+def _op_chat_broadcast_text(data):
+    """Текст отбивки. Цифры построчно не повторяем — они на картинке этого же сообщения."""
+    title = (f"<b>Чаты верификаторов · итог {data['period_label']}</b>" if data.get('period_label')
+             else "<b>Чаты верификаторов</b>")
+    lines = [f"{title} ({data['generated_at']}):"]
+    notes = _op_chat_broadcast_notes(data)
+    if notes:
+        lines.append("")
+        lines.extend(notes)
+    return "\n".join(lines)
+
+
+def _op_render_chat_wallboard_png(data):
+    """PNG направления «Чат» ОП: те же плитки, что на стене, общим рисовальщиком табло."""
+    now = data.get('now') or {}
+    today = data.get('today') or {}
+
+    def _tone(value, target):
+        # Цвет — только у времени ответа, как на табло: уложились в норму или нет.
+        if value is None:
+            return ('#f1f5f9', '#334155')
+        if target and value > target:
+            return ('#ffe4e6', '#be123c')
+        return ('#d1fae5', '#047857')
+
+    first, inner = today.get('first_reply_seconds'), today.get('inner_reply_seconds')
+    first_colors = _tone(first, _szov_wallboard_int(data.get('first_target_seconds')))
+    inner_colors = _tone(inner, _szov_wallboard_int(data.get('inner_target_seconds')))
+    key_tiles = [
+        ('Чатов в работе', str(_szov_wallboard_int(now.get('chats_in_work'))), '#f1f5f9', '#334155'),
+        ('Ждут ответа', str(_szov_wallboard_int(now.get('chats_waiting'))), '#f1f5f9', '#334155'),
+        ('Первый ответ', _op_chat_broadcast_duration(first), first_colors[0], first_colors[1]),
+        ('Ответ внутри чата', _op_chat_broadcast_duration(inner), inner_colors[0], inner_colors[1]),
+    ]
+    label = data.get('period_label')
+    stat_tiles = [
+        (f"Чатов за {label}" if label else 'Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
+        ('Ждёт дольше всех', _op_chat_broadcast_duration(now.get('longest_wait_seconds'))),
+        ('Верификаторов в работе', str(_szov_wallboard_int(now.get('verifiers_in_work')))),
+    ]
+    subtitle = (f"Итог {label} · {data['generated_at']}" if label
+                else f"Чаты верификаторов · {data['generated_at']}")
+    return _szov_render_tiles_png('Табло ОП · чаты', subtitle, key_tiles, stat_tiles)
+
+
+def _op_chat_broadcast_preview():
+    """Предпросмотр отбивки «Чата» ОП: текст и картинка, ничего не отправляя."""
+    try:
+        data = _op_chat_broadcast_collect()
+    except Exception as exc:
+        logging.error("Предпросмотр отбивки (ОП, чат): данные не собрались: %s", exc)
+        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
+    if (request.args.get('image') or '').strip() == 'board':
+        try:
+            blob = _op_render_chat_wallboard_png(data)
+        except Exception as exc:
+            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
+        response = Response(blob, mimetype='image/png')
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    regular, _bold = _szov_font_paths()
+    return jsonify({
+        "text": _op_chat_broadcast_text(data),
+        "font_path": regular,
+        "images_available": bool(regular),
+        "deviations": _op_chat_broadcast_deviations(data),
+    })
+
+
+async def _op_chat_broadcast_prepare(scheduled=False):
+    """Собрать отбивку целиком: данные, текст и картинку. Снимок читается из базы синхронно —
+    в пуле потоков, а не на event loop бота."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(executor_pool, _op_chat_broadcast_collect, scheduled)
+    text = _op_chat_broadcast_text(data)
+    media = []
+    try:
+        media = [('op_chat_board.png',
+                  await loop.run_in_executor(executor_pool, _op_render_chat_wallboard_png, data))]
+    except Exception as exc:
+        # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинки.
+        logging.error("Отбивка табло ОП (чат): не удалось собрать картинку: %s", exc)
+    return data, text, media
+
+
+async def _op_chat_broadcast_send(chat_id):
+    """Собрать и отправить отбивку «Чата» ОП в один чат — кнопка «Отправить сейчас»."""
+    data, text, media = await _op_chat_broadcast_prepare()
+    await _szov_broadcast_deliver(chat_id, text, media)
+    return data
+
+
+async def _op_chat_broadcast_prepare_scheduled():
+    return await _op_chat_broadcast_prepare(scheduled=True)
+
+
+async def op_chat_broadcast_job():
+    """Плановая отбивка направления «Чат» табло ОП."""
+    await _szov_broadcast_run_job(
+        direction=SZOV_BROADCAST_DIRECTION_OP_CHAT,
+        label="Отбивка табло ОП (чат)",
+        prepare=_op_chat_broadcast_prepare_scheduled,
+        deviations=_op_chat_broadcast_deviations)
+
+
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
 
 def amo_leads_sync(days=None):
@@ -46462,6 +46697,8 @@ def _szov_broadcast_direction_times(direction):
         times = _op_broadcast_send_times()
     elif direction == SZOV_BROADCAST_DIRECTION_TEZ:
         times = _tez_broadcast_send_times()
+    elif direction == SZOV_BROADCAST_DIRECTION_OP_CHAT:
+        times = _op_chat_broadcast_send_times()
     else:
         times = _szov_broadcast_send_times()
     return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
@@ -46583,6 +46820,8 @@ def api_szov_wallboard_broadcast_preview():
         return _op_broadcast_preview()
     if direction == SZOV_BROADCAST_DIRECTION_TEZ:
         return _tez_broadcast_preview()
+    if direction == SZOV_BROADCAST_DIRECTION_OP_CHAT:
+        return _op_chat_broadcast_preview()
     hour_raw = (request.args.get('hour') or '').strip()
     hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
 
@@ -46696,6 +46935,7 @@ def api_szov_wallboard_broadcast_test():
         SZOV_BROADCAST_DIRECTION_CHAT: _szov_chat_broadcast_send,
         SZOV_BROADCAST_DIRECTION_OP: _op_broadcast_send,
         SZOV_BROADCAST_DIRECTION_TEZ: _tez_broadcast_send,
+        SZOV_BROADCAST_DIRECTION_OP_CHAT: _op_chat_broadcast_send,
     }.get(direction, _szov_broadcast_send)
     try:
         loop = _bot_event_loop()
@@ -63841,12 +64081,29 @@ try:
         sl_seconds=_env_int('OP_WALLBOARD_SL_SECONDS', 20, minimum=5, maximum=120),
         ar_min_percent=_env_int('OP_WALLBOARD_AR_MIN_PERCENT', 3, minimum=0, maximum=50),
         ar_max_percent=_env_int('OP_WALLBOARD_AR_MAX_PERCENT', 5, minimum=0, maximum=50),
+        # Направление «Чат» (#367): чаты верификаторов в Wazzup. Нормы — владельца 25.09.2026.
+        chat_ttl_seconds=_env_int('OP_CHAT_WALLBOARD_CACHE_TTL_SECONDS', 30, minimum=5, maximum=600),
+        chat_export_max_days=_env_int('OP_CHAT_EXPORT_MAX_DAYS', 31, minimum=1, maximum=45),
+        chat_settings={
+            'first_target_seconds': _env_int('OP_CHAT_WALLBOARD_FIRST_TARGET_SECONDS', 60,
+                                             minimum=10, maximum=3600),
+            'inner_target_seconds': _env_int('OP_CHAT_WALLBOARD_INNER_TARGET_SECONDS', 240,
+                                             minimum=10, maximum=3600),
+            'in_work_seconds': 60 * _env_int('OP_CHAT_WALLBOARD_IN_WORK_MINUTES', 15,
+                                             minimum=1, maximum=240),
+            'waiting_max_seconds': 60 * _env_int('OP_CHAT_WALLBOARD_WAITING_MAX_MINUTES', 60,
+                                                 minimum=5, maximum=360),
+        },
     )
     # Снимок из того же кэша — отбивке (op_broadcast_job): картинка в Telegram обязана
     # совпадать с экраном, а второй запрос к базе ради этого не нужен.
     _op_wallboard_snapshot = _op_wallboard_bp.snapshot
     # Итоги закончившихся суток тем же расчётом — отбивке в полночь (_op_broadcast_attach_period).
     _op_wallboard_day_parts = _op_wallboard_bp.day_parts
+    # Снимок чатов верификаторов — отбивке направления «Чат» (op_chat_broadcast_job).
+    _op_chat_wallboard_snapshot = _op_wallboard_bp.chat_snapshot
+    # Итог закончившихся суток тем же расчётом — отбивке в полночь (_op_chat_broadcast_collect).
+    _op_chat_wallboard_day = _op_wallboard_bp.chat_day
     app.register_blueprint(_op_wallboard_bp)
     logging.info("Табло ОП: Blueprint подключён на /api/op_wallboard")
 except Exception:
@@ -67583,6 +67840,18 @@ if __name__ == '__main__':
             op_broadcast_job,
             CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
             id=f'op_wallboard_broadcast_{_hour:02d}{_minute:02d}',
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+
+    # «Табло ОП · Чат» (#367): своё расписание, по умолчанию — как у «Табло ОП». Снимок — из
+    # нашей базы, так что джоба без получателей ничего не дёргает.
+    for _hour, _minute in _op_chat_broadcast_send_times():
+        scheduler.add_job(
+            op_chat_broadcast_job,
+            CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
+            id=f'op_chat_wallboard_broadcast_{_hour:02d}{_minute:02d}',
             misfire_grace_time=600,
             max_instances=1,
             coalesce=True

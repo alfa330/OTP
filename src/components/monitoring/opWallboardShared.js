@@ -1,10 +1,12 @@
 import {
     arTone,
+    chatReplyTone,
     createSnapshotFeed,
     formatAsa,
     formatClock,
     formatDuration,
     formatInt,
+    formatMinutes,
     formatPercent,
     slTone,
 } from './szovWallboardShared';
@@ -268,6 +270,109 @@ export const DEFAULT_OP_WIDGET_METRICS = [
     'op_ar',
 ];
 
+// ── Направление «Чат»: чаты верификаторов в Wazzup (задача #367) ──────────────────────────────
+/*
+ * Второй экран раздела, как «Чат» у табло СЗоВ. Переписка приходит вебхуком в нашу базу, снимок
+ * сервер держит в кэше 30 с — чаще опрашивать бессмысленно. Статусов людей здесь нет: у Wazzup их
+ * нет ни в API, ни в вебхуках (решение владельца 25.09.2026 — не показывать). «Сейчас» — это чаты:
+ * в работе (последнее сообщение не старше окна) и ждущие ответа.
+ */
+export const OP_CHAT_POLL_INTERVAL_MS = 30000;
+
+export const OP_CHAT_SNAPSHOT_PATH = '/api/op_wallboard/chat_snapshot';
+
+export const useOpChatWallboardSnapshot = createSnapshotFeed({
+    path: OP_CHAT_SNAPSHOT_PATH,
+    pollIntervalMs: OP_CHAT_POLL_INTERVAL_MS,
+});
+
+// Переключатель в шапке раздела: подписи те же, что у табло СЗоВ («Линия / Чат», запрос владельца).
+export const OP_WALLBOARD_VIEWS = [
+    { key: 'line', label: 'Линия', hint: 'Звонки отдела продаж: FreePBX и iCORE Phone' },
+    { key: 'chat', label: 'Чат', hint: 'Чаты верификаторов: Wazzup' },
+];
+
+/*
+ * Каталог показателей «Чата» — для плиток экрана и для виджета. Цвет только у времени ответа и
+ * только относительно нормы, которая приходит в снимке (first_target_seconds, inner_target_seconds):
+ * поправят норму на сервере — экран перекрасится сам. Очередь «ждут ответа» не красится: клиенты
+ * ждут секунды постоянно, и плитка горела бы весь день.
+ */
+export const OP_CHAT_METRICS = [
+    {
+        key: 'op_chat_in_work', group: 'now', label: 'Чатов в работе',
+        hint: (s) => `последнее сообщение не старше ${s?.in_work_minutes ?? 15} мин`,
+        read: (s) => ({ value: formatCount(s.now?.chats_in_work) }),
+    },
+    {
+        key: 'op_chat_waiting', group: 'now', label: 'Ждут ответа',
+        hint: (s) => `клиент написал, ответа ещё нет · до ${s?.waiting_max_minutes ?? 60} мин`,
+        read: (s) => ({ value: formatCount(s.now?.chats_waiting) }),
+    },
+    {
+        key: 'op_chat_longest_wait', group: 'now', label: 'Ждёт дольше всех',
+        hint: 'минуты:секунды',
+        read: (s) => ({ value: formatSeconds(s.now?.longest_wait_seconds) }),
+    },
+    {
+        key: 'op_chat_verifiers', group: 'now', label: 'Верификаторов в работе',
+        hint: 'у кого есть чаты в работе',
+        read: (s) => ({ value: formatCount(s.now?.verifiers_in_work) }),
+    },
+    {
+        key: 'op_chat_chats', group: 'day', label: 'Чатов за сутки',
+        hint: 'Диалогов с клиентами, начатых сегодня',
+        read: (s) => ({ value: formatCount(s.today?.chats) }),
+    },
+    {
+        key: 'op_chat_first', group: 'day', label: 'Первый ответ',
+        // Снимка может не быть (окно выбора показателей виджета): тогда норма — умолчание сервера.
+        hint: (s) => `Среднее за сутки, норма ${formatMinutes(s?.first_target_seconds ?? 60, 0)}`,
+        read: (s) => ({
+            value: formatMinutes(s.today?.first_reply_seconds),
+            tone: chatReplyTone(s.today?.first_reply_seconds, s.first_target_seconds),
+        }),
+    },
+    {
+        key: 'op_chat_inner', group: 'day', label: 'Ответ внутри чата',
+        hint: (s) => `Среднее за сутки, норма ${formatMinutes(s?.inner_target_seconds ?? 240, 0)}`,
+        read: (s) => ({
+            value: formatMinutes(s.today?.inner_reply_seconds),
+            tone: chatReplyTone(s.today?.inner_reply_seconds, s.inner_target_seconds),
+        }),
+    },
+];
+
+export const OP_CHAT_METRIC_MAP = OP_CHAT_METRICS.reduce((acc, metric) => {
+    acc[metric.key] = metric;
+    return acc;
+}, {});
+
+export const DEFAULT_OP_CHAT_WIDGET_METRICS = [
+    'op_chat_in_work',
+    'op_chat_waiting',
+    'op_chat_chats',
+    'op_chat_first',
+    'op_chat_inner',
+];
+
+/*
+ * Поток вебхука Wazzup замолчал — цифры на стене замерли, хотя снимок «свежий». Порог сервер
+ * выбирает по часу (ночью тишина — норма) и присылает готовый признак `stream.silent`.
+ */
+export const opChatFreshnessNotice = (snapshot) => {
+    const stream = snapshot?.stream;
+    if (!stream?.silent) return null;
+    if (isBlank(stream.silent_seconds)) return 'Wazzup ещё не присылал сообщений';
+    return `Wazzup молчит ${formatDuration(stream.silent_seconds)} — цифры могут отставать`;
+};
+
+/** «данные на 19:09:55» — по последнему сообщению Wazzup, а не по моменту снимка. */
+export const opChatClockLabel = (snapshot) => {
+    const at = snapshot?.source_now || snapshot?.captured_at;
+    return at ? `данные на ${formatClock(at)}` : null;
+};
+
 export const OP_WALLBOARD_DIRECTIONS = {
     op: {
         key: 'op',
@@ -288,6 +393,26 @@ export const OP_WALLBOARD_DIRECTIONS = {
             return clock ? `Мост «Касаний», ${clock}` : null;
         },
         freshnessNotice: opFreshnessNotice,
+    },
+    op_chat: {
+        key: 'op_chat',
+        label: 'ОП · Чат',
+        hint: 'Чаты верификаторов: Wazzup',
+        title: 'Табло ОП · чаты',
+        source: 'Wazzup',
+        clockField: 'source_now',
+        icon: 'fa-comments',
+        useSnapshot: useOpChatWallboardSnapshot,
+        metrics: OP_CHAT_METRICS,
+        metricMap: OP_CHAT_METRIC_MAP,
+        metricGroups: OP_METRIC_GROUPS,
+        defaultMetrics: DEFAULT_OP_CHAT_WIDGET_METRICS,
+        readMetric: readOpMetric,
+        clockLabel: (snapshot) => {
+            const clock = opChatClockLabel(snapshot);
+            return clock ? `Wazzup, ${clock}` : null;
+        },
+        freshnessNotice: opChatFreshnessNotice,
     },
 };
 

@@ -3,21 +3,27 @@ import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import { APPLE_FONT, IosSegmented, iosCard, iosBtnGhost } from '../ui/ios';
+import { isoDate } from '../ui/DateRangePicker';
 import { formatInt, wallboardStaleNotice } from './szovWallboardShared';
-import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
-import { BroadcastControls, WidgetButton } from './SzovWallboardView';
+import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
+import { BroadcastControls, ChatExportControls, WidgetButton } from './SzovWallboardView';
 import OpStatusJournalPanel from './OpStatusJournal';
+import OpChatWallboardBody from './OpChatWallboard';
 import { OP_GROUP_ALL, opEntryTime, opGroupOptions, opGroupView, opHourRange, opSelectedGroup } from './opWallboardGroups';
 import {
     OP_METRIC_MAP,
+    OP_WALLBOARD_VIEWS,
     formatCount,
     formatSeconds,
     opClockLabel,
     opDataGapNotice,
     opFreshnessNotice,
     opMetricHint,
+    opChatClockLabel,
+    opChatFreshnessNotice,
     opStatusChip,
     readOpMetric,
+    useOpChatWallboardSnapshot,
     useOpWallboardSnapshot,
 } from './opWallboardShared';
 
@@ -33,6 +39,10 @@ import {
  *
  * ТЗ #339: фильтр по группам пересчитывает всё табло сразу (разрезы приезжают в том же снимке),
  * в списке — время входа, а ФИО открывает журнал статусов боковой панелью здесь же.
+ *
+ * Задача #367: у раздела два направления, как у табло СЗоВ, — «Линия» (всё, что выше) и «Чат»
+ * (чаты верификаторов в Wazzup, OpChatWallboard.jsx). Переключатель в шапке; монтируется только
+ * выбранное направление, поэтому скрытое не опрашивает свой источник.
  */
 
 const FULLSCREEN_Z = 150;
@@ -295,8 +305,10 @@ const BROADCAST_HINT = (
     </>
 );
 
-export default function OpWallboardView({
+/** Направление «Линия»: звонки на FreePBX и статусы iCORE Phone. */
+function OpLineWallboard({
     apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false, widgetOpen, onToggleWidget,
+    directionSwitch = null,
 }) {
     const { snapshot, error, loading, refresh } = useOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -369,6 +381,7 @@ export default function OpWallboardView({
                 ) : null}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
+                {directionSwitch}
                 {/* Фильтр — в одной строке с действиями, как сегменты в тулбаре macOS; на узком
                     экране строка переносится сама. */}
                 {groupSwitch ? <div className="mr-2">{groupSwitch}</div> : null}
@@ -442,4 +455,179 @@ export default function OpWallboardView({
             />
         </div>
     );
+}
+
+// ── Направление «Чат»: чаты верификаторов в Wazzup (задача #367) ─────────────────────────────────
+
+// «… не отвечает» у замершего снимка — про нашу базу: переписка уже лежит в ней, и снимок
+// замирает только при её сбое. Молчание самого Wazzup — отдельное предупреждение (stream.silent).
+const OP_CHAT_SOURCE_LABEL = 'База iCORE';
+
+// Потолок выгрузки — тот же, что на сервере (OP_CHAT_EXPORT_MAX_DAYS): просить больше — получить 400.
+// Месяц, а не неделя, как у СЗоВ: переписка уже лежит в нашей базе, вендора никто не качает.
+const OP_CHAT_EXPORT_MAX_DAYS = 31;
+
+const opChatExportPresets = [
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: '7 дней', range: () => ({ from: isoDate(new Date(Date.now() - 6 * 864e5)), to: isoDate(new Date()) }) },
+    { label: '30 дней', range: () => ({ from: isoDate(new Date(Date.now() - 29 * 864e5)), to: isoDate(new Date()) }) },
+];
+
+const OP_CHAT_EXPORT_HINTS = {
+    single: 'Сводка, по часам и по каждому верификатору',
+    multi: 'Считается из переписки в базе — несколько секунд',
+};
+
+/* Имя собирает фронт: Content-Disposition через CORS сюда не доходит. */
+const opChatExportFileName = (snapshot, from, to) => {
+    const day = (value) => String(value || '').replace(/-/g, '');
+    if (from && to && from !== to) return `op_wallboard_chat_${day(from)}_${day(to)}.xlsx`;
+    return `op_wallboard_chat_${day(from || to || snapshot?.day) || 'now'}.xlsx`;
+};
+
+const OP_CHAT_BROADCAST_HINT = (
+    <>
+        Отклонением считаем то же, что подсвечено на табло: первый ответ или ответ внутри чата за
+        сутки дольше нормы, либо Wazzup перестал присылать сообщения и цифры замерли. Время ответа
+        судим, когда за сутки набралось хотя бы 5 чатов — ночные единицы поводом не считаются.
+    </>
+);
+
+/** Направление «Чат»: переписка верификаторов в Wazzup — чаты в работе, время ответа, люди. */
+function OpChatBoard({
+    apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false, widgetOpen, onToggleWidget,
+    directionSwitch = null,
+}) {
+    const { snapshot, error, loading, refresh } = useOpChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
+    const [fullscreen, setFullscreen] = useState(false);
+    const notice = useMemo(
+        () => wallboardStaleNotice(snapshot, error, OP_CHAT_SOURCE_LABEL) || opChatFreshnessNotice(snapshot),
+        [error, snapshot],
+    );
+    const clock = opChatClockLabel(snapshot);
+
+    const header = (
+        <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
+            <div>
+                <div className="flex items-center gap-2 text-[17px] font-semibold text-slate-900">
+                    <FaIcon className="fas fa-tachometer-alt text-blue-600"></FaIcon>
+                    Табло ОП
+                </div>
+                <div className="text-[13px] text-slate-500">
+                    Чаты верификаторов · Wazzup{clock ? ` · ${clock}` : ''}
+                </div>
+                {notice ? (
+                    <div className="mt-1 inline-flex items-center gap-2 rounded-full bg-amber-50 px-2.5 py-0.5 text-[12px] text-amber-800 ring-1 ring-amber-200">
+                        <FaIcon className="fas fa-triangle-exclamation"></FaIcon>
+                        {notice}
+                    </div>
+                ) : null}
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+                {directionSwitch}
+                {canManageBroadcast ? (
+                    <BroadcastControls
+                        direction="op_chat"
+                        directionLabel="ОП · Чат"
+                        deviationHint={OP_CHAT_BROADCAST_HINT}
+                        apiBaseUrl={apiBaseUrl}
+                        withAccessTokenHeader={withAccessTokenHeader}
+                        showToast={showToast}
+                    />
+                ) : null}
+                {/* Пока снимка нет, выгружать нечего: кнопка появляется вместе с цифрами. */}
+                {snapshot ? (
+                    <ChatExportControls
+                        apiBaseUrl={apiBaseUrl}
+                        withAccessTokenHeader={withAccessTokenHeader}
+                        showToast={showToast}
+                        snapshot={snapshot}
+                        exportPath="/api/op_wallboard/chat_export"
+                        fileName={opChatExportFileName}
+                        maxDays={OP_CHAT_EXPORT_MAX_DAYS}
+                        presets={opChatExportPresets}
+                        hints={OP_CHAT_EXPORT_HINTS}
+                    />
+                ) : null}
+                <button type="button" className={`${iosBtnGhost} disabled:opacity-40`} disabled={loading} onClick={() => refresh()}>
+                    <FaIcon className={`fas fa-rotate ${loading ? 'animate-spin' : ''}`}></FaIcon>
+                    Обновить
+                </button>
+                {onToggleWidget ? <WidgetButton direction="op_chat" widgetOpen={widgetOpen}
+                                                onToggleWidget={onToggleWidget} /> : null}
+                <button type="button" className={iosBtnGhost} onClick={() => setFullscreen(true)} title="На весь экран — для вывода на стену">
+                    <FaIcon className="fas fa-expand"></FaIcon>
+                    На стену
+                </button>
+            </div>
+        </div>
+    );
+
+    if (!snapshot) {
+        return (
+            <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+                {header}
+                <div className={`${iosCard} p-6 text-[13px] ${loading ? 'text-slate-500' : 'text-rose-600'}`}>
+                    {loading ? 'Загружаем чаты верификаторов…' : (error || 'Данные недоступны')}
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+            {header}
+            <OpChatWallboardBody snapshot={snapshot} scale={1} />
+            {fullscreen ? createPortal(
+                <FullscreenSheet
+                    open
+                    wide
+                    z={FULLSCREEN_Z}
+                    icon="fa-comments"
+                    title="Табло ОП · чаты"
+                    subtitle={`${clock ? `${clock} · ` : ''}Esc чтобы выйти`}
+                    onClose={() => setFullscreen(false)}
+                >
+                    <OpChatWallboardBody snapshot={snapshot} scale={1.35} />
+                </FullscreenSheet>,
+                document.body,
+            ) : null}
+        </div>
+    );
+}
+
+// Выбор направления — удобство зрителя (стена верификаторов утром включается на «Чате»), поэтому
+// живёт в браузере, с id пользователя в ключе, и молча отступает на «Линию», если хранилище недоступно.
+const directionStorageKey = (userId) => `otp:op-wallboard-direction${userId ? `:${userId}` : ''}`;
+
+const readStoredDirection = (userId) => {
+    try {
+        const stored = window.localStorage.getItem(directionStorageKey(userId));
+        return OP_WALLBOARD_VIEWS.some((item) => item.key === stored) ? stored : OP_WALLBOARD_VIEWS[0].key;
+    } catch (storageError) {
+        return OP_WALLBOARD_VIEWS[0].key;
+    }
+};
+
+export default function OpWallboardView(props) {
+    const userId = props.user?.id;
+    const [direction, setDirection] = useState(() => readStoredDirection(userId));
+
+    const changeDirection = useCallback((next) => {
+        setDirection(next);
+        try {
+            window.localStorage.setItem(directionStorageKey(userId), next);
+        } catch (storageError) {
+            // Приватное окно или запрет хранилища: переключение работает, просто не запомнится.
+        }
+    }, [userId]);
+
+    const directionSwitch = (
+        <SegmentedSwitch value={direction} options={OP_WALLBOARD_VIEWS} onChange={changeDirection} />
+    );
+    // Монтируется только выбранное направление: у каждого свой опрос, и скрытое молчит.
+    if (direction === 'chat') {
+        return <OpChatBoard {...props} directionSwitch={directionSwitch} />;
+    }
+    return <OpLineWallboard {...props} directionSwitch={directionSwitch} />;
 }

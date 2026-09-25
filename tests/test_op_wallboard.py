@@ -883,7 +883,8 @@ class FrontendTests(unittest.TestCase):
     def test_widget_button_is_the_same_as_szov(self):
         """Кнопка виджета — общая с СЗоВ (экспорт), а не третья копия."""
         self.assertIn('export const WidgetButton', self.szov_view)
-        self.assertIn("import { BroadcastControls, WidgetButton } from './SzovWallboardView';", self.view)
+        self.assertIn("import { BroadcastControls, ChatExportControls, WidgetButton } from './SzovWallboardView';",
+                      self.view)
         self.assertIn('<WidgetButton direction="op" widgetOpen={widgetOpen}', self.view)
         self.assertIn('onToggleWidget={onToggleWidget}', self.view)
 
@@ -954,7 +955,7 @@ class FrontendTests(unittest.TestCase):
                       '                            </Suspense>\n'
                       '                        )}\n'
                       '                        {view === "tez_wallboard"', self.app)
-        self.assertIn(": szovWallboardWidget === 'op'\n"
+        self.assertIn(": (szovWallboardWidget === 'op' || szovWallboardWidget === 'op_chat')\n"
                       "                            ? canAccessOpWallboardSection", self.app)
 
 
