@@ -108,6 +108,9 @@ import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting } from './utils/departmentViews';
+// Отдельной строкой: общий импорт выше тесты держат дословно.
+import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
+import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -3773,6 +3776,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         };
 
+        const HOURS_PEOPLE_KIND_OPTIONS = [
+            { value: 'operators', label: 'Операторы' },
+            { value: 'supervisors', label: 'Супервайзеры' },
+            { value: 'all', label: 'Все сотрудники' },
+        ];
+
+        // Глобальный админ — как на сервере (_is_global_admin_requester): super_admin
+        // всегда, admin — если не возглавляет отдел (глава отдела ограничен им).
+        const isGlobalAdminUser = (someUser) => (
+            normalizeRole(someUser?.role) === 'super_admin'
+            || (isAdminLikeRoleFn(someUser?.role) && !isDepartmentHead(someUser))
+        );
+
+        // Строка «Учёта часов», чьи часы посчитаны из отметок Clockster (СВ, задача #352).
+        const isClocksterHoursRow = (op) => (
+            String(op?.hours_source || '') === 'clockster' || op?.employee_kind === 'supervisor'
+        );
+
         const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
         const [month, setMonth] = useState(() => {
             const d = new Date();
@@ -3819,6 +3840,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // NEW: filter active/fired + counters
         const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'fired'
+        // Кого показывает таблица (задача #352): операторов, СВ или всех. СВ приходят
+        // отдельным запросом (people=supervisors) в той же форме строк; их часы
+        // считаются из отметок Clockster, поэтому ячейки СВ руками не правятся.
+        // Видят: РОП, СВ отдела продаж (только себя) и те, кто выше, — глобальные
+        // админы. Главы других отделов — нет (как и на сервере).
+        const showSupervisorHoursTabs = headsSupervisorHoursDepartment(user)
+            || isGlobalAdminUser(user)
+            || (isSupervisorRole(user?.role) && !isHoursDepartmentHead && departmentHasSupervisorHours(user));
+        const [hoursPeopleKind, setHoursPeopleKind] = useState('operators'); // 'operators' | 'supervisors' | 'all'
+        const [supervisorHoursRows, setSupervisorHoursRows] = useState([]);
+        const [supervisorHoursReloadKey, setSupervisorHoursReloadKey] = useState(0);
+        // Окно дня СВ: отметки Clockster и ручные отметки РОП ({ operator, dateStr }).
+        const [supervisorDayMarks, setSupervisorDayMarks] = useState(null);
+        // Строки таблицы по выбранному виду сотрудников. В «Всех» бывший оператор,
+        // ставший СВ, может прийти обоими запросами — берём строку СВ: у неё окно
+        // отметок, а операторское окно правки дало бы правку, которую ночной
+        // пересчёт по Clockster молча перепишет (дни оператора окно отметок
+        // само помечает «работал оператором»).
+        const hoursPeopleRows = useMemo(() => {
+            if (!showSupervisorHoursTabs || hoursPeopleKind === 'operators') return operators;
+            if (hoursPeopleKind === 'supervisors') return supervisorHoursRows;
+            const supervisorIds = new Set(supervisorHoursRows.map(op => String(op?.operator_id)));
+            return [...(operators || []).filter(op => !supervisorIds.has(String(op?.operator_id))), ...supervisorHoursRows];
+        }, [showSupervisorHoursTabs, hoursPeopleKind, operators, supervisorHoursRows]);
+
         const [selectedDirections, setSelectedDirections] = useState(['all']); // multi-select directions for filtering
 
         // Группы: выбор группы для учёта часов + локальный реестр групп/метрик моделей.
@@ -4046,6 +4092,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             fetchDailyHoursAndTrainings();
             // eslint-disable-next-line
         }, [user, selectedSvId, selectedGroupId, month]);
+
+        // Строки СВ грузим только когда их просят видеть: у остальных отделов и
+        // на вкладке «Операторы» лишнего запроса нет.
+        useEffect(() => {
+            if (!user || !showSupervisorHoursTabs || hoursPeopleKind === 'operators') return undefined;
+            let cancelled = false;
+            axios.get(`${API_BASE_URL}/api/sv/daily_hours`, {
+                params: { month, people: 'supervisors' },
+                headers: { 'X-User-Id': user.id },
+            })
+                .then((resp) => {
+                    if (cancelled) return;
+                    const rows = Array.isArray(resp?.data?.operators) ? resp.data.operators : [];
+                    setSupervisorHoursRows(rows);
+                })
+                .catch((error) => {
+                    if (cancelled) return;
+                    setSupervisorHoursRows([]);
+                    fallbackToast(error?.response?.data?.error || 'Не удалось загрузить часы супервайзеров', 'error');
+                });
+            return () => { cancelled = true; };
+            // eslint-disable-next-line
+        }, [user?.id, showSupervisorHoursTabs, hoursPeopleKind, month, supervisorHoursReloadKey]);
 
         useEffect(() => {
             setSelectedHourCells([]);
@@ -5102,6 +5171,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             e.stopPropagation();
             return;
             }
+            // Часы СВ считаются из отметок Clockster и пересчитываются каждую ночь:
+            // ручная правка ячейки молча исчезла бы к утру. Вместо окна правки —
+            // окно отметок дня, где РОП дописывает пропущенный приход/уход.
+            if (isClocksterHoursRow(operator)) {
+                setSupervisorDayMarks({ operator, dateStr: dayToDateStr(day) });
+                return;
+            }
             if (e?.ctrlKey || e?.metaKey) {
             e.preventDefault();
             e.stopPropagation();
@@ -5257,6 +5333,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // ====== Cell detail modal ======
         function openCellDetail(operator, day) {
+            // И с телефона тоже: у СВ вместо окна правки — окно отметок Clockster.
+            if (isClocksterHoursRow(operator)) {
+                setSupervisorDayMarks({ operator, dateStr: dayToDateStr(day) });
+                return;
+            }
             const dayKey = String(day);
             const dayData = operator.daily?.[dayKey] ?? { work_time: 0, break_time: 0, talk_time: 0, calls: 0, efficiency: 0 };
             setSelectedCell({ operator, day, dateStr: dayToDateStr(day) });
@@ -5692,6 +5773,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 norm_hours: norm
             }, { headers: { 'X-User-Id': user.id } });
             setOperators(prev => prev.map(op => op.operator_id === operatorId ? { ...op, norm_hours: norm } : op));
+            setSupervisorHoursRows(prev => prev.map(op => op.operator_id === operatorId ? { ...op, norm_hours: norm } : op));
             fallbackToast('Норма часов обновлена', 'success');
             } catch (err) {
             console.error('update norm_hours error', err);
@@ -5760,12 +5842,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Direction options derived from loaded operators (for filtering)
         const directionOptions = useMemo(() => {
             const s = new Set();
-            for (const op of operators) {
+            for (const op of hoursPeopleRows) {
             const key = op.direction || op.direction_name || (op.direction_id ? String(op.direction_id) : 'Без направления');
             if (key) s.add(key);
             }
             return Array.from(s).sort();
-        }, [operators]);
+        }, [hoursPeopleRows]);
+
+        // Направления у операторов и у СВ разные (у СВ — склейка направлений их
+        // групп): выбор, оставшийся от другого вида, спрятал бы все строки.
+        const hoursPeopleKindRef = useRef(hoursPeopleKind);
+        useEffect(() => {
+            if (hoursPeopleKindRef.current === hoursPeopleKind) return;
+            hoursPeopleKindRef.current = hoursPeopleKind;
+            setSelectedDirections(['all']);
+        }, [hoursPeopleKind]);
 
         function toggleDirectionSelection(dirKey) {
             const s = (selectedDirections || []).slice();
@@ -6005,7 +6096,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const { filteredOperators, activeCount, firedCount } = useMemo(() => {
             const activeList = [];
             const firedList = [];
-            for (const op of operators) {
+            for (const op of hoursPeopleRows) {
             const status = String(op?.status || '').trim().toLowerCase();
             const isFiredLike = status === 'fired' || status === 'dismissal';
             if (isFiredLike) {
@@ -6046,7 +6137,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             activeCount: activeList.length,
             firedCount: firedList.length
             };
-        }, [operators, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap, month]);
+        }, [hoursPeopleRows, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap, month]);
 
         // Group operators by direction (key fallbacks: direction, direction_name, direction_id)
         const groupedByDirection = useMemo(() => {
@@ -6380,7 +6471,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             for (let row = fromRow; row <= toRow; row += 1) {
             const op = renderedHourOperators[row];
-            if (!op) continue;
+            if (!op || isClocksterHoursRow(op)) continue;
             for (let day = fromDay; day <= toDay; day += 1) {
                 range.push({
                 operator_id: op.operator_id,
@@ -6413,6 +6504,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         function startHourSelectionDrag(e, operator, day) {
             if (!(e?.ctrlKey || e?.metaKey) || e?.button !== 0) return;
+            if (isClocksterHoursRow(operator)) return;
             // transfer-aware: чужие дни (вне выбранной группы) не выделяем для массового
             // редактирования — их можно менять только переключившись на нужную группу.
             const _segs = Array.isArray(operator?.group_segments) ? operator.group_segments : [];
@@ -7491,6 +7583,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onOperatorsTab: setOperatorsViewTab,
                             activeCount,
                             firedCount,
+                            peopleKinds: showSupervisorHoursTabs ? HOURS_PEOPLE_KIND_OPTIONS : null,
+                            peopleKind: hoursPeopleKind,
+                            onPeopleKind: setHoursPeopleKind,
                         }}
                         metrics={{ tabs: VIEW_TABS, selectedTab, onSelectTab: setSelectedTab }}
                         data={{
@@ -7542,6 +7637,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             onDownloadReport: downloadMonthlyReport,
                             isDownloadingReport,
                             onNormChange: handleNormChange,
+                            isNormLocked: (op) => isClocksterHoursRow(op) && !isHoursDepartmentHead,
                         }}
                         day={{
                             selectedCell,
@@ -7609,6 +7705,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         ) : null}
                     />
+                <SupervisorDayMarksModal
+                    open={Boolean(supervisorDayMarks)}
+                    onClose={() => setSupervisorDayMarks(null)}
+                    viewerId={user?.id}
+                    apiBaseUrl={API_BASE_URL}
+                    operator={supervisorDayMarks?.operator}
+                    dateStr={supervisorDayMarks?.dateStr}
+                    onChanged={() => setSupervisorHoursReloadKey(key => key + 1)}
+                />
                 </Suspense>
             );
         }
@@ -8020,6 +8125,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         disabled={reportScope === 'all'}
                         ariaLabel="Группа"
                         className="w-[248px]"
+                    />
+                    )}
+
+                    {showSupervisorHoursTabs && (
+                    <IosSegmented
+                        ariaLabel="Сотрудники"
+                        value={hoursPeopleKind}
+                        onChange={setHoursPeopleKind}
+                        options={HOURS_PEOPLE_KIND_OPTIONS}
                     />
                     )}
 
@@ -9300,6 +9414,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         Уволен
                                     </span>
                                     )}
+                                    {hoursPeopleKind === 'all' && isClocksterHoursRow(op) && (
+                                    <span
+                                        className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-slate-500"
+                                        title="Супервайзер: часы по отметкам Clockster за вычетом перерыва"
+                                    >
+                                        СВ
+                                    </span>
+                                    )}
                                     {Array.isArray(op.group_segments) && op.group_segments.length > 1 && (
                                     <span
                                         className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-600"
@@ -9324,6 +9446,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     className="w-full rounded-lg bg-transparent px-2 py-1 text-center text-[13px] text-slate-800 ring-1 ring-transparent transition hover:bg-white hover:ring-slate-200/70 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/60"
                                     aria-label={`Норма часов: ${op.name}`}
                                     value={op.norm_hours ?? 0}
+                                    readOnly={isClocksterHoursRow(op) && !isHoursDepartmentHead}
                                     onChange={e => handleNormChange(op.operator_id, e.target.value)}
                                 />
                                 </div>
@@ -9748,6 +9871,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
                 </div>
             )}
+
+            {/* Окно дня СВ: отметки Clockster и ручные отметки РОП (задача #352) */}
+            <SupervisorDayMarksModal
+                open={Boolean(supervisorDayMarks)}
+                onClose={() => setSupervisorDayMarks(null)}
+                viewerId={user?.id}
+                apiBaseUrl={API_BASE_URL}
+                operator={supervisorDayMarks?.operator}
+                dateStr={supervisorDayMarks?.dateStr}
+                onChanged={() => setSupervisorHoursReloadKey(key => key + 1)}
+            />
 
             {/* Detail modal for a single cell (trainings shown only in work_time tab) */}
             {selectedCell && cellModel && (
@@ -15266,6 +15400,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             }
 
+        // Строки СВ в «Графиках работы» (задача #352). Направления у СВ нет, поэтому в
+        // фильтре и подписях они идут служебным «Супервайзеры», а op.direction не
+        // трогаем: по нему движок перерывов ищет правила и соседей.
+        const PLANNER_SUPERVISORS_DIRECTION = '__supervisors__';
+        const PLANNER_SUPERVISORS_DIRECTION_LABEL = 'Супервайзеры';
+        const PLANNER_SUPERVISOR_NO_CARD = '__none__';
+        const isPlannerSupervisorRow = (op) => isSupervisorRole(op?.role);
+        const plannerRowDirectionLabel = (op) => (
+            isPlannerSupervisorRow(op) ? PLANNER_SUPERVISORS_DIRECTION_LABEL : String(op?.direction || '').trim()
+        );
+
         function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null }) {
             /* «Мы на телефоне» — только для шапки окна «Запроса на замену»: там
                окно едет отдельным экраном, и уход с него делает шеврон «Назад»
@@ -15283,6 +15428,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Состав операторов задаёт сервер (отделы СЗоВ и ОП), поэтому seed
             // из общего списка пользователей для тренера не используется.
             const plannerReadOnly = normalizeRole(user?.role) === 'trainer';
+            // Строки СВ (задача #352): их график ведёт РОП. Рядовой СВ видит свою
+            // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
+            // равно отклонит, а открытое окно правки обещало бы обратное.
+            const plannerViewerIsPlainSupervisor = isSupervisorRole(user?.role) && !isDepartmentHead(user);
             const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
                 const next = { ...(op || {}), ...overrides };
@@ -15407,6 +15556,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 statusSaving: false,
                 statusDeleting: false
             });
+            // Окно дня открыто на строке СВ: операторские санкции (штраф, тренинг,
+            // тех. сбой) к СВ неприменимы — сервер штраф СВ не примет (задача #352).
+            const plannerModalIsSupervisorRow = isPlannerSupervisorRow(
+                operators.find(o => String(o?.id) === String(modalState?.opId))
+            );
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [modalActiveTab, setModalActiveTab] = useState('shifts');
             const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
@@ -15569,6 +15723,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 snapshot: null
             });
             const [showBreakRulesSettingsModal, setShowBreakRulesSettingsModal] = useState(false);
+            // Перерыв СВ (задача #352): РОП задаёт минуты, которые вычитаются из часов СВ
+            // по Clockster, и при нужде привязывает карточку Clockster вручную.
+            // РОП и те, кто выше (глобальные админы); главы других отделов — нет.
+            const canManageSupervisorBreaks = headsSupervisorHoursDepartment(user) || isGlobalAdminUser(user);
+            const [plannerSupervisorBreaks, setPlannerSupervisorBreaks] = useState({ loading: false, error: '', rows: [], cards: [] });
+            const [plannerSupervisorBreakDrafts, setPlannerSupervisorBreakDrafts] = useState({});
             const [plannerBreakRulesLoading, setPlannerBreakRulesLoading] = useState(false);
             const [plannerBreakRulesSaving, setPlannerBreakRulesSaving] = useState(false);
             const [plannerBreakRulesError, setPlannerBreakRulesError] = useState('');
@@ -16727,9 +16887,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => uniqueSupervisors.map(sv => ({ value: String(sv.id), label: sv.name })),
                 [uniqueSupervisors]
             );
+            const plannerHasSupervisorRows = useMemo(
+                () => plannerDepartmentOperators.some(isPlannerSupervisorRow),
+                [plannerDepartmentOperators]
+            );
             const plannerDirectionOptions = useMemo(
-                () => uniqueDirections.map(dir => ({ value: dir, label: dir })),
-                [uniqueDirections]
+                () => [
+                    ...uniqueDirections.map(dir => ({ value: dir, label: dir })),
+                    // СВ — своей строкой в конце: направления у них нет, а смотреть
+                    // «кто из СВ на смене» РОП и сами СВ хотят отдельно (задача #352).
+                    ...(plannerHasSupervisorRows
+                        ? [{ value: PLANNER_SUPERVISORS_DIRECTION, label: PLANNER_SUPERVISORS_DIRECTION_LABEL }]
+                        : []),
+                ],
+                [uniqueDirections, plannerHasSupervisorRows]
             );
 
             /* Варианты для поиска по людям. Уволенных в списке нет, пока их не
@@ -16742,7 +16913,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .map(op => ({
                         value: String(op?.id ?? ''),
                         label: String(op?.name || '').trim() || `#${op?.id}`,
-                        groupLabel: String(op?.direction || '').trim() || 'Без направления'
+                        groupLabel: plannerRowDirectionLabel(op) || 'Без направления'
                     }))
                     .filter(opt => opt.value)
                     .sort((a, b) => (
@@ -17148,9 +17319,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     filtered = filtered.filter(op => !plannerIsFiredStatus(op?.status));
                 }
 
-                // Фильтр по направлениям
+                // Фильтр по направлениям (строки СВ — служебное «Супервайзеры»)
                 if (selectedDirections.length > 0) {
-                    filtered = filtered.filter(op => selectedDirections.includes(op.direction));
+                    filtered = filtered.filter(op => selectedDirections.includes(
+                        isPlannerSupervisorRow(op) ? PLANNER_SUPERVISORS_DIRECTION : op.direction
+                    ));
                 }
 
                 // Точечный отбор людей поиском
@@ -17178,8 +17351,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }
                     }
 
-                    const dirA = (a.direction || '').toLowerCase();
-                    const dirB = (b.direction || '').toLowerCase();
+                    const dirA = plannerRowDirectionLabel(a).toLowerCase();
+                    const dirB = plannerRowDirectionLabel(b).toLowerCase();
                     if (dirA !== dirB) {
                         return dirA.localeCompare(dirB);
                     }
@@ -17213,16 +17386,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             /* Сколько смен стоит на каждый день периода — по тем же отфильтрованным
                людям, что и строки сетки. Смена относится к дню своего начала: ночная
                20:00 — 02:00 считается один раз, как и в ячейках недели и месяца. */
+            // Покрытие линии — без СВ (они на линии не сидят), кроме случая, когда в
+            // фильтре явно выбраны «Супервайзеры»: тогда вопрос и есть «кто из СВ на смене».
+            const plannerCoverageOperators = useMemo(() => (
+                selectedDirections.includes(PLANNER_SUPERVISORS_DIRECTION)
+                    ? filteredOperators
+                    : filteredOperators.filter(op => !isPlannerSupervisorRow(op))
+            ), [filteredOperators, selectedDirections]);
             const plannerShiftCountByDate = useMemo(() => {
                 const counts = new Map();
                 visibleRange.forEach(d => {
-                    counts.set(d, filteredOperators.reduce((acc, op) => {
+                    counts.set(d, plannerCoverageOperators.reduce((acc, op) => {
                         const dayShifts = op?.shifts?.[d];
                         return acc + (Array.isArray(dayShifts) ? dayShifts.length : 0);
                     }, 0));
                 });
                 return counts;
-            }, [filteredOperators, visibleRange]);
+            }, [plannerCoverageOperators, visibleRange]);
             const plannerStatusFetchRange = useMemo(() => {
                 const normalizedVisibleDays = (Array.isArray(visibleRange) ? visibleRange : [])
                     .map(day => String(day || '').trim())
@@ -18261,8 +18441,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            const isPlannerRowLocked = (opId) => (
+                plannerViewerIsPlainSupervisor
+                && isPlannerSupervisorRow(operators.find(o => String(o?.id) === String(opId)))
+            );
+
             const openEditModal = (opId, date, editIndex = null) => {
                 if (plannerReadOnly) return;
+                if (isPlannerRowLocked(opId)) return;
                 const op = operators.find(o => o.id === opId);
                 const arr = op?.shifts?.[date] ?? [];
                 const isDayOff = op?.daysOff?.includes(date) ?? false;
@@ -18305,6 +18491,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const toggleDayOff = async (opId, date) => {
                 if (plannerReadOnly) return;
+                if (isPlannerRowLocked(opId)) return;
                 try {
                     // Отправляем на сервер
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/day_off`, {
@@ -18521,7 +18708,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const openEditModalForMultipleTargets = (targets) => {
                 if (plannerReadOnly) return;
-                const normalizedTargets = normalizeBulkTargets(targets);
+                const normalizedTargets = normalizeBulkTargets(targets).filter(t => !isPlannerRowLocked(t.opId));
                 if (normalizedTargets.length === 0) return;
                 if (normalizedTargets.length === 1) {
                     const only = normalizedTargets[0];
@@ -18609,8 +18796,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [plannerOfflineActivityModalState?.open]);
 
+            // СВ в раскладку перерывов не входят (задача #352): их смене перерывы не
+            // ставятся, и соседями операторам по перерывам они не считаются.
             const cloneOperatorsForBreakSimulation = (sourceOperators = []) => {
-                return (sourceOperators || []).map(op => ({
+                return (sourceOperators || []).filter(op => !isPlannerSupervisorRow(op)).map(op => ({
                     ...op,
                     shifts: Object.fromEntries(
                         Object.entries(op?.shifts || {}).map(([dateKey, segs]) => [
@@ -18828,8 +19017,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
+                // СВ перерывов не получают и операторским пересчётом не считаются
+                // (задача #352); рядовому СВ сервер ответил бы 403 на весь пакет.
                 const operatorIds = Array.from(new Set(
                     (Array.isArray(filteredOperators) ? filteredOperators : [])
+                        .filter(op => !isPlannerSupervisorRow(op))
                         .map(op => Number(op?.id))
                         .filter(id => Number.isFinite(id) && id > 0)
                         .map(id => Math.trunc(id))
@@ -18924,10 +19116,82 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            // Значение выбора карточки: '' — сшивка по ФИО, '__none__' — карточки нет,
+            // иначе ручная привязка.
+            const plannerSupervisorManualCard = (row) => {
+                if (row?.clockster?.source === 'none') return PLANNER_SUPERVISOR_NO_CARD;
+                return row?.clockster?.source === 'manual' ? String(row.clockster.ext_id || '') : '';
+            };
+            const applyPlannerSupervisorBreaksPayload = (payload) => {
+                const rows = Array.isArray(payload?.supervisors) ? payload.supervisors : [];
+                setPlannerSupervisorBreaks({
+                    loading: false,
+                    error: '',
+                    rows,
+                    cards: Array.isArray(payload?.clockster_cards) ? payload.clockster_cards : [],
+                });
+                setPlannerSupervisorBreakDrafts(Object.fromEntries(rows.map(row => [String(row.user_id), {
+                    break_minutes: String(row.break_minutes ?? ''),
+                    clockster_ext_id: plannerSupervisorManualCard(row),
+                }])));
+            };
+            const loadPlannerSupervisorBreaks = async () => {
+                setPlannerSupervisorBreaks(prev => ({ ...prev, loading: true, error: '' }));
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/supervisor_hours_settings`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({}),
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+                    applyPlannerSupervisorBreaksPayload(payload);
+                } catch (error) {
+                    setPlannerSupervisorBreaks(prev => ({
+                        ...prev,
+                        loading: false,
+                        error: error?.message || 'Не удалось загрузить перерывы супервайзеров',
+                    }));
+                }
+            };
+            const updatePlannerSupervisorBreakDraft = (userId, field, value) => {
+                setPlannerSupervisorBreakDrafts(prev => ({
+                    ...prev,
+                    [String(userId)]: { ...(prev[String(userId)] || {}), [field]: value },
+                }));
+            };
+            // Только изменённое: неизменённый перерыв не превращаем в «свою» настройку,
+            // иначе смена значения по умолчанию его бы уже не коснулась.
+            const buildPlannerSupervisorBreakItems = () => {
+                const items = [];
+                if (plannerSupervisorBreaks.loading || plannerSupervisorBreaks.error) return items;
+                for (const row of plannerSupervisorBreaks.rows || []) {
+                    const draft = plannerSupervisorBreakDrafts[String(row.user_id)] || {};
+                    const item = { user_id: row.user_id };
+                    const minutesText = String(draft.break_minutes ?? '').trim();
+                    if (minutesText !== String(row.break_minutes ?? '')) {
+                        if (!/^\d{1,3}$/.test(minutesText) || Number(minutesText) > 240) {
+                            throw new Error(`${row.name}: время перерыва — целое число минут от 0 до 240`);
+                        }
+                        item.break_minutes = Number(minutesText);
+                    }
+                    const card = String(draft.clockster_ext_id || '');
+                    if (card !== plannerSupervisorManualCard(row)) item.clockster_ext_id = card;
+                    if (Object.keys(item).length > 1) items.push(item);
+                }
+                return items;
+            };
+
             const openPlannerBreakRulesSettings = async () => {
                 if (plannerReadOnly) return;
                 setShowPlannerTopActionsMenu(false);
                 setShowBreakRulesSettingsModal(true);
+                if (canManageSupervisorBreaks) {
+                    // Черновики прошлого открытия не переживают закрытие окна: иначе
+                    // отменённая правка ушла бы с ближайшим «Сохранить».
+                    setPlannerSupervisorBreaks({ loading: true, error: '', rows: [], cards: [] });
+                    setPlannerSupervisorBreakDrafts({});
+                    loadPlannerSupervisorBreaks();
+                }
                 setPlannerBreakRulesDraftByDirection(
                     buildPlannerBreakRulesDraftMap(plannerBreakRulesByDirection, plannerBreakRuleDirections)
                 );
@@ -19031,7 +19295,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const savePlannerBreakRulesToServer = async () => {
                 let parsedRulesByDirection = {};
                 let parsedCrossGapByDirection = {};
+                let supervisorBreakItems = [];
                 try {
+                    // Проверяем и перерывы СВ до первой записи: иначе правила направлений
+                    // уже сохранились бы, а окно встало бы с ошибкой по СВ.
+                    if (canManageSupervisorBreaks) supervisorBreakItems = buildPlannerSupervisorBreakItems();
                     parsedRulesByDirection = parsePlannerBreakRulesDraftMap(
                         plannerBreakRulesDraftByDirection,
                         plannerBreakRuleDirections
@@ -19075,6 +19343,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setPlannerBreakCrossGapDraftByDirection(
                         buildPlannerBreakCrossGapDraftMap(normalizedGaps, plannerBreakRuleDirections)
                     );
+                    if (supervisorBreakItems.length > 0) {
+                        const svResponse = await fetch(`${API_BASE_URL}/api/work_schedules/supervisor_hours_settings`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: withAccessTokenHeader({ 'Content-Type': 'application/json' }),
+                            body: JSON.stringify({ items: supervisorBreakItems })
+                        });
+                        const svPayload = await svResponse.json().catch(() => ({}));
+                        if (!svResponse.ok) {
+                            throw new Error(svPayload?.error
+                                ? `Перерывы супервайзеров: ${svPayload.error}`
+                                : `Перерывы супервайзеров не сохранены (HTTP ${svResponse.status})`);
+                        }
+                        applyPlannerSupervisorBreaksPayload(svPayload);
+                    }
                     setShowBreakRulesSettingsModal(false);
                 } catch (error) {
                     setPlannerBreakRulesError(error?.message || 'Не удалось сохранить настройки перерывов');
@@ -19091,6 +19374,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (Array.isArray(filteredOperators) && filteredOperators.length === 0) {
                     emitAppToast('По текущим фильтрам нет операторов для экспорта', 'warning');
+                    return;
+                }
+                // Выгрузка — график операторов; строк СВ в ней нет (задача #352).
+                if (Array.isArray(filteredOperators) && !filteredOperators.some(op => !isPlannerSupervisorRow(op))) {
+                    emitAppToast('В Excel выгружается график операторов, а в выборке только супервайзеры', 'warning');
                     return;
                 }
                 const sortedDates = [...visibleRange].sort();
@@ -19117,7 +19405,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     (selectedDirections || []).forEach(directionValue => {
                         const normalized = String(directionValue || '').trim();
-                        if (normalized) queryParams.append('direction', normalized);
+                        // «Супервайзеры» — фильтр экрана, а не направление: в выгрузку не шлём.
+                        if (normalized && normalized !== PLANNER_SUPERVISORS_DIRECTION) {
+                            queryParams.append('direction', normalized);
+                        }
                     });
                     // Отдел и точечный отбор людей — те же, что на экране:
                     // иначе админ, глядя на СЗоВ, выгружал бы все отделы разом.
@@ -19266,7 +19557,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                отдел, точечный выбор людей и «уволенных нет по умолчанию».
                Разъедься они, отчёт молча считал бы по другому составу. */
             const filterPlannerOperatorsForStatusMatchExport = (sourceOperators = []) => {
-                let filtered = Array.isArray(sourceOperators) ? [...sourceOperators] : [];
+                // Соответствие статусам — про линию; у СВ статусов нет (задача #352).
+                let filtered = (Array.isArray(sourceOperators) ? sourceOperators : []).filter(op => !isPlannerSupervisorRow(op));
                 if (plannerDepartmentId) {
                     filtered = filtered.filter(op => String(op?.department_id ?? '') === plannerDepartmentId);
                 }
@@ -21034,6 +21326,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const dayKey = String(todayDateStr(new Date(currentDate)) || '').trim();
                 const operatorIds = Array.from(new Set(
                     (operators || [])
+                        .filter(op => !isPlannerSupervisorRow(op))
                         .map(op => Number(op?.id))
                         .filter(id => Number.isFinite(id))
                 ));
@@ -21120,6 +21413,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const openPlannerOfflineActivityModal = ({ operatorId, date, startMin, endMin }) => {
                 if (plannerReadOnly) return;
+                if (isPlannerRowLocked(operatorId)) return;
                 const normalizedOperatorId = Number(operatorId);
                 const dayKey = String(date || '').trim();
                 const startMinutesRaw = Number(startMin);
@@ -22240,6 +22534,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         null
                       );
                     } catch (e) { /* ignore */ }
+                    // У смены СВ перерывы только ручные (задача #352): до ответа сервера
+                    // показываем ровно поставленные, а не операторский профиль 15/30/15.
+                    if (isPlannerSupervisorRow(op)) {
+                      const sentBreaks = (breaksToSend || []).map(b => ({ start: b.start, end: b.end }));
+                      op.shifts[date] = (op.shifts[date] || []).map(seg => {
+                        const segStart = seg.__startMin ?? timeToMinutes(seg.start);
+                        const segEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
+                        return { ...seg, breaks: sentBreaks.filter(b => b.start >= segStart && b.end <= segEnd) };
+                      });
+                    }
                     return copy;
                   });
               
@@ -22366,7 +22670,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const totalsPerHourForDate = (dateStr) => {
                 const totals = Array.from({ length: 24 }).map(() => 0);
-                filteredOperators.forEach(op => {
+                plannerCoverageOperators.forEach(op => {
                 const parts = getShiftPartsForDate(op, dateStr);
                 parts.forEach(p => {
                     for (let hour = 0; hour < 24; hour++) {
@@ -22406,6 +22710,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return res;
             };
 
+            // Ручные перерывы СВ «тронуты» только для той смены, на которой их правили:
+            // флаг хранит ключ смены, а не true, и не переживает переход к другой.
+            const plannerSvBreaksKey = `${modalState.opId}|${modalState.date}|${modalState.editIndex ?? 'new'}`;
             const getModalBreakEditorContext = () => {
                 if (modalState.isDayOff || modalState.multipleDates || modalState.multipleTargets) return null;
                 const op = operators.find(o => o.id === modalState.opId);
@@ -22421,6 +22728,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const dayBreaksSnapshot = ((op?.shifts?.[modalState.date] ?? []).flatMap(s => (
                     Array.isArray(s.breaks) ? s.breaks.map(b => ({ start: Number(b.start), end: Number(b.end) })) : []
                 ))).filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
+                // СВ (задача #352): перерывы только ручные — без автоматики и правил
+                // направлений; прошедшие тоже правятся, потому что по ним считается
+                // вычет из часов СВ за день. Отдельный флаг svBreaksEdited отличает
+                // «убрал все перерывы» от «ещё не трогал».
+                if (isPlannerSupervisorRow(op)) {
+                    const manualBreaks = modalState.svBreaksEdited === plannerSvBreaksKey
+                        ? (Array.isArray(modalState.breaks) ? modalState.breaks : [])
+                        : (seg?.breaks ?? []);
+                    return {
+                        seg,
+                        segStartMin,
+                        segEndMin,
+                        segDur,
+                        breaksLocal: manualBreaks.map(b => ({ start: b.start, end: b.end })),
+                        frozenBreakIndexes: new Set(),
+                        planningFromMin: Number.NEGATIVE_INFINITY,
+                        suggestedBreaks: [],
+                        manualOnly: true
+                    };
+                }
                 const freezePlan = planBreaksForShiftWithFrozen(
                     segStartMin,
                     segEndMin,
@@ -22454,6 +22781,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             };
             const modalBreakEditorContext = getModalBreakEditorContext();
+            const modalBreaksManualOnly = Boolean(modalBreakEditorContext?.manualOnly);
+            // Ручные перерывы СВ: добавить (час в середине смены — общий перерыв СВ
+            // по умолчанию, время потом правится) и убрать конкретный.
+            const addPlannerSupervisorBreak = () => {
+                const ctx = modalBreakEditorContext;
+                if (!ctx) return;
+                const length = Math.min(60, Math.max(5, ctx.segDur));
+                // Первый — посередине смены; следующий — через час после последнего,
+                // если помещается, иначе тоже посередине (время потом правится).
+                const lastEnd = ctx.breaksLocal.reduce((max, b) => Math.max(max, Number(b.end) || 0), Number.NEGATIVE_INFINITY);
+                const afterLast = Math.round((lastEnd + 60) / 5) * 5;
+                const start = Number.isFinite(lastEnd) && afterLast + length <= ctx.segEndMin
+                    ? afterLast
+                    : Math.round((ctx.segStartMin + (ctx.segDur - length) / 2) / 5) * 5;
+                setModalState(m => ({
+                    ...m,
+                    svBreaksEdited: plannerSvBreaksKey,
+                    breaks: [...ctx.breaksLocal, { start, end: start + length }].sort((a, b) => a.start - b.start)
+                }));
+            };
+            const removePlannerSupervisorBreak = (index) => {
+                const ctx = modalBreakEditorContext;
+                if (!ctx) return;
+                setModalState(m => ({
+                    ...m,
+                    svBreaksEdited: plannerSvBreaksKey,
+                    breaks: ctx.breaksLocal.filter((_, i) => i !== index)
+                }));
+            };
+            // Что отправить при сохранении смены. У СВ — всегда явный список: и «без
+            // перерывов», и нетронутые сохранённые (иначе правка времени смены
+            // молча стёрла бы поставленные перерывы).
+            const modalBreaksPayload = () => {
+                if (modalBreaksManualOnly) return (modalBreakEditorContext?.breaksLocal || []).map(b => ({ start: b.start, end: b.end }));
+                return modalState.breaks && modalState.breaks.length ? modalState.breaks : null;
+            };
             const modalBreaksForEditor = Array.isArray(modalBreakEditorContext?.breaksLocal)
                 ? modalBreakEditorContext.breaksLocal
                 : [];
@@ -30376,7 +30739,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                    ничего не значил бы. Стрелки в «Дне» листают неделю — день
                    выбирают самой полосой. */
                 const wsStripDays = weekRange.map(date => {
-                    const onShift = plannerPhoneOnShiftCount(filteredOperators, date);
+                    const onShift = plannerPhoneOnShiftCount(plannerCoverageOperators, date);
                     return {
                         date,
                         weekday: wsCapitalize(formatWeekdayRu(date, 'short')),
@@ -30797,7 +31160,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             open={!!wsOperator}
                             onClose={() => setPlannerPhoneOperatorId(null)}
                             title={wsOperator?.name || 'Сотрудник'}
-                            subtitle={`${wsOperator?.direction || 'Без направления'} · ${plannerPhonePeriodLabel(viewMode, visibleRange)}`}
+                            subtitle={`${plannerRowDirectionLabel(wsOperator) || 'Без направления'} · ${plannerPhonePeriodLabel(viewMode, visibleRange)}`}
                         >
                             {wsOperator ? (
                                 <div className="flex flex-col gap-4">
@@ -30863,7 +31226,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     end: modalState.end,
                                                     shiftType: modalState.shiftType,
                                                     editIndex: modalState.editIndex,
-                                                    breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null
+                                                    breaks: modalBreaksPayload()
                                                 })}
                                             >
                                                 {modalState.editIndex !== null ? 'Обновить смену' : 'Сохранить смену'}
@@ -31019,10 +31382,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {!plannerReadOnly && !modalState.isDayOff && wsModalEditing && modalBreakEditorContext ? (
                                             <WsPhoneGroup
                                                 label="Перерывы"
-                                                hint={modalBreakConflictState.hasConflict
-                                                    ? 'Есть пересечение с перерывами направления — время можно поправить вручную.'
-                                                    : 'Предпросмотр до сохранения: время можно поправить вручную.'}
-                                                right={modalBreaksForEditor.length === 0 ? (
+                                                hint={modalBreaksManualOnly
+                                                    ? 'Перерывы супервайзера ставятся вручную. Их сумма вычитается из часов за день; без них — общий перерыв СВ.'
+                                                    : (modalBreakConflictState.hasConflict
+                                                        ? 'Есть пересечение с перерывами направления — время можно поправить вручную.'
+                                                        : 'Предпросмотр до сохранения: время можно поправить вручную.')}
+                                                right={modalBreaksManualOnly ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={addPlannerSupervisorBreak}
+                                                        className="shrink-0 text-[15px] font-semibold text-blue-600 active:opacity-60"
+                                                    >
+                                                        Добавить
+                                                    </button>
+                                                ) : modalBreaksForEditor.length === 0 ? (
                                                     <button
                                                         type="button"
                                                         onClick={() => setModalState(m => ({
@@ -31061,7 +31434,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             const dayOffset = Math.floor(b.start / 1440) * 1440;
                                                                             const nextStart = Math.max(val + dayOffset, modalBreakPlanningFromMin);
                                                                             nb[i] = { start: nextStart, end: nextStart + (b.end - b.start) };
-                                                                            return { ...m, breaks: nb };
+                                                                            return { ...m, breaks: nb, ...(modalBreaksManualOnly ? { svBreaksEdited: plannerSvBreaksKey } : {}) };
                                                                         });
                                                                     }}
                                                                 />
@@ -31078,10 +31451,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             const nb = source.map(x => ({ ...x }));
                                                                             if (!nb[i]) return m;
                                                                             nb[i] = { start: nb[i].start, end: val + Math.floor(b.end / 1440) * 1440 };
-                                                                            return { ...m, breaks: nb };
+                                                                            return { ...m, breaks: nb, ...(modalBreaksManualOnly ? { svBreaksEdited: plannerSvBreaksKey } : {}) };
                                                                         });
                                                                     }}
                                                                 />
+                                                                {modalBreaksManualOnly && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => removePlannerSupervisorBreak(i)}
+                                                                        aria-label={`Убрать перерыв ${i + 1}`}
+                                                                        className="shrink-0 px-1 text-[20px] leading-none text-slate-400 active:opacity-60"
+                                                                    >
+                                                                        ×
+                                                                    </button>
+                                                                )}
                                                             </span>
                                                         </WorkSchedulesValueRow>
                                                     )
@@ -31360,7 +31743,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             ))}
                                         </WsPhoneGroup>
 
-                                        {!plannerReadOnly ? (
+                                        {!plannerReadOnly && !plannerModalIsSupervisorRow ? (
                                             <button
                                                 type="button"
                                                 className={WS_PHONE_BUTTON.gray}
@@ -32442,7 +32825,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-20 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     <div className="font-medium">{op.name || '—'}</div>
                                     <div className="flex items-center justify-between mt-1">
-                                        <div className="text-xs text-slate-500">{op.direction || '—'}</div>
+                                        <div className="text-xs text-slate-500">{plannerRowDirectionLabel(op) || '—'}</div>
                                         {op.rate !== undefined && op.rate !== null && (
                                             <div className="text-xs font-bold text-slate-700">{op.rate}</div>
                                         )}
@@ -33344,7 +33727,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         <span className="text-xs text-slate-500">
                                             {(() => {
                                                 const op = operators.find(o => o.id === modalState.opId);
-                                                return op?.direction || 'Без направления';
+                                                return plannerRowDirectionLabel(op) || 'Без направления';
                                             })()}
                                         </span>
                                         {(() => {
@@ -33698,7 +34081,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                     )}
 
-                    {!isBulkSelectionModal && !modalState.multipleDates && modalTabControl && (
+                    {!isBulkSelectionModal && !modalState.multipleDates && modalTabControl && !plannerModalIsSupervisorRow && (
                     <div className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50/60">
                         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
@@ -34431,7 +34814,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     const earliestStart = Math.max(segStartMin, modalBreakPlanningFromMin);
                                     nb[idx].start = Math.max(earliestStart, Math.min(segEndMin - size, minutes - Math.round(size/2)));
                                     nb[idx].end = nb[idx].start + size;
-                                    return { ...m, breaks: nb };
+                                    return { ...m, breaks: nb, ...(modalBreaksManualOnly ? { svBreaksEdited: plannerSvBreaksKey } : {}) };
                                     });
                                 }}
                                 onDragEnd={() => { dragState.current = null; }}
@@ -34460,7 +34843,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     // Начало перерыва не может уехать в уже прошедшее время.
                                     const nextStart = Math.max(val + dayOffset, modalBreakPlanningFromMin);
                                     nb[i] = { start: nextStart, end: nextStart + (b.end - b.start) };
-                                    return { ...m, breaks: nb };
+                                    return { ...m, breaks: nb, ...(modalBreaksManualOnly ? { svBreaksEdited: plannerSvBreaksKey } : {}) };
                                 });
                             }} className="p-1 border rounded text-sm" />
                             <span className="text-xs">—</span>
@@ -34471,9 +34854,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     const nb = source.map(x => ({ ...x }));
                                     if (!nb[i]) return m;
                                     nb[i] = { start: nb[i].start, end: val + Math.floor((b.end/1440))*1440 };
-                                    return { ...m, breaks: nb };
+                                    return { ...m, breaks: nb, ...(modalBreaksManualOnly ? { svBreaksEdited: plannerSvBreaksKey } : {}) };
                                 });
                             }} className="p-1 border rounded text-sm" />
+                            {modalBreaksManualOnly && (
+                                <button
+                                    type="button"
+                                    onClick={() => removePlannerSupervisorBreak(i)}
+                                    aria-label={`Убрать перерыв ${i + 1}`}
+                                    title="Убрать перерыв"
+                                    className="px-1.5 text-slate-400 hover:text-rose-600"
+                                >
+                                    <FaIcon className="fas fa-times text-xs"></FaIcon>
+                                </button>
+                            )}
                             {modalBreakConflictState.conflictIndexes.has(i) && (
                                 <span
                                     className="text-[11px] text-rose-700"
@@ -34488,7 +34882,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )
                         ))}
 
-                        {(modalBreaksForEditor.length === 0) && (() => {
+                        {modalBreaksManualOnly && (
+                            <button
+                                type="button"
+                                className="px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 text-sm hover:bg-slate-50"
+                                onClick={addPlannerSupervisorBreak}
+                            >
+                                <FaIcon className="fas fa-plus mr-1 text-xs"></FaIcon>
+                                Добавить перерыв
+                            </button>
+                        )}
+                        {(modalBreaksForEditor.length === 0) && !modalBreaksManualOnly && (() => {
                             const ctx = modalBreakEditorContext;
                             if (!ctx || !Array.isArray(ctx.breaksLocal)) return null;
                             return (
@@ -34617,7 +35021,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         end: modalState.end,
                                         shiftType: modalState.shiftType,
                                         editIndex: modalState.editIndex,
-                                        breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null
+                                        breaks: modalBreaksPayload()
                                     })}
                                 >
                                     <FaIcon className="fas fa-save"></FaIcon>
@@ -37753,6 +38157,88 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 );
                             })}
+
+                            {canManageSupervisorBreaks && (
+                                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                                    <div className="mb-2">
+                                        <div className="font-semibold text-slate-900">Супервайзеры</div>
+                                        <div className="text-[12px] text-slate-500 mt-0.5">
+                                            Часы считаются по отметкам Clockster: приход → уход минус время перерыва.
+                                        </div>
+                                    </div>
+                                    {plannerSupervisorBreaks.loading ? (
+                                        <div className="py-2 text-xs text-slate-500">
+                                            <FaIcon className="fas fa-spinner fa-spin mr-1.5"></FaIcon>
+                                            Загрузка…
+                                        </div>
+                                    ) : plannerSupervisorBreaks.error ? (
+                                        <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-xs text-rose-700">
+                                            {plannerSupervisorBreaks.error}
+                                        </div>
+                                    ) : (plannerSupervisorBreaks.rows || []).length === 0 ? (
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-600">
+                                            В отделе нет супервайзеров.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            <div className="grid grid-cols-12 gap-2 px-1 text-[11px] text-slate-500">
+                                                <div className="col-span-4">Сотрудник</div>
+                                                <div className="col-span-5">Карточка Clockster</div>
+                                                <div className="col-span-3 text-right">Время перерыва</div>
+                                            </div>
+                                            {plannerSupervisorBreaks.rows.map(row => {
+                                                const draft = plannerSupervisorBreakDrafts[String(row.user_id)] || {};
+                                                const autoCard = row?.clockster?.source === 'auto' ? row.clockster : null;
+                                                const draftCard = String(draft.clockster_ext_id || '');
+                                                const hasCard = draftCard === PLANNER_SUPERVISOR_NO_CARD
+                                                    ? false
+                                                    : Boolean(draftCard || autoCard);
+                                                return (
+                                                    <div key={`planner-sv-break-${row.user_id}`} className="grid grid-cols-12 items-center gap-2">
+                                                        <div className="col-span-4 min-w-0">
+                                                            <div className="truncate text-sm font-medium text-slate-900">{row.name}</div>
+                                                            <div className="truncate text-[11px] text-slate-500">{row.direction || '—'}</div>
+                                                        </div>
+                                                        <div className="col-span-5 min-w-0">
+                                                            <CustomSelect
+                                                                searchable
+                                                                variant="ios"
+                                                                className="w-full"
+                                                                value={draft.clockster_ext_id || ''}
+                                                                onChange={(value) => updatePlannerSupervisorBreakDraft(row.user_id, 'clockster_ext_id', value || '')}
+                                                                options={[
+                                                                    { value: '', label: autoCard ? `По ФИО: ${autoCard.full_name}` : 'По ФИО — не найдена' },
+                                                                    { value: PLANNER_SUPERVISOR_NO_CARD, label: 'Нет карточки' },
+                                                                    // Чужие карточки не предлагаем: одни отметки дали бы часы двоим.
+                                                                    ...(plannerSupervisorBreaks.cards || [])
+                                                                        .filter(card => card.owner_id == null || String(card.owner_id) === String(row.user_id))
+                                                                        .map(card => ({ value: card.ext_id, label: card.full_name })),
+                                                                ]}
+                                                                searchPlaceholder="ФИО в Clockster…"
+                                                                ariaLabel={`Карточка Clockster: ${row.name}`}
+                                                            />
+                                                            {!hasCard && (
+                                                                <div className="mt-1 text-[11px] text-amber-700">Без карточки часы не считаются</div>
+                                                            )}
+                                                        </div>
+                                                        <div className="col-span-3 flex items-center justify-end gap-1.5">
+                                                            <input
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                value={draft.break_minutes ?? ''}
+                                                                onChange={(e) => updatePlannerSupervisorBreakDraft(row.user_id, 'break_minutes', e.target.value.replace(/[^\d]/g, '').slice(0, 3))}
+                                                                className="w-16 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-right text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                                aria-label={`Время перерыва: ${row.name}, минут`}
+                                                            />
+                                                            <span className="text-[11px] text-slate-500">мин</span>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     )}
 

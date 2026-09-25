@@ -193,6 +193,27 @@ export const departmentCodeOf = (user) => {
     return code ? String(code).toLowerCase() : null;
 };
 
+// Отделы, у СВ которых часы считаются по отметкам Clockster, а РОП ведёт их
+// график и перерыв (задача #352). Зеркало SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
+// в supervisor_hours.py — меняются вместе.
+const SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENTS = new Set(['op']);
+
+// Свой отдел пользователя — для СВ: его часы и график коллег-СВ.
+export const departmentHasSupervisorHours = (user) => {
+    const code = departmentCodeOf(user);
+    return Boolean(code && SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENTS.has(code));
+};
+
+// Возглавляемый отдел — для РОП: карточка отдела в users у главы может быть
+// другой или пустой, а права на СВ сервер даёт именно по главенству.
+export const headsSupervisorHoursDepartment = (user) => {
+    const codes = [];
+    const plural = user?.headed_department_codes ?? user?.headedDepartmentCodes;
+    if (Array.isArray(plural)) codes.push(...plural);
+    codes.push(user?.headed_department_code ?? user?.headedDepartmentCode);
+    return codes.some((code) => code && SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENTS.has(String(code).toLowerCase()));
+};
+
 // Отделы, операторам которых нельзя видеть смены коллег по отделу/направлению:
 // в «Мои смены» скрываются табы «Замены» и «Смены коллег» вместе с кнопками
 // обмена; бэкенд зеркалит это запретом /work_schedules/direction и shift_swap.

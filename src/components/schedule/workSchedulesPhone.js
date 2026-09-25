@@ -170,7 +170,9 @@ export const groupPlannerPhoneOperators = (operators) => {
   const groups = [];
   const byKey = new Map();
   (Array.isArray(operators) ? operators : []).forEach((op) => {
-    const label = String(op?.direction || '').trim() || 'Без направления';
+    // Строки СВ (задача #352) — своей группой, как в фильтре «Направления».
+    const isSupervisor = ['sv', 'supervisor'].includes(String(op?.role || '').trim().toLowerCase());
+    const label = (isSupervisor ? 'Супервайзеры' : String(op?.direction || '').trim()) || 'Без направления';
     if (!byKey.has(label)) {
       const group = { key: label, label, items: [] };
       byKey.set(label, group);

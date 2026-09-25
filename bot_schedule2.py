@@ -2517,11 +2517,17 @@ def _filter_operators_for_requester_scope(requester, requester_id, operators):
     if requester_role == 'trainer':
         member_ids = _trainer_work_schedule_member_ids()
         return [it for it in items if _operator_item_id(it) in member_ids]
-    # Супервайзер — только операторы своего отдела.
+    # Супервайзер — только операторы своего отдела (и СВ этого отдела — общий график СВ).
     if _is_supervisor_role(requester_role):
         scope = _department_scope_id_for_requester(requester_id)
         if scope is None:
-            return items
+            # СВ без отдела видит операторов, как раньше, но не СВ всей компании:
+            # из СВ — только себя.
+            return [
+                it for it in items
+                if not _is_supervisor_role(_normalize_user_role((it or {}).get('role')))
+                or _operator_item_id(it) == requester_id
+            ]
         member_ids = db.get_department_member_ids(scope)
         return [it for it in items if _operator_item_id(it) in member_ids]
     return []
@@ -16908,6 +16914,36 @@ def sv_daily_hours():
         role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
         is_global_admin = _is_global_admin_requester(role, requester_id)
+
+        # Вкладка «Супервайзеры» (задача #352): СВ отделов с часами по Clockster.
+        # РОП и глобальный админ видят всех таких СВ, сам СВ — только свою строку,
+        # и параметр id тут не читается вовсе.
+        if str(request.args.get('people') or '').strip().lower() == 'supervisors':
+            clockster_departments = set(db.clockster_hours_department_ids())
+            user_scope = None
+            if is_global_admin:
+                departments = sorted(clockster_departments)
+            else:
+                departments = sorted(set(_headed_department_ids(requester_id) or ()) & clockster_departments)
+                if not departments and _is_supervisor_role(role):
+                    own_department = db.get_user_department_id(requester_id)
+                    if own_department in clockster_departments:
+                        departments = [own_department]
+                        user_scope = [requester_id]
+            if not departments:
+                return jsonify({"error": "Forbidden"}), 403
+            supervisors = []
+            for department_id in departments:
+                part = db.get_daily_hours_for_all_month(
+                    month, department_id=department_id, people='supervisors', user_ids=user_scope)
+                supervisors.extend(part.get("operators", []))
+            return jsonify({
+                "status": "success",
+                "month": month,
+                "days_in_month": calendar.monthrange(_year, _mon)[1],
+                "operators": supervisors
+            }), 200
+
         if headed_dept_id is not None and not is_global_admin:
             if group_id is not None:
                 _grp = db.get_group(group_id)
@@ -30758,6 +30794,22 @@ def get_monthly_report_hours():
                     month,
                     department_id=None if _is_global_admin_requester(role, requester_id) else scope_department_id
                 )
+                # СВ отделов с часами по Clockster (задача #352) в операторский список
+                # больше не попадают — в общий файл они идут своими строками, как на
+                # вкладке «Все сотрудники». Рядовому СВ — нет: он видит только себя.
+                if _is_global_admin_requester(role, requester_id) or headed_dept_id is not None:
+                    clockster_departments = set(db.clockster_hours_department_ids())
+                    if _is_global_admin_requester(role, requester_id):
+                        sv_departments = sorted(clockster_departments)
+                    else:
+                        sv_departments = sorted(set(_headed_department_ids(requester_id) or ()) & clockster_departments)
+                    seen_ids = {row.get('operator_id') for row in (operators.get('operators') or [])}
+                    for sv_department in sv_departments:
+                        part = db.get_daily_hours_for_all_month(month, department_id=sv_department, people='supervisors')
+                        for row in part.get('operators') or []:
+                            if row.get('operator_id') not in seen_ids:
+                                operators.setdefault('operators', []).append(row)
+                                seen_ids.add(row.get('operator_id'))
             elif group_id is not None:
                 operators = db.get_daily_hours_by_group_month(group_id, month)
             else:
@@ -49426,7 +49478,10 @@ def get_operators_with_schedules():
             end_date,
             include_imported_statuses=include_imported_statuses,
             include_technical_issues=include_technical_issues,
-            include_offline_activities=include_offline_activities
+            include_offline_activities=include_offline_activities,
+            # Строки СВ (задача #352): РОП ведёт их график, СВ смотрит график
+            # коллег. Тренеру график СВ не нужен — его просмотр про операторов.
+            include_supervisors=_normalize_user_role(user_data[3]) != 'trainer'
         )
         _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
@@ -49443,6 +49498,188 @@ def get_operators_with_schedules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting operators with schedules: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _supervisor_hours_settings_scope(requester_id, role):
+    """Отделы, чьим СВ requester задаёт перерыв (задача #352): РОП — свой отдел,
+    глобальный админ — все отделы с часами СВ по Clockster. Сам СВ — нет: иначе
+    он выставлял бы себе перерыв, который вычитают из его же часов."""
+    clockster_departments = set(db.clockster_hours_department_ids())
+    if not clockster_departments:
+        return []
+    if _is_global_admin_requester(role, requester_id):
+        return sorted(clockster_departments)
+    headed = set(_headed_department_ids(requester_id) or ())
+    return sorted(headed & clockster_departments)
+
+
+@app.route('/api/work_schedules/supervisor_hours_settings', methods=['GET', 'POST'])
+@require_api_key
+def supervisor_hours_settings():
+    """Перерыв СВ и его карточка Clockster (задача #352).
+
+    GET — СВ отделов requester'а с перерывом, направлением и карточкой +
+    справочник карточек Clockster для ручной привязки.
+    POST {"items": [{"user_id", "break_minutes"?, "clockster_ext_id"?}]} —
+    пакетом, все строки проверяются до записи; затем часы СВ за месяц
+    пересчитываются с новым перерывом."""
+    try:
+        requester_id, user_data, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = _normalize_user_role(user_data[3])
+        scope = _supervisor_hours_settings_scope(requester_id, role)
+        if not scope:
+            return jsonify({"error": "Перерыв супервайзеров задаёт руководитель отдела"}), 403
+        if request.method == 'GET':
+            return jsonify(db.get_supervisor_hours_settings(scope)), 200
+
+        payload = request.get_json(silent=True) or {}
+        items = payload.get('items')
+        allowed = [row['user_id'] for row in db.get_supervisor_hours_settings(scope)['supervisors']]
+        result = db.save_supervisor_hours_settings(items, actor_id=requester_id, allowed_user_ids=allowed)
+        return jsonify({"status": "success", **result, **db.get_supervisor_hours_settings(scope)}), 200
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in supervisor_hours_settings: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _supervisor_marks_access(requester_id, role, target_user_id):
+    """Окно дня СВ (задача #352): 'edit' — РОП отдела СВ или глобальный админ
+    (дописывают и снимают ручные отметки), 'view' — сам СВ смотрит свои
+    отметки, None — нельзя."""
+    clockster_departments = set(db.clockster_hours_department_ids())
+    target_department = db.get_user_department_id(target_user_id)
+    if target_department is None or int(target_department) not in clockster_departments:
+        return None
+    if _is_global_admin_requester(role, requester_id):
+        return 'edit'
+    if int(target_department) in set(_headed_department_ids(requester_id) or ()):
+        return 'edit'
+    if int(target_user_id) == int(requester_id) and _is_supervisor_role(role):
+        return 'view'
+    return None
+
+
+def _supervisor_day_response(user_id, day, access):
+    detail = db.get_supervisor_clockster_day(user_id, day)
+    detail['can_edit'] = access == 'edit'
+    return jsonify(detail), 200
+
+
+@app.route('/api/sv/supervisor_day', methods=['GET'])
+@require_api_key
+def supervisor_clockster_day():
+    """Отметки Clockster и ручные отметки СВ за день с разбором пар."""
+    try:
+        requester_id, user_data, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        user_param = request.args.get('user_id')
+        if not user_param or not str(user_param).isdigit():
+            return jsonify({"error": "Не указан сотрудник"}), 400
+        day = request.args.get('date')
+        if not day:
+            return jsonify({"error": "Не указан день"}), 400
+        access = _supervisor_marks_access(requester_id, _normalize_user_role(user_data[3]), int(user_param))
+        if not access:
+            return jsonify({"error": "Forbidden"}), 403
+        return _supervisor_day_response(int(user_param), day, access)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in supervisor_clockster_day: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _supervisor_view_date(value):
+    """День окна, который вернуть после правки. Проверяется ДО записи: иначе
+    отметка уже сохранена, а клиент получает 400 и повторяет — «уже есть»."""
+    if not value:
+        return None
+    try:
+        return db._normalize_schedule_date(value).isoformat()
+    except (TypeError, ValueError):
+        raise ValueError('Неверная дата окна: нужен формат ГГГГ-ММ-ДД')
+
+
+@app.route('/api/sv/supervisor_marks', methods=['POST'])
+@require_api_key
+def add_supervisor_manual_mark():
+    """РОП дописывает СВ приход/уход или исправляет отметку Clockster.
+    Body: {"user_id", "at": "YYYY-MM-DDTHH:MM" (по Алматы), "kind": "in"|"out",
+    "comment"?, "replaces_clockster"?: {"at", "kind"} — исправляемая отметка,
+    "view_date"? — день окна, который вернуть обновлённым}."""
+    try:
+        requester_id, user_data, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        payload = request.get_json(silent=True) or {}
+        try:
+            user_id = int(payload.get('user_id'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Не указан сотрудник"}), 400
+        access = _supervisor_marks_access(requester_id, _normalize_user_role(user_data[3]), user_id)
+        if access != 'edit':
+            return jsonify({"error": "Отметки дописывает руководитель отдела"}), 403
+        view_date = _supervisor_view_date(payload.get('view_date'))
+        replaces = payload.get('replaces_clockster')
+        added = db.add_supervisor_manual_mark(
+            user_id, payload.get('at'), payload.get('kind'),
+            actor_id=requester_id, comment=payload.get('comment'),
+            replaces_clockster=replaces if isinstance(replaces, dict) else None)
+        return _supervisor_day_response(user_id, view_date or added['day'], access)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in add_supervisor_manual_mark: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sv/supervisor_marks/<int:mark_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@require_api_key
+def supervisor_manual_mark_item(mark_id):
+    """РОП меняет (PATCH {"at", "kind", "comment"?}) или снимает (DELETE) ручную
+    отметку СВ. Право — по владельцу отметки, как у добавления: так РОП снимет
+    и отметку уволенного СВ, которую сам же дописал. ?view_date= / "view_date" —
+    день окна, который вернуть обновлённым."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, user_data, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        owner_id = db.supervisor_manual_mark_user(mark_id)
+        access = _supervisor_marks_access(requester_id, _normalize_user_role(user_data[3]), owner_id)
+        if access != 'edit':
+            return jsonify({"error": "Отметки меняет руководитель отдела"}), 403
+        if request.method == 'PATCH':
+            payload = request.get_json(silent=True) or {}
+            view_date = _supervisor_view_date(payload.get('view_date'))
+            changed = db.update_supervisor_manual_mark(
+                mark_id, payload.get('at'), payload.get('kind'),
+                actor_id=requester_id, comment=payload.get('comment'))
+        else:
+            view_date = _supervisor_view_date(request.args.get('view_date'))
+            changed = db.delete_supervisor_manual_mark(mark_id, actor_id=requester_id)
+        return _supervisor_day_response(owner_id, view_date or changed['day'], access)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in supervisor_manual_mark_item: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -66219,6 +66456,29 @@ def group_late_nightly_job():
             logging.info("Отметки: из кэша убрано строк — %s", removed)
     except Exception:
         logging.exception("Отметки: ночная джоба не удалась")
+    # Часы СВ по Clockster (задача #352) — сразу после досбора кэша, на свежих днях.
+    # Окно — весь текущий месяц и неделя назад: так закрываются и ночные смены
+    # (уход после полуночи попадает в кэш следующей ночью), и хвост прошлого
+    # месяца первых чисел, и дни, которые досбор добрал только сейчас.
+    try:
+        today = datetime.now(group_late.TZ).date()
+        yesterday = today - timedelta(days=1)
+        start = min(today.replace(day=1), today - timedelta(days=8))
+        # День, собранный при сбое Clockster, досбор больше не трогает, а часы СВ
+        # по нему не считаются. Пересобираем такие дни недели здесь.
+        if _group_late_config.is_clockster_configured():
+            for day in db.glb_attendance_days_without_clockster(today - timedelta(days=8), yesterday):
+                try:
+                    _attendance_cache.build_day(db, day)
+                except Exception:
+                    logging.exception("Отметки: пересборка дня %s с Clockster не удалась", day)
+        # Прошлый месяц уже закрыт: его дни берут прежний вычет перерыва, чтобы
+        # правка перерыва в первые дни месяца не переписала закрытый месяц.
+        summary = db.recalculate_supervisor_clockster_hours(
+            start, yesterday, keep_break_before=today.replace(day=1))
+        logging.info("Часы СВ по Clockster: %s", summary)
+    except Exception:
+        logging.exception("Часы СВ по Clockster: пересчёт не удался")
 
 
 async def _group_late_poll_cycle():

@@ -681,6 +681,13 @@ export const HoursAccountingPhone = ({
           value={scope.reportScope === 'all' ? 'Общий' : 'По СВ'}
           onClick={() => setPicker('scope')}
         />
+        {scope.peopleKinds ? (
+          <HoursPhoneFilterRow
+            title="Сотрудники"
+            value={(scope.peopleKinds.find((item) => item.value === scope.peopleKind) || scope.peopleKinds[0]).label}
+            onClick={() => setPicker('people')}
+          />
+        ) : null}
         {scope.groups.length ? (
           <HoursPhoneFilterRow
             title="Группа"
@@ -765,6 +772,18 @@ export const HoursAccountingPhone = ({
         hint="Общий отчёт собирает всех операторов сразу и не спрашивает группу."
       />
 
+      {scope.peopleKinds ? (
+        <HoursPhonePicker
+          open={picker === 'people'}
+          onClose={closePicker}
+          title="Сотрудники"
+          options={scope.peopleKinds}
+          isSelected={(value) => value === scope.peopleKind}
+          onPick={(value) => { scope.onPeopleKind(value); closePicker(); }}
+          hint="Часы супервайзеров считаются по отметкам Clockster за вычетом перерыва."
+        />
+      ) : null}
+
       <HoursPhonePicker
         open={picker === 'group'}
         onClose={closePicker}
@@ -837,13 +856,20 @@ export const HoursAccountingPhone = ({
                   <span className={`shrink-0 text-[16px] tabular-nums ${row.valueClassName || 'text-slate-500'}`}>{row.value}</span>
                 </div>
               ))}
-              <HoursPhoneNumberRow
-                label="Норма часов"
-                unit="ч"
-                step="0.1"
-                value={shownRow.op.norm_hours ?? 0}
-                onChange={(value) => actions.onNormChange(shownRow.op.operator_id, value)}
-              />
+              {actions.isNormLocked?.(shownRow.op) ? (
+                <div className="sa-m-row flex items-center gap-3 px-4 py-3" style={NO_WRAP}>
+                  <span className="min-w-0 flex-1 truncate text-[16px] text-slate-900">Норма часов</span>
+                  <span className="shrink-0 text-[16px] tabular-nums text-slate-500">{formatHoursPhoneHours(shownRow.op.norm_hours ?? 0)} ч</span>
+                </div>
+              ) : (
+                <HoursPhoneNumberRow
+                  label="Норма часов"
+                  unit="ч"
+                  step="0.1"
+                  value={shownRow.op.norm_hours ?? 0}
+                  onChange={(value) => actions.onNormChange(shownRow.op.operator_id, value)}
+                />
+              )}
             </AuctionPhoneGroup>
 
             {calendar ? (

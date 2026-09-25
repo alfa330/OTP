@@ -33,6 +33,9 @@ from collections import defaultdict
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 
+import supervisor_hours
+from supervisor_hours import SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
+
 logging.basicConfig(level=logging.INFO)
 
 os.environ['TZ'] = 'Asia/Almaty'
@@ -3683,6 +3686,84 @@ class Database:
                     CHECK (cross_operator_gap_minutes >= 0 AND cross_operator_gap_minutes <= 240)
                 );
             """)
+            # Задача #352. Перерыв супервайзера, который РОП вычитает из его часов по
+            # Clockster (supervisor_hours.py). На человека, а не на направление: у СВ
+            # направления нет, а значение у разных СВ разное. Нет строки или NULL —
+            # действует supervisor_hours.DEFAULT_BREAK_MINUTES (час), таблицу не засеваем.
+            # no_clockster_card — РОП явно сказал «у этого СВ карточки нет»: сшивка по
+            # ФИО могла найти чужого человека, и без флага отменить её было бы нечем.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS supervisor_hours_settings (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    break_minutes INTEGER NULL,
+                    no_clockster_card BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CHECK (break_minutes IS NULL OR (break_minutes >= 0 AND break_minutes <= 240))
+                );
+            """)
+            # Ручные отметки СВ (задача #352): РОП дописывает приход/уход, который
+            # терминал Clockster не записал (забыл отметить уход, не зарегистрирован
+            # на терминале). Сам Clockster не меняем — отметка живёт у нас и идёт в
+            # ночной пересчёт наравне с терминальной. Удаление мягкое: по этим
+            # строкам считаются часы и ЗП, и кто что дописал/снял, должно остаться.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS supervisor_manual_marks (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    mark_at TIMESTAMPTZ NOT NULL,
+                    kind VARCHAR(8) NOT NULL CHECK (kind IN ('in', 'out')),
+                    comment TEXT NULL,
+                    -- Правка ручной отметки: прежняя строка мягко снимается, новая
+                    -- ссылается на неё — история правок остаётся.
+                    replaces_mark_id BIGINT NULL REFERENCES supervisor_manual_marks(id) ON DELETE SET NULL,
+                    -- Исправление отметки Clockster: исходная (время и тип) в пары не
+                    -- идёт, вместо неё считается эта. Снятие исправления её возвращает.
+                    replaces_clockster_at TIMESTAMPTZ NULL,
+                    replaces_clockster_kind VARCHAR(8) NULL CHECK (replaces_clockster_kind IN ('in', 'out')),
+                    created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    deleted_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    deleted_at TIMESTAMPTZ NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_supervisor_manual_marks_user_at
+                    ON supervisor_manual_marks(user_id, mark_at) WHERE deleted_at IS NULL;
+            """)
+            # Разовые задачи старта: строка появляется один раз, и задача с её ключом
+            # больше не выполняется. Нужна там, где повторный запуск на каждом старте
+            # стёр бы уже новые, правильные данные.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS app_one_time_jobs (
+                    job_key TEXT PRIMARY KEY,
+                    done_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+            # Перерывы на сменах СВ до задачи #352 ставил запасной профиль операторов
+            # (15/30/15): у СВ нет направления. Теперь перерывы СВ РОП ставит только
+            # руками (_save_shift_tx), поэтому автоматические снимаем — ОДИН раз, при
+            # первом старте нового кода: на каждом старте это стёрло бы и ручные.
+            # Смены дней, когда человек ещё был оператором (операторское членство в
+            # группе), не трогаем: это его операторское прошлое, а не график СВ.
+            cursor.execute("""
+                INSERT INTO app_one_time_jobs (job_key) VALUES (%s)
+                ON CONFLICT (job_key) DO NOTHING RETURNING job_key
+            """, ('task352_drop_auto_supervisor_breaks',))
+            if cursor.fetchone():
+                cursor.execute("""
+                DELETE FROM shift_breaks sb
+                USING work_shifts ws, users u, departments d
+                WHERE sb.shift_id = ws.id
+                  AND ws.operator_id = u.id
+                  AND u.department_id = d.id
+                  AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                  AND lower(COALESCE(d.code, '')) = ANY(%s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM group_operator_memberships gom
+                      WHERE gom.operator_id = ws.operator_id
+                        AND gom.start_date <= ws.shift_date
+                        AND (gom.end_date IS NULL OR gom.end_date >= ws.shift_date)
+                  )
+                """, (list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES),))
 
             # Days off table
             cursor.execute("""
@@ -26481,10 +26562,18 @@ class Database:
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
-    def get_daily_hours_for_all_month(self, month, department_id=None):
+    def get_daily_hours_for_all_month(self, month, department_id=None, people='operators', user_ids=None):
         """
         Возвращает все daily_hours и агрегаты work_hours для всех операторов за месяц YYYY-MM.
         Аналогично get_daily_hours_by_supervisor_month, но без фильтра по супервайзеру.
+
+        people='supervisors' (задача #352) — вместо операторов СВ отделов с часами по
+        Clockster, в той же форме строк: экран показывает их той же таблицей.
+        В режиме операторов такие СВ, наоборот, не выводятся — у главы ОП они
+        попадали сюда через строки daily_hours с нулём и выглядели операторами.
+        Исключаются только те, у кого в месяце нет операторского членства в
+        группе: бывший оператор, ставший СВ, остаётся в месяцах, когда работал.
+        user_ids — сузить выборку до этих людей (СВ видит только себя).
         """
         import calendar as _py_calendar
         from datetime import date as _date
@@ -26496,6 +26585,39 @@ class Database:
             end = _date(year, mon, days)
         except Exception as e:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
+
+        supervisors_mode = str(people or 'operators').strip().lower() == 'supervisors'
+        scope_ids = None
+        if user_ids is not None:
+            scope_ids = sorted({int(v) for v in user_ids if v is not None})
+        clockster_codes = list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES)
+        if supervisors_mode:
+            # Уволенный СВ остаётся в месяце, где у него есть отработанные дни.
+            people_where = (
+                "(" + self.SUPERVISOR_ROLES_SQL + " AND " + self.SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL + """
+                    AND (lower(COALESCE(u.status, '')) <> 'fired'
+                         OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.operator_id = u.id
+                                      AND dh.day >= %s AND dh.day <= %s)))"""
+            )
+            people_params = (clockster_codes, start, end)
+        else:
+            # Историческая видимость: берём не только текущих операторов, но и всех,
+            # кто был оператором В ЭТОМ МЕСЯЦЕ (есть daily_hours или членство в группе),
+            # даже если сейчас стал СВ/уволен. Иначе прошлый отчёт «теряет» людей.
+            people_where = """(
+                    u.role = 'operator'
+                    OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.operator_id = u.id AND dh.day >= %s AND dh.day <= %s)
+                    OR EXISTS (SELECT 1 FROM group_operator_memberships gom
+                               WHERE gom.operator_id = u.id AND gom.start_date <= %s
+                                 AND (gom.end_date IS NULL OR gom.end_date >= %s))
+                )
+                AND NOT (
+                    """ + self.SUPERVISOR_ROLES_SQL + " AND " + self.SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL + """
+                    AND NOT EXISTS (SELECT 1 FROM group_operator_memberships gom2
+                                    WHERE gom2.operator_id = u.id AND gom2.start_date <= %s
+                                      AND (gom2.end_date IS NULL OR gom2.end_date >= %s))
+                )"""
+            people_params = (start, end, end, start, clockster_codes, end, start)
 
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -26517,24 +26639,18 @@ class Database:
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) as calls_per_hour,
                     COALESCE(w.fines, 0) as fines,
-                    u.department_id
+                    u.department_id,
+                    u.role,
+                    u.job_title
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
                 LEFT JOIN directions d ON u.direction_id = d.id
-                -- Историческая видимость: берём не только текущих операторов, но и всех,
-                -- кто был оператором В ЭТОМ МЕСЯЦЕ (есть daily_hours или членство в группе),
-                -- даже если сейчас стал СВ/уволен. Иначе прошлый отчёт «теряет» людей.
-                WHERE (
-                    u.role = 'operator'
-                    OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.operator_id = u.id AND dh.day >= %s AND dh.day <= %s)
-                    OR EXISTS (SELECT 1 FROM group_operator_memberships gom
-                               WHERE gom.operator_id = u.id AND gom.start_date <= %s
-                                 AND (gom.end_date IS NULL OR gom.end_date >= %s))
-                )
+                WHERE """ + people_where + """
                 AND (%s::int IS NULL OR u.department_id = %s::int)
+                AND (%s::int[] IS NULL OR u.id = ANY(%s::int[]))
                 ORDER BY u.name
-            """, (month, month, start, end, end, start, department_id, department_id))
+            """, (month, month, *people_params, department_id, department_id, scope_ids, scope_ids))
             operator_rows = cursor.fetchall()
 
             if not operator_rows:
@@ -26661,11 +26777,19 @@ class Database:
                 end_date=end
             )
 
+            # У СВ своего направления нет — берём направления групп, которые он ведёт.
+            supervisor_directions = (
+                self._supervisor_directions_tx(cursor, op_ids, start, end) if supervisors_mode else {}
+            )
+
             operators = []
             for row in operator_rows:
                 (op_id, op_name, rate, status, sup_id, hire_date, direction_name, calculation_model_raw, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour, fines, operator_department_id) = row
+                total_calls, total_efficiency_hours, calls_per_hour, fines, operator_department_id,
+                user_role, job_title) = row
+                if supervisors_mode:
+                    direction_name = supervisor_directions.get(op_id) or direction_name
                 calculation_model_code = self._normalize_calculation_model_code(calculation_model_raw, direction_name)
                 op_daily = daily_map.get(op_id, {})
                 daily_dial_total = sum(
@@ -26693,6 +26817,10 @@ class Database:
                 offline_activity_hours = float(offline_totals_by_operator.get(op_id, 0.0)) if isinstance(offline_totals_by_operator, dict) else 0.0
                 no_phone_hours = float(no_phone_totals_by_operator.get(op_id, 0.0))
                 accounted_hours = float(regular_hours or 0.0) + training_hours + technical_issue_hours + offline_activity_hours
+                if supervisors_mode:
+                    # Часы СВ — только Clockster минус перерыв: собрание или тренинг СВ
+                    # проходит в офисе и уже есть в отметках, второй раз не прибавляем.
+                    accounted_hours = float(regular_hours or 0.0)
                 chat_metrics_by_day = chat_metrics_by_operator.get(op_id, {}) if isinstance(chat_metrics_by_operator, dict) else {}
                 chat_metric_totals = chat_totals_by_operator.get(op_id, {}) if isinstance(chat_totals_by_operator, dict) else {}
                 if calculation_model_code == CALCULATION_MODEL_CHAT_MANAGER:
@@ -26733,6 +26861,10 @@ class Database:
                     "calculation_model_code": calculation_model_code,
                     "calculationModelCode": calculation_model_code,
                     "supervisor_id": sup_id,
+                    "role": user_role,
+                    "employee_kind": "supervisor" if supervisors_mode else "operator",
+                    "job_title": job_title or ("Супервайзер" if supervisors_mode else None),
+                    "hours_source": "clockster" if supervisors_mode else None,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "dismissal_date": self._dismissal_date_iso(dismissal_dates, op_id),
@@ -26777,6 +26909,772 @@ class Database:
                 operator_id=int(operator_id),
                 month=str(month)
             )
+
+    # ---- Часы супервайзеров по Clockster (задача #352) ----
+    # СВ не сидят на линии, статусов у них нет, и операторский пересчёт «смена ×
+    # статусы» даёт им ноль. У СВ отделов SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
+    # часы считаются из отметок Clockster, которые раздел «Отметки» уже копит в
+    # glb_attendance_rows, минус перерыв СВ из supervisor_hours_settings.
+    #
+    # Роль берётся НА ДАТУ, а не текущая: день, на который у человека есть
+    # операторское членство в группе, — операторский (он ещё работал на линии), и
+    # его считает операторский пересчёт по статусам. По Clockster — только дни СВ.
+
+    SUPERVISOR_ROLES_SQL = "lower(COALESCE(u.role, '')) IN ('sv', 'supervisor')"
+    SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL = (
+        "u.department_id IN (SELECT dd.id FROM departments dd WHERE lower(COALESCE(dd.code, '')) = ANY(%s))"
+    )
+    SUPERVISOR_NO_CLOCKSTER_CARD = '__none__'
+
+    def _clockster_hours_supervisor_ids_tx(self, cursor, user_ids=None):
+        """СВ, чьи часы считаются по Clockster. user_ids=None — все такие СВ."""
+        params = [list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES)]
+        user_filter = ''
+        if user_ids is not None:
+            ids = sorted({int(v) for v in user_ids if v is not None})
+            if not ids:
+                return set()
+            user_filter = ' AND u.id = ANY(%s)'
+            params.append(ids)
+        cursor.execute(
+            "SELECT u.id FROM users u WHERE " + self.SUPERVISOR_ROLES_SQL
+            + " AND " + self.SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL + user_filter,
+            tuple(params),
+        )
+        return {int(row[0]) for row in cursor.fetchall()}
+
+    def _operator_membership_days_tx(self, cursor, user_ids, date_from, date_to):
+        """{(человек, день)} периода, покрытые операторским членством в группе."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        if not ids or date_to < date_from:
+            return set()
+        cursor.execute("""
+            SELECT operator_id, start_date, end_date
+            FROM group_operator_memberships
+            WHERE operator_id = ANY(%s)
+              AND start_date <= %s
+              AND (end_date IS NULL OR end_date >= %s)
+        """, (ids, date_to, date_from))
+        days = set()
+        for operator_id, membership_start, membership_end in cursor.fetchall():
+            first = max(date_from, membership_start)
+            last = min(date_to, membership_end or date_to)
+            for day in supervisor_hours.iter_days(first, last):
+                days.add((int(operator_id), day))
+        return days
+
+    def clockster_hours_department_ids(self):
+        """id отделов, у СВ которых часы по Clockster (коды засеяны миграцией, id разные)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM departments WHERE lower(COALESCE(code, '')) = ANY(%s)",
+                (list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES),),
+            )
+            return sorted(int(row[0]) for row in cursor.fetchall())
+
+    def _supervisor_hours_settings_tx(self, cursor, user_ids):
+        """{СВ: {'break_minutes', 'custom_break', 'no_card'}}; без строки — час по умолчанию."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        result = {
+            uid: {'break_minutes': supervisor_hours.DEFAULT_BREAK_MINUTES, 'custom_break': False, 'no_card': False}
+            for uid in ids
+        }
+        if not ids:
+            return result
+        cursor.execute("""
+            SELECT user_id, break_minutes, no_clockster_card
+            FROM supervisor_hours_settings WHERE user_id = ANY(%s)
+        """, (ids,))
+        for user_id, minutes, no_card in cursor.fetchall():
+            entry = result[int(user_id)]
+            if minutes is not None:
+                entry['break_minutes'] = int(minutes)
+                entry['custom_break'] = True
+            entry['no_card'] = bool(no_card)
+        return result
+
+    def _supervisor_directions_tx(self, cursor, user_ids, period_start, period_end):
+        """{СВ: «Поток, Основа ОП»} — направления групп, которые СВ ведёт в периоде.
+
+        Своего направления у СВ нет, и ставить его в карточку нельзя: по
+        users.direction_id людей отбирают воронка ОП, табло Тез КЦ и план чатов,
+        и СВ попал бы туда оператором. Направление группы — действующее
+        (_GROUP_EFFECTIVE_DIRECTION_SQL): у части групп оно не задано, но
+        выводится из модели расчёта."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        if not ids:
+            return {}
+        cursor.execute("""
+            SELECT gsm.supervisor_id, string_agg(DISTINCT dn.name, ', ' ORDER BY dn.name)
+            FROM group_supervisor_memberships gsm
+            JOIN groups g ON g.id = gsm.group_id
+            JOIN directions dn ON dn.id = (""" + self._GROUP_EFFECTIVE_DIRECTION_SQL + """)
+            WHERE gsm.supervisor_id = ANY(%s)
+              AND gsm.start_date <= %s
+              AND (gsm.end_date IS NULL OR gsm.end_date >= %s)
+            GROUP BY gsm.supervisor_id
+        """, (ids, period_end, period_start))
+        return {int(row[0]): row[1] for row in cursor.fetchall() if row[1]}
+
+    def _supervisor_clockster_cards_tx(self, cursor, people, settings=None):
+        """{СВ: {'ext_id', 'full_name', 'source'} или None} — карточка Clockster человека.
+
+        Ручная привязка (glb_employee_links, та же таблица, что в «Отметках»)
+        главнее автоматической; «нет карточки» (no_clockster_card) главнее обеих.
+        Автоматически сшиваем по ФИО тем же ключом, что «Отметки»
+        (_glb_name_keys): «Иванов Пётр Сергеевич» у нас и «Иванов Пётр» в
+        Clockster сходятся по «Фамилия Имя». Не сшиваем, если отчества есть с
+        обеих сторон и разные, если ключ неоднозначен в Clockster (тёзки) или
+        среди самих СВ — приписать СВ чужие часы хуже, чем не посчитать их вовсе.
+        Карточка, у которой уже есть ручная строка (чья угодно или «не наш»), в
+        автоматику не идёт."""
+        people = [(int(uid), name) for uid, name in (people or [])]
+        if settings is None:
+            settings = self._supervisor_hours_settings_tx(cursor, [uid for uid, _ in people])
+        cursor.execute(
+            "SELECT workpace_ext_id, user_id FROM glb_employee_links WHERE workpace_ext_id LIKE %s",
+            ('clockster:%',),
+        )
+        manual_by_user = {}
+        taken = set()
+        for ext_id, user_id in cursor.fetchall():
+            taken.add(ext_id)
+            if user_id is not None:
+                manual_by_user.setdefault(int(user_id), ext_id)
+        cursor.execute("SELECT ext_id, full_name FROM glb_employees WHERE source = 'clockster'")
+        names = {}
+        card_tokens = {}
+        by_full, by_short = {}, {}
+        for ext_id, full_name in cursor.fetchall():
+            names[ext_id] = full_name
+            full_key, short_key = self._glb_name_keys(full_name)
+            card_tokens[ext_id] = len(full_key.split()) if full_key else 0
+            if ext_id in taken:
+                continue
+            self._glb_index_put(by_full, full_key, ext_id)
+            self._glb_index_put(by_short, short_key, ext_id)
+
+        # Тёзки среди самих СВ: одна карточка не должна сшиться с двумя людьми.
+        # Считаем по ВСЕМ СВ с часами по Clockster, а не по переданным: окно дня
+        # и пересчёт после ручной отметки зовут этот метод с одним человеком, и
+        # тёзка тогда был бы не виден — сшивка разошлась бы с ночным пересчётом.
+        our_keys = {}
+        for user_id, name in people:
+            full_key, short_key = self._glb_name_keys(name)
+            our_keys[user_id] = (full_key, short_key)
+        all_supervisors = self._clockster_hours_supervisor_ids_tx(cursor)
+        cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sorted(all_supervisors | set(our_keys)),))
+        short_counts = {}
+        for _user_id, name in cursor.fetchall():
+            _full_key, short_key = self._glb_name_keys(name)
+            if short_key:
+                short_counts[short_key] = short_counts.get(short_key, 0) + 1
+
+        cards = {}
+        for user_id, _name in people:
+            if (settings.get(user_id) or {}).get('no_card'):
+                cards[user_id] = None
+                continue
+            if user_id in manual_by_user:
+                ext_id = manual_by_user[user_id]
+                cards[user_id] = {'ext_id': ext_id, 'full_name': names.get(ext_id), 'source': 'manual'}
+                continue
+            full_key, short_key = our_keys[user_id]
+            ext_id = None
+            if full_key and full_key in by_full:
+                ext_id = by_full[full_key]          # None — тёзки в Clockster
+            elif short_key and short_key in by_short and short_counts.get(short_key, 0) == 1:
+                candidate = by_short[short_key]
+                our_tokens = len(full_key.split()) if full_key else 0
+                # Отчество с обеих сторон и разное — это другой человек.
+                if candidate and (our_tokens <= 2 or card_tokens.get(candidate, 0) <= 2):
+                    ext_id = candidate
+            cards[user_id] = (
+                {'ext_id': ext_id, 'full_name': names.get(ext_id), 'source': 'auto'} if ext_id else None
+            )
+        return cards
+
+    def _fill_supervisor_norm_hours_tx(self, cursor, month, user_ids):
+        """Норма СВ за месяц — та же формула, что у операторов (auto_fill_norm_hours):
+        рабочие дни × 8 × ставка. Пишется только там, где норма ещё ноль, чтобы
+        не затереть норму, которую РОП поставил руками."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        if not ids:
+            return 0
+        work_days = self._get_month_work_days(month)
+        cursor.execute("""
+            INSERT INTO work_hours (operator_id, month, norm_hours)
+            SELECT u.id, %s, (%s::float * 8.0 * COALESCE(
+                (SELECT wr.rate FROM work_hours wr
+                 WHERE wr.operator_id = u.id AND wr.rate IS NOT NULL AND wr.month <= %s
+                 ORDER BY wr.month DESC LIMIT 1),
+                u.rate, 1.0))::float
+            FROM users u
+            WHERE u.id = ANY(%s)
+            ON CONFLICT (operator_id, month) DO UPDATE
+              SET norm_hours = EXCLUDED.norm_hours
+              WHERE COALESCE(work_hours.norm_hours, 0) = 0
+        """, (month, work_days, month, ids))
+        return cursor.rowcount or 0
+
+    SUPERVISOR_MANUAL_MARK_MAX_AGE_DAYS = 62
+
+    def _supervisor_manual_marks_tx(self, cursor, user_ids, date_from, date_to):
+        """Ручные отметки РОП за дни [date_from, date_to] (по Алматы).
+
+        Возвращает ({СВ: [отметка]}, {СВ: {ключ исправленной отметки Clockster}}).
+        Исправление попадает во второй словарь, если в период попадает время
+        исходной отметки, — иначе исходная вернулась бы в пары на краю окна."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        if not ids:
+            return {}, {}
+        start_at = datetime.combine(date_from, dt_time.min, tzinfo=supervisor_hours.TZ)
+        end_at = datetime.combine(date_to + timedelta(days=1), dt_time.min, tzinfo=supervisor_hours.TZ)
+        cursor.execute("""
+            SELECT m.id, m.user_id, m.mark_at, m.kind, m.comment, m.created_at, u.name,
+                   m.replaces_clockster_at, m.replaces_clockster_kind
+            FROM supervisor_manual_marks m
+            LEFT JOIN users u ON u.id = m.created_by
+            WHERE m.user_id = ANY(%s) AND m.deleted_at IS NULL
+              AND ((m.mark_at >= %s AND m.mark_at < %s)
+                   OR (m.replaces_clockster_at >= %s AND m.replaces_clockster_at < %s))
+            ORDER BY m.mark_at, m.id
+        """, (ids, start_at, end_at, start_at, end_at))
+        marks, replaced = {}, {}
+        for (mark_id, user_id, mark_at, kind, comment, created_at, author,
+             replaces_at, replaces_kind) in cursor.fetchall():
+            user_id = int(user_id)
+            if replaces_at is not None and replaces_kind:
+                key = supervisor_hours.mark_key(replaces_at, replaces_kind)
+                if key:
+                    replaced.setdefault(user_id, set()).add(key)
+            if not (start_at <= mark_at < end_at):
+                continue
+            marks.setdefault(user_id, []).append({
+                'id': int(mark_id),
+                'at': mark_at.astimezone(supervisor_hours.TZ).isoformat(),
+                'kind': kind,
+                'source': 'manual',
+                'comment': comment,
+                'created_by_name': author,
+                'created_at': created_at.isoformat() if created_at else None,
+                'replaces_at': replaces_at.astimezone(supervisor_hours.TZ).isoformat() if replaces_at else None,
+                'replaces_kind': replaces_kind,
+            })
+        return marks, replaced
+
+    def recalculate_supervisor_clockster_hours(self, date_from, date_to, user_ids=None, keep_break_before=None):
+        """Пересчитать часы СВ по отметкам Clockster за период и записать в учёт часов.
+
+        Пишутся только дни, которые кэш «Отметок» собрал вместе с Clockster, и
+        только дни СВ (не покрытые операторским членством). День, которого в кэше
+        нет или который собран без Clockster (сбой), не трогается — иначе сброс
+        кэша стёр бы отработанные часы; так же не трогается день, у которого
+        следующий собран без Clockster: уход ночной смены лежит в нём.
+        СВ без карточки Clockster (не сшит или «нет карточки») получает ноль по
+        собранным дням — прежние часы по карточке, которую сняли, не остаются.
+
+        keep_break_before — дни раньше этой даты (закрытый прошлый месяц) берут
+        уже вычтенный перерыв из строки, а не нынешнюю настройку: правка перерыва
+        не переписывает задним числом месяц, который уже закрыт."""
+        start = self._normalize_schedule_date(date_from)
+        end = self._normalize_schedule_date(date_to)
+        if end < start:
+            start, end = end, start
+        keep_before = self._normalize_schedule_date(keep_break_before) if keep_break_before else None
+        summary = {'updated_days': 0, 'supervisors': 0, 'unlinked': [], 'months': []}
+        with self._get_cursor() as cursor:
+            sv_ids = self._clockster_hours_supervisor_ids_tx(cursor, user_ids)
+            if not sv_ids:
+                return summary
+            cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sorted(sv_ids),))
+            people = [(int(row[0]), row[1]) for row in cursor.fetchall()]
+            summary['supervisors'] = len(people)
+
+            months = []
+            cursor_month = date(start.year, start.month, 1)
+            while cursor_month <= end:
+                months.append(cursor_month.strftime('%Y-%m'))
+                cursor_month = (cursor_month + timedelta(days=32)).replace(day=1)
+            for month in months:
+                self._fill_supervisor_norm_hours_tx(cursor, month, sv_ids)
+            summary['months'] = months
+
+            settings = self._supervisor_hours_settings_tx(cursor, sv_ids)
+            cards = self._supervisor_clockster_cards_tx(cursor, people, settings)
+            linked = {uid: card['ext_id'] for uid, card in cards.items() if card and card.get('ext_id')}
+            summary['unlinked'] = sorted(uid for uid, _ in people if uid not in linked)
+
+            cursor.execute("""
+                SELECT day, COALESCE(sources, '') LIKE %s
+                FROM glb_attendance_days
+                WHERE day BETWEEN %s AND %s
+            """, ('%clockster%', start, end + timedelta(days=1)))
+            built_with_clockster, built_without_clockster = set(), set()
+            for day, has_clockster in cursor.fetchall():
+                (built_with_clockster if has_clockster else built_without_clockster).add(day)
+            countable_days = {
+                day for day in built_with_clockster
+                if start <= day <= end and (day + timedelta(days=1)) not in built_without_clockster
+            }
+            if not countable_days:
+                return summary
+
+            # Отметки читаются с дня накануне: иначе повторное касание после
+            # полуночи на краю окна стало бы новым приходом и первый день получил
+            # бы смену, уже учтённую накануне.
+            marks_by_card = {}
+            if linked:
+                cursor.execute("""
+                    SELECT employee_id, marks FROM glb_attendance_rows
+                    WHERE employee_id = ANY(%s) AND day BETWEEN %s AND %s
+                """, (sorted(set(linked.values())), start - timedelta(days=1), end + timedelta(days=1)))
+                for ext_id, marks in cursor.fetchall():
+                    marks_by_card.setdefault(ext_id, []).extend(marks or [])
+
+            cursor.execute("""
+                SELECT operator_id, day, break_time FROM daily_hours
+                WHERE operator_id = ANY(%s) AND day BETWEEN %s AND %s
+            """, (sorted(sv_ids), start, end))
+            existing = {(int(row[0]), row[1]): float(row[2] or 0) for row in cursor.fetchall()}
+            operator_days = self._operator_membership_days_tx(cursor, sv_ids, start, end)
+            # Перерывы, поставленные РОП на сменах дня, главнее общего перерыва СВ.
+            schedule_breaks = self._supervisor_schedule_break_minutes_tx(cursor, sv_ids, start, end)
+            # Ручные отметки РОП идут в ленту наравне с терминальными — в том числе
+            # у СВ без карточки Clockster (не зарегистрирован на терминале).
+            manual_marks, replaced_marks = self._supervisor_manual_marks_tx(
+                cursor, sv_ids, start - timedelta(days=1), end + timedelta(days=1))
+
+            rows = []
+            affected = set()
+            for user_id, _name in people:
+                ext_id = linked.get(user_id)
+                user_marks = supervisor_hours.drop_replaced(
+                    marks_by_card.get(ext_id, []) if ext_id else [], replaced_marks.get(user_id)
+                ) + manual_marks.get(user_id, [])
+                sessions = supervisor_hours.pair_sessions(supervisor_hours.normalize_marks(user_marks))
+                presence_by_day = supervisor_hours.presence_by_day(sessions)
+                break_minutes = settings[user_id]['break_minutes']
+                for day in sorted(countable_days):
+                    if (user_id, day) in operator_days:
+                        continue
+                    presence = presence_by_day.get(day, 0)
+                    key = (user_id, day)
+                    if presence <= 0 and key not in existing:
+                        continue
+                    day_break = break_minutes
+                    if key in schedule_breaks:
+                        day_break = schedule_breaks[key]
+                    elif keep_before and day < keep_before and existing.get(key, 0) > 0:
+                        day_break = int(round(existing[key] * 60))
+                    worked, deducted = supervisor_hours.day_hours(presence, day_break)
+                    rows.append((user_id, day, round(worked / 3600.0, 4), round(deducted / 3600.0, 4)))
+                    affected.add((user_id, day.strftime('%Y-%m')))
+
+            if rows:
+                execute_values(cursor, """
+                    INSERT INTO daily_hours (operator_id, day, work_time, break_time,
+                                             auto_aggregated, auto_aggregated_at)
+                    VALUES %s
+                    ON CONFLICT (operator_id, day) DO UPDATE SET
+                        work_time = EXCLUDED.work_time,
+                        break_time = EXCLUDED.break_time,
+                        auto_aggregated = TRUE,
+                        auto_aggregated_at = CURRENT_TIMESTAMP
+                """, rows, template="(%s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)", page_size=500)
+            for user_id, month in sorted(affected):
+                self._aggregate_month_from_daily_tx(cursor, user_id, month)
+            summary['updated_days'] = len(rows)
+        return summary
+
+    def _supervisor_card_marks_tx(self, cursor, user_id, name, settings, date_from, date_to):
+        """(карточка Clockster СВ, её отметки из кэша «Отметок» за дни периода)."""
+        card = self._supervisor_clockster_cards_tx(cursor, [(user_id, name)], settings).get(user_id)
+        raw = []
+        if card and card.get('ext_id'):
+            cursor.execute("""
+                SELECT marks FROM glb_attendance_rows
+                WHERE employee_id = %s AND day BETWEEN %s AND %s
+            """, (card['ext_id'], date_from, date_to))
+            for (marks,) in cursor.fetchall():
+                raw.extend(marks or [])
+        return card, raw
+
+    def get_supervisor_clockster_day(self, user_id, day):
+        """Окно дня СВ в «Учёте часов»: отметки Clockster и ручные, какие вошли в
+        пары и почему остальные не засчитаны, итог дня и что записано в учёт."""
+        user_id = int(user_id)
+        day = self._normalize_schedule_date(day)
+        with self._get_cursor() as cursor:
+            if not self._clockster_hours_supervisor_ids_tx(cursor, [user_id]):
+                raise ValueError('Это не супервайзер с часами по Clockster')
+            cursor.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+            name = (cursor.fetchone() or [None])[0]
+            settings = self._supervisor_hours_settings_tx(cursor, [user_id])
+            card, raw = self._supervisor_card_marks_tx(
+                cursor, user_id, name, settings, day - timedelta(days=1), day + timedelta(days=1))
+            manual_by_user, replaced_by_user = self._supervisor_manual_marks_tx(
+                cursor, [user_id], day - timedelta(days=1), day + timedelta(days=1))
+            manual = manual_by_user.get(user_id, [])
+            raw.extend(manual)
+            cursor.execute("""
+                SELECT COALESCE(sources, '') LIKE %s FROM glb_attendance_days WHERE day = %s
+            """, ('%clockster%', day))
+            built_row = cursor.fetchone()
+            cursor.execute("""
+                SELECT work_time, break_time FROM daily_hours WHERE operator_id = %s AND day = %s
+            """, (user_id, day))
+            stored = cursor.fetchone()
+            operator_day = bool(self._operator_membership_days_tx(cursor, [user_id], day, day))
+            schedule_break = self._supervisor_schedule_break_minutes_tx(cursor, [user_id], day, day).get((user_id, day))
+        break_minutes = schedule_break if schedule_break is not None else settings[user_id]['break_minutes']
+        detail = supervisor_hours.explain_day(raw, day, break_minutes, replaced_by_user.get(user_id))
+        manual_by_id = {mark['id']: mark for mark in manual}
+        for row in detail['marks']:
+            extra = manual_by_id.get(row.get('id')) if row.get('source') == 'manual' else None
+            if extra:
+                for field in ('comment', 'created_by_name', 'replaces_at', 'replaces_kind'):
+                    row[field] = extra.get(field)
+        return {
+            'user_id': user_id,
+            'name': name,
+            'date': day.isoformat(),
+            'card': card,
+            'day_built': bool(built_row and built_row[0]),
+            'operator_day': operator_day,
+            'break_minutes': break_minutes,
+            # schedule — перерывы, поставленные на смене; settings — общий перерыв СВ.
+            'break_source': 'schedule' if schedule_break is not None else 'settings',
+            'stored_work_time': float(stored[0]) if stored else None,
+            'stored_break_time': float(stored[1]) if stored else None,
+            **detail,
+        }
+
+    def supervisor_manual_mark_user(self, mark_id):
+        """Чья действующая ручная отметка (для проверки прав до правки/снятия)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT user_id FROM supervisor_manual_marks WHERE id = %s AND deleted_at IS NULL
+            """, (int(mark_id),))
+            row = cursor.fetchone()
+        if not row:
+            raise ValueError('Отметка не найдена')
+        return int(row[0])
+
+    def _validate_supervisor_mark_input(self, at, kind):
+        kind = str(kind or '').strip().lower()
+        if kind not in (supervisor_hours.MARK_IN, supervisor_hours.MARK_OUT):
+            raise ValueError('Тип отметки — приход или уход')
+        when = supervisor_hours.parse_mark_time(at)
+        if when is None:
+            raise ValueError('Укажите дату и время отметки')
+        when = when.replace(second=0, microsecond=0)
+        now = datetime.now(supervisor_hours.TZ)
+        if when > now + timedelta(minutes=1):
+            raise ValueError('Отметка не может быть в будущем')
+        if when < now - timedelta(days=self.SUPERVISOR_MANUAL_MARK_MAX_AGE_DAYS):
+            raise ValueError('Слишком старая дата: такой месяц уже закрыт')
+        return when, kind
+
+    def _recalculate_supervisor_days(self, user_id, *moments):
+        """Пересчитать дни отметок (и дни накануне: уход после полуночи закрывает
+        смену вчерашнего дня). Закрытый месяц держит прежний вычет перерыва — как
+        в ночном пересчёте, иначе правка отметки переписала бы его по нынешнему."""
+        days = [moment.astimezone(supervisor_hours.TZ).date() for moment in moments if moment is not None]
+        if not days:
+            return None
+        today = datetime.now(supervisor_hours.TZ).date()
+        return self.recalculate_supervisor_clockster_hours(
+            min(days) - timedelta(days=1), max(days), [user_id],
+            keep_break_before=today.replace(day=1))
+
+    def add_supervisor_manual_mark(self, user_id, at, kind, actor_id=None, comment=None, replaces_clockster=None):
+        """Дописать СВ приход/уход, которого нет в Clockster, или исправить отметку
+        Clockster (replaces_clockster={'at', 'kind'} — исходная), и пересчитать часы.
+
+        Отметка из будущего и старше SUPERVISOR_MANUAL_MARK_MAX_AGE_DAYS не
+        принимается: первая — это не исправление, вторая переписала бы давно
+        закрытый месяц. Дубль (та же минута, тот же тип) — тоже отказ. Исходная
+        отметка должна быть в отметках этого СВ, исправить её можно один раз
+        (дальше правится само исправление), сдвинуть — не дальше чем на сутки."""
+        user_id = int(user_id)
+        when, kind = self._validate_supervisor_mark_input(at, kind)
+        comment = str(comment or '').strip()[:500] or None
+        original = None
+        if replaces_clockster:
+            original = supervisor_hours.mark_key(
+                (replaces_clockster or {}).get('at'), (replaces_clockster or {}).get('kind'))
+            if original is None or original[1] not in (supervisor_hours.MARK_IN, supervisor_hours.MARK_OUT):
+                raise ValueError('Не указана исправляемая отметка Clockster')
+            if abs((when - original[0]).total_seconds()) > 24 * 3600:
+                raise ValueError('Исправленная отметка — не дальше суток от исходной')
+        with self._get_cursor() as cursor:
+            if not self._clockster_hours_supervisor_ids_tx(cursor, [user_id]):
+                raise PermissionError('Отметки дописываются только супервайзерам с часами по Clockster')
+            if original is not None:
+                cursor.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+                name = (cursor.fetchone() or [None])[0]
+                settings = self._supervisor_hours_settings_tx(cursor, [user_id])
+                original_day = original[0].date()
+                _card, raw = self._supervisor_card_marks_tx(
+                    cursor, user_id, name, settings, original_day - timedelta(days=1), original_day + timedelta(days=1))
+                if original not in {supervisor_hours.mark_key(m.get('at'), m.get('kind')) for m in raw}:
+                    raise ValueError('Исходной отметки нет среди отметок Clockster этого сотрудника')
+                cursor.execute("""
+                    SELECT 1 FROM supervisor_manual_marks
+                    WHERE user_id = %s AND deleted_at IS NULL
+                      AND replaces_clockster_at = %s AND replaces_clockster_kind = %s
+                """, (user_id, original[0], original[1]))
+                if cursor.fetchone():
+                    raise ValueError('Эта отметка уже исправлена — измените исправление')
+            cursor.execute("""
+                SELECT 1 FROM supervisor_manual_marks
+                WHERE user_id = %s AND kind = %s AND deleted_at IS NULL
+                  AND mark_at >= %s AND mark_at < %s
+            """, (user_id, kind, when, when + timedelta(minutes=1)))
+            if cursor.fetchone():
+                raise ValueError('Такая отметка уже есть')
+            cursor.execute("""
+                INSERT INTO supervisor_manual_marks
+                    (user_id, mark_at, kind, comment, created_by, replaces_clockster_at, replaces_clockster_kind)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (user_id, when, kind, comment, actor_id,
+                  original[0] if original else None, original[1] if original else None))
+            mark_id = int(cursor.fetchone()[0])
+        self._recalculate_supervisor_days(user_id, when, original[0] if original else None)
+        return {'id': mark_id, 'user_id': user_id, 'day': when.date().isoformat()}
+
+    def update_supervisor_manual_mark(self, mark_id, at, kind, actor_id=None, comment=None):
+        """Изменить ручную отметку. Прежняя строка мягко снимается, новая ссылается
+        на неё (replaces_mark_id) и наследует исправляемую отметку Clockster —
+        история правок остаётся, а часы пересчитываются за старый и новый день."""
+        when, kind = self._validate_supervisor_mark_input(at, kind)
+        comment = str(comment or '').strip()[:500] or None
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT user_id, mark_at, replaces_clockster_at, replaces_clockster_kind
+                FROM supervisor_manual_marks WHERE id = %s AND deleted_at IS NULL
+            """, (int(mark_id),))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError('Отметка не найдена')
+            user_id, old_at, replaces_at, replaces_kind = int(row[0]), row[1], row[2], row[3]
+            if replaces_at is not None and abs((when - replaces_at).total_seconds()) > 24 * 3600:
+                raise ValueError('Исправленная отметка — не дальше суток от исходной')
+            cursor.execute("""
+                SELECT 1 FROM supervisor_manual_marks
+                WHERE user_id = %s AND kind = %s AND deleted_at IS NULL AND id <> %s
+                  AND mark_at >= %s AND mark_at < %s
+            """, (user_id, kind, int(mark_id), when, when + timedelta(minutes=1)))
+            if cursor.fetchone():
+                raise ValueError('Такая отметка уже есть')
+            cursor.execute("""
+                UPDATE supervisor_manual_marks SET deleted_at = NOW(), deleted_by = %s WHERE id = %s
+            """, (actor_id, int(mark_id)))
+            cursor.execute("""
+                INSERT INTO supervisor_manual_marks
+                    (user_id, mark_at, kind, comment, created_by, replaces_mark_id,
+                     replaces_clockster_at, replaces_clockster_kind)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (user_id, when, kind, comment, actor_id, int(mark_id), replaces_at, replaces_kind))
+            new_id = int(cursor.fetchone()[0])
+        self._recalculate_supervisor_days(user_id, when, old_at)
+        return {'id': new_id, 'user_id': user_id, 'day': when.date().isoformat()}
+
+    def delete_supervisor_manual_mark(self, mark_id, actor_id=None):
+        """Снять ручную отметку (мягко: строка остаётся с автором снятия) и пересчитать
+        часы. Снятие исправления возвращает в пары исходную отметку Clockster."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT user_id, mark_at, replaces_clockster_at FROM supervisor_manual_marks
+                WHERE id = %s AND deleted_at IS NULL
+            """, (int(mark_id),))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError('Отметка не найдена')
+            user_id, mark_at, replaces_at = int(row[0]), row[1], row[2]
+            cursor.execute("""
+                UPDATE supervisor_manual_marks SET deleted_at = NOW(), deleted_by = %s WHERE id = %s
+            """, (actor_id, int(mark_id)))
+        self._recalculate_supervisor_days(user_id, mark_at, replaces_at)
+        return {'id': int(mark_id), 'user_id': user_id,
+                'day': mark_at.astimezone(supervisor_hours.TZ).date().isoformat()}
+
+    def get_supervisor_hours_settings(self, department_ids=None):
+        """СВ отделов с часами по Clockster: перерыв, направление, карточка Clockster.
+
+        Плюс справочник карточек Clockster — РОП выбирает из него карточку тому,
+        кого ФИО не сшило (у нас «Хасенов», в Clockster «Касенов» — х против к).
+        У карточки, которая уже чья-то, есть owner — занятую другому не отдать."""
+        today = datetime.now(supervisor_hours.TZ).date()
+        params = [list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES)]
+        department_filter = ''
+        if department_ids is not None:
+            dept_ids = sorted({int(v) for v in department_ids if v is not None})
+            if not dept_ids:
+                return {'supervisors': [], 'clockster_cards': [],
+                        'default_break_minutes': supervisor_hours.DEFAULT_BREAK_MINUTES}
+            department_filter = ' AND u.department_id = ANY(%s)'
+            params.append(dept_ids)
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT u.id, u.name, u.department_id FROM users u WHERE "
+                + self.SUPERVISOR_ROLES_SQL + " AND " + self.SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL
+                + " AND lower(COALESCE(u.status, '')) <> 'fired'" + department_filter
+                + " ORDER BY u.name",
+                tuple(params),
+            )
+            people = [(int(row[0]), row[1], row[2]) for row in cursor.fetchall()]
+            ids = [row[0] for row in people]
+            settings = self._supervisor_hours_settings_tx(cursor, ids)
+            directions = self._supervisor_directions_tx(cursor, ids, today, today)
+            cards = self._supervisor_clockster_cards_tx(cursor, [(uid, name) for uid, name, _ in people], settings)
+            owners = self._clockster_card_owners_tx(cursor)
+            cursor.execute("""
+                SELECT ext_id, full_name, department_name, position_name
+                FROM glb_employees WHERE source = 'clockster' ORDER BY full_name
+            """)
+            clockster_cards = [
+                {'ext_id': row[0], 'full_name': row[1], 'department_name': row[2],
+                 'position_name': row[3], 'owner_id': owners.get(row[0])}
+                for row in cursor.fetchall()
+            ]
+        supervisors = []
+        for user_id, name, department_id in people:
+            entry = settings.get(user_id) or {}
+            card = cards.get(user_id)
+            if entry.get('no_card'):
+                card = {'ext_id': None, 'full_name': None, 'source': 'none'}
+            supervisors.append({
+                'user_id': user_id,
+                'name': name,
+                'department_id': department_id,
+                'direction': directions.get(user_id),
+                'break_minutes': entry.get('break_minutes', supervisor_hours.DEFAULT_BREAK_MINUTES),
+                'break_is_default': not entry.get('custom_break'),
+                'clockster': card,
+            })
+        return {
+            'supervisors': supervisors,
+            'clockster_cards': clockster_cards,
+            'default_break_minutes': supervisor_hours.DEFAULT_BREAK_MINUTES,
+        }
+
+    def _clockster_card_owners_tx(self, cursor):
+        """{карточка Clockster: чей она сейчас} — ручные привязки любых людей плюс
+        карточки, сшитые по ФИО с СВ. Отдать занятую карточку другому нельзя:
+        одни и те же отметки дали бы часы двоим."""
+        cursor.execute(
+            "SELECT workpace_ext_id, user_id FROM glb_employee_links WHERE workpace_ext_id LIKE %s AND user_id IS NOT NULL",
+            ('clockster:%',),
+        )
+        owners = {row[0]: int(row[1]) for row in cursor.fetchall()}
+        sv_ids = self._clockster_hours_supervisor_ids_tx(cursor)
+        if sv_ids:
+            cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sorted(sv_ids),))
+            people = [(int(row[0]), row[1]) for row in cursor.fetchall()]
+            for user_id, card in self._supervisor_clockster_cards_tx(cursor, people).items():
+                if card and card.get('ext_id'):
+                    owners.setdefault(card['ext_id'], user_id)
+        return owners
+
+    def save_supervisor_hours_settings(self, items, actor_id=None, allowed_user_ids=None):
+        """Сохранить перерыв и карточку Clockster СВ пакетом.
+
+        Все строки проверяются ДО первой записи: пакетная ручка, которая
+        записала половину и ответила 400, хуже отказа целиком.
+        `break_minutes`: пусто — вернуть час по умолчанию.
+        `clockster_ext_id`: ключа нет — карточку не трогаем; пусто — снять ручную
+        привязку (вернётся автоматическая по ФИО); '__none__' — у СВ карточки нет;
+        `clockster:<id>` — привязать. Карточку, которая уже чья-то, отдать нельзя.
+        После записи часы этих СВ за текущий месяц пересчитываются."""
+        if not isinstance(items, list) or not items:
+            raise ValueError('Нет строк для сохранения')
+        allowed = None if allowed_user_ids is None else {int(v) for v in allowed_user_ids}
+        normalized = []
+        with self._get_cursor() as cursor:
+            requested_ids = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError('Строка настройки должна быть объектом')
+                try:
+                    requested_ids.append(int(item.get('user_id')))
+                except (TypeError, ValueError):
+                    raise ValueError('Не указан супервайзер')
+            if len(set(requested_ids)) != len(requested_ids):
+                raise ValueError('Супервайзер указан дважды')
+            eligible = self._clockster_hours_supervisor_ids_tx(cursor, requested_ids)
+            cursor.execute("SELECT ext_id FROM glb_employees WHERE source = 'clockster'")
+            known_cards = {row[0] for row in cursor.fetchall()}
+            owners = self._clockster_card_owners_tx(cursor)
+            chosen_cards = set()
+            for item, user_id in zip(items, requested_ids):
+                if user_id not in eligible or (allowed is not None and user_id not in allowed):
+                    raise PermissionError('Нельзя менять настройки этого сотрудника')
+                entry = {'user_id': user_id}
+                if 'break_minutes' in item:
+                    raw_minutes = item.get('break_minutes')
+                    entry['break_minutes'] = (
+                        None if raw_minutes is None or str(raw_minutes).strip() == ''
+                        else supervisor_hours.normalize_break_minutes(raw_minutes)
+                    )
+                if 'clockster_ext_id' in item:
+                    ext_id = str(item.get('clockster_ext_id') or '').strip()
+                    if ext_id == self.SUPERVISOR_NO_CLOCKSTER_CARD:
+                        entry['clockster'] = 'none'
+                    elif ext_id:
+                        if ext_id not in known_cards:
+                            raise ValueError('Карточка Clockster не найдена')
+                        if ext_id in chosen_cards:
+                            raise ValueError('Одна карточка Clockster выбрана двум сотрудникам')
+                        owner = owners.get(ext_id)
+                        if owner is not None and owner != user_id:
+                            raise ValueError('Эта карточка Clockster уже привязана к другому сотруднику')
+                        chosen_cards.add(ext_id)
+                        entry['clockster'] = ext_id
+                    else:
+                        entry['clockster'] = 'auto'
+                normalized.append(entry)
+
+            for entry in normalized:
+                user_id = entry['user_id']
+                if 'break_minutes' in entry:
+                    cursor.execute("""
+                        INSERT INTO supervisor_hours_settings (user_id, break_minutes, updated_by, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            break_minutes = EXCLUDED.break_minutes,
+                            updated_by = EXCLUDED.updated_by,
+                            updated_at = NOW()
+                    """, (user_id, entry['break_minutes'], actor_id))
+                if 'clockster' in entry:
+                    no_card = entry['clockster'] == 'none'
+                    cursor.execute("""
+                        INSERT INTO supervisor_hours_settings (user_id, no_clockster_card, updated_by, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            no_clockster_card = EXCLUDED.no_clockster_card,
+                            updated_by = EXCLUDED.updated_by,
+                            updated_at = NOW()
+                    """, (user_id, no_card, actor_id))
+                    cursor.execute(
+                        "DELETE FROM glb_employee_links WHERE user_id = %s AND workpace_ext_id LIKE %s",
+                        (user_id, 'clockster:%'),
+                    )
+                    if entry['clockster'] not in ('none', 'auto'):
+                        cursor.execute("""
+                            INSERT INTO glb_employee_links (workpace_ext_id, user_id, linked_by, linked_at)
+                            VALUES (%s, %s, %s, NOW())
+                            ON CONFLICT (workpace_ext_id) DO UPDATE SET
+                                user_id = EXCLUDED.user_id,
+                                linked_by = EXCLUDED.linked_by,
+                                linked_at = NOW()
+                        """, (entry['clockster'], user_id, actor_id))
+
+        today = datetime.now(supervisor_hours.TZ).date()
+        recalc = self.recalculate_supervisor_clockster_hours(
+            date(today.year, today.month, 1), today, [entry['user_id'] for entry in normalized])
+        return {'saved': len(normalized), 'recalculated': recalc}
 
     def auto_fill_norm_hours(self, month):
         """
@@ -44128,6 +45026,25 @@ class Database:
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         if not op_ids:
             return {'updated_days': 0, 'aggregated_months': 0}
+        # Часы СВ с Clockster пишет recalculate_supervisor_clockster_hours. Статусов
+        # у СВ нет, и этот пересчёт при каждом сохранении смены затирал бы их нулём.
+        # Роль — на дату: дни, покрытые операторским членством (СВ ещё работал на
+        # линии), остаются за этим пересчётом.
+        clockster_supervisors = self._clockster_hours_supervisor_ids_tx(cursor, op_ids)
+        supervisor_operator_days = set()
+        if clockster_supervisors:
+            supervisor_operator_days = self._operator_membership_days_tx(
+                cursor, clockster_supervisors,
+                self._normalize_schedule_date(start_date) - timedelta(days=1),
+                self._normalize_schedule_date(end_date) + timedelta(days=1),
+            )
+            still_operators = {user_id for user_id, _day in supervisor_operator_days}
+            op_ids = [
+                op_id for op_id in op_ids
+                if op_id not in clockster_supervisors or op_id in still_operators
+            ]
+            if not op_ids:
+                return {'updated_days': 0, 'aggregated_months': 0}
 
         start_date_obj = self._normalize_schedule_date(start_date)
         end_date_obj = self._normalize_schedule_date(end_date)
@@ -44287,6 +45204,11 @@ class Database:
                 or item.get('technical_reason_status')
             ):
                 target_days.add(key)
+        if clockster_supervisors:
+            target_days = {
+                key for key in target_days
+                if key[0] not in clockster_supervisors or key in supervisor_operator_days
+            }
 
         if not target_days:
             return {'updated_days': 0, 'aggregated_months': 0}
@@ -45143,6 +46065,22 @@ class Database:
             planning_from_minutes=planning_window_start,
             extra_occupied=extra_occupied
         )
+        # Смене СВ перерывы ставит только РОП руками (задача #352): автоматика и
+        # правила направлений тут не работают (у СВ направления нет — сработал бы
+        # запасной профиль операторов 15/30/15), соседей по перерывам у СВ тоже нет.
+        # Берём присланное как есть, в пределах смены, в том числе в прошлом: по
+        # этим перерывам считается вычет из часов СВ за день.
+        if (
+            self._clockster_hours_supervisor_ids_tx(cursor, [operator_id])
+            and not self._operator_membership_days_tx(
+                cursor, [operator_id],
+                self._normalize_schedule_date(shift_date), self._normalize_schedule_date(shift_date))
+        ):
+            shift_start_min, shift_end_min = self._schedule_interval_minutes(start_time, end_time)
+            breaks_norm = [
+                item for item in self._normalize_shift_breaks(breaks)
+                if int(item['start']) >= shift_start_min and int(item['end']) <= shift_end_min
+            ]
 
         # Если редактировали существующую смену по previous_* и время изменилось,
         # удаляем старую запись, чтобы не оставлять дубль.
@@ -46368,12 +47306,17 @@ class Database:
         department_id=None,
         include_imported_statuses=False,
         include_technical_issues=False,
-        include_offline_activities=False
+        include_offline_activities=False,
+        include_supervisors=False
     ):
         """
         Получить всех операторов со сменами и выходными днями за период.
         Если direction_name задан — только операторы этого направления.
         Если department_id задан — только операторы этого отдела.
+        include_supervisors (задача #352) — плюс СВ отделов, где РОП ведёт их график
+        (SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES). Только для строк планировщика:
+        импорт и выгрузка Excel, симуляция и «смены коллег» зовут без флага, иначе
+        СВ сопоставлялись бы по ФИО и попадали в соседи по перерывам.
         Возвращает список операторов с их сменами и выходными.
         """
         start_date_obj = self._normalize_schedule_date(start_date) if start_date else None
@@ -46394,7 +47337,7 @@ class Database:
                     operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                           d.name as direction, u.status, u.rate, u.department_id
+                           d.name as direction, u.status, u.rate, u.department_id, u.role
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
@@ -46404,12 +47347,18 @@ class Database:
             else:
                 operator_filters = ["u.role = 'operator'"]
                 operator_params = []
+                if include_supervisors:
+                    operator_filters = [
+                        "(u.role = 'operator' OR (" + self.SUPERVISOR_ROLES_SQL
+                        + " AND " + self.SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL + "))"
+                    ]
+                    operator_params = [list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES)]
                 if department_filter_id is not None:
                     operator_filters.append("u.department_id = %s")
                     operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                           d.name as direction, u.status, u.rate, u.department_id
+                           d.name as direction, u.status, u.rate, u.department_id, u.role
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
@@ -46424,10 +47373,11 @@ class Database:
             result_map = {}
             # department_id едет во фронт: в «Графиках работы» админ переключает
             # отдел, а состав операторов в ответе один на все отделы.
-            for op_id, name, supervisor_id, supervisor_name, direction, status, rate, department_id in operators:
+            for op_id, name, supervisor_id, supervisor_name, direction, status, rate, department_id, role in operators:
                 result_map[op_id] = {
                     'id': op_id,
                     'name': name,
+                    'role': role,
                     'supervisor_id': supervisor_id,
                     'supervisor_name': supervisor_name,
                     'direction': direction,
@@ -50096,7 +51046,10 @@ class Database:
                 start_date=shift_date_obj,
                 end_date=shift_date_obj
             )
-            return shift_id
+        # Перерывы на смене СВ — вычет из его часов за день: пересчитываем сразу,
+        # уже после записи (пересчёт читает базу своим соединением).
+        self._recalculate_supervisor_shift_day(operator_id, shift_date_obj)
+        return shift_id
 
     def delete_shift(self, operator_id, shift_date, start_time, end_time, actor_id=None, change_source='supervisor'):
         """
@@ -50127,7 +51080,37 @@ class Database:
                     start_date=shift_date_obj,
                     end_date=shift_date_obj
                 )
-            return deleted
+        if deleted:
+            self._recalculate_supervisor_shift_day(operator_id, shift_date_obj)
+        return deleted
+
+    def _recalculate_supervisor_shift_day(self, operator_id, shift_date):
+        """После правки смены СВ пересчитать его часы за день: поставленные на смене
+        перерывы — это вычет из часов (задача #352). Операторов не касается."""
+        with self._get_cursor() as cursor:
+            if not self._clockster_hours_supervisor_ids_tx(cursor, [int(operator_id)]):
+                return None
+        day = self._normalize_schedule_date(shift_date)
+        today = datetime.now(supervisor_hours.TZ).date()
+        return self.recalculate_supervisor_clockster_hours(
+            day, day, [int(operator_id)], keep_break_before=today.replace(day=1))
+
+    def _supervisor_schedule_break_minutes_tx(self, cursor, user_ids, date_from, date_to):
+        """{(СВ, день): минут перерывов, поставленных РОП на сменах этого дня}.
+
+        День — дата смены (смена принадлежит дню своего начала, как и отметки).
+        Нет перерывов на сменах дня — нет ключа, и вычитается общий перерыв СВ."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        if not ids:
+            return {}
+        cursor.execute("""
+            SELECT ws.operator_id, ws.shift_date, SUM(sb.end_minutes - sb.start_minutes)
+            FROM work_shifts ws
+            JOIN shift_breaks sb ON sb.shift_id = ws.id
+            WHERE ws.operator_id = ANY(%s) AND ws.shift_date BETWEEN %s AND %s
+            GROUP BY ws.operator_id, ws.shift_date
+        """, (ids, date_from, date_to))
+        return {(int(row[0]), row[1]): int(row[2] or 0) for row in cursor.fetchall() if row[2]}
 
     def toggle_day_off(self, operator_id, day_off_date, actor_id=None, change_source='supervisor'):
         """
@@ -61283,6 +62266,22 @@ class Database:
                 WHERE day BETWEEN %s AND %s
             """, (start, end))
             return {row[0] for row in cursor.fetchall()}
+
+    def glb_attendance_days_without_clockster(self, day_from, day_to):
+        """Дни периода, собранные в кэш без Clockster (он падал при сборке).
+
+        Досбор такие дни считает собранными и не трогает, а часы СВ (задача #352)
+        по ним не считаются — ночная джоба пересобирает их отдельно."""
+        start, end = self._glb_day(day_from), self._glb_day(day_to)
+        if not start or not end:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT day FROM glb_attendance_days
+                WHERE day BETWEEN %s AND %s AND COALESCE(sources, '') NOT LIKE %s
+                ORDER BY day
+            """, (start, end, '%clockster%'))
+            return [row[0] for row in cursor.fetchall()]
 
     def glb_store_attendance_day(self, day, rows, sources=None):
         """Кладёт в кэш ОДИН день целиком, заменяя всё, что там было.
