@@ -24,6 +24,11 @@ import { TRAINERS, trainerCard } from '../components/wiki/trainers/registry';
 import {
     authHeadersFor, hasPhoneHost, isTokenFresh, parseTokenMessage, postToPhone, requestPhoneToken,
 } from './phoneBridge';
+import { phoneTrainers } from './trainerList';
+
+/* Не весь реестр: тренажёры рабочего места и фотоконтроль в телефоне не показываем
+   (почему — в trainerList.js). Считается один раз: реестр статический. */
+const PHONE_TRAINERS = phoneTrainers(TRAINERS);
 
 const TrainerModal = lazy(() => import('../components/wiki/trainers/TrainerPlayer'));
 
@@ -235,7 +240,7 @@ export default function TrainersEmbed() {
             )}
 
             <div className="space-y-3">
-                {TRAINERS.map((scenario) => (
+                {PHONE_TRAINERS.map((scenario) => (
                     <TrainerCardView key={scenario.key} scenario={scenario} onOpen={openTrainer} />
                 ))}
             </div>
