@@ -140,9 +140,18 @@ class SectionEntryTests(unittest.TestCase):
             self.assertFalse(access.can_open_section(ctx(department_code=code)),
                              'отдел %r не должен попадать в раздел' % code)
 
-    def test_trainer_is_out_even_from_a_permitted_department(self):
-        self.assertFalse(access.can_open_section(ctx(role='trainer', department_code='szov')))
-        self.assertFalse(access.can_open_section(ctx(role='trainer', department_code='front_office')))
+    def test_trainer_gets_in_by_his_department(self):
+        """Задача #360 (25.09.2026): исключение для тренера снято.
+
+        Тренер проходит своим отделом, ссылку получает, QR ему не задают, а
+        журнала не видит — он не глава и не админ."""
+        for code in ('szov', 'front_office', 'op'):
+            trainer = ctx(role='trainer', department_code=code)
+            self.assertTrue(access.can_open_section(trainer), code)
+            self.assertTrue(access.can_generate(trainer), code)
+            self.assertFalse(access.requires_sensitive_qr(trainer), code)
+            self.assertFalse(access.can_view_journal(trainer), code)
+        self.assertFalse(access.can_open_section(ctx(role='trainer', department_code='tez')))
 
     def test_global_admin_gets_in_from_anywhere(self):
         self.assertTrue(access.can_open_section(ctx(role='super_admin', department_code=None)))

@@ -443,7 +443,7 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                 <div className="space-y-1">
                     <h1 className="text-[26px] font-semibold tracking-tight text-slate-900">Тренажёр</h1>
                     <p className="text-[13.5px] text-slate-500">
-                        Голосовой разговор с ИИ и разбор после него. Раздел тестовый, доступен только супер-админу.
+                        Голосовой разговор с ИИ и разбор после него. Раздел тестовый.
                     </p>
                 </div>
                 <IosSegmented value={tab} options={TAB_OPTIONS} onChange={setTab} ariaLabel="Раздел тренажёра" />

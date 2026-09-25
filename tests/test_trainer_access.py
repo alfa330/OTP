@@ -1,13 +1,22 @@
-"""Гейт раздела «Тренажёр»: только супер-админ, и проверка стоит на сервере.
+"""Гейт раздела «Тренажёр»: супер-админ и тренер, и проверка стоит на сервере.
 
 Раздел тестовый, но раздаёт браузеру ключи к платным внешним сервисам, поэтому
 цена ошибки в правах здесь не «увидел лишний экран», а «потратил чужую квоту».
 Спрятанный пункт меню доступом не является — раздел открывается прямым адресом,
-и отвечать «нет» обязан сервер.
+и отвечать «нет» обязан сервер. Тренер добавлен 25.09.2026 (задача #362).
 """
 
 import contextlib
+import re
 import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _is_trainer(value):
+    """Та же трактовка, что передаёт монолит: _normalize_user_role(role) == 'trainer'."""
+    return str(value or '').strip().lower() == 'trainer'
 
 
 class Cursor:
@@ -38,10 +47,11 @@ class Db:
         return cm()
 
 
-def client_for(role, *, requester_id=7):
+def client_for(role, *, requester_id=7, wire_trainer=True):
     from flask import Flask
     from voice_trainer.routes import build_trainer_blueprint
 
+    extra = {'is_trainer_role': _is_trainer} if wire_trainer else {}
     app = Flask(__name__)
     app.register_blueprint(build_trainer_blueprint(
         db=Db((requester_id, 'Тест', role)),
@@ -54,6 +64,7 @@ def client_for(role, *, requester_id=7):
             '-', '_').replace(' ', '_') == 'super_admin',
         env=lambda key, default=None: {'SONIOX_API_KEY': 'x',
                                        'GEMINI_API_KEY': 'y'}.get(key, default),
+        **extra,
     ))
     return app.test_client()
 
@@ -78,6 +89,57 @@ class AccessTest(unittest.TestCase):
         response = client_for('super_admin').get('/api/trainer/scenarios')
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.get_json()['scenarios'])
+
+    def test_trainer_passes_every_entry_point(self):
+        """Задача #362 (25.09.2026): тренер участвует в разработке звонка ИИ."""
+        client = client_for('trainer')
+        for method, path in (('get', '/api/trainer/ping'),
+                             ('get', '/api/trainer/scenarios'),
+                             ('get', '/api/trainer/sessions')):
+            response = getattr(client, method)(path)
+            self.assertEqual(200, response.status_code, f'{method} {path}')
+
+    def test_trainer_is_closed_when_the_predicate_is_not_wired(self):
+        """Без is_trainer_role раздел остаётся за одним супер-админом: ошибка
+        подключения обязана закрывать, а не открывать."""
+        response = client_for('trainer', wire_trainer=False).get('/api/trainer/scenarios')
+        self.assertEqual(403, response.status_code)
+        self.assertEqual('TRAINER_FORBIDDEN', response.get_json().get('code'))
+        self.assertEqual(200, client_for('super_admin', wire_trainer=False)
+                         .get('/api/trainer/scenarios').status_code)
+
+    def test_trainer_predicate_does_not_open_the_section_to_others(self):
+        """Тренер добавлен рядом с супер-админом, а не «всем от тренера и выше»:
+        админ, супервайзер и оператор по-прежнему получают 403."""
+        for role in ('admin', 'sv', 'operator', 'trainee', ''):
+            response = client_for(role).get('/api/trainer/scenarios')
+            self.assertEqual(403, response.status_code, role)
+
+    def test_monolith_wires_the_trainer_with_the_shared_normalizer(self):
+        """Роль тренера трактует монолит, а не раздел — та же причина, что у
+        супер-админа (см. test_role_is_delegated_verbatim_to_the_shared_check)."""
+        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        start = source.index('app.register_blueprint(build_trainer_blueprint(')
+        block = source[start:source.index('))', start)]
+        self.assertIn('is_super_admin_role=_is_super_admin_role,', block)
+        self.assertIn("is_trainer_role=lambda role: _normalize_user_role(role) == 'trainer',", block)
+
+    def test_frontend_twin_matches_the_server_rule(self):
+        """Пункт меню, разделитель и экран решает один предикат, и он
+        буквально повторяет серверное правило: супер-админ или роль тренера."""
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        self.assertIn(
+            "const canAccessVoiceTrainerSection = isSuperAdmin || currentUserRole === 'trainer';", app)
+        self.assertIn("canAccessVoiceTrainerSection && deptAllowsInner('voice_trainer'),", app)
+        self.assertIn('{view === "voice_trainer" && canAccessVoiceTrainerSection && (', app)
+        self.assertNotIn('isSuperAdmin && deptAllowsInner(\'voice_trainer\')', app)
+        self.assertNotIn('view === "voice_trainer" && isSuperAdmin', app)
+        item = app.index("handleSidebarViewNavigation(e, 'voice_trainer')")
+        gate = app.rfind('&& (', 0, item)
+        self.assertEqual(app[app.rfind('{', 0, gate) + 1:gate].strip(), 'canAccessVoiceTrainerSection')
+        # Тренер без раздела в своём списке был бы выкинут гардом вида в «Опросы».
+        trainer_views = re.search(r'TRAINER_ALLOWED_VIEWS = Object\.freeze\(\[(.*?)\]\)', app, re.S)
+        self.assertIn("'voice_trainer'", trainer_views.group(1))
 
     def test_role_is_delegated_verbatim_to_the_shared_check(self):
         """Раздел НЕ трактует роль сам, а отдаёт её проверке из монолита.

@@ -55,12 +55,20 @@ class ScopeTest(unittest.TestCase):
         self.assertTrue(access.can_view_ticket(me, ticket(created_by=10)))
         self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)))
 
-    def test_trainer_sees_nothing_even_inside_the_department(self):
-        """Тренер видит «всё» в других разделах, но переписка — не его дело."""
+    def test_trainer_of_the_department_sees_every_ticket(self):
+        """Задача #360 (25.09.2026): тренер СЗоВ входит в раздел наравне с отделом.
+
+        До неё тренер был единственным исключением внутри отдела. Теперь он
+        проходит своим отделом и видит общий список, как все, кого пустили.
+        """
         me = ctx(role='trainer', user_id=10, department_code='szov')
-        self.assertFalse(access.can_open_section(me))
-        self.assertEqual(access.visibility_scope(me), access.SCOPE_OWN)
-        self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)))
+        self.assertTrue(access.can_open_section(me))
+        self.assertEqual(access.visibility_scope(me), access.SCOPE_ALL)
+        self.assertTrue(access.can_view_ticket(me, ticket(created_by=11)))
+        # Тренер чужого отдела — нет: граница отдела осталась строгой.
+        stranger = ctx(role='trainer', user_id=10, department_code='op')
+        self.assertFalse(access.can_open_section(stranger))
+        self.assertFalse(access.can_view_ticket(stranger, ticket(created_by=11)))
 
     def test_everyone_admitted_to_the_section_sees_every_ticket(self):
         """Просьба СЗоВ 18.08.2026 (задача #181).
@@ -137,9 +145,16 @@ class SectionGateTest(unittest.TestCase):
             self.assertFalse(access.can_open_section(
                 ctx(role='operator', user_id=99999, department_code=code)), repr(code))
 
-    def test_trainer_is_the_only_exception_inside_the_department(self):
-        """Тренер видит «всё» в других разделах, но переписка не его дело."""
-        self.assertFalse(access.can_open_section(
+    def test_trainer_is_no_longer_an_exception_inside_the_department(self):
+        """Исключение для тренера снято задачей #360: внутри СЗоВ роль значения
+        не имеет вовсе, снаружи — не пускает никого, тренера тоже."""
+        self.assertTrue(access.can_open_section(
+            ctx(role='trainer', user_id=77, department_code='szov')))
+        for code in ('tez', 'op', 'front_office', None):
+            self.assertFalse(access.can_open_section(
+                ctx(role='trainer', user_id=77, department_code=code)), repr(code))
+        # QR тренеру не нужен — гейт стоит на рядовых, как в «Вики».
+        self.assertFalse(access.requires_sensitive_qr(
             ctx(role='trainer', user_id=77, department_code='szov')))
 
     def test_head_of_the_department_is_let_in(self):
@@ -599,27 +614,30 @@ class FrontendContractTest(unittest.TestCase):
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
         self.assertNotIn('CRM_PILOT_USER_IDS', app)
 
-    def test_frontend_gate_has_no_role_condition_beyond_the_trainer(self):
+    def test_frontend_gate_has_no_role_condition_inside_the_department(self):
         """Пункт меню и API обязаны сходиться: раздел открыт всему отделу.
 
         Разойдись они — получим «пункт виден, а API отдаёт 403» либо наоборот,
-        и оба случая человек увидит раньше нас.
+        и оба случая человек увидит раньше нас. С задачи #360 исключения для
+        тренера нет ни на сервере, ни здесь.
         """
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
         gate = app.split('const canAccessCrmSectionForUser')[1].split('};')[0]
-        self.assertIn("role === 'trainer'", gate)
+        self.assertNotIn("'trainer'", gate)
         self.assertNotIn('isSupervisorRole', gate)
 
     def test_department_code_matches_the_backend(self):
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
         self.assertIn("CRM_SECTION_DEPARTMENT_CODE = '%s'" % access.SECTION_DEPARTMENT_CODE, app)
 
-    def test_trainer_list_does_not_carry_the_section(self):
-        """Тренер вне периметра выката, и в его списке разделов места ему нет."""
+    def test_trainer_list_carries_the_section(self):
+        """Тренер теперь в периметре (задача #360), и раздел обязан быть в его
+        списке: иначе гард вида выкидывал бы его из «Обращений» в «Опросы»
+        сразу после нажатия на пункт меню."""
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
         trainer_block = re.search(r'TRAINER_ALLOWED_VIEWS = Object\.freeze\(\[(.*?)\]\)', app, re.S)
         self.assertIsNotNone(trainer_block)
-        self.assertNotIn("'crm_tickets'", trainer_block.group(1))
+        self.assertIn("'crm_tickets'", trainer_block.group(1))
 
     def test_delete_button_asks_the_server_who_may_delete(self):
         """Кнопка удаления в карточке стоит за правом, пришедшим с сервера.

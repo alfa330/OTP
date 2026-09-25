@@ -63822,9 +63822,11 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
-        # Та же трактовка «супер-админа», что и во всём портале: своя копия
-        # нормализации разошлась бы с общей молча.
+        # Та же трактовка «супер-админа» и «тренера», что и во всём портале:
+        # своя копия нормализации разошлась бы с общей молча. Тренер пущен в
+        # раздел 25.09.2026 по задаче #362.
         is_super_admin_role=_is_super_admin_role,
+        is_trainer_role=lambda role: _normalize_user_role(role) == 'trainer',
         env=_trainer_env,
     ))
     logging.info("Раздел «Тренажёр»: Blueprint подключён на /api/trainer")

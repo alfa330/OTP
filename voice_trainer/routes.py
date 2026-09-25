@@ -24,8 +24,9 @@ WebSocket невозможен, а гнать непрерывный поток 
 кредитами, и постоянного ключа не требует вовсе. Ключ AI Studio остался вторым
 номером в цепочке: вернутся кредиты — вернётся и он, без правки кода.
 
-Раздел закрыт для всех, кроме супер-админа: он тестовый, тратит платные квоты и
-выдаёт браузеру ключи к внешним сервисам.
+Раздел закрыт для всех, кроме супер-админа и тренера: он тестовый, тратит
+платные квоты и выдаёт браузеру ключи к внешним сервисам. Тренер добавлен
+25.09.2026 по задаче #362 — он участвует в разработке звонка ИИ-водителя.
 """
 from __future__ import annotations
 
@@ -112,12 +113,15 @@ MAX_TEXT = 2000
 
 
 def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                            resolve_requester, is_super_admin_role, env):
+                            resolve_requester, is_super_admin_role, env,
+                            is_trainer_role=None):
     """Собирает Blueprint раздела.
 
-    is_super_admin_role — (role) -> bool из монолита: нормализация ролей и
-    таблица уровней живут там, дублировать их здесь значило бы завести вторую
-    трактовку слова «супер-админ».
+    is_super_admin_role, is_trainer_role — (role) -> bool из монолита:
+    нормализация ролей и таблица уровней живут там, дублировать их здесь
+    значило бы завести вторую трактовку слов «супер-админ» и «тренер».
+    is_trainer_role необязателен: не передали — раздел остаётся за одним
+    супер-админом, то есть ошибка подключения закрывает, а не открывает.
 
     env — (key, default=None) -> str: доступ к секретам. Приходит аргументом,
     чтобы раздел не решал сам, откуда берутся ключи (на проде это окружение
@@ -125,8 +129,19 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
     """
     bp = Blueprint('trainer', __name__, url_prefix='/api/trainer')
 
+    def can_open_section(role):
+        """Кто входит в раздел: супер-админ и тренер (задача #362, 25.09.2026).
+
+        Тренер — роль целиком, а не «чистый» тренер: глава-тренер тоже тренер.
+        Двойник правила — canAccessVoiceTrainerSection в src/App.jsx; там оно
+        решает только пункт меню, обязательная граница — здесь.
+        """
+        if is_super_admin_role(role):
+            return True
+        return bool(is_trainer_role is not None and is_trainer_role(role))
+
     def trainer_route(rule, methods=('GET',)):
-        """Каркас роута: preflight, авторизация, гейт супер-админа, ошибки."""
+        """Каркас роута: preflight, авторизация, гейт раздела, ошибки."""
         all_methods = tuple(methods) + ('OPTIONS',)
 
         def decorator(handler):
@@ -151,9 +166,9 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     user = {'id': row[0], 'name': row[1], 'role': row[2]}
                     # Гейт здесь, а не во фронте: спрятанный пункт меню доступом
                     # не является, раздел открывается и прямым адресом.
-                    if not is_super_admin_role(user['role']):
+                    if not can_open_section(user['role']):
                         return jsonify({
-                            'error': 'Раздел «Тренажёр» доступен только супер-админу',
+                            'error': 'Раздел «Тренажёр» доступен только супер-админу и тренеру',
                             'code': 'TRAINER_FORBIDDEN',
                         }), 403
                     return handler(*args, user=user, **kwargs)

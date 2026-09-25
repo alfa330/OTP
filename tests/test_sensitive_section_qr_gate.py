@@ -264,9 +264,18 @@ class CrmQrGateTest(CrmGateHarness, unittest.TestCase):
                 self.assertEqual(client.get('/api/crm/ping').status_code, 200)
                 self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
 
+    def test_trainer_of_the_department_passes_without_qr(self):
+        """С задачи #360 тренер СЗоВ в разделе, и ключ у него не спрашивают:
+        гейт стоит на рядовых, как в «Вики»."""
+        client, gate = self.build(crm_ctx(role='trainer'), granted=False)
+        self.assertEqual(client.get('/api/crm/ping').status_code, 200)
+        self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
+
     def test_closed_section_answers_before_the_qr_gate(self):
-        """Тренеру и чужому отделу — «раздел не открыт», а не «покажите QR»."""
-        for context in (crm_ctx(role='trainer'), crm_ctx(role='operator', department_code='op')):
+        """Чужому отделу — «раздел не открыт», а не «покажите QR». Тренер чужого
+        отдела здесь же: граница отдела касается и его."""
+        for context in (crm_ctx(role='trainer', department_code='op'),
+                        crm_ctx(role='operator', department_code='op')):
             with self.subTest(role=context['role'], dept=context['department_code']):
                 client, gate = self.build(context, granted=False)
                 response = client.get('/api/crm/ping')
@@ -379,13 +388,21 @@ class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
                 self.assertEqual(client.get('/api/parcels/ping').status_code, 200)
                 self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
 
+    def test_trainer_of_the_department_passes_without_qr(self):
+        """С задачи #360 тренер СЗоВ читает реестр, и ключ у него не спрашивают."""
+        client, gate = self.build(parcels_ctx(role='trainer', department_code='szov'),
+                                  granted=False)
+        self.assertEqual(client.get('/api/parcels/ping').status_code, 200)
+        self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
+
     def test_closed_section_answers_before_the_qr_gate(self):
-        """Тренеру и чужому отделу — «раздел не открыт», а не «покажите QR».
+        """Чужому отделу — «раздел не открыт», а не «покажите QR». Тренер
+        чужого отдела здесь же: граница отдела касается и его.
 
         Иначе человеку предлагают подтвердить доступ к тому, чего ему не
         выдавали, — тупик, из которого он не выйдет.
         """
-        for context in (parcels_ctx(role='trainer'),
+        for context in (parcels_ctx(role='trainer', department_code='op'),
                         parcels_ctx(role='operator', department_code='op')):
             with self.subTest(role=context['role'], dept=context['department_code']):
                 client, gate = self.build(context, granted=False)
@@ -486,9 +503,16 @@ class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
                 self.assertEqual(client.get('/api/driver_chats/ping').status_code, 200)
                 self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
 
+    def test_trainer_of_the_department_passes_without_qr(self):
+        """С задачи #360 тренер СЗоВ в разделе, и ключ у него не спрашивают:
+        QR стоит на операторе и стажёре, тренер ни тот, ни другой."""
+        client, gate = self.build(driver_chats_ctx(role='trainer'), granted=False)
+        self.assertEqual(client.get('/api/driver_chats/ping').status_code, 200)
+        self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
+
     def test_closed_section_answers_before_the_qr_gate(self):
-        """Тренеру, чужому отделу, ЧАТ-МЕНЕДЖЕРУ и админу портала — «раздел не
-        открыт».
+        """Чужому отделу (тренеру в том числе), ЧАТ-МЕНЕДЖЕРУ и админу портала —
+        «раздел не открыт».
 
         Иначе человеку предлагают подтвердить доступ к тому, чего ему не
         выдавали, — тупик, из которого он не выйдет. Чат-менеджер здесь главный
@@ -498,7 +522,7 @@ class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
         08.09.2026, см. driver_chats/access.py).
         """
         self._forbid_vendor()
-        for context in (driver_chats_ctx(role='trainer'),
+        for context in (driver_chats_ctx(role='trainer', department_code='op'),
                         driver_chats_ctx(department_code='op'),
                         driver_chats_ctx(direction_model='chat_manager'),
                         driver_chats_ctx(role='admin', department_code='op'),

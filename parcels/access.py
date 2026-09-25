@@ -11,7 +11,7 @@
     СЗоВ (szov)                  читают и ищут — «операторам нет необходимости
                                  давать возможность редактировать записи»
     глобальный админ             то же, что фронт-офис, плюс удаление
-    тренер                       в раздел не пускается вовсе
+    тренер                       по своему отделу, как все (с 25.09.2026, #360)
 
 Почему периметр — ОТДЕЛ, а не роль. Посылку принимает тот, кто сидит в офисе, а
 ищет её тот, кому позвонил водитель; ни то, ни другое не зависит от того,
@@ -34,9 +34,10 @@ READ_DEPARTMENT_CODE = 'szov'            # ищут и читают
 
 SECTION_DEPARTMENT_CODES = (WRITE_DEPARTMENT_CODE, READ_DEPARTMENT_CODE)
 
-# Тренер видит «всё» в других разделах, но телефоны живых водителей не его дело
-# (то же решение, что закрыло ему «Обращения»).
-_SECTION_EXCLUDED_ROLES = ('trainer',)
+# Исключений по роли нет. До 25.09.2026 им был тренер («телефоны живых водителей
+# не его дело», то же решение, что у «Обращений»); снято по задаче #360 вместе с
+# «Обращениями». Тренер проходит своим отделом и получает права своего отдела:
+# тренер СЗоВ читает реестр, но не правит его.
 
 _ADMIN_ROLES = ('super_admin', 'admin')
 
@@ -86,8 +87,6 @@ def can_open_section(ctx):
     """
     if is_global_admin(ctx):
         return True
-    if normalize_role(ctx.get('role')) in _SECTION_EXCLUDED_ROLES:
-        return False
     return any(_belongs_to(ctx, code) for code in SECTION_DEPARTMENT_CODES)
 
 
@@ -106,8 +105,6 @@ def can_edit(ctx):
     """
     if is_global_admin(ctx):
         return True
-    if normalize_role(ctx.get('role')) in _SECTION_EXCLUDED_ROLES:
-        return False
     return _belongs_to(ctx, WRITE_DEPARTMENT_CODE)
 
 

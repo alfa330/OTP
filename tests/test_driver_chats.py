@@ -5,8 +5,9 @@
 
 * **Периметр.** Раздел даёт рядовому оператору переписку ЛЮБОГО водителя по
   номеру телефона — это самое широкое право, какое портал выдавал операторам.
-  Каждая строка матрицы прав проверяется отдельно, включая два исключения
-  внутри самого СЗоВ (чат-менеджер и тренер), которых нет у соседних разделов.
+  Каждая строка матрицы прав проверяется отдельно, включая исключение внутри
+  самого СЗоВ (рядовой чат-менеджер), которого нет у соседних разделов. Второе
+  такое исключение — тренер — снято задачей #360 (25.09.2026).
 * **Номер телефона.** Оператор вводит его как привык, а вендор хранит как
   прислали. Промах нормализации выглядит как «водителя нет», а не как ошибка
   формата, и ищут его потом не там.
@@ -87,7 +88,7 @@ class RolloutTests(unittest.TestCase):
             ctx(role='admin', department_code='szov', headed=('szov',))))
         self.assertTrue(access.can_open_section(ctx(role='super_admin', department_code='')))
         self.assertFalse(access.can_open_section(ctx(direction_model='chat_manager')))
-        self.assertFalse(access.can_open_section(ctx(role='trainer')))
+        self.assertTrue(access.can_open_section(ctx(role='trainer')))     # с задачи #360
         self.assertFalse(access.can_open_section(ctx(department_code='op')))
 
     def test_only_super_admin_passes_while_the_flag_is_on(self):
@@ -146,9 +147,20 @@ class SectionPerimeterTests(unittest.TestCase):
         self.assertFalse(access.is_chat_manager(
             ctx(department_code='op', direction_model='chat_manager')))
 
-    def test_trainer_is_excluded(self):
-        """То же решение, что закрыло тренеру «Обращения» и «Посылки»."""
-        self.assertFalse(access.section_perimeter_allows(ctx(role='trainer')))
+    def test_trainer_of_the_department_is_let_in(self):
+        """Задача #360 (25.09.2026) сняла исключение для тренера — здесь и в
+        «Обращениях», «Посылках», «Ссылке на подписание».
+
+        Тренер СЗоВ проходит своим отделом: без QR (он не рядовой), с суточным
+        лимитом поисков (лимит на всех, кроме супер-админа) и без журнала — он
+        не супервайзер и не глава. Тренер чужого отдела не проходит.
+        """
+        trainer = ctx(role='trainer')
+        self.assertTrue(access.section_perimeter_allows(trainer))
+        self.assertFalse(access.requires_sensitive_qr(trainer))
+        self.assertTrue(access.is_search_limited(trainer))
+        self.assertFalse(access.can_view_journal(trainer))
+        self.assertFalse(access.section_perimeter_allows(ctx(role='trainer', department_code='op')))
 
     def test_other_departments_are_excluded(self):
         for code in ('op', 'tez', 'front_office', 'accounting', 'hr', ''):
@@ -240,7 +252,7 @@ class JournalPerimeterTests(unittest.TestCase):
         """Тот, кого не пустили в раздел, не видит и журнал."""
         for person in (ctx(role='sv', department_code='op'),
                        ctx(role='admin', department_code='szov'),
-                       ctx(role='trainer')):
+                       ctx(role='trainer', department_code='op')):
             with self.subTest(role=person['role'], dept=person['department_code']):
                 self.assertFalse(access.can_open_section(person))
                 self.assertFalse(access.can_view_journal(person))

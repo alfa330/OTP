@@ -8,7 +8,7 @@
 
 Поэтому проверяются именно границы:
   * фронт-офис пишет, СЗоВ только читает — в любой роли, включая супервайзера;
-  * тренер не входит вовсе;
+  * тренер входит своим отделом и получает права своего отдела (с задачи #360);
   * глава отдела своим отделом и ограничен;
   * QR спрашивается у операторов ОБОИХ отделов (прямое требование постановки);
   * удаление — только у глобального админа.
@@ -49,13 +49,21 @@ class SectionEntryTests(unittest.TestCase):
             self.assertFalse(access.can_open_section(ctx(department_code=code)),
                              'отдел %r не должен попадать в раздел' % code)
 
-    def test_trainer_is_out_even_from_a_permitted_department(self):
-        """Тренер видит «всё» в других разделах, но телефоны водителей не его дело."""
-        self.assertFalse(access.can_open_section(
+    def test_trainer_gets_the_rights_of_his_department(self):
+        """Задача #360 (25.09.2026): исключение для тренера снято.
+
+        Тренер проходит своим отделом и получает ровно права отдела: тренер
+        СЗоВ — единственный тренер портала — реестр читает, но не правит, а
+        тренер чужого отдела не входит вовсе.
+        """
+        szov_trainer = ctx(role='trainer', department_code='szov')
+        self.assertTrue(access.can_open_section(szov_trainer))
+        self.assertFalse(access.can_edit(szov_trainer))
+        self.assertFalse(access.can_delete(szov_trainer))
+        self.assertFalse(access.requires_sensitive_qr(szov_trainer))
+        self.assertTrue(access.can_open_section(
             ctx(role='trainer', department_code='front_office')))
-        self.assertFalse(access.can_open_section(
-            ctx(role='trainer', department_code='szov')))
-        self.assertFalse(access.can_edit(ctx(role='trainer', department_code='front_office')))
+        self.assertFalse(access.can_open_section(ctx(role='trainer', department_code='op')))
 
     def test_global_admin_gets_in_from_anywhere(self):
         self.assertTrue(access.can_open_section(ctx(role='super_admin', department_code=None)))

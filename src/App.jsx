@@ -674,6 +674,13 @@ const SALARY_CALCULATOR_TYPES = new Set(
     SALARY_CALCULATOR_CATALOG.flatMap((entry) => entry.models.map((model) => model.key))
 );
 const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(SALARY_CALCULATOR_CATALOG.map((entry) => entry.code));
+// Тренер переключает отделы, как админ, но только два из трёх: «ОП по группам
+// и СЗоВ» — формулировка постановки (задача #360, 25.09.2026). ТЭЗ он не
+// просил, а выдать его без просьбы значило бы расширить правило за владельца.
+// Порядок каталога сохраняется: СЗоВ первым, как у админа.
+const TRAINER_SALARY_CALCULATOR_CATALOG = SALARY_CALCULATOR_CATALOG.filter(
+    (entry) => entry.code === 'szov' || entry.code === 'op'
+);
 const TEZ_SALARY_CALCULATOR_TYPES = new Set(['tez_line', 'tez_op']);
 // Отдел продаж: расчёт есть у всех четырёх направлений — «Основа», «Поток»,
 // «Верификатор» и «Яндекс Регистрация». Заглушка «скоро» остаётся только для
@@ -685,6 +692,10 @@ const OP_DEFAULT_SALARY_CALCULATOR_MODEL = 'op_osnova';
 // вида: пока это были два литерала, раздел, добавленный в один, молча
 // выбрасывался вторым обратно в «Опросы». «Ивенты» тренер только читает —
 // право публикации даёт бэкенд (can_publish), у тренера его нет.
+// Шесть разделов с 'salary' добавлены 25.09.2026 по задачам #360 и #362
+// (тренер просил сам). Список лишь не выкидывает тренера из раздела: пункт
+// меню и сам экран по-прежнему решают предикаты разделов (canAccess…Section,
+// canAccessVoiceTrainerSection), а обязательную границу — бэкенд.
 const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'surveys',
     'manage_operators',
@@ -694,6 +705,12 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'work_schedules',
     'wiki',
     'events',
+    'salary',
+    'crm_tickets',
+    'parcels',
+    'sign_links',
+    'driver_chats',
+    'voice_trainer',
 ]);
 // Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
 // (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
@@ -2313,8 +2330,9 @@ const canAccessPaymentsForUser = (userLike) => (
    разный, а /api/admin/departments оператору недоступен.
 
    Роль внутри отдела значения не имеет: обращение заводит тот, у кого возник
-   вопрос. Исключение одно — тренер: он видит «всё» в других разделах, но
-   переписка с рабочими группами не его дело. Ту же границу держит
+   вопрос. Тренер отдела тоже проходит — до 25.09.2026 он был единственным
+   исключением, снятым по задаче #360 (тренер учит операторов работе в разделе,
+   а показать то, чего сам не видит, не может). Ту же границу держит
    crm/access.py::can_open_section — там она и обязательная, а здесь только про
    то, показывать ли пункт меню. */
 const CRM_SECTION_DEPARTMENT_CODE = 'szov';
@@ -2327,7 +2345,6 @@ const isCrmSectionDepartmentHead = (userLike) => (
 const canAccessCrmSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
-    if (role === 'trainer') return false;
     // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
     // отделов обращения СЗоВ не нужны (глава СЗоВ проходит проверкой ниже).
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
@@ -2341,7 +2358,8 @@ const canAccessCrmSectionForUser = (userLike) => {
    Два отдела с разными правами на одни и те же записи: фронт-офисы заводят и
    ведут карточки, СЗоВ ищет и читает. Роль внутри отдела на вход не влияет —
    посылку принимает тот, кто сидит в офисе, а ищет тот, кому позвонил водитель.
-   Исключение то же, что у «Обращений»: тренер сюда не ходит.
+   Тренер проходит своим отделом наравне с остальными — исключение снято
+   25.09.2026 по задаче #360, как и у «Обращений».
 
    Здесь решается только «показывать ли пункт меню»; обязательную границу и
    разницу «читает / правит» держит parcels/access.py. */
@@ -2357,7 +2375,6 @@ const isParcelsSectionDepartmentHead = (userLike) => (
 const canAccessParcelsSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
-    if (role === 'trainer') return false;
     // Глава отдела с базовой admin-ролью — не глобальный админ: реестр посылок
     // главам чужих отделов не нужен (главы СЗоВ и фронт-офисов проходят ниже).
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
@@ -2372,7 +2389,8 @@ const canAccessParcelsSectionForUser = (userLike) => {
 
    Периметр как у «Посылок», но на три отдела — СЗоВ, фронт-офисы и отдел продаж
    (ОП добавлен 16.09.2026: «раздел так же должен быть у ОП операторов через
-   QR») — в любой роли, кроме тренера; главы этих отделов и глобальные админы.
+   QR») — в любой роли, включая тренера (исключение снято 25.09.2026 по задаче
+   #360); главы этих отделов и глобальные админы.
    Журнал запросов внутри раздела открыт только админам и главам — это решает
    бэкенд (sign_links/access.py), здесь только «показывать ли пункт меню». */
 const SIGN_LINKS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov', 'op'];
@@ -2387,7 +2405,6 @@ const isSignLinksSectionDepartmentHead = (userLike) => (
 const canAccessSignLinksSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
-    if (role === 'trainer') return false;
     // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
     // отделов раздел не нужен (главы СЗоВ и фронт-офисов проходят ниже).
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
@@ -2400,7 +2417,7 @@ const canAccessSignLinksSectionForUser = (userLike) => {
 /* «Чаты водителей» — поиск переписки водителя и передача её чат-менеджеру
    (задача #271).
 
-   Периметр у́же, чем у «Посылок»: один отдел, СЗоВ. И три исключения, которых
+   Периметр у́же, чем у «Посылок»: один отдел, СЗоВ. И два исключения, которых
    нет у соседних разделов:
 
    * РЯДОВОЙ чат-менеджер сюда не ходит — раздел существует, чтобы оператор
@@ -2408,11 +2425,13 @@ const canAccessSignLinksSectionForUser = (userLike) => {
      Chat2Desk целиком и без посредника (прямое требование постановщика).
      Его СУПЕРВАЙЗЕР проходит: доступ супервайзерам владелец назвал по роли
      (08.09.2026), а разбирать чужие чаты — его работа;
-   * тренер — по той же причине, по которой ему закрыты «Обращения» и
-     «Посылки»: переписка живых водителей не его дело;
    * админ портала (роль admin без своего отдела) — сужено владельцем
      08.09.2026 до «линия/основа, супервайзеры, Ару, суперадмины». В соседних
      разделах он проходит, здесь нет.
+
+   Тренер СЗоВ проходит своим отделом: третье исключение — «переписка живых
+   водителей не его дело» — снято 25.09.2026 по задаче #360 вместе с такими же
+   в «Обращениях», «Посылках» и «Ссылке на подписание».
 
    Модель направления приходит в профиле (`direction_model`) и спрашивается
    сервером только у СЗоВ — в других отделах чат-менеджеров нет. Если поле не
@@ -2442,7 +2461,6 @@ const canAccessDriverChatsSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY) return role === 'super_admin';
     if (role === 'super_admin') return true;
-    if (role === 'trainer') return false;
     // Админ портала (роль admin, не назначенный главой) здесь НЕ проходит, в
     // отличие от соседних разделов: 08.09.2026 владелец сузил круг до «линия/
     // основа СЗоВ, супервайзеры, Ару, суперадмины». Глава СЗоВ проходит ниже —
@@ -2465,8 +2483,9 @@ const canAccessDriverChatsSectionForUser = (userLike) => {
    раздел видят глобальные админы, глава отдела продаж и супервайзеры ОП.
 
    Оператору не показываем: выгрузка — это телефоны клиентов за период целиком,
-   инструмент разбора работы отдела, а не личный кабинет. Тренеру — по той же
-   причине, по которой ему закрыты «Обращения» и «Посылки».
+   инструмент разбора работы отдела, а не личный кабинет. Тренеру — тоже нет:
+   «Обращения» и «Посылки» ему открыли 25.09.2026 (задача #360), а этот раздел
+   он не просил, и расширять выдачу без постановки не стали.
 
    Здесь решается только «показывать ли пункт меню»; обязательную границу держит
    cdr/access.py. */
@@ -42093,6 +42112,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const isAdminLikeRole = isAdminLikeRoleFn(currentUserRole) && !isScopedDepartmentHead;
             const isDepartmentManager = isSupervisorRole(currentUserRole) || isScopedDepartmentHead;
             const isPlainTrainer = currentUserRole === 'trainer' && !isDepartmentHeadUser;
+            // «Тренажёр» (голосовой разговор с ИИ-водителем): супер-админ и тренер —
+            // тренеру открыт 25.09.2026 по задаче #362. Правило буквально совпадает с
+            // серверным (voice_trainer/routes.py, гейт trainer_route): там оно и
+            // обязательное, а здесь решает только пункт меню и экран. Роль, а не
+            // isPlainTrainer — сервер главу-тренера тоже пускает.
+            const canAccessVoiceTrainerSection = isSuperAdmin || currentUserRole === 'trainer';
             // Выгрузка операторов в Excel из раздела СВ: область та же, что у главы отдела —
             // весь свой отдел со всеми группами, поэтому окно параметров у них одинаковое.
             const canSupervisorExportOperators = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;
@@ -42536,23 +42561,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : OP_DEFAULT_SALARY_CALCULATOR_MODEL);
 
             // Раздел «Зарплата» по отделам: админ (не глава отдела) переключает отделы
-            // и видит все готовые расчёты; СВ и глава отдела — модели только своего
-            // отдела; оператор ОП — свою модель без вкладок.
-            const canPickSalaryDepartment = isAdminLikeRole;
+            // и видит все готовые расчёты; тренер — тоже, но только СЗоВ и ОП; СВ и
+            // глава отдела — модели только своего отдела; оператор ОП — свою модель
+            // без вкладок.
+            const salaryPickerCatalog = isAdminLikeRole
+                ? SALARY_CALCULATOR_CATALOG
+                : (isPlainTrainer ? TRAINER_SALARY_CALCULATOR_CATALOG : null);
+            const canPickSalaryDepartment = Boolean(salaryPickerCatalog);
+            // Выбор ищется в СВОЁМ каталоге, а не в общем: в localStorage мог
+            // остаться «ТЭЗ» от админа на том же компьютере, и тренер открыл бы
+            // отдел, которого у него нет.
+            const salaryPickerEntry = (code) => {
+                const normalized = normalizeDepartmentCode(code);
+                return (salaryPickerCatalog || []).find((entry) => entry.code === normalized) || null;
+            };
             const [salaryDeptCode, setSalaryDeptCode] = useState(
                 () => normalizeDepartmentCode(getStoredValue('salaryDeptCode', ''))
             );
             const ownSalaryDeptCode = normalizeDepartmentCode(salaryDepartment.code);
             const activeSalaryDeptCode = canPickSalaryDepartment
                 ? (
-                    salaryCatalogEntry(salaryDeptCode)?.code
-                    || salaryCatalogEntry(ownSalaryDeptCode)?.code
-                    || SALARY_CALCULATOR_CATALOG[0].code
+                    salaryPickerEntry(salaryDeptCode)?.code
+                    || salaryPickerEntry(ownSalaryDeptCode)?.code
+                    || salaryPickerCatalog[0].code
                 )
                 : ownSalaryDeptCode;
             const activeSalaryCatalogEntry = salaryCatalogEntry(activeSalaryDeptCode);
             const salaryDeptOptions = canPickSalaryDepartment
-                ? SALARY_CALCULATOR_CATALOG
+                ? salaryPickerCatalog
                 : (activeSalaryCatalogEntry ? [activeSalaryCatalogEntry] : []);
             const salaryModelOptions = activeSalaryCatalogEntry?.models || [];
             // Модель активной вкладки. У ОП и TEZ свои правила выбора (замок на
@@ -42568,11 +42604,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Вкладки моделей прячем только у оператора ОП: он считает себе.
             const showSalaryModelTabs = salaryModelOptions.length > 1
                 && !(activeSalaryDeptCode === 'op' && isOwnSalaryOperator && isOwnOpModelSupported);
-            // Админу заглушка не нужна: у него всегда есть выбор отдела.
+            // Админу и тренеру заглушка не нужна: у них всегда есть выбор отдела.
             const salaryStubShown = !canPickSalaryDepartment
                 && (!hasSalaryCalculatorForDepartment || (isOpSalaryDept && !showOpCalculator));
             const pickSalaryDepartment = (code) => {
-                const entry = salaryCatalogEntry(code);
+                const entry = salaryPickerEntry(code);
                 if (!entry) return;
                 setSalaryDeptCode(entry.code);
                 try {
@@ -53184,6 +53220,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
                                                 </button>
                                             </li>
+
+                                            {renderSidebarDividerInner()}
+
+                                            {/* Оплата и мотивация — тем же блоком, что у админа и главы.
+                                                Отделы внутри раздела — СЗоВ и ОП (задача #360). */}
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                                </button>
+                                            </li>
                                         </>
                                     )}
 
@@ -53749,18 +53795,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {renderDividerIfInner(
-                                        isSuperAdmin && deptAllowsInner('voice_trainer'),
+                                        canAccessVoiceTrainerSection && deptAllowsInner('voice_trainer'),
                                         canDownloadIcorePhone && deptAllowsInner('download_icore_phone'),
                                     )}
 
                                     {/* Тренажёр и программы на машину сотрудника. */}
                                     {/* «Тренажёр» — голосовой разговор с ИИ и разбор после него.
                                         Раздел тестовый: тратит платные квоты и раздаёт браузеру
-                                        ключи к внешним сервисам, поэтому только супер-админ.
+                                        ключи к внешним сервисам, поэтому круг узкий — супер-админ
+                                        и тренер (с 25.09.2026, задача #362: тренер участвует в
+                                        разработке звонка ИИ-водителя).
                                         Гейт продублирован на сервере — спрятанный пункт меню
                                         доступом не является, раздел открывается и прямым адресом.
                                         Объявлен ОДИН раз в общей части, как «Вики» и «Обращения». */}
-                                    {isSuperAdmin && (
+                                    {canAccessVoiceTrainerSection && (
                                     <SidebarDeptScope section="voice_trainer" activeCode={activeDeptCode}>
                                         <li>
                                             <button
@@ -54650,7 +54698,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {view === "voice_trainer" && isSuperAdmin && (
+                        {view === "voice_trainer" && canAccessVoiceTrainerSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренажёра…</div>}>
                                 <TrainerView
                                     apiBaseUrl={API_BASE_URL}
@@ -59446,7 +59494,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 />
                                             </Suspense>
                                         )}
-                                        {user.role !== 'trainer' && view === 'salary' && (
+                                        {/* Тренеру калькулятор открыт с 25.09.2026 (задача #360):
+                                            отделы СЗоВ и ОП, см. TRAINER_SALARY_CALCULATOR_CATALOG. */}
+                                        {view === 'salary' && (
                                             <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg overflow-hidden">
                                                 <h2 className="text-xl sm:text-3xl font-bold mb-4 sm:mb-8 text-gray-900 flex items-center gap-2">
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
