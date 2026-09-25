@@ -2623,6 +2623,14 @@ const canManageOpBroadcastForUser = (userLike) => {
     return isOpWallboardDepartmentHead(userLike);
 };
 
+// Отбивка «Табло ОП · Чат» ТОЛЬКО лично себе, поимённо: СВ верификаторов, постановщик #367
+// (решение владельца 25.09.2026). Группы ему не открываются — форма покажет одну строку
+// «Лично мне». Зеркало серверного OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS.
+const OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS = new Set([402]);
+const canReceiveOpChatBroadcastPersonallyForUser = (userLike) => (
+    OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS.has(Number(userLike?.id))
+);
+
 // Отбивка «Табло Тез КЦ» — то же правило, хозяин третий: глава Тез КЦ. Отбивка там одна на
 // оба направления отдела и пишет только о перерывах вне графика (возврат #292).
 const canManageTezBroadcastForUser = (userLike) => {
@@ -54659,6 +54667,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
                                     canManageBroadcast={canManageOpBroadcastForUser(user)}
+                                    canPersonalChatBroadcast={canReceiveOpChatBroadcastPersonallyForUser(user)}
                                     widgetOpen={szovWallboardWidget}
                                     onToggleWidget={setSzovWallboardWidget}
                                 />
