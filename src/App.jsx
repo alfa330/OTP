@@ -54654,6 +54654,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "op_wallboard" && canAccessOpWallboardSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
                                 <OpWallboardView
+                                    user={user}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
@@ -61009,13 +61010,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
 
                     {/* Окно «поверх других» одно на приложение, а табло три: направления Тез
-                        начинаются с `tez_`, у ОП ключ `op`, и права у каждого свои — виджет
+                        начинаются с `tez_`, у ОП ключи `op` (линия) и `op_chat` (чаты
+                        верификаторов), и права у каждого свои — виджет
                         обязан спрашивать про доступ того раздела, чьё направление сейчас
                         открыто, иначе табло Тез или ОП показывалось бы тому, кому закрыт
                         сам раздел. */}
                     {szovWallboardWidget && (String(szovWallboardWidget).startsWith('tez_')
                         ? canAccessTezWallboardSection
-                        : szovWallboardWidget === 'op'
+                        : (szovWallboardWidget === 'op' || szovWallboardWidget === 'op_chat')
                             ? canAccessOpWallboardSection
                             : canAccessSzovWallboardSection) && (
                         <SzovWallboardWidget
