@@ -358,7 +358,7 @@ const VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = new Set([183]);
 // прочитанное — уже никогда. Открыть «всем admin» значило бы раздать эту кнопку
 // десяткам людей, которым её никто не давал. Та же константа на бэкенде —
 // SECTION_ALLOWED_USER_IDS в driver_mailings/access.py.
-const DRIVER_MAILINGS_ALLOWED_USER_IDS = new Set([476]);
+const DRIVER_MAILINGS_ALLOWED_USER_IDS = new Set([476, 523]);
 // Раздел «Оплата счетов» (задача #179): бизнес-процесс согласования закупа и
 // оплаты счетов. На время выката открыт ОДНОМУ человеку — владельцу (id 2), его
 // прямое указание. Не «всем super_admin»: их пятеро, и согласование оплаты
