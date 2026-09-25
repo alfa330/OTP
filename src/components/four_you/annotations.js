@@ -2,7 +2,7 @@
 // Координаты всех элементов нормализованы к фото (0..1), поэтому рисунок,
 // стикеры и текст одинаково ложатся на превью, полноразмерное фото и зум.
 
-export const FOUR_YOU_USER_NAMES = { 2: 'Руслан', 241: 'Адия' };
+export const FOUR_YOU_USER_NAMES = { 2: 'Руслан' };
 export const userName = (id) => FOUR_YOU_USER_NAMES[Number(id)] || 'Гость';
 
 // Ключи шрифтов (должны совпадать с FOUR_YOU_ANN_FONTS на бэкенде).

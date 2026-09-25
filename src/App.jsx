@@ -309,7 +309,6 @@ const SESSION_DEPARTMENT_ALL = 'all';
 const SESSION_DEPARTMENT_NONE = 'none';
 const SESSION_DEPARTMENT_NONE_LABEL = 'Без отдела';
 const FOUR_YOU_ADMIN_USER_ID = 2;
-const FOUR_YOU_VIEWER_USER_ID = 241;
 const AI_QA_OP_DEPARTMENT_ID = 367;
 // Кому доступна программа iCORE Phone: отдел продаж (367), Тез КЦ (560) и админы.
 // Та же константа на бэкенде (ICORE_PHONE_DEPARTMENT_IDS в bot_schedule2.py) — она
@@ -1966,10 +1965,9 @@ const canManageFourYouForUser = (userLike) => (
     Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID
 );
 
-const canAccessFourYouForUser = (userLike) => (
-    canManageFourYouForUser(userLike) ||
-    (FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID)
-);
+// Смотреть раздел может только тот, кто его ведёт: отдельного «читателя» нет
+// (снят 25.09.2026 по решению владельца), так же решает и бэкенд.
+const canAccessFourYouForUser = (userLike) => canManageFourYouForUser(userLike);
 
 // СВ отдела продаж: раздел «ИИ-оценка» доступен, данные бэкенд режет до его направлений.
 // ВНИМАНИЕ: предикат переиспользован в «Настройках SIP» и «Касаниях», поэтому
@@ -53877,31 +53875,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         открыты всем ролям, поэтому блок не бывает пустым. */}
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
-
-                                    {canAccessFourYouSection && !canManageFourYouSection && (
-                                        <li>
-                                            <button
-                                                type="button"
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}
-                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'four_you' ? 'bg-blue-700' : ''}`}
-                                            >
-                                                <FaIcon className="fas fa-heart text-rose-300" />
-                                                {fourYouUnreadCount > 0 && (
-                                                    <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
-                                                        {fourYouUnreadCount > 9 ? '9+' : fourYouUnreadCount}
-                                                    </span>
-                                                )}
-                                                <span className="sidebar-text inline-flex items-center gap-2">
-                                                    <span>4 You</span>
-                                                    {fourYouUnreadCount > 0 && (
-                                                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
-                                                            {fourYouUnreadCount > 99 ? '99+' : fourYouUnreadCount}
-                                                        </span>
-                                                    )}
-                                                </span>
-                                            </button>
-                                        </li>
-                                    )}
 
                                     {canAccessDevLetterSection && (
                                         <li>

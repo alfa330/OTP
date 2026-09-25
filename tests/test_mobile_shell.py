@@ -198,8 +198,8 @@ class SheetTests(unittest.TestCase):
 
     def test_hidden_logo_does_not_take_away_four_you(self):
         """Логотип над портретом убран (решение владельца), а вход в «4 You» на
-        компьютере есть ТОЛЬКО через него: пункт меню показан лишь читателям
-        (canAccessFourYouSection && !canManage...). Значит тем, кто раздел
+        компьютере есть ТОЛЬКО через него: отдельного пункта меню у раздела нет
+        (он был лишь у «читателя», снятого 25.09.2026). Значит тем, кто раздел
         ведёт, нужна своя строка в шапке — иначе раздел пропадает молча."""
         self.assertIn('display: none;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar h1 {', 200))
         at = APP.index('{canManageFourYouSection && (')

@@ -1,6 +1,9 @@
+import ast
 import re
 from pathlib import Path
 import unittest
+
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,29 +19,76 @@ class FourYouAccessControlTests(unittest.TestCase):
         cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
         cls.lenta_css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
 
-    def test_frontend_access_is_bound_to_the_two_user_ids(self):
+    def test_frontend_access_is_bound_to_the_admin_only(self):
         self.assertIn("const FOUR_YOU_ADMIN_USER_ID = 2;", self.app_source)
-        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.app_source)
         self.assertIn("Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID", self.app_source)
-        self.assertIn("FOUR_YOU_VIEWER_USER_ID > 0 && Number(userLike?.id) === FOUR_YOU_VIEWER_USER_ID", self.app_source)
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin'", self.app_source)
+        # Смотреть раздел может только тот, кто его ведёт.
+        self.assertIn(
+            "const canAccessFourYouForUser = (userLike) => canManageFourYouForUser(userLike);",
+            self.app_source,
+        )
         self.assertNotIn('title="Раздел временно недоступен"', self.app_source)
         self.assertIn("onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}", self.app_source)
 
-    def test_backend_access_is_bound_to_id_and_admin_role(self):
-        self.assertIn("FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))", self.api_source)
-        self.assertIn("FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)", self.api_source)
-        self.assertIn("return FOUR_YOU_VIEWER_USER_ID if FOUR_YOU_VIEWER_USER_ID > 0 else None", self.api_source)
-        self.assertIn("requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID", self.api_source)
-        self.assertIn("requester_id == int(viewer_user_id)", self.api_source)
+    def test_viewer_access_is_removed_everywhere(self):
+        """Доступ «читателя» (id 241) снят целиком 25.09.2026 — владелец: «убрать
+        раздел 4you с доступов полностью». В прошлый раз (a32882ed) id обнулили,
+        но оставили и константу, и переменную окружения на бэкенде, — доступ
+        вернули одной правкой. Теперь не должно остаться ни того, ни другого."""
+        for label, source in (
+            ("src/App.jsx", self.app_source),
+            ("src/utils/departmentViews.js", self.department_views_source),
+            ("bot_schedule2.py", self.api_source),
+        ):
+            self.assertTrue("FOUR_YOU_VIEWER" not in source, f"{label}: читатель 4 You вернулся")
+            self.assertTrue("_four_you_viewer" not in source, f"{label}: читатель 4 You вернулся")
+        # Пункт меню «4 You» был только у читателя; тот, кто ведёт раздел,
+        # входит через строку в шапке (см. test_mobile_shell).
+        self.assertTrue("canAccessFourYouSection && !canManageFourYouSection" not in self.app_source,
+                        "пункт меню читателя 4 You вернулся")
+        # Имя в подписи комментариев тоже убрано: в карте только тот, кто ведёт раздел.
+        annotations = (ROOT / "src" / "components" / "four_you" / "annotations.js").read_text(encoding="utf-8-sig")
+        self.assertIn("export const FOUR_YOU_USER_NAMES = { 2: 'Руслан' };", annotations)
         self.assertNotIn("тукеев", self.api_source.lower())
 
-    def test_viewer_bypasses_only_the_department_guard_for_four_you(self):
-        self.assertIn("const FOUR_YOU_VIEWER_USER_ID = 241;", self.department_views_source)
-        self.assertIn(
-            "if (viewKey === 'four_you' && FOUR_YOU_VIEWER_USER_ID > 0 && Number(user?.id) === FOUR_YOU_VIEWER_USER_ID) return true;",
-            self.department_views_source,
-        )
+    def test_backend_access_is_bound_to_id_and_admin_role(self):
+        self.assertIn("FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))", self.api_source)
+        self.assertIn("requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID", self.api_source)
+        self.assertIn("return can_upload, can_upload", self.api_source)
+        # Колокол решает по той же функции, что и раздел, — иначе бейдж «4 You»
+        # показывался бы тому, кого в раздел не пускают.
+        self.assertIn("can_see_four_you, _ = _four_you_access_for_requester(requester_id, requester)", self.api_source)
+
+    def test_backend_access_function_lets_in_only_the_admin(self):
+        """Настоящая функция бэкенда, а не поиск строки: её же зовут гард ручек
+        и колокол уведомлений (_notifications_viewer_context)."""
+        bot_path = ROOT / "bot_schedule2.py"
+        nodes = [
+            source_cache.function_copy(bot_path, "_normalize_user_role"),
+            source_cache.function_copy(bot_path, "_four_you_access_for_requester"),
+        ]
+        namespace = {"FOUR_YOU_ADMIN_USER_ID": 2}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(bot_path), "exec"), namespace)
+        access = namespace["_four_you_access_for_requester"]
+
+        def requester(role, status="working"):
+            # Форма строки как у get_user: role — [3], status — [11].
+            row = [None] * 12
+            row[3], row[11] = role, status
+            return tuple(row)
+
+        self.assertEqual((True, True), access(2, requester("super_admin")))
+        self.assertEqual((True, True), access("2", requester("superadmin")))
+        # Бывший читатель — ни с какой ролью, в том числе с правами админа.
+        for role in ("operator", "trainer", "admin", "super_admin"):
+            self.assertEqual((False, False), access(241, requester(role)), role)
+        self.assertEqual((False, False), access(2, requester("admin")))
+        self.assertEqual((False, False), access(2, requester("super_admin", "fired")))
+        self.assertEqual((False, False), access(None, None))
+
+    def test_department_guard_has_no_four_you_exceptions(self):
+        self.assertNotIn("viewKey === 'four_you'", self.department_views_source)
         self.assertNotIn("'four_you'", self.department_views_source.split("export const DEPARTMENT_VIEW_ALLOWLIST", 1)[1].split("};", 1)[0])
 
     def test_every_image_route_requires_authenticated_guard(self):

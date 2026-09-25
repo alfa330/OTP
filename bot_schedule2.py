@@ -3133,7 +3133,6 @@ AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip(
 AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
-FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)
 # Поимённый доступ к разделу «ИИ-оценка» — сверх ролей. Проверяется ПЕРВЫМ, до
 # роли и отдела, поэтому человек из списка проходит независимо от того, как
 # сложится остальная проверка.
@@ -4335,20 +4334,17 @@ def _delete_avatar_blobs(bucket_name, *blob_paths):
             pass
 
 
-def _resolve_four_you_viewer_user_id():
-    return FOUR_YOU_VIEWER_USER_ID if FOUR_YOU_VIEWER_USER_ID > 0 else None
-
-
 def _four_you_access_for_requester(requester_id, requester):
+    # Раздел открыт только тому, кто его ведёт. Отдельного «читателя» больше нет:
+    # его доступ снят целиком по решению владельца 25.09.2026, и вернуть его
+    # переменной окружения нельзя — такой настройки не осталось.
     requester_role = _normalize_user_role(requester[3] if requester else None)
     requester_id = int(requester_id or 0)
     requester_status = str(requester[11] if requester and len(requester) > 11 else '').strip().lower()
     if requester_status in ('fired', 'dismissal'):
         return False, False
     can_upload = requester_role == 'super_admin' and requester_id == FOUR_YOU_ADMIN_USER_ID
-    viewer_user_id = _resolve_four_you_viewer_user_id()
-    can_view = can_upload or (viewer_user_id is not None and requester_id == int(viewer_user_id))
-    return can_view, can_upload
+    return can_upload, can_upload
 
 
 def _four_you_route_guard(require_upload=False):
