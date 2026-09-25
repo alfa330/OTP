@@ -97,9 +97,11 @@ _RIGHT = (PatternFill(fill_type='solid', fgColor='DCFCE7'), Font(color='166534')
 _WRONG = (PatternFill(fill_type='solid', fgColor='FEF2F2'), Font(color='991B1B'))
 _EMPTY = (PatternFill(fill_type='solid', fgColor='F3F4F6'), Font(color='6B7280'))
 
-# Перерасход времени — янтарём, как «застрял на тесте» на экране: это то, по
-# чему руководитель будет разбираться с человеком.
-_OVER = (PatternFill(fill_type='solid', fgColor='FEF3C7'), Font(color='92400E'))
+# Перерасход времени — красным, как в журнале на экране (решение владельца
+# 25.09.2026: «сохранять таких и подмечать красным»). Тот же красный, что у
+# неверного ответа: файл открывают рядом с «Опросами». Красим и ФИО — строку
+# превысившего находят глазами, не листая до колонки «Сверх отведённого».
+_OVER = _WRONG
 
 _QUESTION_TITLE_LIMIT = 100
 
@@ -330,11 +332,12 @@ def build(post, rows, questions=(), attempts=()):
                    first=True)
     keys = [key for key, _t, _w in headers]
     if 'overtime' in keys:
-        column = keys.index('overtime') + 1
+        marked = [keys.index(key) + 1 for key in ('overtime', 'name') if key in keys]
         for index, value in enumerate(values['overtime'], start=2):
             if value:
-                cell = sheet.cell(row=index, column=column)
-                cell.fill, cell.font = _OVER
+                for column in marked:
+                    cell = sheet.cell(row=index, column=column)
+                    cell.fill, cell.font = _OVER
     if questions and attempts:
         _attempts_sheet(book, rows, questions, attempts)
     if questions:

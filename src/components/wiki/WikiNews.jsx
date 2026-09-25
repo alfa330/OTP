@@ -1873,6 +1873,32 @@ const STATUS_BADGE_COLOR = {
     retrying: 'amber', failed: 'amber', pending: 'gray', absent: 'gray', not_seen: 'gray',
 };
 
+/* ПРЕВЫСИЛ ОТВЕДЁННОЕ ВРЕМЯ в окне Oktell — на чтении или на тесте. Красным
+   (решение владельца 25.09.2026: «в журнале самой новости сохранять таких и
+   подмечать красным»): об этом с человеком и будут говорить. Правило то же, что
+   у счётчика сервера (news/access.py: report_summary → overtime). Уложился или
+   замера нет (старая сборка агента) — ничего. */
+const isOvertime = (row) => (row?.read_over_seconds || 0) > 0 || (row?.quiz_over_seconds || 0) > 0;
+
+function OvertimeBadges({ row, limits }) {
+    const spentTitle = (label, spent, limit) => (
+        `${label} ${clockLabel(spent)}${limit ? ` из отведённых ${clockLabel(limit)}` : ''}`);
+    return (
+        <>
+            {row.read_over_seconds > 0 && (
+                <span title={spentTitle('На чтении', row.read_spent_seconds, limits?.read_limit_seconds)}>
+                    <Badge color="red">чтение +{clockLabel(row.read_over_seconds)}</Badge>
+                </span>
+            )}
+            {row.quiz_over_seconds > 0 && (
+                <span title={spentTitle('На тесте', row.quiz_spent_seconds, limits?.quiz_limit_seconds)}>
+                    <Badge color="red">тест +{clockLabel(row.quiz_over_seconds)}</Badge>
+                </span>
+            )}
+        </>
+    );
+}
+
 // «2 попытки», «5 попыток» — считается у каждой карточки, склонять обязательно.
 const attemptsLabel = (count) => {
     const n = Math.abs(Number(count) || 0);
@@ -1962,7 +1988,10 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
     const [loading, setLoading] = useState(false);
     const [tab, setTab] = useState('people');
     const [query, setQuery] = useState('');
-    const [onlyAttention, setOnlyAttention] = useState(false);
+    /* Какой список показан: null — все, 'attention' — «Требуют внимания»,
+       'overtime' — «Превысили время». Одно значение, а не два флажка: вместе
+       они дали бы пересечение, которого никто не просил. */
+    const [listFilter, setListFilter] = useState(null);
     const [exporting, setExporting] = useState(false);
     /* Второй уровень окна — разбор одного сотрудника, как «Ответы» в опросах.
        Не второе окно: IosModal умеет шеврон «назад» внутри себя. */
@@ -1975,7 +2004,7 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
         setLoading(true);
         setTab('people');
         setQuery('');
-        setOnlyAttention(false);
+        setListFilter(null);
         setPerson(null);
         axios.get(`${apiBaseUrl}/api/news/posts/${post.id}/report`, { headers })
             .then((r) => setState(r.data))
@@ -1995,9 +2024,14 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
             /* «Требуют внимания» — от кого ещё чего-то ждут: не подтвердил ИЛИ
                не сдал тест. Выбывшего из адресатов не показываем: дожимать его
                незачем. */
-            && (!onlyAttention || (row.in_audience && !['passed', 'done'].includes(row.status)))
+            && (listFilter !== 'attention'
+                || (row.in_audience && !['passed', 'done'].includes(row.status)))
+            /* «Превысили время» — тем же кругом, что счётчик на кнопке
+               (report_summary: нынешние адресаты), иначе число на кнопке и
+               длина списка разошлись бы. */
+            && (listFilter !== 'overtime' || (row.in_audience && isOvertime(row)))
         ));
-    }, [state, query, onlyAttention]);
+    }, [state, query, listFilter]);
 
     const openPerson = (row) => {
         if (!hasQuiz || !row.attempts) return;
@@ -2089,6 +2123,12 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
         { key: 'confirmed', label: 'Ознакомились', value: state.confirmed ?? 0 },
         { key: 'rate', label: 'Доля ознакомления', value: `${state.percent ?? 0}%` },
     ]) : [];
+    /* Сколько отводилось в окне Oktell — подпись к отметкам «+1:12»: без неё их
+       не с чем сравнить. Пусто — лимитов у новости нет. */
+    const limitsLabel = [
+        state?.limits?.read_limit_seconds ? `чтение ${clockLabel(state.limits.read_limit_seconds)}` : '',
+        state?.limits?.quiz_limit_seconds ? `тест ${clockLabel(state.limits.quiz_limit_seconds)}` : '',
+    ].filter(Boolean).join(', ');
 
     return (
         <IosModal
@@ -2140,6 +2180,9 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                                 {STATUS_LABELS[person.status]}
                                             </Badge>
                                         )}
+                                        {/* Перерасход — и в разборе: открыв карточку,
+                                            руководитель не должен терять отметку. */}
+                                        <OvertimeBadges row={person} limits={state.limits} />
                                     </div>
                                     <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
                                         <span>
@@ -2197,28 +2240,18 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                     {/* Обстоятельства выпуска — мелкой строкой под плитками и только
                         когда они есть: растяжка, запуск по плану, снятие. */}
                     {(state.confirmed_outside > 0 || hasTrainer || state.plan?.publish_mode === 'spread'
-                      || state.plan?.scheduled_at || post?.archived_at || state.overtime > 0) && (
+                      || state.plan?.scheduled_at || post?.archived_at || limitsLabel) && (
                         <div className="space-y-0.5 px-1 text-[12px] tabular-nums text-slate-500">
                             {state.confirmed_outside > 0 && (
                                 <p>и ещё {state.confirmed_outside} подтвердили из тех, кто больше не в адресатах</p>
                             )}
                             {hasTrainer && <p>тренажёр прошли {state.trainer_passed || 0}</p>}
                             {/* Время в окне Oktell (решение владельца 23.09.2026:
-                                «ничего не прерывать, отметить»). Сколько было
-                                отведено — здесь же: «+1:12» без него не с чем
-                                сравнить. */}
-                            {state.overtime > 0 && (
-                                <p className="text-amber-700">
-                                    превысили отведённое время — {state.overtime}
-                                    {' (отведено: '}
-                                    {[state.limits?.read_limit_seconds
-                                        ? `чтение ${clockLabel(state.limits.read_limit_seconds)}` : '',
-                                      state.limits?.quiz_limit_seconds
-                                        ? `тест ${clockLabel(state.limits.quiz_limit_seconds)}` : '']
-                                        .filter(Boolean).join(', ')}
-                                    )
-                                </p>
-                            )}
+                                «ничего не прерывать, отметить») — настройка
+                                выпуска, как растяжка ниже, поэтому нейтрально.
+                                Сколько человек превысили, — красной кнопкой над
+                                списком: там их и открывают. */}
+                            {limitsLabel && <p>отведено в окне Oktell: {limitsLabel}</p>}
                             {state.plan?.publish_mode === 'spread' && (
                                 <p>
                                     волнами: {state.plan.waves} по {minutesLabel(state.plan.wave_interval_minutes)}
@@ -2262,8 +2295,10 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
 
                     {tab === 'people' && (
                         <div className="animate-card-open space-y-2.5">
+                            {/* На телефоне поиск — отдельной строкой: рядом с двумя
+                                кнопками он сжимался до одной буквы. */}
                             <div className="flex flex-wrap items-center gap-2">
-                                <div className="relative min-w-0 flex-1">
+                                <div className="relative w-full sm:w-auto sm:min-w-0 sm:flex-1">
                                     <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />
                                     <input
                                         value={query}
@@ -2274,19 +2309,37 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                 </div>
                                 <button
                                     type="button"
-                                    onClick={() => setOnlyAttention((value) => !value)}
-                                    aria-pressed={onlyAttention}
+                                    onClick={() => setListFilter((value) => (value === 'attention' ? null : 'attention'))}
+                                    aria-pressed={listFilter === 'attention'}
                                     className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] tabular-nums transition active:scale-[0.98] ${
-                                        onlyAttention ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                                        listFilter === 'attention' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                                 >
                                     Требуют внимания{state.needs_attention ? ` · ${state.needs_attention}` : ''}
                                 </button>
+                                {/* Кто превысил отведённое время — списком, одним
+                                    нажатием (решение владельца 25.09.2026). Кнопка
+                                    есть, только когда такие есть: «Превысили время
+                                    · 0» у каждой новости было бы шумом. */}
+                                {state.overtime > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setListFilter((value) => (value === 'overtime' ? null : 'overtime'))}
+                                        aria-pressed={listFilter === 'overtime'}
+                                        className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] tabular-nums transition active:scale-[0.98] ${
+                                            listFilter === 'overtime'
+                                                ? 'bg-rose-600 text-white'
+                                                : 'bg-rose-50 text-rose-600 ring-1 ring-rose-100 hover:bg-rose-100'}`}
+                                    >
+                                        Превысили время · {state.overtime}
+                                    </button>
+                                )}
                             </div>
 
                             {people.length === 0 && (
                                 <p className="py-8 text-center text-[13px] text-slate-400">
                                     {query ? 'Сотрудники не найдены'
-                                        : (onlyAttention ? 'Все ознакомились' : 'Адресатов нет')}
+                                        : ({ attention: 'Все ознакомились',
+                                             overtime: 'Никто не превысил время' }[listFilter] || 'Адресатов нет')}
                                 </p>
                             )}
 
@@ -2298,16 +2351,23 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                     const score = row.last_total
                                         ? Math.round((row.last_correct || 0) * 100 / row.last_total) : null;
                                     const settled = ['passed', 'done'].includes(row.status);
+                                    /* Превысившего время видно по красной рамке,
+                                       не читая плашек: в журнале на двести
+                                       человек его ищут глазами. */
+                                    const over = isOvertime(row);
+                                    const ring = over
+                                        ? `ring-rose-300${clickable ? ' hover:ring-rose-400' : ''}`
+                                        : (clickable ? 'ring-slate-200/70 hover:ring-blue-300' : 'ring-slate-200/60');
                                     return (
                                         <button
                                             key={row.user_id}
                                             type="button"
                                             disabled={!clickable}
                                             onClick={() => openPerson(row)}
-                                            className={`flex min-h-[88px] flex-col justify-between rounded-2xl px-4 py-3.5 text-left ring-1 transition-all duration-200 ${
+                                            className={`flex min-h-[88px] flex-col justify-between rounded-2xl px-4 py-3.5 text-left ring-1 transition-all duration-200 ${ring} ${
                                                 clickable
-                                                    ? 'bg-white ring-slate-200/70 hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(15,23,42,0.4)] hover:ring-blue-300 active:scale-[0.99]'
-                                                    : `cursor-default ring-slate-200/60 ${settled ? 'bg-white' : 'bg-slate-50'}`
+                                                    ? 'bg-white hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(15,23,42,0.4)] active:scale-[0.99]'
+                                                    : `cursor-default ${settled ? 'bg-white' : 'bg-slate-50'}`
                                             }`}
                                         >
                                             <div className="min-w-0">
@@ -2344,19 +2404,9 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
                                                     {hasTrainer && row.trainer_passed_at && (
                                                         <Badge color="green">тренажёр</Badge>
                                                     )}
-                                                    {/* Перерасход — янтарём, как «застрял на
-                                                        тесте»: это то, о чём с человеком
-                                                        будут говорить. Уложился — ничего. */}
-                                                    {row.read_over_seconds > 0 && (
-                                                        <span title={`На чтении ${clockLabel(row.read_spent_seconds)}`}>
-                                                            <Badge color="amber">чтение +{clockLabel(row.read_over_seconds)}</Badge>
-                                                        </span>
-                                                    )}
-                                                    {row.quiz_over_seconds > 0 && (
-                                                        <span title={`На тесте ${clockLabel(row.quiz_spent_seconds)}`}>
-                                                            <Badge color="amber">тест +{clockLabel(row.quiz_over_seconds)}</Badge>
-                                                        </span>
-                                                    )}
+                                                    {/* На сколько превышено — красным, см.
+                                                        isOvertime. Уложился — ничего. */}
+                                                    <OvertimeBadges row={row} limits={state.limits} />
                                                 </div>
                                                 {hasQuiz && score !== null && (
                                                     <span className={`shrink-0 text-[19px] font-bold leading-none tabular-nums ${scoreToneClass(score)}`}>

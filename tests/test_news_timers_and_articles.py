@@ -234,7 +234,38 @@ class TimeLimitAgentWindowTests(unittest.TestCase):
         self.assertNotIn('set_operator_status', press)
 
     def test_the_change_rides_the_unreleased_build(self):
-        self.assertIn('VERSION = "1.0.32"', self.agent)
+        # 1.0.32 выпущена 25.09.2026; перенос времени между показами окна
+        # (carry_news_spent) едет следующей сборкой.
+        self.assertIn('VERSION = "1.0.33"', self.agent)
+
+    def test_reopened_window_continues_the_count(self):
+        """Закрытое окно показывается снова из active_news — и обязано нести
+        набежавшее время. Иначе закрыть окно на 2:50 из 3:00 значило получить
+        три минуты заново, а сервер (GREATEST) превышения не увидел бы."""
+        press = _between(self.agent, '    def handle_news_press(', '    def release_news(')
+        self.assertIn('carry_news_spent(active_news, spent)', press)
+        # Замер переносится ДО ветки повторного показа, а не только раз в 20 с.
+        self.assertLess(press.index('carry_news_spent(active_news, spent)'),
+                        press.index('next_news_state_check = time.time()'))
+        self.assertLess(press.index('carry_news_spent(active_news, spent)'),
+                        press.index('news_overlay.show(active_news)'))
+
+    def test_carry_only_moves_the_count_up(self):
+        from oktell_recall_guard import agent
+        item = {'id': 1, 'read_spent_seconds': 40, 'quiz_spent_seconds': 0}
+        agent.carry_news_spent(item, {'read': 170, 'quiz': 12})
+        self.assertEqual((item['read_spent_seconds'], item['quiz_spent_seconds']), (170, 12))
+        # Запоздавший замер назад не отматывает.
+        agent.carry_news_spent(item, {'read': 90, 'quiz': 5})
+        self.assertEqual((item['read_spent_seconds'], item['quiz_spent_seconds']), (170, 12))
+        # Мёртвое окно (None) и мусор ничего не трогают.
+        agent.carry_news_spent(item, None)
+        agent.carry_news_spent(item, {'read': 'abc'})
+        agent.carry_news_spent(None, {'read': 5})
+        self.assertEqual(item['read_spent_seconds'], 170)
+        # Окно пересоздаётся из объявления — и продолжает с перенесённого.
+        payload = agent.build_news_js({**item, 'read_limit_seconds': 180})
+        self.assertIn('"read_spent_seconds": 170', payload)
 
     def test_progress_helper_reads_without_side_effects(self):
         from oktell_recall_guard import agent
@@ -280,6 +311,57 @@ class TimeLimitFormTests(unittest.TestCase):
         self.assertIn('state.overtime > 0', code)
 
 
+class OvertimeInJournalTests(unittest.TestCase):
+    """Решение владельца 25.09.2026: «если время прочтения или время на
+    прохождение теста становится больше указанного значения в настройках
+    новости, то в журнале самой новости сохранять таких и подмечать красным»."""
+
+    def setUp(self):
+        self.form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        self.code = _jsx_code_only(self.form)
+        self.report = _between(self.code, 'function NewsReport(', '\nexport default function WikiNews(')
+
+    def test_overtime_badges_are_red(self):
+        badges = _between(self.code, 'function OvertimeBadges(', '\n}\n')
+        self.assertEqual(badges.count('<Badge color="red">'), 2)
+        self.assertNotIn('amber', badges)
+        kit = _read('src', 'components', 'surveys', 'resultsKit.jsx')
+        self.assertIn("red: 'bg-rose-50 text-rose-600 ring-1 ring-rose-100'", kit)
+
+    def test_card_and_person_view_carry_the_mark(self):
+        # Карточка в списке и разбор сотрудника — одним и тем же компонентом.
+        self.assertEqual(self.report.count('<OvertimeBadges row='), 2)
+        self.assertIn('<OvertimeBadges row={person}', self.report)
+        # Превысившего видно по красной рамке карточки.
+        self.assertIn('const over = isOvertime(row);', self.report)
+        self.assertIn("ring-rose-300", self.report)
+
+    def test_such_people_are_listed_by_a_filter(self):
+        # Кнопка — только когда такие есть, число — счётчик сервера.
+        self.assertIn('{state.overtime > 0 && (', self.report)
+        self.assertIn('Превысили время · {state.overtime}', self.report)
+        self.assertIn("aria-pressed={listFilter === 'overtime'}", self.report)
+        # Список тем же кругом, что счётчик: нынешние адресаты.
+        self.assertIn("listFilter !== 'overtime' || (row.in_audience && isOvertime(row))", self.report)
+        self.assertNotIn('onlyAttention', self.report)
+
+    def test_the_rule_matches_the_server_summary(self):
+        rule = _between(self.code, 'const isOvertime = ', ';\n')
+        self.assertIn('read_over_seconds', rule)
+        self.assertIn('quiz_over_seconds', rule)
+        summary = _between(_read('news', 'access.py'), 'def report_summary(', '\n\n\n')
+        self.assertIn("(row.get('read_over_seconds') or 0) > 0", summary)
+        self.assertIn("(row.get('quiz_over_seconds') or 0) > 0", summary)
+
+    def test_limits_are_a_neutral_release_setting(self):
+        # Сколько отводилось — нейтральной строкой среди обстоятельств выпуска;
+        # красным — только люди.
+        block = _between(self.report, 'post?.archived_at || limitsLabel) && (', '<IosSegmented')
+        self.assertIn('{limitsLabel && <p>отведено в окне Oktell: {limitsLabel}</p>}', block)
+        self.assertNotIn('amber', block)
+        self.assertNotIn('rose', block)
+
+
 class TimeLimitExcelTests(unittest.TestCase):
 
     POST = {'published_at': '2026-09-23T09:00:00'}
@@ -309,7 +391,22 @@ class TimeLimitExcelTests(unittest.TestCase):
         self.assertEqual(sheet.cell(row=2, column=headers.index('На чтении') + 1).value, '4:12')
         over = sheet.cell(row=2, column=headers.index('Сверх отведённого') + 1)
         self.assertEqual(over.value, 'чтение +1:12')
-        self.assertEqual(over.fill.fgColor.rgb[-6:], 'FEF3C7')
+        # Красным, как в журнале (25.09.2026), — и ячейка, и ФИО.
+        self.assertEqual(over.fill.fgColor.rgb[-6:], 'FEF2F2')
+        self.assertEqual(over.font.color.rgb[-6:], '991B1B')
+        name = sheet.cell(row=2, column=headers.index('ФИО') + 1)
+        self.assertEqual(name.fill.fgColor.rgb[-6:], 'FEF2F2')
+
+    def test_those_within_the_limit_stay_unpainted(self):
+        sheet = self._sheet([
+            self._row(user_id=1, name='Превысил', read_spent_seconds=252, read_over_seconds=72),
+            self._row(user_id=2, name='Уложился', read_spent_seconds=100, read_over_seconds=0),
+        ])
+        headers = [cell.value for cell in sheet[1]]
+        for column in ('ФИО', 'Сверх отведённого'):
+            index = headers.index(column) + 1
+            self.assertEqual(sheet.cell(row=2, column=index).fill.fgColor.rgb[-6:], 'FEF2F2')
+            self.assertNotEqual(sheet.cell(row=3, column=index).fill.fgColor.rgb[-6:], 'FEF2F2')
 
     def test_duration_label(self):
         self.assertEqual(report_xlsx._duration(None), '')

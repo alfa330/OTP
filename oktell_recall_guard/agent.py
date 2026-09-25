@@ -64,7 +64,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.32"
+VERSION = "1.0.33"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -3285,6 +3285,28 @@ def has_time_limits(item: Optional[dict]) -> bool:
                 or int(item.get("quiz_limit_seconds") or 0))
 
 
+def carry_news_spent(item: Optional[dict], spent: Optional[dict]) -> None:
+    """Перенести набежавшее в окне время в само объявление (на месте).
+
+    Окно пересоздаётся при каждом показе и начинает счёт с «потрачено» из
+    объявления, а объявление агент получает один раз — при выдаче. Без переноса
+    окно, закрытое и показанное снова, считало с того же места, что в первый
+    раз: оператор, закрывший окно на 2:50 из 3:00, получал три минуты заново, а
+    сервер хранит максимум замеров, а не сумму (GREATEST), — и превысившим время
+    в журнале такой не значился (25.09.2026). Только вверх: запоздавший замер
+    не отматывает счёт назад.
+    """
+    if not item or not isinstance(spent, dict):
+        return
+    for key, part in (("read_spent_seconds", "read"), ("quiz_spent_seconds", "quiz")):
+        try:
+            value = int(spent.get(part) or 0)
+            current = int(item.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        item[key] = max(current, value)
+
+
 def build_news_feedback_js(payload: dict) -> str:
     data = json.dumps(payload or {}, ensure_ascii=False)
     return f"""
@@ -5049,6 +5071,12 @@ def run_agent(cfg: dict) -> int:
         nonlocal next_news_state_check
         if active_news is None:
             return False
+        # Сколько человек уже провёл в окне — каждый заход, пока окно живо, и
+        # сразу в само объявление: закрытое окно показывается снова ИЗ НЕГО и
+        # продолжает счёт с последней секунды, а не с момента выдачи
+        # (carry_news_spent). Мёртвое окно ответит None — перенесённое остаётся.
+        spent = news_overlay.progress()
+        carry_news_spent(active_news, spent)
         # Сначала — жива ли сама новость: снятую с показа не показываем заново,
         # даже если окно успели закрыть (ветка ниже открыла бы его опять).
         if time.time() >= next_news_state_check:
@@ -5056,16 +5084,16 @@ def run_agent(cfg: dict) -> int:
             if link.news_state(active_news.get("id")) is False:
                 release_news("снято с показа")
                 return True
-            # Тем же шагом — сколько человек уже провёл в окне. Без этого время
-            # узнавалось бы только при нажатии «Подтвердить», и тот, кто сидит
-            # в окне час и не жмёт ничего, превышением не значился бы вовсе.
-            if has_time_limits(active_news):
-                spent = news_overlay.progress()
-                if spent:
-                    link.news_progress(active_news.get("id"), spent)
+            # Тем же шагом — замер на сервер. Без этого время узнавалось бы
+            # только при нажатии «Подтвердить», и тот, кто сидит в окне час и не
+            # жмёт ничего, превышением не значился бы вовсе.
+            if has_time_limits(active_news) and spent:
+                link.news_progress(active_news.get("id"), spent)
         if not news_overlay.alive():
             # Окно закрыли, не подтвердив. Объявление обязательное — показываем
             # снова: «закрыл крестиком» не может быть способом его не читать.
+            # И не способом получить отведённое время заново: active_news уже
+            # несёт набежавшее (см. выше).
             logging.info("Окно объявления закрыли — показываю снова")
             if not news_overlay.show(active_news):
                 return False

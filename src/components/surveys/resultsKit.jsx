@@ -56,6 +56,8 @@ export const Badge = ({ children, color = 'gray' }) => {
         green: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100',
         blue: 'bg-blue-50 text-blue-700 ring-1 ring-blue-100',
         amber: 'bg-amber-50 text-amber-700 ring-1 ring-amber-100',
+        // Тот же красный, что у IosBadge (ui/ios.jsx: BADGE_TONES.red).
+        red: 'bg-rose-50 text-rose-600 ring-1 ring-rose-100',
         gray: 'bg-slate-100 text-slate-600',
     };
     return (
