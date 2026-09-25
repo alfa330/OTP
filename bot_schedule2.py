@@ -39252,7 +39252,21 @@ def _szov_broadcast_guard():
         department_id = _szov_wallboard_department_id()
     if department_id is not None and _headed_department_id(requester_id) == department_id:
         return requester_id, None
+    # Поимённый доступ «только лично себе» (см. OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS). Пометка
+    # в g — ручки по ней отказывают во всём, что касается групп, и не показывают их вовсе.
+    if (direction == SZOV_BROADCAST_DIRECTION_OP_CHAT
+            and int(requester_id) in OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS):
+        g.szov_broadcast_personal_only = True
+        return requester_id, None
     return requester_id, (jsonify({"error": "forbidden"}), 403)
+
+
+def _szov_broadcast_is_personal_only():
+    """Запрос пропущен гардом отбивки только ради личной подписки — групп ему не показываем."""
+    return bool(getattr(g, 'szov_broadcast_personal_only', False))
+
+
+SZOV_BROADCAST_PERSONAL_ONLY_ERROR = "Вам открыта только отбивка лично себе — группы настраивает руководитель отдела"
 
 
 def _oktell_wallboard_totals_sql(sl_seconds):
@@ -39758,6 +39772,12 @@ SZOV_BROADCAST_DIRECTION_TEZ = 'tez'
 # «Табло ОП · Чат» — пятое (задача #367): чаты верификаторов в Wazzup. Хозяин тот же, что у
 # «Табло ОП», — глава отдела продаж.
 SZOV_BROADCAST_DIRECTION_OP_CHAT = 'op_chat'
+# Кому отбивка «Табло ОП · Чат» открыта поимённо и ТОЛЬКО лично себе, без групп-получателей:
+# СВ верификаторов, постановщик #367 (решение владельца 25.09.2026). По общему правилу СВ форму
+# отбивки не открывают — группами распоряжается руководитель отдела, и это не меняется: такой
+# человек видит в форме одну строку «Лично мне». Зеркало на фронте —
+# OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS в App.jsx.
+OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS = {402}
 SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT,
                              SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ,
                              SZOV_BROADCAST_DIRECTION_OP_CHAT)
@@ -46030,14 +46050,15 @@ async def _op_chat_broadcast_prepare_scheduled():
 
 
 def _op_chat_broadcast_personal_recipients():
-    """Админы, включившие отбивку «Чата» ОП себе лично, — с той же границей, что у раздела:
-    супер-админ, админ без отдела и админ — глава отдела продаж.
+    """Кто включил отбивку «Чата» ОП себе лично, — с той же границей, что у раздела: супер-админ,
+    админ без отдела и админ — глава отдела продаж, плюс поимённые «только лично».
 
     Сбой здесь группы не останавливает: личная рассылка — добавка к общей."""
     try:
         resolver = globals().get('_op_wallboard_department_id')
-        return db.get_tez_broadcast_personal_recipients(resolver() if resolver else None,
-                                                       direction=SZOV_BROADCAST_DIRECTION_OP_CHAT)
+        return db.get_tez_broadcast_personal_recipients(
+            resolver() if resolver else None, direction=SZOV_BROADCAST_DIRECTION_OP_CHAT,
+            extra_user_ids=OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS)
     except Exception as exc:
         logging.error("Отбивка табло ОП (чат): не удалось прочитать личных получателей: %s", exc)
         return []
@@ -46737,9 +46758,15 @@ def _szov_broadcast_personal_owner(direction):
     if direction not in SZOV_BROADCAST_PERSONAL_DIRECTIONS:
         return None
     _requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error or not requester or not _is_admin_role(requester[3]):
+    if auth_error or not requester:
         return None
-    return requester
+    if _is_admin_role(requester[3]):
+        return requester
+    # Поимённый доступ «только лично» к отбивке «Чата» ОП — роль там ниже админа намеренно.
+    if (direction == SZOV_BROADCAST_DIRECTION_OP_CHAT
+            and int(requester[0]) in OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS):
+        return requester
+    return None
 
 
 def _szov_broadcast_personal_state(direction):
@@ -46778,6 +46805,10 @@ def api_szov_wallboard_broadcast():
         direction = _szov_broadcast_direction_arg(payload)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    personal_only = _szov_broadcast_is_personal_only()
+    if personal_only and (request.method == 'DELETE' or (
+            request.method == 'POST' and not ('personal' in payload or 'personal_mode' in payload))):
+        return jsonify({"error": SZOV_BROADCAST_PERSONAL_ONLY_ERROR}), 403
     if request.method in ('POST', 'DELETE'):
         try:
             if request.method == 'DELETE':
@@ -46806,8 +46837,18 @@ def api_szov_wallboard_broadcast():
         except Exception as exc:
             logging.error("Отбивка табло: не удалось сохранить настройку: %s", exc)
             return jsonify({"error": "Не удалось сохранить настройку"}), 500
+    if personal_only:
+        # Групп такой человек не настраивает — и не видит: ни списка, ни чатов бота, ни истории.
+        return jsonify({
+            "direction": direction,
+            "groups_allowed": False,
+            "recipients": [], "history": [], "chats": [], "groups": [],
+            "send_times": _szov_broadcast_direction_times(direction),
+            "personal": _szov_broadcast_personal_state(direction),
+        })
     return jsonify({
         "direction": direction,
+        "groups_allowed": True,
         "recipients": db.get_szov_broadcast_chats(direction),
         "history": db.get_szov_broadcast_history(direction=direction),
         "chats": db.list_bot_group_chats(),
@@ -46945,6 +46986,8 @@ def api_szov_wallboard_broadcast_test():
         if not owner[1]:
             return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
         chat_id = int(owner[1])
+    elif _szov_broadcast_is_personal_only():
+        return jsonify({"error": SZOV_BROADCAST_PERSONAL_ONLY_ERROR}), 403
     else:
         raw = payload.get('chat_id')
         recipients = {str(chat['chat_id']): chat

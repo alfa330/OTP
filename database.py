@@ -62720,14 +62720,15 @@ class Database:
             row = cursor.fetchone()
         return {'enabled': bool(row[0]), 'mode': row[1] or 'always'}
 
-    def get_tez_broadcast_personal_recipients(self, tez_department_id=None,
-                                              direction='tez') -> List[Dict[str, Any]]:
+    def get_tez_broadcast_personal_recipients(self, tez_department_id=None, direction='tez',
+                                              extra_user_ids=None) -> List[Dict[str, Any]]:
         """Кому отбивка табло уходит лично: флаг направления включён и человек до сих пор вправе.
 
         Право — админ или супер-админ, у которого раздел табло отображается (постановка
         владельца 23.09.2026 для Тез КЦ, та же лестница у «Табло ОП · Чат»): супер-админ;
         админ, который не возглавляет ни одного отдела; админ — глава отдела этого табло
-        (`tez_department_id` — id отдела табло, имя параметра историческое). Перепроверяем на каждой отправке, а не
+        (`tez_department_id` — id отдела табло, имя параметра историческое). extra_user_ids —
+        поимённо допущенные без роли админа (у «Чата» ОП — СВ верификаторов, только лично). Перепроверяем на каждой отправке, а не
         только при включении: админ, которого потом поставили главой другого отдела,
         раздела больше не видит — и выключить подписку ему было бы негде.
 
@@ -62761,9 +62762,10 @@ class Database:
                                )
                            )
                        )
+                       OR u.id = ANY(%s::int[])
                    )
                  ORDER BY u.name, u.id
-            """, (tez_department_id,))
+            """, (tez_department_id, sorted(int(v) for v in (extra_user_ids or ()))))
             rows = cursor.fetchall() or []
         return [{'id': int(row[0]), 'name': row[1] or '', 'telegram_id': int(row[2]),
                  'mode': row[3] or 'always'}

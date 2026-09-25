@@ -501,6 +501,10 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
     const personal = state?.personal || null;
     // Группы присылает только табло ОП: у остальных табло групп нет, и выбора тоже нет.
     const groups = state?.groups || [];
+    // Групп-получателей человеку может быть не открыто вовсе (поимённый доступ «только лично» к
+    // отбивке «Чата» ОП): тогда в форме одна строка «Лично мне». Старый сервер поля не шлёт —
+    // значит, группы открыты, как было.
+    const groupsAllowed = state?.groups_allowed !== false;
 
     // Чат, который уже получает отбивку, второй раз не предлагаем: дублей быть не должно.
     const available = useMemo(() => {
@@ -590,6 +594,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                         </div>
                     ) : null}
 
+                    {groupsAllowed ? (<>
                     <div className={`${iosCard} divide-y divide-slate-100`}>
                         {recipients.length === 0 ? (
                             <div className="px-4 py-5 text-[13.5px] text-slate-500">
@@ -711,11 +716,13 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                             </div>
                         ) : null}
                     </div>
+                    </>) : null}
 
                     <div className="px-1 text-[12.5px] leading-relaxed text-slate-500">
                         {deviationHint}
                     </div>
 
+                    {groupsAllowed ? (
                     <div>
                         <button type="button" className={iosBtnGhost} onClick={() => setHistoryOpen((value) => !value)}>
                             <FaIcon className={`fas ${historyOpen ? 'fa-chevron-up' : 'fa-chevron-down'}`}></FaIcon>
@@ -741,6 +748,7 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
                             )
                         ) : null}
                     </div>
+                    ) : null}
                 </div>
             )}
         </IosModal>

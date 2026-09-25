@@ -54,6 +54,7 @@ NAMES = {
     # Личная отбивка админам: адресаты и право на строку «лично мне».
     'SZOV_BROADCAST_DIRECTION_TEZ', 'SZOV_BROADCAST_DIRECTION_LINE',
     'SZOV_BROADCAST_DIRECTION_OP_CHAT', 'SZOV_BROADCAST_PERSONAL_DIRECTIONS',
+    'OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS',
     '_tez_broadcast_personal_recipients',
     '_szov_broadcast_personal_owner', '_szov_broadcast_personal_state',
     '_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role',

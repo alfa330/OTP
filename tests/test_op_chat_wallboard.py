@@ -519,25 +519,90 @@ class PersonalBroadcastTests(unittest.TestCase):
         # У линии ОП личной отбивки по-прежнему нет.
         self.assertIsNone(ns['_szov_broadcast_personal_state']('op'))
 
-    def test_supervisor_does_not_get_it(self):
+    def test_supervisor_gets_it_only_by_name_and_only_for_the_chat(self):
+        """СВ по общему правилу отбивку не получает; поимённо допущенный (постановщик #367) — да,
+        и только у «Чата»: у линии ОП и у «Тез КЦ» он остаётся СВ."""
         from tests.test_tez_break_violations import _owner_namespace
-        ns = _owner_namespace((402, 777, 'СВ', 'sv'))
-        self.assertIsNone(ns['_szov_broadcast_personal_owner']('op_chat'))
+        named = _owner_namespace((402, 777, 'СВ верификаторов', 'sv'))
+        self.assertIsNotNone(named['_szov_broadcast_personal_owner']('op_chat'))
+        self.assertIsNone(named['_szov_broadcast_personal_owner']('tez'))
+        other = _owner_namespace((403, 777, 'Другой СВ', 'sv'))
+        self.assertIsNone(other['_szov_broadcast_personal_owner']('op_chat'))
+
+    def _guard(self, requester_id, role, direction):
+        from types import SimpleNamespace
+        flags = SimpleNamespace()
+        ns = {
+            'jsonify': lambda payload: payload, 'g': flags,
+            '_get_authenticated_requester': lambda: (requester_id, (requester_id, 777, None, role), None),
+            '_normalize_user_role': lambda value: str(value or '').strip().lower(),
+            '_is_global_admin_requester': lambda r, rid: r in ('admin', 'super_admin'),
+            '_headed_department_id': lambda rid: None,
+            '_op_wallboard_department_id': lambda: 367,
+            '_szov_wallboard_department_id': lambda: 1,
+            'request': type('Req', (), {'method': 'GET',
+                                        'get_json': staticmethod(lambda silent=True: None)})(),
+            '_szov_broadcast_direction_arg': lambda payload=None: direction,
+        }
+        _load_names(BOT_SOURCE, {'SZOV_BROADCAST_DIRECTION_LINE', 'SZOV_BROADCAST_DIRECTION_OP',
+                                 'SZOV_BROADCAST_DIRECTION_TEZ', 'SZOV_BROADCAST_DIRECTION_OP_CHAT',
+                                 'OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS', '_szov_broadcast_guard',
+                                 '_szov_broadcast_is_personal_only'}, ns)
+        _, refusal = ns['_szov_broadcast_guard']()
+        return refusal, getattr(flags, 'szov_broadcast_personal_only', False)
+
+    def test_named_supervisor_passes_the_chat_guard_marked_personal_only(self):
+        self.assertEqual(self._guard(402, 'sv', 'op_chat'), (None, True))
+        refusal, _ = self._guard(402, 'sv', 'op')            # линия ОП — по-прежнему нет
+        self.assertEqual(refusal[1], 403)
+        refusal, _ = self._guard(403, 'sv', 'op_chat')       # другой СВ — нет
+        self.assertEqual(refusal[1], 403)
+        self.assertEqual(self._guard(5, 'admin', 'op_chat'), (None, False))   # админу — всё
+
+    def test_personal_only_request_never_touches_groups(self):
+        handler = BOT_SOURCE[BOT_SOURCE.index('def api_szov_wallboard_broadcast():'):]
+        handler = handler[:handler.index('\n@app.route')]
+        self.assertIn('personal_only = _szov_broadcast_is_personal_only()', handler)
+        self.assertLess(handler.index('return jsonify({"error": SZOV_BROADCAST_PERSONAL_ONLY_ERROR}), 403'),
+                        handler.index("if request.method in ('POST', 'DELETE'):"))
+        only = handler[handler.index('    if personal_only:\n        # Групп'):]
+        only = only[:only.index('    return jsonify({\n        "direction": direction,\n        "groups_allowed": True')]
+        self.assertIn('"groups_allowed": False', only)
+        self.assertIn('"recipients": [], "history": [], "chats": [], "groups": []', only)
+        self.assertNotIn('get_szov_broadcast_chats', only)
+        test_send = BOT_SOURCE[BOT_SOURCE.index('def api_szov_wallboard_broadcast_test():'):]
+        test_send = test_send[:test_send.index('\n@app.route')]
+        self.assertIn('elif _szov_broadcast_is_personal_only():\n        return jsonify({"error": '
+                      'SZOV_BROADCAST_PERSONAL_ONLY_ERROR}), 403', test_send)
+
+    def test_named_people_are_personal_recipients_and_the_lists_match(self):
+        import re
+        self.assertIn('extra_user_ids=OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS', BOT_SOURCE)
+        self.assertIn('OR u.id = ANY(%s::int[])', DB_SOURCE)
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8-sig')
+        backend = set(map(int, re.search(r'OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS = \{([\d, ]+)\}',
+                                         BOT_SOURCE).group(1).split(',')))
+        frontend = set(map(int, re.search(r'OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS = new Set\(\[([\d, ]+)\]\)',
+                                          app).group(1).split(',')))
+        self.assertEqual(backend, frontend)
+        self.assertIn('canPersonalChatBroadcast={canReceiveOpChatBroadcastPersonallyForUser(user)}', app)
 
     def test_scheduled_job_adds_personal_recipients_of_the_sales_department(self):
         calls = []
 
         class Db:
-            def get_tez_broadcast_personal_recipients(self, department_id=None, direction='tez'):
-                calls.append((department_id, direction))
+            def get_tez_broadcast_personal_recipients(self, department_id=None, direction='tez',
+                                                      extra_user_ids=None):
+                calls.append((department_id, direction, sorted(extra_user_ids or ())))
                 return [{'id': 1, 'telegram_id': 777, 'mode': 'always'}]
 
         ns = _load_names(BOT_SOURCE, {'SZOV_BROADCAST_DIRECTION_OP_CHAT',
+                                      'OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS',
                                       '_op_chat_broadcast_personal_recipients'},
                          {'db': Db(), 'logging': __import__('logging'),
                           '_op_wallboard_department_id': lambda: 367})
         self.assertEqual(len(ns['_op_chat_broadcast_personal_recipients']()), 1)
-        self.assertEqual(calls, [(367, 'op_chat')])
+        self.assertEqual(calls, [(367, 'op_chat', [402])])
         job = BOT_SOURCE[BOT_SOURCE.index('async def op_chat_broadcast_job():'):]
         job = job[:job.index('\n\n\n')]
         self.assertIn('personal=_op_chat_broadcast_personal_recipients', job)
@@ -600,6 +665,12 @@ class FrontendTests(unittest.TestCase):
         for field in ("key: 'op_chat'", 'useSnapshot: useOpChatWallboardSnapshot',
                       'metrics: OP_CHAT_METRICS', 'freshnessNotice: opChatFreshnessNotice'):
             self.assertIn(field, registry, field)
+
+    def test_personal_only_user_sees_the_button_and_only_the_personal_row(self):
+        chat = self.view[self.view.index('function OpChatBoard('):]
+        self.assertIn('{canManageBroadcast || canPersonalChatBroadcast ? (', chat)
+        self.assertIn("const groupsAllowed = state?.groups_allowed !== false;", self.szov_view)
+        self.assertEqual(self.szov_view.count('{groupsAllowed ? ('), 2)   # группы и «Кто менял»
 
     def test_export_limit_reads_as_russian(self):
         self.assertIn("pluralRu(maxDays, 'сутки', 'суток', 'суток')", self.szov_view)

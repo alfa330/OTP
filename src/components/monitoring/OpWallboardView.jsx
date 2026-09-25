@@ -495,8 +495,8 @@ const OP_CHAT_BROADCAST_HINT = (
 
 /** Направление «Чат»: переписка верификаторов в Wazzup — чаты в работе, время ответа, люди. */
 function OpChatBoard({
-    apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false, widgetOpen, onToggleWidget,
-    directionSwitch = null,
+    apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false,
+    canPersonalChatBroadcast = false, widgetOpen, onToggleWidget, directionSwitch = null,
 }) {
     const { snapshot, error, loading, refresh } = useOpChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -525,7 +525,9 @@ function OpChatBoard({
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
                 {directionSwitch}
-                {canManageBroadcast ? (
+                {/* Кнопку видит и тот, кому отбивка открыта только лично себе: форма у него
+                    сама покажет одну строку «Лично мне» — группы сервер ему не отдаёт. */}
+                {canManageBroadcast || canPersonalChatBroadcast ? (
                     <BroadcastControls
                         direction="op_chat"
                         directionLabel="ОП · Чат"
