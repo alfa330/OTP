@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosToggle } from '../ui/ios';
 import { LINE_PREFIXES, ScriptView } from './scriptMarkup';
+import { AiIcon, BriefField, BRIEF_MIN, POLISH_MIN, ScriptGenerateModal, ScriptPolishModal } from './ScriptAiModal';
 
 /*
  * Скрипт разговора (запрос владельца 25.09.2026): руководитель пишет здесь
@@ -14,12 +15,18 @@ import { LINE_PREFIXES, ScriptView } from './scriptMarkup';
  *
  * Вопросы не удаляются, а выключаются: на них может ссылаться история. Убранный
  * из списка вопрос сервер помечает выключенным, и его можно вернуть.
+ *
+ * ИИ (запрос владельца 25.09.2026): «Создать с ИИ» пишет скрипт и вопросы по
+ * описанию кампании, «Оформить с ИИ» размечает уже написанный текст. Сервер
+ * ничего не сохраняет — результат попадает в редактор как несохранённое
+ * изменение, окна и запросы живут в ScriptAiModal.jsx.
  */
 
 const BODY_MAX = 20000;
 const QUESTION_MAX = 200;
 const ANSWER_MAX = 8000;
 const QUESTIONS_MAX = 50;
+const AI_TIMEOUT_MS = 90000; // ИИ обычно отвечает за 5–30 с
 
 const readError = async (resp) => {
     const data = await resp.json().catch(() => ({}));
@@ -100,10 +107,17 @@ const Counter = ({ len, max }) => (
  * Textarea с панелью разметки. Растёт под текст (не ниже minRows, не выше
  * maxHeight, если задан). Кнопки панели держат фокус в поле — иначе выделение
  * терялось бы по клику.
+ *
+ * toolbarExtra — что показать справа в панели (кнопка ИИ); inputRef — наружная
+ * ссылка на textarea, чтобы панель могла поставить в него фокус.
  */
-const MarkupEditor = ({ value, onChange, disabled = false, minRows = 4, maxHeight = 0, maxLength, placeholder, compact = false, ariaLabel, invalid = false }) => {
+const MarkupEditor = ({ value, onChange, disabled = false, minRows = 4, maxHeight = 0, maxLength, placeholder, compact = false, ariaLabel, invalid = false, toolbarExtra = null, inputRef = null }) => {
     const ref = useRef(null);
     const pendingSel = useRef(null);
+    const setRef = (el) => {
+        ref.current = el;
+        if (inputRef) inputRef.current = el;
+    };
 
     useEffect(() => {
         const el = ref.current;
@@ -149,10 +163,11 @@ const MarkupEditor = ({ value, onChange, disabled = false, minRows = 4, maxHeigh
                             {!compact && <span>{t.label}</span>}
                         </button>
                     ))}
+                    {toolbarExtra && <div className="ml-auto">{toolbarExtra}</div>}
                 </div>
             )}
             <textarea
-                ref={ref}
+                ref={setRef}
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
                 disabled={disabled}
@@ -200,6 +215,32 @@ const MarkupHelp = () => {
     );
 };
 
+/**
+ * Кнопка «Оформить с ИИ» для панели разметки. Заголовок с причиной — на
+ * обёртке, а не на кнопке: выключенная кнопка не ловит мышь, и подсказка
+ * с неё не показывалась бы.
+ */
+const PolishButton = ({ text, busy, blocked, onClick, compact = false }) => {
+    const short = String(text || '').trim().length < POLISH_MIN;
+    const disabled = busy || blocked || short;
+    const title = short
+        ? `Напишите хотя бы ${POLISH_MIN} символов — тогда ИИ сможет оформить`
+        : blocked ? 'ИИ уже оформляет другой текст — дождитесь' : 'ИИ расставит заголовки, списки и выделения';
+    return (
+        <span title={title} className="inline-flex">
+            <button
+                type="button"
+                onClick={onClick}
+                disabled={disabled}
+                className={`${iosBtnGhost} ${compact ? 'px-2 py-1 text-[12px]' : 'px-2.5 py-1.5 text-[12.5px]'} gap-1.5 text-blue-600 hover:bg-blue-50 disabled:opacity-40 disabled:hover:bg-transparent`}
+            >
+                <AiIcon spinning={busy} />
+                {busy ? 'ИИ оформляет…' : 'Оформить с ИИ'}
+            </button>
+        </span>
+    );
+};
+
 const PreviewCard = ({ text, title = 'Так увидит оператор', sticky = false }) => (
     <div className={`${iosCard} p-4 ${sticky ? 'lg:sticky lg:top-4 lg:self-start' : ''}`}>
         <div className="mb-3 flex items-center gap-2 text-[12px] font-medium text-slate-500">
@@ -225,6 +266,24 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
     const [archiveOpen, setArchiveOpen] = useState(false);
     const [focusId, setFocusId] = useState(null);
     const questionRefs = useRef({});
+    const bodyRef = useRef(null);
+    // ИИ. gen — окно «Создать с ИИ» ({ brief, autoStart }); genBrief — описание
+    // из карточки пустого скрипта; polishing — 'body' или id вопроса, чей текст
+    // сейчас оформляется; polish — окно с предложением ({ target, id, current, proposal }).
+    const [gen, setGen] = useState(null);
+    const [genBrief, setGenBrief] = useState('');
+    const [polishing, setPolishing] = useState(null);
+    const [polish, setPolish] = useState(null);
+    const polishAbort = useRef(null);
+
+    // Сменился отдел — окна ИИ закрываем, запущенное оформление обрываем:
+    // иначе предложение для одного отдела можно было бы применить в другом.
+    useEffect(() => () => {
+        polishAbort.current?.abort();
+        setGen(null);
+        setGenBrief('');
+        setPolish(null);
+    }, [departmentId]);
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
@@ -365,6 +424,106 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
         }
     };
 
+    /* ---------- ИИ ---------- */
+
+    // Единственный запрос к ИИ. Сеть упала — «Нет связи с сервером», сервер
+    // ответил ошибкой — его текст (400 короткое описание, 502 ИИ недоступен,
+    // 503 нет ключа). Отмена снаружи (signal) пробрасывается как есть; если
+    // ответа нет дольше AI_TIMEOUT_MS — своя ошибка, чтобы кнопки не висели.
+    const aiRequest = useCallback(async (payload, signal) => {
+        const ctl = new AbortController();
+        const onOuterAbort = () => ctl.abort();
+        if (signal?.aborted) onOuterAbort(); else signal?.addEventListener('abort', onOuterAbort);
+        const timer = setTimeout(() => ctl.abort(), AI_TIMEOUT_MS);
+        let resp;
+        try {
+            resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/script/ai`, {
+                method: 'POST', credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify(payload),
+                signal: ctl.signal,
+            });
+        } catch (e) {
+            if (e?.name === 'AbortError') {
+                if (signal?.aborted) throw e;
+                throw new Error(`ИИ не ответил за ${Math.round(AI_TIMEOUT_MS / 1000)} секунд, попробуйте ещё раз`);
+            }
+            throw new Error('Нет связи с сервером');
+        } finally {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onOuterAbort);
+        }
+        if (!resp.ok) throw new Error(await readError(resp));
+        const data = await resp.json().catch(() => ({}));
+        if (!data?.result) throw new Error('ИИ вернул пустой ответ, попробуйте ещё раз');
+        return data.result;
+    }, [apiBaseUrl, authHeaders, departmentId]);
+
+    const toQuestions = (list) => list.map((q) => ({
+        id: tempId(), question: q.question.slice(0, QUESTION_MAX), answer: q.answer.slice(0, ANSWER_MAX), is_active: true,
+    }));
+
+    // Результат «Создать с ИИ» в редактор. replace — тело и вопросы целиком
+    // (текущие вопросы уходят в «Убранные» и выключатся при сохранении);
+    // append — вопросы в конец списка, тело только если оно пустое.
+    const applyGenerate = (result, mode) => {
+        if (!working) return;
+        const fresh = toQuestions(result.questions);
+        const room = mode === 'replace' ? QUESTIONS_MAX : Math.max(0, QUESTIONS_MAX - working.questions.length);
+        setWorking((w) => (mode === 'replace'
+            ? { body: result.body.slice(0, BODY_MAX), questions: fresh.slice(0, room) }
+            : { body: w.body.trim() ? w.body : result.body.slice(0, BODY_MAX), questions: [...w.questions, ...fresh.slice(0, room)] }));
+        setInvalidId(null);
+        setGen(null);
+        setGenBrief('');
+        if (fresh.length > room) toast(`Вопросов не больше ${QUESTIONS_MAX} — лишние ${fresh.length - room} не добавлены`, 'error');
+        toast('Скрипт создан — проверьте и сохраните', 'success');
+    };
+
+    // «Оформить с ИИ»: target 'body' — основной скрипт, 'answer' — ответ вопроса id.
+    // Пока ждём, редактор свободен; предложение показываем в окне, текст
+    // человека не трогаем до «Применить».
+    const runPolish = async (target, id, text) => {
+        if (polishing) return;
+        const ctl = new AbortController();
+        polishAbort.current = ctl;
+        setPolishing(target === 'body' ? 'body' : id);
+        try {
+            const r = await aiRequest({ mode: 'polish', text, target }, ctl.signal);
+            if (ctl.signal.aborted) return;
+            const proposal = String(r?.text ?? '');
+            if (!proposal.trim()) throw new Error('ИИ вернул пустой текст, попробуйте ещё раз');
+            setPolish({ target, id, current: text, proposal });
+        } catch (e) {
+            if (e?.name !== 'AbortError') toast(e.message || 'ИИ сейчас недоступен, попробуйте ещё раз', 'error');
+        } finally {
+            setPolishing(null);
+        }
+    };
+
+    const applyPolish = () => {
+        if (!polish || !working) return;
+        if (polish.target === 'body') {
+            setBody(polish.proposal);
+        } else {
+            if (!working.questions.some((q) => q.id === polish.id)) {
+                setPolish(null);
+                toast('Этот вопрос уже убран из списка', 'error');
+                return;
+            }
+            setWorking((w) => ({ ...w, questions: w.questions.map((q) => (q.id === polish.id ? { ...q, answer: polish.proposal } : q)) }));
+        }
+        setPolish(null);
+        toast('Текст оформлен — проверьте и сохраните', 'success');
+    };
+
+    const focusBody = () => {
+        const el = bodyRef.current;
+        if (!el) return;
+        el.focus();
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
+
     const updated = fmtUpdated(meta.updated_at);
     const versionLine = meta.version
         ? `Версия ${meta.version}${updated ? ` · обновлено ${updated}` : ''}`
@@ -397,16 +556,57 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
         );
     }
 
+    const isEmpty = !working.body.trim() && working.questions.length === 0;
+    const showStarter = canEdit && isEmpty;
+
     return (
         <div className="space-y-5">
+            {/* Пустой скрипт: предложение начать с ИИ. Кнопка в шапке на это время
+                спрятана — два одинаковых призыва рядом читались бы как ошибка. */}
+            {showStarter && (
+                <div className="rounded-2xl bg-gradient-to-br from-blue-50 via-white to-amber-50/70 p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-blue-100">
+                    <div className="flex items-start gap-3.5">
+                        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-blue-600 text-white shadow-sm">
+                            <AiIcon size={16} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                            <div className="text-[15px] font-semibold text-slate-900">Начните со скрипта от ИИ</div>
+                            <div className="mt-0.5 text-[12.5px] leading-relaxed text-slate-600">
+                                Опишите кампанию в двух-трёх фразах — ИИ напишет приветствие, ход разговора и быстрые вопросы с ответами, а вы поправите и сохраните.
+                            </div>
+                            <div className="mt-3">
+                                <BriefField value={genBrief} onChange={setGenBrief} rows={3} />
+                            </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                                <span title={genBrief.trim().length < BRIEF_MIN ? `Опишите кампанию хотя бы в ${BRIEF_MIN} символов` : undefined} className="inline-flex">
+                                    <button type="button" onClick={() => setGen({ brief: genBrief, autoStart: true })} disabled={genBrief.trim().length < BRIEF_MIN} className={iosBtnPrimary}>
+                                        <AiIcon /> Создать с ИИ
+                                    </button>
+                                </span>
+                                <button type="button" onClick={focusBody} className={iosBtnGhost}>
+                                    или напишите вручную
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Основной скрипт */}
             <section className="space-y-1.5">
-                <div className="flex items-center justify-between gap-3 px-1">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-1">
                     <div className="flex items-center gap-2">
                         <div className={iosGroupLabel}>Основной скрипт</div>
                         <IosHint text="Показывается оператору на всё время разговора: приветствие, ход беседы, что обязательно сказать. Выделяйте важное — ==так== — чтобы взгляд цеплялся." />
                     </div>
-                    <span className="text-[11.5px] text-slate-500">{versionLine}</span>
+                    <div className="flex items-center gap-3">
+                        <span className="text-[11.5px] text-slate-500">{versionLine}</span>
+                        {canEdit && !showStarter && (
+                            <button type="button" onClick={() => setGen({ brief: genBrief, autoStart: false })} className={`${iosBtnSecondary} px-3 py-1.5 text-[12.5px]`}>
+                                <AiIcon /> Создать с ИИ
+                            </button>
+                        )}
+                    </div>
                 </div>
                 <div className="grid gap-4 lg:grid-cols-2">
                     <div className={`${iosCard} space-y-3 p-4`}>
@@ -418,6 +618,15 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
                             maxLength={BODY_MAX}
                             placeholder={'# Приветствие\nЗдравствуйте, меня зовут **Имя**, компания …\n\n- уточнить, удобно ли говорить\n- ==назвать предложение==\n\n> Если водитель занят — договориться, когда перезвонить'}
                             ariaLabel="Основной скрипт"
+                            inputRef={bodyRef}
+                            toolbarExtra={(
+                                <PolishButton
+                                    text={working.body}
+                                    busy={polishing === 'body'}
+                                    blocked={!!polishing && polishing !== 'body'}
+                                    onClick={() => runPolish('body', null, working.body)}
+                                />
+                            )}
                         />
                         <div className="flex items-center justify-between gap-2">
                             {canEdit ? <MarkupHelp /> : <span />}
@@ -496,6 +705,15 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
                                                     compact
                                                     placeholder="Что ответить оператору — можно с разметкой"
                                                     ariaLabel={`Ответ на вопрос ${idx + 1}`}
+                                                    toolbarExtra={(
+                                                        <PolishButton
+                                                            compact
+                                                            text={q.answer}
+                                                            busy={polishing === q.id}
+                                                            blocked={!!polishing && polishing !== q.id}
+                                                            onClick={() => runPolish('answer', q.id, q.answer)}
+                                                        />
+                                                    )}
                                                 />
                                             )}
                                             <div className="flex items-center justify-between gap-2 px-1">
@@ -600,6 +818,32 @@ const DialListScriptPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = 
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Окна ИИ — только у того, кто может править */}
+            {canEdit && (
+                <>
+                    <ScriptGenerateModal
+                        open={!!gen}
+                        onClose={() => setGen(null)}
+                        initialBrief={gen?.brief || ''}
+                        autoStart={!!gen?.autoStart}
+                        request={aiRequest}
+                        onReplace={(r) => applyGenerate(r, 'replace')}
+                        onAppend={(r) => applyGenerate(r, 'append')}
+                        currentQuestions={working.questions.length}
+                        bodyEmpty={!working.body.trim()}
+                        toast={toast}
+                    />
+                    <ScriptPolishModal
+                        open={!!polish}
+                        onClose={() => setPolish(null)}
+                        current={polish?.current || ''}
+                        proposal={polish?.proposal || ''}
+                        onApply={applyPolish}
+                        subtitle={polish?.target === 'answer' ? 'Ответ на быстрый вопрос' : 'Основной скрипт'}
+                    />
+                </>
             )}
         </div>
     );
