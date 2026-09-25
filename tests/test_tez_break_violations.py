@@ -53,6 +53,7 @@ NAMES = {
     '_tez_broadcast_journal', '_tez_broadcast_mark_reported', '_szov_broadcast_run_job',
     # Личная отбивка админам: адресаты и право на строку «лично мне».
     'SZOV_BROADCAST_DIRECTION_TEZ', 'SZOV_BROADCAST_DIRECTION_LINE',
+    'SZOV_BROADCAST_DIRECTION_OP_CHAT', 'SZOV_BROADCAST_PERSONAL_DIRECTIONS',
     '_tez_broadcast_personal_recipients',
     '_szov_broadcast_personal_owner', '_szov_broadcast_personal_state',
     '_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role',
@@ -809,7 +810,8 @@ class _PersonalDb:
     def __init__(self, states=None):
         self.states = states or {}
 
-    def get_tez_broadcast_personal(self, user_id):
+    def get_tez_broadcast_personal(self, user_id, direction='tez'):
+        self.last_direction = direction
         return self.states.get(user_id, {'enabled': False, 'mode': 'always'})
 
 
@@ -882,8 +884,11 @@ class TezPersonalBroadcastWiringTests(unittest.TestCase):
                       'tez_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;', DB_SOURCE)
         self.assertIn('ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS '
                       "tez_broadcast_personal_mode VARCHAR(16) NOT NULL DEFAULT 'always';", DB_SOURCE)
+        # Колонки подписки у каждого табло свои, и подставляются только из белого списка.
+        self.assertIn("'tez': ('tez_broadcast_personal_enabled', 'tez_broadcast_personal_mode'),",
+                      DB_SOURCE)
         method = DB_SOURCE[DB_SOURCE.index('def get_tez_broadcast_personal_recipients('):]
-        method = method[:method.index('\n# Initialize database')]
+        method = method[:method.index('\n    def ', 10)]
         self.assertIn('u.telegram_id IS NOT NULL', method)
         self.assertIn("NOT IN ('fired', 'dismissal')", method)
         # Лестница раздела: супер-админ, админ без отдела, админ — глава Тез КЦ.
@@ -891,7 +896,9 @@ class TezPersonalBroadcastWiringTests(unittest.TestCase):
         self.assertIn("LOWER(COALESCE(u.role, '')) = 'admin'", method)
         self.assertIn('NOT EXISTS (', method)
         self.assertIn('AND d.id = %s', method)
-        self.assertIn("COALESCE(ap.tez_broadcast_personal_mode, 'always')", method)
+        self.assertIn('enabled_col, mode_col = self._broadcast_personal_columns(direction)', method)
+        self.assertIn("COALESCE(ap.{mode_col}, 'always')", method)
+        self.assertIn('WHERE ap.{enabled_col} = TRUE', method)
         setter = DB_SOURCE[DB_SOURCE.index('def set_tez_broadcast_personal('):]
         setter = setter[:setter.index('\n    def ', 10)]
         self.assertIn('if mode not in self.SZOV_BROADCAST_MODES:', setter)

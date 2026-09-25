@@ -6343,6 +6343,10 @@ class Database:
                 -- лично подписанный админ получал бы 24 сообщения в сутки. Значение проверяет
                 -- код (SZOV_BROADCAST_MODES), CHECK здесь не заводим.
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS tez_broadcast_personal_mode VARCHAR(16) NOT NULL DEFAULT 'always';
+                -- То же для «Табло ОП · Чат» (#367, 25.09.2026): у каждого табло с личной
+                -- отбивкой своя пара колонок — подписаться можно на одно и не получать другое.
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS op_chat_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS op_chat_broadcast_personal_mode VARCHAR(16) NOT NULL DEFAULT 'always';
 
                 -- Indexes for new tables
                 CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
@@ -62657,15 +62661,30 @@ class Database:
         self.glb_forget_attendance_days(day_from=row[0])
         return True
 
-    # --- Отбивка «Табло Тез КЦ» лично себе ----------------------------------------------------
+    # --- Отбивка табло лично себе («Тез КЦ», «Табло ОП · Чат») --------------------------------
+    #
+    # Имена методов исторические: личная отбивка появилась у «Тез КЦ», направление — параметр.
+    # Колонки берутся ТОЛЬКО из этого словаря (в SQL они подставляются строкой), поэтому
+    # незнакомое направление — ошибка, а не запрос к несуществующей колонке.
+    BROADCAST_PERSONAL_COLUMNS = {
+        'tez': ('tez_broadcast_personal_enabled', 'tez_broadcast_personal_mode'),
+        'op_chat': ('op_chat_broadcast_personal_enabled', 'op_chat_broadcast_personal_mode'),
+    }
 
-    def get_tez_broadcast_personal(self, user_id) -> Dict[str, Any]:
-        """Личная отбивка Тез КЦ у человека: {enabled, mode}. Пустого профиля достаточно:
+    def _broadcast_personal_columns(self, direction):
+        columns = self.BROADCAST_PERSONAL_COLUMNS.get(str(direction or '').strip())
+        if columns is None:
+            raise ValueError("У этого табло нет отбивки лично себе")
+        return columns
+
+    def get_tez_broadcast_personal(self, user_id, direction='tez') -> Dict[str, Any]:
+        """Личная отбивка табло у человека: {enabled, mode}. Пустого профиля достаточно:
         строку в admin_profiles заводит только запись."""
+        enabled_col, mode_col = self._broadcast_personal_columns(direction)
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT COALESCE(tez_broadcast_personal_enabled, FALSE),
-                       COALESCE(tez_broadcast_personal_mode, 'always')
+            cursor.execute(f"""
+                SELECT COALESCE({enabled_col}, FALSE),
+                       COALESCE({mode_col}, 'always')
                   FROM admin_profiles
                  WHERE user_id = %s
             """, (int(user_id),))
@@ -62674,7 +62693,8 @@ class Database:
             return {'enabled': False, 'mode': 'always'}
         return {'enabled': bool(row[0]), 'mode': row[1] or 'always'}
 
-    def set_tez_broadcast_personal(self, user_id, enabled=None, mode=None) -> Dict[str, Any]:
+    def set_tez_broadcast_personal(self, user_id, enabled=None, mode=None,
+                                   direction='tez') -> Dict[str, Any]:
         """Включить/выключить личную отбивку или сменить её режим. Не переданное поле остаётся
         как было — форма шлёт точечные патчи, как у получателей-чатов.
 
@@ -62684,41 +62704,43 @@ class Database:
             mode = str(mode).strip()
             if mode not in self.SZOV_BROADCAST_MODES:
                 raise ValueError("Неизвестный режим отправки")
-        current = self.get_tez_broadcast_personal(user_id)
+        enabled_col, mode_col = self._broadcast_personal_columns(direction)
+        current = self.get_tez_broadcast_personal(user_id, direction=direction)
         enabled = current['enabled'] if enabled is None else bool(enabled)
         mode = current['mode'] if mode is None else mode
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO admin_profiles (user_id, tez_broadcast_personal_enabled,
-                                            tez_broadcast_personal_mode)
+            cursor.execute(f"""
+                INSERT INTO admin_profiles (user_id, {enabled_col}, {mode_col})
                 VALUES (%s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE
-                   SET tez_broadcast_personal_enabled = EXCLUDED.tez_broadcast_personal_enabled,
-                       tez_broadcast_personal_mode = EXCLUDED.tez_broadcast_personal_mode
-                RETURNING tez_broadcast_personal_enabled, tez_broadcast_personal_mode
+                   SET {enabled_col} = EXCLUDED.{enabled_col},
+                       {mode_col} = EXCLUDED.{mode_col}
+                RETURNING {enabled_col}, {mode_col}
             """, (int(user_id), enabled, mode))
             row = cursor.fetchone()
         return {'enabled': bool(row[0]), 'mode': row[1] or 'always'}
 
-    def get_tez_broadcast_personal_recipients(self, tez_department_id=None) -> List[Dict[str, Any]]:
-        """Кому отбивка Тез КЦ уходит лично: флаг включён и человек до сих пор вправе.
+    def get_tez_broadcast_personal_recipients(self, tez_department_id=None,
+                                              direction='tez') -> List[Dict[str, Any]]:
+        """Кому отбивка табло уходит лично: флаг направления включён и человек до сих пор вправе.
 
-        Право — админ или супер-админ, у которого раздел «Табло Тез КЦ» отображается
-        (постановка владельца 23.09.2026; та же лестница, что у _tez_wallboard_guard и
-        canAccessTezWallboardForUser): супер-админ; админ, который не возглавляет ни
-        одного отдела; админ — глава самого Тез КЦ. Перепроверяем на каждой отправке, а не
+        Право — админ или супер-админ, у которого раздел табло отображается (постановка
+        владельца 23.09.2026 для Тез КЦ, та же лестница у «Табло ОП · Чат»): супер-админ;
+        админ, который не возглавляет ни одного отдела; админ — глава отдела этого табло
+        (`tez_department_id` — id отдела табло, имя параметра историческое). Перепроверяем на каждой отправке, а не
         только при включении: админ, которого потом поставили главой другого отдела,
         раздела больше не видит — и выключить подписку ему было бы негде.
 
         Без Telegram отправлять некуда; уволенный тоже выпадает — увольнение не снимает
         ни telegram_id, ни роль 'admin' ('dismissal' — такое же увольнение, как 'fired')."""
+        enabled_col, mode_col = self._broadcast_personal_columns(direction)
         with self._get_cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT u.id, u.name, u.telegram_id,
-                       COALESCE(ap.tez_broadcast_personal_mode, 'always')
+                       COALESCE(ap.{mode_col}, 'always')
                   FROM admin_profiles ap
                   JOIN users u ON u.id = ap.user_id
-                 WHERE ap.tez_broadcast_personal_enabled = TRUE
+                 WHERE ap.{enabled_col} = TRUE
                    AND u.telegram_id IS NOT NULL
                    AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
                    AND (

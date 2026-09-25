@@ -505,6 +505,55 @@ class BroadcastTests(unittest.TestCase):
             self.assertIn(fragment, BOT_SOURCE, fragment)
 
 
+class PersonalBroadcastTests(unittest.TestCase):
+    """Отбивка «Чата» лично себе — как у «Тез КЦ»: супер-админ, админ без отдела, админ — глава
+    отдела продаж; у каждого табло своя подписка."""
+
+    def test_admin_gets_the_row_and_it_reads_the_chat_subscription(self):
+        from tests.test_tez_break_violations import _PersonalDb, _owner_namespace
+        db = _PersonalDb({300: {'enabled': True, 'mode': 'deviations'}})
+        ns = _owner_namespace((300, 777, 'Глава ОП', 'admin'), db=db)
+        self.assertEqual(ns['_szov_broadcast_personal_state']('op_chat'),
+                         {'enabled': True, 'mode': 'deviations', 'telegram_connected': True})
+        self.assertEqual(db.last_direction, 'op_chat')
+        # У линии ОП личной отбивки по-прежнему нет.
+        self.assertIsNone(ns['_szov_broadcast_personal_state']('op'))
+
+    def test_supervisor_does_not_get_it(self):
+        from tests.test_tez_break_violations import _owner_namespace
+        ns = _owner_namespace((402, 777, 'СВ', 'sv'))
+        self.assertIsNone(ns['_szov_broadcast_personal_owner']('op_chat'))
+
+    def test_scheduled_job_adds_personal_recipients_of_the_sales_department(self):
+        calls = []
+
+        class Db:
+            def get_tez_broadcast_personal_recipients(self, department_id=None, direction='tez'):
+                calls.append((department_id, direction))
+                return [{'id': 1, 'telegram_id': 777, 'mode': 'always'}]
+
+        ns = _load_names(BOT_SOURCE, {'SZOV_BROADCAST_DIRECTION_OP_CHAT',
+                                      '_op_chat_broadcast_personal_recipients'},
+                         {'db': Db(), 'logging': __import__('logging'),
+                          '_op_wallboard_department_id': lambda: 367})
+        self.assertEqual(len(ns['_op_chat_broadcast_personal_recipients']()), 1)
+        self.assertEqual(calls, [(367, 'op_chat')])
+        job = BOT_SOURCE[BOT_SOURCE.index('async def op_chat_broadcast_job():'):]
+        job = job[:job.index('\n\n\n')]
+        self.assertIn('personal=_op_chat_broadcast_personal_recipients', job)
+
+    def test_subscription_has_its_own_columns(self):
+        self.assertIn("'op_chat': ('op_chat_broadcast_personal_enabled', 'op_chat_broadcast_personal_mode'),",
+                      DB_SOURCE)
+        self.assertIn('ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS '
+                      'op_chat_broadcast_personal_enabled BOOLEAN NOT NULL DEFAULT FALSE;', DB_SOURCE)
+        self.assertIn('ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS '
+                      "op_chat_broadcast_personal_mode VARCHAR(16) NOT NULL DEFAULT 'always';", DB_SOURCE)
+        self.assertIn('raise ValueError("У этого табло нет отбивки лично себе")', DB_SOURCE)
+        self.assertIn('SZOV_BROADCAST_PERSONAL_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_TEZ, '
+                      'SZOV_BROADCAST_DIRECTION_OP_CHAT)', BOT_SOURCE)
+
+
 class FrontendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

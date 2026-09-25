@@ -46029,13 +46029,29 @@ async def _op_chat_broadcast_prepare_scheduled():
     return await _op_chat_broadcast_prepare(scheduled=True)
 
 
+def _op_chat_broadcast_personal_recipients():
+    """Админы, включившие отбивку «Чата» ОП себе лично, — с той же границей, что у раздела:
+    супер-админ, админ без отдела и админ — глава отдела продаж.
+
+    Сбой здесь группы не останавливает: личная рассылка — добавка к общей."""
+    try:
+        resolver = globals().get('_op_wallboard_department_id')
+        return db.get_tez_broadcast_personal_recipients(resolver() if resolver else None,
+                                                       direction=SZOV_BROADCAST_DIRECTION_OP_CHAT)
+    except Exception as exc:
+        logging.error("Отбивка табло ОП (чат): не удалось прочитать личных получателей: %s", exc)
+        return []
+
+
 async def op_chat_broadcast_job():
-    """Плановая отбивка направления «Чат» табло ОП."""
+    """Плановая отбивка направления «Чат» табло ОП: группы из формы и админы, включившие её
+    себе лично (личный chat_id в Telegram положительный и с группами не пересекается)."""
     await _szov_broadcast_run_job(
         direction=SZOV_BROADCAST_DIRECTION_OP_CHAT,
         label="Отбивка табло ОП (чат)",
         prepare=_op_chat_broadcast_prepare_scheduled,
-        deviations=_op_chat_broadcast_deviations)
+        deviations=_op_chat_broadcast_deviations,
+        personal=_op_chat_broadcast_personal_recipients)
 
 
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
@@ -46704,15 +46720,21 @@ def _szov_broadcast_direction_times(direction):
     return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
 
 
+# Табло, у которых есть отбивка лично себе: «Тез КЦ» (23.09.2026) и «Табло ОП · Чат» (#367,
+# 25.09.2026). Колонки подписки у каждого свои — Database.BROADCAST_PERSONAL_COLUMNS.
+SZOV_BROADCAST_PERSONAL_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_TEZ, SZOV_BROADCAST_DIRECTION_OP_CHAT)
+
+
 def _szov_broadcast_personal_owner(direction):
     """Учётка запросившего, если он вправе получать отбивку направления лично; иначе None.
 
-    Лично себе отбивку получают только у «Тез КЦ» и только админы и супер-админы, у
-    которых этот раздел отображается (постановка владельца 23.09.2026): супер-админ, админ
-    без отдела и админ — глава Тез КЦ. Админу — главе чужого отдела табло не видно, и
-    гейт отбивки (_szov_broadcast_guard) его сюда уже не пустил; здесь остаётся отсечь
-    роль ниже админа — форму открывает любой глава Тез КЦ, но лично себе получает админ."""
-    if direction != SZOV_BROADCAST_DIRECTION_TEZ:
+    Лично себе отбивку получают у «Тез КЦ» и у «Табло ОП · Чат», и только админы и
+    супер-админы, у которых этот раздел отображается (постановка владельца 23.09.2026):
+    супер-админ, админ без отдела и админ — глава отдела табло. Админу — главе чужого отдела
+    табло не видно, и гейт отбивки (_szov_broadcast_guard) его сюда уже не пустил; здесь
+    остаётся отсечь роль ниже админа — форму открывает любой глава отдела, но лично себе
+    получает админ."""
+    if direction not in SZOV_BROADCAST_PERSONAL_DIRECTIONS:
         return None
     _requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error or not requester or not _is_admin_role(requester[3]):
@@ -46725,7 +46747,7 @@ def _szov_broadcast_personal_state(direction):
     requester = _szov_broadcast_personal_owner(direction)
     if requester is None:
         return None
-    state = db.get_tez_broadcast_personal(requester[0])
+    state = db.get_tez_broadcast_personal(requester[0], direction=direction)
     return {
         "enabled": bool(state.get('enabled')),
         "mode": state.get('mode') or SZOV_BROADCAST_MODE_ALWAYS,
@@ -46744,7 +46766,7 @@ def api_szov_wallboard_broadcast():
     «Линии» и в «Чате» это две независимые строки.
 
     POST {personal: true|false, personal_mode: 'always'|'deviations'} — личная отбивка самому
-    себе (есть только у «Тез КЦ»), любое из полей по отдельности. В историю «кто менял» она не
+    себе (есть у «Тез КЦ» и «Табло ОП · Чат»), любое из полей по отдельности. В историю «кто менял» она не
     пишется: это настройка человека о себе, а не общий список получателей."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
@@ -46765,7 +46787,7 @@ def api_szov_wallboard_broadcast():
             elif 'personal' in payload or 'personal_mode' in payload:
                 owner = _szov_broadcast_personal_owner(direction)
                 if owner is None:
-                    return jsonify({"error": "Лично себе получают только отбивку табло Тез КЦ и только админы"}), 403
+                    return jsonify({"error": "Лично себе отбивку этого табло получают только админы"}), 403
                 enabled = None
                 if 'personal' in payload:
                     enabled, flag_error = _parse_boolean_setting(payload.get('personal'), 'personal')
@@ -46774,7 +46796,8 @@ def api_szov_wallboard_broadcast():
                 if enabled and not owner[1]:
                     return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
                 saved = db.set_tez_broadcast_personal(requester_id, enabled=enabled,
-                                                      mode=payload.get('personal_mode'))
+                                                      mode=payload.get('personal_mode'),
+                                                      direction=direction)
                 logging.info("Отбивка %s: личная подписка у %s -> %s", direction, requester_id, saved)
             else:
                 db.save_szov_broadcast_chat(payload, user_id=requester_id, direction=direction)
@@ -46918,7 +46941,7 @@ def api_szov_wallboard_broadcast_test():
     if payload.get('personal'):
         owner = _szov_broadcast_personal_owner(direction)
         if owner is None:
-            return jsonify({"error": "Лично себе получают только отбивку табло Тез КЦ и только админы"}), 403
+            return jsonify({"error": "Лично себе отбивку этого табло получают только админы"}), 403
         if not owner[1]:
             return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
         chat_id = int(owner[1])
