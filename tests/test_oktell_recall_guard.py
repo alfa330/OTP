@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -1263,13 +1264,165 @@ def test_child_env_drops_packer_variables(monkeypatch):
     assert env["PATH"] == "нужное-сохраняем"
 
 
-def test_child_env_keeps_launcher_variable(monkeypatch):
-    """А эту переменную трогать нельзя: её ставит первая ступень загрузчика для
-    второй, и без неё запуск падает окном «_PYI_APPLICATION_HOME_DIR is not
-    defined». Вычистил её один раз — получил два окна с ошибкой у пользователя.
+def test_child_env_starts_an_independent_copy(monkeypatch):
+    """Копия, поднятая программой, распаковывается САМА, а не живёт в папке
+    запустившего.
+
+    С переменными загрузчика PyInstaller 6 новая копия того же exe считала
+    себя подпроцессом и брала чужую папку _MEI. Ярлык поднимал сторожа и
+    выходил, его загрузчик вычищал папку (оставались только занятые DLL), и
+    агент, поднятый сторожем, падал окном «Failed to start embedded python
+    interpreter!» — сторож повторял, окна шли без конца (25.09.2026).
+    Убирать надо ВСЕ _PYI_* разом: одна вычищенная _PYI_APPLICATION_HOME_DIR
+    при двух оставшихся даёт окно «…environment variable is not defined!».
     """
-    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", r"C:\Temp\_MEI1")
-    assert agent.child_env().get("_PYI_APPLICATION_HOME_DIR") == r"C:\Temp\_MEI1"
+    for key, value in {
+        "_PYI_ARCHIVE_FILE": r"C:\Users\op\AppData\Local\OktellRecallGuard\OktellRecallGuard.exe",
+        "_PYI_APPLICATION_HOME_DIR": r"C:\Temp\_MEI1",
+        "_PYI_PARENT_PROCESS_LEVEL": "1",
+        "_PYI_SPLASH_IPC": "0",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    env = agent.child_env()
+    assert env.get("PYINSTALLER_RESET_ENVIRONMENT") == "1"
+    for key in ("_PYI_ARCHIVE_FILE", "_PYI_APPLICATION_HOME_DIR", "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC"):
+        assert key not in env, key
+
+
+class _FakeClock:
+    """Часы для цикла сторожа: sleep двигает время, а не ждёт."""
+
+    def __init__(self, rounds: int):
+        self.now = 1_000_000.0
+        self.rounds = rounds
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.rounds -= 1
+        if self.rounds < 0:
+            raise KeyboardInterrupt  # run_watchdog на нём выходит с 0
+        self.now += max(float(seconds), 0.01)
+
+
+class _FakeProcess:
+    def __init__(self, alive_until: float, clock: _FakeClock):
+        self.alive_until = alive_until
+        self.clock = clock
+
+    def poll(self):
+        return None if self.clock.now < self.alive_until else 1
+
+
+def _watchdog_harness(monkeypatch, clock, make_process):
+    spawned = []
+
+    def fake_spawn(*args):
+        process = make_process(len(spawned))
+        spawned.append((clock.now, args))
+        return process
+
+    monkeypatch.setattr(agent, "time", clock)
+    monkeypatch.setattr(agent, "acquire_mutex", lambda name: True)
+    monkeypatch.setattr(agent, "release_mutex", lambda name: None)
+    monkeypatch.setattr(agent, "setup_logging", lambda cfg, name: None)
+    monkeypatch.setattr(agent, "is_running_by_mutex", lambda name: False)
+    monkeypatch.setattr(agent, "spawn_self", fake_spawn)
+    return spawned
+
+
+def test_watchdog_does_not_stack_a_second_copy_over_an_error_window(monkeypatch):
+    """Пока поднятая копия жива без мьютекса (висит на окне ошибки загрузчика),
+    вторую рядом не поднимаем: каждая принесла бы своё окно."""
+    clock = _FakeClock(rounds=500)
+    spawned = _watchdog_harness(monkeypatch, clock, lambda n: _FakeProcess(float("inf"), clock))
+
+    assert agent.run_watchdog({}) == 0
+    assert len(spawned) == 1, "окно ошибки ещё на экране, а сторож поднял новую копию"
+
+
+def test_watchdog_waits_after_the_error_window_is_closed(monkeypatch):
+    """Человек закрыл окно — следующая попытка не сразу, а через паузу, и пауза
+    растёт от попытки к попытке."""
+    clock = _FakeClock(rounds=2000)
+    closed_after = 30.0
+    spawned = _watchdog_harness(
+        monkeypatch, clock, lambda n: _FakeProcess(clock.now + closed_after, clock))
+
+    agent.run_watchdog({})
+    assert len(spawned) >= 3
+    gaps = [b[0] - a[0] for a, b in zip(spawned, spawned[1:])]
+    assert all(gap > closed_after for gap in gaps), gaps
+    waits = [gap - closed_after for gap in gaps]
+    assert waits == sorted(waits) and waits[-1] > waits[0], waits
+
+
+def test_agent_does_not_stack_watchdog_copies_either():
+    """Та же мина с другой стороны: агент поднимает сторожа."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    assert "still_starting(watchdog_attempt)" in body
+
+
+def test_no_copy_is_started_when_there_is_no_room_to_unpack(monkeypatch):
+    """Код −1 в «Failed to extract …: decompression resulted in return code -1» —
+    это отказ ЗАПИСИ первого же файла во временную папку, то есть кончилось
+    место. Каждый повтор сторожа на таком диске — ещё одно окно."""
+    import shutil as shutil_module
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(agent.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(agent, "_low_space_reported", False)
+    monkeypatch.setattr(shutil_module, "disk_usage", lambda path: usage(10 * 2 ** 30, 10 * 2 ** 30, 5 * 2 ** 20))
+    monkeypatch.setattr(agent.subprocess, "Popen", lambda *a, **k: pytest.fail("запуск на полном диске"))
+
+    assert agent.spawn_self("--agent") is None
+
+
+def _unpack_dir(root: Path, name: str, files: dict, mtime: float) -> Path:
+    folder = root / name
+    for rel, size in files.items():
+        path = folder / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+    for path in [*sorted(folder.rglob("*"), reverse=True), folder]:
+        if path.is_dir():
+            os.utime(path, (mtime, mtime))
+    return folder
+
+
+def test_sweep_removes_only_our_abandoned_unpack_dirs(tmp_path, monkeypatch):
+    now = 2_000_000.0
+    old = now - 2 * agent.STALE_UNPACK_AGE_S
+    intact = _unpack_dir(tmp_path, "_MEI111", {"icore.ico": 10, "base_library.zip": 20, "python311.dll": 30}, old)
+    gutted = _unpack_dir(tmp_path, "_MEI222", {"python311.dll": 30, "python3.dll": 5, "win32/win32gui.pyd": 7}, old)
+    fresh = _unpack_dir(tmp_path, "_MEI333", {"icore.ico": 10, "python311.dll": 30}, now - 60)
+    foreign = _unpack_dir(tmp_path, "_MEI444", {"base_library.zip": 20, "python311.dll": 30}, old)
+    busy = _unpack_dir(tmp_path, "_MEI555", {"icore.ico": 10, "base_library.zip": 20, "python311.dll": 30}, old)
+    foreign_gutted = _unpack_dir(tmp_path, "_MEI666", {"python311.dll": 30}, old)
+    unrelated = _unpack_dir(tmp_path, "keep-me", {"icore.ico": 1}, old)
+
+    real_unlink = Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        if self.parent == busy and self.name == "python311.dll":
+            raise PermissionError("загружен процессом")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    removed, freed = agent.sweep_stale_unpack_dirs(tmp_path, now=now)
+
+    # Вычищенная чужая тоже мусор: без base_library.zip из неё не стартует ничто.
+    assert (removed, freed) == (3, 60 + 42 + 30)
+    assert not intact.exists() and not gutted.exists() and not foreign_gutted.exists()
+    for kept in (fresh, foreign, busy, unrelated):
+        assert kept.exists(), kept.name
+    # Занятую папку не надкусываем: ни один её файл не тронут.
+    assert sorted(p.name for p in busy.iterdir()) == ["base_library.zip", "icore.ico", "python311.dll"]
 
 
 def test_all_child_launches_use_clean_env():

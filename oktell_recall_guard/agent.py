@@ -817,21 +817,33 @@ def release_mutex(name: str) -> None:
     _close_handle(_held_mutexes.pop(name, None))
 
 
-# Переменные, которые упаковщик выставляет ДЛЯ СЕБЯ. Дочернему процессу они
-# смертельны: путь к сертификатам указывает во временную папку родителя, а она
-# удаляется, когда родитель выходит. Установленный агент после этого падал на
-# КАЖДОМ запросе с «Could not find a suitable TLS CA certificate bundle» —
-# то есть молча переставал отчитываться.
-# ВАЖНО: `_PYI_APPLICATION_HOME_DIR` здесь быть НЕ должно. Её ставит первая
-# ступень загрузчика для второй, и если её вычистить, запуск падает с окном
-# «_PYI_APPLICATION_HOME_DIR environment variable is not defined!».
-# Вычищаем ровно то, из-за чего дочерний процесс брал файлы из чужой временной
-# папки: путь распаковки (по нему certifi ищет сертификаты) и явные указания
-# на файл сертификатов.
+# Переменные, которые упаковщик выставляет ДЛЯ СЕБЯ. Дочерней копии нашего же
+# exe они смертельны. Загрузчик PyInstaller 6, увидев свои _PYI_ARCHIVE_FILE (тот
+# же exe) и _PYI_PARENT_PROCESS_LEVEL, считает новый процесс «подпроцессом» и НЕ
+# распаковывается, а живёт в папке _MEI ТОГО, КТО ЕГО ЗАПУСТИЛ
+# (_PYI_APPLICATION_HOME_DIR). Запустивший выходит, его загрузчик чистит папку, и
+# уцелевают только DLL, которые держат живые соседи. Следующая копия находит
+# python311.dll без base_library.zip и падает окном «Failed to start embedded
+# python interpreter!», а сторож повторяет запуск, и окна идут без конца. Так было
+# у операторов 25.09.2026: ярлык поднимал сторожа и выходил, сторож поднимал
+# агента уже в вычищенной папке (воспроизведено на настоящем загрузчике).
+# Поэтому каждая копия запускается НЕЗАВИСИМОЙ, со своей распаковкой: штатное
+# PYINSTALLER_RESET_ENVIRONMENT=1 (PyInstaller ≥ 6.10) и без всех _PYI_*. Убрать
+# одну _PYI_APPLICATION_HOME_DIR нельзя: при двух оставшихся загрузчик ищет её и
+# падает окном «_PYI_APPLICATION_HOME_DIR environment variable is not defined!».
 _PYINSTALLER_ENV_KEYS = (
     "_MEIPASS", "_MEIPASS2",
+    "_PYI_ARCHIVE_FILE", "_PYI_APPLICATION_HOME_DIR", "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC",
     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
 )
+
+# Сколько места нужно копии, чтобы распаковаться: сама распаковка около 30 МБ,
+# остальное — запас. Меньше — загрузчик упадёт на первом же файле окном «Failed
+# to extract …: decompression resulted in return code -1» (код −1 у него значит
+# «не удалась запись»), и каждый повтор сторожа добавит такое окно.
+MIN_FREE_TEMP_BYTES = 64 * 1024 * 1024
+
+_low_space_reported = False
 
 
 def child_env() -> dict:
@@ -839,7 +851,43 @@ def child_env() -> dict:
     env = dict(os.environ)
     for key in _PYINSTALLER_ENV_KEYS:
         env.pop(key, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return env
+
+
+def unpack_root() -> Path:
+    """Куда распаковывается загрузчик: он берёт папку у GetTempPathW (TMP, потом TEMP)."""
+    if IS_WINDOWS:
+        try:
+            buffer = ctypes.create_unicode_buffer(261)
+            if ctypes.windll.kernel32.GetTempPathW(261, buffer) and buffer.value:
+                return Path(buffer.value)
+        except Exception:  # noqa: BLE001
+            logging.debug("Временная папка не определена через GetTempPathW", exc_info=True)
+    return Path(os.environ.get("TMP") or os.environ.get("TEMP") or "/tmp")
+
+
+def enough_space_to_unpack() -> bool:
+    """Хватит ли места под распаковку ещё одной копии. Не узнали — считаем, что хватит."""
+    global _low_space_reported
+    try:
+        free = shutil.disk_usage(unpack_root()).free
+    except Exception:  # noqa: BLE001
+        return True
+    if free >= MIN_FREE_TEMP_BYTES:
+        if _low_space_reported:
+            _low_space_reported = False
+            logging.info("Место на диске временной папки появилось (%.0f МБ)", free / 2 ** 20)
+        return True
+    # Жалуемся один раз: повторы сторожа иначе превратили бы это в стену строк.
+    if not _low_space_reported:
+        _low_space_reported = True
+        logging.error(
+            "На диске временной папки %s свободно %.0f МБ — копию не запускаю: "
+            "распаковка упала бы окном ошибки. Нужно освободить место.",
+            unpack_root(), free / 2 ** 20,
+        )
+    return False
 
 
 def _self_command(*args: str) -> list[str]:
@@ -848,15 +896,93 @@ def _self_command(*args: str) -> list[str]:
     return [sys.executable, str(program_path()), *args]
 
 
-def spawn_self(*args: str) -> None:
+def spawn_self(*args: str) -> Optional[subprocess.Popen]:
+    """Запустить свою копию. None — не запустилась (или некуда распаковаться)."""
     cmd = _self_command(*args)
+    if getattr(sys, "frozen", False) and not enough_space_to_unpack():
+        return None
     try:
         flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
-        subprocess.Popen(cmd, cwd=str(program_path().parent), creationflags=flags,
-                         close_fds=True, env=child_env())
+        process = subprocess.Popen(cmd, cwd=str(program_path().parent), creationflags=flags,
+                                   close_fds=True, env=child_env())
         logging.info("Запущен процесс: %s", " ".join(cmd))
+        return process
     except Exception:  # noqa: BLE001
         logging.exception("Не удалось запустить %s", " ".join(cmd))
+        return None
+
+
+def still_starting(process: Optional[subprocess.Popen]) -> bool:
+    """Запущенная копия ещё жива, хотя своего мьютекса пока не взяла.
+
+    Значит она либо распаковывается, либо ВИСИТ на модальном окне ошибки
+    загрузчика — такое окно держит процесс, пока его не закроют. Вторую копию
+    рядом поднимать нельзя: каждая принесла бы своё окно, и за смену у
+    оператора набиралась стопка одинаковых ошибок.
+    """
+    if process is None:
+        return False
+    try:
+        return process.poll() is None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# Брошенные папки распаковки старше часа. Свежую не трогаем: в ней может идти
+# распаковка только что запущенной копии.
+STALE_UNPACK_AGE_S = 3600
+_PYTHON_CORE_DLL = re.compile(r"python3\d+\.dll", re.IGNORECASE)
+
+
+def sweep_stale_unpack_dirs(root: Optional[Path] = None, now: Optional[float] = None) -> tuple[int, int]:
+    """Убрать из временной папки брошенные папки распаковки _MEI* нашей программы.
+
+    Их оставляли все версии до 1.0.32: копия, поднятая программой, жила в папке
+    запустившего, и тот при выходе вычищал её лишь частично — занятые DLL
+    оставались навсегда, по 15 МБ на случай; убитая копия бросала всю папку,
+    30 МБ. На общих машинах так копится у каждого пользователя Windows, а на
+    полном диске загрузчик падает окном «Failed to extract». На машине сборки к
+    25.09.2026 набралось 25 таких папок, 363 МБ.
+
+    Убираем две породы: целую НАШУ (в ней наш значок icore.ico) и вычищенную —
+    без base_library.zip из неё не стартует уже ни одна программа, чья бы она ни
+    была. Целые чужие не трогаем. Занятость проверяется ядром интерпретатора:
+    пока python3xx.dll загружен хоть одним процессом, удалить его нельзя, и такую
+    папку пропускаем, не тронув в ней ни файла.
+
+    Возвращает (сколько папок убрано, сколько байт освобождено).
+    """
+    root = unpack_root() if root is None else Path(root)
+    now = time.time() if now is None else now
+    own = os.path.normcase(str(getattr(sys, "_MEIPASS", "") or ""))
+    removed = freed = 0
+    try:
+        folders = [p for p in root.iterdir() if p.name.startswith("_MEI") and p.is_dir()]
+    except OSError:
+        return 0, 0
+    for folder in folders:
+        try:
+            if own and os.path.normcase(str(folder)) == own:
+                continue
+            if now - folder.stat().st_mtime < STALE_UNPACK_AGE_S:
+                continue
+            ours = (folder / "icore.ico").exists()
+            gutted = not (folder / "base_library.zip").exists()
+            if not ours and not gutted:
+                continue
+            size = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
+            try:
+                for core in [f for f in folder.iterdir() if _PYTHON_CORE_DLL.fullmatch(f.name)]:
+                    core.unlink()
+            except OSError:
+                continue  # папка в работе
+            shutil.rmtree(folder, ignore_errors=True)
+            if not folder.exists():
+                removed += 1
+                freed += size
+        except OSError:
+            continue
+    return removed, freed
 
 
 # --------------------------------------------------------------------------- #
@@ -4889,6 +5015,7 @@ def run_agent(cfg: dict) -> int:
     # Сколько кругов подряд не удалось поднять сторожа и сколько ещё пропустить.
     watchdog_failures = 0
     watchdog_skip = 0
+    watchdog_attempt: Optional[subprocess.Popen] = None   # последний поднятый нами сторож
     # Надстройка над ограничителем: вход по учётке iCORE и обязательные
     # объявления. Живут в том же цикле — своего процесса им не нужно.
     news_every_s = max(30.0, float(cfg.get("news_poll_s", 60)))
@@ -5070,15 +5197,12 @@ def run_agent(cfg: dict) -> int:
                 # висеть модальное окно, и минутный цикл превращался в стопку
                 # таких окон за смену.
                 if cfg.get("ensure_watchdog_alive", True) and not is_running_by_mutex(WATCHDOG_MUTEX_NAME):
-                    if watchdog_skip > 0:
-                        watchdog_skip -= 1
+                    if still_starting(watchdog_attempt):
+                        pass  # прошлый запуск ещё распаковывается или висит на окне ошибки
                     else:
-                        logging.info("Watchdog не обнаружен — поднимаю")
-                        spawn_self()
-                        time.sleep(1.0)
-                        if is_running_by_mutex(WATCHDOG_MUTEX_NAME):
-                            watchdog_failures = 0
-                        else:
+                        if watchdog_attempt is not None:
+                            # Прошлый запуск вышел, так и не став сторожем.
+                            watchdog_attempt = None
                             watchdog_failures += 1
                             # Пропускаем тем больше кругов, чем дольше не выходит.
                             watchdog_skip = min(30, 2 ** min(watchdog_failures, 5))
@@ -5087,9 +5211,18 @@ def run_agent(cfg: dict) -> int:
                                     "Watchdog не поднимается три раза подряд — пробую реже. "
                                     "Похоже, сломана сборка."
                                 )
-                elif watchdog_failures:
+                        if watchdog_skip > 0:
+                            watchdog_skip -= 1
+                        else:
+                            logging.info("Watchdog не обнаружен — поднимаю")
+                            watchdog_attempt = spawn_self()
+                            if watchdog_attempt is None:
+                                watchdog_failures += 1
+                                watchdog_skip = min(30, 2 ** min(watchdog_failures, 5))
+                elif watchdog_failures or watchdog_attempt is not None:
                     watchdog_failures = 0
                     watchdog_skip = 0
+                    watchdog_attempt = None
 
                 if browser_cfg.get("keep_open", False):
                     browser.ensure_running()
@@ -5279,6 +5412,37 @@ def run_watchdog(cfg: dict) -> int:
     max_retry_s = max(60.0, float(cfg.get("watchdog_max_retry_s", 300)))
     failures = 0
     complained = False
+    attempt: Optional[subprocess.Popen] = None   # последний поднятый нами агент
+    next_try = 0.0
+
+    if getattr(sys, "frozen", False):
+        # Раз за вход в Windows: место под распаковку нужно раньше первого запуска агента.
+        try:
+            removed, freed = sweep_stale_unpack_dirs()
+            if removed:
+                logging.info("Убраны брошенные папки распаковки: %d, освобождено %.0f МБ",
+                             removed, freed / 2 ** 20)
+        except Exception:  # noqa: BLE001 — уборка не повод не поднять агента
+            logging.debug("Уборка папок распаковки не удалась", exc_info=True)
+
+    def failed() -> None:
+        nonlocal failures, complained, retry_s, next_try
+        failures += 1
+        # Жалуемся ОДИН раз: строка в логе на каждую попытку — это тот
+        # же шум, только в файле, и он вытесняет из лога всё остальное
+        # (за восемь минут набежало 47 КБ).
+        if not complained and failures >= 3:
+            complained = True
+            logging.error(
+                "Агент не поднимается (%d попытки подряд). Дальше пробую реже, "
+                "с паузой до %.0f c. Скорее всего сломана сама сборка.",
+                failures, max_retry_s,
+            )
+        elif failures < 3:
+            logging.warning("Агент не поднялся после запуска (попытка %d)", failures)
+        next_try = time.time() + retry_s
+        retry_s = min(max_retry_s, retry_s * 2)
+
     try:
         while True:
             try:
@@ -5288,34 +5452,30 @@ def run_watchdog(cfg: dict) -> int:
                     failures = 0
                     retry_s = check_s
                     complained = False
+                    attempt = None
+                    next_try = 0.0
                     time.sleep(check_s)
+                    continue
+
+                if still_starting(attempt):
+                    # Пауза отсчитывается от момента, когда окно ошибки закрыли,
+                    # а не от запуска: иначе человек нажал OK — и тут же новое.
+                    next_try = time.time() + retry_s
+                    time.sleep(check_s)
+                    continue
+                if attempt is not None:
+                    attempt = None   # вышла, так и не став агентом
+                    failed()
+                if time.time() < next_try:
+                    time.sleep(min(check_s, max(0.0, next_try - time.time())))
                     continue
 
                 logging.info("Агент не обнаружен — запускаю")
-                spawn_self("--agent")
-                time.sleep(grace_s)
-                if is_running_by_mutex(AGENT_MUTEX_NAME):
-                    failures = 0
-                    retry_s = check_s
-                    complained = False
-                    time.sleep(check_s)
+                attempt = spawn_self("--agent")
+                if attempt is None:
+                    failed()
                     continue
-
-                failures += 1
-                # Жалуемся ОДИН раз: строка в логе на каждую попытку — это тот
-                # же шум, только в файле, и он вытесняет из лога всё остальное
-                # (за восемь минут набежало 47 КБ).
-                if not complained and failures >= 3:
-                    complained = True
-                    logging.error(
-                        "Агент не поднимается (%d попытки подряд). Дальше пробую реже, "
-                        "с паузой до %.0f c. Скорее всего сломана сама сборка.",
-                        failures, max_retry_s,
-                    )
-                elif failures < 3:
-                    logging.warning("Агент не поднялся после запуска (попытка %d)", failures)
-                time.sleep(retry_s)
-                retry_s = min(max_retry_s, retry_s * 2)
+                time.sleep(grace_s)
             except KeyboardInterrupt:
                 return 0
             except Exception:  # noqa: BLE001
