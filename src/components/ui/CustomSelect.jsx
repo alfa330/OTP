@@ -33,6 +33,10 @@ import { APPLE_FONT } from './ios';
  *                       Без неё в кнопке стоит «Выбрано: N».
  *   maxSelected       — потолок выбора; при достижении невыбранные строки
  *                       гаснут, а не молча игнорируют клик.
+ *   textClassName     — (только variant="ios") кегль и цвет текста в кнопке
+ *                       вместо мелкого 12.5 px по умолчанию: когда список стоит
+ *                       в одной форме с полями ввода, текст должен совпадать с
+ *                       ними (форма «Мои данные» в «Профиле»).
  *   bulkActions       — (только multiple) строка «Выбрать все · Сбросить» над
  *                       списком. При строке поиска «Выбрать» берёт найденные,
  *                       а не весь список: набрал «Астана» — отметил Астану.
@@ -54,6 +58,7 @@ export default function CustomSelect({
   renderValue = null,
   maxSelected = 0,
   bulkActions = false,
+  textClassName = '',
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
@@ -247,7 +252,7 @@ export default function CustomSelect({
           }
         }}
         className={isIos
-          ? `flex w-full items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-left text-[12.5px] font-medium text-slate-700 ring-1 transition-all ${
+          ? `flex w-full items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-left ${textClassName || 'text-[12.5px] font-medium text-slate-700'} ring-1 transition-all ${
             disabled
               ? 'cursor-not-allowed opacity-50 ring-slate-200/70'
               : 'cursor-pointer ring-slate-200/70 hover:bg-slate-50 active:scale-[0.99]'

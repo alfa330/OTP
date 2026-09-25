@@ -289,7 +289,9 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertNotRegex(self.card, r'/api/my_data\?')
 
     def test_block_is_rendered_only_behind_the_eligibility_check(self):
-        self.assertIn('{canEditOwnData(user) && (\n', self.app)
+        # С 25.09.2026 блок уходит в ProfileView слотом myData — и только тем,
+        # кому он положен.
+        self.assertIn('myData={canEditOwnData(user) ? (', self.app)
         self.assertEqual(1, self.app.count('<MyDataCard'))
 
     def test_history_labels_cover_the_six_fields(self):

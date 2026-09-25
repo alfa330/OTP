@@ -26,6 +26,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "src" / "App.jsx"
 MY_LOW_RATINGS_PATH = ROOT / "src" / "components" / "c2d_eval" / "MyLowRatings.jsx"
+# «Профиль» с 25.09.2026 — отдельный компонент; показатели по-прежнему считает
+# App.jsx (buildProfileStats), а рисует ProfileView.
+PROFILE_VIEW_PATH = ROOT / "src" / "components" / "profile" / "ProfileView.jsx"
 
 
 def _read(path):
@@ -48,10 +51,12 @@ class EvaluationPlanIsGoneTests(unittest.TestCase):
 
     def setUp(self):
         self.src = _read(APP_PATH)
-        # «Ваши оценки» (личный раздел) и плитки «Профиля».
+        # «Ваши оценки» (личный раздел) и показатели «Профиля»: их расчёт в
+        # App.jsx и сам экран профиля.
         self.own_screens = (
             _region(self.src, "{view === 'evaluation' && (", "view === 'salary' && (")
-            + _region(self.src, "const profileIsTezOp", "Быстрые действия")
+            + _region(self.src, "const buildProfileStats = () => {", "const fetchProfileData = async () => {")
+            + _read(PROFILE_VIEW_PATH)
         )
 
     def test_plan_labels_are_gone(self):
@@ -103,7 +108,8 @@ class EvaluationPlanIsGoneTests(unittest.TestCase):
         # У ОП TEZ успешки и выполнение плана — их работа, а не проверка качества.
         self.assertIn("Успешки / план", self.src)
         self.assertIn("Выполнение плана", self.src)
-        self.assertIn("profileIsTezOp ? 'sm:grid-cols-4' : 'sm:grid-cols-3'", self.src)
+        # Ячейки ОП TEZ — ветка по модели, у остальных вместо них средний балл.
+        self.assertIn("const modelCells = profileIsTezOp ? [", self.src)
 
     def test_reviewer_side_counters_survive(self):
         # Проверяющим количества нужны: бейдж раздела и числа в фильтрах.

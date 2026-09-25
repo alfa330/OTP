@@ -274,11 +274,19 @@ class ProfileTilesTests(unittest.TestCase):
         self.assertNotIn("Прослушано / нужно", self.src)
 
     def test_hours_and_norm_tiles_are_shared(self):
-        """Часы и норма показываются всем — они вне ветвления по модели."""
+        """Часы и норма показываются всем — они вне ветвления по модели.
+
+        С 25.09.2026 плитки — ячейки полосы ProfileView, а их список собирает
+        buildProfileStats: ячейки модели идут отдельным массивом, часы и норма
+        дописываются к нему для всех.
+        """
         head, _, tail = self.src.partition("const profileIsTezOp")
-        block = tail.split("Быстрые действия")[0]
-        self.assertEqual(block.count('Часов<'), 1)
-        self.assertEqual(block.count('>Норма<'), 1)
+        block = tail.split("const fetchProfileData = async () => {")[0]
+        self.assertEqual(block.count("label: 'Часов'"), 1)
+        self.assertEqual(block.count("label: 'Норма'"), 1)
+        shared = block.partition("return [\n                    ...modelCells,")[2]
+        self.assertIn("label: 'Часов'", shared)
+        self.assertIn("label: 'Норма'", shared)
 
 
 class DayDetailSuccessesTests(unittest.TestCase):

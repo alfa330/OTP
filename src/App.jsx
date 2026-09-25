@@ -42,6 +42,7 @@ import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';
 import FaIcon from './components/common/FaIcon';
 import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
+import ProfileView from './components/profile/ProfileView';
 import MyDataCard from './components/profile/MyDataCard';
 import { canEditOwnData } from './components/profile/myData';
 import OrazAitSplash from './components/common/OrazAitSplash';
@@ -41261,47 +41262,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             <div className={`sk-shimmer ${className}`} />
         );
 
-        const ProfilePageSkeleton = () => (
-            <div className="space-y-6">
-                <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
-                    <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full sk-shimmer shrink-0" style={{borderRadius:'9999px'}} />
-                    <div className="space-y-2 text-center sm:text-left w-full max-w-xs">
-                        <_SkPulse className="h-6 w-36 mx-auto sm:mx-0" />
-                        <div className="flex gap-2 justify-center sm:justify-start">
-                            <_SkPulse className="h-5 w-20 rounded-full" />
-                            <_SkPulse className="h-5 w-24 rounded-full" />
-                        </div>
-                    </div>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-                    {[0,1,2,3].map(i => (
-                        <div key={i} className="rounded-xl bg-gray-50 p-3 sm:p-4 text-center space-y-2">
-                            <_SkPulse className="h-8 w-16 mx-auto" />
-                            <_SkPulse className="h-3 w-20 mx-auto" />
-                            <_SkPulse className="h-3 w-20 mx-auto" />
-                        </div>
-                    ))}
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                    {[0,1,2].map(i => (
-                        <div key={i} className="bg-gray-50 p-4 rounded-xl flex items-center gap-3">
-                            <div className="w-10 h-10 sm:w-12 sm:h-12 sk-shimmer shrink-0" style={{borderRadius:'9999px'}} />
-                            <div className="space-y-2 flex-1 min-w-0">
-                                <_SkPulse className="h-3 w-20" />
-                                <_SkPulse className="h-4 w-28" />
-                            </div>
-                        </div>
-                    ))}
-                </div>
-                <div className="pt-4 border-t border-gray-200 space-y-3">
-                    <_SkPulse className="h-3 w-28" />
-                    <div className="flex gap-2">
-                        <_SkPulse className="h-9 w-28 rounded-lg" />
-                        <_SkPulse className="h-9 w-28 rounded-lg" />
-                    </div>
-                </div>
-            </div>
-        );
 
         const HoursPageSkeleton = () => (
             <div className="workhours-main-grid grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -49438,6 +49398,127 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ));
             }, [manageUsersDeptFilter]);
 
+            // Показатели в шапке «Профиля» (переделка раздела 25.09.2026). Расчёт —
+            // прежний, из плиток; поменялся только вид: ячейки полосы ProfileView.
+            // Ячейка ведёт в свой раздел — балл в «Мои оценки», остальное в «Мои
+            // часы» — и только если раздел этому отделу выдан: у фронт-офиса их нет,
+            // и нажатие вернуло бы человека обратно в профиль.
+            const buildProfileStats = () => {
+                const evals = operatorData?.evaluations ?? [];
+                const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
+                // «Тестирование знаний» входит в средний балл — тест тоже влияет
+                // на качество. Плана проверок в плитках больше нет (решение
+                // владельца 03.09.2026, задача #272), поэтому и делить оценки
+                // на прослушанные и тестовые здесь незачем.
+                const avgScore = evalsFiltered.length > 0
+                  ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalsFiltered.length
+                  : 0;
+
+                const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
+                const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
+                const totalHoursFromServer = Number(hoursOp?.worked_hours_used ?? hoursOp?.accounted_hours);
+                const totalHoursTraining = computeUniqueTrainingDurationHours(
+                  (Array.isArray(operatorTrainings) ? operatorTrainings : []).filter(t => {
+                    if (!t) return false;
+                    if (t.operator_id && Number(t.operator_id) !== Number(hoursOp?.operator_id ?? user.id)) return false;
+                    if (t.date && String(t.date).slice(0, 7) !== selectedMonth) return false;
+                    return t.count_in_hours !== false;
+                  })
+                );
+                const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
+                const totalHoursOffline = Number(hoursOp?.offline_activity_hours ?? 0);
+                const totalHours = Number.isFinite(totalHoursFromServer)
+                  ? totalHoursFromServer
+                  : totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
+                const normHours = Number(hoursOp?.norm_hours ?? 0);
+                const hasHoursData = hoursData?.operators?.length > 0;
+
+                const profileIsTezOp = resolveWorkHoursMonthModelInfo(hoursOp).modelCode === 'tez_op';
+                const profileSuccesses = Number(hoursOp?.aggregates?.total_tez_successes ?? 0) || 0;
+                const profilePlanResult = profileIsTezOp
+                  ? calculateTezOpMonthlyPlan({
+                      planPerFte: hoursOp?.tez_plan_per_fte,
+                      rate: hoursOp?.rate,
+                      normHours,
+                      factHours: totalHours,
+                      hireDate: hoursOp?.hire_date,
+                      month: selectedMonth,
+                    })
+                  : null;
+                const profilePlan = profilePlanResult?.plan ?? null;
+                const profilePlanPercent = (profilePlan && profilePlan > 0)
+                  ? (profileSuccesses / profilePlan) * 100
+                  : null;
+                const profileSuccessesLeft = (profilePlan && profilePlan > 0)
+                  ? Math.max(0, Math.ceil(profilePlan - profileSuccesses))
+                  : null;
+
+                const openProfileView = (viewKey) => (
+                    departmentAllowsView(user, viewKey) ? () => setView(viewKey) : null
+                );
+                const openHours = openProfileView('hours');
+                const openEvaluation = openProfileView('evaluation');
+                const toHours = 'Открыть «Мои часы»';
+
+                // У ОП TEZ качество не в выплате и звонки почти не прослушивают,
+                // поэтому их ячейки — успешки и выполнение плана. У остальных —
+                // средний балл: плана проверок в профиле нет ни у кого (решение
+                // владельца 03.09.2026, задача #272).
+                const modelCells = profileIsTezOp ? [
+                    {
+                        key: 'successes',
+                        value: `${profileSuccesses}${profilePlan != null ? `/${profilePlan.toFixed(0)}` : ''}`,
+                        label: 'Успешки / план',
+                        note: profileSuccessesLeft === null
+                            ? 'План не задан'
+                            : profileSuccessesLeft > 0
+                                ? `Осталось ${profileSuccessesLeft}`
+                                : 'План выполнен',
+                        noteTone: profileSuccessesLeft === null ? 'muted' : profileSuccessesLeft > 0 ? 'warn' : 'good',
+                        onClick: openHours,
+                        hint: toHours,
+                    },
+                    {
+                        key: 'plan',
+                        value: profilePlanPercent === null ? '—' : `${profilePlanPercent.toFixed(0)}%`,
+                        label: 'Выполнение плана',
+                        tone: profilePlanPercent === null ? 'muted' : profilePlanPercent >= 100 ? 'good' : profilePlanPercent >= 85 ? 'warn' : 'bad',
+                        onClick: openHours,
+                        hint: toHours,
+                    },
+                ] : [
+                    {
+                        key: 'score',
+                        value: avgScore > 0 ? avgScore.toFixed(1) : '—',
+                        label: 'Ср. балл',
+                        tone: avgScore > 0 ? (avgScore >= 90 ? 'good' : avgScore >= 70 ? 'warn' : 'bad') : 'muted',
+                        onClick: openEvaluation,
+                        hint: 'Открыть «Мои оценки»',
+                    },
+                ];
+                // Часы и норма — у всех моделей, вне ветвления. Нейтральным цветом:
+                // порога, который бы окрашивал их, нет.
+                return [
+                    ...modelCells,
+                    {
+                        key: 'hours',
+                        value: hasHoursData ? totalHours.toFixed(0) : '—',
+                        label: 'Часов',
+                        tone: hasHoursData ? null : 'muted',
+                        onClick: openHours,
+                        hint: toHours,
+                    },
+                    {
+                        key: 'norm',
+                        value: hasHoursData && normHours > 0 ? `${((totalHours / normHours) * 100).toFixed(0)}%` : '—',
+                        label: 'Норма',
+                        tone: hasHoursData && normHours > 0 ? null : 'muted',
+                        onClick: openHours,
+                        hint: toHours,
+                    },
+                ];
+            };
+
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 
@@ -56483,330 +56564,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </Suspense>
                                 ))}
-                                {view === 'profile' && ( 
-                                  <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                    <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
-                                      <FaIcon className="fas fa-user-circle text-blue-600"></FaIcon>
-                                      <span className="text-blue-600">
-                                        Профиль
-                                      </span>
-                                    </h2>
-
-                                    {!profileHidesOperatorBlocks && (
-                                    <RateSelfChangeCard
-                                      user={user}
-                                      currentRate={profileData?.rate ?? user?.rate}
-                                      showToast={showToast}
-                                      onChanged={(r) => setProfileData((prev) => (prev ? { ...prev, rate: r } : prev))}
-                                    />
-                                    )}
-
-                                    {isLoading ? (
-                                      <ProfilePageSkeleton />
-                                    ) : profileData ? (
-                                      <div className="space-y-6">
-                                        {/* Имя в шапке при прокрутке — как в Telegram. Только на
-                                            телефоне: на компьютере имя и так на виду, а раздел не
-                                            прокручивается страницей. */}
-                                        <MobileScrollTitle
-                                          active={isMobileShell}
-                                          title={profileData.name || ''}
-                                          avatarUrl={profileData.avatar_url}
-                                          initial={profileData.name}
+                                {view === 'profile' && (() => {
+                                  const profileRateLabel = profileData ? formatRateValue(profileData.rate) : '';
+                                  return (
+                                    <ProfileView
+                                      loading={isLoading}
+                                      profile={profileData}
+                                      isMobileShell={isMobileShell}
+                                      AvatarImage={AvatarImage}
+                                      hidesOperatorBlocks={profileHidesOperatorBlocks}
+                                      stats={profileHidesOperatorBlocks ? null : buildProfileStats()}
+                                      rateBanner={!profileHidesOperatorBlocks && (
+                                        <RateSelfChangeCard
+                                          user={user}
+                                          currentRate={profileData?.rate ?? user?.rate}
+                                          showToast={showToast}
+                                          onChanged={(r) => setProfileData((prev) => (prev ? { ...prev, rate: r } : prev))}
                                         />
-                                        {/* Profile header - avatar and name */}
-                                        <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
-                                          <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg overflow-hidden">
-                                            {profileData.avatar_url ? (
-                                                <AvatarImage
-                                                    src={profileData.avatar_url}
-                                                    alt={profileData.name || 'avatar'}
-                                                    className="w-full h-full object-cover"
-                                                    loading="eager"
-                                                    fetchPriority="high"
-                                                />
-                                            ) : (
-                                                (profileData.name || 'U').charAt(0).toUpperCase()
-                                            )}
-                                          </div>
-                                          <div className="text-center sm:text-left">
-                                            <h3 className="text-xl sm:text-2xl font-bold text-gray-900">{profileData.name || '-'}</h3>
-                                            {/* Плашки роли под именем нет намеренно (решение владельца
-                                                26.08.2026): она печатала СЫРОЕ значение из базы —
-                                                «operator», «sv» — латиницей и с фолбэком «Оператор»,
-                                                который у любой другой должности был просто неверен.
-                                                Человек и так знает, кто он; направление остаётся —
-                                                оно рабочее и у бэк-офиса его нет. */}
-                                            {profileData.direction && (
-                                              <div className="flex flex-wrap justify-center sm:justify-start gap-2 mt-2">
-                                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                                                  <FaIcon className="fas fa-compass"></FaIcon> {profileData.direction}
-                                                </span>
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-
-                                        {/* Stats cards - evaluation & hours summary */}
-                                        {!profileHidesOperatorBlocks && (() => {
-                                          const evals = operatorData?.evaluations ?? [];
-                                          const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
-                                          // «Тестирование знаний» входит в средний балл — тест тоже влияет
-                                          // на качество. Плана проверок в плитках больше нет (решение
-                                          // владельца 03.09.2026, задача #272), поэтому и делить оценки
-                                          // на прослушанные и тестовые здесь незачем.
-                                          const avgScore = evalsFiltered.length > 0
-                                            ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalsFiltered.length
-                                            : 0;
-
-
-                                          const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
-                                          const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
-                                          const totalHoursFromServer = Number(hoursOp?.worked_hours_used ?? hoursOp?.accounted_hours);
-                                          const parseHMToMinutes = (hm) => {
-                                            if (!hm || typeof hm !== 'string') return null;
-                                            const parts = hm.split(':');
-                                            if (parts.length < 2) return null;
-                                            const hh = parseInt(parts[0], 10);
-                                            const mm = parseInt(parts[1], 10);
-                                            if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-                                            return hh * 60 + mm;
-                                          };
-                                          const totalHoursTraining = computeUniqueTrainingDurationHours(
-                                            (Array.isArray(operatorTrainings) ? operatorTrainings : []).filter(t => {
-                                              if (!t) return false;
-                                              if (t.operator_id && Number(t.operator_id) !== Number(hoursOp?.operator_id ?? user.id)) return false;
-                                              if (t.date && String(t.date).slice(0, 7) !== selectedMonth) return false;
-                                              return t.count_in_hours !== false;
-                                            })
-                                          );
-                                          const totalHoursTechnical = Number(hoursOp?.technical_issue_hours ?? 0);
-                                          const totalHoursOffline = Number(hoursOp?.offline_activity_hours ?? 0);
-                                          const totalHours = Number.isFinite(totalHoursFromServer)
-                                            ? totalHoursFromServer
-                                            : totalHoursBase + totalHoursTraining + totalHoursTechnical + totalHoursOffline;
-                                          const normHours = Number(hoursOp?.norm_hours ?? 0);
-                                          const hasHoursData = hoursData?.operators?.length > 0;
-
-                                          // ОП TEZ: качество у них не в выплате и звонки почти не прослушивают,
-                                          // поэтому первые две плитки — успешки и выполнение плана.
-                                          const profileIsTezOp = resolveWorkHoursMonthModelInfo(hoursOp).modelCode === 'tez_op';
-                                          const profileSuccesses = Number(hoursOp?.aggregates?.total_tez_successes ?? 0) || 0;
-                                          const profilePlanResult = profileIsTezOp
-                                            ? calculateTezOpMonthlyPlan({
-                                                planPerFte: hoursOp?.tez_plan_per_fte,
-                                                rate: hoursOp?.rate,
-                                                normHours,
-                                                factHours: totalHours,
-                                                hireDate: hoursOp?.hire_date,
-                                                month: selectedMonth,
-                                              })
-                                            : null;
-                                          const profilePlan = profilePlanResult?.plan ?? null;
-                                          const profilePlanPercent = (profilePlan && profilePlan > 0)
-                                            ? (profileSuccesses / profilePlan) * 100
-                                            : null;
-                                          const profileSuccessesLeft = (profilePlan && profilePlan > 0)
-                                            ? Math.max(0, Math.ceil(profilePlan - profileSuccesses))
-                                            : null;
-
-                                          return (
-                                            /* У ОП TEZ четыре плитки (успешки и план — их рабочие мерки),
-                                               у остальных три: плитки плана проверок здесь больше нет. */
-                                            <div className={`grid grid-cols-2 ${profileIsTezOp ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-3 sm:gap-4`}>
-                                              {profileIsTezOp ? (
-                                                <>
-                                              <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className="text-2xl sm:text-3xl font-bold text-blue-600 tabular-nums">
-                                                  {profileSuccesses}{profilePlan != null ? `/${profilePlan.toFixed(0)}` : ''}
-                                                </div>
-                                                <div className="text-xs text-gray-600 mt-1">Успешки / план</div>
-                                                <div className={`text-[11px] mt-1 ${profileSuccessesLeft === null ? 'text-gray-500' : profileSuccessesLeft > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-                                                  {profileSuccessesLeft === null
-                                                    ? 'План не задан'
-                                                    : profileSuccessesLeft > 0
-                                                      ? `Осталось ${profileSuccessesLeft}`
-                                                      : 'План выполнен'}
-                                                </div>
-                                              </div>
-                                              <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className={`text-2xl sm:text-3xl font-bold tabular-nums ${profilePlanPercent === null ? 'text-gray-400' : profilePlanPercent >= 100 ? 'text-green-600' : profilePlanPercent >= 85 ? 'text-yellow-600' : 'text-red-600'}`}>
-                                                  {profilePlanPercent === null ? '-' : `${profilePlanPercent.toFixed(0)}%`}
-                                                </div>
-                                                <div className="text-xs text-gray-600 mt-1">Выполнение плана</div>
-                                              </div>
-                                                </>
-                                              ) : (
-                                                <>
-                                              <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className={`text-2xl sm:text-3xl font-bold ${avgScore >= 90 ? 'text-green-600' : avgScore >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
-                                                  {avgScore > 0 ? avgScore.toFixed(1) : '-'}
-                                                </div>
-                                                <div className="text-xs text-gray-600 mt-1">Ср. балл</div>
-                                              </div>
-                                                </>
-                                              )}
-                                              <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className="text-2xl sm:text-3xl font-bold text-purple-600">{hasHoursData ? totalHours.toFixed(0) : '-'}</div>
-                                                <div className="text-xs text-gray-600 mt-1">Часов</div>
-                                              </div>
-                                              <div className="bg-gradient-to-br from-orange-50 to-orange-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className="text-2xl sm:text-3xl font-bold text-orange-600">
-                                                  {hasHoursData && normHours > 0 ? ((totalHours / normHours) * 100).toFixed(0) + '%' : '-'}
-                                                </div>
-                                                <div className="text-xs text-gray-600 mt-1">Норма</div>
-                                              </div>
-                                            </div>
-                                          );
-                                        })()}
-
-                                        {/* Info cards grid */}
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-                                          {/* Hire Date */}
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-green-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-calendar-alt text-green-600 text-lg"></FaIcon>
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Дата найма</p>
-                                              <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">{profileData.hire_date || '-'}</p>
-                                            </div>
-                                          </div>
-                                  
-                                          {/* Должность и отдел — вместо супервайзера и ставки:
-                                              у бэк-офиса человека определяют именно они. */}
-                                          {profileHidesOperatorBlocks && (
-                                          <>
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-id-card text-indigo-600 text-lg"></FaIcon>
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Должность</p>
-                                              <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.job_title || '-'}</p>
-                                            </div>
-                                          </div>
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-layer-group text-blue-600 text-lg"></FaIcon>
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Отдел</p>
-                                              <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.department_name || '-'}</p>
-                                            </div>
-                                          </div>
-                                          </>
-                                          )}
-
-                                          {/* Supervisor */}
-                                          {!profileHidesOperatorBlocks && (
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-user-tie text-indigo-600 text-lg"></FaIcon>
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Супервайзер</p>
-                                              <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.supervisor_name || '-'}</p>
-                                            </div>
-                                          </div>
-                                          )}
-
-                                          {/* Rate */}
-                                          {!profileHidesOperatorBlocks && (
-                                          <div
-                                            className={`bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3 ${isFirstOfMonthAlmaty() ? 'cursor-pointer ring-2 ring-blue-400 ring-offset-1' : ''}`}
-                                            onClick={() => { if (isFirstOfMonthAlmaty()) window.dispatchEvent(new CustomEvent('open-self-rate-modal')); }}
-                                          >
-                                            <div className="relative w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-briefcase text-blue-600 text-lg"></FaIcon>
-                                              {isFirstOfMonthAlmaty() && (
-                                                <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3">
-                                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                                                  <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
-                                                </span>
-                                              )}
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Ставка</p>
-                                              <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">
-                                                {formatRateValue(profileData.rate)}
-                                                {isFirstOfMonthAlmaty() && (
-                                                  <span className="ml-2 text-xs font-medium text-blue-600 normal-case">Изменить</span>
-                                                )}
-                                              </p>
-                                            </div>
-                                          </div>
-                                          )}
-
-                                          {/* Experience */}
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-yellow-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-award text-yellow-600 text-lg"></FaIcon>
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Стаж работы <span className="text-gray-400 normal-case">(приблизительно)</span></p>
-                                              <p className="text-base sm:text-lg font-semibold text-gray-900">
-                                                {(() => {
-                                                  if (!profileData.hire_date) return '-';
-                                                  const hire = new Date(profileData.hire_date);
-                                                  const now = new Date();
-                                                  const months = (now.getFullYear() - hire.getFullYear()) * 12 + (now.getMonth() - hire.getMonth());
-                                                  if (months < 1) return 'Меньше месяца';
-                                                  if (months < 12) return `${months} мес.`;
-                                                  const years = Math.floor(months / 12);
-                                                  const remMonths = months % 12;
-                                                  return `${years} г. ${remMonths > 0 ? remMonths + ' мес.' : ''}`;
-                                                })()}
-                                              </p>
-                                            </div>
-                                          </div>
-                                        </div>
-
-                                        {/* «Мои данные» (задача #357): оператор СЗоВ, ОП и Тез сам
-                                            правит телефон, Telegram, карту и учёбу. Кому блок
-                                            положен, решает canEditOwnData, окончательно — сервер. */}
-                                        {canEditOwnData(user) && (
-                                          <MyDataCard
-                                            apiBaseUrl={API_BASE_URL}
-                                            userId={user?.id}
-                                            withAccessTokenHeader={withAccessTokenHeader}
-                                            showToast={showToast}
-                                          />
-                                        )}
-
-                                        {/* Quick actions. У бэк-офиса обе кнопки вели бы в разделы,
-                                            которых ему не выдали: гард видимости вернул бы его обратно
-                                            в профиль, и кнопка выглядела бы сломанной. */}
-                                        {!profileHidesOperatorBlocks && (
-                                        <div className="pt-4 border-t border-gray-200">
-                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-3">Быстрые действия</p>
-                                          <div className="flex flex-wrap gap-2">
-                                            <button 
-                                              onClick={() => setView('hours')}
-                                              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-sm font-medium transition"
-                                            >
-                                              <FaIcon className="fas fa-clock"></FaIcon>
-                                              <span>Мои часы</span>
-                                            </button>
-                                            <button 
-                                              onClick={() => setView('evaluation')}
-                                              className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg text-sm font-medium transition"
-                                            >
-                                              <FaIcon className="fas fa-chart-bar"></FaIcon>
-                                              <span>Мои оценки</span>
-                                            </button>
-                                          </div>
-                                        </div>
-                                        )}
-                                      </div>
-                                    ) : (
-                                      <p className="text-center text-gray-600 flex items-center justify-center">
-                                        <FaIcon className="fas fa-exclamation-circle mr-2 text-red-500"></FaIcon>
-                                        <span className="font-medium">Нету информации о профиле</span>
-                                      </p>
-                                    )}
-                                  </div>
-                                )} 
+                                      )}
+                                      rateLabel={profileRateLabel === '-' ? '' : profileRateLabel}
+                                      // Окно смены ставки открывает RateSelfChangeCard и только
+                                      // оператору — строка «Ставка» зовёт его же и тем же условием.
+                                      onChangeRate={!profileHidesOperatorBlocks && user?.role === 'operator' && isFirstOfMonthAlmaty()
+                                        ? () => window.dispatchEvent(new CustomEvent('open-self-rate-modal'))
+                                        : null}
+                                      // «Повторить» — тот же набор запросов, что при входе в раздел
+                                      // (эффект view === 'profile'): один профиль оставил бы полосу
+                                      // показателей пустой, а ОП TEZ — с ячейками чужой модели.
+                                      onRetry={() => {
+                                        fetchProfileData();
+                                        if (!profileHidesOperatorBlocks) {
+                                          fetchHoursData();
+                                          fetchOperatorData();
+                                          fetchTrainings();
+                                        }
+                                      }}
+                                      myData={canEditOwnData(user) ? (
+                                        /* «Мои данные» (задача #357): оператор СЗоВ, ОП и Тез сам
+                                           правит телефон, Telegram, карту и учёбу. Кому блок
+                                           положен, решает canEditOwnData, окончательно — сервер. */
+                                        <MyDataCard
+                                          apiBaseUrl={API_BASE_URL}
+                                          userId={user?.id}
+                                          withAccessTokenHeader={withAccessTokenHeader}
+                                          showToast={showToast}
+                                        />
+                                      ) : null}
+                                    />
+                                  );
+                                })()}
                                 {( view === "trainings" && (
                                     <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренингов…</div>}>
                                         <TrainingsView

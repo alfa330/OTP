@@ -734,7 +734,12 @@ class BackOfficeEmployeeRoleTests(unittest.TestCase):
 
 
 class ProfileSectionTests(unittest.TestCase):
-    """«Профиль»: без плашки роли у всех, без операторского — у бэк-офиса."""
+    """«Профиль»: без плашки роли у всех, без операторского — у бэк-офиса.
+
+    С 25.09.2026 разметка профиля — ProfileView.jsx; App.jsx решает, что ему
+    отдать, по тому же флагу profileHidesOperatorBlocks."""
+
+    PROFILE_VIEW = ROOT / "src" / "components" / "profile" / "ProfileView.jsx"
 
     def test_role_badge_is_gone_for_everyone(self):
         # Плашка печатала СЫРОЕ значение из базы («operator», «sv») латиницей,
@@ -742,6 +747,9 @@ class ProfileSectionTests(unittest.TestCase):
         app = _read(APP_PATH)
         self.assertNotIn("{profileData.role || 'Оператор'}", app)
         self.assertNotIn('fas fa-user-tag"></FaIcon> {profileData.role', app)
+        view = _read(self.PROFILE_VIEW)
+        self.assertNotIn("profile.role", view)
+        self.assertNotIn("profile?.role", view)
 
     def test_operator_blocks_are_gated(self):
         app = _read(APP_PATH)
@@ -749,15 +757,24 @@ class ProfileSectionTests(unittest.TestCase):
             "const profileHidesOperatorBlocks = departmentHidesOperatorFields(user);",
             app,
         )
-        # Плитки оценок/часов, смена ставки, карточки СВ и ставки, быстрые
-        # действия — всё, что ведёт в разделы, которых у бэк-офиса нет.
-        self.assertIn("{!profileHidesOperatorBlocks && (() => {", app)
-        self.assertIn("{!profileHidesOperatorBlocks && (\n                                    <RateSelfChangeCard", app)
-        self.assertGreaterEqual(app.count("!profileHidesOperatorBlocks"), 5)
-        # Взамен — должность и отдел.
-        self.assertIn("{profileHidesOperatorBlocks && (", app)
-        self.assertIn("{profileData.job_title || '-'}", app)
-        self.assertIn("{profileData.department_name || '-'}", app)
+        # Показатели оценок/часов, смена ставки и её строка — всё, что ведёт в
+        # разделы, которых у бэк-офиса нет, — App.jsx не отдаёт вовсе.
+        self.assertIn("hidesOperatorBlocks={profileHidesOperatorBlocks}", app)
+        self.assertIn("stats={profileHidesOperatorBlocks ? null : buildProfileStats()}", app)
+        self.assertIn("rateBanner={!profileHidesOperatorBlocks && (\n", app)
+        self.assertIn("onChangeRate={!profileHidesOperatorBlocks && user?.role === 'operator'", app)
+
+        view = _read(self.PROFILE_VIEW)
+        # Полоса показателей — только при открытых операторских блоках.
+        self.assertIn("{!hidesOperatorBlocks && Array.isArray(stats) && stats.length > 0 && <StatStrip", view)
+        # Взамен супервайзера и ставки — отдел; должность — строкой под именем.
+        work = view.partition('title="Работа">')[2]
+        gated, _, _ = work.partition("workRow('Дата найма'")
+        branch, _, operator = gated.partition(") : (")
+        self.assertIn("workRow('Отдел', profile?.department_name)", branch)
+        self.assertIn("workRow('Супервайзер', profile?.supervisor_name)", operator)
+        self.assertIn("workRow('Ставка', rateLabel", operator)
+        self.assertIn("const subtitle = hidesOperatorBlocks ? profile?.job_title : profile?.direction;", view)
 
     def test_backend_sends_job_title_and_department(self):
         endpoint = _function_source(BOT_PATH, "get_user_profile")
