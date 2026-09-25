@@ -50,10 +50,10 @@ export default function DealBadge({ deal, full = false, className = '' }) {
         ['Причина отказа', deal.reason],
         ['Ответственный', deal.responsible],
     ].filter(([, value, placeholder]) => value || placeholder);
-    const column = (rows) => (
-        <dl className="divide-y divide-slate-200/60">
+    const column = (rows, className = '') => (
+        <dl className={`divide-y divide-slate-200/60 ${className}`}>
             {rows.map(([name, value, placeholder]) => (
-                <div key={name} className="grid grid-cols-[152px_minmax(0,1fr)] gap-x-3 py-1.5 text-[12.5px]">
+                <div key={name} className="grid grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)] gap-x-3 py-1.5 text-[12.5px]">
                     <dt className="text-slate-400">{name}</dt>
                     <dd className={`min-w-0 truncate ${value ? 'text-slate-800' : 'text-slate-400'}`}
                         title={value || placeholder}>{value || placeholder}</dd>
@@ -75,9 +75,14 @@ export default function DealBadge({ deal, full = false, className = '' }) {
                     </IosBadge>
                 )}
             </header>
-            <div className="mt-1.5 grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+            {/* Две колонки — только когда карточке есть где их развернуть:
+                ревью занимает половину экрана, и на ноутбуке две колонки по
+                ~200 px оставляли значениям несколько пикселей. */}
+            <div className="mt-1.5 grid grid-cols-1 gap-x-6 2xl:grid-cols-2">
                 {column(origin)}
-                {column(fate)}
+                {/* В одну колонку половины идут подряд — на стыке нужна та же
+                    линия, что между строками; в две колонки она не нужна. */}
+                {column(fate, origin.length ? 'border-t border-slate-200/60 2xl:border-t-0' : '')}
             </div>
         </section>
     );

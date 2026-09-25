@@ -652,7 +652,7 @@ class DealBlockLookTests(unittest.TestCase):
     def test_panel_layout(self):
         panel = _read('src', 'components', 'call_qa', 'QaFilters.jsx')
         # Переключатели режимов — маленьким сегментом в строке подписи.
-        self.assertEqual(panel.count('<IosSegmented size="sm"'), 2)
+        self.assertEqual(panel.count('<IosSegmented size="xs"'), 2)
         self.assertIn('function DealField(', panel)
         # Значения без разборов — отдельной частью списка, серым.
         self.assertIn("const ZERO_GROUP = 'Без разборов';", panel)
@@ -665,13 +665,25 @@ class DealBlockLookTests(unittest.TestCase):
         body = panel.split('export default function QaFilters', 1)[1].split('\nfunction ', 1)[0]
         self.assertLess(body.index('Балл ИИ'), body.rindex('<MarketingFilters'))
 
+    def test_deal_card_has_room(self):
+        card = _read('src', 'components', 'call_qa', 'CallReviewCard.jsx')
+        header = card.split('<div className="flex items-start justify-between gap-3">', 1)[1]
+        # Не в строке с баллами (там её сжимало), а под ней.
+        self.assertLess(header.index('{isChat ? <ChatMeta'), len(header))
+        self.assertIn('{call.deal && <DealBadge deal={call.deal} full className="mt-3" />}', card)
+        badge = _read('src', 'components', 'call_qa', 'DealBadge.jsx')
+        self.assertNotIn('152px', badge)
+        self.assertIn('2xl:grid-cols-2', badge)
+
     def test_shared_primitives_stay_backward_compatible(self):
         select = _read('src', 'components', 'ui', 'CustomSelect.jsx')
         # meta/muted — необязательные поля опции: без них строка прежняя.
         self.assertIn("o.meta != null && o.meta !== ''", select)
         self.assertIn('o.muted && !isSel', select)
         ios = _read('src', 'components', 'ui', 'ios.jsx')
-        self.assertIn("const small = size === 'sm';", ios)
+        self.assertIn("const small = size === 'xs';", ios)
+        # 'sm' уже передают другие разделы и видели его как 'md' — не занимать.
+        self.assertNotIn("size === 'sm'", ios)
         self.assertIn(": 'rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium'", ios)
 
 if __name__ == '__main__':

@@ -700,11 +700,6 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                                 <IosBadge tone="slate">{call.direction}</IosBadge>
                             </div>
                             <p className="mt-0.5 text-[12.5px] text-slate-500">{call.operator} · {call.datetime}</p>
-                            {/* Сделка amoCRM этого разговора (ТЗ #317). Только когда
-                                связь есть: пустой блок «сделка не найдена» на
-                                каждой карточке СЗоВ — это шум для отдела, у
-                                которого сделок нет вовсе. */}
-                            {call.deal && <DealBadge deal={call.deal} full className="mt-2" />}
                         </div>
                         <div className="flex flex-col items-end gap-1.5">
                             {call.ai_score != null && (
@@ -736,6 +731,12 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                             )}
                         </div>
                     </div>
+                    {/* Сделка amoCRM этого разговора (ТЗ #317) — под строкой
+                        заголовка, во всю ширину карточки: в строке рядом с
+                        баллами её сжимало, и значения обрезались до многоточия.
+                        Только когда связь есть: пустой блок «сделка не найдена» на
+                        каждой карточке СЗоВ — шум для отдела без сделок. */}
+                    {call.deal && <DealBadge deal={call.deal} full className="mt-3" />}
                     {isChat ? <ChatMeta call={call} /> : (
                         <div className="mt-3 flex items-center gap-2 text-[11.5px] text-slate-500">
                             <Languages size={13} />

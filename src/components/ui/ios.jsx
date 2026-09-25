@@ -303,11 +303,13 @@ export const IosPager = ({ page, pageCount, total, from, to, onPage, unit = 'с�
  *
  * options: [{ value, label, icon?, count? }]
  */
-/* size: 'sm' — компактный переключатель режима в строке подписи поля (как
-   маленький NSSegmentedControl в настройках macOS), 'md' — обычный, 'lg' — крупный. */
+/* size: 'xs' — компактный переключатель режима в строке подписи поля (как
+   маленький NSSegmentedControl в настройках macOS), 'md' — обычный, 'lg' — крупный.
+   Именно 'xs', а не 'sm': 'sm' уже передают OLX, «Воронка ОП» и «Тренажёр», и
+   раньше он рисовался как 'md' — занять его значило бы уменьшить их переключатели. */
 export const IosSegmented = ({ value, options = [], onChange, size = 'md', stretch = false, className = '', ariaLabel }) => {
     const large = size === 'lg';
-    const small = size === 'sm';
+    const small = size === 'xs';
     const wide = stretch || large;
     return (
         <div

@@ -682,12 +682,24 @@ const countedOptions = (items, { valueOf, titleOf, countOf, extra = () => ({}) }
     ];
 };
 
-/* Подпись кнопки мультивыбора: «iTaxi, Jana» или «iTaxi, Jana +3». */
+/* Подпись кнопки мультивыбора: «iTaxi, Jana» или «iTaxi, Jana +3». Вложенная
+   строка (кампания) без выбранного родителя подписана с ним — «Google / весна»,
+   как в чипе: одноимённые кампании разных каналов иначе неразличимы. «+N»
+   считается по всему выбору, а не по найденным подписям: значение, которого
+   нет в текущем списке (уволенный на другой вкладке), всё равно отбирает. */
 const pickedLabel = (values, options) => {
-    const labelOf = new Map(options.map((option) => [String(option.value), option.label]));
-    const names = values.map((value) => labelOf.get(String(value))).filter(Boolean);
+    const byValue = new Map(options.map((option) => [String(option.value), option]));
+    const chosen = new Set(values.map(String));
+    const names = values.map((value) => {
+        const option = byValue.get(String(value));
+        if (!option) return null;
+        const parent = option.parent != null ? byValue.get(String(option.parent)) : null;
+        return parent && !chosen.has(String(option.parent)) ? `${parent.label} / ${option.label}` : option.label;
+    }).filter(Boolean);
     if (!names.length) return `Выбрано: ${values.length}`;
-    return names.length <= 2 ? names.join(', ') : `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
+    const shown = names.slice(0, 2);
+    const extra = values.length - shown.length;
+    return extra > 0 ? `${shown.join(', ')} +${extra}` : shown.join(', ');
 };
 
 function DealField({ label, accessory, children }) {
@@ -799,7 +811,7 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
                 <DealField label="Кто обрабатывал" accessory={(
                     /* Смена режима сбрасывает выбранных: список людей другой, и
                        id оператора портала в режиме CRM означал бы не того человека. */
-                    <IosSegmented size="sm" ariaLabel="Режим «кто обрабатывал»"
+                    <IosSegmented size="xs" ariaLabel="Режим «кто обрабатывал»"
                         value={value.handler_mode || ''} options={HANDLER_MODE_OPTIONS}
                         onChange={(next) => set({ handler_mode: next, handler_ids: [], handler_group_ids: [], handler_keys: [] })} />
                 )}>
@@ -808,7 +820,7 @@ function MarketingFilters({ value, set, marketing, groups, operators, draft, set
                               onChange: (next) => set(decodeHandlerValues(next)) })}
                 </DealField>
                 <DealField label="Этап сделки" accessory={(
-                    <IosSegmented size="sm" ariaLabel="Режим этапа"
+                    <IosSegmented size="xs" ariaLabel="Режим этапа"
                         value={value.stage_mode || ''} options={STAGE_MODE_OPTIONS}
                         onChange={(next) => set({ stage_mode: next })} />
                 )}>
