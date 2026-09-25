@@ -11,6 +11,12 @@
  *                       { type: 'trainer:open', key, title } / { type: 'trainer:close' }
  *                       { type: 'open:external', url }
  *   телефон → страница  { type: 'auth:token', token, user_id, phone_version, error? }
+ *                       { type: 'trainer:host', framed, width, height } — на 'trainer:open'
+ *                         телефон перенёс страницу в отдельное окно на весь экран (framed)
+ *                         или оставил во вкладке; только теперь можно монтировать
+ *                         проигрыватель: он меряет ширину один раз при монтировании
+ *                       { type: 'trainer:close-request' } — закрыть тренажёр (крестик
+ *                         окна телефона или входящий звонок)
  *
  * Модуль без React и без DOM-зависимостей сверх window.chrome.webview — его читают
  * тесты через node.
@@ -64,14 +70,21 @@ export const isTokenFresh = (token, graceSec = 120, nowMs = Date.now()) => {
     return exp - nowMs / 1000 > graceSec;
 };
 
-/** Разобрать сообщение от телефона. Возвращает { token, userId, phoneVersion, error }
- *  или null, если это не ответ на запрос токена. */
-export const parseTokenMessage = (data) => {
+/** Любое сообщение телефона как объект с полем type; null — не наше сообщение. */
+export const parseHostMessage = (data) => {
     let payload = data;
     if (typeof payload === 'string') {
         try { payload = JSON.parse(payload); } catch { return null; }
     }
-    if (!payload || typeof payload !== 'object' || payload.type !== 'auth:token') return null;
+    if (!payload || typeof payload !== 'object' || typeof payload.type !== 'string' || !payload.type) return null;
+    return payload;
+};
+
+/** Разобрать сообщение от телефона. Возвращает { token, userId, phoneVersion, error }
+ *  или null, если это не ответ на запрос токена. */
+export const parseTokenMessage = (data) => {
+    const payload = parseHostMessage(data);
+    if (!payload || payload.type !== 'auth:token') return null;
     return {
         token: String(payload.token || '').trim(),
         userId: Number(payload.user_id) || 0,
@@ -79,6 +92,29 @@ export const parseTokenMessage = (data) => {
         error: String(payload.error || ''),
     };
 };
+
+/** Дождаться, пока окно страницы сменит ширину (телефон перенёс её в большое окно).
+ *  Проигрыватель меряет ширину ОДИН РАЗ при монтировании: смонтируй его до того, как
+ *  окно выросло, — и он останется в узкой раскладке на весь урок. Ширина уже другая —
+ *  сразу; иначе ждём событие resize, но не дольше timeoutMs (телефон мог не суметь
+ *  открыть окно — тогда тренажёр всё равно нужно показать). */
+export const waitForViewport = (fromWidth, timeoutMs = 500, win = globalThis.window) => (
+    new Promise((resolve) => {
+        if (!win || typeof win.addEventListener !== 'function') { resolve(false); return; }
+        if (win.innerWidth !== fromWidth) { resolve(true); return; }
+        let done = false;
+        const finish = (changed) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            try { win.removeEventListener('resize', onResize); } catch { /* уже снят */ }
+            resolve(changed);
+        };
+        const onResize = () => finish(true);
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        win.addEventListener('resize', onResize);
+    })
+);
 
 /** Попросить у телефона токен. Ответ приходит событием message; ждём не дольше
  *  AUTH_TIMEOUT_MS — если телефон молчит, страница работает без записи попыток. */

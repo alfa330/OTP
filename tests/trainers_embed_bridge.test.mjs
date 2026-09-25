@@ -5,10 +5,12 @@ import {
   authHeadersFor,
   hasPhoneHost,
   isTokenFresh,
+  parseHostMessage,
   parseTokenMessage,
   postToPhone,
   readJwtExpiry,
   requestPhoneToken,
+  waitForViewport,
 } from '../src/trainers_embed/phoneBridge.js';
 
 /* Мост страницы тренажёров с iCORE Phone. Проверяем то, из-за чего учёт попыток
@@ -86,6 +88,51 @@ test('запрос токена: телефон молчит — таймаут,
   const reply = await requestPhoneToken(win, 30);
   assert.equal(reply, null);
   assert.equal(listeners.size, 0, 'слушатель снят и по таймауту');
+});
+
+test('сообщения телефона: объект или строка с type; остальное — null', () => {
+  assert.deepEqual(parseHostMessage({ type: 'trainer:host', framed: true, width: 1900, height: 1000 }),
+    { type: 'trainer:host', framed: true, width: 1900, height: 1000 });
+  assert.deepEqual(parseHostMessage('{"type":"trainer:close-request"}'), { type: 'trainer:close-request' });
+  assert.equal(parseHostMessage({ framed: true }), null);
+  assert.equal(parseHostMessage({ type: '' }), null);
+  assert.equal(parseHostMessage('oops'), null);
+  assert.equal(parseHostMessage(undefined), null);
+});
+
+/* Тренажёр монтируется после того, как телефон вынес страницу в большое окно:
+   проигрыватель меряет ширину один раз, и смонтированный раньше времени он остался
+   бы сжатым. Три исхода: ширина уже другая, resize пришёл, resize не пришёл. */
+const fakeViewport = (width) => {
+  const listeners = new Set();
+  const win = {
+    innerWidth: width,
+    addEventListener(_type, fn) { listeners.add(fn); },
+    removeEventListener(_type, fn) { listeners.delete(fn); },
+    resize(nextWidth) { win.innerWidth = nextWidth; for (const fn of listeners) fn(); },
+  };
+  return { win, listeners };
+};
+
+test('ожидание окна: ширина уже сменилась — сразу', async () => {
+  const { win } = fakeViewport(1500);
+  assert.equal(await waitForViewport(480, 50, win), true);
+});
+
+test('ожидание окна: пришёл resize — продолжаем, слушатель снят', async () => {
+  const { win, listeners } = fakeViewport(480);
+  const waiting = waitForViewport(480, 500, win);
+  setTimeout(() => win.resize(1500), 5);
+  assert.equal(await waiting, true);
+  assert.equal(listeners.size, 0);
+});
+
+test('ожидание окна: телефон окно не открыл — по таймауту монтируем как есть', async () => {
+  const { win, listeners } = fakeViewport(480);
+  assert.equal(await waitForViewport(480, 20, win), false);
+  assert.equal(listeners.size, 0);
+  // Вне браузера (нет окна) — тоже не виснем.
+  assert.equal(await waitForViewport(480, 20, undefined), false);
 });
 
 test('заголовки для API вики только при токене', () => {

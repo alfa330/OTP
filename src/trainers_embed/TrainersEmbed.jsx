@@ -22,7 +22,8 @@ import {
 import { iosCard, iosBtnPrimary, IosBadge } from '../components/ui/ios';
 import { TRAINERS, trainerCard } from '../components/wiki/trainers/registry';
 import {
-    authHeadersFor, hasPhoneHost, isTokenFresh, parseTokenMessage, postToPhone, requestPhoneToken,
+    authHeadersFor, hasPhoneHost, isTokenFresh, parseHostMessage, parseTokenMessage, postToPhone,
+    requestPhoneToken, waitForViewport,
 } from './phoneBridge';
 import { phoneTrainers } from './trainerList';
 
@@ -38,6 +39,9 @@ const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 // Как часто проверять срок токена. Access живёт 30 минут; проверка раз в полминуты
 // успевает попросить свежий за две минуты до истечения (isTokenFresh).
 const TOKEN_CHECK_MS = 30000;
+// Сколько ждать от телефона "trainer:host" после "trainer:open": не ответил — значит,
+// окно он не открыл, и тренажёр монтируем во вкладке как есть.
+const HOST_REPLY_MS = 1500;
 
 const plural = (n, one, few, many) => {
     const mod100 = Math.abs(n) % 100;
@@ -181,11 +185,48 @@ function TrainerCardView({ scenario, onOpen }) {
 export default function TrainersEmbed() {
     const { inPhone, token, error, asked } = useHostToken();
     const [open, setOpen] = useState(null);
+    /* Тренажёр, который ждёт, пока телефон вынесет страницу в большое окно.
+       В ref, а не в state: ответ телефона приходит в слушатель, который вешается один раз. */
+    const pendingRef = useRef(null);      // { scenario, fromWidth, timer }
 
     useEffect(() => {
         document.title = 'Тренажёры';
         postToPhone({ type: 'ready' });
     }, []);
+
+    /* Смонтировать отложенный тренажёр — после того, как окно сменило ширину (или
+       не сменит: телефон не открыл окно либо не ответил вовремя). */
+    const mountPending = useCallback(async () => {
+        const pending = pendingRef.current;
+        if (!pending) return;
+        pendingRef.current = null;
+        clearTimeout(pending.timer);
+        await waitForViewport(pending.fromWidth);
+        setOpen(pending.scenario);
+    }, []);
+
+    /* Команды телефона: окно открыто (монтируем тренажёр) и «закрой тренажёр»
+       (крестик окна или входящий звонок — закрываем без анимации, сразу). */
+    useEffect(() => {
+        if (!inPhone) return undefined;
+        const bridge = window.chrome.webview;
+        const onMessage = (event) => {
+            const msg = parseHostMessage(event?.data);
+            if (!msg) return;
+            if (msg.type === 'trainer:host' && pendingRef.current) {
+                mountPending();
+            } else if (msg.type === 'trainer:close-request') {
+                if (pendingRef.current) {
+                    clearTimeout(pendingRef.current.timer);
+                    pendingRef.current = null;
+                }
+                setOpen(null);
+                postToPhone({ type: 'trainer:close' });
+            }
+        };
+        bridge.addEventListener('message', onMessage);
+        return () => bridge.removeEventListener('message', onMessage);
+    }, [inPhone, mountPending]);
 
     const headers = useMemo(() => authHeadersFor(token), [token]);
     /* Учёт попытки — только с токеном: без него запрос ушёл бы в 401 и молча потерялся,
@@ -197,9 +238,23 @@ export default function TrainersEmbed() {
     ), [headers, inPhone]);
 
     const openTrainer = useCallback((scenario) => {
-        setOpen(scenario);
+        if (!inPhone) {
+            setOpen(scenario);
+            return;
+        }
+        /* В телефоне тренажёр не монтируем сразу: телефон на "trainer:open" переносит
+           страницу в окно на весь экран и отвечает "trainer:host". Проигрыватель меряет
+           ширину один раз при монтировании — смонтированный в узкой вкладке, он остался
+           бы сжатым на весь урок (владелец, 25.09.2026: «в окне ноутбука тренажёр очень
+           сжатый»). */
+        if (pendingRef.current) clearTimeout(pendingRef.current.timer);
+        pendingRef.current = {
+            scenario,
+            fromWidth: window.innerWidth,
+            timer: setTimeout(() => mountPending(), HOST_REPLY_MS),
+        };
         postToPhone({ type: 'trainer:open', key: scenario.key, title: scenario.title });
-    }, []);
+    }, [inPhone, mountPending]);
     const closeTrainer = useCallback(() => {
         setOpen(null);
         postToPhone({ type: 'trainer:close' });
