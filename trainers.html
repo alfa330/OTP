@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru" translate="no" class="notranslate">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Страница тренажёров для iCORE Phone. Телефон открывает её во вкладке
+      «Тренажёры» через WebView2 (microsip-src/DialTrainers.cpp) — без меню и
+      прочих разделов портала. Вход страница получает от телефона по мосту
+      WebView2, поэтому открытая в обычном браузере она тренажёры покажет, но
+      попытки запишет лишь при живой сессии портала в этом же браузере.
+      См. src/trainers_embed/.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <!-- См. index.html: перевод страницы браузером ломает React (removeChild). -->
+    <meta name="google" content="notranslate" />
+    <title>Тренажёры</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  </head>
+  <body class="bg-slate-50 font-sans antialiased text-slate-900">
+    <div id="root"></div>
+    <script type="module" src="/src/trainers_embed/main.jsx"></script>
+  </body>
+</html>

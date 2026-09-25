@@ -2125,8 +2125,29 @@ _TRAINER_STATEMENTS = [
         CONSTRAINT wiki_trainer_runs_status_check
             CHECK (status IN ('started', 'finished', 'abandoned')),
         CONSTRAINT wiki_trainer_runs_source_check
-            CHECK (source IN ('article', 'catalog'))
+            CHECK (source IN ('article', 'catalog', 'phone'))
     );
+    """,
+    # Источник 'phone' — вкладка «Тренажёры» в iCORE Phone (25.09.2026). CHECK объявлен
+    # внутри CREATE TABLE, то есть на проде лежит со старым списком; без пересборки
+    # запись попытки из телефона падала бы. Пересобираем один раз — только когда в
+    # определении ещё нет 'phone' (тот же приём, что у wiki_operator_questions).
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conrelid = 'wiki_trainer_runs'::regclass
+               AND conname = 'wiki_trainer_runs_source_check'
+               AND position('phone' in pg_get_constraintdef(oid)) > 0
+        ) THEN
+            ALTER TABLE wiki_trainer_runs
+                DROP CONSTRAINT IF EXISTS wiki_trainer_runs_source_check;
+            ALTER TABLE wiki_trainer_runs
+                ADD CONSTRAINT wiki_trainer_runs_source_check
+                CHECK (source IN ('article', 'catalog', 'phone'));
+        END IF;
+    END $$;
     """,
     # Витрина статистики читает по ключу и по времени, выгрузка — по ключу и
     # диапазону дат. Оба запроса ложатся на один индекс.

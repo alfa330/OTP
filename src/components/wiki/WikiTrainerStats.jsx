@@ -31,7 +31,7 @@ const STATUS = {
     abandoned: { label: 'Бросил', tone: 'slate' },
 };
 
-const SOURCE = { article: 'Из статьи', catalog: 'Из вкладки' };
+const SOURCE = { article: 'Из статьи', catalog: 'Из вкладки', phone: 'Из iCORE Phone' };
 
 const ROLE = {
     super_admin: 'Супер-админ',

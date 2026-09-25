@@ -24,7 +24,9 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(rootDir, 'index.html'),
-        callEvaluation: resolve(rootDir, 'call_evaluation.html')
+        callEvaluation: resolve(rootDir, 'call_evaluation.html'),
+        // Страница тренажёров для iCORE Phone (WebView2), см. src/trainers_embed/.
+        trainers: resolve(rootDir, 'trainers.html')
       },
       output: {
         manualChunks: {
