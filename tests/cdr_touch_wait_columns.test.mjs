@@ -37,7 +37,7 @@ test('в таблице раздела нет «Вызова», а есть пр
     const source = readFileSync(new URL('../src/components/cdr/TouchesView.jsx', import.meta.url), 'utf8');
     assert.ok(!/<Th className="text-right">Вызов<\/Th>/.test(source), 'колонка «Вызов» вернулась');
     assert.ok(/<Th className="text-right">IVR<\/Th>/.test(source));
-    assert.ok(/<Th className="text-right">Ожид\. в очереди<\/Th>/.test(source));
+    assert.ok(/<Th className="text-right"( wrap)?>Ожид\. в очереди<\/Th>/.test(source));
     assert.ok(/seconds\(touch\.ivr_seconds\)/.test(source), 'IVR должен браться из поля касания');
     assert.ok(/seconds\(touch\.wait_seconds\)/.test(source), 'ожидание — из поля касания');
     assert.ok(!/touch\.dial_seconds/.test(source), 'старое поле больше не показываем');

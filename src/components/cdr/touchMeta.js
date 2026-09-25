@@ -93,6 +93,16 @@ export const lineCaption = (park, queue) => {
     return line ? `${name} · ${line}` : name;
 };
 
+/** «Входящий (не дошёл до очереди)» → { base: 'Входящий', note: 'не дошёл до очереди' }.
+ *
+ *  Уточнение идёт в ячейке второй строкой: одной строкой тип «не дошёл до очереди» был
+ *  шириной 244px и один выталкивал таблицу за край раздела. */
+export const splitCallType = (value) => {
+    const text = String(value || '').trim();
+    const matched = text.match(/^(.*?)\s*\((.+)\)$/);
+    return matched ? { base: matched[1], note: matched[2] } : { base: text, note: '' };
+};
+
 /** «2026-08-24 09:00:00» → «09:00:00». */
 export const shortTime = (value) => (value ? String(value).slice(11, 19) : '—');
 

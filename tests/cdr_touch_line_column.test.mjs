@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { lineCaption, prettyPhone } from '../src/components/cdr/touchMeta.js';
+import { lineCaption, prettyPhone, splitCallType } from '../src/components/cdr/touchMeta.js';
 
 /* Колонка «Линия» вместо «Очереди»: номер парка, а под ним парк и очередь.
  *
@@ -65,4 +65,16 @@ test('не дошедшие до очереди — свой тип в пере�
     assert.ok(/value: TYPE_IN_BEFORE_QUEUE, label: 'До очереди'/.test(source), 'нет сегмента «До очереди»');
     assert.ok(/summary\.before_queue/.test(source), 'число не дошедших не показано рядом с «Касаний»');
     assert.ok(/оператору не поступал/.test(source));
+});
+
+test('уточнение типа уходит второй строкой — таблица помещается в раздел', () => {
+    /* Одной строкой «Входящий (не дошёл до очереди)» был шириной 244px, и таблица
+       вылезала за край раздела даже на широком мониторе. */
+    assert.deepEqual(splitCallType('Входящий (не дошёл до очереди)'), { base: 'Входящий', note: 'не дошёл до очереди' });
+    assert.deepEqual(splitCallType('Входящий (не приняли)'), { base: 'Входящий', note: 'не приняли' });
+    assert.deepEqual(splitCallType('Исходящий'), { base: 'Исходящий', note: '' });
+    assert.deepEqual(splitCallType(''), { base: '', note: '' });
+    const source = readFileSync(new URL('../src/components/cdr/TouchesView.jsx', import.meta.url), 'utf8');
+    assert.ok(/max-w-\[1480px\]/.test(source), 'раздел снова зажат по ширине');
+    assert.ok(/inline-flex whitespace-nowrap rounded-full/.test(source), 'плашка результата переносится');
 });

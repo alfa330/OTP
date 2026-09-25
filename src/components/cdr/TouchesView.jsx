@@ -13,7 +13,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
     exportFileName, hms, hours, lineCaption, percent, prettyPhone, resultTone,
-    seconds, shortDay, shortTime, silence, TYPE_IN_BEFORE_QUEUE,
+    seconds, shortDay, shortTime, silence, splitCallType, TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
 import DealsView from './DealsView';
 
@@ -97,8 +97,10 @@ const Metric = ({ label, value, hint }) => (
     </div>
 );
 
-const Th = ({ children, className = '' }) => (
-    <th className={`whitespace-nowrap px-3 py-2 text-left text-[11.5px] font-semibold uppercase tracking-wider text-slate-500 ${className}`}>
+/* wrap — заголовок, который длиннее своих значений («Ожид. в очереди» над «41 с»),
+   переносится на две строки, а не распирает колонку. */
+const Th = ({ children, className = '', wrap = false }) => (
+    <th className={`${wrap ? 'whitespace-normal leading-tight' : 'whitespace-nowrap'} px-2.5 py-2 text-left text-[11.5px] font-semibold uppercase tracking-wider text-slate-500 ${className}`}>
         {children}
     </th>
 );
@@ -106,7 +108,7 @@ const Th = ({ children, className = '' }) => (
 /* title пробрасывается в ячейку: без него подсказки у «IVR», «Ожид. в очереди» и
    «Линии» молча терялись — проп принимался и никуда не шёл. */
 const Td = ({ children, className = '', title }) => (
-    <td title={title} className={`px-3 py-2 align-middle text-[13px] text-slate-700 ${className}`}>{children}</td>
+    <td title={title} className={`px-2.5 py-2 align-middle text-[13px] text-slate-700 ${className}`}>{children}</td>
 );
 
 export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToast }) {
@@ -324,7 +326,9 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const bridgeDown = bridge && !bridge.connected;
 
     return (
-        <div className="mx-auto w-full max-w-[1240px] px-3 py-4 sm:px-5 sm:py-6"
+        /* Раздел тянется до 1480px: на 1240 таблица из десяти колонок упиралась в край
+           и давала прокрутку даже на широком мониторе. */
+        <div className="mx-auto w-full max-w-[1480px] px-3 py-4 sm:px-5 sm:py-6"
              style={{ fontFamily: APPLE_FONT }}>
             <header className="flex flex-col gap-3 sm:flex-row sm:items-center">
                 <div className="min-w-0 sm:flex-1">
@@ -583,7 +587,7 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
     return (
         <>
             <div className={`${iosCard} mt-3 hidden overflow-x-auto md:block`}>
-                <table className="w-full min-w-[1200px] border-collapse">
+                <table className="w-full min-w-[1080px] border-collapse">
                     <thead className="bg-slate-50">
                         <tr>
                             <Th>Когда</Th>
@@ -593,7 +597,7 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                             <Th>Результат</Th>
                             <Th className="text-right">Разговор</Th>
                             <Th className="text-right">IVR</Th>
-                            <Th className="text-right">Ожид. в очереди</Th>
+                            <Th className="text-right" wrap>Ожид. в очереди</Th>
                             <Th>Линия</Th>
                             <Th>Запись</Th>
                         </tr>
@@ -604,16 +608,18 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                 <Td className="whitespace-nowrap tabular-nums">
                                     <span className="text-slate-500">{shortDay(touch.started_at)}</span>{' '}
                                     {shortTime(touch.started_at)}
+                                    {/* Момент ответа — второй строкой, как подписи в соседних
+                                        ячейках: в одной строке он прибавлял колонке 60px. */}
                                     {touch.answered_at ? (
-                                        <span className="ml-1 text-[11.5px] text-slate-400"
-                                              title="Начало плеча, на котором состоялся разговор — момент, когда вызов дошёл до оператора">
+                                        <div className="text-[11.5px] text-slate-400"
+                                             title="Начало плеча, на котором состоялся разговор — момент, когда вызов дошёл до оператора">
                                             → {shortTime(touch.answered_at)}
-                                        </span>
+                                        </div>
                                     ) : null}
                                 </Td>
                                 <Td className="whitespace-nowrap tabular-nums">{prettyPhone(touch.phone)}</Td>
                                 <Td>
-                                    <div className="truncate max-w-[220px]">{touch.operator || '—'}</div>
+                                    <div className="truncate max-w-[200px]" title={touch.operator || undefined}>{touch.operator || '—'}</div>
                                     <div className="text-[11.5px] text-slate-400">
                                         {touch.call_type === TYPE_IN_BEFORE_QUEUE ? 'оператору не поступал'
                                             : touch.ext ? `вн. ${touch.ext}` : 'номер не определён'}
@@ -626,11 +632,18 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                             : touch.call_type === 'Входящий' ? <PhoneIncoming size={13} className="text-slate-400" />
                                                 : touch.call_type === TYPE_IN_BEFORE_QUEUE ? <PhoneOff size={13} className="text-slate-400" />
                                                     : <PhoneMissed size={13} className="text-slate-400" />}
-                                        {touch.call_type}
+                                        {splitCallType(touch.call_type).base}
                                     </span>
+                                    {/* «не приняли», «не дошёл до очереди» — второй строкой: одной
+                                        строкой тип был шириной 244px и выталкивал таблицу за край. */}
+                                    {splitCallType(touch.call_type).note ? (
+                                        <div className="pl-[19px] text-[11.5px] text-slate-400">
+                                            {splitCallType(touch.call_type).note}
+                                        </div>
+                                    ) : null}
                                 </Td>
                                 <Td>
-                                    <span className={`inline-flex rounded-full px-2.5 py-1 text-[11.5px] font-medium ring-1 ${
+                                    <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[11.5px] font-medium ring-1 ${
                                         resultTone(touch.result)}`}>
                                         {touch.result}
                                     </span>
