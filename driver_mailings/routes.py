@@ -38,8 +38,24 @@ Blueprint собирается фабрикой, зависимости прих
 порядок везде один: короткая транзакция на запись, закрыли, сходили в кабинет,
 снова короткая транзакция. Ни одного `with db._get_cursor()` вокруг запроса
 наружу.
+
+ПОЧЕМУ ПОДСЧЁТ ОХВАТА УСТРОЕН ИМЕННО ТАК (28.09.2026).
+Подсчёт по 89 паркам — это 89 запросов по ~1,3 с на стороне кабинета. Форма
+запускала его заново на каждый щелчок, а прежний подсчёт на сервере шёл до
+конца, хотя браузеру его ответ был уже не нужен. Подсчёты копились десятками, у
+каждого был свой клиент кабинета со своей паузой на 429, и кабинет отбивался:
+больше двадцати тысяч отказов за 45 минут, подсчёт «навсегда» и «ошибка» по
+паркам. Теперь:
+* клиент кабинета один на процесс, и в полёте к кабинету не больше
+  client.CONCURRENCY запросов на всех вместе (см. MailingsClient);
+* охват парка по фильтру помнится COUNT_TTL_SECONDS, и один парк с одним
+  фильтром в один момент считается одним запросом (memo.FlightCache);
+* форма подписывает подсчёт своим номером (stream + seq), и новый подсчёт той
+  же формы гасит прежний: тот больше не начинает новых парков.
 """
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -52,7 +68,7 @@ from flask import Blueprint, jsonify, request
 from fleet_edm import queries as fleet_session
 from fleet_edm.client import FleetError, FleetSessionExpired
 
-from . import access, catalog, queries
+from . import access, catalog, memo, queries
 from .client import MailingRefused, MailingsClient
 
 # Сколько живёт список «где разрешена рассылка». Права на рассылку меняет Яндекс,
@@ -71,7 +87,23 @@ SCAN_WORKERS = 4
 # медиана 0,35 с). Такой запрос упирается в их вычисление, и больше потоков
 # сокращают ожидание, не нагружая одну и ту же очередь. На 429 клиент всё равно
 # притормаживает все потоки разом (FleetClient._note_throttled).
+#
+# Это потоки ОДНОГО запроса портала. Сколько запросов в полёте на всех, решает
+# общий предел клиента (client.CONCURRENCY): лишние потоки просто ждут места.
 COUNT_WORKERS = 8
+
+# Сколько помним охват парка по фильтру. Охват меняется медленно: «всем» по 89
+# паркам за двое суток сдвинулся на 268 человек из 1,69 миллиона. А пересчёт
+# того же самого стоил 89 запросов — на каждую снятую и снова поставленную
+# галочку, на «все минус одна», на отправку сразу после подсчёта. Десять минут
+# — это одна сессия составления рассылки: число на кнопке «Отправить» и число в
+# журнале совпадают с тем, что человек видел в окне подтверждения.
+COUNT_TTL_SECONDS = 10 * 60
+
+# Потолок числа форм, чьи номера подсчёта помним. Номер — это пара чисел, и
+# старые (час без подсчётов) выбрасываются, как только их становится много.
+COUNT_STREAMS_MAX = 512
+COUNT_STREAM_IDLE_SECONDS = 60 * 60
 
 # Справочники отбора кэшируются в памяти процесса ПО КАЖДОМУ ПАРКУ, а не по
 # набору парков. Пока диспетчерских было пять, ключом был весь набор; с
@@ -178,6 +210,29 @@ def _sent_total(detail):
                if target.get('status') == 'sent')
 
 
+def _session_fingerprint(session):
+    """Отпечаток сессии кабинета: сменились куки — нужен новый клиент.
+
+    Отпечаток, а не сами куки: куки — это пароль, и держать их лишний раз в
+    ключе словаря не за чем. Хэш живёт только в памяти процесса.
+    """
+    raw = json.dumps([session.get('cookies'), session.get('user_agent') or ''],
+                     sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def count_key(filters):
+    """Ключ кэша охвата для УЖЕ нормализованного фильтра.
+
+    Порядок значений в списке кабинету безразличен (это набор), поэтому в ключе
+    списки отсортированы: «Алматы, Астана» и «Астана, Алматы» — один подсчёт.
+    В кабинет по-прежнему уходит сам фильтр, а не ключ.
+    """
+    canonical = {key: sorted(value) if isinstance(value, list) else value
+                 for key, value in (filters or {}).items()}
+    return json.dumps(canonical, sort_keys=True, ensure_ascii=False)
+
+
 def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                     resolve_requester, sensitive_access_granted):
     """sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ сессия
@@ -187,10 +242,26 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
     bp = Blueprint('driver_mailings', __name__, url_prefix='/api/driver_mailings')
 
     # Кэш справочников: (парк, '') → общие справочники парка, (парк, сегмент) →
-    # его города работы; значение — (когда, что). Живёт в процессе, а не в базе:
-    # он производный от кабинета и восстанавливается запросом.
-    _refs_cache = {}
-    _refs_lock = threading.Lock()
+    # его города работы. Живёт в процессе, а не в базе: он производный от
+    # кабинета и восстанавливается запросом. Ключей — по парку на сегмент, то
+    # есть сотни, а не тысячи; потолок — чтобы не рос без края.
+    #
+    # Один полёт на ключ и здесь: «Выбрать все», а следом снятая галочка —
+    # это два запроса справочников по почти тем же паркам, пока первый ещё
+    # идёт. Без этого второй спрашивал бы кабинет о том же самом заново.
+    _refs_memo = memo.FlightCache(REFS_TTL_SECONDS, max_items=1024)
+
+    # Охват: (парк, count_key(фильтр)) → число получателей.
+    _count_memo = memo.FlightCache(COUNT_TTL_SECONDS, max_items=8192)
+
+    # Последний номер подсчёта каждой формы: (кто, stream) → (seq, когда).
+    _count_streams = {}
+    _streams_lock = threading.Lock()
+
+    # Клиент кабинета — один на процесс, пока не сменились куки (см.
+    # MailingsClient: общая пауза на 429 и общий предел запросов в полёте).
+    _client_lock = threading.Lock()
+    _shared_client = {'fingerprint': None, 'client': None}
 
     # ── доступ ───────────────────────────────────────────────────────────────
 
@@ -268,11 +339,23 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         Общую («Провайдер ЭДО») отсюда только читаем и никогда не пишем в неё
         last_error: там смысл «куки протухли», а наши 403 — про права на
         рассылку в конкретном парке.
+
+        Клиент ОДИН на процесс, пока не сменились куки. Раньше каждый запрос
+        портала заводил свой — и свою паузу на 429: подсчёты, шедшие
+        одновременно, не знали, что кабинет уже отбивает соседа, и давили на
+        него дальше. Сессию читаем из базы каждый раз (это один SELECT): новые
+        куки из POST /session должны подхватываться без перезапуска.
         """
         session, _source = load_cabinet_session()
         if not session:
             raise FleetSessionExpired('Связь с кабинетом диспетчерской не настроена.')
-        return MailingsClient(session['cookies'], session.get('user_agent'))
+        fingerprint = _session_fingerprint(session)
+        with _client_lock:
+            if _shared_client['client'] is None or _shared_client['fingerprint'] != fingerprint:
+                _shared_client['client'] = MailingsClient(session['cookies'],
+                                                          session.get('user_agent'))
+                _shared_client['fingerprint'] = fingerprint
+            return _shared_client['client']
 
     def note_session_expired(error):
         """Отметить протухание в СВОЕЙ строке. True — если она есть (значит,
@@ -467,36 +550,88 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         if city_segment:
             wanted += [(park_id, city_segment) for park_id in park_ids]
 
-        now = time.time()
         found = {}
         missing = []
-        with _refs_lock:
-            for park_id, part in wanted:
-                cached = _refs_cache.get((park_id, part or ''))
-                if cached and now - cached[0] < REFS_TTL_SECONDS:
-                    found[(park_id, part)] = cached[1]
-                else:
-                    missing.append((park_id, part))
+        for park_id, part in wanted:
+            hit, out = _refs_memo.peek((park_id, part or ''))
+            if hit:
+                found[(park_id, part)] = out
+            else:
+                missing.append((park_id, part))
 
         if missing:
             client = make_client()
+
+            def load(pair):
+                park_id, part = pair
+                # fetch_park_refs уже отдаёт (что собрали, собрали ли всё) —
+                # ровно «значение и класть ли в кэш».
+                return pair, _refs_memo.get(
+                    (park_id, part or ''), lambda: fetch_park_refs(client, park_id, part))
+
             with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
                                     thread_name_prefix='mailings-refs') as pool:
-                fetched = list(pool.map(
-                    lambda pair: (pair, fetch_park_refs(client, pair[0], pair[1])), missing))
-            with _refs_lock:
-                for (park_id, part), (out, complete) in fetched:
-                    found[(park_id, part)] = out
-                    if complete:
-                        _refs_cache[(park_id, part or '')] = (now, out)
-                # Ключей — по парку на сегмент, то есть сотни, а не тысячи; но
-                # чистим, чтобы кэш не рос без края.
-                if len(_refs_cache) > 1024:
-                    oldest = sorted(_refs_cache.items(), key=lambda pair: pair[1][0])[:512]
-                    for stale_key, _ in oldest:
-                        _refs_cache.pop(stale_key, None)
+                for pair, out in pool.map(load, missing):
+                    found[pair] = out
 
         return merge_refs([found[pair] for pair in wanted if pair in found])
+
+    # ── охват ────────────────────────────────────────────────────────────────
+
+    def count_turn(requester_id, stream, seq):
+        """Номер подсчёта формы → функция «этот подсчёт уже не нужен?».
+
+        Форма шлёт свой stream (один на открытую вкладку) и растущий seq. Новый
+        seq той же формы означает, что человек уже поменял набор, и прежний
+        подсчёт ему не покажут никогда. Сравниваем номера, а не порядок
+        прихода: запрос, обогнавший предыдущий в сети, не должен быть погашен
+        тем, что пришёл позже, но отправлен раньше.
+
+        Ключ — вместе с тем, кто спрашивает: соседняя вкладка — другая форма, и
+        гасить её подсчёты нельзя. Нет номера (старая сборка фронта) — подсчёт
+        просто не гасится.
+        """
+        stream = str(stream or '').strip()[:64]
+        try:
+            seq = int(seq)
+        except (TypeError, ValueError):
+            return None
+        if not stream:
+            return None
+        key = (requester_id, stream)
+        now = time.monotonic()
+        with _streams_lock:
+            latest = _count_streams.get(key)
+            if latest is None or seq > latest[0]:
+                _count_streams[key] = (seq, now)
+            if len(_count_streams) > COUNT_STREAMS_MAX:
+                for idle in [k for k, (_seq, stamp) in _count_streams.items()
+                             if now - stamp > COUNT_STREAM_IDLE_SECONDS]:
+                    del _count_streams[idle]
+
+        def superseded():
+            with _streams_lock:
+                latest = _count_streams.get(key)
+            return latest is not None and latest[0] > seq
+
+        return superseded
+
+    def count_park(client, park_id, filters, key, superseded=None):
+        """Охват одного парка: из кэша, из идущего подсчёта или запросом.
+
+        Проверка «не отменён ли» стоит и ДО, и ПОСЛЕ ожидания места у клиента:
+        пока ждали, форма могла запросить новый подсчёт, и тогда место надо
+        отдать ему, а не тратить на ответ, который выбросят.
+        """
+        def compute():
+            if superseded and superseded():
+                raise memo.Abandoned()
+            with client.slot():
+                if superseded and superseded():
+                    raise memo.Abandoned()
+                return client.recipients_count(park_id, filters), True
+
+        return _count_memo.get((park_id, key), compute)
 
     # ── прочтения из кабинета ────────────────────────────────────────────────
 
@@ -741,8 +876,9 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                 account=checked.get('account'), parks_count=checked.get('parks_count'),
                 updated_by=requester_id,
             )
-        with _refs_lock:
-            _refs_cache.clear()
+        # Новый аккаунт — новые парки и права; ответы прежнего не годятся.
+        _refs_memo.clear()
+        _count_memo.clear()
 
         scan_error = None
         rows = []
@@ -794,11 +930,16 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             return jsonify({'total': 0, 'by_park': []})
 
         client = make_client()
+        key = count_key(filters)
+        superseded = count_turn(requester_id, payload.get('stream'), payload.get('seq'))
 
         def one(park_id):
             row = {'park_id': park_id, 'park_name': allowed[park_id].get('name'), 'count': 0}
             try:
-                row['count'] = client.recipients_count(park_id, filters)
+                row['count'] = count_park(client, park_id, filters, key, superseded)
+            except memo.Abandoned:
+                # Форма уже ждёт другой подсчёт — этот парк не считаем вовсе.
+                row['skipped'] = True
             except FleetSessionExpired:
                 raise
             except FleetError as error:
@@ -809,10 +950,15 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         with ThreadPoolExecutor(max_workers=COUNT_WORKERS,
                                 thread_name_prefix='mailings-count') as pool:
             by_park = list(pool.map(one, park_ids))
-        return jsonify({
+        body = {
             'total': sum(int(row.get('count') or 0) for row in by_park),
             'by_park': by_park,
-        })
+        }
+        if any(row.get('skipped') for row in by_park):
+            # Итог неполный, и форма его не покажет (у неё уже новый номер);
+            # флаг — чтобы неполное число нельзя было принять за охват.
+            body['superseded'] = True
+        return jsonify(body)
 
     @section_route('/send', methods=('POST',), sending=True)
     def driver_mailings_send(requester_id, requester):
@@ -889,9 +1035,16 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         #
         # Протухшую сессию пропускаем наверх отсюда, ДО карточки рассылки: иначе
         # в журнале осталась бы «неудачная рассылка», которую никто не начинал.
+        #
+        # Охват — из того же кэша, что и подсчёт в форме: человек только что
+        # видел это число в окне подтверждения, и оно же ложится в журнал. Так
+        # отправка «всем» не спрашивает кабинет о 89 парках второй раз подряд.
+        # Снимок журнала — всегда свежий: по нему ищется id своей рассылки.
+        filters_key = count_key(filters)
+
         def prepare(park_id):
             try:
-                estimate = client.recipients_count(park_id, filters)
+                estimate = count_park(client, park_id, filters, filters_key)
             except FleetSessionExpired:
                 raise
             except FleetError:

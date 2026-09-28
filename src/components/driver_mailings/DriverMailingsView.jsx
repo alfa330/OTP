@@ -158,6 +158,13 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
 
     // ── пересчёт получателей ─────────────────────────────────────────────────
 
+    /* Номер подсчёта уходит на сервер вместе с номером формы (stream — один на
+       открытую вкладку). Без него прежний подсчёт шёл на сервере до конца, хотя
+       его ответ здесь выбрасывался: щелчок по фильтрам — ещё 89 запросов в
+       кабинет поверх недосчитанных, и 28.09.2026 кабинет отбился больше чем
+       двадцатью тысячами 429. С номером новый подсчёт гасит прежний этой же
+       формы. */
+    const [countStream] = useState(newToken);
     const countSeq = useRef(0);
     const filtersKey = JSON.stringify(filters);
     useEffect(() => {
@@ -168,6 +175,7 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
         const timer = setTimeout(() => {
             axios.post(`${base}/recipients/count`, {
                 park_ids: parkKey.split(','), filters: JSON.parse(filtersKey),
+                stream: countStream, seq,
             }, { headers: headers() })
                 .then((response) => {
                     if (countSeq.current !== seq) return;
@@ -182,7 +190,7 @@ export default function DriverMailingsView({ apiBaseUrl, withAccessTokenHeader, 
                 .finally(() => { if (countSeq.current === seq) setCounting(false); });
         }, COUNT_DEBOUNCE_MS);
         return () => clearTimeout(timer);
-    }, [base, headers, parkKey, filtersKey]);
+    }, [base, headers, parkKey, filtersKey, countStream]);
 
     // ── журнал ───────────────────────────────────────────────────────────────
 

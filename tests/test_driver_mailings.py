@@ -11,6 +11,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import unittest
 from contextlib import contextmanager
 
@@ -19,9 +21,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from driver_mailings import access, catalog  # noqa: E402
 from driver_mailings.client import MailingRefused, MailingsClient  # noqa: E402
 from driver_mailings.schema import DRIVER_MAILINGS_SCHEMA_SQL  # noqa: E402
+from fleet_edm.client import FleetError  # noqa: E402
 
 APP_JSX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        'src', 'App.jsx')
+VIEW_JSX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        'src', 'components', 'driver_mailings', 'DriverMailingsView.jsx')
 PARK = 'fd0a19dbced14faa928e9f38f76dc09f'
 
 
@@ -459,6 +464,222 @@ class ResolveMailingIdTests(unittest.TestCase):
             client.resolve_mailing_id(PARK, 'Акция', '2026-09-07T09:59:30+00:00'))
 
 
+class _SlowSession:
+    """Транспорт, который отвечает не сразу и помнит, сколько запросов было в
+    полёте одновременно, — чтобы увидеть общий предел клиента."""
+
+    def __init__(self, delay=0.05):
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.now = 0
+        self.peak = 0
+        self.cookies = type('J', (), {'update': lambda self, value: None})()
+
+    def request(self, method, url, headers=None, data=None, timeout=None, params=None):
+        with self.lock:
+            self.now += 1
+            self.peak = max(self.peak, self.now)
+        time.sleep(self.delay)
+        with self.lock:
+            self.now -= 1
+        return _Response(200, {'count': 7})
+
+
+class GateTests(unittest.TestCase):
+    """Общий предел запросов в полёте — на клиент, а не на запрос портала.
+
+    28.09.2026 его не было: пять подсчётов охвата шли разом по восемь потоков
+    каждый, и кабинет отбивался 429 больше двадцати тысяч раз за 45 минут."""
+
+    def test_never_more_in_flight_than_the_width(self):
+        from concurrent.futures import ThreadPoolExecutor
+        session = _SlowSession()
+        client = MailingsClient({'Session_id': 'x'}, 'UA', concurrency=3, session=session)
+        # Двенадцать потоков — как два запроса портала по шесть.
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            counts = list(pool.map(lambda _i: client.recipients_count(PARK, {}), range(12)))
+        self.assertEqual(counts, [7] * 12)
+        self.assertLessEqual(session.peak, 3)
+        self.assertGreaterEqual(session.peak, 2)    # но и не по одному
+
+    def test_default_width_is_the_measured_one(self):
+        from driver_mailings import client as client_module
+        client = MailingsClient({'Session_id': 'x'}, 'UA')
+        self.assertEqual(client.concurrency, client_module.CONCURRENCY)
+        self.assertEqual(client_module.CONCURRENCY, 8)
+
+    def test_slot_taken_twice_by_one_thread_is_one_slot(self):
+        # Маршрут держит место вокруг вызова, а _request берёт его ещё раз.
+        # При ширине 1 второе взятие ждало бы само себя вечно.
+        client = MailingsClient({'Session_id': 'x'}, 'UA', concurrency=1,
+                                session=_SlowSession(delay=0))
+        done = []
+
+        def nested():
+            with client.slot():
+                done.append(client.recipients_count(PARK, {}))
+
+        worker = threading.Thread(target=nested, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), 'повторное взятие места зависло')
+        self.assertEqual(done, [7])
+
+    def test_throttle_narrows_and_quiet_brings_the_width_back(self):
+        from driver_mailings import client as client_module
+        client = MailingsClient({'Session_id': 'x'}, 'UA')
+        client._note_throttled()
+        self.assertEqual(client.concurrency, 7)
+        with client.slot():
+            pass
+        self.assertEqual(client.concurrency, 7)     # сразу после отказа — узко
+        client._throttled_at = time.time() - client_module.QUIET_RESET_SECONDS - 1
+        with client.slot():
+            pass
+        self.assertEqual(client.concurrency, 8)
+
+    def test_transport_log_names_the_section(self):
+        # Отказы рассылок раньше ложились в лог как «Провайдер ЭДО».
+        import requests
+
+        class _Down(_Session):
+            def request(self, *args, **kwargs):
+                raise requests.ConnectionError('нет сети')
+
+        client = MailingsClient({'Session_id': 'x'}, 'UA', max_delay=0, session=_Down([]))
+        with self.assertLogs(level='WARNING') as logs:
+            with self.assertRaises(FleetError):
+                client.recipients_count(PARK, {})
+        self.assertTrue(all(line.split(':', 2)[2].startswith('Рассылки:')
+                            for line in logs.output), logs.output)
+        from fleet_edm.client import FleetClient
+        self.assertEqual(FleetClient.LOG_LABEL, 'Провайдер ЭДО')
+
+
+class FlightCacheTests(unittest.TestCase):
+    """Один ключ — один запрос в кабинет, сколько бы потоков ни спрашивали."""
+
+    def setUp(self):
+        from driver_mailings import memo
+        self.memo = memo
+
+    def test_simultaneous_askers_share_one_computation(self):
+        cache = self.memo.FlightCache(60)
+        release = threading.Event()
+        calls = []
+
+        def compute():
+            calls.append(1)
+            release.wait(5)
+            return 42, True
+
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(cache.get('k', compute)))
+                   for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        time.sleep(0.2)             # пусть все дойдут до ожидания
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(results, [42] * 6)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(cache.peek('k'), (True, 42))
+
+    def test_error_reaches_the_waiters_and_is_not_remembered(self):
+        cache = self.memo.FlightCache(60)
+        release = threading.Event()
+        calls = []
+
+        def failing():
+            calls.append(1)
+            release.wait(5)
+            raise FleetError('429 Too Many Requests')
+
+        errors = []
+
+        def ask():
+            try:
+                cache.get('k', failing)
+            except FleetError as error:
+                errors.append(str(error))
+
+        threads = [threading.Thread(target=ask) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        time.sleep(0.2)
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(len(errors), 4)
+        self.assertEqual(len(calls), 1)             # отказ не удвоил запросы
+        self.assertEqual(cache.peek('k'), (False, None))
+        self.assertEqual(cache.get('k', lambda: (5, True)), 5)
+
+    def test_abandoned_owner_hands_the_key_to_a_waiter(self):
+        cache = self.memo.FlightCache(60)
+        entered = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        def given_up():
+            entered.set()
+            release.wait(5)
+            raise self.memo.Abandoned()
+
+        def owner():
+            try:
+                cache.get('k', given_up)
+            except self.memo.Abandoned:
+                outcome['owner'] = 'abandoned'
+
+        first = threading.Thread(target=owner)
+        first.start()
+        entered.wait(5)
+        second = threading.Thread(target=lambda: outcome.update(
+            waiter=cache.get('k', lambda: (9, True))))
+        second.start()
+        time.sleep(0.2)
+        release.set()
+        first.join(5)
+        second.join(5)
+        self.assertEqual(outcome, {'owner': 'abandoned', 'waiter': 9})
+        self.assertEqual(cache.peek('k'), (True, 9))
+
+    def test_incomplete_value_is_returned_but_not_kept(self):
+        cache = self.memo.FlightCache(60)
+        self.assertEqual(cache.get('k', lambda: ('часть', False)), 'часть')
+        self.assertEqual(cache.peek('k'), (False, None))
+
+    def test_value_lives_ttl_seconds(self):
+        now = [100.0]
+        cache = self.memo.FlightCache(10, clock=lambda: now[0])
+        cache.get('k', lambda: (1, True))
+        now[0] = 109.0
+        self.assertEqual(cache.peek('k'), (True, 1))
+        now[0] = 110.5
+        self.assertEqual(cache.peek('k'), (False, None))
+        self.assertEqual(cache.get('k', lambda: (2, True)), 2)
+
+    def test_answer_counted_before_clear_is_not_kept(self):
+        # Смена аккаунта посреди подсчёта: ответ под прежним в кэш не ложится.
+        cache = self.memo.FlightCache(60)
+
+        def compute():
+            cache.clear()
+            return 1, True
+
+        self.assertEqual(cache.get('k', compute), 1)
+        self.assertEqual(cache.peek('k'), (False, None))
+
+    def test_cache_does_not_grow_without_bound(self):
+        cache = self.memo.FlightCache(60, max_items=10)
+        for index in range(50):
+            cache.get(index, lambda index=index: (index, True))
+        self.assertLessEqual(len(cache), 10)
+        self.assertEqual(cache.peek(49), (True, 49))    # свежее не выброшено
+
+
 class RouteHelpersTests(unittest.TestCase):
     """Помощники маршрутов. Оба закрывают найденные ревью дефекты."""
 
@@ -608,6 +829,11 @@ class _FakeCabinet:
             'time_limit': {'day': 30}, 'delete_limit': {'seconds': 300}}}}
 
     pro_limits = staticmethod(MailingsClient.pro_limits)
+
+    @contextmanager
+    def slot(self):
+        # Общий предел запросов проверяется на настоящем клиенте (GateTests).
+        yield
 
     # ── отправка: всё пишется в общий журнал событий по порядку ─────────────
     events = []
@@ -1000,6 +1226,180 @@ class RefsCacheTests(_RouteHarness):
         self.filters(['a'])
         # Первый ответ был неполным и в кэш не лёг — второй раз спросили снова.
         self.assertEqual(calls['n'], 2)
+
+
+class CountRouteTests(_RouteHarness):
+    """Охват: ответ кабинета помнится, одно и то же дважды не спрашивается, а
+    новый подсчёт формы гасит прежний.
+
+    28.09.2026 каждый щелчок по фильтрам запускал подсчёт по 89 паркам заново,
+    прежний шёл до конца, подсчёты копились десятками — и кабинет отбивался
+    429 больше двадцати тысяч раз за 45 минут."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        self.asked = []
+        self.fail_once = set()
+        self.on_count = None
+        harness = self
+
+        def _count(cabinet, park_id, filters):
+            harness.asked.append((park_id, json.dumps(filters, sort_keys=True)))
+            if park_id in harness.fail_once:
+                harness.fail_once.discard(park_id)
+                raise FleetError('429 Too Many Requests')
+            if harness.on_count:
+                harness.on_count(park_id, filters)
+            return 100
+
+        patcher = mock.patch.object(_FakeCabinet, 'recipients_count', _count)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def count(self, park_ids=('a', 'b', 'c'), filters=None, http=None, **extra):
+        body = {'park_ids': list(park_ids), 'filters': filters or {}}
+        body.update(extra)
+        response = (http or self.http).post('/api/driver_mailings/recipients/count', json=body)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()
+
+    def parks_asked(self, filters=None):
+        key = json.dumps(filters or {}, sort_keys=True)
+        return sorted(park for park, asked_filters in self.asked if asked_filters == key)
+
+    def test_same_count_again_does_not_ask_the_cabinet(self):
+        self.assertEqual(self.count()['total'], 300)
+        self.assertEqual(self.parks_asked(), ['a', 'b', 'c'])
+        self.asked.clear()
+        self.assertEqual(self.count()['total'], 300)
+        self.assertEqual(self.asked, [])
+
+    def test_one_more_park_asks_only_that_park(self):
+        # «Выбрать все», потом ещё галочка: 88 уже посчитанных не спрашиваем.
+        self.count(['a', 'b'])
+        self.asked.clear()
+        self.assertEqual(self.count(['a', 'b', 'c'])['total'], 300)
+        self.assertEqual(self.parks_asked(), ['c'])
+
+    def test_order_of_values_is_the_same_count(self):
+        self.count(['a'], {'segment': 'active', 'city_ids': ['Алматы', 'Астана']})
+        self.asked.clear()
+        self.count(['a'], {'segment': 'active', 'city_ids': ['Астана', 'Алматы']})
+        self.assertEqual(self.asked, [])
+
+    def test_other_filter_is_another_count(self):
+        self.count(['a'])
+        self.asked.clear()
+        self.count(['a'], {'segment': 'active'})
+        self.assertEqual(self.parks_asked({'segment': 'active'}), ['a'])
+
+    def test_failed_park_is_asked_again(self):
+        self.fail_once = {'b'}
+        first = self.count()
+        rows = {row['park_id']: row for row in first['by_park']}
+        self.assertEqual(rows['b'].get('error'), 'не удалось посчитать')
+        self.assertEqual(first['total'], 200)
+        self.asked.clear()
+        second = self.count()
+        self.assertEqual(self.parks_asked(), ['b'])
+        self.assertEqual(second['total'], 300)
+
+    def test_newer_count_of_the_same_form_stops_the_older_one(self):
+        from unittest import mock
+        # По одному потоку — чтобы «посередине подсчёта» было детерминированным.
+        patcher = mock.patch.object(self.routes, 'COUNT_WORKERS', 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        newer = {}
+
+        def on_count(park_id, filters):
+            # Пока прежний подсчёт считает первый парк, форма просит новый.
+            if park_id == 'a' and not filters and not newer:
+                newer['body'] = self.count(filters={'segment': 'active'}, stream='tab-1',
+                                           seq=2, http=self.http.application.test_client())
+
+        self.on_count = on_count
+        older = self.count(stream='tab-1', seq=1)
+        rows = {row['park_id']: row for row in older['by_park']}
+        self.assertEqual(rows['a']['count'], 100)       # начатый парк досчитан
+        self.assertTrue(rows['b'].get('skipped'))
+        self.assertTrue(rows['c'].get('skipped'))
+        self.assertTrue(older['superseded'])
+        self.assertEqual(self.parks_asked(), ['a'])     # b и c в кабинет не ушли
+        self.assertEqual(newer['body']['total'], 300)
+        self.assertNotIn('superseded', newer['body'])
+
+    def test_older_number_arriving_late_is_stopped_at_once(self):
+        # Запрос, обогнанный в сети следующим, не гасит его — и сам в кабинет
+        # уже не идёт.
+        self.count(filters={'segment': 'active'}, stream='tab-1', seq=2)
+        self.asked.clear()
+        late = self.count(stream='tab-1', seq=1)
+        self.assertEqual(self.asked, [])
+        self.assertTrue(late['superseded'])
+        self.assertTrue(all(row.get('skipped') for row in late['by_park']))
+
+    def test_other_tab_and_other_person_are_not_stopped(self):
+        self.count(filters={'segment': 'active'}, stream='tab-1', seq=5)
+        self.assertEqual(self.count(stream='tab-2', seq=1)['total'], 300)
+        self.requester = {'id': 476, 'name': 'Дана', 'role': 'admin'}
+        body = self.count(filters={'segment': 'churn'}, stream='tab-1', seq=1)
+        self.assertEqual(body['total'], 300)
+        self.assertNotIn('superseded', body)
+
+    def test_without_a_number_nothing_is_stopped(self):
+        # Старая сборка фронта, открытая до деплоя, номера не шлёт.
+        self.count(filters={'segment': 'active'}, stream='tab-1', seq=9)
+        body = self.count()
+        self.assertEqual(body['total'], 300)
+        self.assertNotIn('superseded', body)
+
+    def test_send_right_after_count_takes_the_counted_reach(self):
+        self.count()
+        self.asked.clear()
+        response = self.http.post('/api/driver_mailings/send', json={
+            'idempotency_key': 'tok-2', 'title': 'Акция', 'message': 'Текст',
+            'park_ids': ['a', 'b', 'c'], 'filters': {}})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        # Охват — тот, что человек видел в окне подтверждения, без 89 запросов.
+        self.assertEqual(self.asked, [])
+        estimates = {kw['park_id']: kw['recipients_estimate']
+                     for name, _args, kw in self.calls if name == 'add_target'}
+        self.assertEqual(estimates, {'a': 100, 'b': 100, 'c': 100})
+        # А снимок журнала — свежий: по нему ищется id своей рассылки.
+        self.assertEqual(sorted(e for e in _FakeCabinet.events if e.startswith('snap:')),
+                         ['snap:a', 'snap:b', 'snap:c'])
+
+    def test_client_lives_until_the_cookies_change(self):
+        self.own_row = {'cookies': [{'name': 'Session_id', 'value': 'one'}]}
+        self.count(['a'])
+        self.count(['b'])
+        self.assertEqual([c[0]['value'] for c in _FakeCabinet.created], ['one'])
+        self.own_row = {'cookies': [{'name': 'Session_id', 'value': 'two'}]}
+        self.count(['c'])
+        self.assertEqual([c[0]['value'] for c in _FakeCabinet.created], ['one', 'two'])
+
+    def test_new_account_forgets_the_counted_reach(self):
+        self.count(['a'])
+        self.asked.clear()
+        push = self.http.post('/api/driver_mailings/session', json={
+            'cookies': [{'name': 'Session_id', 'value': 'new'}], 'user_agent': 'UA'})
+        self.assertEqual(push.status_code, 200, push.get_json())
+        self.count(['a'])
+        self.assertEqual(self.parks_asked(), ['a'])
+
+
+class CountWiringTests(unittest.TestCase):
+    """Форма подписывает подсчёт своим номером: без него сервер не отличит
+    устаревший подсчёт от нужного, и они снова начнут копиться десятками."""
+
+    def test_count_request_carries_the_form_number(self):
+        with open(VIEW_JSX, encoding='utf-8') as handle:
+            source = handle.read()
+        self.assertIn('const [countStream] = useState(newToken);', source)
+        self.assertRegex(source, r"/recipients/count`, \{\s*park_ids: parkKey\.split\(','\), "
+                                 r"filters: JSON\.parse\(filtersKey\),\s*stream: countStream, seq,")
 
 
 class FrontendWiringTests(unittest.TestCase):

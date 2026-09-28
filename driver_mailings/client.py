@@ -23,6 +23,9 @@
 
 import logging
 import re
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from fleet_edm.client import FleetClient, FleetError, FleetSessionExpired  # noqa: F401
@@ -73,6 +76,24 @@ RESOLVE_PAGE_LIMIT = 50
 # запись в журнале без связи с кабинетом и без возможности отозвать.
 SINCE_TOLERANCE = timedelta(seconds=60)
 
+# Сколько запросов к кабинету «Рассылки» держат в полёте ОДНОВРЕМЕННО — на весь
+# процесс, а не на один запрос портала. Восемь — замер 23.09.2026: подсчёт охвата
+# по 89 паркам в восемь потоков прошёл за 13,6 с без единого 429.
+#
+# Раньше восемь было числом потоков ОДНОГО подсчёта, а общего предела не было
+# вовсе: каждый запрос портала заводил свой клиент со своей паузой на 429. Пять
+# щелчков по фильтрам — пять подсчётов по восемь потоков, сорок запросов разом,
+# и ни один клиент не знал, что кабинет уже отбивает соседей (28.09.2026:
+# больше двадцати тысяч 429 за 45 минут).
+CONCURRENCY = 8
+
+# Через сколько секунд без единого 429 пропускная ширина возвращается целиком.
+# Клиент теперь живёт весь процесс, а базовый возвращает по потоку за сорок
+# удачных ответов подряд: после одного всплеска отказов раздел иначе остался бы
+# узким до следующего деплоя. Две минуты — с запасом больше любой паузы на 429
+# (потолок десять секунд), и это время, за которое кабинет забывает всплеск.
+QUIET_RESET_SECONDS = 120
+
 # Код отказа в теле ответа. Базовый _request прячет тело неуспешного ответа
 # внутрь текста FleetError, а код нам нужен значением — вынимаем его обратно.
 _CODE_RE = re.compile(r"['\"]code['\"]\s*:\s*['\"]([A-Za-z0-9_]+)['\"]")
@@ -119,7 +140,83 @@ def _refusal_code(text):
 
 
 class MailingsClient(FleetClient):
-    """Рассылочные ручки кабинета поверх общего транспорта FleetClient."""
+    """Рассылочные ручки кабинета поверх общего транспорта FleetClient.
+
+    ОДИН ЭКЗЕМПЛЯР НА ПРОЦЕСС (его держит routes.make_client), а не на запрос:
+    пауза после 429 и число запросов в полёте должны быть общими для всех, кто
+    сейчас ходит в кабинет, — подсчётов охвата, справочников, журнала, отправки.
+    Кабинет просит помедленнее не отдельный запрос, а аккаунт целиком.
+
+    Базовый клиент ширину (`concurrency`) только советует — пул потоков по ней
+    размеряет вызывающий. Здесь она соблюдается: каждый запрос берёт место
+    (`slot`), и сверх `concurrency` в полёте не бывает ничего, сколько бы
+    потоков ни ждало.
+    """
+
+    LOG_LABEL = 'Рассылки'
+
+    def __init__(self, cookies, user_agent=None, *, concurrency=CONCURRENCY, **kwargs):
+        super().__init__(cookies, user_agent, concurrency=concurrency, **kwargs)
+        self._gate = threading.Condition()
+        self._in_flight = 0
+        # Сколько мест держит текущий поток: место берут и маршрут (чтобы
+        # проверить «не отменён ли подсчёт» уже ПОСЛЕ ожидания), и сам _request.
+        # Второе взятие тем же потоком — не новое место.
+        self._held = threading.local()
+        self._throttled_at = None
+
+    # ── общий предел запросов в полёте ───────────────────────────────────────
+
+    @contextmanager
+    def slot(self):
+        """Место в общем пределе запросов к кабинету. Повторно в том же потоке
+        — то же самое место: маршрут берёт его вокруг вызова метода клиента,
+        а _request внутри не должен ждать сам себя."""
+        depth = getattr(self._held, 'depth', 0)
+        if depth:
+            self._held.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._held.depth = depth
+            return
+        with self._gate:
+            self._widen_after_quiet()
+            while self._in_flight >= max(1, self.concurrency):
+                # Будит освобождение места: раз ждём, в полёте кто-то есть, и
+                # он обязательно вернёт место — потерянного пробуждения нет.
+                self._gate.wait()
+            self._in_flight += 1
+        self._held.depth = 1
+        try:
+            yield
+        finally:
+            self._held.depth = 0
+            with self._gate:
+                self._in_flight -= 1
+                self._gate.notify_all()
+
+    def _widen_after_quiet(self):
+        """Вернуть полную ширину, если кабинет давно не отказывал. Зовётся под
+        self._gate; порядок замков всегда _gate → _lock, обратного нет."""
+        if self._throttled_at is None or self.concurrency >= self._concurrency_ceiling:
+            return
+        if time.time() - self._throttled_at < QUIET_RESET_SECONDS:
+            return
+        with self._lock:
+            self.concurrency = self._concurrency_ceiling
+            self._since_throttle = 0
+            self._throttled_at = None
+
+    def _note_throttled(self):
+        backoff = super()._note_throttled()
+        with self._lock:
+            self._throttled_at = time.time()
+        return backoff
+
+    def _request(self, method, path, **kwargs):
+        with self.slot():
+            return super()._request(method, path, **kwargs)
 
     # ── доступность и справочники ────────────────────────────────────────────
 

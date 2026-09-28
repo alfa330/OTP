@@ -116,6 +116,11 @@ class FleetClient:
     ответов и не выше измеренного потолка в шесть.
     """
 
+    # Чей это запрос — в строках лога транспорта. Клиентом пользуются и
+    # «Рассылки»; 28.09.2026 больше двадцати тысяч их отказов 429 легли в лог как
+    # «Провайдер ЭДО», и разбор начался не с того раздела.
+    LOG_LABEL = 'Провайдер ЭДО'
+
     def __init__(self, cookies, user_agent=None, *, concurrency=DEFAULT_CONCURRENCY,
                  max_delay=10.0, timeout=60, session=None):
         self._cookies = self._normalize_cookies(cookies)
@@ -274,14 +279,15 @@ class FleetClient:
                 # Сеть моргнула — ждём с нарастанием. В логе только тип ошибки:
                 # тело запроса содержит ID водителей, ему в логах не место.
                 last_error = error
-                logging.warning('Провайдер ЭДО: сеть недоступна (%s), попытка %s',
-                                type(error).__name__, attempt)
+                logging.warning('%s: сеть недоступна (%s), попытка %s',
+                                self.LOG_LABEL, type(error).__name__, attempt)
                 time.sleep(min(self._max_delay, 3.0 * attempt))
                 continue
 
             if response.status_code == 429:
                 backoff = self._note_throttled()
-                logging.warning('Провайдер ЭДО: кабинет просит помедленнее, пауза %.1f с', backoff)
+                logging.warning('%s: кабинет просит помедленнее, пауза %.1f с',
+                                self.LOG_LABEL, backoff)
                 last_error = FleetError('429 Too Many Requests')
                 continue
 
