@@ -31842,6 +31842,11 @@ class Database:
         DISTINCT ON (u.id): у одной пары (оператор, группа) бывает несколько
         строк членства, пересекающих месяц (перезачисление) — без него оператор
         появился бы в таблице дважды и удвоил итоги.
+
+        Членство «конец раньше начала» (перевод, отменённый в момент заведения:
+        на проде 16 таких, 3 — в сентябре 2026) не покрывает ни одного дня. Без
+        отсечки человек попадал в состав группы, где не был ни дня, и фронт
+        записывал его в «Переведённые» этой группы.
         """
         year, mon = map(int, str(month).split('-'))
         last_day = calendar.monthrange(year, mon)[1]
@@ -31910,6 +31915,7 @@ class Database:
                 WHERE gom.group_id = %s
                   AND gom.start_date <= %s
                   AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                  AND (gom.end_date IS NULL OR gom.end_date >= gom.start_date)
                 ORDER BY u.id, gom.start_date
             """, (int(group_id), end, start))
             rows = cursor.fetchall() or []
@@ -31924,7 +31930,13 @@ class Database:
             operators = []
             for row in rows:
                 op_id = int(row[0])
-                segments = segments_by_operator.get(op_id, [])
+                # Сегменты общие с отчётами часов и там не фильтруются; здесь
+                # пустые (конец раньше начала) выбрасываем: по сегментам фронт
+                # решает, ушёл ли человек из группы и куда.
+                segments = [
+                    seg for seg in segments_by_operator.get(op_id, [])
+                    if int(seg.get('end_day') or 0) >= int(seg.get('start_day') or 0)
+                ]
                 other_groups = {int(seg.get('group_id') or 0) for seg in segments} - {int(group_id)}
                 operators.append({
                     'id': row[0],
@@ -31956,8 +31968,8 @@ class Database:
                     'role': row[22],
                     'group_segments': segments,
                     # Признак «в этом месяце оператор был не только в этой группе».
-                    # Метрики оценок месячные и группу не различают, поэтому строка
-                    # честно помечается как переведённая.
+                    # Фронт «Аналитики» направление перевода (ушёл/пришёл) берёт уже
+                    # из group_segments; флаг оставлен для совместимости ответа.
                     'has_other_group_in_month': bool(other_groups),
                 })
 

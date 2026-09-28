@@ -5,6 +5,10 @@ import { createPortal } from 'react-dom';
 import './styles.css';
 import FaIcon from '../components/common/FaIcon';
 import { CALL_KIND_ANY, CALL_KIND_OPTIONS, callKindFlags } from './randomCallKind';
+import {
+    EMPLOYMENT_STATUS_META, buildEmploymentStatusBuckets, buildEmploymentStatusTabs,
+    describeDismissalChip, describeTransferChip, isFiredStatus, normalizeEmploymentStatus,
+} from './employmentTabs';
 import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody, watchAuthTokensFromOtherTabs } from '../utils/authRefresh';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
@@ -749,100 +753,9 @@ const calibrationScoreLabel = (value) => {
     return v || '—';
 };
 
-const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
-
-/* ── Статусы трудоустройства ──────────────────────────────────────────────────
-   Тот же словарь, что в основном приложении. Импортировать оттуда нельзя:
-   «Журнал оценок» — отдельная сборка без Tailwind, а карты статусов в App.jsx
-   объявлены внутри компонентов. Приводим устаревшие имена (unpaid_leave — это
-   Б/С, dismissal — увольнение), иначе один и тот же человек попал бы в две
-   вкладки сразу. */
-const EMPLOYMENT_STATUS_ALIASES = {
-    unpaid_leave: 'bs',
-    dismissal: 'fired',
-    dismissed: 'fired',
-    terminated: 'fired',
-    'уволен': 'fired',
-};
-const EMPLOYMENT_STATUS_META = {
-    working: { label: 'Активные', badge: '' },
-    bs: { label: 'Б/С', badge: 'Б/С', tone: 'amber' },
-    sick_leave: { label: 'Больничный', badge: 'Больничный', tone: 'amber' },
-    annual_leave: { label: 'Ежегодный отпуск', badge: 'Отпуск', tone: 'amber' },
-    fired: { label: 'Уволенные', badge: 'Уволен', tone: 'red' },
-};
-/* Порядок вкладок фиксированный: «Активные» слева, «Уволенные» справа,
-   промежуточные состояния между ними — чтобы вкладки не переставлялись
-   от месяца к месяцу. */
-const EMPLOYMENT_STATUS_TAB_ORDER = ['working', 'bs', 'sick_leave', 'annual_leave', 'fired'];
+/* Статусы трудоустройства и вкладки «Аналитики» (Активные / Переведённые /
+   Уволенные...) — в ./employmentTabs.js, там же правило раскладки и его тесты. */
 const EMPTY_OPERATOR_ROWS = Object.freeze([]);
-
-/* Неизвестный статус НЕ сваливаем в «Активные»: если в базе появится новый
-   код, он должен получить свою вкладку, а не тихо смешаться с работающими. */
-const normalizeEmploymentStatus = (status) => {
-    const s = normalizeStatus(status);
-    if (!s) return 'working';
-    return EMPLOYMENT_STATUS_ALIASES[s] || s;
-};
-const isFiredStatus = (status) => normalizeEmploymentStatus(status) === 'fired';
-
-/* Месяц увольнения ('YYYY-MM') из dismissal_date. null — даты нет (режим по СВ
-   или старый ответ), тогда вкладка определяется по показателям, как раньше. */
-const getDismissalMonth = (op) => {
-    const raw = String(op?.dismissal_date || '').trim();
-    return /^\d{4}-\d{2}/.test(raw) ? raw.slice(0, 7) : null;
-};
-const formatDismissalDate = (op) => {
-    const raw = String(op?.dismissal_date || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return null;
-    const [y, m, d] = raw.slice(0, 10).split('-');
-    return `${d}.${m}.${y}`;
-};
-
-const hasAnyEvaluationIndicators = (operatorRow) => {
-    if (!operatorRow || typeof operatorRow !== 'object') return false;
-    if (operatorRow.has_evaluation_data === true || operatorRow.hasEvaluationData === true) return true;
-
-    const numericKeys = [
-        'call_count',
-        'evaluation_row_count',
-        'feedback_count',
-        'feedback_overdue_count',
-        'feedback_pending_count',
-    ];
-    for (const key of numericKeys) {
-        const value = Number(operatorRow[key]);
-        if (Number.isFinite(value) && value > 0) return true;
-    }
-
-    const avgScore = Number(operatorRow.avg_score);
-    return Number.isFinite(avgScore) && avgScore > 0;
-};
-
-/* Раскладка состава по статусам ОДНИМ проходом: и счётчики вкладок, и состав
-   каждой из них. Раньше это были два независимых .filter() на каждый рендер,
-   и правило приходилось держать в двух местах синхронно. */
-const buildEmploymentStatusBuckets = (rows, month) => {
-    const buckets = new Map();
-    const monthKey = String(month || '');
-    for (const op of (Array.isArray(rows) ? rows : [])) {
-        let key = normalizeEmploymentStatus(op?.status);
-        if (key === 'fired') {
-            /* Уволенный остаётся среди активных только если увольнение пришлось
-               на просматриваемый месяц или позже: месяц отработан частично, и
-               его нельзя потерять. Уволенный РАНЬШЕ весь месяц уже не работал.
-               Правило и формулировка — как в «Учёте часов». */
-            const firedMonth = getDismissalMonth(op);
-            const keepInActive = firedMonth === null
-                ? hasAnyEvaluationIndicators(op)
-                : firedMonth >= monthKey;
-            if (keepInActive) key = 'working';
-        }
-        if (!buckets.has(key)) buckets.set(key, []);
-        buckets.get(key).push(op);
-    }
-    return buckets;
-};
 
 /* ── Селектор с поиском ───────────────────────────────────────────────────────
    Свой, а не src/components/ui/CustomSelect.jsx: тот целиком на Tailwind, а в
@@ -6672,40 +6585,24 @@ const App = ({ user, initialSelection }) => {
        каждый рендер новая и раскладка по статусам пересчитывается вхолостую. */
     const analyticsScopedOperators = analyticsSelectedSvData?.operators ?? EMPTY_OPERATOR_ROWS;
 
-    /* Одна раскладка на рендер: из неё и счётчики вкладок, и состав таблицы. */
-    const analyticsStatusBuckets = React.useMemo(
-        () => buildEmploymentStatusBuckets(analyticsScopedOperators, analyticsMonth),
-        [analyticsScopedOperators, analyticsMonth]
+    /* Месяц и группа — из самого ответа, а не из селекторов: пока грузится новый
+       месяц, на экране ещё старые строки, и делить их надо по их же месяцу. */
+    const analyticsDataMonth = analyticsSelectedSvData?.requested_month || analyticsMonth;
+    const analyticsDataGroupId = analyticsSelectedSvData?.group_id ?? analyticsSelectedGroupId;
+
+    /* Одна раскладка на рендер: из неё и счётчики вкладок, и состав таблицы, и
+       разбор строки для чипов (перевод, дата увольнения). */
+    const { buckets: analyticsStatusBuckets, infoByOperator: analyticsStatusInfo } = React.useMemo(
+        () => buildEmploymentStatusBuckets(analyticsScopedOperators, {
+            month: analyticsDataMonth,
+            groupId: analyticsDataGroupId,
+        }),
+        [analyticsScopedOperators, analyticsDataMonth, analyticsDataGroupId]
     );
-    /* Вкладка есть, если в ней кто-то есть. «Активные» и «Уволенные» показываем
-       всегда — это опорная пара, и её исчезновение читалось бы как сбой.
-       Остальные статусы (Б/С, больничный, отпуск) — только когда они реально
-       встречаются в этом месяце, как и просили. */
-    const analyticsStatusTabs = React.useMemo(() => {
-        const always = new Set(['working', 'fired']);
-        const known = EMPLOYMENT_STATUS_TAB_ORDER
-            .map((key) => ({
-                key,
-                label: EMPLOYMENT_STATUS_META[key]?.label || key,
-                tone: EMPLOYMENT_STATUS_META[key]?.tone || '',
-                count: (analyticsStatusBuckets.get(key) || []).length,
-            }))
-            .filter((tab) => tab.count > 0 || always.has(tab.key));
-        /* Статус, которого нет в словаре (в базе добавили новый код), получает
-           вкладку с сырым кодом — лучше непривычная подпись, чем потерянные люди. */
-        const unknown = [...analyticsStatusBuckets.keys()]
-            .filter((key) => !EMPLOYMENT_STATUS_META[key])
-            .sort((a, b) => String(a).localeCompare(String(b), 'ru'))
-            .map((key) => ({
-                key,
-                label: key,
-                tone: 'amber',
-                count: (analyticsStatusBuckets.get(key) || []).length,
-            }));
-        // Уволенные всегда последними, новые коды — перед ними.
-        const firedTab = known.filter((tab) => tab.key === 'fired');
-        return [...known.filter((tab) => tab.key !== 'fired'), ...unknown, ...firedTab];
-    }, [analyticsStatusBuckets]);
+    const analyticsStatusTabs = React.useMemo(
+        () => buildEmploymentStatusTabs(analyticsStatusBuckets),
+        [analyticsStatusBuckets]
+    );
 
     /* Если активная вкладка опустела (сменили месяц/группу) — уводим на
        «Активные», иначе экран выглядел бы пустым без причины. */
@@ -8879,31 +8776,35 @@ const App = ({ user, initialSelection }) => {
                                                                 <span style={{ fontWeight: 500 }}>{op.name}</span>
                                                                 {(() => {
                                                                     /* Бейдж статуса нужен там, где он объясняет цифры:
-                                                                       во вкладке «Активные» видно, что человек уволен
-                                                                       или в Б/С посреди месяца. Внутри одноимённой
-                                                                       вкладки он был бы дублем заголовка — не рисуем. */
-                                                                    const statusKey = normalizeEmploymentStatus(op.status);
+                                                                       например, переведённый, который сейчас в Б/С.
+                                                                       Внутри одноимённой вкладки он был бы дублем
+                                                                       заголовка — не рисуем. */
+                                                                    const info = analyticsStatusInfo.get(op);
+                                                                    const statusKey = info?.statusKey ?? normalizeEmploymentStatus(op.status);
                                                                     if (statusKey === 'working' || statusKey === analyticsStatusTab) return null;
                                                                     const meta = EMPLOYMENT_STATUS_META[statusKey];
                                                                     if (!meta?.badge) return null;
-                                                                    const firedOn = formatDismissalDate(op);
                                                                     return (
-                                                                        <span
-                                                                            className={`ce-chip ${meta.tone === 'red' ? 'ce-chip-red' : 'ce-chip-amber'}`}
-                                                                            title={statusKey === 'fired' && firedOn ? `Уволен(а) с ${firedOn}` : meta.badge}
-                                                                        >
+                                                                        <span className={`ce-chip ${meta.tone === 'red' ? 'ce-chip-red' : 'ce-chip-amber'}`}>
                                                                             {meta.badge}
                                                                         </span>
                                                                     );
                                                                 })()}
-                                                                {op.has_other_group_in_month && (
-                                                                    <span
-                                                                        className="ce-chip ce-chip-muted"
-                                                                        title="В этом месяце оператор был и в другой группе. Оценки и план считаются за месяц целиком, поэтому здесь они показаны полностью, а не только за дни в этой группе."
-                                                                    >
-                                                                        переведён
-                                                                    </span>
-                                                                )}
+                                                                {(() => {
+                                                                    /* Серый чип с датой: когда перевели или уволили.
+                                                                       Он объясняет, почему у человека оценки и план
+                                                                       за месяц целиком, а не за его дни в группе. */
+                                                                    const info = analyticsStatusInfo.get(op);
+                                                                    const chip = info?.tab === 'fired'
+                                                                        ? describeDismissalChip(op, analyticsDataMonth)
+                                                                        : describeTransferChip(info?.transfer, analyticsDataMonth);
+                                                                    if (!chip) return null;
+                                                                    return (
+                                                                        <span className="ce-chip ce-chip-muted" title={chip.title}>
+                                                                            {chip.text}
+                                                                        </span>
+                                                                    );
+                                                                })()}
                                                             </div>
                                                         </td>
                                                         <td style={tdStyle}>{renderAnalyticsPlanContent(op, callCount)}</td>
