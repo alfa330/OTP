@@ -278,6 +278,79 @@ class LiveTailJournalTests(unittest.TestCase):
         self.assertIsNone(self.posts[0][1]['queue_calls'], 'без журнала — «не знаю», а не «никого»')
 
 
+class _CoveringJournal(_Journal):
+    """Журнал, который, как настоящий `PbxDb`, говорит, докуда прочитал без обрыва."""
+
+    def __init__(self, rows=None, fail=None):
+        super().__init__(rows, fail)
+        self.covered_until = None
+
+    def facts(self, start, end):
+        self.covered_until = None
+        facts = super().facts(start, end)
+        self.covered_until = end
+        return facts
+
+
+def greeting_drop_row(linkedid, calldate):
+    """Отбой на приветствии очереди 3010 за секунду до входа: строка как у брошенного в
+    очереди — агента нет, записи нет, 6 с."""
+    return cdr_row(linkedid, calldate, src='+77776084066', dst='3010', dcontext='ext-queues',
+                   dstchannel='', recordingfile='', disposition='ANSWERED', billsec=6, duration=6,
+                   did='7475777778', channel='PJSIP/+77475777778-0006a5ca')
+
+
+class LiveTailBeforeQueueTests(unittest.TestCase):
+    """Мост 1.4.1: непринятый без входа в очередь едет «не дошёл до очереди»."""
+
+    def setUp(self):
+        self.posts = []
+        self.station = _Station([cdr_row('1.1', '2026-09-15 09:00:00'),
+                                 greeting_drop_row('2.2', '2026-09-15 10:00:00')])
+        self.journal = _CoveringJournal([
+            queue_event('1.1', '2026-09-15 09:00:26', 'ENTERQUEUE', data2='+77015550001'),
+            queue_event('1.1', '2026-09-15 09:00:30', 'CONNECT', agent='op', data1='4'),
+        ])
+
+    def _tail(self, journal):
+        return live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                             self.station, 20, today=lambda: TODAY, pbxdb=journal)
+
+    def test_call_without_an_entry_goes_as_before_the_queue(self):
+        self._tail(self.journal).step()
+        touches = {t['linkedid']: t for t in self.posts[0][1]['touches']}
+        self.assertEqual(touches['2.2']['call_type'], 'Входящий (не дошёл до очереди)')
+        self.assertEqual(touches['2.2']['queue'], '3010')
+        self.assertEqual(touches['1.1']['call_type'], 'Входящий')
+
+    def test_unavailable_journal_decides_nothing(self):
+        self.journal.fail = RuntimeError('база станции не ответила')
+        self._tail(self.journal).step()
+        touch = [t for t in self.posts[0][1]['touches'] if t['linkedid'] == '2.2'][0]
+        self.assertEqual(touch['call_type'], 'Входящий (не приняли)')
+
+    def test_journal_without_a_coverage_mark_decides_nothing(self):
+        """Старый источник без отметки: по-прежнему, как до 1.4.1."""
+        self._tail(_Journal(self.journal.rows)).step()
+        touch = [t for t in self.posts[0][1]['touches'] if t['linkedid'] == '2.2'][0]
+        self.assertEqual(touch['call_type'], 'Входящий (не приняли)')
+
+    def test_the_bridge_day_job_decides_the_same_way(self):
+        """Суточная присылка (перечитка старых суток) идёт тем же правилом, что и хвост."""
+        from cdr_bridge import agent as agent_mod
+        bridge = agent_mod.Bridge({'portal': 'http://portal.invalid', 'token': 'x',
+                                   'station': 'http://127.0.0.1:9', 'login': '', 'password': ''},
+                                  station=self.station, pbxdb_source=self.journal)
+        sent = []
+        bridge._post = lambda path, payload: sent.append((path, payload)) or {'complete': True}
+        self.assertTrue(bridge.do_day({'day': '2026-09-15', 'from_dt': '2026-09-15T00:00:00',
+                                       'to_dt': '2026-09-16T01:00:00'}))
+        touches = {t['linkedid']: t for t in sent[0][1]['touches']}
+        self.assertEqual(touches['2.2']['call_type'], 'Входящий (не дошёл до очереди)')
+        self.assertEqual(touches['2.2']['result'], 'Сброс до очереди')
+        self.assertEqual(touches['1.1']['queued_at'], '2026-09-15 09:00:26')
+
+
 def _epoch(text):
     """Местное время Алматы → секунды эпохи, как их передаёт мосту time.time()."""
     moment = datetime.strptime(text, '%Y-%m-%d %H:%M:%S')

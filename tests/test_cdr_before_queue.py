@@ -173,6 +173,62 @@ class QueryTests(unittest.TestCase):
         self.assertIsNone(touch['wait_seconds'])
 
 
+def menu_to_nowhere(**over):
+    """Кнопка «2» меню линии Dongelek (28.09.2026): набор 2030 через транк на другую машину,
+    канала назначения нет — маршрут не соединил ни одного звонка с 17.05.2025."""
+    base = dict(src=CLIENT, dst='2030', did='+77003241500', dcontext='from-internal',
+                channel='PJSIP/77003241500_Dongelek_OTP-00069990', disposition='ANSWERED',
+                billsec=41, duration=41, calldate='2026-09-25T17:40:13')
+    base.update(over)
+    return row(**base)
+
+
+class ReachedNobodyTests(unittest.TestCase):
+    """Входящий, ни одно плечо которого не дошло ни до очереди, ни до человека, — тоже «не
+    дошёл до очереди», хотя `parse_row` строку принимает (по записи или по набранному номеру).
+
+    До 28.09.2026 такие звонки числились «не приняли», будто оператор их пропустил: 49 за
+    19.08–28.09, из них 30 — мёртвая кнопка «2» меню Dongelek."""
+
+    def test_menu_that_dials_nowhere_did_not_reach_the_queue(self):
+        touch = T.build_touches([menu_to_nowhere()])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+        self.assertEqual(touch['result'], T.RESULT_BEFORE_QUEUE)
+        self.assertEqual((touch['ext'], touch['queue'], touch['talk_seconds']), ('', '', 0))
+        self.assertEqual(touch['dial_seconds'], 41)
+        self.assertEqual(touch['line_number'], '7003241500')
+
+    def test_recorded_announcement_did_not_reach_the_queue(self):
+        """Объявление «Тенге Такси» станция записывает (`in-…`), и по имени файла строка
+        проходит в `parse_row` — но дальше приветствия звонок не ушёл."""
+        announcement = greeting(dcontext='app-announcement-55', did='77470957683',
+                                channel='PJSIP/7470957683-0006b27d', billsec=7, duration=7,
+                                recordingfile='in-77470957683-%s-20260927-165652-1.1.wav'
+                                % CLIENT)
+        self.assertIsNotNone(T.parse_row(announcement))
+        touch = T.build_touches([announcement])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+
+    def test_call_on_a_personal_number_that_rang_the_operator_stays_missed(self):
+        touch = T.build_touches([menu_to_nowhere(dst='6650', dcontext='from-did-direct',
+                                                 dstchannel='PJSIP/6650-000667a8',
+                                                 disposition='NO ANSWER', billsec=0)])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN_MISSED)
+        self.assertEqual(touch['ext'], '6650')
+
+    def test_call_abandoned_in_the_queue_stays_missed(self):
+        """Строка брошенного в очереди: без агента, но с очередью — «не приняли». Вошёл ли он
+        в очередь, решает журнал (queue_facts.never_entered), а не склейка."""
+        touch = T.build_touches([queue_call(dstchannel='', billsec=102, duration=102)])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN_MISSED)
+        self.assertEqual(touch['queue'], '3034')
+
+    def test_outgoing_is_never_affected(self):
+        touch = T.build_touches([row(src='6650', dst='4242*77015550021', disposition='NO ANSWER',
+                                     duration=20)])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_OUT)
+
+
 class ExportTests(unittest.TestCase):
     def test_context_and_summary_name_them_apart(self):
         book = Workbook(write_only=True)

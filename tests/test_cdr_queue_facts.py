@@ -16,7 +16,7 @@
 import unittest
 from datetime import datetime, timedelta
 
-from cdr import queue_facts as Q
+from cdr import queue_facts as Q, touches as T
 
 
 def row(time_text, callid, event, queue='3041', agent='NONE', data1='', data2='', data3=''):
@@ -156,6 +156,106 @@ class AttachTests(unittest.TestCase):
     def test_no_facts_at_all_changes_nothing(self):
         touches = [touch(ANSWERED)]
         self.assertEqual(Q.attach(touches, {}), touches)
+
+
+GREETING_DROP = '1790420937.1198448'
+
+
+def greeting_drop(**over):
+    """Непринятый 26.09.2026 16:08:57 на очередь 3010: 6 с на приветствии «Центра
+    регистрации», отбой ещё в `ext-queues` до `Queue()`. Строка станции у него такая же, как
+    у брошенного в очереди, а в журнале — ни одного события."""
+    base = {'linkedid': GREETING_DROP, 'phone': '7776084066', 'call_type': 'Входящий (не приняли)',
+            'started_at': '2026-09-26 16:08:57', 'answered_at': '', 'talk_seconds': 0,
+            'dial_seconds': 6, 'ext': '', 'queue': '3010', 'result': 'Сброс без разговора',
+            'line_number': '7475777778'}
+    base.update(over)
+    return base
+
+
+JOURNAL_READ = datetime(2026, 9, 27, 1, 0, 0)   # суточное окно с часовым хвостом
+
+
+class NeverEnteredTests(unittest.TestCase):
+    """«Не дошёл до очереди» по журналу: у брошенного на приветствии нет ENTERQUEUE.
+
+    Разбор 01–28.09.2026: 27 непринятых с очередью в очередь не входили (3038 — отбой на
+    4–16 с при входе на 17–18 с; 3010/3001/3007 — за секунду до входа), а считались «не
+    приняли», и табло писало их в потерянные. Решать по ОТСУТСТВИЮ события можно только
+    при полном журнале — это и закреплено."""
+
+    def setUp(self):
+        self.facts = Q.build_facts(ANSWERED_ROWS + ABANDONED_ROWS)
+
+    def test_no_entry_in_a_complete_journal_means_before_the_queue(self):
+        out = Q.attach([greeting_drop()], self.facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+        self.assertEqual(out['result'], T.RESULT_BEFORE_QUEUE)
+        self.assertEqual(out['queue'], '3010', 'по очереди выводится таксопарк линии')
+        self.assertEqual((out['ext'], out['answered_at'], out['dial_seconds']), ('', '', 6))
+        self.assertNotIn('queued_at', out)
+
+    def test_quiet_journal_is_still_an_answer(self):
+        """Ночью журнал бывает пустым целиком — это «событий не было», а не «не знаю»."""
+        out = Q.attach([greeting_drop()], {}, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+
+    def test_did_mark_alone_is_not_an_entry(self):
+        """23.09.2026 17:09: станция записала DID (последний шаг перед Queue()) — и клиент
+        положил трубку в ту же секунду. В очереди он не был."""
+        facts = Q.build_facts([row('2026-09-26 16:09:03', GREETING_DROP, 'DID', queue='3010',
+                                   data1='7475777778')])
+        out = Q.attach([greeting_drop()], facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+
+    def test_call_abandoned_in_the_queue_stays_missed(self):
+        lost = greeting_drop(linkedid=ABANDONED, phone='7053763454', queue='3034',
+                             started_at='2026-09-21 12:54:26', dial_seconds=111)
+        out = Q.attach([lost], self.facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], 'Входящий (не приняли)')
+        self.assertEqual(out['wait_seconds'], 95)
+
+    def test_without_a_journal_nothing_is_decided(self):
+        self.assertEqual(Q.attach([greeting_drop()], self.facts)[0]['call_type'],
+                         'Входящий (не приняли)')
+        self.assertEqual(Q.attach([greeting_drop()], {})[0]['call_type'],
+                         'Входящий (не приняли)')
+
+    def test_journal_that_ends_before_the_call_does_not_decide(self):
+        """Обрезанный потолком или ещё не дочитанный журнал: вход мог быть в хвосте."""
+        early = datetime(2026, 9, 26, 16, 9, 0)   # звонок кончился в 16:09:03
+        out = Q.attach([greeting_drop()], self.facts, journal_until=early)[0]
+        self.assertEqual(out['call_type'], 'Входящий (не приняли)')
+
+    def test_operator_rung_means_the_queue_was_reached(self):
+        out = Q.attach([greeting_drop(ext='6360', result='Не ответил')], self.facts,
+                       journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], 'Входящий (не приняли)')
+
+    def test_call_without_a_queue_is_left_to_the_gluing(self):
+        out = Q.attach([greeting_drop(queue='')], self.facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], 'Входящий (не приняли)')
+
+    def test_entry_under_another_callid_of_the_same_caller_counts(self):
+        """Страховка сопоставления: вход того же клиента во время звонка, но под другим
+        callid (перевод через внутренний канал) — звонок в очередь дошёл."""
+        facts = Q.build_facts([row('2026-09-26 16:09:01', '1790420941.1198450', 'ENTERQUEUE',
+                                   queue='3010', data2='+77776084066')])
+        out = Q.attach([greeting_drop()], facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], 'Входящий (не приняли)')
+
+    def test_the_callers_next_call_does_not_count(self):
+        """12.09.2026: клиент бросил на приветствии в 03:50 и через две минуты позвонил
+        снова — вход второго звонка первому не засчитывается."""
+        facts = Q.build_facts([row('2026-09-26 16:11:13', '1790421066.1198460', 'ENTERQUEUE',
+                                   queue='3010', data2='+77776084066')])
+        out = Q.attach([greeting_drop()], facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+
+    def test_answered_and_outgoing_are_never_touched(self):
+        for call_type in ('Входящий', 'Исходящий'):
+            out = Q.attach([greeting_drop(call_type=call_type)], {}, journal_until=JOURNAL_READ)[0]
+            self.assertEqual(out['call_type'], call_type)
 
 
 class OpenCallsTests(unittest.TestCase):

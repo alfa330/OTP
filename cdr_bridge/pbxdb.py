@@ -72,6 +72,10 @@ class PbxDb:
         self._own_driver = connect is None
         self._connect = connect or self._connect_pymysql
         self._conn = None
+        # Докуда журнал прочитан последним запросом без обрыва (время станции). Нужен тому,
+        # кто делает выводы из ОТСУТСТВИЯ события: «входа в очередь не было» можно сказать
+        # только про звонок, закончившийся до этой отметки (queue_facts.never_entered).
+        self.covered_until = None
 
     @property
     def enabled(self):
@@ -133,11 +137,17 @@ class PbxDb:
         if not timedelta(0) < end - start <= MAX_WINDOW:
             raise PbxDbError('окно %s — %s шире суток с хвостом' % (start, end))
         params = [start, end] + list(queue_facts.WANTED_EVENTS) + [MAX_ROWS]
+        self.covered_until = None
         rows = self._cursor_rows(_QUEUE_SQL, params)
         if len(rows) >= MAX_ROWS:
             # Молча обрезанное окно — это молча испорченные ожидания на табло.
             log.warning('Журнал очередей: упёрлись в потолок %d строк за %s — %s',
                         MAX_ROWS, start, end)
+            # Строки идут по id, то есть по времени записи: всё, что позже последней,
+            # осталось на станции. Отметка — время последней, а не конец окна.
+            self.covered_until = rows[-1][0] if rows else start
+        else:
+            self.covered_until = end
         return [dict(zip(_COLUMNS, row)) for row in rows]
 
     def facts(self, start, end):

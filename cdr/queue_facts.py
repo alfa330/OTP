@@ -246,7 +246,56 @@ def merge(base, fresh):
     return out
 
 
-def attach(touches, facts, incoming_types=INCOMING_TYPES):
+def _call_end(touch):
+    """Когда звонок кончился: начало плюс длительность строки станции."""
+    started = _moment(touch.get('started_at'))
+    if started is None:
+        return None, None
+    return started, started + timedelta(seconds=int(touch.get('dial_seconds') or 0))
+
+
+def _entered_by_caller(facts):
+    """{номер клиента: [моменты входа в очередь]} — страховка сопоставления по callid."""
+    out = {}
+    for fact in (facts or {}).values():
+        if fact.get('caller') and fact.get('queued_at') is not None:
+            out.setdefault(fact['caller'], []).append(fact['queued_at'])
+    return out
+
+
+def never_entered(touch, facts, journal_until, entered_by_caller=None):
+    """Непринятый с очередью, который в очередь так и не вошёл: положил трубку на её
+    приветствии или за секунду до входа.
+
+    По строке станции этого не видно: с 09.09.2026 брошенный на приветствии очереди 3010
+    (6 с) и брошенный в очереди 3034 (102 с) неотличимы ничем, кроме длительности. Видно
+    по журналу очередей — у первого нет ENTERQUEUE. Разбор 01–28.09.2026: 27 таких звонков
+    (3038 — отбой на 4–16 с при входе на 17–18 с, 3010/3001/3007 — на пороге), все
+    считались «не приняли» и табло записывало их в потерянные.
+
+    Отсутствие события — плохая улика, поэтому решение принимается, только когда журнал
+    точно покрывает весь звонок (`journal_until` — докуда он прочитан без обрыва; None —
+    журнала нет, и решать нечем), оператору никто не звонил (`ext` пуст: очередь, звавшая
+    человека, в журнал вход пишет обязательно) и вход не нашёлся ни по callid, ни по
+    номеру клиента за время звонка."""
+    if journal_until is None or touch.get('call_type') != touches_mod.TYPE_IN_MISSED:
+        return False
+    if touch.get('ext') or not str(touch.get('queue') or '').strip():
+        return False
+    started, ended = _call_end(touch)
+    journal_until = _moment(journal_until)
+    if started is None or journal_until is None or ended > journal_until:
+        return False
+    fact = (facts or {}).get(str(touch.get('linkedid') or '')) or {}
+    if fact.get('queued_at') is not None:
+        return False
+    if entered_by_caller is None:
+        entered_by_caller = _entered_by_caller(facts)
+    phone = touches_mod.norm_phone(touch.get('phone'))
+    return not any(started <= moment <= ended for moment in entered_by_caller.get(phone, ()))
+
+
+def attach(touches, facts, incoming_types=INCOMING_TYPES, journal_until=None):
     """Дописать касаниям точные поля очереди. Возвращает новые словари.
 
     Сопоставление — по `linkedid` = `callid`. Правятся только входящие: у исходящего
@@ -255,11 +304,21 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES):
     `answered_at` ставится только тому, кто разговаривал: у брошенного в очереди ответа
     не было, и момент ответа у него обязан остаться пустым — на нём держится и склейка
     «принят / потерян», и SL.
+
+    `journal_until` — докуда журнал прочитан целиком. С ним непринятый, который в очередь
+    не входил (`never_entered`), становится «не дошёл до очереди»; очередь при этом
+    остаётся — по ней выводится таксопарк линии.
     """
-    if not facts:
+    if not facts and journal_until is None:
         return list(touches or [])
+    facts = facts or {}
+    by_caller = _entered_by_caller(facts) if journal_until is not None else None
     out = []
     for touch in touches or []:
+        if by_caller is not None and never_entered(touch, facts, journal_until, by_caller):
+            out.append(dict(touch, call_type=touches_mod.TYPE_IN_BEFORE_QUEUE,
+                            result=touches_mod.RESULT_BEFORE_QUEUE, answered_at=''))
+            continue
         fact = facts.get(str(touch.get('linkedid') or ''))
         if not fact or touch.get('call_type') not in incoming_types:
             out.append(touch)

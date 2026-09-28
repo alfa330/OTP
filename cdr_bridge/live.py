@@ -138,6 +138,7 @@ class LiveTail:
         self.day = None
         self.rows = {}           # ключ плеча → строка CDR
         self.facts = {}          # callid → точные факты очереди (журнал станции)
+        self.facts_until = None  # докуда журнал в self.facts прочитан без обрыва
         self.sent = {}           # (linkedid, phone) → отпечаток отправленного касания
         self.sent_queue = None   # отпечаток последнего отправленного списка queue_calls
         self.cycles = 0
@@ -178,6 +179,7 @@ class LiveTail:
         self.day = day
         self.rows = {}
         self.facts = {}
+        self.facts_until = None
         self.sent = {}
         self.sent_queue = None
         self.cycles = 0
@@ -229,9 +231,12 @@ class LiveTail:
         facts = self._queue_facts(start, end)
         if facts is not None:
             self.facts = facts if full else queue_facts_mod.merge(self.facts, facts)
+            # Окна идут внахлёст (приращение начинается за два часа до последней строки),
+            # поэтому накопленное покрывает день сплошь до конца последнего чтения.
+            self.facts_until = getattr(self._pbxdb, 'covered_until', None)
 
         built = queue_facts_mod.attach(touches_mod.build_touches(list(self.rows.values())),
-                                       self.facts)
+                                       self.facts, journal_until=self.facts_until)
         day_text = self.day.isoformat()
         current = {}
         changed = []

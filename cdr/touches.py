@@ -294,6 +294,19 @@ def _line_number(legs, prefix_lines):
     return ""
 
 
+def _reached_nobody(legs):
+    """Входящий, у которого ни одно плечо не дошло ни до очереди, ни до человека.
+
+    Так выглядит звонок, который меню отправило туда, где никто не ответит: кнопка «2»
+    меню линии Dongelek ведёт на `2030` через транк на другую машину, и этот маршрут с
+    17.05.2025 не соединил ни одного звонка (`dst = 2030`, канала назначения нет). Туда же —
+    объявление, у которого станция пишет запись `in-…`: по записи `parse_row` принимает
+    строку, хотя дальше приветствия звонок не ушёл. За 19.08–28.09.2026 таких 49, и все они
+    числились «не приняли» — как будто оператор их пропустил."""
+    return all(leg["kind"] == "in" and not leg["agent"] and not leg["exts"] and not leg["queues"]
+               for leg in legs)
+
+
 def _before_queue_touch(linkedid, client, legs, prefix_lines=None):
     """Касание без оператора: номер, наша линия, сколько человек слушал приветствие.
 
@@ -432,7 +445,8 @@ def build_touches(rows, resolve_operator=None, phones=None):
         groups[(row.get("linkedid"), client)].append(leg)
 
     prefix_lines = learn_prefix_lines(seen_prefixes)
-    touches = [_touch(linkedid, client, legs, resolve_operator, prefix_lines)
+    touches = [_before_queue_touch(linkedid, client, legs, prefix_lines) if _reached_nobody(legs)
+               else _touch(linkedid, client, legs, resolve_operator, prefix_lines)
                for (linkedid, client), legs in groups.items()]
     # Звонок, у которого есть хоть одна строка очереди или агента, — обычное касание, и
     # строки приветствия к нему не подмешиваются: иначе у него сдвинулись бы начало и

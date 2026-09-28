@@ -95,7 +95,7 @@ from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: 
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.4.0'
+VERSION = '1.4.1'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -401,7 +401,11 @@ class Bridge:
         except Exception as exc:  # noqa: BLE001
             log.warning('Сутки %s: журнал очередей не прочитался: %s', day, exc)
             return touches
-        return queue_facts_mod.attach(touches, facts)
+        # Журнал читается ПОСЛЕ CDR: у каждого звонка из выдачи вход в очередь, если он
+        # был, уже записан. Поэтому по прочитанному без обрыва окну можно сказать и
+        # «входа не было» — такой непринятый становится «не дошёл до очереди».
+        return queue_facts_mod.attach(touches, facts,
+                                      journal_until=getattr(self.pbxdb, 'covered_until', None))
 
     def _report_failure(self, day, error):
         """Сказать порталу, что сутки не вышли. Если и это не дошло — записать в

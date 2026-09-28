@@ -12,6 +12,7 @@
 
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 from cdr_bridge import pbxdb
 
@@ -103,6 +104,27 @@ class QueryTests(unittest.TestCase):
         with self.assertRaises(pbxdb.PbxDbError):
             self.source.queue_rows(END, START)
         self.assertEqual(self.conn.queries, [])
+
+    def test_full_read_covers_the_whole_window(self):
+        """По отметке мост решает «входа в очередь не было» (queue_facts.never_entered)."""
+        self.assertIsNone(self.source.covered_until, 'до первого чтения — ничего не известно')
+        self.source.queue_rows(START, END)
+        self.assertEqual(self.source.covered_until, END)
+
+    def test_read_cut_by_the_ceiling_covers_only_up_to_its_last_row(self):
+        self.conn.rows = [row(callid='%d.1' % n, at='2026-09-21 09:%02d:00' % (n % 60))
+                          for n in range(3)]
+        with mock.patch.object(pbxdb, 'MAX_ROWS', 3):
+            self.source.queue_rows(START, END)
+        self.assertEqual(self.source.covered_until, datetime(2026, 9, 21, 9, 2, 0))
+
+    def test_failed_read_covers_nothing(self):
+        self.source.queue_rows(START, END)
+        self.conn.broken = True
+        with self.assertRaises(pbxdb.PbxDbError):
+            self.source.queue_rows(START, END)
+        self.assertIsNone(self.source.covered_until,
+                          'после отказа прежняя отметка не должна выдавать себя за свежую')
 
     def test_facts_are_built_from_the_rows(self):
         facts = self.source.facts(START, END)
