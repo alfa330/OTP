@@ -26,10 +26,13 @@ import { iosCard } from '../ui/ios';
 const VERDICTS = {
     invalid: { short: 'Необоснованно', label: 'Необоснованно · снята', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
     valid: { short: 'Обоснованно', label: 'Обоснованно', pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
+    // Задача #286: чат вели несколько менеджеров, и проверяющие засчитали
+    // оценку другому. На показатель оператора она не влияет — отсюда зелёный.
+    reassigned: { short: 'Засчитана другому', label: 'Засчитана другому менеджеру', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
     pending: { short: 'На проверке', label: 'На проверке', pill: 'bg-slate-100 text-slate-500 ring-slate-200' },
 };
 
-const verdictOf = (row) => VERDICTS[row?.final_status] || VERDICTS.pending;
+const verdictOf = (row) => (row?.reassigned ? VERDICTS.reassigned : VERDICTS[row?.final_status] || VERDICTS.pending);
 
 const formatDateTime = (value) => {
     const text = String(value || '').trim();
@@ -332,6 +335,7 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
                                                     loading={!chatReady || chat.loading}
                                                     error={chatReady ? chat.error : ''}
                                                     hideService={hideService}
+                                                    managerSegments
                                                     emptyText="В этом чате нет сообщений"
                                                 />
                                             </div>

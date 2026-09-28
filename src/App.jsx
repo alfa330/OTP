@@ -272,6 +272,8 @@ const ShiftHistoryList = lazyWithRetry(() => import('./components/schedule/Shift
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
+const LowRatingAttribution = lazyWithRetry(() => import('./components/c2d_eval/LowRatingAttribution'));
+const LowRatingHistory = lazyWithRetry(() => import('./components/c2d_eval/LowRatingHistory'));
 const QrAccessView = lazyWithRetry(() => import('./components/qr/QrAccessView'));
 
 
@@ -3983,6 +3985,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [selectedLowRatingReviewId, setSelectedLowRatingReviewId] = useState('');
         const [lowRatingReviewDraft, setLowRatingReviewDraft] = useState({ status: '', comment: '' });
         const [lowRatingFinalDraft, setLowRatingFinalDraft] = useState({ status: '', comment: '' });
+        // Кому засчитать оценку (задача #286): id менеджеров. Одна отметка на
+        // разбор — её сохраняет и «Моя проверка», и итог руководителя.
+        const [lowRatingAttributionDraft, setLowRatingAttributionDraft] = useState([]);
         // Кастомный период просмотра (date-range) + поиск среди всех оценок периода.
         const monthBounds = (monthKey) => {
             const [y, m] = String(monthKey || '').split('-').map(Number);
@@ -4008,7 +4013,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [lowRatingExporting, setLowRatingExporting] = useState(false);
         // Переписка выбранной оценки: снапшот тянем по клику на строку и держим
         // в памяти вкладки (на сервере он тоже кэшируется — c2d_chat_snapshots).
-        const [lowRatingChat, setLowRatingChat] = useState({ id: '', snapshot: null, loading: false, error: '' });
+        // participants — менеджеры, которые вели этот чат (приходят вместе с перепиской).
+        const [lowRatingChat, setLowRatingChat] = useState({ id: '', snapshot: null, participants: [], loading: false, error: '' });
         const [lowRatingHideService, setLowRatingHideService] = useState(false);
         const [lowRatingPanelOpen, setLowRatingPanelOpen] = useState(true);
         const lowRatingChatCacheRef = useRef({});
@@ -4369,6 +4375,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return parts.join(' · ');
         };
 
+        // Чья это оценка: кому её засчитали по итогу проверки (задача #286). Пока
+        // итога нет или он «необоснованно», оценка всё ещё на том, кому её отдал
+        // Chat2Desk, — как и в статистике, и в выгрузке.
+        const lowRatingOwnerNames = (row) => {
+            const operators = Array.isArray(row?.attributed_operators) ? row.attributed_operators : [];
+            if (row?.final_status === 'valid' && row?.attribution_changed && operators.length) {
+                return operators.map((op) => op?.name || '—').join(', ');
+            }
+            return row?.operator_name || '—';
+        };
+
         const addChatMetricsSurgeWindow = () => {
             setChatMetricsSurgeWindows(prev => [...cloneChatMetricsSurgeWindows(prev), { start: '', end: '', description: '' }]);
         };
@@ -4593,10 +4610,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             lowRatingChatRequestRef.current = key;
             const cached = lowRatingChatCacheRef.current[key];
             if (cached && !force) {
-                setLowRatingChat({ id: key, snapshot: cached, loading: false, error: '' });
+                setLowRatingChat({ id: key, snapshot: cached.snapshot, participants: cached.participants, loading: false, error: '' });
                 return;
             }
-            setLowRatingChat({ id: key, snapshot: null, loading: true, error: '' });
+            setLowRatingChat({ id: key, snapshot: null, participants: [], loading: true, error: '' });
             try {
                 const response = await fetch(
                     `${API_BASE_URL}/api/chat_manager/low_rating_reviews/${encodeURIComponent(key)}/chat`,
@@ -4605,20 +4622,67 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
                 const snapshot = payload?.snapshot || null;
-                if (snapshot) lowRatingChatCacheRef.current[key] = snapshot;
+                const participants = Array.isArray(payload?.participants) ? payload.participants : [];
+                if (snapshot) lowRatingChatCacheRef.current[key] = { snapshot, participants };
                 // Пока грузили — могли переключиться на другую строку.
                 if (lowRatingChatRequestRef.current !== key) return;
-                setLowRatingChat({ id: key, snapshot, loading: false, error: snapshot ? '' : 'Переписка не найдена' });
+                setLowRatingChat({ id: key, snapshot, participants, loading: false, error: snapshot ? '' : 'Переписка не найдена' });
             } catch (error) {
                 console.error('fetch low rating chat error:', error);
                 if (lowRatingChatRequestRef.current !== key) return;
                 setLowRatingChat({
                     id: key,
                     snapshot: null,
+                    participants: [],
                     loading: false,
                     error: error?.message || 'Не удалось загрузить переписку',
                 });
             }
+        };
+
+        // Журнал изменений разбора — по раскрытию блока «История изменений».
+        // Ссылка стабильная: компонент перечитывает историю по её смене.
+        const loadLowRatingHistory = useCallback(async (reviewId) => {
+            const response = await fetch(
+                `${API_BASE_URL}/api/chat_manager/low_rating_reviews/${encodeURIComponent(reviewId)}/history`,
+                { credentials: 'include', headers: withAccessTokenHeader({ 'X-User-Id': user?.id }) }
+            );
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+            return Array.isArray(payload?.history) ? payload.history : [];
+        }, [user?.id]);
+
+        // Кому засчитать — только вместе с «обоснованно»: при необоснованной
+        // отметки не отправляем, сервер их при ней и не принимает.
+        // base_operator_ids — какие отметки были у карточки, когда её открыли:
+        // решение одно на разбор, и сервер отклонит сохранение (409), если их
+        // уже поменял другой проверяющий. Сами отметки шлём, только если их
+        // меняли, — иначе чужое решение перетиралось бы тем, что показывал
+        // старый список.
+        const lowRatingLoadedAttribution = (row) => (row?.attributed_operators || [])
+            .map((op) => Number(op?.id))
+            .filter(Number.isFinite);
+        const lowRatingAttributionPayload = (status, row) => {
+            if (status !== 'valid') return {};
+            const loaded = lowRatingLoadedAttribution(row);
+            const draft = (lowRatingAttributionDraft || []).map(Number).filter(Number.isFinite);
+            const same = loaded.length === draft.length && loaded.every((id) => draft.includes(id));
+            return same ? { base_operator_ids: loaded } : { base_operator_ids: loaded, operator_ids: draft };
+        };
+
+        // 409 от сервера: отметки поменял другой проверяющий. Карточку обновляем
+        // свежей (отметки встанут по ней), вердикт и комментарий в черновике
+        // остаются — человек видит новое и сохраняет ещё раз.
+        const applyLowRatingAttributionConflict = (payload) => {
+            if (!payload?.review?.id) return false;
+            patchLowRatingReviewInList(payload.review);
+            if (String(lowRatingSelectionRef.current) === String(payload.review.id)) {
+                setLowRatingDetail(payload.review);
+            }
+            // Только тост: отметки на глазах встают по-новому, а та же фраза ещё
+            // и полосой над списком была бы повтором.
+            fallbackToast(payload.error || 'Отметки уже поменял другой проверяющий — проверьте их и сохраните ещё раз', 'error');
+            return true;
         };
 
         const patchLowRatingReviewInList = (review) => {
@@ -4635,6 +4699,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fallbackToast('Выберите решение по проверке', 'error');
                 return;
             }
+            if (lowRatingReviewDraft.status === 'valid' && !(lowRatingAttributionDraft || []).length) {
+                fallbackToast('Отметьте хотя бы одного менеджера, которому засчитать оценку', 'error');
+                return;
+            }
             setLowRatingSavingKey(`${reviewId}:review`);
             setLowRatingError('');
             try {
@@ -4648,10 +4716,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     body: JSON.stringify({
                         action: 'review',
                         status: lowRatingReviewDraft.status || '',
-                        comment: lowRatingReviewDraft.comment || ''
+                        comment: lowRatingReviewDraft.comment || '',
+                        ...lowRatingAttributionPayload(lowRatingReviewDraft.status, row)
                     })
                 });
                 const payload = await response.json().catch(() => ({}));
+                if (response.status === 409 && applyLowRatingAttributionConflict(payload)) return;
                 if (!response.ok) {
                     throw new Error(payload?.error || `HTTP ${response.status}`);
                 }
@@ -4688,6 +4758,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fallbackToast('Выберите итоговое решение', 'error');
                 return;
             }
+            if (lowRatingFinalDraft.status === 'valid' && !(lowRatingAttributionDraft || []).length) {
+                fallbackToast('Отметьте хотя бы одного менеджера, которому засчитать оценку', 'error');
+                return;
+            }
             setLowRatingSavingKey(`${reviewId}:final`);
             setLowRatingError('');
             try {
@@ -4701,10 +4775,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     body: JSON.stringify({
                         action: 'final',
                         status: lowRatingFinalDraft.status || '',
-                        comment: lowRatingFinalDraft.comment || ''
+                        comment: lowRatingFinalDraft.comment || '',
+                        ...lowRatingAttributionPayload(lowRatingFinalDraft.status, row)
                     })
                 });
                 const payload = await response.json().catch(() => ({}));
+                if (response.status === 409 && applyLowRatingAttributionConflict(payload)) return;
                 if (!response.ok) {
                     throw new Error(payload?.error || `HTTP ${response.status}`);
                 }
@@ -6438,21 +6514,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
         }, [showLowRatingReviews]);
 
+        // Черновики сбрасываются, только когда на сервере поменялось то, из чего
+        // они взяты, а не при каждой перезагрузке списка: после неудачного
+        // сохранения список перечитывается, и раньше это стирало набранный
+        // комментарий. Ключи — по отдельности, чтобы 409 «отметки поменял другой»
+        // обновил отметки, но не тронул вердикт и комментарий.
+        const lowRatingReviewDraftKey = selectedLowRatingReview
+            ? `${selectedLowRatingReview.id}|${selectedLowRatingReview.my_review_status || ''}|${selectedLowRatingReview.my_review_comment || ''}`
+            : '';
+        const lowRatingFinalDraftKey = selectedLowRatingReview
+            ? `${selectedLowRatingReview.id}|${selectedLowRatingReview.final_status || ''}|${selectedLowRatingReview.final_comment || ''}`
+            : '';
+        const lowRatingAttributionDraftKey = selectedLowRatingReview
+            ? `${selectedLowRatingReview.id}|${lowRatingLoadedAttribution(selectedLowRatingReview).join(',')}`
+            : '';
+
         useEffect(() => {
-            if (!selectedLowRatingReview) {
-                setLowRatingReviewDraft({ status: '', comment: '' });
-                setLowRatingFinalDraft({ status: '', comment: '' });
-                return;
-            }
             setLowRatingReviewDraft({
-                status: selectedLowRatingReview.my_review_status || '',
-                comment: selectedLowRatingReview.my_review_comment || '',
+                status: selectedLowRatingReview?.my_review_status || '',
+                comment: selectedLowRatingReview?.my_review_comment || '',
             });
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [lowRatingReviewDraftKey]);
+
+        useEffect(() => {
             setLowRatingFinalDraft({
-                status: selectedLowRatingReview.final_status || '',
-                comment: selectedLowRatingReview.final_comment || '',
+                status: selectedLowRatingReview?.final_status || '',
+                comment: selectedLowRatingReview?.final_comment || '',
             });
-        }, [selectedLowRatingReview]);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [lowRatingFinalDraftKey]);
+
+        useEffect(() => {
+            // Отметки — с сохранённого решения (по умолчанию тот, кому оценку отдал Chat2Desk).
+            setLowRatingAttributionDraft(lowRatingLoadedAttribution(selectedLowRatingReview));
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [lowRatingAttributionDraftKey]);
 
         // Метки вкладок по модели. НЕ мутируем общий const TABS — строим производный массив.
         const VIEW_TABS = useMemo(() => {
@@ -8982,8 +9079,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         >
                                                             <div className="flex items-start justify-between gap-2">
                                                                 <div className="min-w-0">
-                                                                    <div className="truncate text-[13px] font-semibold text-slate-900" title={row.operator_name || ''}>
-                                                                        {row.operator_name || '—'}
+                                                                    <div className="truncate text-[13px] font-semibold text-slate-900" title={lowRatingOwnerNames(row)}>
+                                                                        {lowRatingOwnerNames(row)}
                                                                     </div>
                                                                     <div className="mt-0.5 truncate text-[11px] text-slate-500">
                                                                         <span>{`${row.phone_number || row.phone_normalized || '—'} · ${row.taxi_park || row.direction_name || '—'}`}</span>
@@ -9058,7 +9155,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </span>
                                                 <div className="min-w-0">
                                                     <div className="truncate text-sm font-semibold text-slate-900">
-                                                        <span>{selectedLowRatingReview.operator_name || '—'}</span>
+                                                        <span>{lowRatingOwnerNames(selectedLowRatingReview)}</span>
                                                     </div>
                                                     <div className="truncate text-[11px] text-slate-500">
                                                         <span>{lowRatingMetaLine(selectedLowRatingReview, { withDepartment: true })}</span>
@@ -9114,6 +9211,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             loading={!lowRatingChatReady || lowRatingChat.loading}
                                                             error={lowRatingChatReady ? lowRatingChat.error : ''}
                                                             hideService={lowRatingHideService}
+                                                            managerSegments
                                                             emptyText="В этом чате нет сообщений"
                                                         />
                                                     </Suspense>
@@ -9144,6 +9242,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         {lowRatingPanelOpen ? 'Свернуть' : 'Вынести вердикт'}
                                                     </button>
                                                 </div>
+
+                                                {lowRatingPanelOpen && (
+                                                    <div key={`lr-attribution-${selectedLowRatingReview.id}`} className="border-t border-slate-100">
+                                                        <Suspense fallback={null}>
+                                                            <LowRatingAttribution
+                                                                participants={lowRatingChatReady ? lowRatingChat.participants : []}
+                                                                attributed={selectedLowRatingReview.attributed_operators || []}
+                                                                value={lowRatingAttributionDraft}
+                                                                onChange={setLowRatingAttributionDraft}
+                                                                verdict={
+                                                                    selectedLowRatingReview.can_finalize
+                                                                        ? ''
+                                                                        : lowRatingReviewDraft.status
+                                                                }
+                                                                disabled={Boolean(lowRatingSavingKey)}
+                                                            />
+                                                        </Suspense>
+                                                    </div>
+                                                )}
 
                                                 {lowRatingPanelOpen && (
                                                     <div key={`lr-verdict-${selectedLowRatingReview.id}`} className={`grid max-h-[52vh] gap-3 overflow-y-auto border-t border-slate-100 bg-slate-50/60 px-4 py-3 lg:grid-cols-2 ${
@@ -9249,6 +9366,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             <span>{`${lowRatingFinalLabel(selectedLowRatingReview)}${selectedLowRatingReview.final_comment ? ` · ${selectedLowRatingReview.final_comment}` : ''}`}</span>
                                                                         </div>
                                                                     )}
+                                                                    <Suspense fallback={null}>
+                                                                        <LowRatingHistory
+                                                                            reviewId={selectedLowRatingReview.id}
+                                                                            count={Number(selectedLowRatingReview.history_count || 0)}
+                                                                            loadHistory={loadLowRatingHistory}
+                                                                        />
+                                                                    </Suspense>
                                                                 </div>
                                                             );
                                                         })()}

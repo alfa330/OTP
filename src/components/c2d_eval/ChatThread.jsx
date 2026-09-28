@@ -149,12 +149,22 @@ function MediaAnnotation({ ann, light }) {
     );
 }
 
+/* Сообщение Chat2Desk о передаче или назначении чата. По нему в разборе низких
+ * оценок видно, кто принял чат, до какого момента вёл и кому передал. */
+export const isTransferMessage = (m) => m?.type === 'system'
+    && /^(Чат передан|Чат назначен|Chat transferred|Chat assigned)/i.test(String(m?.text || '').trim());
+
 const ChatThread = forwardRef(function ChatThread({
     snapshot,
     loading = false,
     error = '',
     quotes = [],
     hideService = false,
+    // Разбор низких оценок (задача #286): передачи чата рисуются разделителем
+    // и не прячутся вместе с автоответами, а имя менеджера стоит только над
+    // первой репликой после смены автора — так лента читается отрезками
+    // «кто вёл». В остальных местах поведение прежнее.
+    managerSegments = false,
     focusMessageId = null,
     // Куда встать при открытии: 'start' — к началу переписки (так открываются
     // оценки: разбирают чат с первой реплики), 'end' — к свежему хвосту (так
@@ -233,19 +243,36 @@ const ChatThread = forwardRef(function ChatThread({
 
     const messages = useMemo(() => {
         const items = snapshot?.messages || [];
-        return hideService ? items.filter((m) => m.type !== 'system' && m.type !== 'autoreply') : items;
-    }, [snapshot, hideService]);
+        if (!hideService) return items;
+        return items.filter((m) => (
+            m.type === 'autoreply' ? false
+                : m.type !== 'system' || (managerSegments && isTransferMessage(m))
+        ));
+    }, [snapshot, hideService, managerSegments]);
 
     const withDays = useMemo(() => {
         const out = [];
         let lastDay = null;
+        // Автор предыдущей реплики менеджера в текущем отрезке ленты.
+        let lastAuthor = null;
         messages.forEach((m) => {
             const day = (m.created || '').slice(0, 10);
-            if (day && day !== lastDay) { out.push({ _day: fmtDay(m.created), id: `day-${day}` }); lastDay = day; }
+            if (day && day !== lastDay) {
+                out.push({ _day: fmtDay(m.created), id: `day-${day}` });
+                lastDay = day;
+                lastAuthor = null;
+            }
+            if (managerSegments && isTransferMessage(m)) lastAuthor = null;
+            if (managerSegments && m.type === 'to_client' && 'author' in m) {
+                const author = m.author || '';
+                out.push({ ...m, _showAuthor: author !== lastAuthor });
+                lastAuthor = author;
+                return;
+            }
             out.push(m);
         });
         return out;
-    }, [messages]);
+    }, [messages, managerSegments]);
 
     return (
         <div ref={threadRef} className={`min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f2f2f7] py-3 ${className}`}>
@@ -268,6 +295,17 @@ const ChatThread = forwardRef(function ChatThread({
                     return (
                         <div key={m.id} className="flex justify-center py-1.5">
                             <span className="rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">{m._day}</span>
+                        </div>
+                    );
+                }
+                if (managerSegments && isTransferMessage(m)) {
+                    return (
+                        <div key={m.id} className="flex items-center gap-3 px-4 py-2">
+                            <span className="h-px min-w-6 flex-1 bg-slate-300/80" aria-hidden="true" />
+                            <span className="max-w-[80%] text-center text-[11px] font-semibold leading-snug text-slate-500">
+                                {m.text} · {fmtTime(m.created)}
+                            </span>
+                            <span className="h-px min-w-6 flex-1 bg-slate-300/80" aria-hidden="true" />
                         </div>
                     );
                 }
@@ -308,7 +346,11 @@ const ChatThread = forwardRef(function ChatThread({
                                 подписываем строго m.author: если автор неизвестен —
                                 лучше без подписи, чем чужим именем. Имя из снапшота —
                                 фолбэк для Chat2Desk и снапшотов старой схемы. */}
-                            {out && ('author' in m ? m.author : snapshot.operator_name) && (
+                            {/* В разборе низких оценок подпись по оператору снапшота
+                                не годится: это тот, кому Chat2Desk отдал оценку, и реплики
+                                другого менеджера под его именем — ровно та ошибка, которую
+                                разбор исправляет. Там — только настоящий автор. */}
+                            {out && m._showAuthor !== false && ('author' in m ? m.author : (managerSegments ? '' : snapshot.operator_name)) && (
                                 <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-blue-100">
                                     <Headset size={11} /> {'author' in m ? m.author : snapshot.operator_name}
                                 </div>

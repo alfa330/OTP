@@ -52,6 +52,7 @@ from yataxi import reg_contest
 from yataxi import front_office_calls
 from database import (
     db,
+    LowRatingAttributionConflict,
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
     SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES,
     SHIFT_BREAK_MIN_GAP_MINUTES,
@@ -8146,7 +8147,19 @@ def _c2d_normalize_message(msg, target_tz):
         'attachments': attachments,
         'status': msg.get('status'),
         'requestId': msg.get('request_id'),
+        # Учётка Chat2Desk: у реплик менеджера — автор, у сообщений клиента — на
+        # ком чат висел в этот момент. Без неё не видно, кто из менеджеров вёл
+        # чат (задача #286), а приходит она в том же ответе бесплатно.
+        'operatorId': _c2d_int_or_none(msg.get('operator_id')),
     }
+
+
+def _c2d_int_or_none(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _c2d_fetch_request_messages(request_id, request_start=None, request_end=None):
@@ -52995,24 +53008,49 @@ def update_chat_manager_low_rating_review(review_id):
 
         payload = request.get_json(silent=True) or {}
         action = str(payload.get('action') or payload.get('reviewer') or 'review').strip().lower()
-        if action in {'final', 'head', 'manager'}:
-            if not role_can_finalize:
-                return jsonify({"error": "Only department head can set final decision"}), 403
-            if not current.get('has_review_conflict'):
-                return jsonify({"error": "Final decision is available only when two reviews disagree"}), 400
-            updated = db.finalize_chat_manager_low_rating_review(
-                review_id=review_id,
-                status=payload.get('status'),
-                comment=payload.get('comment') or '',
-                updated_by=requester_id
+        # Кому засчитать оценку (задача #286). Поля нет — атрибуцию не трогаем:
+        # так продолжает работать и вкладка, открытая до обновления.
+        operator_ids = payload.get('operator_ids') if 'operator_ids' in payload else None
+        # Какие отметки проверяющий видел, выбирая «обоснованно»: если с тех пор
+        # их поменял другой, сохранение отклоняется с 409 и свежей карточкой.
+        base_operator_ids = payload.get('base_operator_ids') if 'base_operator_ids' in payload else None
+        attribution_scope = (
+            None if _is_global_admin_requester(requester_role, requester_id)
+            else _department_scope_id_for_requester(requester_id)
+        )
+        try:
+            if action in {'final', 'head', 'manager'}:
+                if not role_can_finalize:
+                    return jsonify({"error": "Only department head can set final decision"}), 403
+                if not current.get('has_review_conflict'):
+                    return jsonify({"error": "Final decision is available only when two reviews disagree"}), 400
+                updated = db.finalize_chat_manager_low_rating_review(
+                    review_id=review_id,
+                    status=payload.get('status'),
+                    comment=payload.get('comment') or '',
+                    updated_by=requester_id,
+                    operator_ids=operator_ids,
+                    department_scope_id=attribution_scope,
+                    base_operator_ids=base_operator_ids
+                )
+            else:
+                updated = db.save_chat_manager_low_rating_personal_review(
+                    review_id=review_id,
+                    reviewer_id=requester_id,
+                    status=payload.get('status'),
+                    comment=payload.get('comment') or '',
+                    operator_ids=operator_ids,
+                    department_scope_id=attribution_scope,
+                    base_operator_ids=base_operator_ids
+                )
+        except LowRatingAttributionConflict as conflict:
+            fresh = db.get_chat_manager_low_rating_review(
+                review_id,
+                viewer_id=requester_id,
+                public=True,
+                can_finalize=role_can_finalize
             )
-        else:
-            updated = db.save_chat_manager_low_rating_personal_review(
-                review_id=review_id,
-                reviewer_id=requester_id,
-                status=payload.get('status'),
-                comment=payload.get('comment') or ''
-            )
+            return jsonify({"error": str(conflict), "code": "ATTRIBUTION_CHANGED", "review": fresh}), 409
 
         if not updated:
             return jsonify({"error": "Review not found"}), 404
@@ -53028,6 +53066,42 @@ def update_chat_manager_low_rating_review(review_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error updating chat manager low rating review: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/chat_manager/low_rating_reviews/<review_id>/history', methods=['GET'])
+@require_api_key
+def chat_manager_low_rating_review_history(review_id):
+    """История разбора низкой оценки: кто и когда менял вердикт и атрибуцию
+    (задача #286). Видят только проверяющие — в пределах своего отдела."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3])
+        headed_dept_id = _headed_department_id(requester_id)
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
+            return jsonify({"error": "Forbidden"}), 403
+        if not _is_low_rating_review_id(review_id):
+            return jsonify({"error": "Review not found"}), 404
+
+        current = db.get_chat_manager_low_rating_review(review_id)
+        if not current:
+            return jsonify({"error": "Review not found"}), 404
+        if not _is_global_admin_requester(requester_role, requester_id):
+            scope_dept = _department_scope_id_for_requester(requester_id)
+            if scope_dept is not None and int(current.get('department_id') or 0) != int(scope_dept):
+                return jsonify({"error": "Forbidden"}), 403
+
+        return jsonify({
+            "status": "success",
+            "history": db.get_chat_manager_low_rating_review_history(review_id),
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Error loading chat manager low rating review history: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -53055,6 +53129,210 @@ def _low_rating_chat_request_id(raw_payload):
         if value > 0:
             return value
     return None
+
+
+# Сообщения, по которым видно, кто вёл чат: реплики менеджера, его внутренние
+# заметки и сообщения клиента (у них Chat2Desk ставит того, на ком чат висел, —
+# так в список попадает и тот, кто держал чат, не отвечая). Системные и
+# автоответы не в счёт: при передаче в группу вендор ставит туда кого придётся.
+LOW_RATING_PARTICIPANT_MESSAGE_TYPES = ('to_client', 'comment', 'from_client')
+
+
+def _c2d_api_date(day_iso):
+    """'2026-08-10' → '10-08-2026': другого формата /v1/messages не принимает."""
+    text = str(day_iso or '')[:10]
+    return f"{text[8:10]}-{text[5:7]}-{text[0:4]}"
+
+
+def _low_rating_snapshot_fill_operators(snapshot):
+    """Дописывает в сообщения снапшота учётку Chat2Desk (operatorId).
+
+    Раньше снапшот её выбрасывал, хотя вендор отдаёт её в каждом сообщении, —
+    без неё не видно, кто из менеджеров вёл чат (задача #286). Новые снапшоты
+    пишутся уже с ней. Для старых — сначала бесплатное сырьё вебхуков (неделя),
+    затем ОДИН запрос к API по окну дат диалога (квота Chat2Desk на исходе, а
+    по дате /v1/messages отдаёт всю заявку одним ответом). Найденное сохраняется
+    в снапшот, так что повторное открытие квоту уже не тратит; ленту не
+    переписываем — только добавляем поле.
+
+    Спрашиваем только о тех сообщениях, по которым видно, кто вёл чат
+    (LOW_RATING_PARTICIPANT_MESSAGE_TYPES): учётка у системных и автоответов
+    разбору не нужна, и ради неё платный запрос не делается."""
+    if not snapshot or (snapshot.get('source') or 'chat2desk') != 'chat2desk':
+        return snapshot
+    messages = [dict(m) for m in (snapshot.get('messages') or []) if isinstance(m, dict)]
+    missing = [m for m in messages if 'operatorId' not in m and m.get('id') is not None]
+    if not missing:
+        return snapshot
+
+    def matters(message):
+        return message.get('type') in LOW_RATING_PARTICIPANT_MESSAGE_TYPES
+
+    days = sorted(str(m.get('created') or '')[:10] for m in messages if m.get('created'))
+    first_day = last_day = None
+    try:
+        if days:
+            first_day = dt_date.fromisoformat(days[0])
+            last_day = dt_date.fromisoformat(days[-1])
+    except ValueError:
+        first_day = last_day = None
+
+    found = {}
+    if first_day and snapshot.get('request_id'):
+        try:
+            found.update(db.get_c2d_webhook_message_operators(
+                snapshot['request_id'], first_day - timedelta(days=1), last_day + timedelta(days=1)))
+        except Exception:
+            logging.exception("low rating chat: webhook operators lookup failed")
+
+    api_checked = False
+    api_covered = False
+    request_meta = snapshot.get('request') if isinstance(snapshot.get('request'), dict) else {}
+    need_api = [m['id'] for m in missing if matters(m) and m['id'] not in found]
+    if need_api and first_day and snapshot.get('dialog_id') and not request_meta.get('operator_ids_checked'):
+        try:
+            params = {
+                'dialog_id': int(snapshot['dialog_id']),
+                'start_date': _c2d_api_date(first_day.isoformat()),
+                # Граница конца у вендора — «строго до» по Алматы (проверено
+                # живьём в driver_chats.fetch_window_messages): без лишних суток
+                # чат через полночь терял сообщения второго дня.
+                'finish_date': _c2d_api_date((last_day + timedelta(days=1)).isoformat()),
+                'limit': 200,
+            }
+            page = _c2d_api_get('/v1/messages', params=params)
+            rows = [m for m in (page.get('data') or []) if isinstance(m, dict) and m.get('id') is not None]
+            api_found = {m['id']: _c2d_int_or_none(m.get('operator_id')) for m in rows}
+            try:
+                window_total = int(float((page.get('meta') or {}).get('total') or 0))
+            except (TypeError, ValueError):
+                window_total = 0
+            # В окне больше 200 сообщений (offset вендор игнорирует): второй
+            # и последний запрос — хвост окна. Вместе они кроют до 400.
+            if window_total > len(rows) and any(mid not in api_found for mid in need_api):
+                tail = _c2d_api_get('/v1/messages', params={**params, 'order': 'desc'})
+                for m in tail.get('data') or []:
+                    if isinstance(m, dict) and m.get('id') is not None:
+                        api_found.setdefault(m['id'], _c2d_int_or_none(m.get('operator_id')))
+            for mid, operator_value in api_found.items():
+                found.setdefault(mid, operator_value)
+            api_checked = True
+            # Ответ вообще про эту переписку? Если ни одного нашего сообщения в нём
+            # нет, отмечать остальные «вендор не знает» было бы враньём.
+            api_covered = any(m.get('id') in api_found for m in messages)
+        except Exception as exc:
+            logging.warning("low rating chat: Chat2Desk operators lookup failed: %s", exc)
+
+    changed = False
+    for m in missing:
+        if m['id'] in found:
+            m['operatorId'] = found[m['id']]
+        elif not matters(m) or api_covered:
+            # Разбору не нужно или вендор об этом сообщении не знает — отмечаем,
+            # чтобы не спрашивать снова.
+            m['operatorId'] = None
+        else:
+            continue
+        changed = True
+    if not changed and not api_checked:
+        return snapshot
+    try:
+        # Флаг — после любого успешного ответа: повторный платный запрос по той же
+        # переписке ничего нового не даст, а квота на исходе.
+        db.update_c2d_snapshot_messages(
+            snapshot['id'], messages,
+            {'operator_ids_checked': True} if api_checked else None)
+    except Exception:
+        logging.exception("low rating chat: failed to persist snapshot operators")
+    return {**snapshot, 'messages': messages}
+
+
+def _low_rating_chat_view(snapshot, review, department_scope_id=None):
+    """Переписка для разбора: подписи авторов и список менеджеров чата.
+
+    Возвращает (снапшот для ответа, participants). Подписи — только в ответе,
+    в БД не пишутся: имя учётки может смениться, а id — нет.
+
+    selectable — можно ли этому проверяющему засчитать менеджеру оценку: нужен
+    сотрудник, а проверяющему с ограничением по отделу — сотрудник своего
+    отдела (то же правило, что проверяет сервер при сохранении). Тот, кому
+    оценку отдал Chat2Desk, и уже засчитанные доступны всегда."""
+    messages = [dict(m) for m in (snapshot.get('messages') or []) if isinstance(m, dict)]
+    has_operator_ids = any('operatorId' in m for m in messages)
+    c2d_ids = {m.get('operatorId') for m in messages if m.get('operatorId')}
+    directory = db.get_c2d_operator_directory(c2d_ids) if c2d_ids else {}
+
+    if has_operator_ids:
+        for m in messages:
+            if m.get('type') not in ('to_client', 'comment'):
+                continue
+            # Неизвестный автор — без подписи, а не чужим именем.
+            m['author'] = (directory.get(m.get('operatorId')) or {}).get('name') or ''
+
+    own_id = int(review.get('operator_id') or 0) or None
+    attribution = db._low_rating_effective_attribution(
+        review.get('operator_id'), review.get('attributed_operator_ids'))
+    always_allowed = {value for value in [own_id] + attribution if value}
+    attributed_names = {op.get('id'): op.get('name') for op in (review.get('attributed_operators') or [])}
+
+    def selectable(user_id, department_id):
+        if not user_id:
+            return False
+        if user_id in always_allowed or department_scope_id is None:
+            return True
+        return department_id is not None and int(department_id) == int(department_scope_id)
+
+    participants = {}
+    order = []
+    for m in messages:
+        if m.get('type') not in LOW_RATING_PARTICIPANT_MESSAGE_TYPES or not m.get('operatorId'):
+            continue
+        entry_info = directory.get(m['operatorId']) or {}
+        key = entry_info.get('user_id') or f"c2d:{m['operatorId']}"
+        entry = participants.get(key)
+        if entry is None:
+            entry = {
+                'id': entry_info.get('user_id'),
+                'c2d_id': m['operatorId'],
+                'name': entry_info.get('name') or '',
+                'first_at': m.get('created'),
+                'last_at': m.get('created'),
+                'replies': 0,
+                'selectable': selectable(entry_info.get('user_id'), entry_info.get('department_id')),
+            }
+            participants[key] = entry
+            order.append(key)
+        if m.get('created'):
+            entry['last_at'] = m['created']
+        if m.get('type') == 'to_client':
+            entry['replies'] += 1
+
+    # Тот, кому оценку отдал Chat2Desk, и уже засчитанные — в списке всегда,
+    # даже если в переписке их не видно (старый снапшот без учёток).
+    for user_id in [own_id] + attribution:
+        if user_id and user_id not in participants:
+            participants[user_id] = {
+                'id': user_id,
+                'c2d_id': None,
+                'name': (
+                    (review.get('operator_name') if user_id == own_id else '')
+                    or attributed_names.get(user_id) or ''
+                ),
+                'first_at': None,
+                'last_at': None,
+                'replies': 0,
+                'selectable': True,
+            }
+            order.append(user_id)
+
+    result = []
+    for key in order:
+        entry = participants[key]
+        entry['is_default'] = bool(own_id and entry.get('id') == own_id)
+        result.append(entry)
+    # Сначала по времени появления в чате; без времени — в конец, как были.
+    result.sort(key=lambda item: (item.get('first_at') is None, item.get('first_at') or ''))
+    return {**snapshot, 'messages': messages}, result
 
 
 @app.route('/api/chat_manager/low_rating_reviews/<review_id>/chat', methods=['GET'])
@@ -53089,7 +53367,11 @@ def chat_manager_low_rating_review_chat(review_id):
         # Оператор открывает переписку СВОЕЙ низкой оценки из «Мои оценки» —
         # только для чтения и только по QR-подтверждённой сессии (тот же ключ,
         # что открывает записи разговоров). Чужие оценки ему недоступны.
+        # «Своя» — отданная ему Chat2Desk или засчитанная ему итоговым решением
+        # (задача #286): ровно те строки, что он видит в «Моих оценках».
         is_own_rating = int(current.get('operator_id') or 0) == int(requester_id)
+        if not is_own_rating and current.get('final_status') == 'valid':
+            is_own_rating = int(requester_id) in (current.get('attributed_operator_ids') or [])
         if not is_reviewer:
             if not is_own_rating:
                 return jsonify({"error": "Forbidden"}), 403
@@ -53153,13 +53435,28 @@ def chat_manager_low_rating_review_chat(review_id):
                 request_id, dialog_id, messages,
                 request_row=snapshot_row, created_by=requester_id)
             snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+        else:
+            snapshot = _low_rating_snapshot_fill_operators(snapshot)
 
-        return jsonify({
+        participants = []
+        if snapshot is not None:
+            snapshot, participants = _low_rating_chat_view(
+                snapshot, current,
+                department_scope_id=(
+                    None if not is_reviewer or _is_global_admin_requester(requester_role, requester_id)
+                    else _department_scope_id_for_requester(requester_id)
+                ),
+            )
+        payload = {
             "status": "success",
             "snapshot": snapshot,
             "request_id": request_id,
             "cached": cached,
-        }), 200
+        }
+        # Список менеджеров чата нужен только тем, кто выносит вердикт.
+        if is_reviewer:
+            payload["participants"] = participants
+        return jsonify(payload), 200
 
     except RuntimeError as e:
         logging.warning("low rating chat fetch: %s", e)
@@ -53190,6 +53487,17 @@ def _low_rating_status_ru(status):
     if key == 'invalid':
         return 'Необоснованно'
     return 'На проверке'
+
+
+def _low_rating_attributed_names(row):
+    """Кому засчитана итоговая обоснованная оценка — для колонки выгрузки."""
+    if row.get('final_status') != 'valid':
+        return ''
+    return ', '.join(
+        str(op.get('name') or '').strip()
+        for op in (row.get('attributed_operators') or [])
+        if str(op.get('name') or '').strip()
+    )
 
 
 def _low_rating_fmt_dt(value):
@@ -53231,17 +53539,25 @@ def _build_low_rating_reviews_workbook(rows, summary, period_start, period_end, 
     # ── Лист 1: детализация ──────────────────────────────────────────────
     ws = wb.active
     ws.title = 'Низкие оценки'
+    # «Засчитана» — кому оценка идёт в статистику по итогу разбора (задача #286):
+    # Chat2Desk отдаёт её тому, кто закрыл чат, а проверяющие могут засчитать
+    # её другому менеджеру или сразу нескольким. Заполнена только у итогового
+    # «обоснованно»: необоснованная не засчитывается никому, а пока разбор
+    # идёт, оценка на том, кто в колонке «Оператор».
     headers = [
-        'Дата', 'Оператор', 'Отдел', 'Направление', 'Телефон', 'Таксопарк',
+        'Дата', 'Оператор', 'Засчитана', 'Отдел', 'Направление', 'Телефон', 'Таксопарк',
         'Оценка', 'Итог', 'Источник итога', 'Проверок',
         'Вердикты проверяющих', 'Комментарий итога', 'Комментарий клиента'
     ]
+    center_cols = (8, 11)
+    wrap_cols = (3, 12, 13, 14)
+    verdict_col = 9
     for col_idx, title in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col_idx, value=title)
         cell.fill = header_fill
         cell.font = header_font
         cell.border = border
-        cell.alignment = center if col_idx in (7, 10) else Alignment(vertical='center')
+        cell.alignment = center if col_idx in center_cols else Alignment(vertical='center')
 
     for r_idx, row in enumerate(rows, start=2):
         verdict_text, verdict_cat = _low_rating_verdict_label(row)
@@ -53255,6 +53571,7 @@ def _build_low_rating_reviews_workbook(rows, summary, period_start, period_end, 
         values = [
             _low_rating_fmt_dt(row.get('rated_at') or row.get('day')),
             row.get('operator_name') or '',
+            _low_rating_attributed_names(row),
             row.get('department_name') or '',
             row.get('direction_name') or '',
             row.get('phone_number') or row.get('phone_normalized') or '',
@@ -53270,17 +53587,17 @@ def _build_low_rating_reviews_workbook(rows, summary, period_start, period_end, 
         for c_idx, value in enumerate(values, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=value)
             cell.border = border
-            if c_idx in (11, 12, 13):
+            if c_idx in wrap_cols:
                 cell.alignment = wrap
-            elif c_idx in (7, 10):
+            elif c_idx in center_cols:
                 cell.alignment = center
             else:
                 cell.alignment = Alignment(vertical='top')
-            if c_idx == 8:
+            if c_idx == verdict_col:
                 cell.fill = cat_fill.get(verdict_cat)
                 cell.font = cat_font.get(verdict_cat)
 
-    widths = [17, 24, 18, 18, 16, 18, 9, 22, 15, 10, 46, 30, 36]
+    widths = [17, 24, 26, 18, 18, 16, 18, 9, 22, 15, 10, 46, 30, 36]
     for idx, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     ws.freeze_panes = 'A2'
@@ -53328,25 +53645,31 @@ def _build_low_rating_reviews_workbook(rows, summary, period_start, period_end, 
             vcell.font = cat_font.get(cat)
         r += 1
 
-    # Детализация по операторам
+    # Детализация по операторам. Итоговая обоснованная — у тех, кому она
+    # засчитана (каждому целиком, как и в статистике), остальные — у того,
+    # кому оценку отдал Chat2Desk.
     by_operator = {}
     for row in rows:
-        key = row.get('operator_id') or row.get('operator_name')
-        agg = by_operator.get(key)
-        if agg is None:
-            agg = {
-                'name': row.get('operator_name') or '—',
-                'department': row.get('department_name') or '',
-                'total': 0, 'valid': 0, 'invalid': 0, 'pending': 0, 'conflict': 0,
-                'excluded': 0.0, 'score_sum': 0.0,
-            }
-            by_operator[key] = agg
-        agg['total'] += 1
-        agg['score_sum'] += float(row.get('score') or 0)
         _, cat = _low_rating_verdict_label(row)
-        agg[cat] = agg.get(cat, 0) + 1
-        if row.get('final_status') == 'invalid':
-            agg['excluded'] += float(row.get('score') or 0)
+        owners = [{'id': row.get('operator_id'), 'name': row.get('operator_name')}]
+        if row.get('final_status') == 'valid' and row.get('attributed_operators'):
+            owners = row.get('attributed_operators')
+        for owner in owners:
+            key = owner.get('id') or owner.get('name')
+            agg = by_operator.get(key)
+            if agg is None:
+                agg = {
+                    'name': owner.get('name') or '—',
+                    'department': row.get('department_name') or '',
+                    'total': 0, 'valid': 0, 'invalid': 0, 'pending': 0, 'conflict': 0,
+                    'excluded': 0.0, 'score_sum': 0.0,
+                }
+                by_operator[key] = agg
+            agg['total'] += 1
+            agg['score_sum'] += float(row.get('score') or 0)
+            agg[cat] = agg.get(cat, 0) + 1
+            if row.get('final_status') == 'invalid':
+                agg['excluded'] += float(row.get('score') or 0)
 
     r += 2
     ws2.cell(row=r, column=1, value='Детализация по операторам').font = Font(bold=True, size=12, color='0F172A')

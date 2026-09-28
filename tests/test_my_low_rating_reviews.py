@@ -40,13 +40,18 @@ def _db_method(name):
 def _load_operator_item():
     """Достаём чистые статические методы без импорта database.py целиком."""
     namespace = {}
-    for name in ("_low_rating_extract_source_details", "_low_rating_operator_item"):
+    for name in (
+        "_low_rating_extract_source_details",
+        "_low_rating_effective_attribution",
+        "_low_rating_operator_item",
+    ):
         node = copy.deepcopy(_db_method(name))
         node.decorator_list = []
         exec(compile(ast.Module(body=[node], type_ignores=[]), "<db>", "exec"), namespace)
 
     class DatabaseShim:
         _low_rating_extract_source_details = staticmethod(namespace["_low_rating_extract_source_details"])
+        _low_rating_effective_attribution = staticmethod(namespace["_low_rating_effective_attribution"])
 
     namespace["Database"] = DatabaseShim
     return namespace["_low_rating_operator_item"]
@@ -163,13 +168,27 @@ class OperatorLowRatingItemTests(unittest.TestCase):
 
     def test_reviewer_side_fields_never_leak(self):
         self.item["final_status"] = "valid"
-        result = self.build(self.item)
+        self.item["attributed_operator_ids"] = [190, 227]
+        self.item["attributed_operators"] = [{"id": 190, "name": "Оператор"}, {"id": 227, "name": "Коллега"}]
+        result = self.build(self.item, viewer_id=190)
         for forbidden in (
             "my_review_status", "my_review_comment", "has_review_conflict",
             "can_finalize", "review_entries", "department_id", "department_name",
             "operator_id", "operator_name", "review_count",
+            # Кому ещё засчитана оценка — разбор чужих показателей (задача #286).
+            "attributed_operator_ids", "attributed_operators",
         ):
             self.assertNotIn(forbidden, result)
+
+    def test_rating_given_to_another_manager_is_marked_for_the_owner(self):
+        """Задача #286: обоснованную засчитали другому менеджеру — оператору
+        видно, что на его показатель она не влияет."""
+        self.item["final_status"] = "valid"
+        self.item["attributed_operator_ids"] = [227]
+        self.assertTrue(self.build(self.item, viewer_id=190)["reassigned"])
+        self.assertFalse(self.build(self.item, viewer_id=227)["reassigned"])
+        # Без зрителя (как раньше) пометки нет.
+        self.assertFalse(self.build(self.item)["reassigned"])
 
 
 class LowRatingChatAccessTests(unittest.TestCase):

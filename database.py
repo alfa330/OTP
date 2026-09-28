@@ -1417,6 +1417,12 @@ MEMBERSHIP_DAY_DISTANCE_SQL = (
 )
 
 
+class LowRatingAttributionConflict(ValueError):
+    """Кому засчитана низкая оценка, поменял другой проверяющий уже после того,
+    как сохраняющий открыл карточку (задача #286). Решение об атрибуции одно на
+    разбор, поэтому сохранение по устаревшим отметкам молча стёрло бы чужое."""
+
+
 class Database:
     SURVEY_OTHER_ANSWER_MAX_LENGTH = 500
     SCHEMA_INIT_LOCK_KEY = 915904137
@@ -2799,6 +2805,39 @@ class Database:
                 WHERE zhanna_updated_by IS NOT NULL AND zhanna_status IS NOT NULL
                 ON CONFLICT (review_id, reviewer_id) DO NOTHING;
             """)
+            # Кому засчитана низкая оценка (задача #286). Chat2Desk отдаёт оценку
+            # тому, кто закрыл чат, а вести его могли несколько менеджеров. NULL —
+            # оценка на том, кому её отдал Chat2Desk (operator_id); массив — решение
+            # проверяющих. Обоснованная засчитывается КАЖДОМУ из списка целиком, а
+            # не делится, и действует только при итоговом «обоснованно».
+            cursor.execute("""
+                ALTER TABLE chat_manager_low_rating_reviews
+                ADD COLUMN IF NOT EXISTS attributed_operator_ids INTEGER[];
+            """)
+            # Журнал разбора: кто и когда менял вердикт и атрибуцию. Текущие голоса
+            # живут в review_entries и перезаписываются, поэтому история — отдельно
+            # и только пополняется. comment = NULL — комментарий не менялся;
+            # operator_ids = NULL — атрибуция не менялась.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_manager_low_rating_review_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    review_id UUID NOT NULL REFERENCES chat_manager_low_rating_reviews(id) ON DELETE CASCADE,
+                    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    action TEXT NOT NULL,
+                    status TEXT,
+                    prev_status TEXT,
+                    comment TEXT,
+                    operator_ids INTEGER[],
+                    prev_operator_ids INTEGER[],
+                    final_status TEXT,
+                    prev_final_status TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_low_rating_review_history_review
+                ON chat_manager_low_rating_review_history(review_id, created_at);
+            """)
             self._migrate_chat_low_rating_duplicate_keys(cursor)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_metric_surge_windows (
@@ -3120,6 +3159,12 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_c2d_requests_operator_day
                 ON c2d_requests(operator_id, day);
+            """)
+            # Справочник «учётка Chat2Desk → сотрудник» для разбора низких оценок
+            # (задача #286): сообщения вендора знают только id учётки.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_requests_c2d_operator_day
+                ON c2d_requests(c2d_operator_id, day);
             """)
             # Телефон водителя — разрез раздела «Чаты водителей»: он начинается
             # с номера и по нему находит клиента Chat2Desk. Без индекса это шло
@@ -19574,6 +19619,239 @@ class Database:
             return 'invalid'
         raise ValueError("review status must be valid, invalid or empty")
 
+    # Текст ошибки уходит в тост как есть — поэтому по-русски.
+    LOW_RATING_ATTRIBUTION_REQUIRED = "Отметьте хотя бы одного менеджера, которому засчитать оценку"
+    LOW_RATING_ATTRIBUTION_CHANGED = (
+        "Пока карточка была открыта, другой проверяющий изменил, кому засчитана оценка. "
+        "Отметки обновлены — проверьте их и сохраните ещё раз"
+    )
+
+    @staticmethod
+    def _normalize_low_rating_operator_ids(value):
+        """Кому засчитать оценку: уникальные id сотрудников по возрастанию.
+
+        None — поле не пришло, атрибуцию не трогаем. Пустой список — пришло
+        пустым; для «обоснованно» это ошибка, решает вызывающий."""
+        if value is None:
+            return None
+        if isinstance(value, (str, bytes, dict)) or not isinstance(value, (list, tuple, set)):
+            raise ValueError("operator_ids must be a list of user ids")
+        result = set()
+        for raw in value:
+            if isinstance(raw, bool):
+                raise ValueError("operator_ids must be a list of user ids")
+            try:
+                number = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError("operator_ids must be a list of user ids")
+            if number <= 0:
+                raise ValueError("operator_ids must be a list of user ids")
+            result.add(number)
+        return sorted(result)
+
+    @staticmethod
+    def _low_rating_effective_attribution(operator_id, attributed_operator_ids):
+        """Кому засчитывается оценка сейчас: решение проверяющих или, пока его
+        нет, тот, кому её отдал Chat2Desk."""
+        ids = sorted({int(v) for v in (attributed_operator_ids or []) if v is not None})
+        if ids:
+            return ids
+        return [int(operator_id)] if operator_id is not None else []
+
+    @staticmethod
+    def _low_rating_attribution_to_store(operator_id, operator_ids):
+        """Что писать в attributed_operator_ids. Решение, совпавшее с Chat2Desk,
+        хранится как NULL: тогда оценка и дальше идёт за operator_id, если
+        пересинк поправит, кому её отдал вендор, — «по умолчанию» не застывает."""
+        ids = sorted({int(v) for v in (operator_ids or [])})
+        if not ids or (operator_id is not None and ids == [int(operator_id)]):
+            return None
+        return ids
+
+    @staticmethod
+    def _low_rating_db_time_iso(value):
+        """Служебные метки разбора (голоса, итог, история) пишутся
+        CURRENT_TIMESTAMP в сессии UTC и хранятся без пояса, а время самой
+        оценки — местное. На одном экране они стояли рядом с разницей в пять
+        часов. Отдаём по Алматы."""
+        if not isinstance(value, datetime):
+            return None
+        aware = value if value.tzinfo else value.replace(tzinfo=dt_timezone.utc)
+        return aware.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None).isoformat()
+
+    def _low_rating_operator_names_tx(self, cursor, user_ids):
+        """{id сотрудника: имя} для подписи атрибуции.
+
+        Имя учётки Chat2Desk («Имя Фамилия»), а не карточки: им подписаны
+        журнал, сама переписка и сообщения о передаче чата — на одном экране
+        человек не должен называться двумя разными способами."""
+        ids = sorted({int(v) for v in (user_ids or []) if v is not None})
+        if not ids:
+            return {}
+        cursor.execute(
+            """
+            SELECT u.id,
+                   COALESCE(
+                       (SELECT r.c2d_operator_name
+                          FROM c2d_requests r
+                         WHERE r.operator_id = u.id
+                           AND NULLIF(r.c2d_operator_name, '') IS NOT NULL
+                         ORDER BY r.day DESC
+                         LIMIT 1),
+                       (SELECT lr.operator_name
+                          FROM chat_manager_low_rating_reviews lr
+                         WHERE lr.operator_id = u.id
+                           AND NULLIF(lr.operator_name, '') IS NOT NULL
+                         ORDER BY lr.day DESC
+                         LIMIT 1),
+                       u.name,
+                       ''
+                   )
+            FROM users u
+            WHERE u.id = ANY(%s)
+            """,
+            (ids,)
+        )
+        return {int(row[0]): str(row[1] or '') for row in cursor.fetchall() or []}
+
+    def _attach_low_rating_attribution_tx(self, cursor, items):
+        """attributed_operators = [{id, name}] — кому засчитывается каждая оценка."""
+        explicit_ids = {
+            int(v)
+            for item in items
+            for v in (item.get('attributed_operator_ids') or [])
+            if v is not None
+        }
+        names = self._low_rating_operator_names_tx(cursor, explicit_ids) if explicit_ids else {}
+        for item in items:
+            operator_id = item.get('operator_id')
+            own_id = int(operator_id) if operator_id is not None else None
+            effective = self._low_rating_effective_attribution(operator_id, item.get('attributed_operator_ids'))
+            # Тот, кому оценку отдал Chat2Desk, — первым: так список читается как
+            # «было у него, добавили ещё…», а не перемешивается при каждой правке.
+            effective.sort(key=lambda value: (value != own_id, value))
+            item['attributed_operators'] = [
+                {
+                    'id': value,
+                    'name': (
+                        (item.get('operator_name') if value == own_id else '')
+                        or names.get(value)
+                        or ''
+                    ),
+                }
+                for value in effective
+            ]
+            item['attribution_changed'] = bool(item.get('attributed_operator_ids'))
+        return items
+
+    def _validate_low_rating_attribution_tx(self, cursor, operator_ids, own_operator_id,
+                                            department_scope_id=None, stored_ids=None):
+        """Засчитать можно только существующему сотруднику, а проверяющему с
+        ограничением по отделу — только сотруднику своего отдела. Без проверки
+        отдела проходят тот, кому оценку отдал Chat2Desk (оценка и так на нём), и
+        уже засчитанные раньше: это не новое решение, и переведённого с тех пор в
+        другой отдел менеджера иначе пришлось бы снять, чтобы сохранить вердикт."""
+        cursor.execute(
+            "SELECT id, department_id FROM users WHERE id = ANY(%s)",
+            (list(operator_ids),)
+        )
+        found = {int(row[0]): row[1] for row in cursor.fetchall() or []}
+        if any(value not in found for value in operator_ids):
+            raise ValueError("Менеджер для атрибуции не найден")
+        if department_scope_id is None:
+            return
+        own_id = int(own_operator_id) if own_operator_id is not None else None
+        kept = {int(value) for value in (stored_ids or []) if value is not None}
+        for value in operator_ids:
+            if value == own_id or value in kept:
+                continue
+            department_id = found.get(value)
+            if department_id is None or int(department_id) != int(department_scope_id):
+                raise ValueError("Засчитать оценку можно только менеджеру своего отдела")
+
+    def _log_low_rating_history_tx(self, cursor, review_id, actor_id, action, status, prev_status,
+                                   comment, operator_ids, prev_operator_ids, final_status,
+                                   prev_final_status):
+        cursor.execute(
+            """
+            INSERT INTO chat_manager_low_rating_review_history (
+                review_id, actor_id, action, status, prev_status, comment,
+                operator_ids, prev_operator_ids, final_status, prev_final_status
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                review_id,
+                int(actor_id) if actor_id is not None else None,
+                action,
+                status,
+                prev_status,
+                comment,
+                list(operator_ids) if operator_ids is not None else None,
+                list(prev_operator_ids) if prev_operator_ids is not None else None,
+                final_status,
+                prev_final_status,
+            )
+        )
+
+    @staticmethod
+    def _low_rating_recalc_pairs(operator_id, day_obj, *attributions):
+        """(оператор, день), которые надо пересчитать после правки разбора:
+        тот, кому оценку отдал Chat2Desk, и все, кому она была или стала засчитана."""
+        pairs = {(int(operator_id), day_obj)}
+        for attribution in attributions:
+            for value in attribution or []:
+                pairs.add((int(value), day_obj))
+        return pairs
+
+    def get_chat_manager_low_rating_review_history(self, review_id):
+        """История разбора, новые события сверху."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT h.id, h.action, h.actor_id, COALESCE(NULLIF(u.name, ''), ''),
+                       h.status, h.prev_status, h.comment, h.operator_ids,
+                       h.prev_operator_ids, h.final_status, h.prev_final_status,
+                       h.created_at
+                FROM chat_manager_low_rating_review_history h
+                LEFT JOIN users u ON u.id = h.actor_id
+                WHERE h.review_id = %s
+                ORDER BY h.created_at DESC, h.id DESC
+                """,
+                (review_id,)
+            )
+            rows = cursor.fetchall() or []
+            mentioned = {
+                int(value)
+                for row in rows
+                for value in list(row[7] or []) + list(row[8] or [])
+                if value is not None
+            }
+            names = self._low_rating_operator_names_tx(cursor, mentioned) if mentioned else {}
+
+        def _operators(values):
+            if values is None:
+                return None
+            return [{'id': int(value), 'name': names.get(int(value)) or ''} for value in values]
+
+        return [
+            {
+                'id': int(row[0]),
+                'action': row[1],
+                'actor_id': int(row[2]) if row[2] is not None else None,
+                'actor_name': row[3] or '',
+                'status': self._normalize_low_rating_review_status(row[4]),
+                'prev_status': self._normalize_low_rating_review_status(row[5]),
+                'comment': row[6],
+                'operators': _operators(row[7]),
+                'prev_operators': _operators(row[8]),
+                'final_status': self._normalize_low_rating_review_status(row[9]),
+                'prev_final_status': self._normalize_low_rating_review_status(row[10]),
+                'created_at': self._low_rating_db_time_iso(row[11]),
+            }
+            for row in rows
+        ]
+
     @staticmethod
     def _resolve_low_rating_final_status(arai_status, zhanna_status, head_status):
         arai = Database._normalize_low_rating_review_status(arai_status)
@@ -19642,12 +19920,18 @@ class Database:
             'head_comment', 'head_updated_by', 'head_updated_by_name',
             'head_updated_at', 'final_status', 'final_source', 'final_comment',
             'final_decided_by', 'final_decided_by_name', 'final_decided_at',
-            'created_at', 'updated_at', 'direction_name', 'department_id', 'department_name'
+            'created_at', 'updated_at', 'direction_name', 'department_id', 'department_name',
+            'attributed_operator_ids'
         ]
         item = dict(zip(keys, row))
         for key in ('id', 'source_batch_id'):
             if item.get(key) is not None:
                 item[key] = str(item[key])
+        item['attributed_operator_ids'] = [
+            int(value) for value in (item.get('attributed_operator_ids') or []) if value is not None
+        ] or None
+        # Время решения показывается рядом с временем голосов — оба по Алматы.
+        item['final_decided_at'] = Database._low_rating_db_time_iso(item.get('final_decided_at'))
         for key in (
             'rated_at', 'day', 'arai_updated_at', 'zhanna_updated_at',
             'head_updated_at', 'final_decided_at', 'created_at', 'updated_at'
@@ -19705,6 +19989,11 @@ class Database:
             'my_review_status': item.get('my_review_status'),
             'my_review_comment': item.get('my_review_comment') or '',
             'my_review_updated_at': item.get('my_review_updated_at'),
+            # Кому засчитывается оценка ([{id, name}]) и отличается ли это от
+            # того, кому её отдал Chat2Desk.
+            'attributed_operators': item.get('attributed_operators') or [],
+            'attribution_changed': bool(item.get('attribution_changed')),
+            'history_count': int(item.get('history_count') or 0),
         }
         public_item.update(Database._low_rating_extract_source_details(item))
         return public_item
@@ -19754,7 +20043,7 @@ class Database:
                 'reviewer_name': reviewer_name or '',
                 'status': normalized,
                 'comment': comment or '',
-                'updated_at': updated_at.isoformat() if isinstance(updated_at, datetime) else None,
+                'updated_at': self._low_rating_db_time_iso(updated_at),
                 'is_mine': bool(viewer_id is not None and reviewer_id is not None and int(reviewer_id) == int(viewer_id)),
             })
 
@@ -19773,10 +20062,25 @@ class Database:
                 my_entries[str(review_id)] = {
                     'my_review_status': self._normalize_low_rating_review_status(status),
                     'my_review_comment': comment or '',
-                    'my_review_updated_at': updated_at.isoformat() if isinstance(updated_at, datetime) else None,
+                    'my_review_updated_at': self._low_rating_db_time_iso(updated_at),
                 }
 
+        # Сколько событий в истории разбора — чтобы строку «История» показывать
+        # только там, где она есть, и не тянуть сам журнал на каждую карточку.
+        cursor.execute(
+            """
+            SELECT review_id::text, COUNT(*)
+            FROM chat_manager_low_rating_review_history
+            WHERE review_id = ANY(%s::uuid[])
+            GROUP BY review_id
+            """,
+            (review_ids,)
+        )
+        history_counts = {str(row[0]): int(row[1] or 0) for row in cursor.fetchall() or []}
+        self._attach_low_rating_attribution_tx(cursor, items)
+
         for item in items:
+            item['history_count'] = history_counts.get(str(item.get('id')), 0)
             review_id = str(item.get('id'))
             counts = by_review.get(review_id, {'review_count': 0, 'status_counts': {}})
             status_counts = counts.get('status_counts') or {}
@@ -19851,7 +20155,7 @@ class Database:
         for operator_id, day_obj in pairs:
             cursor.execute(
                 """
-                SELECT raw_score_sum, raw_score_count
+                SELECT raw_score_sum, raw_score_count, avg_score
                 FROM chat_manager_daily_metrics
                 WHERE operator_id = %s AND day = %s
                 FOR UPDATE
@@ -19859,32 +20163,90 @@ class Database:
                 (operator_id, day_obj)
             )
             metric_row = cursor.fetchone()
-            if not metric_row:
-                continue
-            raw_sum, raw_count = metric_row
-            if raw_sum is None or raw_count is None:
-                continue
-            try:
-                base_sum = float(raw_sum)
-                base_count = int(raw_count)
-            except Exception:
-                continue
 
+            # Сырой день Chat2Desk правится решениями по низким оценкам (задача
+            # #286): снимаем свои оценки, которые оператору не засчитаны
+            # (необоснованные и отданные другим менеджерам), и добавляем чужие,
+            # засчитанные ему. Засчитанная нескольким идёт каждому целиком.
             cursor.execute(
                 """
-                SELECT COALESCE(SUM(score), 0), COUNT(*)
+                SELECT
+                    COALESCE(SUM(score) FILTER (WHERE operator_id = %s AND (
+                        final_status = 'invalid'
+                        OR (final_status = 'valid'
+                            AND attributed_operator_ids IS NOT NULL
+                            AND NOT (%s = ANY(attributed_operator_ids)))
+                    )), 0),
+                    COUNT(*) FILTER (WHERE operator_id = %s AND (
+                        final_status = 'invalid'
+                        OR (final_status = 'valid'
+                            AND attributed_operator_ids IS NOT NULL
+                            AND NOT (%s = ANY(attributed_operator_ids)))
+                    )),
+                    COALESCE(SUM(score) FILTER (WHERE operator_id <> %s
+                        AND final_status = 'valid'
+                        AND %s = ANY(attributed_operator_ids)), 0),
+                    COUNT(*) FILTER (WHERE operator_id <> %s
+                        AND final_status = 'valid'
+                        AND %s = ANY(attributed_operator_ids))
                 FROM chat_manager_low_rating_reviews
-                WHERE operator_id = %s
-                  AND day = %s
-                  AND final_status = 'invalid'
+                WHERE day = %s
+                  AND (operator_id = %s OR %s = ANY(attributed_operator_ids))
                 """,
-                (operator_id, day_obj)
+                (
+                    operator_id, operator_id,
+                    operator_id, operator_id,
+                    operator_id, operator_id,
+                    operator_id, operator_id,
+                    day_obj, operator_id, operator_id,
+                )
             )
-            invalid_sum_raw, invalid_count_raw = cursor.fetchone() or (0, 0)
-            invalid_sum = float(invalid_sum_raw or 0.0)
-            invalid_count = int(invalid_count_raw or 0)
-            effective_count = max(0, base_count - invalid_count)
-            effective_sum = round(max(0.0, base_sum - invalid_sum), 4)
+            removed_sum_raw, removed_count_raw, added_sum_raw, added_count_raw = cursor.fetchone() or (0, 0, 0, 0)
+            removed_sum = float(removed_sum_raw or 0.0)
+            removed_count = int(removed_count_raw or 0)
+            added_sum = float(added_sum_raw or 0.0)
+            added_count = int(added_count_raw or 0)
+
+            if not metric_row:
+                # Менеджеру засчитали чужую оценку, а своей строки за этот день у
+                # него нет (чат шёл через полночь). Без строки оценка бы просто
+                # потерялась — заводим пустую: оценок Chat2Desk за день ноль.
+                if added_count <= 0:
+                    continue
+                cursor.execute(
+                    """
+                    INSERT INTO chat_manager_daily_metrics (
+                        operator_id, day, raw_score_sum, raw_score_count, raw_payload
+                    )
+                    VALUES (%s, %s, 0, 0, %s)
+                    ON CONFLICT (operator_id, day) DO NOTHING
+                    """,
+                    (operator_id, day_obj, Json({'source': 'low_rating_attribution'}))
+                )
+                base_sum, base_count = 0.0, 0
+            else:
+                raw_sum, raw_count, stored_avg = metric_row
+                if raw_sum is None or raw_count is None:
+                    # Сырья по оценкам за день нет: Chat2Desk оценок не присылал
+                    # или это старый ручной ввод одной средней. Трогаем такой день
+                    # только ради засчитанной чужой оценки, и тогда сырьём
+                    # становится то, что день уже вносил в месяц: средняя с весом 1
+                    # (так её и считает месячная формула) либо ноль.
+                    if added_count <= 0:
+                        continue
+                    if stored_avg is not None:
+                        base_sum, base_count = float(stored_avg), 1
+                    else:
+                        base_sum, base_count = 0.0, 0
+                else:
+                    try:
+                        base_sum = float(raw_sum)
+                        base_count = int(raw_count)
+                    except Exception:
+                        continue
+
+            effective_count = max(0, base_count - removed_count + added_count)
+            effective_sum = round(max(0.0, base_sum - removed_sum + added_sum), 4)
             # Счётчик и сумма урезаются по отдельности, поэтому у испорченного
             # дня получалось «оценок 0, сумма 4.0». Месячный балл считается как
             # SUM(score_sum)/SUM(score_count), и такой день добавлял в числитель,
@@ -19900,10 +20262,15 @@ class Database:
                 SET score_sum = %s,
                     score_count = %s,
                     avg_score = %s,
+                    -- Сырьё фиксируем, если его не было: следующий пересчёт
+                    -- (например, когда засчитанную оценку отдадут обратно)
+                    -- должен вернуть день ровно к исходному состоянию.
+                    raw_score_sum = COALESCE(raw_score_sum, %s),
+                    raw_score_count = COALESCE(raw_score_count, %s),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE operator_id = %s AND day = %s
                 """,
-                (effective_sum, effective_count, effective_avg, operator_id, day_obj)
+                (effective_sum, effective_count, effective_avg, base_sum, base_count, operator_id, day_obj)
             )
             adjusted.append((operator_id, day_obj))
 
@@ -19977,6 +20344,20 @@ class Database:
             WHERE r.rn > 1
         """)
         affected_pairs = {(int(row[0]), row[1]) for row in (cursor.fetchall() or [])}
+        if affected_pairs:
+            # И дни тех, кому эти оценки засчитаны решением проверяющих.
+            cursor.execute(f"""
+                {ranked_cte}
+                SELECT DISTINCT unnest(lr.attributed_operator_ids), lr.day
+                FROM ranked r
+                JOIN chat_manager_low_rating_reviews lr
+                  ON lr.id IN (r.id, r.winner_id)
+                WHERE r.rn > 1
+                  AND lr.attributed_operator_ids IS NOT NULL
+            """)
+            affected_pairs |= {
+                (int(row[0]), row[1]) for row in (cursor.fetchall() or []) if row[0] is not None
+            }
 
         if affected_pairs:
             # 1. Перенести журнал вердиктов ДО удаления: внешний ключ стоит
@@ -20019,11 +20400,23 @@ class Database:
                     final_comment = CASE WHEN w.final_comment = '' THEN l.final_comment ELSE w.final_comment END,
                     final_decided_by = COALESCE(w.final_decided_by, l.final_decided_by),
                     final_decided_at = COALESCE(w.final_decided_at, l.final_decided_at),
+                    attributed_operator_ids = COALESCE(w.attributed_operator_ids, l.attributed_operator_ids),
                     raw_payload = l.raw_payload || w.raw_payload,
                     updated_at = CURRENT_TIMESTAMP
                 FROM ranked r
                 JOIN chat_manager_low_rating_reviews l ON l.id = r.id
                 WHERE w.id = r.winner_id AND r.rn > 1
+            """)
+
+            # 2b. История разбора копии — к выжившей строке: журнал только
+            #     пополняется, и каскад молча стёр бы, кто что решал.
+            cursor.execute(f"""
+                {ranked_cte}
+                UPDATE chat_manager_low_rating_review_history h
+                SET review_id = r.winner_id
+                FROM ranked r
+                WHERE h.review_id = r.id
+                  AND r.rn > 1
             """)
 
             # 2a. Вердикт этого же проверяющего у выжившей строки уже есть —
@@ -20200,7 +20593,31 @@ class Database:
                 duplicates_in_batch
             )
 
+        batch_sources = [row[0] for row in rows]
+        batch_keys = [row[1] for row in rows]
+
+        def _collect_stored_pairs(cursor, with_owner):
+            # Пересинк может сдвинуть день оценки или сменить оператора: пересчитать
+            # надо и прежний день, и дни всех, кому оценка засчитана решением.
+            cursor.execute(
+                """
+                SELECT lr.operator_id, lr.day, lr.attributed_operator_ids
+                FROM chat_manager_low_rating_reviews lr
+                JOIN unnest(%s::text[], %s::text[]) AS k(source, source_key)
+                  ON lr.source = k.source AND lr.source_key = k.source_key
+                WHERE %s OR lr.attributed_operator_ids IS NOT NULL
+                """,
+                (batch_sources, batch_keys, bool(with_owner))
+            )
+            for owner_id, stored_day, attributed in cursor.fetchall() or []:
+                if with_owner and owner_id is not None:
+                    affected_pairs.add((int(owner_id), stored_day))
+                for value in attributed or []:
+                    if value is not None:
+                        affected_pairs.add((int(value), stored_day))
+
         with self._get_cursor() as cursor:
+            _collect_stored_pairs(cursor, with_owner=True)
             execute_values(
                 cursor,
                 """
@@ -20230,6 +20647,7 @@ class Database:
                 rows,
                 page_size=1000
             )
+            _collect_stored_pairs(cursor, with_owner=False)
             adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, affected_pairs)
 
         return {
@@ -20284,8 +20702,9 @@ class Database:
             where.append("u.department_id = %s")
             params.append(int(department_id))
         if operator_id not in (None, ''):
-            where.append("lr.operator_id = %s")
-            params.append(int(operator_id))
+            # Оценки оператора — и отданные ему Chat2Desk, и засчитанные решением.
+            where.append("(lr.operator_id = %s OR %s = ANY(lr.attributed_operator_ids))")
+            params.extend([int(operator_id), int(operator_id)])
 
         safe_limit = max(1, min(10000, int(limit or 2000)))
         safe_page = max(1, int(page or 1))
@@ -20306,7 +20725,8 @@ class Database:
                     lr.created_at, lr.updated_at,
                     d.name AS direction_name,
                     dep.id AS department_id,
-                    dep.name AS department_name
+                    dep.name AS department_name,
+                    lr.attributed_operator_ids
                 FROM chat_manager_low_rating_reviews lr
                 JOIN users u ON u.id = lr.operator_id
                 LEFT JOIN directions d ON d.id = u.direction_id
@@ -20334,6 +20754,10 @@ class Database:
                     'operator_name', 'phone_number', 'phone_normalized',
                     'taxi_park', 'direction_name', 'department_name'
                 )).lower()
+                # Засчитанную по решению ищут и по тому, кому её засчитали.
+                haystack += ' ' + ' '.join(
+                    str(op.get('name') or '') for op in (item.get('attributed_operators') or [])
+                ).lower()
                 if search_text in haystack:
                     return True
                 if search_digits:
@@ -20415,14 +20839,23 @@ class Database:
         }
 
     @staticmethod
-    def _low_rating_operator_item(item):
+    def _low_rating_operator_item(item, viewer_id=None):
         """Строка низкой оценки в том виде, в каком её видит сам оператор.
 
         Отдаём только итог проверки: пока вердикта нет — «на проверке» без
         промежуточных голосов проверяющих (разногласие ОКК — их внутренняя
         кухня). Когда решение принято, показываем и обоснование каждого
-        проверяющего: именно оно объясняет, почему оценка осталась или снята."""
+        проверяющего: именно оно объясняет, почему оценка осталась или снята.
+
+        reassigned — оценка обоснованная, но по решению проверяющих засчитана
+        другому менеджеру, а не зрителю: на его показатель она не влияет. Кому
+        именно — не сообщаем, это разбор чужих показателей."""
         resolved = bool(item.get('final_status'))
+        reassigned = False
+        if viewer_id is not None and item.get('final_status') == 'valid':
+            reassigned = int(viewer_id) not in Database._low_rating_effective_attribution(
+                item.get('operator_id'), item.get('attributed_operator_ids')
+            )
         public_item = {
             'id': item.get('id'),
             'rated_at': item.get('rated_at'),
@@ -20435,6 +20868,7 @@ class Database:
             'final_comment': item.get('final_comment') or '',
             'final_decided_at': item.get('final_decided_at'),
             'state': 'resolved' if resolved else 'pending',
+            'reassigned': reassigned,
             'decisions': [
                 {
                     'reviewer_name': entry.get('reviewer_name') or 'Проверяющий',
@@ -20456,7 +20890,9 @@ class Database:
 
         Отдельный метод, а не list_chat_manager_low_rating_reviews с фильтром:
         оператору не положены поля проверяющей стороны (личный вердикт зрителя,
-        флаги финализации, отдел), а выборка идёт по индексу (operator_id, day)."""
+        флаги финализации, отдел). Сюда же попадают чужие оценки, засчитанные
+        оператору итоговым решением (задача #286), а его собственная, отданная
+        по итогу другому менеджеру, помечается reassigned."""
         def _coerce_day(value):
             text = str(value or '').strip()
             if not text:
@@ -20495,23 +20931,33 @@ class Database:
                     lr.created_at, lr.updated_at,
                     NULL AS direction_name,
                     u.department_id AS department_id,
-                    NULL AS department_name
+                    NULL AS department_name,
+                    lr.attributed_operator_ids
                 FROM chat_manager_low_rating_reviews lr
                 JOIN users u ON u.id = lr.operator_id
-                WHERE lr.operator_id = %s
-                  AND lr.day >= %s
+                WHERE lr.day >= %s
                   AND lr.day <= %s
+                  AND (
+                      lr.operator_id = %s
+                      -- Засчитанная ему чужая оценка — только когда она на нём
+                      -- по итогу: пока разбор идёт, она всё ещё у того, кому её
+                      -- отдал Chat2Desk, и пугать ею другого рано.
+                      OR (lr.final_status = 'valid' AND %s = ANY(lr.attributed_operator_ids))
+                  )
                 ORDER BY lr.rated_at DESC NULLS LAST, lr.day DESC, lr.created_at DESC
                 """,
-                (int(operator_id), period_start, period_end)
+                (period_start, period_end, int(operator_id), int(operator_id))
             )
             rows = [self._low_rating_row_to_dict(row) for row in cursor.fetchall() or []]
             self._attach_low_rating_review_entries_tx(cursor, rows)
 
-        summary = {'total': len(rows), 'pending': 0, 'valid': 0, 'invalid': 0}
-        for item in rows:
+        public_rows = [self._low_rating_operator_item(item, viewer_id=operator_id) for item in rows]
+        summary = {'total': len(public_rows), 'pending': 0, 'valid': 0, 'invalid': 0, 'reassigned': 0}
+        for item in public_rows:
             final_status = item.get('final_status')
-            if final_status in ('valid', 'invalid'):
+            if item.get('reassigned'):
+                summary['reassigned'] += 1
+            elif final_status in ('valid', 'invalid'):
                 summary[final_status] += 1
             else:
                 summary['pending'] += 1
@@ -20520,7 +20966,7 @@ class Database:
             'month': period_start.strftime('%Y-%m'),
             'start': period_start.isoformat(),
             'end': period_end.isoformat(),
-            'rows': [self._low_rating_operator_item(item) for item in rows],
+            'rows': public_rows,
             'summary': summary,
         }
 
@@ -20541,7 +20987,8 @@ class Database:
                     lr.created_at, lr.updated_at,
                     d.name AS direction_name,
                     dep.id AS department_id,
-                    dep.name AS department_name
+                    dep.name AS department_name,
+                    lr.attributed_operator_ids
                 FROM chat_manager_low_rating_reviews lr
                 JOIN users u ON u.id = lr.operator_id
                 LEFT JOIN directions d ON d.id = u.direction_id
@@ -20564,15 +21011,48 @@ class Database:
             return self._low_rating_public_item(item, viewer_id=viewer_id, can_finalize=can_finalize)
         return item
 
-    def save_chat_manager_low_rating_personal_review(self, review_id, reviewer_id, status, comment=''):
+    def _low_rating_next_attribution_tx(self, cursor, status, operator_ids, operator_id,
+                                        stored_attribution, department_scope_id=None,
+                                        base_operator_ids=None):
+        """Атрибуция после сохранения вердикта (задача #286).
+
+        Меняется только вместе с «обоснованно»: необоснованная не засчитывается
+        никому, и отметки менеджеров при ней не имеют смысла — прежнее решение
+        остаётся как было. operator_ids=None — отметки не трогали (или старый
+        клиент): атрибуцию не меняем. Обоснованную с пустым списком сохранить нельзя.
+
+        base_operator_ids — какие отметки проверяющий видел, когда выносил
+        «обоснованно». Решение об атрибуции одно на разбор, и второй проверяющий
+        со списком, загруженным до чужого сохранения, молча стёр бы его — поэтому
+        при расхождении сохранение отклоняется, а клиент показывает свежие отметки."""
+        if status != 'valid':
+            return stored_attribution
+        if base_operator_ids is not None:
+            current = self._low_rating_effective_attribution(operator_id, stored_attribution)
+            seen = self._low_rating_effective_attribution(operator_id, base_operator_ids)
+            if seen != current:
+                raise LowRatingAttributionConflict(self.LOW_RATING_ATTRIBUTION_CHANGED)
+        if operator_ids is None:
+            return stored_attribution
+        if not operator_ids:
+            raise ValueError(self.LOW_RATING_ATTRIBUTION_REQUIRED)
+        self._validate_low_rating_attribution_tx(
+            cursor, operator_ids, operator_id, department_scope_id, stored_ids=stored_attribution)
+        return self._low_rating_attribution_to_store(operator_id, operator_ids)
+
+    def save_chat_manager_low_rating_personal_review(self, review_id, reviewer_id, status, comment='',
+                                                     operator_ids=None, department_scope_id=None,
+                                                     base_operator_ids=None):
         normalized_status = self._normalize_low_rating_review_status(status)
         clean_comment = str(comment or '').strip()[:4000]
         reviewer_id_int = int(reviewer_id)
+        requested_ids = self._normalize_low_rating_operator_ids(operator_ids)
+        seen_ids = self._normalize_low_rating_operator_ids(base_operator_ids)
 
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT operator_id, day, head_status, head_comment
+                SELECT operator_id, day, head_status, head_comment, final_status, attributed_operator_ids
                 FROM chat_manager_low_rating_reviews
                 WHERE id = %s
                 FOR UPDATE
@@ -20582,7 +21062,25 @@ class Database:
             current = cursor.fetchone()
             if not current:
                 return None
-            operator_id, day_obj, head_status, head_comment = current
+            operator_id, day_obj, head_status, head_comment, prev_final_status, stored_attribution = current
+            prev_attribution = self._low_rating_effective_attribution(operator_id, stored_attribution)
+            next_stored = self._low_rating_next_attribution_tx(
+                cursor, normalized_status, requested_ids, operator_id, stored_attribution,
+                department_scope_id=department_scope_id, base_operator_ids=seen_ids
+            )
+            next_attribution = self._low_rating_effective_attribution(operator_id, next_stored)
+
+            cursor.execute(
+                """
+                SELECT status, comment
+                FROM chat_manager_low_rating_review_entries
+                WHERE review_id = %s AND reviewer_id = %s
+                """,
+                (review_id, reviewer_id_int)
+            )
+            prev_entry = cursor.fetchone()
+            prev_status = self._normalize_low_rating_review_status(prev_entry[0]) if prev_entry else None
+            prev_comment = (prev_entry[1] or '') if prev_entry else ''
 
             cursor.execute(
                 """
@@ -20612,29 +21110,56 @@ class Database:
                     final_comment = %s,
                     final_decided_by = %s,
                     final_decided_at = CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    attributed_operator_ids = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
                 """,
-                (final_status, final_source, final_comment or '', reviewer_id_int if final_status else None, final_status, review_id)
+                (
+                    final_status, final_source, final_comment or '',
+                    reviewer_id_int if final_status else None, final_status,
+                    next_stored, review_id,
+                )
             )
-            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, [(operator_id, day_obj)])
+
+            attribution_changed = next_attribution != prev_attribution
+            comment_changed = clean_comment != prev_comment
+            if (normalized_status != prev_status or comment_changed or attribution_changed
+                    or final_status != prev_final_status):
+                self._log_low_rating_history_tx(
+                    cursor, review_id, reviewer_id_int, 'review',
+                    status=normalized_status,
+                    prev_status=prev_status,
+                    comment=clean_comment if comment_changed else None,
+                    operator_ids=next_attribution if attribution_changed else None,
+                    prev_operator_ids=prev_attribution if attribution_changed else None,
+                    final_status=final_status,
+                    prev_final_status=prev_final_status,
+                )
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(
+                cursor,
+                self._low_rating_recalc_pairs(operator_id, day_obj, prev_attribution, next_attribution)
+            )
 
         item = self.get_chat_manager_low_rating_review(review_id, viewer_id=reviewer_id_int)
         if item is not None:
             item['adjustment'] = adjustment
         return item
 
-    def finalize_chat_manager_low_rating_review(self, review_id, status, comment='', updated_by=None):
+    def finalize_chat_manager_low_rating_review(self, review_id, status, comment='', updated_by=None,
+                                                operator_ids=None, department_scope_id=None,
+                                                base_operator_ids=None):
         normalized_status = self._normalize_low_rating_review_status(status)
         if not normalized_status:
             raise ValueError("final status is required")
         clean_comment = str(comment or '').strip()[:4000]
         updated_by_id = int(updated_by) if updated_by is not None else None
+        requested_ids = self._normalize_low_rating_operator_ids(operator_ids)
+        seen_ids = self._normalize_low_rating_operator_ids(base_operator_ids)
 
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT operator_id, day
+                SELECT operator_id, day, head_status, head_comment, final_status, attributed_operator_ids
                 FROM chat_manager_low_rating_reviews
                 WHERE id = %s
                 FOR UPDATE
@@ -20644,7 +21169,11 @@ class Database:
             current = cursor.fetchone()
             if not current:
                 return None
-            operator_id, day_obj = current
+            (
+                operator_id, day_obj, prev_head_status, prev_head_comment,
+                prev_final_status, stored_attribution,
+            ) = current
+            prev_attribution = self._low_rating_effective_attribution(operator_id, stored_attribution)
 
             cursor.execute(
                 """
@@ -20670,6 +21199,12 @@ class Database:
             if not has_review_conflict:
                 raise ValueError("Final decision is available only when two reviews disagree")
 
+            next_stored = self._low_rating_next_attribution_tx(
+                cursor, normalized_status, requested_ids, operator_id, stored_attribution,
+                department_scope_id=department_scope_id, base_operator_ids=seen_ids
+            )
+            next_attribution = self._low_rating_effective_attribution(operator_id, next_stored)
+
             final_status, final_source = self._resolve_low_rating_final_status_from_entries_tx(
                 cursor,
                 review_id,
@@ -20688,6 +21223,7 @@ class Database:
                     final_comment = %s,
                     final_decided_by = %s,
                     final_decided_at = CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    attributed_operator_ids = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
                 """,
@@ -20700,10 +21236,30 @@ class Database:
                     final_comment,
                     updated_by_id if final_status else None,
                     final_status,
+                    next_stored,
                     review_id,
                 )
             )
-            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, [(operator_id, day_obj)])
+
+            attribution_changed = next_attribution != prev_attribution
+            comment_changed = clean_comment != (prev_head_comment or '')
+            prev_head = self._normalize_low_rating_review_status(prev_head_status)
+            if (normalized_status != prev_head or comment_changed or attribution_changed
+                    or final_status != prev_final_status):
+                self._log_low_rating_history_tx(
+                    cursor, review_id, updated_by_id, 'final',
+                    status=normalized_status,
+                    prev_status=prev_head,
+                    comment=clean_comment if comment_changed else None,
+                    operator_ids=next_attribution if attribution_changed else None,
+                    prev_operator_ids=prev_attribution if attribution_changed else None,
+                    final_status=final_status,
+                    prev_final_status=prev_final_status,
+                )
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(
+                cursor,
+                self._low_rating_recalc_pairs(operator_id, day_obj, prev_attribution, next_attribution)
+            )
 
         item = self.get_chat_manager_low_rating_review(review_id, viewer_id=updated_by_id)
         if item is not None:
@@ -20727,7 +21283,7 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT operator_id, day, arai_status, zhanna_status, head_status
+                SELECT operator_id, day, arai_status, zhanna_status, head_status, attributed_operator_ids
                 FROM chat_manager_low_rating_reviews
                 WHERE id = %s
                 FOR UPDATE
@@ -20737,7 +21293,7 @@ class Database:
             current = cursor.fetchone()
             if not current:
                 return None
-            operator_id, day_obj, arai_status, zhanna_status, head_status = current
+            operator_id, day_obj, arai_status, zhanna_status, head_status, stored_attribution = current
 
             cursor.execute(
                 f"""
@@ -20775,7 +21331,13 @@ class Database:
                 """,
                 (final_status, final_source, updated_by_id if final_status else None, final_status, review_id)
             )
-            adjustment = self._recalculate_chat_manager_score_adjustments_tx(cursor, [(operator_id, day_obj)])
+            adjustment = self._recalculate_chat_manager_score_adjustments_tx(
+                cursor,
+                self._low_rating_recalc_pairs(
+                    operator_id, day_obj,
+                    self._low_rating_effective_attribution(operator_id, stored_attribution)
+                )
+            )
 
         item = self.get_chat_manager_low_rating_review(review_id)
         if item is not None:
@@ -24979,6 +25541,108 @@ class Database:
                 int(created_by) if created_by is not None else None,
             ))
             return cursor.fetchone()[0]
+
+    def update_c2d_snapshot_messages(self, snapshot_id, messages, request_patch=None):
+        """Перезаписывает ленту снапшота тем же набором сообщений, но дополненным
+        полями (сейчас — operatorId, задача #286). Состав сообщений не меняется:
+        на их id ссылаются цитаты оценок в журнале."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE c2d_chat_snapshots
+                SET messages = %s,
+                    request_payload = COALESCE(request_payload, '{}'::jsonb) || %s
+                WHERE id = %s
+                """,
+                (Json(messages or []), Json(request_patch or {}), int(snapshot_id))
+            )
+            return int(cursor.rowcount or 0)
+
+    def get_c2d_webhook_message_operators(self, request_id, day_from, day_to):
+        """{id сообщения: id учётки Chat2Desk или None} из сырья вебхуков — бесплатно,
+        без квоты API. Сырьё живёт неделю, поэтому годится только для свежих чатов.
+        None — вендор сам прислал сообщение без учётки (чат ещё в очереди): это
+        ответ, а не пробел, и спрашивать о нём платный API незачем.
+        Выборка по (day, request_id) — ровно по индексу idx_c2d_webhook_events_day."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT message_id, MAX(c2d_operator_id)
+                FROM c2d_webhook_events
+                WHERE day BETWEEN %s AND %s
+                  AND request_id = %s
+                  AND message_id IS NOT NULL
+                GROUP BY message_id
+                """,
+                (day_from, day_to, int(request_id))
+            )
+            return {
+                int(row[0]): (int(row[1]) if row[1] is not None else None)
+                for row in cursor.fetchall() or []
+            }
+
+    def get_c2d_operator_directory(self, c2d_operator_ids):
+        """{id учётки Chat2Desk: {'user_id', 'name'}} — кто есть кто в переписке.
+
+        Сообщения вендора знают только id учётки. Связку «учётка → сотрудник» уже
+        строит ночной синк (c2d_requests сопоставляет имя учётки с сотрудником), а
+        у заявок старше 45 дней она сохраняется в самих низких оценках."""
+        ids = sorted({int(v) for v in (c2d_operator_ids or []) if v not in (None, '')})
+        if not ids:
+            return {}
+        result = {}
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT ON (r.c2d_operator_id)
+                       r.c2d_operator_id, r.operator_id, NULLIF(r.c2d_operator_name, '')
+                FROM c2d_requests r
+                WHERE r.c2d_operator_id = ANY(%s)
+                ORDER BY r.c2d_operator_id, (r.operator_id IS NULL), r.day DESC
+                """,
+                (ids,)
+            )
+            for c2d_id, user_id, name in cursor.fetchall() or []:
+                result[int(c2d_id)] = {
+                    'user_id': int(user_id) if user_id is not None else None,
+                    'name': name or '',
+                }
+            missing = [value for value in ids if not (result.get(value) or {}).get('user_id')]
+            if missing:
+                cursor.execute(
+                    """
+                    SELECT DISTINCT ON (lr.raw_payload->>'operator_id')
+                           lr.raw_payload->>'operator_id', lr.operator_id, NULLIF(lr.operator_name, '')
+                    FROM chat_manager_low_rating_reviews lr
+                    WHERE lr.raw_payload->>'operator_id' = ANY(%s)
+                    ORDER BY lr.raw_payload->>'operator_id', lr.day DESC
+                    """,
+                    ([str(value) for value in missing],)
+                )
+                for c2d_raw, user_id, name in cursor.fetchall() or []:
+                    try:
+                        c2d_id = int(c2d_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    known = result.get(c2d_id) or {}
+                    result[c2d_id] = {
+                        'user_id': int(user_id) if user_id is not None else None,
+                        'name': known.get('name') or name or '',
+                    }
+            user_ids = [entry['user_id'] for entry in result.values() if entry.get('user_id')]
+            if user_ids:
+                cursor.execute("SELECT id, name, department_id FROM users WHERE id = ANY(%s)", (user_ids,))
+                users_info = {int(row[0]): (str(row[1] or ''), row[2]) for row in cursor.fetchall() or []}
+                for entry in result.values():
+                    if not entry.get('user_id'):
+                        continue
+                    name, department_id = users_info.get(entry['user_id'], ('', None))
+                    if not entry.get('name'):
+                        entry['name'] = name
+                    # Отдел — чтобы не предлагать проверяющему засчитать оценку
+                    # тому, кому он её засчитать не вправе.
+                    entry['department_id'] = int(department_id) if department_id is not None else None
+        return result
 
     def get_c2d_snapshot(self, snapshot_id=None, request_id=None):
         """Снапшот по id или request_id (Chat2Desk и Wazzup — общая таблица)."""

@@ -46,6 +46,7 @@ def _c2d_namespace():
         "_chat2desk_build_request_rows",
         "_c2d_parse_api_datetime",
         "_c2d_media_url",
+        "_c2d_int_or_none",
         "_c2d_normalize_message",
         "_c2d_eval_normalize_quotes",
     }
@@ -230,6 +231,20 @@ class C2dEvalHelpersTests(unittest.TestCase):
         self.assertEqual(len(msg["attachments"]), 1)  # битые вложения отброшены
         self.assertEqual(msg["created"], "2026-07-17T15:48:57")
         self.assertEqual(msg["requestId"], 75050526)
+        # Учётки в сообщении нет — поле есть, но пустое («неизвестно»).
+        self.assertIn("operatorId", msg)
+        self.assertIsNone(msg["operatorId"])
+
+    def test_normalize_message_keeps_chat2desk_operator(self):
+        """Учётка Chat2Desk приходит в каждом сообщении и нужна разбору низких
+        оценок (задача #286): по ней видно, кто из менеджеров вёл чат."""
+        msg = self.ns["_c2d_normalize_message"]({
+            "id": 1, "type": "to_client", "text": "Здравствуйте!",
+            "created": "2026-09-22T11:30:55 UTC", "operator_id": 41006,
+        }, ZoneInfo("Asia/Almaty"))
+        self.assertEqual(msg["operatorId"], 41006)
+        bad = self.ns["_c2d_normalize_message"]({"id": 2, "operator_id": "—"}, ZoneInfo("Asia/Almaty"))
+        self.assertIsNone(bad["operatorId"])
 
     # ── цитаты ──
 
