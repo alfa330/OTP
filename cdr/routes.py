@@ -57,8 +57,8 @@ from io import BytesIO
 from flask import Blueprint, g, jsonify, request, send_file
 
 from . import (access, agent_auth, config, directory as directory_mod, lead_queries, lead_report,
-               leads as leads_mod, lines as lines_mod, queries, report, schema, sync,
-               touches as touches_mod)
+               leads as leads_mod, lines as lines_mod, missed_config, queries, report, schema,
+               sync, touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ AGENT_JOBS_PER_POLL = 1
 # Касаний в одних сутках у отдела продаж ~3,4 тысячи (замерено). Сорок тысяч —
 # это десятикратный запас; больше похоже не на сутки, а на ошибку моста.
 MAX_TOUCHES_PER_DAY = 40000
+
+# Звонков «прямо сейчас в очередях» в одном приращении. Мост сам режет список до двухсот
+# (queue_facts.OPEN_CALL_LIMIT); больше — не очередь отдела продаж, а ошибка.
+MAX_QUEUE_CALLS = 500
 
 # Сколько молчания считаем обрывом. Мост здоровается не реже раза в минуту, так
 # что пять минут — это пять пропущенных ударов, а не «он просто задумался».
@@ -278,6 +282,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                              if ch.isdigit())[:16] or None,
             'talked_only': str(request.args.get('talked_only') or '').lower()
                            in ('1', 'true', 'yes'),
+            # Только звонки, по которым робот пропущенных завёл сделку (задача #291).
+            'amo_only': str(request.args.get('amo') or '').lower() in ('1', 'true', 'yes'),
         }
         if filters['park']:
             # Парк не колонка, а вывод из номера и очереди: SQL получает готовые списки.
@@ -304,6 +310,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                  for key in labels if filters.get(key)]
         if filters.get('talked_only'):
             parts.append('только состоявшиеся разговоры')
+        if filters.get('amo_only'):
+            parts.append('только переданные в amoCRM')
         return '; '.join(parts)
 
     # ── справочник номеров ───────────────────────────────────────────────────
@@ -383,6 +391,9 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             'cached_to': last.isoformat() if last else None,
             'max_period_days': sync.MAX_PERIOD_DAYS,
             'today': queries.today_almaty().isoformat(),
+            # Робот пропущенных (задача #291): включён ли — от этого зависит, показывать ли
+            # фильтр «переданные в amoCRM», пока переданных за период ещё нет.
+            'missed_amo': {'enabled': missed_config.enabled()},
         })
 
     @cdr_route('/period')
@@ -969,11 +980,21 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not isinstance(removed, list) or len(removed) > MAX_TOUCHES_PER_DAY:
             raise ValueError('Поле removed должно быть небольшим списком ключей')
         clean = _dedupe(_clean_touch(item, day_value) for item in touches)
+        # Звонки из журнала очередей, которых ещё нет в CDR (мост 1.4.0). Поля нет или
+        # None — мост их не знает, и прежний снимок не трогаем: «не знаю» не значит «никого».
+        queue_calls = payload.get('queue_calls')
+        if queue_calls is not None:
+            if not isinstance(queue_calls, list) or len(queue_calls) > MAX_QUEUE_CALLS:
+                raise ValueError('Поле queue_calls должно быть небольшим списком звонков')
+            queue_calls = [call for call in (_clean_queue_call(item) for item in queue_calls)
+                           if call]
         with db._get_cursor() as cursor:
             stored = queries.upsert_touches(cursor, day_value, clean)
             dropped = queries.delete_touches(
                 cursor, day_value, [k for k in removed if isinstance(k, dict)])
             queries.agent_seen(cursor, live=True, agent_key=g.get('cdr_agent_key'))
+            if queue_calls is not None:
+                queries.save_queue_calls(cursor, queue_calls)
         return jsonify({'status': 'ok', 'stored': stored, 'removed': dropped})
 
     @agent_route('/agent/directory')
@@ -1227,6 +1248,29 @@ def _clean_touch(item, day_value):
         'queue': str(item.get('queue') or '')[:64],
         'recording_url': _safe_url(item.get('recording_url')),
         'legs': max(1, min(int(item.get('legs') or 1), 32000)),
+    }
+
+
+def _clean_queue_call(item):
+    """Звонок из журнала очередей, присланный мостом, → то, что сохраним. Мусор — None.
+
+    Тело приходит снаружи, поэтому всё режется и нормализуется здесь: номер — тем же
+    правилом, что у касаний, времена — ровно девятнадцать знаков или пусто."""
+    if not isinstance(item, dict):
+        return None
+    phone = touches_mod.norm_phone(item.get('phone'))
+    linkedid = str(item.get('linkedid') or '')[:64]
+    if not phone or not linkedid:
+        return None
+    queued = str(item.get('queued_at') or '')[:19]
+    answered = str(item.get('answered_at') or '')[:19]
+    return {
+        'linkedid': linkedid,
+        'phone': phone,
+        'queue': str(item.get('queue') or '')[:8],
+        'queued_at': queued if len(queued) == 19 else '',
+        'answered_at': answered if len(answered) == 19 else '',
+        'ended': bool(item.get('ended')),
     }
 
 

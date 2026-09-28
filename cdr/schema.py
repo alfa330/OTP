@@ -211,6 +211,58 @@ CREATE TABLE IF NOT EXISTS cdr_audio_jobs (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_cdr_audio_jobs_imported_call
     ON cdr_audio_jobs(imported_call_id) WHERE imported_call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cdr_audio_jobs_status ON cdr_audio_jobs(status);
+
+-- ── ПРОПУЩЕННЫЕ ВХОДЯЩИЕ → amoCRM (задача #291) ─────────────────────────────
+-- Журнал решений робота: по строке на непринятый входящий звонок, который он разобрал.
+-- Ключ тот же, что у касания, но внешнего ключа нет намеренно: сутки касаний мост
+-- перезаписывает целиком (DELETE + INSERT), и каскад стёр бы историю передачи.
+--
+-- status:
+--   sending   строка заведена ДО запроса в amoCRM — отметка «уже делаю»; зависшая
+--             дольше пяти минут проверяется по amoCRM и либо закрывается, либо повторяется
+--   created   сделка заведена (amo_lead_id)
+--   repeat    у клиента уже есть наша сделка на перезвон, ещё не взятая в работу, —
+--             новой не заводили, к той дописано примечание (amo_lead_id — она)
+--   chained   клиент перезвонил в течение минуты и снова не дозвонился; решение за
+--             последним звонком цепочки, его сделка проставляется и сюда
+--   answered  клиент дозвонился — передавать нечего (reason — как именно)
+--   error     amoCRM не приняла; повтор с растущей паузой
+--   failed    повторы кончились — видно в разделе, чтобы перезвонили руками
+-- CHECK на статус не ставим: список растёт, а расширять CHECK на живой таблице дороже,
+-- чем держать допустимые значения в коде (cdr/missed_queries.py).
+CREATE TABLE IF NOT EXISTS cdr_missed_leads (
+    linkedid       VARCHAR(64) NOT NULL,
+    phone          VARCHAR(16) NOT NULL,
+    call_day       DATE        NOT NULL,
+    started_at     TIMESTAMP   NOT NULL,   -- местное время, как в cdr_touches
+    ended_at       TIMESTAMP,
+    status         VARCHAR(16) NOT NULL,
+    reason         TEXT,
+    next_linkedid  VARCHAR(64),
+    amo_lead_id    BIGINT,
+    amo_contact_id BIGINT,
+    attempts       INTEGER     NOT NULL DEFAULT 0,
+    error          TEXT,
+    decided_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at        TIMESTAMPTZ,
+    PRIMARY KEY (linkedid, phone)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cdr_missed_leads_phone ON cdr_missed_leads(phone, started_at);
+CREATE INDEX IF NOT EXISTS idx_cdr_missed_leads_day ON cdr_missed_leads(call_day);
+CREATE INDEX IF NOT EXISTS idx_cdr_missed_leads_pending ON cdr_missed_leads(status)
+    WHERE status IN ('sending', 'error');
+
+-- Одна строка: с какого звонка робот работает и когда в последний раз прошёл цикл.
+-- enabled_since ставится при первом цикле: без неё первый запуск разобрал бы всю
+-- накопленную историю непринятых и завёл сотни сделок задним числом.
+CREATE TABLE IF NOT EXISTS cdr_missed_state (
+    id            INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    enabled_since TIMESTAMP,   -- местное время
+    last_run_at   TIMESTAMPTZ,
+    last_error    TEXT,
+    last_error_at TIMESTAMPTZ
+);
 """
 
 # Таблица могла быть создана до появления колонки: CREATE TABLE IF NOT EXISTS
@@ -230,6 +282,12 @@ CDR_SCHEMA_MIGRATIONS = (
     # Номер линии таксопарка (24.09.2026). Постоянный DEFAULT — колонка добавляется без
     # переписывания таблицы; старые касания получают его при перечитке суток мостом.
     "ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS line_number VARCHAR(16) NOT NULL DEFAULT ''",
+    # Звонки из журнала очередей, которых ещё нет в CDR (мост 1.4.0, задача #291): кто ждёт
+    # в очереди или говорит прямо сейчас. Список целиком заменяется каждым приращением;
+    # queue_calls_at — когда снят. NULL — мост его не шлёт (старая версия или журнал не
+    # ответил), и робот пропущенных тогда решает по одним касаниям.
+    "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS queue_calls JSONB",
+    "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS queue_calls_at TIMESTAMPTZ",
 )
 
 

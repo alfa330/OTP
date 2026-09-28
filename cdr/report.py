@@ -87,6 +87,9 @@ COLUMNS = (
     ('line_park', 'Таксопарк', 18),
     ('has_recording', 'Есть запись', 11),
     ('recording_url', 'Ссылка на запись', 20),
+    # Робот пропущенных (задача #291): номер сделки на перезвон, ссылкой в amoCRM. Пусто —
+    # звонок не пропущенный, клиент дозвонился или робот его ещё не разбирал.
+    ('amo_lead_id', 'Сделка amoCRM', 14),
     ('linkedid', 'linkedid', 22),
     ('legs', 'Плеч в CDR', 10),
 )
@@ -95,7 +98,7 @@ COLUMNS = (
 # перечисление: они разбросаны по листу, и одним отрезком C:E, как было сперва,
 # зелёный уголок гасился только у телефона и внутреннего номера, а у «Очереди» и
 # «linkedid» оставался на каждой строке.
-TEXT_COLUMNS = ('phone', 'ext', 'queue', 'line_number', 'linkedid')
+TEXT_COLUMNS = ('phone', 'ext', 'queue', 'line_number', 'amo_lead_id', 'linkedid')
 
 
 def _column_index(key):
@@ -250,6 +253,15 @@ def _touch_row(sheet, touch):
     else:
         link = None
 
+    lead_id = touch.get('amo_lead_id')
+    if lead_id:
+        lead = WriteOnlyCell(sheet, value=str(lead_id))
+        if touch.get('amo_url'):
+            lead.hyperlink = touch['amo_url']
+            lead.font = LINK_FONT
+    else:
+        lead = None
+
     return [
         started, answered,
         str(touch.get('phone') or ''),
@@ -269,6 +281,7 @@ def _touch_row(sheet, touch):
         touch.get('line_park') or '',
         'да' if touch.get('has_recording') else 'нет',
         link,
+        lead,
         str(touch.get('linkedid') or ''),
         int(touch.get('legs') or 0),
     ]
@@ -334,6 +347,10 @@ def _fill_context(sheet, period_from, period_to, summary, generated_at,
          'У входящего — номер, который набрал клиент; у исходящего — номер, с которого '
          'ему позвонили. «Таксопарк» — по очереди, куда станция ведёт входящие на этот '
          'номер. Пусто — станция этого номера не назвала.'),
+        ('«Сделка amoCRM» — сделка на перезвон по пропущенному входящему.',
+         'Её заводит робот: если за минуту после непринятого звонка клиент так и не '
+         'дозвонился, в amoCRM появляется сделка «Новая заявка» с тегом «Пропущенный '
+         'входящий». Перезвонил и снова не дозвонился — у обоих звонков та же сделка.'),
         ('Оператор определён по имени файла записи.',
          'В полях src/dst внутреннего номера у автодозвона нет вовсе. Если номер '
          'ни разу не назвал себя, в колонке ФИО стоит прочерк.'),

@@ -17,6 +17,8 @@
 
 Что дают события (проверено на живых звонках 21.09.2026)
 --------------------------------------------------------
+    DID             набранный клиентом номер (data1) — есть ТОЛЬКО у настоящего входящего:
+                    заявка автообзвона входит в те же очереди (3001, 3034…) без него
     ENTERQUEUE      вход в очередь — та самая точка отсчёта ожидания; data2 — номер клиента
     CONNECT         ответ агента; data1 — ожидание, с; data3 — сколько звонил телефон
     COMPLETECALLER  разговор закончил КЛИЕНТ;   data1 — ожидание, data2 — разговор, с
@@ -48,6 +50,9 @@ INCOMING_TYPES = (touches_mod.TYPE_IN, touches_mod.TYPE_IN_MISSED)
 # События, ради которых мост вообще ходит в журнал. Список — часть договора с запросом:
 # он же стоит в `IN (...)` у моста, чтобы станция не отдавала лишнего.
 WANTED_EVENTS = (
+    # DID — ради одного: отличить входящий от заявки автообзвона в списке звонков, которые
+    # идут прямо сейчас (`open_calls`). Одна строка на входящий, ~430 в сутки.
+    'DID',
     'ENTERQUEUE',
     'CONNECT',
     'COMPLETECALLER',
@@ -152,16 +157,22 @@ def build_facts(rows):
         fact = facts.setdefault(callid, {
             'callid': callid, 'queue': '', 'queued_at': None, 'answered_at': None,
             'wait_seconds': None, 'talk_seconds': None, 'hangup_side': '',
-            'agent': '', 'lost': False,
+            'agent': '', 'lost': False, 'caller': '', 'did': '',
         })
         queue = str(row.get('queuename') or '').strip()
         if queue and queue != 'NONE' and not fact['queue']:
             fact['queue'] = queue
         agent = str(row.get('agent') or '').strip()
 
-        if event == 'ENTERQUEUE':
+        if event == 'DID':
+            if not fact['did']:
+                fact['did'] = touches_mod.norm_phone(row.get('data1')) or str(
+                    row.get('data1') or '').strip()[:16]
+        elif event == 'ENTERQUEUE':
             if fact['queued_at'] is None or moment < fact['queued_at']:
                 fact['queued_at'] = moment
+            if not fact['caller']:
+                fact['caller'] = touches_mod.norm_phone(row.get('data2'))
         elif event == 'CONNECT':
             if fact['answered_at'] is None or moment < fact['answered_at']:
                 fact['answered_at'] = moment
@@ -212,7 +223,7 @@ def wire(fact):
 
 
 _MERGE_FIELDS = ('queue', 'queued_at', 'answered_at', 'wait_seconds', 'talk_seconds',
-                 'hangup_side', 'agent')
+                 'hangup_side', 'agent', 'lost', 'caller', 'did')
 
 
 def merge(base, fresh):
@@ -267,3 +278,46 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES):
             enriched['hangup_side'] = values['hangup_side']
         out.append(enriched)
     return out
+
+
+# Звонок, вошедший в очередь раньше этого, в список «идут сейчас» не попадает. Порталу
+# список нужен ради одного решения — дозвонился ли клиент в течение минуты после
+# пропущенного звонка (cdr/missed.py), и дальше четверти часа оно не ждёт. Заодно окно
+# отсекает призраков — факты, у которых строки CDR не будет никогда.
+OPEN_CALL_MINUTES = 30
+# Потолок списка: в очередях отдела продаж одновременно единицы звонков, сотня — это
+# уже не очередь, а ошибка, и тащить её порталу незачем.
+OPEN_CALL_LIMIT = 200
+
+
+def open_calls(facts, finished_linkedids, now, minutes=OPEN_CALL_MINUTES, limit=OPEN_CALL_LIMIT):
+    """Входящие звонки, которых ещё нет в CDR: ждут в очереди, идут или только что кончились.
+
+    CDR пишет звонок после отбоя, а журнал очередей — по событию: вход, ответ, отказ.
+    Поэтому клиент, который перезвонил и сейчас говорит с оператором, виден только здесь.
+
+    Только настоящие входящие — с событием DID. Заявка автообзвона входит в те же очереди
+    (3001, 3034, 3035…) с номером клиента в data2, но DID у неё нет: это наш исходящий
+    звонок, и засчитать его клиенту «дозвонился» значило бы потерять сделку на перезвон.
+    Проверено на журнале 28.09.2026: все входы без DID — заявки, ждавшие по 70–940 с.
+
+    finished_linkedids — звонки, у которых строки CDR уже есть: они едут касаниями."""
+    edge = now - timedelta(minutes=int(minutes))
+    finished = {str(value) for value in (finished_linkedids or ())}
+    out = []
+    for callid, fact in (facts or {}).items():
+        if callid in finished or not fact.get('did') or not fact.get('caller'):
+            continue
+        queued = fact.get('queued_at')
+        if queued is None or queued < edge:
+            continue
+        out.append({
+            'linkedid': callid,
+            'phone': fact['caller'],
+            'queue': fact.get('queue') or '',
+            'queued_at': _stamp(queued),
+            'answered_at': _stamp(fact.get('answered_at')),
+            'ended': bool(fact.get('hangup_side') or fact.get('lost')),
+        })
+    out.sort(key=lambda call: (call['queued_at'], call['linkedid']))
+    return out[-int(limit):] if limit else out

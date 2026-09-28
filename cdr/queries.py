@@ -12,6 +12,7 @@ parcels и call_qa.
 """
 
 import json
+import os
 from datetime import datetime, timedelta
 
 from psycopg2.extras import Json, execute_values
@@ -412,6 +413,27 @@ def agent_state(cursor):
     }
 
 
+def save_queue_calls(cursor, calls):
+    """Звонки из журнала очередей, которых ещё нет в CDR (мост 1.4.0). Список заменяется
+    целиком: это снимок «кто сейчас в очереди или на разговоре», а не журнал."""
+    cursor.execute("""
+        UPDATE cdr_agent_state SET queue_calls = %s, queue_calls_at = NOW() WHERE id = 1
+    """, (Json(list(calls or [])),))
+
+
+def load_queue_calls(cursor):
+    """(список, когда снят) — или (None, None), если мост его ни разу не присылал.
+
+    Отдельно от agent_state: в списке номера клиентов, а состояние моста уходит в
+    интерфейс раздела целиком."""
+    cursor.execute("SELECT queue_calls, queue_calls_at FROM cdr_agent_state WHERE id = 1")
+    row = cursor.fetchone()
+    if not row or row[0] is None:
+        return None, None
+    calls = row[0] if isinstance(row[0], list) else json.loads(row[0] or '[]')
+    return calls, row[1]
+
+
 def save_station_agents(cursor, agents):
     """Справочник агентов станции, присланный мостом.
 
@@ -468,6 +490,7 @@ def cleanup_due(cursor, hours=24):
 
 _FILTER_SQL = """
   FROM cdr_touches t
+  LEFT JOIN cdr_missed_leads ml ON ml.linkedid = t.linkedid AND ml.phone = t.phone
  WHERE t.call_day BETWEEN %(day_from)s AND %(day_to)s
    AND (%(call_type)s IS NULL OR t.call_type = %(call_type)s)
    AND (%(result)s    IS NULL OR t.result    = %(result)s)
@@ -475,6 +498,7 @@ _FILTER_SQL = """
    AND (%(queue)s     IS NULL OR t.queue LIKE '%%' || %(queue)s || '%%')
    AND (%(phone)s     IS NULL OR t.phone LIKE '%%' || %(phone)s || '%%')
    AND (NOT %(talked_only)s OR t.talk_seconds > 0)
+   AND (NOT %(amo_only)s OR ml.amo_lead_id IS NOT NULL)
    AND (NOT %(park_on)s OR CASE
           WHEN t.line_number = ANY(%(park_known)s)
                AND (t.call_type = 'Исходящий' OR t.queue = '')
@@ -484,6 +508,11 @@ _FILTER_SQL = """
 # Условие по парку — то же правило, что cdr/lines.py:park_queue: входящий называется
 # по своей очереди, исходящий и бесочередный — по очереди своего номера. Списки
 # готовит lines.park_filter; пустой список — `= ANY('{}')`, то есть «ни одного».
+#
+# Журнал робота пропущенных (`cdr_missed_leads`, задача #291) присоединён по ключу
+# касания. Ключ у журнала первичный, поэтому LEFT JOIN строк не множит, и счётчики
+# итогов, операторов и дней остаются ровно теми же, что без него. «Передан в amoCRM» —
+# это amo_lead_id: сделка есть, заведена ли по этому звонку или раньше по тому же клиенту.
 
 
 def _params(day_from, day_to, filters):
@@ -497,6 +526,7 @@ def _params(day_from, day_to, filters):
         'queue': filters.get('queue') or None,
         'phone': filters.get('phone') or None,
         'talked_only': bool(filters.get('talked_only')),
+        'amo_only': bool(filters.get('amo_only')),
         'park_on': park is not None,
         'park_queues': list(park[0]) if park else [],
         'park_lines': list(park[1]) if park else [],
@@ -522,6 +552,39 @@ _COLUMNS = ("t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result,
             + TALK_SQL + ", t.dial_seconds, t.queue, t.recording_url, "
             "t.linkedid, t.legs, t.queued_at, t.wait_seconds, t.talk_measured_seconds, "
             "t.hangup_side, t.line_number")
+
+# Что робот пропущенных решил по звонку. Отдельным хвостом, а не внутри _COLUMNS: те же
+# семнадцать колонок читают сверки и тесты, и хвост в них не нужен.
+_MISSED_COLUMNS = ", ml.status, ml.amo_lead_id, ml.reason, ml.error"
+
+# Адрес сделки в интерфейсе amoCRM. Домен — тот же, которым ходит клиент amoCRM
+# (amocrm/leads.py, переменная AMO_DOMAIN); здесь без импорта клиента: он тянет requests.
+AMO_LEAD_URL = 'https://%s/leads/detail/%%s' % (
+    (os.getenv('AMO_DOMAIN') or 'igroupkz.amocrm.ru').strip())
+
+
+def _missed_view(status, lead_id, reason, error):
+    """Хвост строки → поля касания для метки «в amoCRM».
+
+    amo_state: 'sent' — сделка есть (заведена или была); 'error' — повторы кончились, и это
+    видно, чтобы перезвонили руками; 'answered' — клиент дозвонился, передавать было
+    нечего; '' — робот этот звонок не разбирал, ещё идёт минута или робот повторяет
+    передачу (`error` до исчерпания попыток — не повод звать человека: через пару минут
+    сделка может появиться сама)."""
+    if lead_id:
+        state = 'sent'
+    elif status == 'failed':
+        state = 'error'
+    elif status == 'answered':
+        state = 'answered'
+    else:
+        state = ''
+    return {
+        'amo_state': state,
+        'amo_lead_id': int(lead_id) if lead_id else None,
+        'amo_url': (AMO_LEAD_URL % int(lead_id)) if lead_id else '',
+        'amo_note': (reason or '') if state != 'error' else (error or reason or ''),
+    }
 
 
 def _row_to_touch(row):
@@ -552,7 +615,7 @@ def _row_to_touch(row):
         'talk_measured_seconds': None if row[14] is None else int(row[14]),
         'hangup_side': row[15] or '',
         'line_number': row[16] or '',
-    }
+    } | (_missed_view(*row[17:21]) if len(row) >= 21 else _missed_view(None, None, None, None))
 
 
 def count_touches(cursor, day_from, day_to, filters=None):
@@ -565,7 +628,7 @@ def select_touches(cursor, day_from, day_to, filters=None, limit=100, offset=0):
     params['limit'] = int(limit)
     params['offset'] = int(offset)
     cursor.execute(
-        "SELECT " + _COLUMNS + _FILTER_SQL +
+        "SELECT " + _COLUMNS + _MISSED_COLUMNS + _FILTER_SQL +
         " ORDER BY t.started_at, t.phone LIMIT %(limit)s OFFSET %(offset)s", params)
     return [_row_to_touch(row) for row in cursor.fetchall()]
 
@@ -582,7 +645,8 @@ def iter_touches(cursor, day_from, day_to, filters=None, chunk=5000):
     Порциями — чтобы не держать месяц в памяти дважды: здесь списком и в openpyxl.
     """
     cursor.execute(
-        "SELECT " + _COLUMNS + _FILTER_SQL + " ORDER BY t.started_at, t.linkedid, t.phone",
+        "SELECT " + _COLUMNS + _MISSED_COLUMNS + _FILTER_SQL
+        + " ORDER BY t.started_at, t.linkedid, t.phone",
         _params(day_from, day_to, filters))
     while True:
         rows = cursor.fetchmany(int(chunk))
@@ -608,15 +672,18 @@ def summary(cursor, day_from, day_to, filters=None):
                COUNT(DISTINCT t.ext) FILTER (WHERE t.ext <> ''),
                COUNT(DISTINCT t.phone) FILTER (WHERE t.call_type <> %(before_queue_type)s),
                COUNT(*) FILTER (WHERE t.recording_url IS NOT NULL),
-               COUNT(*) FILTER (WHERE t.call_type = %(before_queue_type)s)
+               COUNT(*) FILTER (WHERE t.call_type = %(before_queue_type)s),
+               COUNT(*) FILTER (WHERE ml.amo_lead_id IS NOT NULL)
     """ + _FILTER_SQL, _params(day_from, day_to, filters))
-    row = cursor.fetchone() or (0,) * 10
+    row = tuple(cursor.fetchone() or ()) + (0,) * 11
     return {
         'total': int(row[0]), 'talks': int(row[1]), 'outgoing': int(row[2]),
         'incoming': int(row[3]), 'incoming_missed': int(row[4]),
         'talk_seconds': int(row[5]), 'operators': int(row[6]),
         'phones': int(row[7]), 'with_recording': int(row[8]),
         'before_queue': int(row[9]),
+        # Переданы в amoCRM роботом пропущенных (задача #291) — подпись у «не приняли».
+        'amo_transferred': int(row[10] or 0),
     }
 
 

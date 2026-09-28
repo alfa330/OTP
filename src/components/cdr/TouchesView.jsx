@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Download, Filter, Loader2, Phone, PhoneIncoming, PhoneMissed, PhoneOff,
+    Download, ExternalLink, Filter, Loader2, Phone, PhoneIncoming, PhoneMissed, PhoneOff,
     PhoneOutgoing, PlugZap, RefreshCw, Search, X,
 } from 'lucide-react';
 
@@ -12,8 +12,8 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
-    exportFileName, hms, hours, lineCaption, percent, prettyPhone, resultTone,
-    seconds, shortDay, shortTime, silence, splitCallType, TYPE_IN_BEFORE_QUEUE,
+    amoAnsweredNote, amoMark, exportFileName, hms, hours, lineCaption, percent, prettyPhone,
+    resultTone, seconds, shortDay, shortTime, silence, splitCallType, TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
 import DealsView from './DealsView';
 
@@ -87,7 +87,28 @@ const MODES = [
     { value: 'deals', label: 'Сделки' },
 ];
 
-const EMPTY_FILTERS = { result: '', ext: '', queue: '', park: '', talkedOnly: false };
+const EMPTY_FILTERS = { result: '', ext: '', queue: '', park: '', talkedOnly: false, amoOnly: false };
+
+/* Метка робота пропущенных (задача #291): «в amoCRM» ссылкой на сделку или «не передан»,
+   если amoCRM её не приняла. Одна на таблицу и карточку телефона — чтобы подписи не
+   разъехались. */
+const AmoMark = ({ touch }) => {
+    const mark = amoMark(touch);
+    if (!mark) return null;
+    if (mark.kind === 'error') {
+        return (
+            <div className="mt-1 text-[11.5px] font-medium text-rose-600" title={mark.title}>
+                {mark.label}
+            </div>
+        );
+    }
+    return (
+        <a href={mark.href} target="_blank" rel="noreferrer" title={mark.title}
+           className="mt-1 inline-flex items-center gap-1 text-[11.5px] font-medium text-blue-600 hover:underline">
+            {mark.label} <ExternalLink size={11} />
+        </a>
+    );
+};
 
 const Metric = ({ label, value, hint }) => (
     <div className={`${iosCard} px-3.5 py-3`}>
@@ -193,6 +214,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
         if (filters.queue) params.queue = filters.queue;
         if (filters.park) params.park = filters.park;
         if (filters.talkedOnly) params.talked_only = 1;
+        if (filters.amoOnly) params.amo = 1;
         if (phone) params.phone = phone;
         return params;
     }, [range.from, range.to, page, callType, filters, phone]);
@@ -296,13 +318,16 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
         filters.ext && { key: 'ext', label: `Номер ${filters.ext}` },
         filters.queue && { key: 'queue', label: `Очередь ${filters.queue}` },
         filters.talkedOnly && { key: 'talkedOnly', label: 'Только разговоры' },
+        filters.amoOnly && { key: 'amoOnly', label: 'Переданы в amoCRM' },
         phone && { key: 'phone', label: `Телефон …${phone.slice(-4)}` },
     ].filter(Boolean);
 
     const dropFilter = (key) => {
         if (key === 'phone') { setPhoneInput(''); setPhone(''); setPage(1); return; }
         if (key === 'callType') { applyCallType(''); return; }
-        applyFilters((prev) => ({ ...prev, [key]: key === 'talkedOnly' ? false : '' }));
+        applyFilters((prev) => ({
+            ...prev, [key]: key === 'talkedOnly' || key === 'amoOnly' ? false : '',
+        }));
     };
 
     const resultOptions = useMemo(() => [
@@ -324,6 +349,11 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
        раз при входе, а мост может отвалиться, пока человек смотрит на экран. */
     const bridge = coverage.bridge || meta?.bridge || null;
     const bridgeDown = bridge && !bridge.connected;
+
+    /* Фильтр «переданные в amoCRM» — только там, где он может что-то найти: робот включён
+       или переданные за период уже есть. Иначе это обещание пустой таблицы. */
+    const amoFilterShown = Boolean(meta?.missed_amo?.enabled || summary.amo_transferred
+        || filters.amoOnly);
 
     return (
         /* Раздел тянется до 1480px: на 1240 таблица из десяти колонок упиралась в край
@@ -439,14 +469,26 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                         <CustomSelect variant="ios" value={filters.queue} options={queueOptions}
                                       onChange={(value) => applyFilters((prev) => ({ ...prev, queue: value }))} />
                     </label>
-                    <label className="flex items-end gap-2 pb-1">
-                        <input type="checkbox" checked={filters.talkedOnly}
-                               className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500/70"
-                               onChange={(event) => applyFilters((prev) => ({
-                                   ...prev, talkedOnly: event.target.checked,
-                               }))} />
-                        <span className="text-[13px] text-slate-700">Только состоявшиеся разговоры</span>
-                    </label>
+                    <div className="flex flex-col justify-end gap-2 pb-1">
+                        <label className="flex items-center gap-2">
+                            <input type="checkbox" checked={filters.talkedOnly}
+                                   className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500/70"
+                                   onChange={(event) => applyFilters((prev) => ({
+                                       ...prev, talkedOnly: event.target.checked,
+                                   }))} />
+                            <span className="text-[13px] text-slate-700">Только состоявшиеся разговоры</span>
+                        </label>
+                        {amoFilterShown ? (
+                            <label className="flex items-center gap-2">
+                                <input type="checkbox" checked={filters.amoOnly}
+                                       className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500/70"
+                                       onChange={(event) => applyFilters((prev) => ({
+                                           ...prev, amoOnly: event.target.checked,
+                                       }))} />
+                                <span className="text-[13px] text-slate-700">Только переданные в amoCRM</span>
+                            </label>
+                        ) : null}
+                    </div>
                 </section>
             ) : null}
 
@@ -499,7 +541,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 <Metric label="Время разговоров" value={`${hours(summary.talk_seconds)} ч`} />
                 <Metric label="Исходящих" value={(summary.outgoing || 0).toLocaleString('ru-RU')} />
                 <Metric label="Входящих" value={(summary.incoming || 0).toLocaleString('ru-RU')}
-                        hint={`не приняли ${summary.incoming_missed || 0}`} />
+                        hint={`не приняли ${summary.incoming_missed || 0}${summary.amo_transferred
+                            ? ` · в amoCRM ${summary.amo_transferred.toLocaleString('ru-RU')}` : ''}`} />
                 <Metric label="Клиентов" value={(summary.phones || 0).toLocaleString('ru-RU')}
                         hint={`${summary.operators || 0} внутр. номеров`} />
             </section>
@@ -538,6 +581,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 позвонили; под номером — таксопарк и очередь звонка.
                 «Не дошёл до очереди» — клиент положил трубку на приветствии: строка есть,
                 но в «Касаний», «Операторы», «По дням» и «Сделки» такие звонки не входят.
+                «В amoCRM» — по непринятому звонку заведена сделка на перезвон: через минуту
+                после звонка клиент так и не дозвонился.
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>
@@ -643,10 +688,14 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                     ) : null}
                                 </Td>
                                 <Td>
-                                    <span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[11.5px] font-medium ring-1 ${
+                                    <span title={amoAnsweredNote(touch) || undefined}
+                                          className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[11.5px] font-medium ring-1 ${
                                         resultTone(touch.result)}`}>
                                         {touch.result}
                                     </span>
+                                    {/* Второй строкой, как подписи в соседних ячейках: метка
+                                        «в amoCRM» рядом с плашкой расширяла бы колонку. */}
+                                    <div><AmoMark touch={touch} /></div>
                                 </Td>
                                 <Td className="whitespace-nowrap text-right tabular-nums">{hms(touch.talk_seconds)}</Td>
                                 {/* Две величины вместо прежней «Вызов всего»: она складывала
@@ -735,6 +784,7 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                    className="ml-auto text-[12.5px] font-medium text-blue-600">запись</a>
                             ) : null}
                         </div>
+                        <AmoMark touch={touch} />
                     </div>
                 ))}
             </div>

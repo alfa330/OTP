@@ -24,6 +24,16 @@
 iCORE, и аудит 17.09.2026 намерил из-за этого 3–5 п.п. лишнего SL. Журнал недоступен —
 касания едут как раньше, без этих полей: точность важна, но не важнее данных.
 
+Звонки, которых ещё нет в CDR (с 1.4.0)
+--------------------------------------
+CDR пишет звонок после отбоя, а портал решает, дозвонился ли клиент в течение минуты
+после пропущенного звонка (задача #291, `cdr/missed.py`). Клиент, который перезвонил и
+сейчас говорит с оператором, в CDR появится только через минуты. Поэтому к каждому
+приращению — и к пульсу — мост прикладывает `queue_calls`: входящие из журнала очередей,
+у которых строки CDR ещё нет (`queue_facts.open_calls`). Журнал в этом цикле не
+прочитался — поле уходит пустым значением `None`, а не пустым списком: «в очередях никого»
+и «не знаю» — разные ответы, и портал на втором ждёт, а не решает.
+
 Что он НИКОГДА не делает
 ------------------------
 Не трогает у станции ничего, кроме `/freepbx/cdr` — того же пути, что читает суточное
@@ -39,7 +49,7 @@ iCORE, и аудит 17.09.2026 намерил из-за этого 3–5 п.п.
 import json
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from cdr import queue_facts as queue_facts_mod, touches as touches_mod
 from cdr_bridge.station import StationError
@@ -105,6 +115,16 @@ def _wire(touch):
     return {name: touch.get(name) for name in TOUCH_FIELDS}
 
 
+# Алматы сдвигом, а не ZoneInfo: в контейнере моста tzdata может не оказаться, а время
+# журнала очередей станции — местное (+05), как и calldate в CDR.
+_ALMATY = timezone(timedelta(hours=5))
+
+
+def _local(epoch):
+    """Секунды эпохи → наивное время Алматы, в котором живёт журнал очередей."""
+    return datetime.fromtimestamp(epoch, tz=_ALMATY).replace(tzinfo=None)
+
+
 class LiveTail:
     def __init__(self, post, station, interval_seconds, today=None, pbxdb=None):
         """post(path, payload) — отправка на портал (подписанная, как у моста);
@@ -119,6 +139,7 @@ class LiveTail:
         self.rows = {}           # ключ плеча → строка CDR
         self.facts = {}          # callid → точные факты очереди (журнал станции)
         self.sent = {}           # (linkedid, phone) → отпечаток отправленного касания
+        self.sent_queue = None   # отпечаток последнего отправленного списка queue_calls
         self.cycles = 0
         self.failures = 0
         self.next_due = 0.0
@@ -158,6 +179,7 @@ class LiveTail:
         self.rows = {}
         self.facts = {}
         self.sent = {}
+        self.sent_queue = None
         self.cycles = 0
 
     def window(self):
@@ -222,7 +244,16 @@ class LiveTail:
             if self.sent.get(key) != fingerprint:
                 changed.append(_wire(touch))
         removed = [{'linkedid': k[0], 'phone': k[1]} for k in self.sent if k not in current]
-        if not changed and not removed:
+        # Звонки, которых ещё нет в CDR. Журнал в этом цикле не ответил — None: старый
+        # список уже мог устареть, а «не знаю» портал обязан отличать от «никого нет».
+        queue_calls = None
+        if facts is not None:
+            queue_calls = queue_facts_mod.open_calls(
+                self.facts, {touch['linkedid'] for touch in built}, _local(now))
+        queue_print = (json.dumps(queue_calls, ensure_ascii=False, sort_keys=True)
+                       if queue_calls is not None else None)
+        queue_changed = queue_print is not None and queue_print != self.sent_queue
+        if not changed and not removed and not queue_changed:
             if self.last_push_at is not None and now - self.last_push_at < HEARTBEAT_SECONDS:
                 log.debug('Живой хвост: без изменений (%d строк, %d касаний)', len(fresh), len(current))
                 return
@@ -234,6 +265,7 @@ class LiveTail:
                 'rows_seen': len(self.rows),
                 'full_refresh': full,
                 'heartbeat': True,
+                'queue_calls': queue_calls,
             })
             self.last_push_at = now
             log.debug('Живой хвост: пульс без изменений (%d строк, %d касаний)', len(fresh), len(current))
@@ -244,10 +276,19 @@ class LiveTail:
             'removed': removed,
             'rows_seen': len(self.rows),
             'full_refresh': full,
+            'queue_calls': queue_calls,
         })
         # Отправлено — значит принято: портал отвечает 200 только после записи.
         self.sent = current
+        if queue_print is not None:
+            self.sent_queue = queue_print
         self.last_push_at = now
+        if not changed and not removed:
+            # Сменились только звонки в очередях — это каждые двадцать секунд в часы пик,
+            # и строка на INFO утопила бы журнал моста.
+            log.debug('Живой хвост %s: в очередях сейчас %d звонков', day_text,
+                      len(queue_calls or ()))
+            return
         log.info('Живой хвост %s: строк в окне %d, касаний за день %d, дослано %d, убрано %d%s',
                  day_text, len(fresh), len(current), len(changed), len(removed),
                  ' (полный проход)' if full else '')

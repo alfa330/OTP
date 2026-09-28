@@ -103,6 +103,44 @@ export const splitCallType = (value) => {
     return matched ? { base: matched[1], note: matched[2] } : { base: text, note: '' };
 };
 
+/** Метка робота пропущенных (задача #291) под результатом звонка — или null.
+ *
+ *  Сервер отдаёт у касания `amo_state` (cdr/queries.py:_missed_view):
+ *    sent     — сделка на перезвон в amoCRM есть: заведена по этому звонку или раньше по
+ *               тому же клиенту (перезвонил и снова не дозвонился) — метка-ссылка на неё;
+ *    error    — передать не вышло: метка видна, чтобы клиенту перезвонили руками;
+ *    answered — клиент дозвонился, передавать было нечего: метки НЕТ, причина уходит
+ *               в подсказку плашки результата (amoAnsweredNote) — шум на каждой строке
+ *               «не передан» не нужен никому;
+ *    ''       — робот звонок не разбирал: не пропущенный или ещё идёт минута ожидания. */
+export const amoMark = (touch) => {
+    const state = touch?.amo_state || '';
+    if (state === 'sent' && touch.amo_url) {
+        const lead = touch.amo_lead_id ? `Сделка ${touch.amo_lead_id} в amoCRM` : 'Сделка в amoCRM';
+        return {
+            kind: 'sent',
+            label: 'в amoCRM',
+            href: touch.amo_url,
+            title: touch.amo_note ? `${lead}. ${touch.amo_note}` : lead,
+        };
+    }
+    if (state === 'error') {
+        return {
+            kind: 'error',
+            label: 'не передан в amoCRM',
+            href: '',
+            title: touch.amo_note || 'amoCRM не приняла сделку — перезвоните клиенту вручную',
+        };
+    }
+    return null;
+};
+
+/** Почему пропущенный звонок НЕ ушёл в amoCRM — для подсказки плашки результата. */
+export const amoAnsweredNote = (touch) => (
+    touch?.amo_state === 'answered' && touch.amo_note
+        ? `В amoCRM не передан: ${touch.amo_note.charAt(0).toLowerCase()}${touch.amo_note.slice(1)}`
+        : '');
+
 /** «2026-08-24 09:00:00» → «09:00:00». */
 export const shortTime = (value) => (value ? String(value).slice(11, 19) : '—');
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    RESULT_DROPPED, RESULT_TALK, exportFileName, hms, hours, percent,
+    RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark, exportFileName, hms, hours, percent,
     fullDay, prettyPhone, resultTone, shortDay, shortTime, silence,
 } from '../src/components/cdr/touchMeta.js';
 
@@ -106,4 +106,39 @@ test('имя файла собирает фронт — через CORS оно �
                  'Касания 01.08.2026 — 31.08.2026.xlsx');
     assert.equal(fullDay('2026-08-24'), '24.08.2026');
     assert.equal(fullDay(''), '');
+});
+
+/* Метка робота пропущенных (задача #291). Сервер отдаёт amo_state, экран решает, что
+ * показать: ссылку, красную метку «не передан» или ничего. */
+test('переданный звонок — ссылка на сделку', () => {
+    const mark = amoMark({
+        amo_state: 'sent', amo_lead_id: 57009999,
+        amo_url: 'https://example.amocrm.ru/leads/detail/57009999',
+        amo_note: 'За минуту после звонка клиенту не ответили',
+    });
+    assert.equal(mark.kind, 'sent');
+    assert.equal(mark.label, 'в amoCRM');
+    assert.equal(mark.href, 'https://example.amocrm.ru/leads/detail/57009999');
+    assert.match(mark.title, /Сделка 57009999 в amoCRM\. За минуту/);
+});
+
+test('без ссылки метки нет, даже если сервер назвал звонок переданным', () => {
+    assert.equal(amoMark({ amo_state: 'sent', amo_url: '' }), null);
+});
+
+test('сбой передачи видно, чтобы перезвонили руками', () => {
+    const mark = amoMark({ amo_state: 'error', amo_note: '' });
+    assert.equal(mark.kind, 'error');
+    assert.equal(mark.label, 'не передан в amoCRM');
+    assert.match(mark.title, /перезвоните клиенту вручную/);
+});
+
+test('дозвонившийся — без метки, причина только в подсказке', () => {
+    const touch = { amo_state: 'answered', amo_note: 'Клиент перезвонил в 10:01:17 и поговорил с оператором' };
+    assert.equal(amoMark(touch), null);
+    assert.equal(amoAnsweredNote(touch),
+                 'В amoCRM не передан: клиент перезвонил в 10:01:17 и поговорил с оператором');
+    assert.equal(amoAnsweredNote({ amo_state: '' }), '');
+    assert.equal(amoMark({}), null);
+    assert.equal(amoMark(null), null);
 });

@@ -17,7 +17,7 @@
 import json
 import unittest
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from flask import Flask
@@ -275,6 +275,68 @@ class LiveTailJournalTests(unittest.TestCase):
         touch = self.posts[0][1]['touches'][0]
         self.assertEqual(touch['queued_at'], None)
         self.assertEqual(touch['wait_seconds'], None)
+        self.assertIsNone(self.posts[0][1]['queue_calls'], 'без журнала — «не знаю», а не «никого»')
+
+
+def _epoch(text):
+    """Местное время Алматы → секунды эпохи, как их передаёт мосту time.time()."""
+    moment = datetime.strptime(text, '%Y-%m-%d %H:%M:%S')
+    return moment.replace(tzinfo=timezone(timedelta(hours=5))).timestamp()
+
+
+class LiveTailQueueCallsTests(unittest.TestCase):
+    """Звонки, которых ещё нет в CDR (мост 1.4.0, задача #291)."""
+
+    def setUp(self):
+        self.posts = []
+        self.station = _Station([cdr_row('1.1', '2026-09-15 09:00:00')])
+        self.journal = _Journal([
+            queue_event('1.1', '2026-09-15 09:00:26', 'DID', data1='7475550078'),
+            queue_event('1.1', '2026-09-15 09:00:26', 'ENTERQUEUE', data2='+77015550001'),
+            # Перезвон того же клиента: вошёл в очередь, строки CDR ещё нет.
+            queue_event('3.3', '2026-09-15 09:02:10', 'DID', data1='7475550078'),
+            queue_event('3.3', '2026-09-15 09:02:10', 'ENTERQUEUE', data2='+77015550001'),
+        ])
+        self.tail = live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                                  self.station, 20, today=lambda: TODAY, pbxdb=self.journal)
+        self.now = _epoch('2026-09-15 09:02:30')
+
+    def test_call_without_a_cdr_row_rides_with_the_increment(self):
+        self.tail.step(self.now)
+        calls = self.posts[0][1]['queue_calls']
+        self.assertEqual([c['linkedid'] for c in calls], ['3.3'])
+        self.assertEqual(calls[0]['phone'], '7015550001')
+        self.assertEqual(calls[0]['answered_at'], '')
+
+    def test_answer_in_the_queue_alone_is_pushed_at_once(self):
+        """Касания не изменились, а оператор взял трубку — портал должен узнать сейчас, а
+        не с пульсом через минуту: от этого зависит, заведётся ли сделка на перезвон."""
+        self.tail.step(self.now)
+        self.journal.rows.append(queue_event('3.3', '2026-09-15 09:02:35', 'CONNECT',
+                                             agent='op', data1='25'))
+        self.tail.step(self.now + 20)
+        self.assertEqual(len(self.posts), 2)
+        payload = self.posts[1][1]
+        self.assertEqual(payload['touches'], [])
+        self.assertNotIn('heartbeat', payload)
+        self.assertEqual(payload['queue_calls'][0]['answered_at'], '2026-09-15 09:02:35')
+
+    def test_unchanged_queue_calls_do_not_trigger_a_push(self):
+        self.tail.step(self.now)
+        self.tail.step(self.now + 20)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_heartbeat_carries_the_list_too(self):
+        self.tail.step(self.now)
+        self.tail.step(self.now + live.HEARTBEAT_SECONDS + 1)
+        self.assertTrue(self.posts[1][1]['heartbeat'])
+        self.assertEqual(len(self.posts[1][1]['queue_calls']), 1)
+
+    def test_failed_journal_read_sends_unknown_not_empty(self):
+        self.tail.step(self.now)
+        self.journal.fail = RuntimeError('база станции не ответила')
+        self.tail.step(self.now + live.HEARTBEAT_SECONDS + 1)
+        self.assertIsNone(self.posts[1][1]['queue_calls'])
 
 
 # ── портал ────────────────────────────────────────────────────────────────────
@@ -303,6 +365,7 @@ class _Recorder:
         self.upserts = []
         self.deleted = []
         self.seen = []
+        self.queue_calls = []
 
     def today_almaty(self):
         return TODAY
@@ -317,6 +380,9 @@ class _Recorder:
 
     def agent_seen(self, cursor, **kwargs):
         self.seen.append(kwargs)
+
+    def save_queue_calls(self, cursor, calls):
+        self.queue_calls.append(calls)
 
 
 class LiveRouteTests(unittest.TestCase):
@@ -388,6 +454,34 @@ class LiveRouteTests(unittest.TestCase):
     def test_removed_must_be_a_list_of_keys(self):
         response = self._live({'day': '2026-09-15', 'touches': [], 'removed': 'все'})
         self.assertEqual(response.status_code, 400)
+
+    def test_queue_calls_are_cleaned_and_stored(self):
+        response = self._live({'day': '2026-09-15', 'touches': [], 'queue_calls': [
+            {'linkedid': '3.3', 'phone': '+7 701 555 00 01', 'queue': '3010',
+             'queued_at': '2026-09-15 09:02:10', 'answered_at': '', 'ended': False},
+            {'linkedid': '', 'phone': '77015550002'},          # без ключа — мимо
+            {'linkedid': '4.4', 'phone': '123'},                # не номер — мимо
+            'мусор',
+        ]})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(self.recorder.queue_calls, [[{
+            'linkedid': '3.3', 'phone': '7015550001', 'queue': '3010',
+            'queued_at': '2026-09-15 09:02:10', 'answered_at': '', 'ended': False}]])
+
+    def test_empty_list_is_stored_but_unknown_is_not(self):
+        # Пустой список — «в очередях никого», его надо записать; нет поля или None —
+        # «мост не знает» (старая версия, журнал не ответил), прежний снимок не трогаем.
+        self._live({'day': '2026-09-15', 'touches': [], 'queue_calls': []})
+        self._live({'day': '2026-09-15', 'touches': [], 'queue_calls': None})
+        self._live({'day': '2026-09-15', 'touches': []})
+        self.assertEqual(self.recorder.queue_calls, [[]])
+
+    def test_oversized_queue_calls_are_refused(self):
+        calls = [{'linkedid': '%d.1' % i, 'phone': '7015550001'}
+                 for i in range(cdr_routes.MAX_QUEUE_CALLS + 1)]
+        response = self._live({'day': '2026-09-15', 'touches': [], 'queue_calls': calls})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.recorder.queue_calls, [])
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@
 """
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from cdr import queue_facts as Q
 
@@ -156,6 +156,64 @@ class AttachTests(unittest.TestCase):
     def test_no_facts_at_all_changes_nothing(self):
         touches = [touch(ANSWERED)]
         self.assertEqual(Q.attach(touches, {}), touches)
+
+
+class OpenCallsTests(unittest.TestCase):
+    """Звонки, которых ещё нет в CDR (задача #291): кто сейчас в очереди или говорит.
+
+    Заявка автообзвона 28.09.2026 входила в очередь 3035 с номером клиента в data2, ждала
+    72 с и получила CONNECT — но события DID у неё не было: это наш исходящий звонок."""
+
+    NOW = datetime(2026, 9, 21, 13, 14, 0)
+    DIAL_REQUEST = '1789978300.1127700'
+
+    def facts(self, extra=()):
+        rows = list(ANSWERED_ROWS[:3]) + list(extra) + [
+            row('2026-09-21 13:12:30', self.DIAL_REQUEST, 'ENTERQUEUE', queue='3035',
+                data2='+77015550009'),
+            row('2026-09-21 13:13:42', self.DIAL_REQUEST, 'CONNECT', queue='3035',
+                agent='sagidollayev_nurmakhan', data1='72'),
+        ]
+        return Q.build_facts(rows)
+
+    def test_caller_and_did_are_read(self):
+        fact = Q.build_facts(ANSWERED_ROWS)[ANSWERED]
+        self.assertEqual(fact['caller'], '7718533633')
+        self.assertEqual(fact['did'], '7009214242')
+
+    def test_conversation_in_progress_is_listed_with_its_answer(self):
+        calls = Q.open_calls(self.facts(), set(), self.NOW)
+        self.assertEqual([c['linkedid'] for c in calls], [ANSWERED])
+        self.assertEqual(calls[0]['phone'], '7718533633')
+        self.assertEqual(calls[0]['answered_at'], '2026-09-21 13:13:11')
+        self.assertFalse(calls[0]['ended'])
+
+    def test_dial_request_without_did_is_not_an_incoming_call(self):
+        linkedids = [c['linkedid'] for c in Q.open_calls(self.facts(), set(), self.NOW)]
+        self.assertNotIn(self.DIAL_REQUEST, linkedids)
+
+    def test_calls_already_in_cdr_are_not_repeated(self):
+        self.assertEqual(Q.open_calls(self.facts(), {ANSWERED}, self.NOW), [])
+
+    def test_finished_call_not_yet_in_cdr_is_listed_as_ended(self):
+        facts = Q.build_facts(ANSWERED_ROWS)
+        calls = Q.open_calls(facts, set(), self.NOW)
+        self.assertTrue(calls[0]['ended'])
+
+    def test_old_calls_fall_out_of_the_list(self):
+        later = datetime(2026, 9, 21, 13, 13, 10) + timedelta(minutes=Q.OPEN_CALL_MINUTES + 1)
+        self.assertEqual(Q.open_calls(self.facts(), set(), later), [])
+
+    def test_merge_keeps_the_did_seen_in_an_earlier_window(self):
+        early = Q.build_facts(ANSWERED_ROWS[:2])
+        late = Q.build_facts(ANSWERED_ROWS[2:3])
+        merged = Q.merge(early, late)
+        self.assertEqual(merged[ANSWERED]['did'], '7009214242')
+        self.assertEqual(merged[ANSWERED]['caller'], '7718533633')
+        self.assertIsNotNone(merged[ANSWERED]['answered_at'])
+
+    def test_did_is_part_of_what_the_bridge_asks_for(self):
+        self.assertIn('DID', Q.WANTED_EVENTS)
 
 
 if __name__ == '__main__':
