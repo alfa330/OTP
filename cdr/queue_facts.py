@@ -308,6 +308,9 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES, journal_until=None):
     `journal_until` — докуда журнал прочитан целиком. С ним непринятый, который в очередь
     не входил (`never_entered`), становится «не дошёл до очереди»; очередь при этом
     остаётся — по ней выводится таксопарк линии.
+
+    Обратное — без всяких условий на полноту: «не дошёл до очереди» от склейки, у которого
+    в журнале ЕСТЬ вход в очередь, возвращается в «не приняли». Событие — улика прямая.
     """
     if not facts and journal_until is None:
         return list(touches or [])
@@ -320,6 +323,14 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES, journal_until=None):
                             result=touches_mod.RESULT_BEFORE_QUEUE, answered_at=''))
             continue
         fact = facts.get(str(touch.get('linkedid') or ''))
+        if (fact and fact.get('queued_at') is not None and not touch.get('ext')
+                and touch.get('call_type') == touches_mod.TYPE_IN_BEFORE_QUEUE):
+            # Склейка решает по строке станции, журнал — по событию очереди, и журнал
+            # главнее: вошёл в очередь — значит, дошёл. Строка станции могла показать звонок
+            # уже после очереди (таймаут → `app-blackhole`) или только его приветствие.
+            # Такой звонок — непринятый: очередь «сняла трубку», разговора не было.
+            touch = dict(touch, call_type=touches_mod.TYPE_IN_MISSED,
+                         result=touches_mod.RESULT_DROPPED)
         if not fact or touch.get('call_type') not in incoming_types:
             out.append(touch)
             continue

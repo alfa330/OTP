@@ -223,6 +223,28 @@ class ReachedNobodyTests(unittest.TestCase):
         self.assertEqual(touch['call_type'], T.TYPE_IN_MISSED)
         self.assertEqual(touch['queue'], '3034')
 
+    def test_queue_timeout_shown_by_its_blackhole_row_reached_the_queue(self):
+        """12.09.2026 01:23: десять минут в очереди 3001, таймаут, `app-blackhole` — и станция
+        показала звонок этой строкой. Очереди в ней нет, но запись `q-3001-…` пишет только
+        очередь: звонок до неё дошёл."""
+        timeout = row(src=CLIENT, dst='hangup', did='+77470943333', dcontext='app-blackhole',
+                      channel='PJSIP/77470943333_itaxi_OS-0005a33e', disposition='ANSWERED',
+                      billsec=625, duration=625, calldate='2026-09-12T01:23:54',
+                      recordingfile='q-3001-%s-20260912-012354-1.1.wav' % CLIENT)
+        touch = T.build_touches([timeout])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN_MISSED)
+        self.assertTrue(touch['recording_url'])
+
+    def test_own_recording_is_kept_and_a_substituted_one_is_not(self):
+        """Объявление станция записывает — ссылка остаётся. У строки приветствия файла нет, а
+        ссылку станция подставляет по номеру клиента — это был бы чужой звонок."""
+        announcement = greeting(dcontext='app-announcement-55', did='77470957683',
+                                recordingfile='in-77470957683-%s-20260927-165652-1.1.wav' % CLIENT)
+        self.assertIn('in-77470957683-', T.build_touches([announcement])[0]['recording_url'])
+        substituted = greeting(recording_url='http://192.168.88.251/recordings/2026/09/24/'
+                                             'external-6687-77015550001-20260924-200229-9.9.wav')
+        self.assertEqual(T.build_touches([substituted])[0]['recording_url'], '')
+
     def test_outgoing_is_never_affected(self):
         touch = T.build_touches([row(src='6650', dst='4242*77015550021', disposition='NO ANSWER',
                                      duration=20)])[0]

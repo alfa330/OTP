@@ -252,6 +252,24 @@ class NeverEnteredTests(unittest.TestCase):
         out = Q.attach([greeting_drop()], facts, journal_until=JOURNAL_READ)[0]
         self.assertEqual(out['call_type'], T.TYPE_IN_BEFORE_QUEUE)
 
+    def test_journal_entry_overrules_the_gluing(self):
+        """Склейка назвала звонок «не дошёл», а журнал знает вход в очередь — журнал главнее,
+        и так без всяких условий на полноту: событие — улика прямая. 12.09.2026 так вышло у
+        звонка, который станция показала строкой после таймаута очереди."""
+        glued = greeting_drop(linkedid=ABANDONED, phone='7053763454', queue='',
+                              call_type=T.TYPE_IN_BEFORE_QUEUE, result=T.RESULT_BEFORE_QUEUE,
+                              started_at='2026-09-21 12:54:26', dial_seconds=111)
+        for until in (None, JOURNAL_READ):
+            out = Q.attach([glued], self.facts, journal_until=until)[0]
+            self.assertEqual(out['call_type'], T.TYPE_IN_MISSED)
+            self.assertEqual(out['result'], T.RESULT_DROPPED)
+            self.assertEqual((out['queued_at'], out['wait_seconds']), ('2026-09-21 12:54:42', 95))
+
+    def test_greeting_without_an_entry_stays_before_the_queue(self):
+        glued = greeting_drop(call_type=T.TYPE_IN_BEFORE_QUEUE, result=T.RESULT_BEFORE_QUEUE)
+        out = Q.attach([glued], self.facts, journal_until=JOURNAL_READ)[0]
+        self.assertEqual(out['call_type'], T.TYPE_IN_BEFORE_QUEUE)
+
     def test_answered_and_outgoing_are_never_touched(self):
         for call_type in ('Входящий', 'Исходящий'):
             out = Q.attach([greeting_drop(call_type=call_type)], {}, journal_until=JOURNAL_READ)[0]

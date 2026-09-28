@@ -301,9 +301,14 @@ def _reached_nobody(legs):
     меню линии Dongelek ведёт на `2030` через транк на другую машину, и этот маршрут с
     17.05.2025 не соединил ни одного звонка (`dst = 2030`, канала назначения нет). Туда же —
     объявление, у которого станция пишет запись `in-…`: по записи `parse_row` принимает
-    строку, хотя дальше приветствия звонок не ушёл. За 19.08–28.09.2026 таких 49, и все они
-    числились «не приняли» — как будто оператор их пропустил."""
+    строку, хотя дальше приветствия звонок не ушёл. За 19.08–28.09.2026 таких 48, и все они
+    числились «не приняли» — как будто оператор их пропустил.
+
+    Запись `q-<очередь>-…` — улика обратного: её пишет сама очередь. 12.09.2026 звонок
+    простоял в 3001 десять минут, очередь сдалась по таймауту и отправила его в
+    `app-blackhole`, и станция показала именно эту строку: `dst = hangup`, очереди нет."""
     return all(leg["kind"] == "in" and not leg["agent"] and not leg["exts"] and not leg["queues"]
+               and not Q_REC.match(leg["recordingfile"])
                for leg in legs)
 
 
@@ -315,6 +320,10 @@ def _before_queue_touch(linkedid, client, legs, prefix_lines=None):
     назвал бы это «Разговором»."""
     legs.sort(key=lambda leg: (leg["at"] or "", leg["disposition"] or ""))
     started = min((leg["at"] for leg in legs if leg["at"]), default=None)
+    # Запись — только собственная, по имени файла строки: объявление «Тенге Такси» станция
+    # пишет. Ссылку без файла не берём: станция подставляет её по номеру клиента, и у
+    # строки приветствия это была бы запись чужого звонка.
+    url = next((_recording_url(leg) for leg in legs if leg["recordingfile"]), "")
     return {
         "started_at": str(started).replace("T", " ") if started else "",
         "answered_at": "",
@@ -328,8 +337,8 @@ def _before_queue_touch(linkedid, client, legs, prefix_lines=None):
         "dial_seconds": max((leg["duration"] for leg in legs), default=0),
         "queue": "",
         "line_number": _line_number(legs, prefix_lines),
-        "recording_url": "",
-        "has_recording": False,
+        "recording_url": url,
+        "has_recording": bool(url),
         "linkedid": linkedid,
         "legs": len(legs),
     }
