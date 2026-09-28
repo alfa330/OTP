@@ -6905,6 +6905,7 @@ class Database:
             self._init_dial_list_schema_tx(cursor)
             self._init_qa_marketing_schema_tx(cursor)
             self._init_payments_schema_tx(cursor)
+            self._init_library_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -63488,6 +63489,29 @@ class Database:
                 }
                 for item in cursor.fetchall()
             ]
+
+
+    def _init_library_schema_tx(self, cursor):
+        """Схема раздела «Библиотека» (задача #282) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете library/schema.py, как у новостей и посылок; импорт
+        локальный, иначе цикл. Не развернулась — раздел отвечает пустым
+        каталогом (schema_ready=false), остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT library_schema")
+        try:
+            from library.schema import init_library_schema
+            init_library_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT library_schema")
+            logging.exception(
+                "Схема раздела «Библиотека» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT library_schema")
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и

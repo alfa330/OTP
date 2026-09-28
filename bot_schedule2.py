@@ -64264,6 +64264,28 @@ except Exception:
     logging.exception("«Мои данные»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Библиотека» (задача #282) ────────────────────────────────────────
+# Каталог книг EPUB, веб-ридер и мониторинг чтения. Загружают и смотрят
+# мониторинг супер-админ и тренер (library/routes.py: MANAGER_ROLES); пока раздел
+# открыт только им же (READER_ROLES — решение владельца 28.09.2026).
+# Бакет — тот же каскад env, что у новостей: своя переменная не нужна, пока
+# книги не захотят развести по сроку хранения.
+try:
+    from library.routes import build_library_blueprint  # noqa: E402
+
+    app.register_blueprint(build_library_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        normalize_role=_normalize_user_role,
+        gcs={'bucket_name': _news_bucket_name, 'client': get_gcs_client},
+    ))
+    logging.info("Раздел «Библиотека»: Blueprint подключён на /api/library")
+except Exception:
+    logging.exception("Раздел «Библиотека»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Лиды OLX» (робот переноса откликов из чатов OLX в amoCRM) ────────
 # Задача #223. Раздел показывает журнал обращений, сводку за день и состояние
 # девяти кабинетов; сам перенос делает фоновая джоба olx_amo_poll_job ниже.

@@ -7,6 +7,7 @@ import {
     BarChart3,
     Bell,
     BookOpen,
+    LibraryBig,
     Briefcase,
     Building2,
     Calculator,
@@ -198,6 +199,8 @@ const TOKEN_TO_ICON = {
     'fa-bell': 'Bell',
     'fa-bolt': 'Zap',
     'fa-book': 'BookOpen',
+    // «Библиотека» (#282): полка, а не раскрытая книга — та уже у «Вики».
+    'fa-book-bookmark': 'LibraryBig',
     // «Мои данные» в «Профиле»: номер карты и университет.
     'fa-credit-card': 'CreditCard',
     'fa-university': 'Landmark',
@@ -461,6 +464,7 @@ const ICON_COMPONENTS = {
     BarChart3,
     Bell,
     BookOpen,
+    LibraryBig,
     Briefcase,
     Building2,
     Calculator,
