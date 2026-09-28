@@ -1,4 +1,4 @@
-﻿import React, { Suspense, lazy, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
+﻿import React, { Suspense, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
@@ -128,8 +128,8 @@ import {
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
+import lazyWithRetry from './utils/lazyWithRetry';
 
-const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
 const PROXY_STATUS_LABELS = {
     lost: 'Утерян',
@@ -190,36 +190,6 @@ const normalizePinnedTaskPosition = (value) => {
     return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 };
 
-const lazyWithRetry = (importer) =>
-    lazy(async () => {
-        try {
-            const module = await importer();
-            if (typeof window !== 'undefined') {
-                window.sessionStorage.removeItem(CHUNK_RELOAD_STORAGE_KEY);
-            }
-            return module;
-        } catch (error) {
-            if (typeof window !== 'undefined') {
-                const message = String(error?.message || '');
-                const isChunkLoadError =
-                    message.includes('Failed to fetch dynamically imported module') ||
-                    message.includes('Importing a module script failed') ||
-                    message.includes('ChunkLoadError');
-
-                if (isChunkLoadError) {
-                    const hasReloaded = window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY);
-                    if (!hasReloaded) {
-                        window.sessionStorage.setItem(CHUNK_RELOAD_STORAGE_KEY, '1');
-                        const url = new URL(window.location.href);
-                        url.searchParams.set('v', Date.now().toString());
-                        window.location.replace(url.toString());
-                        return new Promise(() => {});
-                    }
-                }
-            }
-            throw error;
-        }
-    });
 
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
@@ -252,6 +222,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
+const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
 const OlxLeadsView = lazyWithRetry(() => import('./components/olx/OlxLeadsView'));
@@ -721,6 +692,8 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'sign_links',
     'driver_chats',
     'voice_trainer',
+    // «Библиотека» (#282): тренер по ТЗ загружает книги и смотрит мониторинг.
+    'library',
 ]);
 // Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
 // (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
@@ -750,6 +723,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     four_you: '4 You',
     hours: 'Hours',
     lms: 'LMS',
+    library: 'Library',
     manage_admins: 'Manage admins',
     manage_operators: 'Manage operators',
     manage_trainers: 'Manage trainers',
@@ -42292,6 +42266,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
+            // «Библиотека» (#282): пока только супер-админ и тренер — решение
+            // владельца 28.09.2026 («у других пока даже раздел не будет
+            // отображаться»). Сервер закрыт тем же правилом (library/routes.py:
+            // READER_ROLES); открывать чтение другим — там и здесь вместе.
+            const canAccessLibrarySection = isSuperAdmin || currentUserRole === 'trainer';
             const canAccessSignLinksSection = canAccessSignLinksSectionForUser(user);
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
@@ -52187,6 +52166,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
                 const menuDailyBlockHasItems = Boolean(
                     wikiSectionEnabled
+                    || canAccessLibrarySection
                     || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
                     || isAdminLikeRole
                     || isPlainTrainer
@@ -52828,6 +52808,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wiki' ? 'bg-blue-700' : ''}`}
                                         >
                                             <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {canAccessLibrarySection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'library')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'library' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-book-bookmark"></FaIcon> <span className="sidebar-text">Библиотека</span>
                                         </button>
                                     </li>
                                     )}
@@ -54244,6 +54235,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 crmUnreadCount,
                 canAccessCrmSection,
                 canAccessParcelsSection,
+                canAccessLibrarySection,
                 canAccessSignLinksSection,
                 canAccessTouchesSection,
                 canAccessOpFunnelSection,
@@ -54686,6 +54678,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
+                        {view === 'library' && canAccessLibrarySection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка библиотеки…</div>}>
+                                <LibraryView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
                         {view === "parcels" && canAccessParcelsSection && (sensitiveSectionsLocked ? (
                             <SensitiveSectionGate
                                 sectionTitle="Посылки"
