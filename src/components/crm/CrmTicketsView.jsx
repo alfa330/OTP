@@ -24,7 +24,7 @@ import {
     queueMonogram, queueTile, rowBadges, unreadLabel,
 } from './ticketList';
 import { fitHeight, measureShell } from './layout';
-import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds } from './feedMerge';
+import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds, withSortRank } from './feedMerge';
 import ComplaintCard from '../complaints/ComplaintCard';
 import { TARGET_ICONS } from '../complaints/ComplaintDraft';
 import {
@@ -1898,7 +1898,9 @@ export default function CrmTicketsView({
             params.set('offset', String(nextOffset));
             const response = await axios.get(`${apiBaseUrl}/api/crm/tickets?${params}`,
                 { headers: headers() });
-            const items = response.data.items || [];
+            // Ярус «непрочитано» фиксируем на загрузке: прочитанная строка не
+            // уезжает из-под курсора до следующего перечитывания (feedMerge.js).
+            const items = (response.data.items || []).map(withSortRank);
             // Склейка по id, а не конкатенация: порядок «непрочитанное сверху»
             // сдвигается от прочтения, и OFFSET на догрузке иначе то пропускает
             // строку, то приносит дубль (см. mergeTicketsById).
@@ -1942,7 +1944,9 @@ export default function CrmTicketsView({
             params.set('offset', String(nextOffset));
             const response = await axios.get(`${apiBaseUrl}/api/complaints/complaints?${params}`,
                 { headers: headers() });
-            const items = response.data.items || [];
+            // Ярус «непрочитано» фиксируем на загрузке: прочитанная строка не
+            // уезжает из-под курсора до следующего перечитывания (feedMerge.js).
+            const items = (response.data.items || []).map(withSortRank);
             setComplaintItems((prev) => (nextOffset ? mergeTicketsById(prev, items) : items));
             setComplaintsHasMore(Boolean(response.data.has_more));
             setComplaintsOffset(nextOffset);

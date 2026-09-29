@@ -5,9 +5,14 @@
  * них свой доступ (сотрудник, на которого жалуются, её не видит) и свой цикл в
  * группе, — поэтому сервер отдаёт их отдельной лентой, а склеиваются они здесь.
  *
- * Обе ленты порционные. Склейка обязана соблюдать две вещи:
+ * Обе ленты порционные. Склейка обязана соблюдать три вещи:
  *   порядок  — тот же, что у обращений на сервере (crm/queries.list_tickets):
  *              в «Моих» без поиска непрочитанное наверху, дальше свежее;
+ *   покой    — прочитанная строка не уезжает из-под курсора, пока список не
+ *              перечитан (см. ticketList.markTicketSeen). Поэтому ярус
+ *              «непрочитано» берётся на момент загрузки (sort_unread), а
+ *              порядок внутри каждой ленты — ровно серверный: две ленты
+ *              сливаются двумя указателями, без пересортировки;
  *   границу  — пока у одной ленты есть ещё порция, строки другой, которые
  *              идут ПОСЛЕ её последней загруженной строки, держим: следующая
  *              порция может встать перед ними, и строка «прыгнула» бы вниз.
@@ -21,6 +26,11 @@ export const COMPLAINTS_FILTER = 'complaints';
 const COMPLAINT_STATUS_BY_STATE = { active: 'open', answered: 'answered', closed: 'done', all: '' };
 
 export const complaintStatusFor = (stateKey) => COMPLAINT_STATUS_BY_STATE[stateKey] ?? '';
+
+/* Ярус «непрочитано» на момент загрузки — ставится строкам сразу из ответа
+ * сервера. Открытие карточки гасит unread, но не sort_unread: строка стоит,
+ * где стояла, до следующей загрузки списка. */
+export const withSortRank = (item) => ({ ...item, sort_unread: Boolean(item && item.unread) });
 
 const KIND_ORDER = { ticket: 0, complaint: 1 };
 
@@ -38,11 +48,13 @@ export const complaintEntry = (complaint) => ({
     at: complaint.last_activity_at || complaint.created_at || '',
 });
 
+const sortUnread = (entry) => (entry.item.sort_unread ?? entry.item.unread);
+
 /* Порядок строк: <0 — a выше b. Время — наивное ISO Алматы у обеих лент,
  * поэтому сравнивается как есть. */
 export const compareEntries = (a, b, unreadFirst = false) => {
     if (unreadFirst) {
-        const rank = (entry) => (entry.item.unread ? 0 : 1);
+        const rank = (entry) => (sortUnread(entry) ? 0 : 1);
         if (rank(a) !== rank(b)) return rank(a) - rank(b);
     }
     const at = (entry) => Date.parse(entry.at) || 0;
@@ -51,9 +63,6 @@ export const compareEntries = (a, b, unreadFirst = false) => {
     return Number(b.item.id) - Number(a.item.id);
 };
 
-const lastOf = (entries, unreadFirst) => entries.reduce(
-    (last, entry) => (!last || compareEntries(entry, last, unreadFirst) > 0 ? entry : last), null);
-
 /* Склейка. Возвращает { items, loadMore }: items — строки в порядке показа,
  * loadMore — какую ленту догружать ('tickets' | 'complaints') или null, если
  * загружено всё. */
@@ -61,25 +70,32 @@ export const mergeFeeds = ({
     tickets = [], ticketsMore = false, complaints = [], complaintsMore = false,
     unreadFirst = false,
 }) => {
-    const ticketEntries = tickets.map(ticketEntry);
-    const complaintEntries = complaints.map(complaintEntry);
-    const all = ticketEntries.concat(complaintEntries)
-        .sort((a, b) => compareEntries(a, b, unreadFirst));
+    const a = tickets.map(ticketEntry);
+    const b = complaints.map(complaintEntry);
+    const merged = [];
+    let i = 0;
+    let j = 0;
+    while (i < a.length || j < b.length) {
+        if (j >= b.length || (i < a.length && compareEntries(a[i], b[j], unreadFirst) <= 0)) {
+            merged.push(a[i]);
+            i += 1;
+        } else {
+            merged.push(b[j]);
+            j += 1;
+        }
+    }
 
     const bounds = [];
-    if (ticketsMore && ticketEntries.length) {
-        bounds.push({ source: 'tickets', entry: lastOf(ticketEntries, unreadFirst) });
-    }
-    if (complaintsMore && complaintEntries.length) {
-        bounds.push({ source: 'complaints', entry: lastOf(complaintEntries, unreadFirst) });
-    }
-    if (!bounds.length) return { items: all, loadMore: null };
+    if (ticketsMore && a.length) bounds.push({ source: 'tickets', entry: a[a.length - 1] });
+    if (complaintsMore && b.length) bounds.push({ source: 'complaints', entry: b[b.length - 1] });
+    if (!bounds.length) return { items: merged, loadMore: null };
 
     // Ограничивает показ та граница, что выше: за ней ещё не всё известно.
+    // Всё, что склейка поставила после неё, — строки другой ленты, их держим.
     const limit = bounds.reduce((best, bound) => (
-        compareEntries(bound.entry, best.entry, unreadFirst) < 0 ? bound : best));
+        merged.indexOf(bound.entry) < merged.indexOf(best.entry) ? bound : best));
     return {
-        items: all.filter((entry) => compareEntries(entry, limit.entry, unreadFirst) <= 0),
+        items: merged.slice(0, merged.indexOf(limit.entry) + 1),
         loadMore: limit.source,
     };
 };

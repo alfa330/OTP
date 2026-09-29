@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
     COMPLAINTS_FILTER, compareEntries, complaintEntry, complaintStatusFor, mergeFeeds, ticketEntry,
+    withSortRank,
 } from '../src/components/crm/feedMerge.js';
 
 /* Одна лента «Обращений» из обращений и своих жалоб (решение владельца
@@ -23,8 +24,9 @@ test('свежее сверху, жалобы и обращения вперем
 });
 
 test('в «Моих» непрочитанное наверху — как у обращений на сервере', () => {
+    // Ленты приходят в серверном порядке: у обращений непрочитанное уже сверху.
     const result = mergeFeeds({
-        tickets: [ticket(10, '2026-09-29T12:00:00'), ticket(9, '2026-09-29T09:00:00', { unread: true })],
+        tickets: [ticket(9, '2026-09-29T09:00:00', { unread: true }), ticket(10, '2026-09-29T12:00:00')],
         complaints: [complaint(5, '2026-09-29T08:00:00', { unread: true })],
         unreadFirst: true,
     });
@@ -32,8 +34,21 @@ test('в «Моих» непрочитанное наверху — как у о
     // Без «Моих» (лента «Все», поиск) непрочитанное не поднимается.
     const plain = mergeFeeds({
         tickets: [ticket(10, '2026-09-29T12:00:00'), ticket(9, '2026-09-29T09:00:00', { unread: true })],
+        complaints: [complaint(5, '2026-09-29T11:00:00', { unread: true })],
     });
-    assert.deepEqual(keys(plain), ['ticket:10', 'ticket:9']);
+    assert.deepEqual(keys(plain), ['ticket:10', 'complaint:5', 'ticket:9']);
+});
+
+test('прочитанная строка не уезжает из-под курсора до перечитывания', () => {
+    // Как в ленте: ярус фиксируется на загрузке, открытие гасит только unread.
+    const tickets = [ticket(9, '2026-09-29T09:00:00', { unread: true }), ticket(10, '2026-09-29T12:00:00')]
+        .map(withSortRank);
+    const complaints = [complaint(5, '2026-09-29T08:00:00', { unread: true })].map(withSortRank);
+    const before = keys(mergeFeeds({ tickets, complaints, unreadFirst: true }));
+    const read = [{ ...tickets[0], unread: false }, tickets[1]];
+    const after = keys(mergeFeeds({ tickets: read, complaints, unreadFirst: true }));
+    assert.deepEqual(after, before);
+    assert.deepEqual(after, ['ticket:9', 'complaint:5', 'ticket:10']);
 });
 
 test('пока у обращений есть ещё порция, более старые жалобы ждут', () => {
