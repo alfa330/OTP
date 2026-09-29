@@ -44,7 +44,7 @@ class ComplaintsWiringTest(unittest.TestCase):
         self.assertIn("{view === 'complaints' && canAccessComplaintsSection && (sensitiveSectionsLocked ? (",
                       APP)
         self.assertIn("import('./components/complaints/ComplaintsView')", APP)
-        self.assertIn("|| view === 'driver_mailings' || view === 'complaints') {", APP)
+        self.assertIn("if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki'", APP)
 
     def test_trainer_is_not_thrown_out(self):
         block = re.search(r'const TRAINER_ALLOWED_VIEWS = Object\.freeze\(\[(.*?)\]\);', APP, re.S)

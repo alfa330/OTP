@@ -51693,9 +51693,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // закрыты тем же ключом. Статус спрашиваем до отрисовки раздела:
                 // иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
                 // раздел успеет получить 403.
-                if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
+                if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'driver_chats' || view === 'sign_links'
-                        || view === 'driver_mailings' || view === 'complaints') {
+                        || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
