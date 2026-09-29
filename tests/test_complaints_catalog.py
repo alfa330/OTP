@@ -74,7 +74,13 @@ class TargetsTest(unittest.TestCase):
         self.assertEqual(catalog.CALL_CENTER_DEPARTMENT_CODES[:2], ('szov', 'op'))
         self.assertEqual(catalog.department_label('szov', 'СЗоВ'), 'Техподдержка (СЗоВ)')
         self.assertEqual(catalog.department_label('op', 'Отдел продаж'), 'Отдел продаж')
-        self.assertEqual(catalog.department_label('tez', 'Тез КЦ'), 'Тез КЦ')
+        self.assertEqual(catalog.department_label('remote_cc', 'Удаленный КЦ'), 'Удаленный КЦ')
+
+    def test_tez_is_not_part_of_complaints(self):
+        """Владелец, 29.09.2026: «у никого ТЭЗ КЦ не должно быть» — ни в выборе
+        подразделения, ни среди отделов, которые разбирают жалобы."""
+        self.assertNotIn('tez', catalog.CALL_CENTER_DEPARTMENT_CODES)
+        self.assertNotIn('tez', catalog.HANDLER_DEPARTMENT_CODES)
 
 
 class ProcessingTest(unittest.TestCase):

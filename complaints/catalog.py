@@ -191,7 +191,9 @@ def target_title(code):
 # Порядок — порядок ТЗ: сначала техподдержка, потом продажи, потом прочие.
 # ─────────────────────────────────────────────────────────────────────────────
 
-CALL_CENTER_DEPARTMENT_CODES = ('szov', 'op', 'tez', 'remote_cc',
+# ТЭЗ КЦ в жалобах нет вовсе (владелец, 29.09.2026: «у никого ТЭЗ КЦ не должно
+# быть»): ни в выборе подразделения у оператора, ни среди разбирающих отделов.
+CALL_CENTER_DEPARTMENT_CODES = ('szov', 'op', 'remote_cc',
                                 'request_processing_department')
 
 CALL_CENTER_DEPARTMENT_LABELS = {

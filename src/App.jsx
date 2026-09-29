@@ -428,7 +428,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     crm_tickets: ['szov'],
     // Жалобы принимает СЗоВ, разбирают отделы сотрудников (complaints/catalog.py:
     // HANDLER_DEPARTMENT_CODES) — пункт виден при выборе любого из них.
-    complaints: ['szov', 'op', 'tez', 'front_office', 'remote_cc', 'request_processing_department'],
+    complaints: ['szov', 'op', 'front_office', 'remote_cc', 'request_processing_department'],
     // Раздел отдела продаж. У СЗоВ своя переписка в Chat2Desk, поэтому в его
     // наборе «Чатов Верификаторов» нет (решение владельца 09.09.2026) —
     // круг доступа при этом не менялся, см. canAccessVerifierChatsForUser.
@@ -2351,8 +2351,9 @@ const canAccessCrmSectionForUser = (userLike) => {
    группы (решение владельца 29.09.2026). Здесь решается только «показывать ли
    пункт меню»; обязательную границу держит complaints/access.py (зеркало —
    can_open_section). */
+// Без ТЭЗ КЦ: в жалобах его нет (complaints/catalog.py, решение владельца 29.09.2026).
 const COMPLAINTS_HANDLER_DEPARTMENT_CODES = [
-    'szov', 'op', 'tez', 'remote_cc', 'request_processing_department', 'front_office',
+    'szov', 'op', 'remote_cc', 'request_processing_department', 'front_office',
 ];
 
 const canAccessComplaintsSectionForUser = (userLike) => {
