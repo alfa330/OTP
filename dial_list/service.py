@@ -33,6 +33,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import hmac
@@ -119,6 +120,14 @@ OUTCOME_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 OUTCOME_NAME_MAX = 64
 OUTCOMES_MAX = 30
 COMMENT_MAX = 500
+# Типы итога (запрос владельца 29.09.2026): «Отказ» → «Дорого», «Уже работает в
+# другом парке»… Выключенные тоже считаются в лимит — список один на итог.
+SUBTYPE_NAME_MAX = 64
+SUBTYPES_MAX = 20
+# Маркер «телефон не прислал ключ subtype_id вовсе» — так шлют телефоны до типов
+# итога (≤ 3.22.28). Им тип не нужен, итог сохраняется без него; новый телефон
+# шлёт ключ всегда (null — тип не выбран), и тогда сервер проверяет выбор.
+SUBTYPE_NOT_SENT = object()
 # Скрипт разговора отдела (владелец, 25.09.2026): основной текст с лёгкой разметкой
 # («# заголовок», «**жирный**», «==выделение==», «- пункт», «> примечание») и быстрые
 # вопросы с ответами — их оператор открывает прямо во время звонка. Хранится по
@@ -217,6 +226,16 @@ def _iso(value):
 
 def _sid(value):
     return None if value is None else str(value)
+
+
+def _subtypes_from_json(value):
+    """Типы итога из json_agg-колонки (_outcome_rows) → список словарей.
+    psycopg2 сам разбирает json; строка — если драйвер отдал текст."""
+    if isinstance(value, str):
+        value = json.loads(value or "[]")
+    return [{"id": _sid(s.get("id")), "name": s.get("name") or "", "position": int(s.get("position") or 0),
+             "is_active": bool(s.get("is_active")), "used": int(s.get("used") or 0)}
+            for s in (value or []) if isinstance(s, dict)]
 
 
 def mask_phone(phone_norm):
@@ -870,13 +889,24 @@ class DialListService:
     # удаляются, а выключаются: на них ссылается история.
 
     def _outcome_rows(self, cur, department_id, active_only=False):
+        # Типы итога (29.09.2026) — json-колонкой в том же запросе: у каждого итога
+        # сразу его список, без второго запроса и без склейки по id в Python.
+        # active_only — только включённые итоги и только включённые типы (телефон).
         cur.execute("""
             SELECT id, name, color, position, requeue, is_active,
-                   (SELECT COUNT(*) FROM dial_list_attempts t WHERE t.outcome_id = o.id) AS used
+                   (SELECT COUNT(*) FROM dial_list_attempts t WHERE t.outcome_id = o.id) AS used,
+                   (SELECT COALESCE(json_agg(json_build_object(
+                               'id', s.id, 'name', s.name, 'position', s.position, 'is_active', s.is_active,
+                               'used', (SELECT COUNT(*) FROM dial_list_attempts t2
+                                        WHERE t2.outcome_subtype_id = s.id))
+                           ORDER BY s.is_active DESC, s.position, s.created_at), '[]'::json)
+                    FROM dial_list_outcome_subtypes s
+                    WHERE s.outcome_id = o.id {sub_active}) AS subtypes
             FROM dial_list_outcomes o
             WHERE department_id = %s {active}
             ORDER BY is_active DESC, position, created_at
-        """.format(active="AND is_active" if active_only else ""), (int(department_id),))
+        """.format(active="AND is_active" if active_only else "",
+                   sub_active="AND s.is_active" if active_only else ""), (int(department_id),))
         rows = cur.fetchall()
         if not rows and active_only:
             # У отдела ещё нет ни одного итога — заводим стартовый набор один раз.
@@ -885,7 +915,8 @@ class DialListService:
                 self._seed_outcomes(cur, department_id)
                 return self._outcome_rows(cur, department_id, active_only=True)
         return [{"id": _sid(r[0]), "name": r[1], "color": r[2], "position": int(r[3]),
-                 "requeue": bool(r[4]), "is_active": bool(r[5]), "used": int(r[6] or 0)} for r in rows]
+                 "requeue": bool(r[4]), "is_active": bool(r[5]), "used": int(r[6] or 0),
+                 "subtypes": _subtypes_from_json(r[7])} for r in rows]
 
     def _seed_outcomes(self, cur, department_id):
         for position, (name, color, requeue) in enumerate(DEFAULT_OUTCOMES, start=1):
@@ -896,7 +927,8 @@ class DialListService:
         log.info("dial_list: отделу %s заведён стартовый набор итогов", department_id)
 
     def outcomes(self, department_id):
-        """Все итоги отдела (включая выключенные) для редактора руководителя."""
+        """Все итоги отдела (включая выключенные) для редактора руководителя — у
+        каждого subtypes: все его типы, тоже с выключенными и числом использований."""
         with self.db._get_cursor() as cur:
             rows = self._outcome_rows(cur, department_id)
             if not rows:
@@ -904,9 +936,80 @@ class DialListService:
                 rows = self._outcome_rows(cur, department_id)
         return rows
 
+    @staticmethod
+    def _clean_subtypes(outcome_name, raw):
+        """Типы одного итога из редактора: проверка до обращения к базе (как у итогов)."""
+        if not isinstance(raw, list):
+            raise DialListError(f"Типы итога «{outcome_name}»: ожидается список")
+        if len(raw) > SUBTYPES_MAX:
+            raise DialListError(f"У итога «{outcome_name}» не больше {SUBTYPES_MAX} типов")
+        cleaned = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                raise DialListError(f"Типы итога «{outcome_name}»: каждый тип — объект {{id?, name, is_active}}")
+            name = str(item.get("name") or "").strip()[:SUBTYPE_NAME_MAX]
+            if not name:
+                raise DialListError(f"У типа итога «{outcome_name}» должно быть название")
+            if name.lower() in seen:
+                raise DialListError(f"Тип «{name}» у итога «{outcome_name}» повторяется")
+            seen.add(name.lower())
+            cleaned.append({"id": _sid(item.get("id")) or None, "name": name,
+                            "is_active": item.get("is_active", True) is not False})
+        return cleaned
+
+    def _save_subtypes(self, cur, department_id, outcome_id, outcome_name, subtypes):
+        """Полный список типов одного итога — те же правила, что у итогов: с id этого
+        итога — обновить, без id (или с чужим) — добавить, отсутствующие — выключить."""
+        cur.execute("""
+            SELECT id FROM dial_list_outcome_subtypes WHERE outcome_id = %s AND department_id = %s
+        """, (outcome_id, department_id))
+        existing = {str(r[0]) for r in cur.fetchall()}
+        kept = set()
+        for position, s in enumerate(subtypes, start=1):
+            if s["id"] and s["id"] in existing and s["id"] not in kept:
+                cur.execute("""
+                    UPDATE dial_list_outcome_subtypes
+                    SET name = %s, position = %s, is_active = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND outcome_id = %s
+                """, (s["name"], position, s["is_active"], s["id"], outcome_id))
+                kept.add(s["id"])
+            else:
+                cur.execute("""
+                    INSERT INTO dial_list_outcome_subtypes (outcome_id, department_id, name, position, is_active)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id
+                """, (outcome_id, department_id, s["name"], position, s["is_active"]))
+                kept.add(str(cur.fetchone()[0]))
+        gone = existing - kept
+        if gone:
+            cur.execute("""
+                UPDATE dial_list_outcome_subtypes SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                WHERE outcome_id = %s AND id = ANY(%s::uuid[])
+            """, (outcome_id, list(gone)))
+        # Лимит и уникальность — ещё и по базе: отсутствующие в списке типы только
+        # выключаются, и сохранение из устаревшей вкладки (без типов, добавленных
+        # в другой) довело бы итог до 20+ типов или до двух «Дорого». Тогда GET
+        # вернул бы список, который PUT уже не принимает, — редактор заперт.
+        # Ошибка внутри транзакции откатывает всё сохранение. Регистр сравниваем в
+        # Python, как в _clean_subtypes: LOWER() базы с локалью C кириллицу не понижает.
+        cur.execute("""
+            SELECT name FROM dial_list_outcome_subtypes WHERE outcome_id = %s
+        """, (outcome_id,))
+        stored = [str(r[0]).lower() for r in cur.fetchall()]
+        if len(stored) > SUBTYPES_MAX:
+            raise DialListError(f"У итога «{outcome_name}» не больше {SUBTYPES_MAX} типов "
+                                f"(с учётом сохранённых в другой вкладке) — обновите страницу")
+        if len(set(stored)) < len(stored):
+            raise DialListError(f"Тип у итога «{outcome_name}» повторяется с сохранённым "
+                                f"в другой вкладке — обновите страницу")
+
     def save_outcomes(self, department_id, items, changed_by=None):
         """Полный список от редактора: с id — обновить, без id — добавить, отсутствующие
-        в списке — выключить (не удалить). Порядок — как в списке."""
+        в списке — выключить (не удалить). Порядок — как в списке.
+
+        subtypes у итога — полный список его типов по тем же правилам. Ключа нет —
+        типы итога не трогаем: закэшированная старая сборка сайта шлёт итоги без
+        типов, и сохранение из неё не должно стирать настроенное (29.09.2026)."""
         department_id = int(department_id)
         if not isinstance(items, list):
             raise DialListError("items: ожидается список итогов")
@@ -929,6 +1032,7 @@ class DialListService:
             cleaned.append({
                 "id": _sid(raw.get("id")) or None, "name": name, "color": color,
                 "requeue": bool(raw.get("requeue")), "is_active": raw.get("is_active", True) is not False,
+                "subtypes": self._clean_subtypes(name, raw["subtypes"]) if "subtypes" in raw else None,
             })
         if not any(c["is_active"] for c in cleaned):
             raise DialListError("Хотя бы один итог должен быть включён")
@@ -944,13 +1048,16 @@ class DialListService:
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s AND department_id = %s
                     """, (c["name"], c["color"], position, c["requeue"], c["is_active"], c["id"], department_id))
-                    kept.add(c["id"])
+                    outcome_id = c["id"]
                 else:
                     cur.execute("""
                         INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, is_active)
                         VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
                     """, (department_id, c["name"], c["color"], position, c["requeue"], c["is_active"]))
-                    kept.add(str(cur.fetchone()[0]))
+                    outcome_id = str(cur.fetchone()[0])
+                kept.add(outcome_id)
+                if c["subtypes"] is not None:
+                    self._save_subtypes(cur, department_id, outcome_id, c["name"], c["subtypes"])
             gone = existing - kept
             if gone:
                 cur.execute("""
@@ -994,8 +1101,13 @@ class DialListService:
             raise DialListError(
                 f"Сначала укажите итог звонка: {pending['full_name'] or 'предыдущий разговор'}", 409)
 
-    def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment=""):
-        """Оператор указал итог разговора (и, возможно, комментарий)."""
+    def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment="", subtype_id=SUBTYPE_NOT_SENT):
+        """Оператор указал итог разговора (и, возможно, комментарий).
+
+        subtype_id — тип итога (29.09.2026). SUBTYPE_NOT_SENT — телефон до типов
+        итога ключ не шлёт: итог сохраняется без типа, иначе такие операторы
+        навсегда застряли бы на «Сначала укажите итог звонка». Ключ прислан —
+        новый телефон: у итога с включёнными типами тип обязателен."""
         ctx = self.operator_context(user_id)
         attempt_id = str(attempt_id)
         outcome_id = str(outcome_id or "").strip()
@@ -1028,12 +1140,37 @@ class DialListService:
             outcome = cur.fetchone()
             if not outcome:
                 raise DialListError("Такого итога нет — обновите список", 400)
+            subtype = None
+            if subtype_id is not SUBTYPE_NOT_SENT:
+                subtype_text = str(subtype_id or "").strip()
+                if subtype_text:
+                    # Кривой id — та же 400, что и чужой/выключенный тип, а не 500 от базы.
+                    try:
+                        subtype_text = str(uuid.UUID(subtype_text))
+                    except (ValueError, AttributeError, TypeError):
+                        raise DialListError("Такого типа итога нет — обновите список", 400)
+                    cur.execute("""
+                        SELECT id, name FROM dial_list_outcome_subtypes
+                        WHERE id = %s AND outcome_id = %s AND department_id = %s AND is_active
+                    """, (subtype_text, str(outcome[0]), ctx["department_id"]))
+                    subtype = cur.fetchone()
+                    if not subtype:
+                        raise DialListError("Такого типа итога нет — обновите список", 400)
+                else:
+                    cur.execute("""
+                        SELECT 1 FROM dial_list_outcome_subtypes
+                        WHERE outcome_id = %s AND is_active LIMIT 1
+                    """, (str(outcome[0]),))
+                    if cur.fetchone():
+                        raise DialListError("Выберите тип итога", 400)
+            # Тип пишется ВСЕГДА вместе с итогом (NULL — без типа): повторный выбор
+            # другого итога не оставит на попытке тип от прежнего.
             cur.execute("""
                 UPDATE dial_list_attempts
-                SET outcome_id = %s, operator_comment = %s, outcome_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
+                SET outcome_id = %s, outcome_subtype_id = %s, operator_comment = %s,
+                    outcome_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-            """, (outcome_id, comment, attempt_id))
+            """, (outcome_id, _sid(subtype[0]) if subtype else None, comment, attempt_id))
             if outcome[3]:
                 # «Перезвонить»: лид снова в работе, попытки с нуля. Если исход от АТС
                 # приедет позже, _touch_lead увидит этот итог и статус не перебьёт.
@@ -1043,9 +1180,11 @@ class DialListService:
                         attempts_total = 0, updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (str(row[1]),))
-        log.info("dial_list: оператор %s указал итог %s по попытке %s", ctx["user_id"], outcome[1], attempt_id)
+        log.info("dial_list: оператор %s указал итог %s%s по попытке %s", ctx["user_id"], outcome[1],
+                 f" · {subtype[1]}" if subtype else "", attempt_id)
         return {"attempt_id": attempt_id,
-                "outcome": {"id": _sid(outcome[0]), "name": outcome[1], "color": outcome[2], "requeue": bool(outcome[3])},
+                "outcome": {"id": _sid(outcome[0]), "name": outcome[1], "color": outcome[2], "requeue": bool(outcome[3]),
+                            "subtype": {"id": _sid(subtype[0]), "name": subtype[1]} if subtype else None},
                 "comment": comment}
 
     # ------------------------------------------------------------ журнал водителей
@@ -1059,6 +1198,7 @@ class DialListService:
                    COALESCE(l.note, '') AS note,
                    l.period,
                    lo.id AS last_outcome_id, lo.name AS last_outcome_name, lo.color AS last_outcome_color,
+                   ls.id AS last_outcome_subtype_id, ls.name AS last_outcome_subtype_name,
                    COALESCE(lt.operator_comment, '') AS last_comment,
                    COALESCE(lt.cancelled, FALSE) AS last_cancelled,
                    fb.file_name AS first_file, fb.created_at AS first_uploaded_at,
@@ -1100,7 +1240,7 @@ class DialListService:
             LEFT JOIN users lu ON lu.id = la.operator_id
             LEFT JOIN LATERAL (
                 SELECT t.requested_at, t.state, t.disposition, t.billsec, t.api_error, t.operator_id,
-                       t.outcome_id, t.operator_comment, t.cancelled
+                       t.outcome_id, t.operator_comment, t.cancelled, t.outcome_subtype_id
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a2 ON a2.id = t.assignment_id
                 WHERE a2.lead_id = l.id
@@ -1108,10 +1248,12 @@ class DialListService:
             ) lt ON TRUE
             LEFT JOIN users tu ON tu.id = lt.operator_id
             LEFT JOIN dial_list_outcomes lo ON lo.id = lt.outcome_id
+            LEFT JOIN dial_list_outcome_subtypes ls ON ls.id = lt.outcome_subtype_id
             WHERE {scope}
         )
     """
-    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[36]).
+    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[38]).
+    # Новые колонки — только в конец: за ними страница добавляет total, rn и сводку.
     _JOURNAL_COLUMNS = """
                id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
                answered_at, created_at, updated_at, upload_count, note,
@@ -1120,7 +1262,10 @@ class DialListService:
                last_result, last_done_at, last_call_at, last_call_state, last_disposition,
                last_billsec, last_api_error, last_call_operator_name, activity_at, stage, next_retry_at,
                period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment,
-               last_cancelled"""
+               last_cancelled, last_outcome_subtype_id, last_outcome_subtype_name"""
+    # Сколько колонок у строки журнала: сразу за ними идёт total (индекс не
+    # зашит числом — иначе новая колонка молча сдвигала бы «всего» на rn).
+    _JOURNAL_COLUMN_COUNT = len([c for c in _JOURNAL_COLUMNS.split(",") if c.strip()])
     _JOURNAL_SQL = _JOURNAL_BASE_SQL + """
         SELECT""" + _JOURNAL_COLUMNS + """,
                COUNT(*) OVER () AS total
@@ -1154,14 +1299,15 @@ class DialListService:
             LIMIT %(limit)s OFFSET %(offset)s
         ),
         counts AS (
-            SELECT COALESCE(json_agg(json_build_array(stage, last_outcome_id::text, for_stage, for_outcome)),
+            SELECT COALESCE(json_agg(json_build_array(stage, last_outcome_id::text, last_outcome_subtype_id::text,
+                                                      for_stage, for_outcome)),
                             '[]'::json) AS summary
             FROM (
-                SELECT stage, last_outcome_id,
+                SELECT stage, last_outcome_id, last_outcome_subtype_id,
                        COUNT(*) FILTER (WHERE {outcome_ok}) AS for_stage,
                        COUNT(*) FILTER (WHERE {stage_ok}) AS for_outcome
                 FROM f
-                GROUP BY stage, last_outcome_id
+                GROUP BY stage, last_outcome_id, last_outcome_subtype_id
             ) g
         )
         SELECT page.*, counts.summary
@@ -1206,17 +1352,20 @@ class DialListService:
             "next_retry_at": _iso(r[30]) if stage == "waiting" else None,
             "period": r[31].isoformat() if r[31] else None,
             "period_label": period_label(r[31]),
-            # Итог и комментарий оператора по последнему звонку.
-            "outcome": ({"id": _sid(r[32]), "name": r[33] or "", "color": r[34] or "#8E8E93"}
+            # Итог (с типом, если выбран) и комментарий оператора по последнему звонку.
+            "outcome": ({"id": _sid(r[32]), "name": r[33] or "", "color": r[34] or "#8E8E93",
+                         "subtype": ({"id": _sid(r[37]), "name": r[38] or ""} if r[37] is not None else None)}
                         if r[32] is not None else None),
             "comment": r[35] or "",
         }
 
     def leads_journal(self, department_id, q="", stage="", operator_id=None, batch_id=None,
                       date_from=None, date_to=None, sort="activity", limit=50, offset=0,
-                      period=None, outcome_id=None):
+                      period=None, outcome_id=None, outcome_subtype_id=None):
         """Журнал водителей отдела: страница строк + всего. Все фильтры необязательны.
-        period — date первого дня месяца, 'all' — все месяцы, пусто — обзваниваемый."""
+        period — date первого дня месяца, 'all' — все месяцы, пусто — обзваниваемый.
+        outcome_subtype_id — тип итога (uuid) либо 'none' — «без типа»; имеет смысл
+        только вместе с outcome_id, без него не учитывается."""
         department_id = int(department_id)
         settings = self.department_settings(department_id)
         if period is None:
@@ -1232,11 +1381,19 @@ class DialListService:
             scope += " AND l.period = %(period)s"
         filters = ["TRUE"]
         # Этап и итог — отдельно от остальных фильтров: сводка по полосе этапов и
-        # по чипам итогов считается без «своего» фильтра (см. _JOURNAL_COUNTS_SQL).
+        # по чипам итогов считается без «своего» фильтра (см. _JOURNAL_PAGE_SQL).
+        # Тип итога — часть фильтра итога: чипы итогов и типов считаются без обоих,
+        # полоса этапов — с ними.
         stage_ok = outcome_ok = "TRUE"
         if outcome_id:
             params["outcome_id"] = str(outcome_id)
             outcome_ok = "last_outcome_id = %(outcome_id)s::uuid"
+            subtype = str(outcome_subtype_id or "").strip()
+            if subtype.lower() == "none":
+                outcome_ok += " AND last_outcome_subtype_id IS NULL"
+            elif subtype:
+                params["outcome_subtype_id"] = subtype
+                outcome_ok += " AND last_outcome_subtype_id = %(outcome_subtype_id)s::uuid"
         q = str(q or "").strip()
         if q:
             digits = "".join(ch for ch in q if ch.isdigit())
@@ -1286,21 +1443,39 @@ class DialListService:
             # приходит одной строкой, где колонки страницы — NULL.
             summary = (rows[0][-1] if rows else None) or []
             page = [r for r in rows if r[0] is not None]
-            total = int(page[0][37]) if page else 0
+            total = int(page[0][self._JOURNAL_COLUMN_COUNT]) if page else 0
             items = [self._journal_row(r, settings["max_attempts"]) for r in page]
             by_stage = {k: 0 for k in LEAD_STAGES}
             outcome_counts = {}
-            for stage_value, outcome_value, for_stage, for_outcome in summary:
+            # (итог, тип) → водители; тип None — итог без типа («Без типа»).
+            subtype_counts = {}
+            for stage_value, outcome_value, subtype_value, for_stage, for_outcome in summary:
                 by_stage[stage_value] = by_stage.get(stage_value, 0) + int(for_stage or 0)
                 if outcome_value is not None:
                     outcome_counts[outcome_value] = outcome_counts.get(outcome_value, 0) + int(for_outcome or 0)
+                    key = (outcome_value, subtype_value)
+                    subtype_counts[key] = subtype_counts.get(key, 0) + int(for_outcome or 0)
             cur.execute("""
                 SELECT id, name, color, is_active FROM dial_list_outcomes
                 WHERE department_id = %(department_id)s
                 ORDER BY is_active DESC, position
             """, params)
+            outcome_rows = cur.fetchall()
+            cur.execute("""
+                SELECT s.id, s.outcome_id, s.name, s.is_active FROM dial_list_outcome_subtypes s
+                WHERE s.department_id = %(department_id)s
+                ORDER BY s.is_active DESC, s.position, s.created_at
+            """, params)
+            subtypes_by_outcome = {}
+            for s in cur.fetchall():
+                oid = _sid(s[1])
+                subtypes_by_outcome.setdefault(oid, []).append({
+                    "id": _sid(s[0]), "name": s[2], "is_active": bool(s[3]),
+                    "count": subtype_counts.get((oid, _sid(s[0])), 0)})
             by_outcome = [{"id": _sid(r[0]), "name": r[1], "color": r[2], "is_active": bool(r[3]),
-                           "count": outcome_counts.get(_sid(r[0]), 0)} for r in cur.fetchall()]
+                           "count": outcome_counts.get(_sid(r[0]), 0),
+                           "subtypes": subtypes_by_outcome.get(_sid(r[0]), []),
+                           "none_count": subtype_counts.get((_sid(r[0]), None), 0)} for r in outcome_rows]
         return {
             "department_id": department_id, "items": items, "total": total,
             "limit": params["limit"], "offset": params["offset"],
@@ -1354,11 +1529,13 @@ class DialListService:
                        (t.general_call_id IS NOT NULL AND t.general_call_id <> ''),
                        a.id, a.result, a.state, a.created_at,
                        o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at,
-                       t.cancelled, t.operator_hangup_at, t.leg_sec
+                       t.cancelled, t.operator_hangup_at, t.leg_sec,
+                       os.id, os.name
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 LEFT JOIN users u ON u.id = t.operator_id
                 LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
+                LEFT JOIN dial_list_outcome_subtypes os ON os.id = t.outcome_subtype_id
                 WHERE a.lead_id = %s
                 ORDER BY t.requested_at DESC
             """, (lead_id,))
@@ -1387,7 +1564,9 @@ class DialListService:
                                            and int(r[7] or 0) > 0,
                     "assignment": {"id": _sid(r[15]), "result": r[16] or "", "state": r[17] or "",
                                    "issued_at": _iso(r[18])},
-                    "outcome": ({"id": _sid(r[19]), "name": r[20] or "", "color": r[21] or "#8E8E93"}
+                    "outcome": ({"id": _sid(r[19]), "name": r[20] or "", "color": r[21] or "#8E8E93",
+                                 "subtype": ({"id": _sid(r[27]), "name": r[28] or ""}
+                                             if r[27] is not None else None)}
                                 if r[19] is not None else None),
                     "comment": r[22] or "",
                     "outcome_at": _iso(r[23]),
@@ -1645,16 +1824,18 @@ class DialListService:
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
                    t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
-                   o.name, o.color, t.cancelled, t.operator_hangup_at, a.lead_id
+                   o.name, o.color, t.cancelled, t.operator_hangup_at, a.lead_id,
+                   os.name
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
                 SELECT id, state, disposition, requested_at, general_call_id, outcome_id,
-                       cancelled, operator_hangup_at
+                       cancelled, operator_hangup_at, outcome_subtype_id
                 FROM dial_list_attempts WHERE assignment_id = a.id
                 ORDER BY requested_at DESC LIMIT 1
             ) t ON TRUE
             LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
+            LEFT JOIN dial_list_outcome_subtypes os ON os.id = t.outcome_subtype_id
             WHERE a.portion_id = %s
             ORDER BY a.position
         """, (portion_id,))
@@ -1674,6 +1855,8 @@ class DialListService:
                     "attempt_id": str(r[7]), "state": r[8], "disposition": r[9] or "",
                     "requested_at": _iso(r[10]), "general_call_id": r[11],
                     "outcome_name": r[12] or "", "outcome_color": r[13] or "",
+                    # Тип итога (29.09.2026): строка очереди — «Отказ · Дорого».
+                    "outcome_subtype_name": r[17] or "",
                     # Оператор сам завершил звонок; cancelled — до ответа водителя,
                     # попытка не засчитана и строка осталась в работе.
                     "cancelled": bool(r[14]), "operator_hangup": r[15] is not None,
@@ -1734,8 +1917,10 @@ class DialListService:
             "pool_available": pool,
             "active_attempt": active,
             # Справочник итогов для окна после разговора и попытка, по которой итог
-            # ещё не указан (телефон не даст звонить дальше, сервер — тоже).
-            "outcomes": [{"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"]}
+            # ещё не указан (телефон не даст звонить дальше, сервер — тоже). subtypes —
+            # включённые типы итога по порядку: есть хоть один — телефон просит выбрать тип.
+            "outcomes": [{"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"],
+                          "subtypes": [{"id": s["id"], "name": s["name"]} for s in o["subtypes"]]}
                          for o in outcomes],
             "pending_outcome": pending_outcome,
             "script_version": script_version,
@@ -1906,6 +2091,19 @@ class DialListService:
         GROUP BY o.id, o.name, o.color, o.position
         ORDER BY cnt DESC, o.position, o.name
     """
+    # Типы итогов (29.09.2026) — по тем же попыткам, что и итоги выше; попытки без
+    # типа не показываются (строки «без типа» на телефоне нет).
+    _PROGRESS_SUBTYPES_SQL = """
+        SELECT t.outcome_id, s.id, s.name, COUNT(*) AS cnt,
+               COUNT(*) FILTER (WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %(today)s) AS cnt_today
+        FROM dial_list_attempts t
+        JOIN dial_list_outcomes o ON o.id = t.outcome_id
+        JOIN dial_list_outcome_subtypes s ON s.id = t.outcome_subtype_id
+        WHERE t.operator_id = %(operator_id)s
+          AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+        GROUP BY t.outcome_id, s.id, s.name
+        ORDER BY cnt DESC, s.name
+    """
 
     def operator_progress(self, user_id):
         """«Мой прогресс» на телефоне: сколько строк выдано и обработано, попыток,
@@ -1920,7 +2118,15 @@ class DialListService:
             r = cur.fetchone() or (0,) * 10
             cur.execute(self._PROGRESS_OUTCOMES_SQL, params)
             outcomes = [{"id": _sid(o[0]), "name": o[1], "color": o[2] or "#8E8E93",
-                         "count": int(o[3] or 0), "count_today": int(o[4] or 0)} for o in cur.fetchall()]
+                         "count": int(o[3] or 0), "count_today": int(o[4] or 0), "subtypes": []}
+                        for o in cur.fetchall()]
+            cur.execute(self._PROGRESS_SUBTYPES_SQL, params)
+            by_id = {o["id"]: o for o in outcomes}
+            for s in cur.fetchall():
+                parent = by_id.get(_sid(s[0]))
+                if parent is not None:
+                    parent["subtypes"].append({"id": _sid(s[1]), "name": s[2], "count": int(s[3] or 0),
+                                               "count_today": int(s[4] or 0)})
         return {
             "operator": {"id": ctx["user_id"], "name": ctx["name"]},
             "period": month.isoformat(),
@@ -1955,15 +2161,16 @@ class DialListService:
         )
         SELECT s.id, s.lead_id, l.full_name, s.state, s.result, s.done_at, s.created_at,
                t.outcome_id, t.outcome_at, t.operator_comment, t.state,
-               o.name, o.color, o.position, l.status
+               o.name, o.color, o.position, l.status, st.name
         FROM latest s
         JOIN dial_list_leads l ON l.id = s.lead_id
         LEFT JOIN LATERAL (
-            SELECT outcome_id, outcome_at, operator_comment, state
+            SELECT outcome_id, outcome_at, operator_comment, state, outcome_subtype_id
             FROM dial_list_attempts WHERE assignment_id = s.id
             ORDER BY requested_at DESC LIMIT 1
         ) t ON TRUE
         LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
+        LEFT JOIN dial_list_outcome_subtypes st ON st.id = t.outcome_subtype_id
     """
 
     def operator_worked(self, user_id):
@@ -2002,6 +2209,8 @@ class DialListService:
                 "tab": tab,
                 "result": r[4] or "",
                 "comment": (r[9] or "") if tab != WORKED_NO_ANSWER else "",
+                # Тип итога (29.09.2026): вкладка по-прежнему одна на итог, тип — в строке.
+                "subtype_name": (r[15] or "") if tab != WORKED_NO_ANSWER else "",
                 "at": _iso(at), "at_label": at_label(at, today), "_sort": at,
             })
         no_answer = {"key": WORKED_NO_ANSWER, "name": WORKED_NO_ANSWER_NAME, "color": WORKED_NO_ANSWER_COLOR,

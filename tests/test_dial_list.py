@@ -18,6 +18,44 @@ from dial_list import routes as dial_routes  # noqa: E402
 from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
 
+# Ширина строки страницы журнала без сводки: колонки журнала + total + rn.
+PAGE_WIDTH = dial_service.DialListService._JOURNAL_COLUMN_COUNT + 2
+
+
+class _RoutedCursor:
+    """Поддельный курсор: ответ выбирается по первой подстроке SQL из rules.
+    rules — [(подстрока, {'one': строка|callable(), 'all': [строки]|callable(params)})]."""
+
+    def __init__(self, rules):
+        self.rules = rules
+        self.executed = []
+        self._current = {}
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        self._current = next((answer for sub, answer in self.rules if sub in sql), {})
+
+    def fetchone(self):
+        value = self._current.get('one')
+        return value() if callable(value) else value
+
+    def fetchall(self):
+        value = self._current.get('all', [])
+        return list(value(self.executed[-1][1]) if callable(value) else value)
+
+    def sql_with(self, fragment):
+        return [(sql, params) for sql, params in self.executed if fragment in sql]
+
+
+def _routed_db(cursor):
+    import contextlib
+
+    class Db:
+        @contextlib.contextmanager
+        def _get_cursor(self):
+            yield cursor
+    return Db()
+
 
 class DispositionMappingTests(unittest.TestCase):
     def test_final_dispositions(self):
@@ -377,9 +415,10 @@ class LeadsJournalTests(unittest.TestCase):
         refusal, callback = uuid.uuid4(), uuid.uuid4()
         executed = []
 
-        # stage, last_outcome_id, for_stage (без фильтра этапа), for_outcome (без фильтра итога)
-        summary = [['answered', str(refusal), 4, 4], ['answered', str(callback), 0, 2],
-                   ['queue', None, 0, 7], ['exhausted', str(refusal), 1, 0]]
+        # stage, last_outcome_id, last_outcome_subtype_id, for_stage (без фильтра этапа),
+        # for_outcome (без фильтра итога)
+        summary = [['answered', str(refusal), None, 4, 4], ['answered', str(callback), None, 0, 2],
+                   ['queue', None, None, 0, 7], ['exhausted', str(refusal), None, 1, 0]]
 
         class Cursor:
             def execute(self, sql, params=None):
@@ -391,7 +430,7 @@ class LeadsJournalTests(unittest.TestCase):
                     return [(refusal, 'Отказ', '#FF3B30', True), (callback, 'Перезвонить', '#FF9F0A', True)]
                 if 'counts.summary' in sql:
                     # Пустая страница: одна строка, колонки страницы — NULL, сводка — в последней.
-                    return [(None,) * 38 + (summary,)]
+                    return [(None,) * PAGE_WIDTH + (summary,)]
                 return []
 
         class Db:
@@ -423,6 +462,9 @@ class LeadsJournalTests(unittest.TestCase):
         self.assertEqual(res['by_stage']['exhausted'], 1)
         self.assertEqual(res['by_stage']['queue'], 0)
         self.assertEqual({o['name']: o['count'] for o in res['by_outcome']}, {'Отказ': 4, 'Перезвонить': 2})
+        # Типов у итогов нет — все водители итога «без типа».
+        self.assertEqual({o['name']: (o['subtypes'], o['none_count']) for o in res['by_outcome']},
+                         {'Отказ': ([], 4), 'Перезвонить': ([], 2)})
 
     def test_date_filter_means_call_date(self):
         # «Дата звонка»: хотя бы одна попытка в эти дни, обе границы — на одной
@@ -436,7 +478,7 @@ class LeadsJournalTests(unittest.TestCase):
                 executed.append((sql, dict(params or {})))
 
             def fetchall(self):
-                return [(None,) * 38 + ([],)] if 'counts.summary' in executed[-1][0] else []
+                return [(None,) * PAGE_WIDTH + ([],)] if 'counts.summary' in executed[-1][0] else []
 
         class Db:
             @contextlib.contextmanager
@@ -661,6 +703,7 @@ class OperatorProgressTests(unittest.TestCase):
             self.assertNotIn(forbidden, progress)
             self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_SQL)
             self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_OUTCOMES_SQL)
+            self.assertNotIn(forbidden, dial_service.DialListService._PROGRESS_SUBTYPES_SQL)
         # Отменённые до ответа попытки не входят в «попытки», дозвон — по диспозициям Binotel.
         self.assertIn('WHERE NOT cancelled', dial_service.DialListService._PROGRESS_SQL)
         self.assertIn('disp IN %(answered)s', dial_service.DialListService._PROGRESS_SQL)
@@ -807,6 +850,439 @@ class ScriptAITests(unittest.TestCase):
         self.assertNotIn('x-goog-api-key', module)              # секрет остаётся в ai_feedback.service
 
 
+class OutcomeSubtypesTests(unittest.TestCase):
+    """Типы итога (запрос владельца 29.09.2026): «Отказ» → «Дорого», «Уже работает в
+    другом парке»… Руководитель заводит типы на сайте, оператор выбирает тип после
+    итога, журнал показывает и фильтрует по типу, «Мой прогресс» считает по типам."""
+
+    R = '11111111-1111-1111-1111-111111111111'    # «Отказ»
+    C = '22222222-2222-2222-2222-222222222222'    # «Заинтересован»
+    S1 = '33333333-3333-3333-3333-333333333333'   # «Дорого»
+    S2 = '44444444-4444-4444-4444-444444444444'   # «Далеко»
+    S3 = '55555555-5555-5555-5555-555555555555'   # выключенный «Старый»
+
+    # ── схема ──────────────────────────────────────────────────────────────
+    def test_schema_table_before_alter_before_indexes(self):
+        ddl = dial_schema.DDL
+        outcomes_at = next(i for i, s in enumerate(ddl) if 'CREATE TABLE IF NOT EXISTS dial_list_outcomes ' in s)
+        table_at = next(i for i, s in enumerate(ddl) if 'CREATE TABLE IF NOT EXISTS dial_list_outcome_subtypes' in s)
+        alter_at = next(i for i, s in enumerate(ddl) if 'ADD COLUMN IF NOT EXISTS outcome_subtype_id UUID' in s)
+        first_index = next(i for i, s in enumerate(ddl) if 'CREATE INDEX' in s or 'CREATE UNIQUE INDEX' in s)
+        # Таблица — после итогов (FK) и до ALTER, который на неё ссылается; всё — до индексов.
+        self.assertLess(outcomes_at, table_at)
+        self.assertLess(table_at, alter_at)
+        self.assertLess(alter_at, first_index)
+        table = ddl[table_at]
+        for fragment in ('id UUID PRIMARY KEY DEFAULT gen_random_uuid()',
+                         'outcome_id UUID NOT NULL REFERENCES dial_list_outcomes(id) ON DELETE CASCADE',
+                         'department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE',
+                         'name VARCHAR(64) NOT NULL', 'position SMALLINT NOT NULL DEFAULT 0',
+                         'is_active BOOLEAN NOT NULL DEFAULT TRUE'):
+            self.assertIn(fragment, table)
+        self.assertNotIn('color', table)        # цвет — у итога
+        self.assertNotIn('requeue', table)      # «перезвонить» — у итога
+        self.assertIn('REFERENCES dial_list_outcome_subtypes(id) ON DELETE SET NULL', ddl[alter_at])
+        indexes = ddl[first_index:]
+        self.assertIn('CREATE INDEX IF NOT EXISTS idx_dial_list_outcome_subtypes_outcome '
+                      'ON dial_list_outcome_subtypes(outcome_id, position)', indexes)
+        self.assertIn('CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_outcome_subtype '
+                      'ON dial_list_attempts(outcome_subtype_id)', indexes)
+        # Подделки курсоров в тестах узнают итоги по 'FROM dial_list_outcomes' — имя
+        # таблицы типов не должно под это подпадать.
+        self.assertNotIn('FROM dial_list_outcomes', 'FROM dial_list_outcome_subtypes')
+
+    # ── справочник: сохранение ───────────────────────────────────────────────
+    def test_save_outcomes_validates_subtypes_before_db(self):
+        svc = dial_service.DialListService(db=None)
+        base = {"name": "Отказ", "color": "#FF3B30"}
+        cases = [
+            ({"subtypes": "Дорого"}, 'ожидается список'),
+            ({"subtypes": None}, 'ожидается список'),
+            ({"subtypes": ["Дорого"]}, 'объект'),
+            ({"subtypes": [{"name": "   "}]}, 'должно быть название'),
+            ({"subtypes": [{"name": "Дорого"}, {"name": " дорого "}]}, 'повторяется'),
+            ({"subtypes": [{"name": f"Тип {n}"} for n in range(dial_service.SUBTYPES_MAX + 1)]}, 'не больше 20'),
+        ]
+        for extra, text in cases:
+            with self.assertRaises(dial_service.DialListError, msg=text) as ctx:
+                svc.save_outcomes(1, [dict(base, **extra)])
+            self.assertIn(text, str(ctx.exception))
+            self.assertIn('Отказ', str(ctx.exception))      # сообщение называет итог
+            self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(dial_service.SUBTYPES_MAX, 20)
+        # 20 типов (выключенные — в счёт) проходят проверку и доходят до базы (здесь её нет).
+        with self.assertRaises(AttributeError):
+            svc.save_outcomes(1, [dict(base, subtypes=[{"name": f"Тип {n}", "is_active": n % 2 == 0}
+                                                       for n in range(20)])])
+        cleaned = svc._clean_subtypes('Отказ', [{"name": "  " + "я" * 80}, {"name": "Б", "is_active": False}])
+        self.assertEqual(len(cleaned[0]["name"]), dial_service.SUBTYPE_NAME_MAX)
+        self.assertEqual([c["is_active"] for c in cleaned], [True, False])
+
+    def _save_cursor(self, stored=('Дорого', 'Далеко')):
+        import uuid
+        return _RoutedCursor([
+            ('SELECT id FROM dial_list_outcomes WHERE', {'all': [(self.R,)]}),
+            # Типы есть только у «Отказа».
+            ('SELECT id FROM dial_list_outcome_subtypes',
+             {'all': lambda params: [(self.S1,), (self.S2,)] if params[0] == self.R else []}),
+            # Названия всех типов итога в базе после сохранения (с выключенными).
+            ('SELECT name FROM dial_list_outcome_subtypes', {'all': [(n,) for n in stored]}),
+            ('INSERT INTO dial_list_outcomes', {'one': lambda: (uuid.uuid4(),)}),
+            ('INSERT INTO dial_list_outcome_subtypes', {'one': lambda: (uuid.uuid4(),)}),
+            ('FROM dial_list_outcomes o', {'all': [(self.R, 'Отказ', '#FF3B30', 1, False, True, 0, [])]}),
+        ])
+
+    def test_save_outcomes_syncs_nested_subtypes(self):
+        cur = self._save_cursor()
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        res = svc.save_outcomes(1, [
+            {"id": self.R, "name": "Отказ", "color": "#FF3B30",
+             "subtypes": [{"id": self.S2, "name": "Далеко!", "is_active": True}, {"name": "Не интересно"}]},
+            {"name": "Новый", "color": "#000000", "subtypes": [{"name": "Первый", "is_active": False}]},
+            {"name": "Без ключа", "color": "#000000"},
+        ])
+        self.assertEqual(res[0]["subtypes"], [])
+        # S2 — переименован и стал первым; новый тип — вторым; S1 пропал из списка — выключен.
+        upd = cur.sql_with('UPDATE dial_list_outcome_subtypes\n')
+        self.assertEqual([p for _, p in upd], [('Далеко!', 1, True, self.S2, self.R)])
+        ins = [p for _, p in cur.sql_with('INSERT INTO dial_list_outcome_subtypes')]
+        self.assertEqual(ins[0], (self.R, 1, 'Не интересно', 2, True))
+        new_outcome_id = ins[1][0]
+        self.assertNotEqual(new_outcome_id, self.R)          # типы нового итога — к нему
+        self.assertEqual(ins[1][1:], (1, 'Первый', 1, False))
+        off = cur.sql_with('SET is_active = FALSE')
+        sub_off = [p for sql, p in off if 'dial_list_outcome_subtypes' in sql]
+        self.assertEqual(sub_off, [(self.R, [self.S1])])
+        # «Без ключа» — типы не читались и не трогались.
+        reads = [p for _, p in cur.sql_with('SELECT id FROM dial_list_outcome_subtypes')]
+        self.assertEqual([p[0] for p in reads], [self.R, new_outcome_id])
+
+    def test_save_outcomes_rejects_stale_tab_overflowing_stored_subtypes(self):
+        # Устаревшая вкладка: в запросе ≤ 20 типов, но вместе с выключенными
+        # (пропавшими из её списка) в базе их больше 20 или названия повторяются.
+        # Сохранение отвергается — иначе GET → PUT без правок больше не прошёл бы.
+        for stored, text in (([f"Тип {n}" for n in range(21)], 'не больше 20'),
+                             (['Дорого', 'Новый', 'ДОРОГО'], 'повторяется')):
+            cur = self._save_cursor(stored=stored)
+            svc = dial_service.DialListService(db=_routed_db(cur))
+            with self.assertRaises(dial_service.DialListError, msg=text) as ctx:
+                svc.save_outcomes(1, [{"id": self.R, "name": "Отказ", "color": "#FF3B30",
+                                       "subtypes": [{"name": "Новый"}]}])
+            self.assertIn(text, str(ctx.exception))
+            self.assertIn('Отказ', str(ctx.exception))
+            self.assertIn('обновите страницу', str(ctx.exception))
+            self.assertEqual(ctx.exception.status, 400)
+            names = cur.sql_with('SELECT name FROM dial_list_outcome_subtypes')
+            self.assertEqual([p for _, p in names], [(self.R,)])
+
+    def test_save_outcomes_without_subtypes_key_leaves_types_untouched(self):
+        # Старая сборка сайта шлёт итоги без subtypes — типы не должны стереться.
+        cur = self._save_cursor()
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.save_outcomes(1, [{"id": self.R, "name": "Отказ", "color": "#FF3B30", "requeue": False}])
+        for fragment in ('INSERT INTO dial_list_outcome_subtypes', 'UPDATE dial_list_outcome_subtypes',
+                         'SELECT id FROM dial_list_outcome_subtypes'):
+            self.assertEqual(cur.sql_with(fragment), [], fragment)
+
+    def test_outcome_rows_carry_subtypes(self):
+        rows = [(self.R, 'Отказ', '#FF3B30', 1, False, True, 7,
+                 '[{"id": "%s", "name": "Дорого", "position": 1, "is_active": true, "used": 5}]' % self.S1),
+                (self.C, 'Заинтересован', '#34C759', 2, False, True, 0, None)]
+        cur = _RoutedCursor([('FROM dial_list_outcomes o', {'all': rows})])
+        svc = dial_service.DialListService(db=None)
+        out = svc._outcome_rows(cur, 1)
+        self.assertEqual(out[0]["subtypes"], [{"id": self.S1, "name": "Дорого", "position": 1,
+                                               "is_active": True, "used": 5}])
+        self.assertEqual(out[1]["subtypes"], [])
+        self.assertNotIn('s.is_active', cur.executed[-1][0].split('WHERE s.outcome_id = o.id', 1)[1].split(')')[0])
+        svc._outcome_rows(cur, 1, active_only=True)
+        sql = cur.executed[-1][0]
+        self.assertIn('WHERE s.outcome_id = o.id AND s.is_active', sql)   # телефону — только включённые
+        self.assertIn('ORDER BY s.is_active DESC, s.position, s.created_at', sql)
+        self.assertIn('t2.outcome_subtype_id = s.id', sql)                  # used у типа
+
+    # ── телефон: выбор итога ────────────────────────────────────────────────
+    def _outcome_svc(self, subtype_row=None, has_active=False):
+        cur = _RoutedCursor([
+            ('FOR UPDATE OF t', {'one': ('ended', 'lead-1', None, False, None, '')}),
+            ('SELECT id, name FROM dial_list_outcome_subtypes', {'one': subtype_row}),
+            ('SELECT 1 FROM dial_list_outcome_subtypes', {'one': (1,) if has_active else None}),
+            ('FROM dial_list_outcomes', {'one': (self.R, 'Отказ', '#FF3B30', False)}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1}
+        return svc, cur
+
+    def _update_params(self, cur):
+        updates = cur.sql_with('UPDATE dial_list_attempts')
+        return [p for _, p in updates]
+
+    def test_old_phone_without_subtype_key_saves_outcome_without_type(self):
+        # Телефоны ≤ 3.22.28 ключ не шлют: итог сохраняется, даже если у итога есть типы.
+        svc, cur = self._outcome_svc(has_active=True)
+        res = svc.set_attempt_outcome(7, 'att-1', self.R, ' ок ')
+        self.assertEqual(self._update_params(cur), [(self.R, None, 'ок', 'att-1')])
+        self.assertEqual(cur.sql_with('dial_list_outcome_subtypes'), [])
+        self.assertIsNone(res["outcome"]["subtype"])
+        self.assertEqual(res["outcome"]["name"], 'Отказ')
+
+    def test_chosen_active_type_is_saved_with_outcome(self):
+        svc, cur = self._outcome_svc(subtype_row=(self.S1, 'Дорого'), has_active=True)
+        res = svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id=self.S1.upper())
+        lookup = cur.sql_with('SELECT id, name FROM dial_list_outcome_subtypes')
+        self.assertEqual(lookup[0][1], (self.S1, self.R, 1))                 # тип этого итога и отдела
+        self.assertIn('AND is_active', lookup[0][0])
+        self.assertEqual(self._update_params(cur), [(self.R, self.S1, '', 'att-1')])
+        self.assertEqual(res["outcome"]["subtype"], {"id": self.S1, "name": "Дорого"})
+        self.assertEqual(set(res["outcome"]), {"id", "name", "color", "requeue", "subtype"})
+
+    def test_bad_or_foreign_type_is_rejected(self):
+        for bad in ('abc', 123, 'ffffffff-ffff'):
+            svc, cur = self._outcome_svc(has_active=True)
+            with self.assertRaises(dial_service.DialListError) as ctx:
+                svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id=bad)
+            self.assertEqual((str(ctx.exception), ctx.exception.status),
+                             ("Такого типа итога нет — обновите список", 400))
+            self.assertEqual(cur.sql_with('dial_list_outcome_subtypes'), [])   # кривой id до базы не доходит
+            self.assertEqual(self._update_params(cur), [])
+        # Правильный uuid, но не тип этого итога / выключен — тоже 400.
+        svc, cur = self._outcome_svc(subtype_row=None, has_active=True)
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id=self.S2)
+        self.assertEqual((str(ctx.exception), ctx.exception.status), ("Такого типа итога нет — обновите список", 400))
+        self.assertEqual(self._update_params(cur), [])
+
+    def test_type_is_required_when_key_sent_and_outcome_has_active_types(self):
+        for empty in (None, '', '   '):
+            svc, cur = self._outcome_svc(has_active=True)
+            with self.assertRaises(dial_service.DialListError) as ctx:
+                svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id=empty)
+            self.assertEqual((str(ctx.exception), ctx.exception.status), ("Выберите тип итога", 400))
+            self.assertEqual(self._update_params(cur), [])
+        # У итога нет включённых типов — без типа можно, тип пишется NULL.
+        svc, cur = self._outcome_svc(has_active=False)
+        res = svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id=None)
+        self.assertEqual(self._update_params(cur), [(self.R, None, '', 'att-1')])
+        self.assertIsNone(res["outcome"]["subtype"])
+
+    def test_existing_outcome_checks_come_first(self):
+        # Отменённая попытка — прежняя 409, до любых проверок типа.
+        svc, cur = self._outcome_svc(has_active=True)
+        cur.rules[0] = ('FOR UPDATE OF t', {'one': ('finished', 'lead-1', None, True, 't', 'CANCEL')})
+        with self.assertRaises(dial_service.DialListError) as ctx:
+            svc.set_attempt_outcome(7, 'att-1', self.R, '', subtype_id='abc')
+        self.assertEqual(ctx.exception.status, 409)
+        src = inspect.getsource(dial_service.DialListService.set_attempt_outcome)
+        # Тип пишется тем же UPDATE, что и итог, — повторный выбор не оставит чужой тип.
+        self.assertIn('SET outcome_id = %s, outcome_subtype_id = %s', src)
+        self.assertLess(src.index('Такого итога нет'), src.index('Такого типа итога нет'))
+
+    def test_outcome_route_passes_subtype_key_presence(self):
+        seen = []
+
+        class Svc:
+            def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment='',
+                                    subtype_id=dial_service.SUBTYPE_NOT_SENT):
+                seen.append(subtype_id)
+                return {"attempt_id": attempt_id}
+
+        client = self._client(Svc())
+        url = '/api/operator/dial_list/attempts/att-1/outcome'
+        self.assertEqual(client.post(url, json={"outcome_id": self.R}).status_code, 200)
+        client.post(url, json={"outcome_id": self.R, "subtype_id": None})
+        client.post(url, json={"outcome_id": self.R, "subtype_id": self.S1})
+        self.assertIs(seen[0], dial_service.SUBTYPE_NOT_SENT)
+        self.assertEqual(seen[1:], [None, self.S1])
+
+    def _client(self, svc):
+        import flask
+        requester = (5, 'Руководитель', 'x', 'admin', None, None, None, 'admin')
+        bp = dial_routes.build_dial_list_blueprint(
+            db=None, require_api_key=lambda fn: fn, build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (5, requester, None), is_admin_role=lambda role: True,
+            headed_department_ids=lambda rid: [], service=svc)
+        app = flask.Flask('dial_list_test')
+        app.register_blueprint(bp)
+        return app.test_client()
+
+    def test_journal_route_validates_subtype_filter(self):
+        seen = []
+
+        class Svc:
+            def manager_scope(self, is_admin, heads, login=None):
+                return None
+
+            def leads_journal(self, department_id, **kwargs):
+                seen.append(kwargs)
+                return {}
+
+        client = self._client(Svc())
+        url = '/api/dial_list/departments/1/leads'
+        # Без итога тип не учитывается — даже кривой.
+        self.assertEqual(client.get(url + '?outcome_subtype_id=zzz').status_code, 200)
+        self.assertIsNone(seen[-1]['outcome_subtype_id'])
+        resp = client.get(f'{url}?outcome_id={self.R}&outcome_subtype_id=zzz')
+        self.assertEqual((resp.status_code, resp.get_json()), (404, {"error": "Тип итога не найден"}))
+        client.get(f'{url}?outcome_id={self.R}&outcome_subtype_id=NONE')
+        self.assertEqual(seen[-1]['outcome_subtype_id'], 'none')
+        client.get(f'{url}?outcome_id={self.R}&outcome_subtype_id={self.S1.upper()}')
+        self.assertEqual((seen[-1]['outcome_id'], seen[-1]['outcome_subtype_id']), (self.R, self.S1))
+
+    # ── телефон: состояние, вкладки, прогресс ────────────────────────────────
+    def test_state_sends_active_types_and_last_attempt_type(self):
+        from datetime import date
+        portion_item = ('asg-1', 1, 'Иванов', 'done', 'answered', 1, None, 'att-1', 'finished', 'ANSWER', None,
+                        'gc', 'Отказ', '#FF3B30', False, None, 'lead-1', 'Дорого')
+        plain_item = ('asg-2', 2, 'Петров', 'issued', '', 0, None, None, None, None, None,
+                      None, None, None, None, None, 'lead-2', None)
+        outcomes = [(self.R, 'Отказ', '#FF3B30', 1, False, True, 3,
+                     [{"id": self.S1, "name": "Дорого", "position": 1, "is_active": True, "used": 2}]),
+                    (self.C, 'Заинтересован', '#34C759', 2, False, True, 0, [])]
+        cur = _RoutedCursor([
+            ('FROM dial_list_portions', {'one': ('portion-1', 20, None, None)}),
+            ('WHERE a.portion_id = %s', {'all': [portion_item, plain_item]}),
+            ('FROM dial_list_outcomes o', {'all': outcomes}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.operator_context = lambda uid: {
+            "user_id": uid, "department_id": 1, "name": "Оператор", "internal_number": "901",
+            "settings": {"portion_size": 20, "period": "2026-09-01", "period_label": "Сентябрь 2026",
+                         "_period": date(2026, 9, 1), "retry_after_hours": 24, "max_attempts": 3}}
+        svc.reconcile = lambda ctx: None
+        state = svc.get_state(7)
+        self.assertEqual(state["outcomes"][0], {"id": self.R, "name": "Отказ", "color": "#FF3B30", "requeue": False,
+                                                "subtypes": [{"id": self.S1, "name": "Дорого"}]})
+        self.assertEqual(state["outcomes"][1]["subtypes"], [])
+        items = state["portion"]["items"]
+        self.assertEqual(items[0]["last_attempt"]["outcome_subtype_name"], 'Дорого')
+        self.assertEqual(items[0]["last_attempt"]["outcome_name"], 'Отказ')
+        self.assertIsNone(items[1]["last_attempt"])
+        self.assertIn('AND s.is_active', cur.sql_with('FROM dial_list_outcomes o')[0][0])
+
+    def test_progress_nests_type_counts_under_outcomes(self):
+        cur = _RoutedCursor([
+            ('AS issued', {'one': (0,) * 10}),
+            ('JOIN dial_list_outcome_subtypes s', {'all': [(self.R, self.S1, 'Дорого', 3, 1),
+                                                           (self.R, self.S2, 'Далеко', 1, 0),
+                                                           ('ghost', self.S3, 'Чужой', 1, 1)]}),
+            ('JOIN dial_list_outcomes o ON o.id = t.outcome_id', {'all': [(self.R, 'Отказ', '#FF3B30', 5, 2),
+                                                                          (self.C, 'Заинтересован', None, 1, 0)]}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.operator_context = lambda uid: {"user_id": uid, "department_id": 1, "name": "Оператор"}
+        res = svc.operator_progress(7)
+        self.assertEqual(res["outcomes"][0]["subtypes"], [
+            {"id": self.S1, "name": "Дорого", "count": 3, "count_today": 1},
+            {"id": self.S2, "name": "Далеко", "count": 1, "count_today": 0}])
+        self.assertEqual(res["outcomes"][1], {"id": self.C, "name": "Заинтересован", "color": "#8E8E93",
+                                              "count": 1, "count_today": 0, "subtypes": []})
+        # Те же попытки, что у счётчиков итогов: оператор и месяц; без типа — не показываются.
+        sub_sql = dial_service.DialListService._PROGRESS_SUBTYPES_SQL
+        for fragment in ("WHERE t.operator_id = %(operator_id)s",
+                         "AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'",
+                         "JOIN dial_list_outcomes o ON o.id = t.outcome_id"):
+            self.assertIn(fragment, sub_sql)
+            self.assertIn(fragment, dial_service.DialListService._PROGRESS_OUTCOMES_SQL)
+        self.assertIn('JOIN dial_list_outcome_subtypes s ON s.id = t.outcome_subtype_id', sub_sql)
+        self.assertIn('ORDER BY cnt DESC, s.name', sub_sql)
+
+    # ── журнал и карточка ────────────────────────────────────────────────────
+    def _journal_row(self, lead_id, outcome=None, subtype=None, total=None, rn=None, summary=None):
+        r = [None] * dial_service.DialListService._JOURNAL_COLUMN_COUNT
+        r[0], r[1], r[2], r[3], r[4], r[5], r[10], r[29] = lead_id, 1, 'Иванов', '77011234567', 'done', 1, 1, 'answered'
+        if outcome:
+            r[32], r[33], r[34] = outcome, 'Отказ', '#FF3B30'
+        if subtype:
+            r[37], r[38] = subtype, 'Дорого'
+        r[35], r[36] = 'коммент', False
+        return tuple(r) + (total, rn) + ((summary,) if summary is not None else ())
+
+    def _journal(self, summary, page=(), **kwargs):
+        cur = _RoutedCursor([
+            ('counts.summary', {'all': list(page) or [(None,) * PAGE_WIDTH + (summary,)]}),
+            ('FROM dial_list_outcome_subtypes s', {'all': [(self.S1, self.R, 'Дорого', True),
+                                                           (self.S2, self.R, 'Далеко', True),
+                                                           (self.S3, self.R, 'Старый', False)]}),
+            ('FROM dial_list_outcomes', {'all': [(self.R, 'Отказ', '#FF3B30', True),
+                                                 (self.C, 'Заинтересован', '#34C759', True)]}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24, "period": "2026-09-01",
+                                             "_period": dial_service.current_period()}
+        return svc.leads_journal(1, **kwargs), cur
+
+    def test_journal_rows_types_counts_and_total(self):
+        self.assertEqual(dial_service.DialListService._JOURNAL_COLUMNS.split(',')[-2:],
+                         [' last_outcome_subtype_id', ' last_outcome_subtype_name'])   # новые — в конце
+        # stage, outcome, subtype, for_stage, for_outcome
+        summary = [['answered', self.R, self.S1, 2, 3], ['answered', self.R, None, 1, 1],
+                   ['exhausted', self.R, self.S2, 0, 2], ['queue', None, None, 5, 5],
+                   ['answered', self.C, None, 0, 4]]
+        page = [self._journal_row('l1', self.R, self.S1, 17, 1, summary),
+                self._journal_row('l2', self.R, None, 17, 2, summary),
+                self._journal_row('l3', None, None, 17, 3, summary)]
+        res, _ = self._journal(summary, page)
+        self.assertEqual(res['total'], 17)                    # индекс total выведен из числа колонок
+        self.assertEqual(res['items'][0]['outcome'], {"id": self.R, "name": "Отказ", "color": "#FF3B30",
+                                                      "subtype": {"id": self.S1, "name": "Дорого"}})
+        self.assertIsNone(res['items'][1]['outcome']['subtype'])
+        self.assertIsNone(res['items'][2]['outcome'])
+        refusal, interested = res['by_outcome']
+        self.assertEqual(refusal['count'], 6)
+        self.assertEqual(refusal['none_count'], 1)
+        self.assertEqual(refusal['subtypes'], [
+            {"id": self.S1, "name": "Дорого", "is_active": True, "count": 3},
+            {"id": self.S2, "name": "Далеко", "is_active": True, "count": 2},
+            {"id": self.S3, "name": "Старый", "is_active": False, "count": 0}])
+        self.assertEqual((interested['count'], interested['subtypes'], interested['none_count']), (4, [], 4))
+        self.assertEqual(res['by_stage']['answered'], 3)
+
+    def test_journal_subtype_filter_is_part_of_outcome_filter(self):
+        res, cur = self._journal([], outcome_id=self.R, outcome_subtype_id='none', stage='answered')
+        sql, params = cur.executed[0]
+        f_part = sql.split('f AS MATERIALIZED', 1)[1].split('page AS', 1)[0]
+        page_part = sql.split('page AS', 1)[1].split('counts AS', 1)[0]
+        self.assertNotIn('last_outcome_subtype_id IS NULL', f_part)
+        self.assertIn('stage = %(stage)s AND last_outcome_id = %(outcome_id)s::uuid'
+                      ' AND last_outcome_subtype_id IS NULL', page_part)
+        # Полоса этапов — с фильтром типа, чипы итогов и типов — без него.
+        self.assertIn('FILTER (WHERE last_outcome_id = %(outcome_id)s::uuid AND last_outcome_subtype_id IS NULL)'
+                      ' AS for_stage', sql)
+        self.assertIn('FILTER (WHERE stage = %(stage)s) AS for_outcome', sql)
+        self.assertIn('GROUP BY stage, last_outcome_id, last_outcome_subtype_id', sql)
+        self.assertNotIn('outcome_subtype_id', params)
+
+        res, cur = self._journal([], outcome_id=self.R, outcome_subtype_id=self.S1)
+        sql, params = cur.executed[0]
+        self.assertIn('last_outcome_id = %(outcome_id)s::uuid AND last_outcome_subtype_id = '
+                      '%(outcome_subtype_id)s::uuid', sql.split('page AS', 1)[1])
+        self.assertEqual(params['outcome_subtype_id'], self.S1)
+
+        # Без итога тип не фильтрует.
+        res, cur = self._journal([], outcome_subtype_id=self.S1)
+        sql, params = cur.executed[0]
+        self.assertNotIn('last_outcome_subtype_id =', sql)
+        self.assertNotIn('outcome_subtype_id', params)
+
+    def test_lead_card_attempts_carry_type(self):
+        header = self._journal_row('lead-1', self.R, self.S1, 1)
+        base = ['att', None, 3, 'Оператор', '901', 'finished', 'ANSWER', 30, 5, '', 'webhook', None, None, None,
+                True, 'asg', 'answered', 'done', None, self.R, 'Отказ', '#FF3B30', 'дорого', None, False, None, 0]
+        cur = _RoutedCursor([
+            ('l.id = %(lead_id)s', {'one': header}),
+            ('os.id, os.name', {'all': [tuple(base + [self.S1, 'Дорого']), tuple(base + [None, None])]}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        svc.lead_department = lambda lid: 1
+        svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24}
+        card = svc.lead_card('lead-1')
+        self.assertEqual(card['outcome']['subtype'], {"id": self.S1, "name": "Дорого"})
+        self.assertEqual(card['attempts'][0]['outcome']['subtype'], {"id": self.S1, "name": "Дорого"})
+        self.assertIsNone(card['attempts'][1]['outcome']['subtype'])
+        self.assertIn('LEFT JOIN dial_list_outcome_subtypes os ON os.id = t.outcome_subtype_id',
+                      cur.sql_with('os.id, os.name')[0][0])
+
+
 class WorkedTabsTests(unittest.TestCase):
     """Вкладки итогов на телефоне (владелец, 25.09.2026): очередь остаётся очередью,
     обработанный водитель сразу уходит на вкладку своего итога, недозвон — на
@@ -882,17 +1358,20 @@ class WorkedTabsTests(unittest.TestCase):
     def test_tabs_follow_directory_and_newest_first(self):
         from datetime import datetime as dt, timezone as tz
         at = lambda h: dt(2026, 9, 24, h, 0, tzinfo=tz.utc)
-        outcomes = [('o1', 'Заинтересован', '#34C759', 1, False, True, 0),
-                    ('o2', 'Отказ', '#FF3B30', 2, False, True, 0)]
-        # s.id, lead, name, state, result, done_at, created_at, outcome_id, outcome_at, comment, t.state, o.name, o.color, o.pos
+        # id, name, color, position, requeue, is_active, used, subtypes (json_agg)
+        outcomes = [('o1', 'Заинтересован', '#34C759', 1, False, True, 0, []),
+                    ('o2', 'Отказ', '#FF3B30', 2, False, True, 0,
+                     [{'id': 's1', 'name': 'Дорого', 'position': 1, 'is_active': True, 'used': 1}])]
+        # s.id, lead, name, state, result, done_at, created_at, outcome_id, outcome_at, comment, t.state, o.name, o.color,
+        # o.pos, l.status, тип итога
         rows = [
-            ('a1', 'l1', 'Иванов', 'done', 'answered', at(9), at(8), 'o2', at(9), 'дорого', 'finished', 'Отказ', '#FF3B30', 2, 'done'),
-            ('a2', 'l2', 'Петров', 'done', 'answered', at(10), at(8), 'o2', at(11), '', 'finished', 'Отказ', '#FF3B30', 2, 'done'),
-            ('a3', 'l3', '', 'done', 'busy', at(12), at(8), None, None, 'старый', 'finished', None, None, None, 'in_progress'),
-            ('a4', 'l4', 'Сидоров', 'done', 'answered', at(13), at(8), 'old', at(13), '', 'finished', 'Думает', '#AF52DE', 9, 'done'),
+            ('a1', 'l1', 'Иванов', 'done', 'answered', at(9), at(8), 'o2', at(9), 'дорого', 'finished', 'Отказ', '#FF3B30', 2, 'done', 'Дорого'),
+            ('a2', 'l2', 'Петров', 'done', 'answered', at(10), at(8), 'o2', at(11), '', 'finished', 'Отказ', '#FF3B30', 2, 'done', None),
+            ('a3', 'l3', '', 'done', 'busy', at(12), at(8), None, None, 'старый', 'finished', None, None, None, 'in_progress', None),
+            ('a4', 'l4', 'Сидоров', 'done', 'answered', at(13), at(8), 'old', at(13), '', 'finished', 'Думает', '#AF52DE', 9, 'done', None),
             # Исключил руководитель: строка закрыта без звонка — это не недозвон.
-            ('a6', 'l6', 'Исключённый', 'done', 'other', at(14), at(8), None, None, '', None, None, None, None, 'excluded'),
-            ('a5', 'l5', 'В очереди', 'issued', '', None, at(8), None, None, '', None, None, None, None, 'in_progress'),
+            ('a6', 'l6', 'Исключённый', 'done', 'other', at(14), at(8), None, None, '', None, None, None, None, 'excluded', None),
+            ('a5', 'l5', 'В очереди', 'issued', '', None, at(8), None, None, '', None, None, None, None, 'in_progress', None),
         ]
         res = self._worked(rows, outcomes)
         # Включённые — в порядке справочника, даже пустые; выключенный — пока по нему есть люди; недозвон — последний.
@@ -905,12 +1384,17 @@ class WorkedTabsTests(unittest.TestCase):
         self.assertEqual(res['items'][2]['at_label'], '24.09, 16:00')   # время итога по Алматы
         self.assertNotIn('В очереди', [i['full_name'] for i in res['items']])
         self.assertNotIn('Исключённый', [i['full_name'] for i in res['items']])
+        # Тип итога (29.09.2026) — в строке, вкладки по типам не появляются.
+        self.assertEqual({i['full_name']: i['subtype_name'] for i in res['items']},
+                         {'Сидоров': '', 'Без имени': '', 'Петров': '', 'Иванов': 'Дорого'})
+        self.assertNotIn('Дорого', [t['name'] for t in res['tabs']])
 
     def test_tab_is_capped_but_count_is_true(self):
         from datetime import datetime as dt, timezone as tz
-        outcomes = [('o1', 'Отказ', '#FF3B30', 1, False, True, 0)]
+        outcomes = [('o1', 'Отказ', '#FF3B30', 1, False, True, 0, [])]
         rows = [(f'a{n}', f'l{n}', f'Водитель {n}', 'done', 'answered', None, dt(2026, 9, 2, tzinfo=tz.utc),
-                 'o1', dt(2026, 9, 2, n % 24, tzinfo=tz.utc), '', 'finished', 'Отказ', '#FF3B30', 1, 'done') for n in range(5)]
+                 'o1', dt(2026, 9, 2, n % 24, tzinfo=tz.utc), '', 'finished', 'Отказ', '#FF3B30', 1, 'done', None)
+                for n in range(5)]
         res = self._worked(rows, outcomes, limit=3)
         self.assertEqual(res['tabs'][0]['count'], 5)
         self.assertEqual(len(res['items']), 3)

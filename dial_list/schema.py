@@ -248,6 +248,29 @@ DDL = [
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_hangup_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS leg_sec INTEGER NOT NULL DEFAULT 0",
+    # Типы итога (запрос владельца 29.09.2026): у итога может быть свой список
+    # вложенных типов («Отказ» → «Дорого», «Уже работает в другом парке»), чтобы
+    # типизировать сами итоги. Отдельная таблица, а не parent_id в
+    # dial_list_outcomes: иначе каждый запрос к итогам (сохранение списком,
+    # выдача телефону, фишки журнала, лимит в 30) начал бы видеть типы как
+    # итоги. Цвета и «перезвонить» у типа нет — они берутся у итога. Типы не
+    # удаляются, а выключаются: история попыток на них ссылается.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_outcome_subtypes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        outcome_id UUID NOT NULL REFERENCES dial_list_outcomes(id) ON DELETE CASCADE,
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        name VARCHAR(64) NOT NULL,
+        position SMALLINT NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Тип пишется в той же попытке, что и итог; NULL — без типа (старые
+    # телефоны и итоги без типов).
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS outcome_subtype_id UUID"
+    " REFERENCES dial_list_outcome_subtypes(id) ON DELETE SET NULL",
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -276,6 +299,8 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_outcome ON dial_list_attempts(outcome_id)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_script_questions_department ON dial_list_script_questions(department_id, position)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_pending_outcome ON dial_list_attempts(operator_id) WHERE outcome_id IS NULL AND leg_answered_at IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_outcome_subtypes_outcome ON dial_list_outcome_subtypes(outcome_id, position)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_outcome_subtype ON dial_list_attempts(outcome_subtype_id)",
 ]
 
 
