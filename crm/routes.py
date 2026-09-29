@@ -468,6 +468,8 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         """
         data = _payload()
         answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
+        # Ответы скрытой ветки — не ответы: их оператор оставил, уйдя в другую.
+        answers = scenarios.visible_answers(key, answers)
         # Снимок справочника берём свой: присланному верить нельзя, иначе
         # достаточно было бы дописать «офис открыт», чтобы пройти проверку,
         # которой не было.
@@ -684,6 +686,10 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # спрашиваем Sapar. Заодно снимок остаётся в обращении: через месяц по
         # нему видно, на каком основании обращение вообще отправили.
         answers = _with_lookup_snapshot(scenario_key, answers)
+        # Ответы скрытой ветки отбрасываем до всего остального — проверки,
+        # сохранения и подписи «Клиент» (#297: компания из ветки «С
+        # таксопарками» уходила в группу, когда тип переключили на «С Яндексом»).
+        answers = scenarios.visible_answers(scenario_key, answers)
 
         # Спрашиваем Sapar САМИ, а не верим снимку с клиента: иначе достаточно
         # было бы прислать «документы есть», чтобы пройти проверку, которой на

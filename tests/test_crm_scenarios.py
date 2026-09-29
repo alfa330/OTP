@@ -245,6 +245,25 @@ class CooperationTest(unittest.TestCase):
     def test_goes_as_text_not_as_a_picture(self):
         self.assertFalse(sc.sends_card(self.KEY))
 
+    def test_answers_of_the_branch_left_behind_are_dropped(self):
+        """Оператор ввёл компанию в ветке «С таксопарками» и переключился на «С
+        Яндексом»: компания в ответах мастера осталась. Сервер обязан её
+        выбросить до сохранения — иначе она уходила в группу строкой «Клиент»
+        и находилась поиском (сверка с ТЗ, 29.09.2026)."""
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX, coop_company='ТОО Альфа',
+                       coop_service='Подключение')
+        answers[sc.SAPAR_ANSWER_KEY] = {'available': False}
+        kept = sc.visible_answers(self.KEY, answers)
+        self.assertNotIn('coop_company', kept)
+        self.assertNotIn('coop_service', kept)
+        self.assertIn('coop_phone', kept)
+        self.assertIn(sc.SAPAR_ANSWER_KEY, kept, 'служебные снимки остаются')
+
+    def test_screen_title_does_not_repeat_the_topic(self):
+        """Окно называется «Сотрудничество» — экран полей назван иначе, иначе
+        подпись «Сотрудничество · шаг 1 из 2» повторяла бы заголовок."""
+        self.assertNotIn('Сотрудничество', sc.all_groups(sc.get(self.KEY)))
+
 
 class CommonMandatoryDataTest(unittest.TestCase):
     """Раздел 2 ТЗ: общие обязательные данные."""
