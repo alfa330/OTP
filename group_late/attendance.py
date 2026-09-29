@@ -123,7 +123,13 @@ def _fact_bounds(record, raw_marks):
     Workpace не привязывает к смене слишком ранний или неподтверждённый приход,
     поэтому его достаём из отметок терминала — иначе получаем ложную неявку. Берём
     ПЕРВЫЙ вход и ПОСЛЕДНИЙ выход за день: две смены в одном дне сольются в одну,
-    и это осознанный размен — иначе на терминале с одной кнопкой пары не собрать."""
+    и это осознанный размен — иначе на терминале с одной кнопкой пары не собрать.
+
+    Запись Clockster приходит уже со сведёнными приходом и уходом смены
+    (`factFromShifts`, ТЗ iCore 3, п. 4) — перебирать отметки поверх нельзя: утренний
+    уход ночной смены накануне стал бы уходом этого дня."""
+    if record.get("factFromShifts"):
+        return parse_dt(record.get("inMark")), parse_dt(record.get("outMark"))
     fact_in = parse_dt(record.get("inMark"))
     if not fact_in:
         ins = [m for m in raw_marks if _mark_type(m) == 0]
@@ -334,18 +340,25 @@ def _row(record, raw_marks, employee_lookup, date_iso, now_local, rules=None) ->
         "hours_norm": hours_norm,
         "status": status,
         "status_label": STATUS_LABELS.get(status, status),
-        "marks": [
-            {
-                "at": _mark_date(mark),
-                # Приход/уход в общем соглашении: 0 — вход, 1 — выход.
-                "kind": "in" if _mark_type(mark) == 0 else "out",
-                "system": mark.get("markSystem") or WORKPACE_SYSTEM,
-                "suspicious": mark.get("status") == 0,
-                "location": mark.get("location") or mark.get("deviceName") or None,
-            }
-            for mark in raw_marks
-        ],
+        "marks": [_mark_out(mark) for mark in raw_marks],
     }
+
+
+def _mark_out(mark) -> dict:
+    out = {
+        "at": _mark_date(mark),
+        # Приход/уход в общем соглашении: 0 — вход, 1 — выход. У Clockster это
+        # роль по порядку внутри смены, а не угаданный терминалом тип.
+        "kind": "in" if _mark_type(mark) == 0 else "out",
+        "system": mark.get("markSystem") or WORKPACE_SYSTEM,
+        "suspicious": mark.get("status") == 0,
+        "location": mark.get("location") or mark.get("deviceName") or None,
+    }
+    if mark.get("markRole") is not None:
+        # Что назвал терминал — его читают часы СВ (#352): их правило пар
+        # построено на типе терминала, и роль по порядку его бы подменила.
+        out["terminal_kind"] = "in" if mark.get("markType") == 0 else "out"
+    return out
 
 
 def collect(db, date_start, date_end, department=None, now_local=None,
@@ -379,7 +392,9 @@ def collect(db, date_start, date_end, department=None, now_local=None,
             # Одним запросом берём и период показа, и хвост назад: /schedules
             # отдаёт даты словарём, поэтому более широкое окно стоит столько же.
             lookback_start = min(date_start, date_end - timedelta(days=NO_TERMINAL_LOOKBACK_DAYS))
-            rows = clockster_client.get_schedules(lookback_start, date_end)
+            # И день после периода: утренний уход ночной смены лежит в нём, а
+            # считается в день прихода (ТЗ iCore 3, п. 4).
+            rows = clockster_client.get_schedules(lookback_start, date_end + timedelta(days=1))
             clockster_users = clockster_client.get_users()
             if clockster_users_out is not None:
                 clockster_users_out.extend(clockster_users)
@@ -387,7 +402,7 @@ def collect(db, date_start, date_end, department=None, now_local=None,
             cl_records, cl_marks = clockster_to_records(rows, lookup)
             for mark in cl_marks:
                 emp = str(mark.get("employeeId") or "")
-                if emp and _mark_type(mark) == 0:
+                if emp:
                     terminal_users.add(emp)
             for rec in cl_records:
                 day = str(rec.get("date"))[:10]
@@ -395,7 +410,8 @@ def collect(db, date_start, date_end, department=None, now_local=None,
                     continue
                 clockster_by_date.setdefault(day, ([], []))[0].append(rec)
             for mark in cl_marks:
-                day = str(_mark_date(mark) or "")[:10]
+                # Отметка — в день своей смены: ночной уход считается в день прихода.
+                day = str(mark.get("shiftDate") or _mark_date(mark) or "")[:10]
                 if day and date_start.isoformat() <= day <= date_end.isoformat():
                     clockster_by_date.setdefault(day, ([], []))[1].append(mark)
         except Exception as exc:

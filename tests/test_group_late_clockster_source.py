@@ -161,15 +161,33 @@ class ReadOnlyTests(unittest.TestCase):
         self.assertNotIn(".put(", CLOCKSTER_SRC)
         self.assertNotIn(".delete(", CLOCKSTER_SRC)
 
-    def test_window_is_clamped_to_the_api_limit(self):
-        # date_end дальше трёх месяцев даёт 422; урезаем молча, иначе выгрузка
-        # падает на чужом ограничении.
-        start, end = clockster._clamp_window("2026-01-01", "2026-12-31")
-        self.assertEqual((end - start).days, clockster.MAX_WINDOW_DAYS)
+    def test_long_period_is_split_into_api_windows(self):
+        # date_end дальше date_start + 31 день даёт 422 (замер 29.09.2026).
+        # Период не урезается, а собирается из нескольких окон подряд.
+        windows = clockster._windows("2026-08-01", "2026-10-15")
+        self.assertEqual(str(windows[0][0]), "2026-08-01")
+        self.assertEqual(str(windows[-1][1]), "2026-10-15")
+        for (start, end), (next_start, _next_end) in zip(windows, windows[1:]):
+            self.assertEqual((next_start - end).days, 1)
+        for start, end in windows:
+            self.assertLessEqual((end - start).days, clockster.MAX_WINDOW_DAYS)
+        self.assertEqual(clockster.MAX_WINDOW_DAYS, 31)
 
     def test_window_survives_reversed_dates(self):
-        start, end = clockster._clamp_window("2026-09-10", "2026-09-01")
+        [(start, end)] = clockster._windows("2026-09-10", "2026-09-01")
         self.assertLess(start, end)
+
+    def test_windows_of_one_person_are_merged(self):
+        # Ночная смена на стыке окон рвалась бы, если бы у человека было две записи.
+        client = clockster.ClocksterClient()
+        pages = {
+            "2026-08-01": [{"user": {"id": 1}, "dates": {"2026-08-01": {"attendance": []}}}],
+            "2026-09-02": [{"user": {"id": 1}, "dates": {"2026-09-02": {"attendance": []}}}],
+        }
+        client._get_all = lambda path, params: pages.get(params["date_start"], [])
+        rows = client.get_schedules("2026-08-01", "2026-09-10")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sorted(rows[0]["dates"]), ["2026-08-01", "2026-09-02"])
 
 
 if __name__ == "__main__":

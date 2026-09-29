@@ -42,7 +42,8 @@ class FakeDb:
         self.stored = []
         self.forgotten = []
 
-    def glb_attendance_built_days(self, start, end):
+    def glb_attendance_built_days(self, start, end, **criteria):
+        self.built_criteria = criteria
         return {day for day in self.built if start <= day <= end}
 
     def glb_read_attendance_rows(self, start, end, query=None, days=None):
@@ -50,7 +51,8 @@ class FakeDb:
         return [r for r in self.cached if start <= r["day"] <= end
                 and (wanted is None or r["day"] in wanted)]
 
-    def glb_store_attendance_day(self, day, rows, sources=None):
+    def glb_store_attendance_day(self, day, rows, sources=None, engine_version=1):
+        self.stored_versions = getattr(self, "stored_versions", []) + [engine_version]
         self.stored.append((day, len(rows)))
         self.built.add(day)
         return len(rows)

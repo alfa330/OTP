@@ -50,6 +50,10 @@ def mark_date(mark: dict) -> Optional[str]:
 
 
 def mark_type(mark: dict):
+    """Вход (0) или выход (1). У Clockster — роль по порядку внутри смены
+    (`markRole`, ТЗ iCore 3, п. 4), а не тип, который угадал терминал."""
+    if mark.get("markRole") is not None:
+        return mark.get("markRole")
     return mark.get("markType") if mark.get("markType") is not None else mark.get("type")
 
 

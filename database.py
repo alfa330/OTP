@@ -8919,6 +8919,10 @@ class Database:
                 rows_count INTEGER NOT NULL DEFAULT 0,
                 sources    TEXT
             );
+            -- Версия правил, которыми день собран (ТЗ iCore 3, п. 4): день прежних
+            -- правил пересобирается, а не отдаётся из кэша со старыми числами.
+            ALTER TABLE glb_attendance_days
+                ADD COLUMN IF NOT EXISTS engine_version SMALLINT NOT NULL DEFAULT 1;
 
             -- Свой график смен (ТЗ #307, п. 5): кадровик заводит план на проект
             -- целиком или на конкретного человека, в том числе на выходные дни.
@@ -27932,6 +27936,11 @@ class Database:
                         when = supervisor_hours.parse_mark_time((mark or {}).get('at'))
                         # Отметка дня кэша, который синхронизация уже перекрыла, — не дублируем.
                         if when is not None and when.date() not in synced:
+                            # Тип, который назвал терминал: «Отметки» показывают роль
+                            # по порядку в смене (ТЗ iCore 3), а правило пар СВ
+                            # построено на типе терминала — как у синхронизации.
+                            if mark.get('terminal_kind'):
+                                mark = {**mark, 'kind': mark['terminal_kind']}
                             marks.setdefault(ext_id, []).append(mark)
         return marks, known_days, unknown_days
 
@@ -63087,19 +63096,41 @@ class Database:
             return value
         return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
 
-    def glb_attendance_built_days(self, day_from, day_to):
-        """Множество дней периода, уже собранных в кэш."""
+    def glb_attendance_built_days(self, day_from, day_to, settle_from_version=None, settle_hour=None,
+                                  fresh_minutes=None):
+        """Множество дней периода, уже собранных в кэш.
+
+        Без критериев — все сохранённые дни. `settle_hour` — день, собранный
+        правилами версии не ниже `settle_from_version`, окончателен, только если
+        собран после этого часа следующего дня (по Алматы): уход ночной смены
+        лежит завтра (ТЗ iCore 3, п. 4). Неокончательный день всё же считается
+        собранным, если собран не раньше `fresh_minutes` назад, — иначе каждое
+        утреннее открытие пересобирало бы вчерашний день. Дни прежних версий
+        окончательны, как и были: историю задним числом не пересчитываем."""
         start, end = self._glb_day(day_from), self._glb_day(day_to)
         if not start or not end:
             return set()
+        conditions = ['day BETWEEN %s AND %s']
+        params = [start, end]
+        if settle_hour is not None:
+            settled = ("built_at >= ((day + 1)::timestamp + make_interval(hours => %s)) "
+                       "AT TIME ZONE 'Asia/Almaty'")
+            params.append(int(settle_hour))
+            if fresh_minutes is not None:
+                settled += " OR built_at >= NOW() - make_interval(mins => %s)"
+                params.append(int(fresh_minutes))
+            if settle_from_version is not None:
+                settled += " OR engine_version < %s"
+                params.append(int(settle_from_version))
+            conditions.append(f"({settled})")
         with self._get_cursor() as cursor:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT day FROM glb_attendance_days
-                WHERE day BETWEEN %s AND %s
-            """, (start, end))
+                WHERE {' AND '.join(conditions)}
+            """, params)
             return {row[0] for row in cursor.fetchall()}
 
-    def glb_store_attendance_day(self, day, rows, sources=None):
+    def glb_store_attendance_day(self, day, rows, sources=None, engine_version=1):
         """Кладёт в кэш ОДИН день целиком, заменяя всё, что там было.
 
         Замена, а не доливка: смену в источнике могли отменить, и старая строка
@@ -63149,12 +63180,12 @@ class Database:
                     VALUES %s
                 """, payload)
             cursor.execute("""
-                INSERT INTO glb_attendance_days (day, built_at, rows_count, sources)
-                VALUES (%s, NOW(), %s, %s)
+                INSERT INTO glb_attendance_days (day, built_at, rows_count, sources, engine_version)
+                VALUES (%s, NOW(), %s, %s, %s)
                 ON CONFLICT (day) DO UPDATE SET
                     built_at = NOW(), rows_count = EXCLUDED.rows_count,
-                    sources = EXCLUDED.sources
-            """, (target, len(payload), (sources or None)))
+                    sources = EXCLUDED.sources, engine_version = EXCLUDED.engine_version
+            """, (target, len(payload), (sources or None), int(engine_version or 1)))
         return len(payload)
 
     def glb_read_attendance_rows(self, day_from, day_to, query=None, days=None):

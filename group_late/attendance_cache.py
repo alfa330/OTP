@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 # и дособирается следующим открытием или ночной джобой.
 BUILD_MAX_DAYS_PER_REQUEST = 31
 
+# Версия правил сборки дня. 2 — смены Clockster из ленты отметок (ТЗ iCore 3, п. 4).
+# Дни, собранные прежними правилами, НЕ пересобираются сами: история задним числом
+# не пересчитывается (кадровик уже сверял эти числа). Пересчитать период можно
+# кнопкой обновления на экране (`refresh`).
+ENGINE_VERSION = 2
+# День окончателен, только если собран после этого часа СЛЕДУЮЩЕГО дня: смена не
+# длиннее 16 часов, и уход ночной смены (приход 21:55 → уход 08:18) лежит завтра.
+# Ночная джоба в 03:20 собирает вчерашний день раньше этого ухода.
+SETTLE_NEXT_DAY_HOUR = 16
+# Неокончательный день пересобирается не чаще, чем раз в столько минут: иначе
+# каждое утреннее открытие раздела тянуло бы вчерашний день из Workpace заново.
+UNSETTLED_REBUILD_MINUTES = 30
+
 
 def _now():
     """Текущее время компании. Отдельной функцией — чтобы тесты подменяли «сейчас»,
@@ -133,8 +146,16 @@ def build_day(db, day, rules=None, roster=None, store=True, clockster_users_out=
     rows = payload.get("rows") or []
     if store and db is not None:
         sources = "workpace" if payload.get("clockster_error") else "workpace+clockster"
-        db.glb_store_attendance_day(target, rows, sources=sources)
+        db.glb_store_attendance_day(target, rows, sources=sources, engine_version=ENGINE_VERSION)
     return rows, payload.get("clockster_error")
+
+
+def _built_days(db, start, end):
+    """Дни периода, которые лежат в кэше окончательными: собраны текущими
+    правилами и после того, как закончились ночные смены этого дня."""
+    return db.glb_attendance_built_days(
+        start, end, settle_from_version=ENGINE_VERSION, settle_hour=SETTLE_NEXT_DAY_HOUR,
+        fresh_minutes=UNSETTLED_REBUILD_MINUTES)
 
 
 def rows_for(db, date_start, date_end, department=None, refresh=False):
@@ -160,26 +181,34 @@ def rows_for(db, date_start, date_end, department=None, refresh=False):
     if refresh and db is not None and past_days:
         db.glb_forget_attendance_days(day_from=past_days[0], day_to=past_days[-1])
 
-    built = db.glb_attendance_built_days(start, end) if db is not None else set()
+    built = _built_days(db, start, end) if db is not None else set()
+    # Сохранённые дни, в том числе неокончательные: если пересборка такого дня не
+    # удалась, он отдаётся из кэша, а не пропадает с экрана.
+    stored = db.glb_attendance_built_days(start, end) if db is not None else set()
     missing = [day for day in past_days if day not in built]
     # Добираем от свежих к старым: если упрёмся в потолок, человек увидит
     # ближайшие дни, а не хвост трёхмесячной давности.
     missing.sort(reverse=True)
-    pending = missing[BUILD_MAX_DAYS_PER_REQUEST:]
+    # Сверх потолка захода ждут только несохранённые дни: сохранённый, но
+    # неокончательный день пока отдаётся из кэша.
+    pending = [day for day in missing[BUILD_MAX_DAYS_PER_REQUEST:] if day not in stored]
     to_build = sorted(missing[:BUILD_MAX_DAYS_PER_REQUEST])
 
     rules, roster = _plan_inputs(db)
     clockster_error = None
     fresh_rows: list[dict] = []
+    rebuilt = set()
 
     for day in to_build:
         try:
             rows, day_error = build_day(db, day, rules=rules, roster=roster)
         except Exception as exc:
             logger.exception("Отметки: не удалось собрать день %s", day)
-            pending.append(day)
+            if day not in stored:
+                pending.append(day)
             clockster_error = clockster_error or str(exc)[:300]
             continue
+        rebuilt.add(day)
         clockster_error = clockster_error or day_error
         fresh_rows.extend(rows)
 
@@ -194,7 +223,7 @@ def rows_for(db, date_start, date_end, department=None, refresh=False):
             logger.exception("Отметки: не удалось собрать сегодняшний день")
             clockster_error = clockster_error or str(exc)[:300]
 
-    cached_days = [day for day in past_days if day not in set(to_build) and day not in set(pending)]
+    cached_days = [day for day in past_days if day not in rebuilt and day not in set(pending)]
     rows: list[dict] = []
     if cached_days and db is not None:
         rows.extend(row_from_cache(record)
@@ -209,7 +238,7 @@ def rows_for(db, date_start, date_end, department=None, refresh=False):
         "rows": rows,
         "clockster_error": clockster_error,
         "pending_days": [day.isoformat() for day in sorted(pending)],
-        "built_days": len(to_build),
+        "built_days": len(rebuilt),
         "cached_days": len(cached_days),
     }
 
@@ -224,7 +253,7 @@ def backfill(db, days=7, until=None):
         return 0
     edge = _as_date(until) if until else (_now().date() - timedelta(days=1))
     start = edge - timedelta(days=max(0, int(days) - 1))
-    built = db.glb_attendance_built_days(start, edge)
+    built = _built_days(db, start, edge)
     rules, roster = _plan_inputs(db)
     done = 0
     cursor = edge

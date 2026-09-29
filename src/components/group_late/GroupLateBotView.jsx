@@ -193,6 +193,21 @@ const fmtTime = (iso) => (iso
     ? new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
     : '—');
 
+/* Время факта строки дня. Уход ночной смены лежит на следующий день (ТЗ iCore 3,
+ * п. 4) — рядом дата, иначе «21:55–08:18» читается как смена задом наперёд. */
+const otherFactDay = (iso, day) => {
+    if (!iso || !day) return null;
+    const [, month, date] = String(day).slice(0, 10).split('-');
+    const factDay = fmtDay(iso);
+    return month && date && factDay !== `${date}.${month}` ? factDay : null;
+};
+
+const fmtFactTime = (iso, day) => {
+    if (!iso) return '—';
+    const other = otherFactDay(iso, day);
+    return other ? `${fmtTime(iso)}, ${other}` : fmtTime(iso);
+};
+
 /* Время в работе — уже за вычетом обеда, его считает сервер. Ноль показываем
  * прочерком: у человека без пары отметок «00:00» читалось бы как «не работал». */
 const fmtWorked = (seconds) => {
@@ -287,11 +302,22 @@ const AttendanceStatusPill = ({ row }) => {
     );
 };
 
-const TimeCell = ({ fact }) => (
-    <div className={`text-center text-[13.5px] tabular-nums ${fact ? 'text-slate-900' : 'text-slate-300'}`}>
-        {fmtTime(fact)}
-    </div>
-);
+/* Клокстер: тип отметки — по порядку в смене, а не то, что угадал терминал
+ * (ТЗ iCore 3, п. 4). Если они разошлись, кадровик должен видеть почему. */
+const retyped = (mark) => (mark.terminal_kind && mark.terminal_kind !== mark.kind
+    ? `на терминале — ${mark.terminal_kind === 'in' ? 'вход' : 'выход'}`
+    : null);
+
+/* Колонка узкая: дата ухода ночной смены — второй строкой, а не переносом. */
+const TimeCell = ({ fact, day }) => {
+    const other = otherFactDay(fact, day);
+    return (
+        <div className={`text-center text-[13.5px] tabular-nums ${fact ? 'text-slate-900' : 'text-slate-300'}`}>
+            {fmtTime(fact)}
+            {other && <div className="text-[11px] leading-tight text-slate-400">{other}</div>}
+        </div>
+    );
+};
 
 /* Строка сгруппированного списка iOS: подпись слева, значение справа. */
 const DetailRow = ({ label, value, hint = null, tone = null }) => (
@@ -1596,7 +1622,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             </span>
                             <span className={`shrink-0 text-[12.5px] tabular-nums ${row.fact_in ? 'text-slate-600' : 'text-slate-400'}`}>
                                 {row.fact_in && row.fact_out
-                                    ? `${fmtTime(row.fact_in)}–${fmtTime(row.fact_out)}`
+                                    ? `${fmtTime(row.fact_in)}–${fmtFactTime(row.fact_out, row.date)}`
                                     : row.fact_in ? `с ${fmtTime(row.fact_in)}`
                                         : (planRangeLabel(row) ? `план ${planRangeLabel(row)}` : '')}
                             </span>
@@ -1635,8 +1661,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             <div className="text-[11.5px] text-slate-400">наш график</div>
                         )}
                     </div>
-                    <TimeCell fact={row.fact_in} />
-                    <TimeCell fact={row.fact_out} />
+                    <TimeCell fact={row.fact_in} day={row.date} />
+                    <TimeCell fact={row.fact_out} day={row.date} />
                     <div className="text-right tabular-nums">
                         <div className="text-[13.5px] text-slate-800">{fmtWorked(row.work_seconds)}</div>
                         {row.plan_mode === 'hours' && row.hours_norm > 0 && (
@@ -1860,7 +1886,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                        : (planRangeLabel(row) ? meaningfulScheduleName(row.schedule) : null)} />
                         <DetailRow label="Приход" value={fmtTime(row.fact_in)}
                                    hint={row.plan_in ? `план ${fmtTime(row.plan_in)}` : null} />
-                        <DetailRow label="Уход" value={fmtTime(row.fact_out)}
+                        <DetailRow label="Уход" value={fmtFactTime(row.fact_out, row.date)}
                                    hint={row.plan_out ? `план ${fmtTime(row.plan_out)}` : null} />
                         {row.late_minutes > 0 && (
                             <DetailRow label="Опоздание" value={fmtMinutes(row.late_minutes)} tone="red" />
@@ -1899,14 +1925,16 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                     </span>
                                     <div className="min-w-0 flex-1">
                                         <div className="text-[13.5px] text-slate-900">{mark.kind === 'in' ? 'Вход' : 'Выход'}</div>
-                                        {(mark.location || mark.suspicious) && (
+                                        {(mark.location || mark.suspicious || retyped(mark)) && (
                                             <div className={`truncate text-[12px] ${mark.suspicious ? 'text-amber-600' : 'text-slate-400'}`}>
-                                                {mark.suspicious ? 'терминал не подтвердил отметку' : mark.location}
+                                                {mark.suspicious
+                                                    ? 'терминал не подтвердил отметку'
+                                                    : [retyped(mark), mark.location].filter(Boolean).join(' · ')}
                                             </div>
                                         )}
                                     </div>
                                     <span className="shrink-0 text-[14px] font-medium tabular-nums text-slate-900">
-                                        {fmtTime(mark.at)}
+                                        {fmtFactTime(mark.at, row.date)}
                                     </span>
                                 </div>
                             ))}

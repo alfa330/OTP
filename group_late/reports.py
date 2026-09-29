@@ -74,6 +74,16 @@ def _schedule_cell(span: dict, plan_in_dt, plan_out_dt) -> str:
     return str((span or {}).get("scheduleName") or "").strip() or "—"
 
 
+def _fact_time(moment, day) -> str:
+    """Время факта; уход ночной смены (другой календарный день) — с датой."""
+    if not moment:
+        return "—"
+    text = moment.strftime("%H:%M")
+    if moment.date() != day.date():
+        text += f" ({moment.strftime('%d.%m')})"
+    return text
+
+
 def _plan_inputs(db):
     """Свой график и состав обеих систем. Читаются один раз на всю выгрузку."""
     if db is None:
@@ -276,13 +286,18 @@ def generate_report(
     clockster_marks_by_date: dict[str, list] = {}
     if config.is_clockster_configured():
         try:
-            schedule_rows = clockster_client.get_schedules(start_date.date(), end_date.date())
+            # С запасом в день по краям (ТЗ iCore 3, п. 4): уход ночной смены
+            # последнего дня лежит в следующем, а утренний уход первого дня
+            # закрывает смену накануне и не должен стать приходом.
+            schedule_rows = clockster_client.get_schedules(
+                start_date.date() - timedelta(days=1), end_date.date() + timedelta(days=1))
             user_lookup = build_clockster_user_lookup(clockster_client.get_users())
             cl_records, cl_marks = clockster_to_records(schedule_rows, user_lookup)
             for rec in cl_records:
                 clockster_records_by_date.setdefault(str(rec.get("date"))[:10], []).append(rec)
             for mark in cl_marks:
-                day = str(_mark_date(mark) or "")[:10]
+                # Отметка — в день своей смены: ночной уход считается в день прихода.
+                day = str(mark.get("shiftDate") or _mark_date(mark) or "")[:10]
                 if day:
                     clockster_marks_by_date.setdefault(day, []).append(mark)
         except Exception as exc:
@@ -448,6 +463,10 @@ def generate_report(
                     m_time = m_dt.strftime("%H:%M") if m_dt else "??:??"
                     mtype_val = _mark_type(m)
                     mtype = "Вход" if mtype_val == 0 else "Выход" if mtype_val == 1 else "Отм"
+                    if m_dt and m_dt.date() != current_date.date():
+                        # Уход ночной смены — на следующий день: без даты «ушёл
+                        # в 08:18» читается как уход раньше прихода.
+                        mtype += f", {m_dt.strftime('%d.%m')}"
                     is_suspicious = m.get("status") == 0
                     susp_prefix = "⚠️ " if is_suspicious else ""
                     formatted_marks.append(f"{susp_prefix}{m_time}({mtype})")
@@ -473,18 +492,21 @@ def generate_report(
                 if span:
                     plan_in_dt = _parse_dt(span.get("workTimeStart"))
                     fact_in_dt = _parse_dt(span.get("inMark"))
+                    # Clockster отдаёт уже сведённые приход и уход смены (ТЗ iCore 3,
+                    # п. 4): перебирать отметки поверх них нельзя.
+                    shift_facts = bool(span.get("factFromShifts"))
                     
                     # Факт достаём из отметок и когда плана нет: у часовика графика
                     # не бывает вовсе, а раньше без плана приход просто терялся и
                     # человек с четырьмя отметками значился отсутствующим.
-                    if not fact_in_dt:
+                    if not fact_in_dt and not shift_facts:
                         in_marks = [m for m in raw_marks if _mark_type(m) == 0]
                         if in_marks:
                             in_marks.sort(key=lambda x: _mark_date(x) or "")
                             fact_in_dt = _parse_dt(_mark_date(in_marks[0]))
 
                     plan_in = plan_in_dt.strftime("%H:%M") if plan_in_dt else "—"
-                    fact_in = fact_in_dt.strftime("%H:%M") if fact_in_dt else "—"
+                    fact_in = _fact_time(fact_in_dt, current_date)
                     
                     if is_hours:
                         late_in = 0
@@ -497,14 +519,14 @@ def generate_report(
                     plan_out_dt = _parse_dt(span.get("workTimeEnd"))
                     fact_out_dt = _parse_dt(span.get("outMark"))
                     
-                    if not fact_out_dt:
+                    if not fact_out_dt and not shift_facts:
                         out_marks = [m for m in raw_marks if _mark_type(m) == 1]
                         if out_marks:
                             out_marks.sort(key=lambda x: _mark_date(x) or "")
                             fact_out_dt = _parse_dt(_mark_date(out_marks[-1]))
 
                     plan_out = plan_out_dt.strftime("%H:%M") if plan_out_dt else "—"
-                    fact_out = fact_out_dt.strftime("%H:%M") if fact_out_dt else "—"
+                    fact_out = _fact_time(fact_out_dt, current_date)
 
                     if is_hours:
                         early_out = 0

@@ -12,10 +12,11 @@
 (даты приходят словарём внутри записи), тогда как Workpace тянется по одному дню.
 
 Главная ловушка источника, из-за которой и появились «висящие приходы»: терминал
-один на вход и выход, тип отметки Clockster угадывает и регулярно ошибается. Мы
-намеренно берём его сведённые `in`/`out`, а не собираем пару из сырых отметок
-сами: своя догадка была бы третьей и разошлась бы с тем, что видит кадровик в
-кабинете Clockster.
+один на вход и выход, тип отметки Clockster угадывает и иногда ошибается.
+Сведённые `in`/`out` клетки Clockster раздел больше НЕ берёт (ТЗ iCore 3, п. 4):
+клетка — календарный день и угаданный тип, поэтому ночная смена рвалась на два
+дня без пары, а «приход, приход» давал ноль часов. Смены собираются из сырых
+отметок всего периода подряд — правило и его замер в `clockster_shifts`.
 """
 
 import logging
@@ -25,6 +26,8 @@ from typing import Optional
 import requests
 
 from group_late import config
+from group_late.clockster_shifts import IN, OUT, build_shifts, main_shift
+from group_late.helpers import parse_dt
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +35,10 @@ logger = logging.getLogger(__name__)
 # поэтому держим меньшее: /schedules отдаёт 50 и ссылку на следующую страницу.
 PAGE_SIZE = 50
 REQUEST_TIMEOUT = 90
-# Окно запроса ограничено самим API: date_end больше date_start + 3 месяца даёт 422.
-MAX_WINDOW_DAYS = 90
+# Окно запроса ограничено самим API: date_end дальше date_start + 31 день даёт 422
+# («The date must be a date before or equal to …», замер 29.09.2026; прежние
+# «3 месяца» в документации не подтвердились). Длинный период режем на окна.
+MAX_WINDOW_DAYS = 31
 # Приход/уход в отметке: 1 — пришёл, 0 — ушёл. Проверено на данных, а не по доке:
 # среди человеко-дней «приход без ухода» сырой статус равен 1 в 62 случаях из 65.
 MARK_IN = 1
@@ -87,30 +92,44 @@ class ClocksterClient:
         return rows
 
     def get_schedules(self, date_start, date_end) -> list[dict]:
-        """План + факт по каждому человеку на каждую дату периода."""
-        start, end = _clamp_window(date_start, date_end)
-        return self._get_all("/schedules", {
-            "date_start": start.isoformat(),
-            "date_end": end.isoformat(),
-        })
+        """План + факт по каждому человеку на каждую дату периода.
+
+        Период длиннее окна API собирается из нескольких запросов, а даты одного
+        человека сливаются в одну запись: сведение смен идёт по всей ленте его
+        отметок подряд, и ночная смена на стыке окон иначе порвалась бы."""
+        merged: dict = {}
+        order: list = []
+        for start, end in _windows(date_start, date_end):
+            for row in self._get_all("/schedules", {
+                "date_start": start.isoformat(),
+                "date_end": end.isoformat(),
+            }):
+                user_id = (row.get("user") or {}).get("id")
+                if user_id not in merged:
+                    merged[user_id] = {**row, "dates": dict(row.get("dates") or {})}
+                    order.append(user_id)
+                else:
+                    merged[user_id]["dates"].update(row.get("dates") or {})
+        return [merged[user_id] for user_id in order]
 
     def get_users(self) -> list[dict]:
         """Справочник людей: должность, локация, отдел, телефон."""
         return self._get_all("/users", {})
 
 
-def _clamp_window(date_start, date_end):
-    """Период не длиннее окна API. Молча урезаем конец, а не падаем: раздел просит
-    период сам, а 422 от Clockster выглядел бы как поломка выгрузки."""
+def _windows(date_start, date_end):
+    """Период → окна не длиннее окна API, подряд и без пропусков."""
     start = _as_date(date_start)
     end = _as_date(date_end)
     if end < start:
         start, end = end, start
-    limit = start + timedelta(days=MAX_WINDOW_DAYS)
-    if end > limit:
-        logger.warning("Clockster: период %s..%s урезан до %s (окно API)", start, end, limit)
-        end = limit
-    return start, end
+    windows = []
+    window_start = start
+    while window_start <= end:
+        window_end = min(end, window_start + timedelta(days=MAX_WINDOW_DAYS))
+        windows.append((window_start, window_end))
+        window_start = window_end + timedelta(days=1)
+    return windows
 
 
 def _as_date(value) -> date_cls:
@@ -166,7 +185,17 @@ def to_records(schedule_rows, user_lookup=None):
 
     Коды типа отметки у источников ИНВЕРТИРОВАНЫ: у Workpace markType 0 — вход,
     у Clockster status 1 — приход. Приводим к соглашению Workpace, иначе приход и
-    уход поменяются местами и «время в работе» станет отрицательным."""
+    уход поменяются местами и «время в работе» станет отрицательным.
+
+    Приход и уход дня берутся из смен, собранных по всей ленте отметок человека
+    (`clockster_shifts`), а не из клетки Clockster (ТЗ iCore 3, п. 4). Поэтому:
+      * `markType` — тип, который угадал терминал (его читают часы СВ #352 и
+        синхронизация их отметок — их правило пар на нём построено);
+      * `markRole` — тип по порядку внутри смены, его показывает раздел;
+      * `shiftDate` — день смены, к которой отметка относится: утренний уход
+        ночной смены лежит в следующем календарном дне, а считается в день прихода;
+      * у записи `factFromShifts` — приход и уход уже сведены, перебирать сырые
+        отметки поверх них нельзя: ночной уход накануне стал бы уходом этого дня."""
     lookup = user_lookup or {}
     records: list[dict] = []
     marks: list[dict] = []
@@ -180,9 +209,14 @@ def to_records(schedule_rows, user_lookup=None):
         name = full_name(user)
         extra = lookup.get(str(user_id), {})
 
-        for date_str, cell in (row.get("dates") or {}).items():
+        days: dict[str, dict] = {}
+        plans: dict[str, tuple] = {}
+        feed: list[dict] = []
+        seen = set()
+        for date_str, cell in sorted((row.get("dates") or {}).items()):
             if not isinstance(cell, dict):
                 continue
+            day = str(date_str)[:10]
             schedule = cell.get("schedule") or {}
             # Отпуск, больничный, выходной: плана нет, и неявкой это не является.
             is_work = str(schedule.get("type") or "").strip().lower() == "work"
@@ -196,54 +230,83 @@ def to_records(schedule_rows, user_lookup=None):
                           or location)
             position = (_titled(schedule.get("position"))
                         or extra.get("position"))
+            plan_start, plan_end = _plan_bounds(day, schedule) if schedule else (None, None)
+            days[day] = {
+                "schedule": schedule, "location": location, "department": department,
+                "position": position, "plan_start": plan_start, "plan_end": plan_end,
+            }
+            start_dt = parse_dt(plan_start)
+            if start_dt:
+                plans[day] = (start_dt, parse_dt(plan_end),
+                              schedule.get("boundary_start"), schedule.get("boundary_end"))
 
             for mark in (cell.get("attendance") or []):
                 when = mark.get("datetime")
-                if not when:
+                at = parse_dt(when)
+                if not at:
                     continue
-                status = mark.get("status")
+                terminal = IN if mark.get("status") == MARK_IN else OUT
+                # Отметка ночной смены лежит в клетках обоих соседних дней.
+                key = (at, terminal)
+                if key in seen:
+                    continue
+                seen.add(key)
+                feed.append({"at": at, "terminal": terminal, "when": when,
+                             "source": mark.get("source"), "location": location,
+                             "department": department})
+
+        shifts = build_shifts(feed, plans)
+        for shift in shifts:
+            for item, role in shift.roles():
                 marks.append({
                     "employeeId": emp_id,
                     "employeeName": name,
-                    "departmentName": department,
-                    "markDate": when,
+                    "departmentName": item["department"],
+                    "markDate": item["when"],
                     # Инверсия кодов: приход Clockster (1) → вход Workpace (0).
-                    "markType": 0 if status == MARK_IN else 1,
+                    "markType": item["terminal"],
+                    "markRole": role,
+                    "shiftDate": shift.day.isoformat(),
                     # У Workpace status 0 означает неподтверждённую отметку и даёт
                     # событие «подозрительная». У Clockster такого флага нет, и
                     # выдавать его отметки за подозрительные нельзя.
                     "status": 1,
-                    "location": location,
-                    "deviceName": location,
+                    "location": item["location"],
+                    "deviceName": item["location"],
                     "markSystem": MARK_SYSTEM,
-                    "markSource": mark.get("source"),
+                    "markSource": item["source"],
                 })
 
-            plan_start, plan_end = _plan_bounds(date_str, schedule) if schedule else (None, None)
-            if not plan_start and not cell.get("in") and not cell.get("out"):
-                # Ни плана, ни факта — этого дня у человека просто нет.
+        shift_days = {shift.day.isoformat() for shift in shifts}
+        for day, info in days.items():
+            if not info["plan_start"] and day not in shift_days:
+                # Ни плана, ни своей смены — этого дня у человека просто нет.
                 continue
-
+            main = main_shift(shifts, day)
+            arrival = main.arrival if main else None
+            departure = main.departure if main else None
+            schedule = info["schedule"]
             records.append({
                 "employeeId": emp_id,
                 "employeeExternalId": emp_id,
                 "employeeName": name,
-                "departmentName": department,
-                "date": date_str,
-                "workTimeStart": plan_start,
-                "workTimeEnd": plan_end,
-                "inMark": cell.get("in"),
-                "outMark": cell.get("out"),
+                "departmentName": info["department"],
+                "date": day,
+                "workTimeStart": info["plan_start"],
+                "workTimeEnd": info["plan_end"],
+                "inMark": arrival.isoformat() if arrival else None,
+                "outMark": departure.isoformat() if departure else None,
+                "factFromShifts": True,
                 # Опоздание и ранний уход считает общий код по плану и факту:
                 # своих чисел Clockster не даёт, а грейс у него нулевой.
                 "lateIn": 0,
                 "earlyOut": 0,
                 "scheduleName": str(schedule.get("title") or "").strip() or None,
                 "employeeIsArchived": False,
-                "locationName": location,
-                "inLocationName": location,
-                "outLocationName": location,
-                "positionName": position,
+                "locationName": info["location"],
+                "inLocationName": info["location"],
+                "outLocationName": info["location"],
+                "positionName": info["position"],
                 "markSystem": MARK_SYSTEM,
                 # Настоящий обед этого человека по его расписанию. Лучше общего
                 # правила: у части людей он не час, а у отпускных его нет вовсе.
