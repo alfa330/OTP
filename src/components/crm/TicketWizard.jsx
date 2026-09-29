@@ -10,6 +10,10 @@ import {
 } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
+import { ComplaintFields, useComplaintDraft } from '../complaints/ComplaintDraft';
+import {
+    submitLabel as complaintSubmitLabel, wizardTargets as complaintWizardTargets,
+} from '../complaints/complaintRules';
 import {
     CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterCategory, afterChecks, answerValue,
     attachmentAccept, blockedLabel, carryOver, checksAreComplete, checksPayload,
@@ -289,6 +293,41 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null,
  * тему, глядя на заголовок раздела, — но и в бейдж выносить незачем: адрес
  * читают один раз, а бейджи тянут взгляд постоянно.
  */
+/* Строка первого экрана: тематика или направление жалобы.
+ *
+ * Не <button>: внутри неё «i» (InfoHint), а это тоже кнопка, и кнопка в
+ * кнопке — невалидная разметка, которую браузер разбирает как попало (React
+ * ругался на неё в консоли на каждом открытии мастера). Клавиатура работает
+ * так же: Tab доходит до строки, Enter и пробел выбирают. Нажатие по «i»
+ * строку не выбирает. */
+const PickRow = ({ title, hint, ready, blocked, onPick, children = null }) => (
+    <div role="button" tabIndex={ready ? 0 : -1} aria-disabled={!ready}
+         onClick={() => { if (ready) onPick(); }}
+         onKeyDown={(e) => {
+             if (!ready || (e.key !== 'Enter' && e.key !== ' ')) return;
+             e.preventDefault();
+             onPick();
+         }}
+         className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+             ready
+                 ? 'cursor-pointer bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
+                 : 'cursor-not-allowed bg-slate-50/60 opacity-60'
+         }`}>
+        <span className="min-w-0 flex-1">
+            <span className="block truncate text-[14px] font-medium text-slate-900">{title}</span>
+            {children}
+        </span>
+        {/* «Когда используется» — под «i»: в списке тематик столько же
+            абзацев мешают выбирать. */}
+        <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+            <InfoHint title={title}>{hint}</InfoHint>
+        </span>
+        {ready
+            ? <ChevronRight size={15} className="shrink-0 text-slate-400" />
+            : <IosBadge tone="amber">{blocked}</IosBadge>}
+    </div>
+);
+
 const TopicRoute = ({ item }) => {
     const target = routeNote(item);
     if (!target) return null;
@@ -485,11 +524,19 @@ const HandoffScreen = ({ handoff, onCopy, copied }) => (
 
 export default function TicketWizard({
     open, onClose, catalog, entries = [], taxiParks = [], apiBaseUrl, headers,
-    showToast, onCreated,
+    showToast, onCreated, complaints = null, onComplaintCreated,
 }) {
     const [scenarioKey, setScenarioKey] = useState('');
-    // pick | entry | category | checks | form | preview | closed | handoff
+    // pick | entry | category | checks | form | preview | closed | handoff | complaint
     const [phase, setPhase] = useState('pick');
+    /* Жалоба — направление среди тематик (решение владельца 29.09.2026):
+       «на кого или на что» выбирают на первом экране мастера, дальше — её
+       поля. complaints — справочник раздела жалоб (/api/complaints/meta), и
+       приходит он только тому, кто вправе жалобы заводить. */
+    const [complaintTarget, setComplaintTarget] = useState(null);
+    const complaintDraft = useComplaintDraft({
+        open, meta: complaints, targetCode: complaintTarget, apiBaseUrl, headers, showToast,
+    });
     const [groupIndex, setGroupIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [checksConfirmed, setChecksConfirmed] = useState(false);
@@ -530,6 +577,7 @@ export default function TicketWizard({
     );
 
     const catalogGroups = useMemo(() => groupCatalog(catalog, entries), [catalog, entries]);
+    const complaintTargets = useMemo(() => complaintWizardTargets(complaints), [complaints]);
 
     const checksReady = useMemo(
         () => checksAreComplete(scenario, {
@@ -561,8 +609,21 @@ export default function TicketWizard({
         setLookup(null); setLookupChecked('');
         setEntry(null); setEntryVerdict(null); setCategoryVerdicts({});
         setStartGroup(0); setCategoryPicked(false); setHandoff(null); setCopied(false);
+        setComplaintTarget(null);
         if (fileRef.current) fileRef.current.value = '';
     }, []);
+
+    const startComplaint = (code) => {
+        setComplaintTarget(code);
+        setPhase('complaint');
+    };
+
+    const submitComplaint = async () => {
+        const item = await complaintDraft.submit();
+        if (!item) return;
+        onComplaintCreated?.(item.id);
+        onClose();
+    };
 
     useEffect(() => { if (open) reset(); }, [open, reset]);
 
@@ -974,6 +1035,24 @@ export default function TicketWizard({
         if (phase === 'pick' || phase === 'closed' || phase === 'handoff') {
             return <button type="button" onClick={onClose} className={iosBtnSecondary}>Закрыть</button>;
         }
+        if (phase === 'complaint') {
+            const { busy: sending, blocked, form } = complaintDraft;
+            return (
+                <>
+                    <button type="button" onClick={reset} disabled={sending} className={iosBtnSecondary}>
+                        <ArrowLeft size={14} /> Назад
+                    </button>
+                    {/* Подпись называет последствие: «Отправить в группу» или
+                        «Зафиксировать» — оператор знает, кого побеспокоит. */}
+                    <button type="button" onClick={submitComplaint} disabled={sending || blocked}
+                            title={blocked ? 'Telegram-группа для жалоб ещё не выбрана' : undefined}
+                            className={iosBtnPrimary}>
+                        {sending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                        {complaintSubmitLabel(complaintDraft.target, form.requires_processing)}
+                    </button>
+                </>
+            );
+        }
         if (phase === 'entry') {
             return (
                 <>
@@ -1046,6 +1125,7 @@ export default function TicketWizard({
     })();
 
     const subtitle = phase === 'pick' ? 'Выберите тематику — дальше система задаст вопросы'
+        : phase === 'complaint' ? 'Жалоба — данные, как их назвал водитель'
         : phase === 'entry' ? 'Данные водителя — проверим документы за период'
             : phase === 'category' ? 'Выберите категорию обращения'
                 : phase === 'checks' ? 'Проверьте это до обращения'
@@ -1059,7 +1139,8 @@ export default function TicketWizard({
 
     return (
         <IosModal open={open} onClose={onClose}
-                  title={(phase === 'entry' || phase === 'category')
+                  title={phase === 'complaint' ? (complaintDraft.target?.title || 'Жалоба')
+                      : (phase === 'entry' || phase === 'category')
                       ? (entry ? entry.title : 'Новое обращение')
                       : scenario ? scenario.title
                           : entry ? entry.title : 'Новое обращение'}
@@ -1086,42 +1167,50 @@ export default function TicketWizard({
                                 )}
                                 <div className="space-y-1.5">
                                     {group.items.map((item) => (
-                                        <button key={item.key} type="button" disabled={!item.is_ready}
-                                                onClick={() => (item.entry
-                                                    ? startEntry(item.entry)
-                                                    : startScenario(item.key))}
-                                                className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
-                                                    item.is_ready
-                                                        ? 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
-                                                        : 'cursor-not-allowed bg-slate-50/60 opacity-60'
-                                                }`}>
-                                            <span className="min-w-0 flex-1">
-                                                <span className="block truncate text-[14px] font-medium text-slate-900">
-                                                    {item.title}
-                                                </span>
-                                                {/* Адрес пишем ТОЛЬКО у уведённой темы:
-                                                    у остальных он и есть заголовок раздела,
-                                                    а повторённый в каждой строке заголовок
-                                                    перестают читать. */}
-                                                <TopicRoute item={item} />
-                                            </span>
-                                            {/* «Когда используется» — под «i»: в списке
-                                                тематик столько же абзацев мешают выбирать. */}
-                                            <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
-                                            {item.is_ready
-                                                ? <ChevronRight size={15} className="shrink-0 text-slate-400" />
-                                                : <IosBadge tone="amber">{blockedLabel(item)}</IosBadge>}
-                                        </button>
+                                        <PickRow key={item.key} title={item.title} hint={item.when_to_use}
+                                                 ready={item.is_ready} blocked={blockedLabel(item)}
+                                                 onPick={() => (item.entry
+                                                     ? startEntry(item.entry)
+                                                     : startScenario(item.key))}>
+                                            {/* Адрес пишем ТОЛЬКО у уведённой темы:
+                                                у остальных он и есть заголовок раздела,
+                                                а повторённый в каждой строке заголовок
+                                                перестают читать. */}
+                                            <TopicRoute item={item} />
+                                        </PickRow>
                                     ))}
                                 </div>
                             </div>
                         ))}
-                        {!catalogGroups.length && (
+                        {/* Жалоба — такое же направление, как тематики: заголовок
+                            группы и «на кого или на что» строками (ТЗ: «оператор
+                            сначала должен определить, на кого или на что поступила
+                            жалоба»). Уходят жалобы в свою группу, поэтому и
+                            заголовок у них свой. */}
+                        {!!complaintTargets.length && (
+                            <div>
+                                {catalogGroups.length > 0 && (
+                                    <div className={`${iosGroupLabel} mb-1.5`}>Жалобы</div>
+                                )}
+                                <div className="space-y-1.5">
+                                    {complaintTargets.map((item) => (
+                                        <PickRow key={item.code} title={item.title} hint={item.hint}
+                                                 ready={item.is_ready} blocked="Нет группы"
+                                                 onPick={() => startComplaint(item.code)} />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        {!catalogGroups.length && !complaintTargets.length && (
                             <div className="py-10 text-center text-[13px] text-slate-400">
                                 Тематики не настроены
                             </div>
                         )}
                     </div>
+                )}
+
+                {phase === 'complaint' && (
+                    <ComplaintFields draft={complaintDraft} meta={complaints} />
                 )}
 
                 {/* Вход в тематику: сначала данные водителя, потом проверка.
@@ -1171,24 +1260,11 @@ export default function TicketWizard({
                                 /* Категория с неготовым адресом не нажимается по той же
                                    причине, что и тематика в картотеке: пройти интервью и
                                    упереться в «отправлять некуда» хуже, чем не начать. */
-                                <button key={item.key} type="button" disabled={item.is_ready === false}
-                                        onClick={() => pickCategory(item.key)}
-                                        className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
-                                            item.is_ready === false
-                                                ? 'cursor-not-allowed bg-slate-50/60 opacity-60'
-                                                : 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
-                                        }`}>
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-[14px] font-medium text-slate-900">
-                                            {item.title}
-                                        </span>
-                                        <TopicRoute item={item} />
-                                    </span>
-                                    <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
-                                    {item.is_ready === false
-                                        ? <IosBadge tone="amber">{blockedLabel(item)}</IosBadge>
-                                        : <ChevronRight size={15} className="shrink-0 text-slate-400" />}
-                                </button>
+                                <PickRow key={item.key} title={item.title} hint={item.when_to_use}
+                                         ready={item.is_ready !== false} blocked={blockedLabel(item)}
+                                         onPick={() => pickCategory(item.key)}>
+                                    <TopicRoute item={item} />
+                                </PickRow>
                             ))}
                         </div>
                     </div>

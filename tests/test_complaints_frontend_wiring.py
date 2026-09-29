@@ -30,8 +30,23 @@ class ComplaintsWiringTest(unittest.TestCase):
         self.assertIsNotNone(match)
         codes = tuple(re.findall(r"'([a-z_]+)'", match.group(1)))
         self.assertEqual(set(codes), set(catalog.HANDLER_DEPARTMENT_CODES))
-        self.assertIn("const COMPLAINTS_INTAKE_DEPARTMENT_CODE = '%s';"
-                      % access.INTAKE_DEPARTMENT_CODE, APP)
+
+    def test_operator_has_no_menu_item(self):
+        """Раздел — для тех, кто разбирает (access.can_open_section). Оператор
+        СЗоВ заводит жалобу в «Обращениях» (решение владельца 29.09.2026), и
+        правила «весь отдел СЗоВ» в предикате меню быть не должно."""
+        body = APP.split('const canAccessComplaintsSectionForUser = (userLike) => {')[1].split('\n};')[0]
+        self.assertNotIn('COMPLAINTS_INTAKE_DEPARTMENT_CODE', body)
+        self.assertIn('isSupervisorRole(role)', body)
+        self.assertFalse(access.can_open_section({'user_id': 10, 'role': 'operator',
+                                                  'department_code': access.INTAKE_DEPARTMENT_CODE}))
+
+    def test_author_lands_in_crm(self):
+        """Ответ по своей жалобе — в «Обращениях»: колокол даёт цель
+        «complaint:<id>», старая ссылка ?view=complaints переводит туда же."""
+        self.assertIn("/^complaint:(\\d+)$/.exec(String(target || ''))", APP)
+        self.assertIn("if (requestedViewFromUrl === 'complaints' && canAccessCrmSection) {", APP)
+        self.assertIn('const setter = canAccessComplaintsSection ? setComplaintsFocusRequest', APP)
 
     def test_view_guard_keeps_supervisors_of_allowlisted_departments(self):
         """У ОП, Теза и фронт-офисов есть allowlist разделов, и без своего
@@ -46,9 +61,23 @@ class ComplaintsWiringTest(unittest.TestCase):
         self.assertIn("import('./components/complaints/ComplaintsView')", APP)
         self.assertIn("if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki'", APP)
 
-    def test_trainer_is_not_thrown_out(self):
+    def test_trainer_takes_complaints_in_crm(self):
+        """Тренер СЗоВ жалобы принимает, но не разбирает: раздела «Жалобы» в
+        его списке нет, а «Обращения», где жалобы заводят, есть."""
         block = re.search(r'const TRAINER_ALLOWED_VIEWS = Object\.freeze\(\[(.*?)\]\);', APP, re.S)
-        self.assertIn("'complaints'", block.group(1))
+        views = re.findall(r"'([a-z_]+)'", block.group(1))
+        self.assertNotIn('complaints', views)
+        self.assertIn('crm_tickets', views)
+
+    def test_complaints_are_created_in_the_crm_wizard(self):
+        """Заводят жалобу в мастере «Обращений», а не в разделе «Жалобы»."""
+        wizard = (ROOT / 'src' / 'components' / 'crm' / 'TicketWizard.jsx').read_text(encoding='utf-8')
+        self.assertIn('<ComplaintFields draft={complaintDraft} meta={complaints} />', wizard)
+        view = (ROOT / 'src' / 'components' / 'complaints' / 'ComplaintsView.jsx').read_text(encoding='utf-8')
+        self.assertNotIn('Новая жалоба', view)
+        crm = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        self.assertIn('mode="author"', crm)
+        self.assertIn("complaints={complaintsEnabled ? complaintsMeta : null}", crm)
 
     def test_deeplink_parameter_matches_the_bot_link(self):
         link = telegram.complaint_link(7)

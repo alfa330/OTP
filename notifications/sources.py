@@ -404,9 +404,14 @@ def crm(cursor, viewer, limit):
     Гасится не колоколом, а открытием карточки (как ознакомления вики):
     «вам ответили» нельзя закрыть, просто заглянув в список — ответ нужно
     прочитать. Поэтому у источника нет ветки в mark_seen.
+
+    Сюда же — ответ для водителя и вопрос группы по СВОИМ жалобам: автор
+    работает с жалобами в «Обращениях» (решение владельца 29.09.2026), и
+    бейдж, пульс и переход у них общие с обращениями. Обе части сливаются по
+    времени и режутся одним limit; всего — сумма двух счётчиков.
     """
     total, rows = _crm_queries().unread_for_bell(cursor, viewer['user_id'], limit)
-    return total, [{
+    items = [{
         'source': 'crm',
         'id': row[0],
         'title': row[1],
@@ -418,6 +423,21 @@ def crm(cursor, viewer, limit):
         # новость, а не просрочка. Цветом в колоколе помечается горящее.
         'tone': 'default',
     } for row in rows]
+    # Своя точка сохранения: жалобы — другой пакет со своей миграцией, и его
+    # сбой не должен обнулять обращения (collect откатил бы весь источник).
+    cursor.execute('SAVEPOINT notif_crm_complaints')
+    try:
+        complaint_total, complaint_items = _complaint_author_items(cursor, viewer, limit)
+        cursor.execute('RELEASE SAVEPOINT notif_crm_complaints')
+    except Exception:
+        cursor.execute('ROLLBACK TO SAVEPOINT notif_crm_complaints')
+        cursor.execute('RELEASE SAVEPOINT notif_crm_complaints')
+        logging.exception('Уведомления: ответы по жалобам не посчитаны')
+        complaint_total, complaint_items = 0, []
+    if complaint_items:
+        items = sorted(items + complaint_items, key=lambda item: item['at'] or '',
+                       reverse=True)[:limit]
+    return int(total or 0) + int(complaint_total or 0), items
 
 
 # Что именно ждёт автора. Подписи короткие: в колоколе строка — не место для
@@ -441,40 +461,54 @@ def _crm_queries():
 
 # ── Жалобы ───────────────────────────────────────────────────────────────────
 def complaints(cursor, viewer, limit):
-    """Жалобы, которые ждут зрителя (задача #297). Две причины:
+    """Задачи раздела «Жалобы» (задача #297): «на сотрудника поступила жалоба,
+    необходимо провести обратную связь и зафиксировать результат» (ТЗ).
+    Гаснет, когда работа с сотрудником завершена, а не просмотром: это
+    задача, а не новость.
 
-    * автору — пришёл ответ для водителя или группа задала вопрос. Гаснет
-      открытием карточки, как у обращений: ответ надо прочитать;
-    * ответственному — «на сотрудника поступила жалоба, необходимо провести
-      обратную связь и зафиксировать результат» (ТЗ). Гаснет, когда работа с
-      сотрудником завершена, а не просмотром: это задача, а не новость.
+    Ответы и вопросы по своим жалобам автор получает в источнике crm — он
+    работает с ними в «Обращениях», а не здесь.
     """
     from complaints import catalog as complaint_catalog
     from complaints import queries as complaint_queries
 
-    total, rows = complaint_queries.bell_items(cursor, viewer['user_id'], limit)
-    items = []
-    for row in rows:
-        reason = complaint_catalog.reason_title(row['target'], row['reason_code'])
-        if row['role'] == 'work':
-            title = 'Жалоба на %s' % (row['employee_name'] or 'сотрудника')
-            body = 'Проведите обратную связь и зафиксируйте результат · %s' % reason
-        else:
-            title = 'Жалоба №%d · %s' % (row['id'], reason)
-            body = _COMPLAINT_UNREAD_LABELS.get(row['kind'], 'Обновление по жалобе')
-        items.append({
-            'source': 'complaints',
-            'id': '%s:%s' % (row['role'], row['id']),
-            'title': title,
-            'body': body,
-            'at': _iso(row['at']),
-            'view': 'complaints',
-            'target': row['id'],
-            # Вопрос группы ждёт оператора, пока он не свяжется с водителем, —
-            # это то, что горит. Ответ и задача по сотруднику — обычный тон.
-            'tone': 'warning' if row['kind'] == 'question' else 'default',
-        })
-    return total, items
+    total, rows = complaint_queries.work_bell_items(cursor, viewer['user_id'], limit)
+    return total, [{
+        'source': 'complaints',
+        'id': 'work:%s' % row['id'],
+        'title': 'Жалоба на %s' % (row['employee_name'] or 'сотрудника'),
+        'body': 'Проведите обратную связь и зафиксируйте результат · %s'
+                % complaint_catalog.reason_title(row['target'], row['reason_code']),
+        'at': _iso(row['at']),
+        'view': 'complaints',
+        'target': row['id'],
+        'tone': 'default',
+    } for row in rows]
+
+
+def _complaint_author_items(cursor, viewer, limit):
+    """Ответ для водителя и вопрос группы по своим жалобам — для источника crm.
+
+    target — «complaint:<id>»: в «Обращениях» у жалоб и обращений общая лента,
+    но разные номера, и голое число открыло бы обращение с тем же номером.
+    """
+    from complaints import catalog as complaint_catalog
+    from complaints import queries as complaint_queries
+
+    total, rows = complaint_queries.author_bell_items(cursor, viewer['user_id'], limit)
+    return total, [{
+        'source': 'crm',
+        'id': 'complaint:%s' % row['id'],
+        'title': 'Жалоба №%d · %s' % (
+            row['id'], complaint_catalog.reason_title(row['target'], row['reason_code'])),
+        'body': _COMPLAINT_UNREAD_LABELS.get(row['kind'], 'Обновление по жалобе'),
+        'at': _iso(row['at']),
+        'view': 'crm_tickets',
+        'target': 'complaint:%s' % row['id'],
+        # Вопрос группы ждёт оператора, пока он не свяжется с водителем, —
+        # это то, что горит. Ответ — обычный тон.
+        'tone': 'warning' if row['kind'] == 'question' else 'default',
+    } for row in rows]
 
 
 _COMPLAINT_UNREAD_LABELS = {

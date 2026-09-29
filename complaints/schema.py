@@ -165,6 +165,12 @@ _STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_complaints_author_recent
         ON complaints(created_by, last_activity_at DESC, id DESC)
     """,
+    # Свои жалобы в ленте «Обращений»: непрочитанное наверху, как у обращений
+    # (idx_crm_tickets_author_attention). Выражение — дословно как в ORDER BY.
+    """
+    CREATE INDEX IF NOT EXISTS idx_complaints_author_attention
+        ON complaints(created_by, (author_unread_at IS NULL), last_activity_at DESC, id DESC)
+    """,
     # Лента «Все» у админа и периметр отдела у главы и СВ.
     """
     CREATE INDEX IF NOT EXISTS idx_complaints_recent

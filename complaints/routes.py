@@ -59,8 +59,12 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                         ctx = queries.load_access_context(cursor, requester_id)
                     if not ctx:
                         return jsonify({"error": "Пользователь не найден"}), 404
-                    if not access.can_open_section(ctx):
-                        return jsonify({"error": "Раздел «Жалобы» вам не открыт",
+                    # К API пускает can_use, а не вход в раздел: оператор
+                    # работает со своими жалобами из «Обращений» теми же
+                    # запросами. Разбор, аналитика и настройки закрыты ему
+                    # своими правилами ниже и в самих обработчиках.
+                    if not access.can_use(ctx):
+                        return jsonify({"error": "Жалобы вам не открыты",
                                         "code": "COMPLAINTS_SECTION_CLOSED"}), 403
                     if (access.requires_sensitive_qr(ctx)
                             and not sensitive_access_granted(ctx['user_id'])):
@@ -184,6 +188,9 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 search=(args.get('q') or '').strip() or None,
                 limit=_int_or_none(args.get('limit')) or PAGE_SIZE,
                 offset=_int_or_none(args.get('offset')) or 0,
+                # Порядок ленты «Обращений»: там свои жалобы стоят в одном
+                # списке с обращениями, и порядок у двух частей обязан совпадать.
+                unread_first=args.get('unread_first') == '1',
             )
         return jsonify({'items': items, 'has_more': has_more,
                         'capabilities': access.capabilities(ctx)})

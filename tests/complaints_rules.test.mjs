@@ -5,7 +5,8 @@ import {
   activeFilterCount, analyticsQuery, availableWorkActions, bucketLabel, driverAnswers,
   employeeDepartmentId, eventText,
   formPayload, formProblems, isRepeated, officeOptions, openQuestion, percent, rowBadges,
-  rowSubtitle, statusView, submitLabel, willProcess, workPayload, workProblems, workSteps,
+  rowSubtitle, statusView, submitLabel, willProcess, wizardTargets, workPayload, workProblems,
+  workSteps,
 } from '../src/components/complaints/complaintRules.js';
 
 /* Правила раздела «Жалобы» (ТЗ задачи #297). Обязательность формы и правило
@@ -205,4 +206,18 @@ test('история говорит, ЧТО произошло', () => {
   assert.equal(eventText({ kind: 'work', payload: { action: 'feedback', closed: true } }, meta),
     'Обратная связь проведена · работа завершена');
   assert.equal(eventText({ kind: 'sent', payload: {} }), 'Отправлена в группу');
+});
+
+test('направления жалобы в мастере «Обращений»: без группы — как тематика без группы', () => {
+  const ready = wizardTargets({ ...META, group: { ready: true } });
+  assert.deepEqual(ready.map((t) => t.code),
+    ['call_center', 'car_rental', 'front_office', 'taxi_park', 'yandex']);
+  assert.ok(ready.every((t) => t.is_ready));
+  // Группа не выбрана: «всегда в группу» отправить некуда, а Яндекс и парк
+  // (только фиксация или по выбору оператора) работают и так.
+  const noGroup = Object.fromEntries(wizardTargets({ ...META, group: { ready: false } })
+    .map((t) => [t.code, t.is_ready]));
+  assert.deepEqual(noGroup, { call_center: false, car_rental: false, front_office: false,
+    taxi_park: true, yandex: true });
+  assert.deepEqual(wizardTargets(null), []);
 });

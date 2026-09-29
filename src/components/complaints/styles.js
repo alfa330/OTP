@@ -1,5 +1,16 @@
 /* Общие классы раздела «Жалобы».
  *
- * Поле времени — тем же видом, что в «Боте опозданий» (GroupLateBotView):
- * белая плашка с кольцом, как у IosDatePicker рядом, а не системное поле ОС. */
-export const TIME_INPUT = 'h-9 w-full rounded-xl border-0 bg-white px-6 text-center text-[13px] font-medium tabular-nums text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70 placeholder-slate-400 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/60';
+ * Дата и время — тем же видом, что обычное поле формы (iosInput): серая
+ * плашка на всю ширину ячейки, как в «Оплате счетов». Кнопка календаря по
+ * умолчанию узкая и живёт своим видом, а белое поле времени рядом с серыми
+ * полями читалось как деталь из другой формы. */
+export const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
+    + 'text-[14px] tabular-nums text-slate-900 border-0 transition hover:bg-slate-200/70 '
+    + 'focus:outline-none focus:ring-2 focus:ring-blue-500/70 [&>span]:flex-1 [&>span]:text-left';
+
+// px-6 с обеих сторон: стрелка выбора лежит поверх поля справа (TimePicker),
+// и симметричный отступ держит время по центру, не наезжая на неё.
+export const TIME_INPUT = 'w-full rounded-xl border-0 bg-slate-100 px-6 py-2.5 text-center text-[14px] '
+    + 'tabular-nums text-slate-900 placeholder-slate-400 transition hover:bg-slate-200/70 '
+    + 'focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70 '
+    + 'disabled:cursor-not-allowed disabled:opacity-50';

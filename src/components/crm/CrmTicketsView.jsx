@@ -24,6 +24,12 @@ import {
     queueMonogram, queueTile, rowBadges, unreadLabel,
 } from './ticketList';
 import { fitHeight, measureShell } from './layout';
+import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds } from './feedMerge';
+import ComplaintCard from '../complaints/ComplaintCard';
+import { TARGET_ICONS } from '../complaints/ComplaintDraft';
+import {
+    rowBadges as complaintRowBadges, rowSubtitle as complaintRowSubtitle,
+} from '../complaints/complaintRules';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
  *
@@ -136,6 +142,68 @@ const LoadingBlock = () => (
 );
 
 /* ─── Лента обращений ─────────────────────────────────────────────────────── */
+
+/* Строка своей жалобы в ленте — тот же каркас, что у обращения. Жалоба
+ * заводится здесь же, выбором направления в «Новом обращении», и здесь же автор
+ * видит ответ для водителя и вопрос группы (решение владельца 29.09.2026).
+ *
+ * Плитка — нейтральная, с иконкой «на кого»: у очередей плитки цветные, и
+ * жалоба узнаётся по тому, что она не похожа на очередь, а не по красному
+ * цвету, — красное в ленте означает сбой. В отборе к удалению жалоб нет: он
+ * чистит обращения. */
+const ComplaintFeedRow = memo(function ComplaintFeedRow({ complaint, active, onSelect }) {
+    const Icon = TARGET_ICONS[complaint.target] || AlertTriangle;
+    const unread = complaint.unread;
+    const closed = complaint.status === 'closed';
+    // В ленте только свои жалобы — «Вопрос вам» адресован автору.
+    const badges = complaintRowBadges(complaint, complaint.created_by);
+    const at = complaint.last_activity_at || complaint.created_at;
+
+    return (
+        <button type="button" onClick={() => onSelect(complaint.id)}
+                className={`relative flex w-full gap-3 px-3 py-2.5 text-left transition-colors ${
+                    active ? 'bg-blue-50' : unread ? 'bg-blue-50/40 hover:bg-blue-50/70' : 'hover:bg-slate-50'
+                }`}>
+            <span className={`absolute inset-y-1 left-0 w-[3px] rounded-r-full transition-colors ${
+                active ? 'bg-blue-500' : 'bg-transparent'
+            }`} />
+            <span className={`mt-0.5 grid h-[38px] w-[38px] shrink-0 place-items-center rounded-[12px] ring-1 ${
+                closed ? 'bg-slate-50 text-slate-400 ring-slate-100' : 'bg-slate-100 text-slate-600 ring-slate-200/70'
+            }`}>
+                <Icon size={17} />
+            </span>
+            <span className="min-w-0 flex-1">
+                <span className="flex items-baseline gap-2">
+                    <span className={`min-w-0 flex-1 truncate text-[13.5px] leading-snug ${
+                        unread ? 'font-semibold text-slate-900'
+                            : closed ? 'font-medium text-slate-500' : 'font-medium text-slate-800'
+                    }`}>
+                        {complaint.reason_title}
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-slate-400" title={fmtDateTime(at)}>
+                        {fmtAgo(at)}
+                    </span>
+                </span>
+                <span className={`mt-0.5 block truncate text-[12px] leading-snug ${
+                    unread ? 'text-slate-600' : 'text-slate-500'
+                }`}>
+                    {complaintRowSubtitle(complaint)}
+                </span>
+                <span className="mt-1 flex items-center gap-1.5 overflow-hidden text-[11px] text-slate-400">
+                    <span className="shrink-0 tabular-nums">Жалоба №{complaint.id}</span>
+                    <span className="shrink-0 text-slate-300">·</span>
+                    {badges.length ? badges.map((badge) => (
+                        <IosBadge key={badge.key} tone={badge.tone} className="!py-0 shrink-0 !text-[10px]">
+                            {badge.label}
+                        </IosBadge>
+                    )) : (
+                        <span className="truncate">{complaint.target_title}</span>
+                    )}
+                </span>
+            </span>
+        </button>
+    );
+});
 
 /* Строка ленты. Раньше это были две строки текста подряд, и сорок таких строк
  * читались как один абзац: глазу не за что зацепиться, а взгляд обязан за один
@@ -1686,6 +1754,31 @@ export default function CrmTicketsView({
     const [selectedId, setSelectedId] = useState(null);
     const [composerOpen, setComposerOpen] = useState(false);
 
+    /* Свои жалобы — в той же ленте (решение владельца 29.09.2026). Справочник
+       раздела жалоб приезжает только тому, кто вправе их заводить; у остальных
+       он null, и жалоб в разделе нет вовсе — ни направления в мастере, ни строк. */
+    const [complaintsMeta, setComplaintsMeta] = useState(null);
+    const [complaintItems, setComplaintItems] = useState([]);
+    const [complaintsHasMore, setComplaintsHasMore] = useState(false);
+    const [complaintsOffset, setComplaintsOffset] = useState(0);
+    const [complaintsUnread, setComplaintsUnread] = useState(0);
+    const [selectedComplaintId, setSelectedComplaintId] = useState(null);
+    const complaintsEnabled = Boolean(complaintsMeta?.capabilities?.can_create);
+    const selectedAny = selectedId || selectedComplaintId;
+
+    const selectTicket = useCallback((ticketId) => {
+        setSelectedComplaintId(null);
+        setSelectedId(ticketId);
+    }, []);
+    const openComplaint = useCallback((complaintId) => {
+        setSelectedId(null);
+        setSelectedComplaintId(complaintId);
+    }, []);
+    const clearSelection = useCallback(() => {
+        setSelectedId(null);
+        setSelectedComplaintId(null);
+    }, []);
+
     /* Режим отбора: лента вместо «открыть обращение» отмечает его к удалению.
        Отдельным режимом, а не действием у каждой строки, по двум причинам.
        Первая — цена в обычной работе: «три точки» у сорока строк это сорок
@@ -1739,7 +1832,7 @@ export default function CrmTicketsView({
             observer.disconnect();
             window.removeEventListener('resize', recompute);
         };
-    }, [tab, selectedId]);
+    }, [tab, selectedAny]);
 
     // Во время поиска выборка не сужается до «моих», поэтому и сегмент показывает
     // «Все»: подсвеченные «Мои» над списком с чужими обращениями — это не фильтр,
@@ -1782,6 +1875,15 @@ export default function CrmTicketsView({
     }, [apiBaseUrl, headers]);
 
     const loadTickets = useCallback(async (nextOffset = 0, silent = false) => {
+        // Фильтр «Жалобы» — в ленте только жалобы, за обращениями не ходим.
+        if (queueFilter === COMPLAINTS_FILTER) {
+            setTickets([]);
+            setHasMore(false);
+            setOffset(0);
+            setError(null);
+            setLoading(false);
+            return;
+        }
         if (!silent) setLoading(true);
         try {
             const params = new URLSearchParams();
@@ -1814,6 +1916,64 @@ export default function CrmTicketsView({
         }
     }, [apiBaseUrl, headers, stateFilter, queueFilter, mine, searchApplied]);
 
+    /* Порядок ленты — как у обращений на сервере: в «Моих» без поиска
+       непрочитанное наверху. Жалобам его передаём явно, иначе при склейке
+       строки встали бы вперемешку (см. feedMerge.js). */
+    const unreadFirst = mine && !searchApplied;
+    const complaintsShown = complaintsEnabled && (!queueFilter || queueFilter === COMPLAINTS_FILTER);
+
+    /* Свои жалобы — всегда только свои, и в «Все» и в поиске: жалобы коллег
+       оператору не видны (сотрудник, на которого жалуются, может сидеть рядом). */
+    const loadComplaints = useCallback(async (nextOffset = 0, silent = false) => {
+        if (!complaintsShown) {
+            setComplaintItems([]);
+            setComplaintsHasMore(false);
+            setComplaintsOffset(0);
+            return;
+        }
+        try {
+            const params = new URLSearchParams();
+            params.set('segment', 'mine');
+            const status = complaintStatusFor(stateFilter);
+            if (status) params.set('status', status);
+            if (searchApplied) params.set('q', searchApplied);
+            if (unreadFirst) params.set('unread_first', '1');
+            params.set('limit', String(PAGE_SIZE));
+            params.set('offset', String(nextOffset));
+            const response = await axios.get(`${apiBaseUrl}/api/complaints/complaints?${params}`,
+                { headers: headers() });
+            const items = response.data.items || [];
+            setComplaintItems((prev) => (nextOffset ? mergeTicketsById(prev, items) : items));
+            setComplaintsHasMore(Boolean(response.data.has_more));
+            setComplaintsOffset(nextOffset);
+        } catch (err) {
+            if (!silent) showToast?.(errorText(err, 'Не удалось загрузить жалобы'), 'error');
+        }
+    }, [apiBaseUrl, headers, complaintsShown, stateFilter, searchApplied, unreadFirst, showToast]);
+
+    /* Ответы и вопросы по своим жалобам — к бейджу раздела: колокол считает
+       их вместе с обращениями (notifications/sources.py: crm). */
+    const refreshComplaintCounters = useCallback(async () => {
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/complaints/ping`, { headers: headers() });
+            setComplaintsUnread(Math.max(0, Number(response.data.counters?.unread) || 0));
+        } catch (err) { /* число в меню — не повод показывать отказ */ }
+    }, [apiBaseUrl, headers]);
+
+    /* Жалобы в разделе — только у того, кто вправе их заводить (СЗоВ, админ).
+       Остальным /api/complaints отвечает отказом, и раздел молча живёт без них. */
+    useEffect(() => {
+        let cancelled = false;
+        axios.get(`${apiBaseUrl}/api/complaints/meta`, { headers: headers() })
+            .then((response) => {
+                if (cancelled || !response.data?.capabilities?.can_create) return;
+                setComplaintsMeta(response.data);
+                refreshComplaintCounters();
+            })
+            .catch(() => { /* жалоб у этого пользователя нет */ });
+        return () => { cancelled = true; };
+    }, [apiBaseUrl, headers, refreshComplaintCounters]);
+
     /* Один раз при входе: числа для шапки и признак, что схема развернулась.
        Агрегаты по периметру считаются только здесь — на каждый фильтр и каждую
        букву в поиске платить проходом по таблице незачем. */
@@ -1835,6 +1995,7 @@ export default function CrmTicketsView({
     }, [apiBaseUrl, headers, loadQueues, loadScenarios]);
 
     useEffect(() => { loadTickets(0); }, [loadTickets]);
+    useEffect(() => { loadComplaints(0); }, [loadComplaints]);
 
     /* Реалтайм. Собственного канала раздел не открывает: «тычок» уже приходит
        колоколу по SSE, и App отдаёт его сюда счётчиком. Второй поток на
@@ -1842,13 +2003,18 @@ export default function CrmTicketsView({
     useEffect(() => {
         if (!realtimePulse) return;
         loadTickets(0, true);
+        if (complaintsEnabled) {
+            loadComplaints(0, true);
+            refreshComplaintCounters();
+        }
     }, [realtimePulse]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Бейдж раздела в сайдбаре ведёт сервер — здесь только передаём наверх.
+    // Бейдж раздела в сайдбаре ведёт сервер — здесь только передаём наверх:
+    // непрочитанное по обращениям и по своим жалобам, как считает колокол.
     useEffect(() => {
         if (counters.unread === undefined) return;
-        onUnreadChange?.(Number(counters.unread) || 0);
-    }, [counters.unread, onUnreadChange]);
+        onUnreadChange?.((Number(counters.unread) || 0) + complaintsUnread);
+    }, [counters.unread, complaintsUnread, onUnreadChange]);
 
     /* Переход из колокола: открываем именно то обращение, о котором уведомили.
        Карточка грузится по своему id, поэтому фильтр списка её не прячет —
@@ -1856,8 +2022,15 @@ export default function CrmTicketsView({
        requestId в зависимостях, а не ticketId: повторный клик по тому же
        уведомлению должен снова открыть карточку. */
     useEffect(() => {
+        // Жалоба из колокола или по старой ссылке ?view=complaints — своя цель:
+        // номера у жалоб и обращений разные, и голое число открыло бы обращение.
+        if (focusRequest?.complaintId) {
+            openComplaint(Number(focusRequest.complaintId));
+            setTab('tickets');
+            return;
+        }
         if (!focusRequest?.ticketId) return;
-        setSelectedId(Number(focusRequest.ticketId));
+        selectTicket(Number(focusRequest.ticketId));
         setTab('tickets');
     }, [focusRequest?.requestId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1978,6 +2151,36 @@ export default function CrmTicketsView({
         setTickets((prev) => markTicketSeen(prev, ticketId));
     }, []);
 
+    /* То же для жалобы: открытие карточки автором гасит «непрочитано» на
+       сервере. Стабильна по той же причине — уходит в load() карточки;
+       счётчик читается через ref, чтобы не тянуть его в зависимости. */
+    const refreshComplaintCountersRef = useRef(refreshComplaintCounters);
+    refreshComplaintCountersRef.current = refreshComplaintCounters;
+    const handleComplaintSeen = useCallback((complaintId) => {
+        setComplaintItems((prev) => prev.map((item) => (item.id === complaintId
+            ? { ...item, unread: false, unread_kind: null, unread_count: 0 } : item)));
+        refreshComplaintCountersRef.current();
+    }, []);
+
+    const handleComplaintChanged = useCallback(() => {
+        loadComplaints(0, true);
+    }, [loadComplaints]);
+
+    /* Вся лента одной склейкой. В отборе к удалению жалоб нет: он чистит
+       обращения, а жалобы удаляет только администратор в разделе «Жалобы». */
+    const feed = useMemo(() => mergeFeeds({
+        tickets,
+        ticketsMore: hasMore,
+        complaints: selectMode ? [] : complaintItems,
+        complaintsMore: selectMode ? false : complaintsHasMore,
+        unreadFirst,
+    }), [tickets, hasMore, complaintItems, complaintsHasMore, selectMode, unreadFirst]);
+
+    const loadMoreFeed = () => {
+        if (feed.loadMore === 'complaints') loadComplaints(complaintsOffset + PAGE_SIZE);
+        else loadTickets(offset + PAGE_SIZE);
+    };
+
     return (
         <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
             <div ref={headerRef}
@@ -2018,7 +2221,7 @@ export default function CrmTicketsView({
                             </button>
                         ) : (
                             <button type="button"
-                                    onClick={() => { setSelectMode(true); setSelectedId(null); }}
+                                    onClick={() => { setSelectMode(true); clearSelection(); }}
                                     title="Отобрать обращения и удалить"
                                     className={iosBtnGhost}>
                                 <ListChecks size={14} /> Выбрать
@@ -2027,8 +2230,8 @@ export default function CrmTicketsView({
                     )}
                     {tab === 'tickets' && !selectMode && (
                         <button type="button" onClick={() => setComposerOpen(true)}
-                                disabled={!readyScenarios.length}
-                                title={readyScenarios.length ? undefined
+                                disabled={!readyScenarios.length && !complaintsEnabled}
+                                title={readyScenarios.length || complaintsEnabled ? undefined
                                     : 'Ни к одной тематике не привязана Telegram-группа'}
                                 className={iosBtnPrimary}>
                             <Plus size={14} /> Новое обращение
@@ -2055,12 +2258,12 @@ export default function CrmTicketsView({
                         Назад к списку (и к фильтрам) ведёт стрелка в шапке. */}
                     <div ref={filtersRef}
                          className={`mb-3 flex-wrap items-center gap-2 px-1 lg:flex ${
-                             selectedId ? 'hidden' : 'flex'
+                             selectedAny ? 'hidden' : 'flex'
                          }`}>
                         <div className="flex rounded-xl bg-slate-100 p-1">
                             {STATE_FILTERS.map((item) => (
                                 <button key={item.key} type="button"
-                                        onClick={() => { setStateFilter(item.key); setSelectedId(null); }}
+                                        onClick={() => { setStateFilter(item.key); clearSelection(); }}
                                         className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
                                             stateFilter === item.key
                                                 ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
@@ -2080,7 +2283,7 @@ export default function CrmTicketsView({
                                     <button key={String(item.key)} type="button"
                                             disabled={Boolean(searchApplied)}
                                             title={searchApplied ? 'Поиск идёт по всем обращениям' : undefined}
-                                            onClick={() => { setMine(item.key); setSelectedId(null); }}
+                                            onClick={() => { setMine(item.key); clearSelection(); }}
                                             className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
                                                 searching === item.key
                                                     ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
@@ -2092,14 +2295,17 @@ export default function CrmTicketsView({
                             </div>
                         )}
 
-                        {queues.length > 1 && (
+                        {/* «Жалобы» — отдельной строкой в конце: у них своя
+                            группа, и так их можно посмотреть без обращений. */}
+                        {queues.length + (complaintsEnabled ? 1 : 0) > 1 && (
                             <CustomSelect
                                 className="w-48"
                                 variant="ios"
                                 value={queueFilter}
-                                onChange={(value) => { setQueueFilter(value); setSelectedId(null); }}
+                                onChange={(value) => { setQueueFilter(value); clearSelection(); }}
                                 options={[{ value: '', label: 'Все группы' }].concat(
                                     queues.map((q) => ({ value: String(q.id), label: q.title })),
+                                    complaintsEnabled ? [{ value: COMPLAINTS_FILTER, label: 'Жалобы' }] : [],
                                 )}
                                 placeholder="Все группы"
                                 ariaLabel="Фильтр по очереди"
@@ -2160,21 +2366,21 @@ export default function CrmTicketsView({
                                 Теперь колонка занимает высоту карточки, а
                                 прокручивается лента внутри — как на широком. */}
                             <div className={`flex w-full min-h-0 flex-col border-slate-200/70 lg:w-[360px] lg:shrink-0 lg:border-r ${
-                                selectedId ? 'hidden lg:flex' : 'flex'
+                                selectedAny ? 'hidden lg:flex' : 'flex'
                             }`}>
                                 <div className="crm-scroll min-h-0 flex-1 overflow-y-auto">
-                                    {loading && !tickets.length && <LoadingBlock />}
+                                    {loading && !feed.items.length && <LoadingBlock />}
                                     {!loading && error && (
                                         <div className="flex items-center justify-center gap-2 py-16 text-center text-[13px] text-rose-500">
                                             <AlertCircle size={15} /> {error}
                                         </div>
                                     )}
-                                    {!loading && !error && !tickets.length && (
+                                    {!loading && !error && !feed.items.length && (
                                         <EmptyBlock
                                             hint={mine
                                                 ? 'Создайте обращение — оно уйдёт в рабочую группу, а ответ вернётся сюда.'
                                                 : 'В этом фильтре пусто.'}>
-                                            Обращений нет
+                                            {queueFilter === COMPLAINTS_FILTER ? 'Жалоб нет' : 'Обращений нет'}
                                         </EmptyBlock>
                                     )}
                                     {/* Волосяная линия между обращениями. Она
@@ -2185,18 +2391,21 @@ export default function CrmTicketsView({
                                         последней строки, ни второй раз рядом с
                                         рамкой подвала «Показано N». */}
                                     <div className="divide-y divide-slate-100">
-                                        {tickets.map((ticket) => (
-                                            <TicketRow key={ticket.id} ticket={ticket}
-                                                       active={ticket.id === selectedId}
-                                                       onSelect={setSelectedId}
+                                        {feed.items.map((entry) => (entry.kind === 'complaint' ? (
+                                            <ComplaintFeedRow key={entry.key} complaint={entry.item}
+                                                              active={entry.item.id === selectedComplaintId}
+                                                              onSelect={openComplaint} />
+                                        ) : (
+                                            <TicketRow key={entry.key} ticket={entry.item}
+                                                       active={entry.item.id === selectedId}
+                                                       onSelect={selectTicket}
                                                        selectable={selectMode}
-                                                       selected={picked.has(ticket.id)}
+                                                       selected={picked.has(entry.item.id)}
                                                        onToggle={togglePicked} />
-                                        ))}
+                                        )))}
                                     </div>
-                                    {hasMore && (
-                                        <button type="button"
-                                                onClick={() => loadTickets(offset + PAGE_SIZE)}
+                                    {!!feed.loadMore && (
+                                        <button type="button" onClick={loadMoreFeed}
                                                 className="w-full py-3 text-[12.5px] font-semibold text-slate-500 transition hover:bg-slate-50">
                                             Показать ещё
                                         </button>
@@ -2207,7 +2416,7 @@ export default function CrmTicketsView({
                                     отмечено и кнопка удаления. Двух подвалов
                                     друг под другом лента не выдержит — она и так
                                     самая узкая колонка раздела. */}
-                                {!!tickets.length && (selectMode ? (
+                                {!!feed.items.length && (selectMode ? (
                                     <div className="flex shrink-0 items-center gap-2 border-t border-slate-100 px-3.5 py-2">
                                         <span className="text-[11.5px] tabular-nums text-slate-500">
                                             {picked.size
@@ -2225,14 +2434,34 @@ export default function CrmTicketsView({
                                     </div>
                                 ) : (
                                     <div className="shrink-0 border-t border-slate-100 px-3.5 py-2 text-[11px] tabular-nums text-slate-400">
-                                        Показано {tickets.length}{hasMore ? ' — есть ещё' : ''}
+                                        Показано {feed.items.length}{feed.loadMore ? ' — есть ещё' : ''}
                                     </div>
                                 ))}
                             </div>
 
                             {/* Карточка (про min-h-0 — см. выше) */}
-                            <div className={`min-h-0 min-w-0 flex-1 ${selectedId ? 'flex' : 'hidden lg:flex'}`}>
-                                {selectedId ? (
+                            <div className={`min-h-0 min-w-0 flex-1 ${selectedAny ? 'flex' : 'hidden lg:flex'}`}>
+                                {selectedComplaintId ? (
+                                    /* Своя жалоба — глазами автора: ответ для
+                                       водителя, вопрос группы и ответ на него.
+                                       Разбор и работа с сотрудником — в разделе
+                                       «Жалобы», у тех, кто разбирает. */
+                                    <div className="h-full min-h-0 w-full">
+                                        <ComplaintCard
+                                            key={`complaint:${selectedComplaintId}`}
+                                            mode="author"
+                                            complaintId={selectedComplaintId}
+                                            meta={complaintsMeta}
+                                            apiBaseUrl={apiBaseUrl}
+                                            headers={headers}
+                                            showToast={showToast}
+                                            onBack={clearSelection}
+                                            onChanged={handleComplaintChanged}
+                                            onSeen={handleComplaintSeen}
+                                            pulse={realtimePulse}
+                                        />
+                                    </div>
+                                ) : selectedId ? (
                                     <div className="h-full min-h-0 w-full">
                                         <TicketCard
                                             key={selectedId}
@@ -2326,7 +2555,13 @@ export default function CrmTicketsView({
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
                 showToast={showToast}
-                onCreated={(id) => { setSelectedId(id); loadTickets(0, true); }}
+                onCreated={(id) => { selectTicket(id); loadTickets(0, true); }}
+                complaints={complaintsEnabled ? complaintsMeta : null}
+                onComplaintCreated={(id) => {
+                    openComplaint(id);
+                    loadComplaints(0, true);
+                    refreshComplaintCounters();
+                }}
             />
         </div>
     );

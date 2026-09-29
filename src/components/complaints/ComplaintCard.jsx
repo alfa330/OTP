@@ -16,7 +16,7 @@ import {
     MESSAGE_KIND_LABELS, availableWorkActions, driverAnswers, eventText, openQuestion, statusView, workPayload,
     workProblems, workSteps,
 } from './complaintRules';
-import { TIME_INPUT } from './styles';
+import { DATE_TRIGGER, TIME_INPUT } from './styles';
 
 /* Карточка жалобы.
  *
@@ -219,6 +219,7 @@ const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showTo
                             <div>
                                 <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Дата</label>
                                 <IosDatePicker value={draft.date || ''} max={todayIso()} className="w-full"
+                                               triggerClassName={DATE_TRIGGER}
                                                onChange={(value) => set('date', value)} ariaLabel="Дата занятия" />
                             </div>
                             <div>
@@ -390,9 +391,15 @@ const EmployeeModal = ({ open, onClose, complaint, meta, apiBaseUrl, headers, sh
 
 export const COMPLAINT_GONE = 'Жалоба удалена или больше вам не видна';
 
+/* mode — чьими глазами карточка:
+ *   handler — раздел «Жалобы»: разбор, итог, работа с сотрудником (по правам);
+ *   author  — «Обращения»: автор видит ответ для водителя, вопрос группы и
+ *             отвечает на него. Инструментов разбора здесь нет даже у того,
+ *             кому они положены (админ сам завёл жалобу) — разбирают в разделе
+ *             «Жалобы», а не в ленте обращений. */
 export default function ComplaintCard({
     complaintId, meta, apiBaseUrl, headers, showToast, onBack, onChanged, onSeen,
-    onDeleted, pulse,
+    onDeleted, pulse, mode = 'handler',
 }) {
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
@@ -430,7 +437,10 @@ export default function ComplaintCard({
     useEffect(() => { if (pulse) load(true); }, [pulse]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const item = data?.item;
-    const permissions = data?.permissions || {};
+    const serverPermissions = data?.permissions || {};
+    const permissions = mode === 'author'
+        ? { can_write: Boolean(serverPermissions.can_write) }
+        : serverPermissions;
     const messages = data?.messages || [];
     const answers = useMemo(() => driverAnswers(messages), [messages]);
     const question = useMemo(() => openQuestion(item, messages), [item, messages]);

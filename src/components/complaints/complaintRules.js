@@ -86,6 +86,20 @@ export const willProcess = (target, wanted = true) => {
 export const submitLabel = (target, wanted = true) => (
     willProcess(target, wanted) ? 'Отправить в группу' : 'Зафиксировать');
 
+/* Направления жалобы на первом экране мастера «Обращений» — там их выбирают
+ * среди тематик (решение владельца 29.09.2026). Как у тематик: то, что без
+ * группы отправить нельзя, стоит неактивным с пометкой «Нет группы».
+ * «Только зафиксировать» (Яндекс) и «по выбору» (парк) работают и без неё. */
+export const wizardTargets = (meta) => {
+    const groupReady = Boolean(meta && meta.group && meta.group.ready);
+    return ((meta && meta.targets) || []).map((item) => ({
+        code: item.code,
+        title: item.title,
+        hint: item.hint,
+        is_ready: groupReady || item.processing !== PROCESS_ALWAYS,
+    }));
+};
+
 /* Подразделения, из которых выбирают у цели. У КЦ — подразделения колл-центра,
  * у фронт-офиса список не нужен: отдел один. */
 export const unitDepartments = (meta) => (

@@ -692,9 +692,10 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'wiki',
     'events',
     'salary',
+    // «Обращения» — и для жалоб: жалобы (#297) тренер СЗоВ принимает наравне
+    // с остальными, а это делается здесь, выбором направления. Раздела
+    // «Жалобы» в списке нет — там разбирают, а тренер не разбирает.
     'crm_tickets',
-    // «Жалобы» (#297) принимает весь СЗоВ, тренер отдела — наравне с остальными.
-    'complaints',
     'parcels',
     'sign_links',
     'driver_chats',
@@ -2343,13 +2344,13 @@ const canAccessCrmSectionForUser = (userLike) => {
         === CRM_SECTION_DEPARTMENT_CODE;
 };
 
-/* «Жалобы» (задача #297) — три круга людей. Жалобы ПРИНИМАЕТ весь СЗоВ (роль
-   значения не имеет: жалобу заводит тот, кому позвонил водитель), РАЗБИРАЮТ
-   супервайзеры и главы отделов, чьих сотрудников она касается, — подразделения
-   КЦ и фронт-офис, — и глобальный админ видит всё. Здесь решается только
-   «показывать ли пункт меню»; обязательную границу и то, КАКИЕ жалобы человек
-   увидит, держит complaints/access.py (зеркало — can_open_section). */
-const COMPLAINTS_INTAKE_DEPARTMENT_CODE = 'szov';
+/* «Жалобы» (задача #297) — раздел разбора: его видят супервайзеры и главы
+   отделов, чьих сотрудников касаются жалобы (подразделения КЦ и фронт-офис), и
+   глобальный админ. ПРИНИМАЕТ жалобы весь СЗоВ, но не здесь, а в «Обращениях»:
+   направление «Жалоба» в «Новом обращении», там же ответ для водителя и вопрос
+   группы (решение владельца 29.09.2026). Здесь решается только «показывать ли
+   пункт меню»; обязательную границу держит complaints/access.py (зеркало —
+   can_open_section). */
 const COMPLAINTS_HANDLER_DEPARTMENT_CODES = [
     'szov', 'op', 'tez', 'remote_cc', 'request_processing_department', 'front_office',
 ];
@@ -2361,7 +2362,6 @@ const canAccessComplaintsSectionForUser = (userLike) => {
     const headed = isDepartmentHead(userLike) ? aiQaHeadDepartmentCodesOf(userLike) : [];
     if (headed.some((code) => COMPLAINTS_HANDLER_DEPARTMENT_CODES.includes(code))) return true;
     const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
-    if (own === COMPLAINTS_INTAKE_DEPARTMENT_CODE) return true;
     return isSupervisorRole(role) && COMPLAINTS_HANDLER_DEPARTMENT_CODES.includes(own);
 };
 
@@ -45906,6 +45906,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
+                    // Ссылка на свою жалобу — в «Обращения», где тренер с ней работает.
+                    if (requestedViewFromUrl === 'complaints' && canAccessCrmSection) {
+                        redirectToView('crm_tickets');
+                        return;
+                    }
                     if (requestedViewFromUrl && TRAINER_ALLOWED_VIEWS.includes(requestedViewFromUrl)) {
                         redirectToView(requestedViewFromUrl);
                         return;
@@ -45943,12 +45948,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     redirectToView(requestedViewFromUrl);
                     return;
                 }
+                /* Автор жалобы в раздел «Жалобы» не ходит — свою жалобу он видит в
+                   «Обращениях». Старая ссылка на неё ведёт туда же; саму жалобу
+                   откроет эффект фокуса ниже. */
+                if (requestedViewFromUrl === 'complaints' && canAccessCrmSection) {
+                    redirectToView('crm_tickets');
+                    return;
+                }
 
                 if (isAdminLikeRole) redirectToView('sv_list');
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, canAccessCrmSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -45969,15 +45981,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }));
             }, [user?.id, requestedViewFromLocation, requestedTicketIdFromLocation]);
 
-            /* Ссылка «Жалоба №N» из Telegram-группы открывает саму жалобу. */
+            /* Ссылка «Жалоба №N» из Telegram-группы открывает саму жалобу: у
+               разбирающего — в разделе «Жалобы», у автора — в «Обращениях»
+               (туда его и перевёл эффект выше). */
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'complaints'
                     || !requestedComplaintIdFromLocation) return;
-                setComplaintsFocusRequest((prev) => ({
+                const setter = canAccessComplaintsSection ? setComplaintsFocusRequest
+                    : canAccessCrmSection ? setCrmFocusRequest : null;
+                if (!setter) return;
+                setter((prev) => ({
                     complaintId: requestedComplaintIdFromLocation,
                     requestId: Number(prev?.requestId || 0) + 1,
                 }));
-            }, [user?.id, requestedViewFromLocation, requestedComplaintIdFromLocation]);
+            }, [user?.id, requestedViewFromLocation, requestedComplaintIdFromLocation,
+                canAccessComplaintsSection, canAccessCrmSection]);
 
             /* И тем же механизмом — статья вики: ссылку копируют из статьи и
                присылают в переписке, поэтому раздел обязан открыть её сразу
@@ -52040,6 +52058,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (nextView === 'crm_tickets' && Number(target)) {
                     setCrmFocusRequest((prev) => ({
                         ticketId: Number(target),
+                        requestId: Number(prev?.requestId || 0) + 1,
+                    }));
+                }
+                /* Ответ или вопрос по своей жалобе — в «Обращениях», где автор
+                   с ней и работает. Цель «complaint:<id>»: номера у жалоб и
+                   обращений свои (notifications/sources.py: crm). */
+                const complaintTarget = nextView === 'crm_tickets'
+                    && /^complaint:(\d+)$/.exec(String(target || ''));
+                if (complaintTarget) {
+                    setCrmFocusRequest((prev) => ({
+                        complaintId: Number(complaintTarget[1]),
                         requestId: Number(prev?.requestId || 0) + 1,
                     }));
                 }

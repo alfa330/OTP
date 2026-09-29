@@ -451,11 +451,21 @@ SEGMENT_ALL = 'all'
 
 
 def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=None,
-                    search=None, limit=40, offset=0):
+                    search=None, limit=40, offset=0, unread_first=False):
     """Порция ленты + есть ли ещё. Возвращает (items, has_more).
 
     Без COUNT(*) — по той же причине, что у обращений: полный проход по
     периметру на каждый фильтр и букву в поиске. has_more — лишняя строка.
+
+    Статусы — двух разделов. «Жалобы»: open, closed (отработанные), recorded
+    (зафиксированные). «Обращения», где автор видит свои жалобы в общей ленте:
+    answered (в работе и есть ответ для водителя) и done (закрытые — любые,
+    и отработанные, и зафиксированные: автору разница не нужна).
+
+    unread_first — порядок «непрочитанное наверху» ленты «Обращений»
+    (crm/queries.list_tickets): две части одной ленты обязаны идти одним
+    порядком, иначе при слиянии строки перемешаются. Имеет смысл только для
+    своих жалоб — «непрочитано» есть у автора и ни у кого больше.
     """
     where, params = visibility_sql(ctx)
     clauses = [where]
@@ -474,6 +484,10 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
         clauses.append("c.status = 'closed' AND NOT %s" % RECORDED_SQL)
     elif status == 'recorded':
         clauses.append(RECORDED_SQL)
+    elif status == 'answered':
+        clauses.append("c.status = 'open' AND c.answer_at IS NOT NULL")
+    elif status == 'done':
+        clauses.append("c.status = 'closed'")
     if target and catalog.target(target):
         params['target'] = target
         clauses.append('c.target = %(target)s')
@@ -499,10 +513,15 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
     page = max(1, min(int(limit), 200))
     params['limit'] = page + 1
     params['offset'] = max(0, int(offset))
+    # Выражение — дословно как в idx_complaints_author_attention, иначе индекс
+    # запросу не подойдёт.
+    order = ('(c.author_unread_at IS NULL), c.last_activity_at DESC, c.id DESC'
+             if unread_first and segment == SEGMENT_MINE
+             else 'c.last_activity_at DESC, c.id DESC')
     cursor.execute(
         'SELECT ' + _COLUMNS + _CREATOR_GROUPS + _JOINS
         + ' WHERE ' + ' AND '.join(clauses)
-        + ' ORDER BY c.last_activity_at DESC, c.id DESC'
+        + ' ORDER BY ' + order
         + ' LIMIT %(limit)s OFFSET %(offset)s',
         params,
     )
@@ -956,40 +975,54 @@ def list_events(cursor, complaint_id, limit=100):
 # Колокол
 # ─────────────────────────────────────────────────────────────────────────────
 
-def bell_items(cursor, user_id, limit):
-    """Что ждёт зрителя: ответ/вопрос по его жалобе и работа с его сотрудником.
+def author_bell_items(cursor, user_id, limit):
+    """Ответ для водителя или вопрос группы по жалобе, которую завёл зритель.
 
-    Возвращает (всего, строки). Одной выборкой через UNION ALL, а не двумя
-    походами: колокол опрашивает источники на каждый тычок.
+    Возвращает (всего, строки). Колокол показывает их в «Обращениях»: там
+    автор и работает со своими жалобами (решение владельца 29.09.2026).
     """
     cursor.execute(
         """
-        WITH mine AS (
-            SELECT c.id, 'author' AS role, c.author_unread_kind AS kind,
-                   c.author_unread_at AS at, c.target, c.reason_code, c.driver_name,
-                   c.employee_name
-              FROM complaints c
-             WHERE c.created_by = %(user_id)s AND c.author_unread_at IS NOT NULL
-               -- Автор, которого СВ определил сотрудником жалобы, её больше не
-               -- видит — и в колоколе она ему тоже не показывается.
-               AND c.employee_id IS DISTINCT FROM %(user_id)s
-            UNION ALL
-            SELECT c.id, 'work', 'work', COALESCE(c.employee_set_at, c.created_at),
-                   c.target, c.reason_code, c.driver_name, c.employee_name
-              FROM complaints c
-             WHERE c.work_state = 'pending'
-               AND c.employee_id IS DISTINCT FROM %(user_id)s
-               AND (c.responsible_id = %(user_id)s
-                    -- Ответственного не нашлось (нет ни СВ, ни главы) — задача
-                    -- глав отдела сотрудника, а не ничья.
-                    OR (c.responsible_id IS NULL AND c.target_department_id IN (
-                        SELECT d.id FROM departments d
-                         WHERE d.head_user_id = %(user_id)s AND d.is_active)))
-        )
-        SELECT id, role, kind, at, target, reason_code, driver_name, employee_name,
+        SELECT c.id, 'author' AS role, c.author_unread_kind AS kind,
+               c.author_unread_at AS at, c.target, c.reason_code, c.driver_name,
+               c.employee_name, COUNT(*) OVER () AS total
+          FROM complaints c
+         WHERE c.created_by = %(user_id)s AND c.author_unread_at IS NOT NULL
+           -- Автор, которого СВ определил сотрудником жалобы, её больше не
+           -- видит — и в колоколе она ему тоже не показывается.
+           AND c.employee_id IS DISTINCT FROM %(user_id)s
+         ORDER BY c.author_unread_at DESC, c.id DESC
+         LIMIT %(limit)s
+        """,
+        {'user_id': int(user_id), 'limit': int(limit)},
+    )
+    rows = _dicts(cursor)
+    total = int(rows[0]['total']) if rows else 0
+    return total, rows
+
+
+def work_bell_items(cursor, user_id, limit):
+    """«На сотрудника поступила жалоба. Необходимо провести обратную связь и
+    зафиксировать результат» (ТЗ) — задачи зрителя в разделе «Жалобы».
+
+    Возвращает (всего, строки). Условие — дословно как у counters()['work'].
+    """
+    cursor.execute(
+        """
+        SELECT c.id, 'work' AS role, 'work' AS kind,
+               COALESCE(c.employee_set_at, c.created_at) AS at,
+               c.target, c.reason_code, c.driver_name, c.employee_name,
                COUNT(*) OVER () AS total
-          FROM mine
-         ORDER BY at DESC, id DESC
+          FROM complaints c
+         WHERE c.work_state = 'pending'
+           AND c.employee_id IS DISTINCT FROM %(user_id)s
+           AND (c.responsible_id = %(user_id)s
+                -- Ответственного не нашлось (нет ни СВ, ни главы) — задача
+                -- глав отдела сотрудника, а не ничья.
+                OR (c.responsible_id IS NULL AND c.target_department_id IN (
+                    SELECT d.id FROM departments d
+                     WHERE d.head_user_id = %(user_id)s AND d.is_active)))
+         ORDER BY at DESC, c.id DESC
          LIMIT %(limit)s
         """,
         {'user_id': int(user_id), 'limit': int(limit)},

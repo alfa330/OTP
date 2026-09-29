@@ -45,12 +45,25 @@ MARKETING = ctx(role='marketing_manager', user_id=90, department_id=1041,
 
 
 class SectionGateTest(unittest.TestCase):
-    def test_who_enters(self):
-        for me in (ADMIN, AUTHOR, SZOV_SV, SZOV_HEAD, OP_SV, OP_HEAD, TEZ_SV):
+    def test_who_enters_the_section(self):
+        """Раздел — для тех, кто разбирает, и для админа. Оператор СЗоВ заводит
+        жалобу и видит ответ в «Обращениях» (решение владельца 29.09.2026)."""
+        for me in (ADMIN, SZOV_SV, SZOV_HEAD, OP_SV, OP_HEAD, TEZ_SV):
             self.assertTrue(access.can_open_section(me), me['user_id'])
-        # Рядовой ОП жалоб не принимает и не разбирает — раздел ему не нужен.
-        for me in (OP_OPERATOR, MARKETING):
+        for me in (AUTHOR, NEIGHBOUR, OP_OPERATOR, MARKETING):
             self.assertFalse(access.can_open_section(me), me['user_id'])
+
+    def test_operator_still_uses_the_api_from_crm(self):
+        """К API оператор ходит из «Обращений»: создать жалобу, открыть свою,
+        ответить на вопрос группы. Закрыть ему API вместе с разделом значило
+        бы отрезать весь цикл ТЗ."""
+        self.assertTrue(access.can_use(AUTHOR))
+        self.assertTrue(access.capabilities(AUTHOR)['can_use'])
+        self.assertFalse(access.capabilities(AUTHOR)['can_open'])
+        self.assertFalse(access.can_view_analytics(AUTHOR))
+        # Рядовой ОП жалоб не принимает и не разбирает — API ему не нужен.
+        for me in (OP_OPERATOR, MARKETING):
+            self.assertFalse(access.can_use(me), me['user_id'])
 
     def test_who_creates(self):
         self.assertTrue(access.can_create(AUTHOR))

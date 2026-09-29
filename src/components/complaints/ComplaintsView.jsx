@@ -1,30 +1,31 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, BarChart3, ChevronRight, Inbox, ListChecks, Loader2, Plus, Search, Settings2,
+    AlertCircle, BarChart3, ChevronRight, Inbox, ListChecks, Loader2, Search, Settings2,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
     IosBadge, IosModal, IosSegmented,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import ComplaintForm, { TARGET_ICONS } from './ComplaintForm';
+import { TARGET_ICONS } from './ComplaintDraft';
 import ComplaintCard from './ComplaintCard';
 import ComplaintsAnalytics from './ComplaintsAnalytics';
 import { rowBadges, rowSubtitle } from './complaintRules';
 import { fitHeight, measureShell } from '../crm/layout';
 
-/* Раздел «Жалобы» (ТЗ задачи #297).
+/* Раздел «Жалобы» (ТЗ задачи #297) — разбор, работа с сотрудником и аналитика.
  *
- * Раскладка — как у «Обращений»: слева лента, справа карточка, на телефоне
- * карточка разворачивается на весь экран. Оператор работает с жалобой, не
- * теряя из виду остальные.
- *
- * Три аудитории видят раздел по-разному, и это решает сервер
- * (complaints/access.py), а здесь только кнопки по capabilities:
- *   оператор СЗоВ       — свои жалобы и «Новая жалоба»;
+ * Принимают жалобу в «Обращениях»: оператор выбирает направление «Жалоба» в
+ * «Новом обращении» и там же видит ответ для водителя и вопрос группы
+ * (решение владельца 29.09.2026). Сюда ходят те, кто разбирает, и админ:
  *   супервайзер, глава  — «К разбору»: жалобы на людей своего отдела;
  *   админ, СВ, глава    — ещё «Аналитика» и выгрузка.
+ * Что кому видно, решает сервер (complaints/access.py), здесь — кнопки по
+ * capabilities.
+ *
+ * Раскладка — как у «Обращений»: слева лента, справа карточка, на телефоне
+ * карточка разворачивается на весь экран.
  *
  * Цвет — только у того, что ждёт действия (см. complaintRules.rowBadges). */
 
@@ -198,7 +199,6 @@ export default function ComplaintsView({
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [selectedId, setSelectedId] = useState(null);
-    const [formOpen, setFormOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
 
     const [status, setStatus] = useState('open');
@@ -248,12 +248,11 @@ export default function ComplaintsView({
 
     useEffect(() => { loadMeta(); }, [loadMeta]);
 
-    /* Сегмент по умолчанию — по роли: разбирающему важнее то, что ждёт его,
-       оператору сегмент не нужен вовсе (он видит только своё). Ставим один
-       раз, когда права приехали, и дальше не трогаем выбор человека. */
+    /* Сегмент по умолчанию — по роли: разбирающему важнее то, что ждёт его.
+       Ставим один раз, когда права приехали, и дальше не трогаем выбор. */
     useEffect(() => {
         if (!capabilities || segment !== null) return;
-        setSegment(capabilities.scope === 'own' ? 'all' : (capabilities.is_handler ? 'work' : 'all'));
+        setSegment(capabilities.is_handler ? 'work' : 'all');
     }, [capabilities, segment]);
 
     const loadList = useCallback(async (nextOffset = 0, silent = false) => {
@@ -299,8 +298,9 @@ export default function ComplaintsView({
     const refreshCounters = useCallback(async () => {
         try {
             const response = await axios.get(`${apiBaseUrl}/api/complaints/ping`, { headers: headers() });
-            const counters = response.data.counters || {};
-            onUnreadChange?.((Number(counters.unread) || 0) + (Number(counters.work) || 0));
+            // Бейдж раздела — задачи разбора. Ответы по своим жалобам автор
+            // видит бейджем «Обращений» (notifications/sources.py: crm).
+            onUnreadChange?.(Number(response.data.counters?.work) || 0);
         } catch (_) { /* число в меню — не повод показывать отказ */ }
     }, [apiBaseUrl, headers, onUnreadChange]);
 
@@ -334,9 +334,9 @@ export default function ComplaintsView({
         capabilities?.can_view_analytics ? { value: 'analytics', label: 'Аналитика', icon: <BarChart3 size={13} /> } : null,
     ].filter(Boolean);
 
+    // «Мои» здесь нет: свои жалобы автор видит в «Обращениях».
     const segmentOptions = [
         handler ? { value: 'work', label: 'К разбору' } : null,
-        { value: 'mine', label: 'Мои' },
         { value: 'all', label: 'Все' },
     ].filter(Boolean);
 
@@ -346,7 +346,7 @@ export default function ComplaintsView({
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Жалобы</h2>
                     <p className="text-xs text-slate-500">
-                        Жалобы водителей: разбор в группе, работа с сотрудником, аналитика
+                        Разбор жалоб, работа с сотрудником и аналитика. Принимают жалобы в «Обращениях»
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -358,12 +358,6 @@ export default function ComplaintsView({
                         <button type="button" onClick={() => setSettingsOpen(true)} title="Группа для жалоб"
                                 className={iosBtnGhost}>
                             <Settings2 size={15} />
-                        </button>
-                    )}
-                    {capabilities?.can_create && tab === 'list' && (
-                        <button type="button" onClick={() => setFormOpen(true)} disabled={!meta}
-                                className={iosBtnPrimary}>
-                            <Plus size={14} /> Новая жалоба
                         </button>
                     )}
                 </div>
@@ -418,9 +412,7 @@ export default function ComplaintsView({
                                     {!loading && !error && !items.length && (
                                         <EmptyBlock hint={segment === 'work'
                                             ? 'Жалоб, которые ждут вашего разбора, нет.'
-                                            : capabilities?.can_create
-                                                ? 'Примите жалобу водителя — она уйдёт на разбор, а ответ вернётся сюда.'
-                                                : 'В этом фильтре пусто.'}>
+                                            : 'В этом фильтре пусто.'}>
                                             Жалоб нет
                                         </EmptyBlock>
                                     )}
@@ -469,14 +461,6 @@ export default function ComplaintsView({
                 </>
             )}
 
-            <ComplaintForm open={formOpen} onClose={() => setFormOpen(false)} meta={meta}
-                           apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                           onCreated={(id) => {
-                               setStatus('open');
-                               setSegment(capabilities?.scope === 'own' ? 'all' : 'mine');
-                               setSelectedId(id || null);
-                               loadList(0, true);
-                           }} />
             <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBaseUrl={apiBaseUrl}
                            headers={headers} showToast={showToast} onSaved={loadMeta} />
         </div>
