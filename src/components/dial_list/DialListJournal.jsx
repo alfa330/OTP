@@ -9,6 +9,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import { OutcomeBadge } from './DialListOutcomesPanel';
+import { subtypeChips } from './outcomeFormat';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 
 /*
@@ -27,7 +28,8 @@ import { buildPeriodOptions, monthLabel } from './dialListPeriods';
  *   4) полоса этапов — она же легенда цвета точек в строках, и чипы итогов.
  * Числа на полосе этапов и на чипах итогов сервер считает по той же выборке, что
  * и список (этапы — без фильтра этапа, итоги — без фильтра итога): число на чипе
- * равно числу строк, которые покажет нажатие.
+ * равно числу строк, которые покажет нажатие. Под выбранным итогом — чипы его
+ * типов и «Без типа» (запрос владельца 29.09.2026), их числа — без фильтра типа.
  *
  * Цвет — только со смыслом: точка этапа и цвет итога из справочника. Аватар и
  * прочее — нейтральные; раньше аватар красился цветом этапа, и тот же смысл
@@ -267,7 +269,14 @@ const LeadRow = ({ lead, onOpen, showMonth }) => {
                     </div>
                     {(lead.outcome || lead.comment) && (
                         <div className="mt-1.5 flex min-w-0 items-center gap-2">
-                            {lead.outcome && <OutcomeBadge outcome={lead.outcome} small className="shrink-0" />}
+                            {/* Бейдж не во всю ширину: «Отказ · Уже работает в другом
+                                парке» иначе выдавливает комментарий за край. При
+                                комментарии бейдж берёт не больше 65 % и обрезается. */}
+                            {lead.outcome && (
+                                <span className={`flex min-w-0 ${lead.comment ? 'max-w-[65%] shrink-0' : ''}`}>
+                                    <OutcomeBadge outcome={lead.outcome} small className="min-w-0" />
+                                </span>
+                            )}
                             {lead.comment && <span className="min-w-0 truncate text-[12.5px] text-slate-500">{lead.comment}</span>}
                         </div>
                     )}
@@ -351,34 +360,73 @@ const StageStrip = ({ value, onChange, counts }) => {
 
 /* Чипы итогов: белые, цвет — только точка. Итог с нулём не показываем — нажатие
    на него дало бы пустой список; выбранный остаётся, чтобы его можно было снять. */
-const OutcomeStrip = ({ outcomes, value, onChange }) => {
+const OutcomeStrip = ({ outcomes, value, onChange, subtypeValue = '', onSubtypeChange }) => {
     const visible = outcomes.filter((o) => o.count > 0 || o.id === value);
     if (!visible.length) return null;
+    const selected = value ? outcomes.find((o) => o.id === value) : null;
+    const subChips = selected ? subtypeChips(selected, subtypeValue) : [];
+    const selectedColor = /^#[0-9A-Fa-f]{6}$/.test(selected?.color || '') ? selected.color : '#8E8E93';
     return (
-        <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-0.5 text-[12px] text-slate-500">Итог оператора</span>
-            {visible.map((o) => {
-                const active = value === o.id;
-                const color = /^#[0-9A-Fa-f]{6}$/.test(o.color || '') ? o.color : '#8E8E93';
-                return (
-                    <button
-                        key={o.id}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() => onChange(active ? '' : o.id)}
-                        title={o.is_active === false ? 'Итог выключен, но встречается в истории' : undefined}
-                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] font-medium transition active:scale-[0.97] ${
-                            active ? 'text-white shadow-sm' : 'bg-white text-slate-700 ring-1 ring-slate-200/80 hover:ring-slate-300'
-                        }`}
-                        style={active ? { backgroundColor: color } : undefined}
-                    >
-                        {!active && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />}
-                        <span className={o.is_active === false ? 'line-through decoration-slate-400' : ''}>{o.name}</span>
-                        <span className={`tabular-nums ${active ? 'text-white/80' : 'text-slate-400'}`}>{o.count}</span>
-                        {active && <X size={12} className="text-white/80" />}
-                    </button>
-                );
-            })}
+        <div className="space-y-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+                <span className="mr-0.5 text-[12px] text-slate-500">Итог оператора</span>
+                {visible.map((o) => {
+                    const active = value === o.id;
+                    const color = /^#[0-9A-Fa-f]{6}$/.test(o.color || '') ? o.color : '#8E8E93';
+                    return (
+                        <button
+                            key={o.id}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => onChange(active ? '' : o.id)}
+                            title={o.is_active === false ? 'Итог выключен, но встречается в истории' : undefined}
+                            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] font-medium transition active:scale-[0.97] ${
+                                active ? 'text-white shadow-sm' : 'bg-white text-slate-700 ring-1 ring-slate-200/80 hover:ring-slate-300'
+                            }`}
+                            style={active ? { backgroundColor: color } : undefined}
+                        >
+                            {!active && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />}
+                            <span className={o.is_active === false ? 'line-through decoration-slate-400' : ''}>{o.name}</span>
+                            <span className={`tabular-nums ${active ? 'text-white/80' : 'text-slate-400'}`}>{o.count}</span>
+                            {active && <X size={12} className="text-white/80" />}
+                        </button>
+                    );
+                })}
+            </div>
+            {/* Типы выбранного итога (запрос владельца 29.09.2026) — второй ряд
+                помельче, тем же цветом итога. Число — строки, которые покажет
+                нажатие: сервер считает их с фильтром итога, но без фильтра типа. */}
+            {subChips.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pl-3">
+                    <span className="mr-0.5 text-[11.5px] text-slate-400">Тип</span>
+                    {subChips.map((s) => {
+                        const active = subtypeValue === s.id;
+                        return (
+                            <button
+                                key={s.id}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => onSubtypeChange?.(active ? '' : s.id)}
+                                title={s.none ? 'Итог поставлен без типа' : s.is_active === false ? 'Тип выключен, но встречается в истории' : undefined}
+                                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium transition active:scale-[0.97] ${
+                                    active ? 'text-white shadow-sm' : 'bg-white text-slate-600 ring-1 ring-slate-200/80 hover:ring-slate-300'
+                                }`}
+                                style={active ? { backgroundColor: selectedColor } : undefined}
+                            >
+                                {!active && (
+                                    <span
+                                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.none ? 'opacity-40' : ''}`}
+                                        style={{ backgroundColor: selectedColor }}
+                                    />
+                                )}
+                                <span className={`${s.none && !active ? 'italic text-slate-500' : ''} ${s.is_active === false ? 'line-through decoration-slate-400' : ''}`}>{s.name}</span>
+                                <span className={`tabular-nums ${active ? 'text-white/80' : 'text-slate-400'}`}>{s.count}</span>
+                                {active && <X size={11} className="text-white/80" />}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
         </div>
     );
 };
@@ -782,6 +830,8 @@ const DialListJournal = ({
     const [operatorId, setOperatorId] = useState('');
     const [batchId, setBatchId] = useState('');
     const [outcomeId, setOutcomeId] = useState('');
+    // Тип итога: '' — все, uuid — тип, 'none' — «Без типа». Имеет смысл только при outcomeId.
+    const [outcomeSubtypeId, setOutcomeSubtypeId] = useState('');
     const [range, setRange] = useState({ from: '', to: '' });
     const [sort, setSort] = useState('activity');
     const [filtersOpen, setFiltersOpen] = useState(false);
@@ -843,11 +893,12 @@ const DialListJournal = ({
         if (operatorId) qs.set('operator_id', operatorId);
         if (batchId) qs.set('batch_id', batchId);
         if (outcomeId) qs.set('outcome_id', outcomeId);
+        if (outcomeId && outcomeSubtypeId) qs.set('outcome_subtype_id', outcomeSubtypeId);
         if (period) qs.set('period', period);
         if (range.from) qs.set('date_from', range.from);
         if (range.to) qs.set('date_to', range.to);
         return qs;
-    }, [qDebounced, stage, operatorId, batchId, outcomeId, period, range.from, range.to, sort]);
+    }, [qDebounced, stage, operatorId, batchId, outcomeId, outcomeSubtypeId, period, range.from, range.to, sort]);
 
     const applySummary = (data) => {
         setTotal(Number(data.total) || 0);
@@ -1010,9 +1061,15 @@ const DialListJournal = ({
         },
     ].filter(Boolean);
 
-    const hasFilters = Boolean(qDebounced || stage || outcomeId || chips.length);
+    const hasFilters = Boolean(qDebounced || stage || outcomeId || outcomeSubtypeId || chips.length);
     const resetFilters = () => {
-        setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setOutcomeId(''); setRange({ from: '', to: '' });
+        setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setOutcomeId(''); setOutcomeSubtypeId(''); setRange({ from: '', to: '' });
+    };
+    /* Тип принадлежит итогу: сменили итог — тип сбрасываем здесь же, в
+       обработчике, а не эффектом (эффект дал бы лишний запрос со старым типом). */
+    const changeOutcome = (id) => {
+        setOutcomeId(id);
+        setOutcomeSubtypeId('');
     };
     const viewingOtherMonth = shownPeriod && shownPeriod !== 'all' && activePeriod && shownPeriod !== activePeriod;
 
@@ -1119,7 +1176,13 @@ const DialListJournal = ({
             )}
 
             <StageStrip value={stage} onChange={setStage} counts={byStage} />
-            <OutcomeStrip outcomes={byOutcome} value={outcomeId} onChange={setOutcomeId} />
+            <OutcomeStrip
+                outcomes={byOutcome}
+                value={outcomeId}
+                onChange={changeOutcome}
+                subtypeValue={outcomeSubtypeId}
+                onSubtypeChange={setOutcomeSubtypeId}
+            />
 
             {viewingOtherMonth && (
                 <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-amber-100">

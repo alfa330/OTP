@@ -86,7 +86,8 @@
     "test:driver-mailings": "node --test tests/driver_mailings_text.test.mjs",
     "test:pwa-install": "node --test tests/pwa_install_offer.test.mjs",
     "test:ai-qa-filters": "node --test tests/ai_qa_filters.test.mjs",
-    "test:op-funnel-format": "node --test tests/op_funnel_format.test.mjs"
+    "test:op-funnel-format": "node --test tests/op_funnel_format.test.mjs",
+    "test:dial-list-outcomes": "node --test tests/dial_list_outcome_format.test.mjs"
   },
   "dependencies": {
     "@tiptap/extension-highlight": "^3.29.2",
