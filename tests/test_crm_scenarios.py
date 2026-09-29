@@ -192,9 +192,29 @@ class CooperationTest(unittest.TestCase):
         self.assertEqual(sc.get(self.KEY)['steps'][3]['options'],
                          [sc.COOP_WITH_YANDEX, sc.COOP_WITH_PARKS])
 
-    def test_yandex_branch_asks_only_the_callback_number(self):
+    def test_yandex_branch_asks_the_number_and_a_comment(self):
+        """Одного номера группе мало: не видно, кто звонил и о чём просит
+        связаться (владелец, 29.09.2026)."""
         answers = {'coop_type': sc.COOP_WITH_YANDEX}
-        self.assertEqual(self.keys(answers)[4:], ['coop_phone', 'coop_file'])
+        self.assertEqual(self.keys(answers)[4:], ['coop_phone', 'coop_comment', 'coop_file'])
+        # Нового экрана комментарий не заводит: он рядом с номером.
+        self.assertEqual(sc.all_groups(sc.get(self.KEY)), ['Данные обращения', 'Вложение'])
+
+    def test_yandex_comment_is_required_and_reaches_the_group(self):
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX)
+        answers.pop('coop_comment')
+        self.assertEqual(set(verdict(self.KEY, answers, has_attachment=False)['missing']),
+                         {'coop_comment'})
+        answers['coop_comment'] = 'Менеджер по партнёрам, просит связаться с директором'
+        body = sc.render_body(self.KEY, answers)
+        self.assertIn('Комментарий: Менеджер по партнёрам, просит связаться с директором', body)
+
+    def test_parks_branch_has_no_comment(self):
+        """У таксопарков свободный текст уже есть — «Предлагаемая услуга»."""
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_PARKS, coop_comment='хвост ветки')
+        self.assertNotIn('coop_comment', self.keys(answers))
+        self.assertNotIn('coop_comment', sc.visible_answers(self.KEY, answers))
+        self.assertNotIn('хвост ветки', sc.render_body(self.KEY, answers))
 
     def test_parks_branch_asks_company_number_and_service_in_that_order(self):
         answers = {'coop_type': sc.COOP_WITH_PARKS}
