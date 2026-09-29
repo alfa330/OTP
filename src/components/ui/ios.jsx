@@ -383,7 +383,12 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
  * призраком по краям. Раздел, которому нужен второй экран, меняет заголовок,
  * подвал и содержимое, а окно остаётся одно.
  */
-export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg' }) => {
+/* bodyClassName — своё тело окна вместо стандартного «прокрутка + поля»: нужно
+   окнам с несколькими колонками, где прокручивается каждая колонка отдельно
+   (карточка водителя «Обзвона»). Не передано — всё как было. */
+const MODAL_BODY_CLASS = 'thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5';
+
+export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg', bodyClassName = MODAL_BODY_CLASS }) => {
     /* НА ТЕЛЕФОНЕ ЭТО НЕ ОКНО, А ЭКРАН. Решение владельца 10.09.2026: «убрать
        все модалки и вместо них сделать плавное переключение 1 в 1 как в
        телеграмме — модалка на мобильном выглядит не очень». Карточка посреди
@@ -474,7 +479,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                     прокрутки внизу окна на всё время перехода.
                     thin-scroll: полоса в 3 px, как у остальных тонких скроллов
                     портала (styles.css), а не системная в ~15 px вдоль окна. */}
-                <div className="thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5">
+                <div className={bodyClassName}>
                     {children}
                 </div>
                 {/* flex-wrap в подвале: там бывает не только «Отмена/Сохранить»,

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Ban, Check, ChevronRight, FileCheck2, Loader2, PhoneCall, PhoneMissed, PhoneOff, PhoneOutgoing, Play, Plus,
-    RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
+    Ban, Check, ChevronRight, Clock3, FileCheck2, Hourglass, Loader2, PhoneCall, PhoneMissed, PhoneOff, PhoneOutgoing,
+    Play, Plus, RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
 } from 'lucide-react';
 import {
     iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosHint, IosModal,
@@ -489,7 +489,13 @@ const Bubble = ({ children }) => (
 
 const SOURCE_LABEL = { webhook: 'исход прислал вебхук Binotel', poll: 'исход получен опросом Binotel' };
 
-const AttemptItem = ({ attempt, recording, onRecording }) => {
+/* Линия ленты: от кружка события вниз к следующему — события дня читаются одной
+   цепочкой, как «Активность» в macOS. У последнего события дня линии нет. */
+const TimelineLine = ({ last }) => (last ? null : (
+    <span aria-hidden className="absolute bottom-[-12px] left-[15.5px] top-12 w-px bg-slate-200" />
+));
+
+const AttemptItem = ({ attempt, recording, onRecording, last = false }) => {
     const result = attempt.result;
     const tone = result === 'answered' ? 'green' : result === 'failed' ? 'red'
         : result === 'cancelled' ? 'slate' : result ? 'amber' : 'blue';
@@ -502,8 +508,9 @@ const AttemptItem = ({ attempt, recording, onRecording }) => {
         ? ' · оператор завершил звонок до ответа водителя, попытка не засчитана' : '';
     const rec = recording || {};
     return (
-        <li className="flex gap-3 py-3 pr-4">
-            <div className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${TONE[tone]}`}>
+        <li className="relative flex gap-3 py-3">
+            <TimelineLine last={last} />
+            <div className={`relative mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${TONE[tone]}`}>
                 <Icon size={14} />
             </div>
             <div className="min-w-0 flex-1">
@@ -563,12 +570,13 @@ const EVENT_META = {
     note: { label: 'Заметка', Icon: StickyNote },
 };
 
-const EventItem = ({ event }) => {
+const EventItem = ({ event, last = false }) => {
     const meta = EVENT_META[event.kind] || { label: event.kind, Icon: StickyNote };
     const label = event.kind === 'note' && !event.note ? 'Заметку убрали' : meta.label;
     return (
-        <li className="flex gap-3 py-3 pr-4">
-            <div className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${TONE.slate}`}>
+        <li className="relative flex gap-3 py-3">
+            <TimelineLine last={last} />
+            <div className={`relative mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${TONE.slate}`}>
                 <meta.Icon size={14} />
             </div>
             <div className="min-w-0 flex-1">
@@ -583,7 +591,8 @@ const EventItem = ({ event }) => {
     );
 };
 
-/* История по дням: заголовок дня, под ним события без повторения даты у каждого. */
+/* История по дням: заголовок дня (прилипает к верху колонки, пока листаешь его
+   события), под ним события без повторения даты у каждого. */
 const History = ({ lead, recordings, onRecording }) => {
     const groups = useMemo(() => {
         const timeline = [
@@ -600,18 +609,75 @@ const History = ({ lead, recordings, onRecording }) => {
     }, [lead.attempts, lead.events]);
 
     if (!groups.length) {
-        return <div className="px-4 py-6 text-center text-[13px] text-slate-500">Звонков по этому водителю ещё не было.</div>;
+        return (
+            <div className="px-6 py-14 text-center">
+                <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                    <PhoneOutgoing size={18} />
+                </div>
+                <div className="mt-3 text-[14px] font-semibold text-slate-800">Звонков ещё не было</div>
+                <div className="mt-1 text-[12.5px] text-slate-500">Здесь появятся звонки операторов и действия руководителей.</div>
+            </div>
+        );
     }
     return groups.map((g) => (
-        <div key={g.key || 'none'}>
-            <div className="px-4 pb-0.5 pt-3 text-[12px] font-semibold text-slate-500">{fmtDay(g.at)}</div>
-            <ul className="ml-4 divide-y divide-slate-100">
-                {g.items.map((t) => (t.kind === 'attempt'
-                    ? <AttemptItem key={`a-${t.item.id}`} attempt={t.item} recording={recordings[t.item.id]} onRecording={onRecording} />
-                    : <EventItem key={`e-${t.item.id}`} event={t.item} />))}
+        <section key={g.key || 'none'}>
+            <div className="sticky top-0 z-10 border-y border-slate-100 bg-slate-50/95 px-4 py-1.5 text-[12px] font-semibold text-slate-500 backdrop-blur lg:px-5">
+                {fmtDay(g.at)}
+            </div>
+            <ul className="px-4 pb-1 lg:px-5">
+                {g.items.map((t, i) => (t.kind === 'attempt'
+                    ? <AttemptItem key={`a-${t.item.id}`} attempt={t.item} recording={recordings[t.item.id]} onRecording={onRecording} last={i === g.items.length - 1} />
+                    : <EventItem key={`e-${t.item.id}`} event={t.item} last={i === g.items.length - 1} />))}
             </ul>
-        </div>
+        </section>
     ));
+};
+
+/* Сводка наверху правой колонки: этап крупно (цвет и значок — в тон точке этапа
+   в списке), под ним что за ним стоит, и три числа, по которым историю водителя
+   видно, не читая её: попытки, звонки, время разговоров. */
+const STAGE_BADGE = {
+    queue: { Icon: Clock3, tone: 'slate' },
+    waiting: { Icon: Hourglass, tone: 'amber' },
+    issued: { Icon: PhoneOutgoing, tone: 'blue' },
+    answered: { Icon: PhoneCall, tone: 'green' },
+    exhausted: { Icon: PhoneMissed, tone: 'red' },
+    excluded: { Icon: Ban, tone: 'slate' },
+    signed: { Icon: FileCheck2, tone: 'green' },
+};
+
+const LeadSummary = ({ lead }) => {
+    const badge = STAGE_BADGE[lead.stage] || STAGE_BADGE.queue;
+    const detail = detailWithSign(lead);
+    const attempts = Array.isArray(lead.attempts) ? lead.attempts : null;
+    const calls = attempts ? attempts.filter((a) => a.result !== 'cancelled').length : null;
+    const talk = attempts ? attempts.reduce((sum, a) => sum + (a.result === 'answered' ? Number(a.billsec) || 0 : 0), 0) : null;
+    const stats = [
+        { label: 'Попытки', value: `${lead.attempts_total} из ${lead.max_attempts}` },
+        { label: 'Звонков', value: calls == null ? '…' : String(calls) },
+        { label: 'Разговоры', value: talk == null ? '…' : (talk ? fmtDuration(talk) : '—') },
+    ];
+    return (
+        <div className={`${iosCard} p-4`}>
+            <div className="flex items-start gap-3">
+                <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${TONE[badge.tone]}`}>
+                    <badge.Icon size={17} />
+                </div>
+                <div className="min-w-0 pt-0.5">
+                    <div className="text-[15px] font-semibold leading-tight text-slate-900">{lead.stage_label}</div>
+                    {detail && <div className="mt-0.5 text-[12.5px] leading-snug text-slate-500">{detail}</div>}
+                </div>
+            </div>
+            <div className="mt-3.5 grid grid-cols-3 gap-2">
+                {stats.map((st) => (
+                    <div key={st.label} className="rounded-xl bg-slate-50 px-2.5 py-2">
+                        <div className="text-[11px] text-slate-500">{st.label}</div>
+                        <div className="mt-0.5 text-[14px] font-semibold tabular-nums text-slate-900">{st.value}</div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
 };
 
 const NoteSection = ({ lead, canEdit, busy, draft, setDraft, onSave }) => {
@@ -681,9 +747,9 @@ const docsSummary = (docs = []) => {
 };
 
 /* Подписание документов по Sapar: статус, ИИН хвостом, когда проверяли, кому
-   засчитано. «Проверить сейчас» — один запрос в Sapar, для случая «водитель
-   говорит, что уже подписал». Подписавшего не перепроверяем: он из обзвона ушёл. */
-const SignSection = ({ lead, canEdit, checking, onCheck }) => {
+   засчитано. Кнопка «Проверить подписание» — в полосе действий внизу окна,
+   вместе с остальными действиями над водителем. */
+const SignSection = ({ lead }) => {
     const sign = lead.sign || {};
     const meta = signMeta(sign.status);
     const signed = sign.status === 'signed';
@@ -722,26 +788,9 @@ const SignSection = ({ lead, canEdit, checking, onCheck }) => {
                             : <span className="text-slate-400">не указан</span>}
                     </InfoRow>
                     {lead.has_iin && !signed && (
-                        <div className="flex items-center justify-between gap-4 py-2.5 pr-4">
-                            <div className="min-w-0">
-                                <div className="text-[13.5px] text-slate-500">Проверено</div>
-                                {sign.error && <div className="truncate text-[12px] text-rose-600" title={sign.error}>Sapar не ответил</div>}
-                            </div>
-                            <div className="flex shrink-0 items-center gap-3">
-                                <span className="text-[13.5px] text-slate-900">{sign.checked_at ? fmtWhen(sign.checked_at) : 'ещё нет'}</span>
-                                {canEdit && sign.can_check !== false && (
-                                    <button
-                                        type="button"
-                                        onClick={onCheck}
-                                        disabled={checking}
-                                        className="inline-flex items-center gap-1 text-[13.5px] font-medium text-blue-600 transition hover:text-blue-700 disabled:opacity-60"
-                                    >
-                                        {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-                                        Проверить
-                                    </button>
-                                )}
-                            </div>
-                        </div>
+                        <InfoRow label="Проверено" sub={sign.error ? 'Sapar не ответил — спросим снова' : ''} subTitle={sign.error}>
+                            {sign.checked_at ? fmtWhen(sign.checked_at) : <span className="text-slate-400">ещё нет</span>}
+                        </InfoRow>
                     )}
                 </div>
             </div>
@@ -811,29 +860,36 @@ const LeadSheet = ({
         if (await onSaveNote(noteDraft)) setNoteDraft(null);
     };
 
+    // «Проверить подписание» — водителю с ИИН, пока он не подписал (подписавшего не перепроверяем).
+    const canCheck = canEdit && historyReady && lead.has_iin && lead.stage !== 'signed' && lead.sign?.can_check !== false;
+
+    /* Полоса действий внизу окна — все действия над водителем в одном месте:
+       разрушительное слева и отдельно от остальных, главное — справа, последним. */
     let footer = null;
-    if (lead && (canRequeue || canExclude)) {
+    if (lead && (canRequeue || canExclude || canCheck)) {
         footer = confirm ? (
             <div className="w-full space-y-2.5">
                 <div className="text-[13px] leading-snug text-slate-700">
                     {CONFIRM_TEXT[confirm]}
                     {confirm === 'exclude' && lead.stage === 'issued' ? ' Строка уйдёт из списка оператора.' : ''}
                 </div>
-                <input
-                    value={reason}
-                    onChange={(e) => setReason(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' && !busy) submit(); }}
-                    maxLength={500}
-                    autoFocus
-                    placeholder="Причина — необязательно"
-                    className={iosInput}
-                />
-                <div className="flex justify-end gap-2">
-                    <button type="button" onClick={() => { setConfirm(null); setReason(''); }} className={iosBtnSecondary}>Отмена</button>
-                    <button type="button" disabled={busy} onClick={submit} className={confirm === 'exclude' ? BTN_DANGER : iosBtnPrimary}>
-                        {busy && <Loader2 size={14} className="animate-spin" />}
-                        {confirm === 'exclude' ? 'Исключить' : requeueKind === 'restore' ? 'Вернуть в обзвон' : 'Вернуть в список'}
-                    </button>
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+                    <input
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && !busy) submit(); }}
+                        maxLength={500}
+                        autoFocus
+                        placeholder="Причина — необязательно"
+                        className={`${iosInput} lg:flex-1`}
+                    />
+                    <div className="flex shrink-0 justify-end gap-2">
+                        <button type="button" onClick={() => { setConfirm(null); setReason(''); }} className={iosBtnSecondary}>Отмена</button>
+                        <button type="button" disabled={busy} onClick={submit} className={confirm === 'exclude' ? BTN_DANGER : iosBtnPrimary}>
+                            {busy && <Loader2 size={14} className="animate-spin" />}
+                            {confirm === 'exclude' ? 'Исключить' : requeueKind === 'restore' ? 'Вернуть в обзвон' : 'Вернуть в список'}
+                        </button>
+                    </div>
                 </div>
             </div>
         ) : (
@@ -847,6 +903,12 @@ const LeadSheet = ({
                 {lead.stage === 'issued' && (
                     <span className="text-[12.5px] text-slate-500">Сейчас у оператора — вернуть можно после звонка</span>
                 )}
+                {canCheck && (
+                    <button type="button" onClick={onSignCheck} disabled={checking} className={iosBtnSecondary}>
+                        {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                        Проверить подписание
+                    </button>
+                )}
                 {canRequeue && (
                     <button type="button" onClick={() => setConfirm(requeueKind)} className={iosBtnPrimary}>
                         <Undo2 size={15} /> {requeueKind === 'restore' ? 'Вернуть в обзвон' : 'Вернуть в список'}
@@ -859,85 +921,98 @@ const LeadSheet = ({
     const firstBatch = lead?.batches?.[0];
     const batchLine = [firstBatch?.file_name, fmtDate(firstBatch?.uploaded_at || lead?.created_at), firstBatch?.uploaded_by]
         .filter(Boolean).join(' · ');
+    const eventsCount = historyReady ? (lead.events || []).length : 0;
+    const callsCount = historyReady ? lead.attempts.length : 0;
+    const historyCount = [
+        callsCount ? `${callsCount} ${plural(callsCount, 'звонок', 'звонка', 'звонков')}` : '',
+        eventsCount ? `${eventsCount} ${plural(eventsCount, 'действие', 'действия', 'действий')}` : '',
+    ].filter(Boolean).join(' · ');
 
+    /* Раскладка — как у окна-инспектора в macOS. На широком экране слева история
+       (белое полотно, своя прокрутка), справа сведения о водителе (серая панель с
+       группами, своя прокрутка), внизу — полоса действий: историю можно листать,
+       не теряя из виду этап, документы и заметку. Высота окна постоянная — оно не
+       прыгает, пока догружается история. На узком экране — одна колонка: сводка,
+       группы, история; действия так же внизу. */
     return (
         <IosModal
             open={open}
             onClose={requestClose}
             title={lead?.full_name || (loading ? 'Загрузка…' : 'Водитель')}
             subtitle={lead ? [lead.phone_masked, monthLabel(lead.period)].filter(Boolean).join(' · ') : undefined}
-            maxWidth="max-w-xl"
+            maxWidth="max-w-5xl"
+            bodyClassName="thin-scroll flex-1 overflow-y-auto overflow-x-hidden overscroll-contain lg:overflow-hidden"
             footer={footer}
         >
             {!lead && error ? (
-                <div className="py-8 text-center">
+                <div className="px-4 py-10 text-center">
                     <div className="text-[13.5px] text-rose-600">{error}</div>
                     <button type="button" onClick={onRetry} className={`${iosBtnSecondary} mt-3`}>Повторить</button>
                 </div>
             ) : !lead ? (
-                <div className="space-y-3 py-2">
+                <div className="space-y-3 px-5 py-6">
                     <Skeleton className="h-4 w-1/2" /><Skeleton className="h-4 w-2/3" /><Skeleton className="h-4 w-1/3" />
                 </div>
             ) : (
-                <div className="space-y-5">
-                    <div className={`${iosCard} overflow-hidden`}>
-                        <div className="ml-4 divide-y divide-slate-100">
-                            <InfoRow
-                                label="Этап"
-                                sub={lead.stage === 'waiting' && lead.next_retry_at ? `повтор ${fmtWhen(lead.next_retry_at)}`
-                                    : lead.stage === 'answered' && lead.answered_at ? fmtWhen(lead.answered_at) : ''}
-                            >
-                                <span className="inline-flex items-center gap-1.5"><Dot stage={lead.stage} />{lead.stage_label}</span>
-                            </InfoRow>
-                            <InfoRow label="Попытки">
-                                <span className="tabular-nums">{lead.attempts_total} из {lead.max_attempts}</span>
-                            </InfoRow>
-                            <InfoRow
-                                label="Ответственный"
-                                sub={lead.responsible ? (lead.responsible_is_current ? 'в списке сейчас' : 'по последнему звонку') : ''}
-                            >
-                                {lead.responsible?.name || <span className="text-slate-400">ещё не выдавался</span>}
-                            </InfoRow>
-                            <InfoRow
-                                label="База"
-                                sub={`${batchLine}${lead.upload_count > 1
-                                    ? ` · в файлах ${lead.upload_count} ${plural(lead.upload_count, 'раз', 'раза', 'раз')}` : ''}`}
-                                subTitle={batchLine}
-                            >
-                                {monthLabel(lead.period) || '—'}
-                            </InfoRow>
-                        </div>
-                    </div>
+                <div className="flex flex-col gap-4 py-4 lg:grid lg:h-[min(760px,calc(92vh-9rem))] lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-0 lg:py-0">
+                    <aside
+                        aria-label="О водителе"
+                        className="thin-scroll space-y-4 px-4 lg:order-2 lg:overflow-y-auto lg:overscroll-contain lg:border-l lg:border-slate-200/70 lg:px-5 lg:py-5"
+                    >
+                        <LeadSummary lead={lead} />
 
-                    {historyReady && lead.sign && (
-                        <SignSection lead={lead} canEdit={canEdit} checking={checking} onCheck={onSignCheck} />
-                    )}
-
-                    <NoteSection lead={lead} canEdit={canEdit && historyReady} busy={busy} draft={noteDraft} setDraft={setNoteDraft} onSave={saveNote} />
-
-                    <section className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-3">
-                            <span className={iosGroupLabel}>История</span>
-                            {historyReady && lead.attempts.length > 0 && (
-                                <span className="px-1 text-[12px] tabular-nums text-slate-400">
-                                    {lead.attempts.length} {plural(lead.attempts.length, 'звонок', 'звонка', 'звонков')}
-                                </span>
-                            )}
-                        </div>
-                        <div className={`${iosCard} overflow-hidden pb-1`}>
-                            {historyReady ? (
-                                <History lead={lead} recordings={recordings} onRecording={onRecording} />
-                            ) : error ? (
-                                <div className="px-4 py-5 text-center text-[13px] text-rose-600">
-                                    {error}
-                                    <button type="button" onClick={onRetry} className="ml-2 font-medium text-blue-600">Повторить</button>
+                        <section className="space-y-1.5">
+                            <div className={iosGroupLabel}>Обзвон</div>
+                            <div className={`${iosCard} overflow-hidden`}>
+                                <div className="ml-4 divide-y divide-slate-100">
+                                    <InfoRow
+                                        label="Ответственный"
+                                        sub={lead.responsible ? (lead.responsible_is_current ? 'в списке сейчас' : 'по последнему звонку') : ''}
+                                    >
+                                        {lead.responsible?.name || <span className="text-slate-400">ещё не выдавался</span>}
+                                    </InfoRow>
+                                    <InfoRow
+                                        label="База"
+                                        sub={`${batchLine}${lead.upload_count > 1
+                                            ? ` · в файлах ${lead.upload_count} ${plural(lead.upload_count, 'раз', 'раза', 'раз')}` : ''}`}
+                                        subTitle={batchLine}
+                                    >
+                                        {monthLabel(lead.period) || '—'}
+                                    </InfoRow>
                                 </div>
-                            ) : (
-                                <div className="space-y-3 p-4">
-                                    <Skeleton className="h-4 w-2/5" /><Skeleton className="h-4 w-3/5" /><Skeleton className="h-4 w-1/3" />
-                                </div>
-                            )}
+                            </div>
+                        </section>
+
+                        {historyReady && lead.sign && <SignSection lead={lead} />}
+
+                        <NoteSection lead={lead} canEdit={canEdit && historyReady} busy={busy} draft={noteDraft} setDraft={setNoteDraft} onSave={saveNote} />
+                    </aside>
+
+                    <section
+                        aria-label="История"
+                        className="thin-scroll mx-4 overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70 lg:order-1 lg:mx-0 lg:overflow-y-auto lg:overscroll-contain lg:rounded-none lg:ring-0"
+                    >
+                        <div className="flex items-baseline justify-between gap-3 px-4 pb-2 pt-3.5 lg:px-5 lg:pt-4">
+                            <span className="text-[15px] font-semibold text-slate-900">История</span>
+                            {historyCount && <span className="text-[12px] tabular-nums text-slate-400">{historyCount}</span>}
                         </div>
+                        {historyReady ? (
+                            <History lead={lead} recordings={recordings} onRecording={onRecording} />
+                        ) : error ? (
+                            <div className="px-4 py-8 text-center text-[13px] text-rose-600">
+                                {error}
+                                <button type="button" onClick={onRetry} className="ml-2 font-medium text-blue-600">Повторить</button>
+                            </div>
+                        ) : (
+                            <div className="space-y-5 px-4 py-4 lg:px-5">
+                                {[0, 1, 2].map((i) => (
+                                    <div key={i} className="flex gap-3">
+                                        <Skeleton className="h-8 w-8 rounded-full" />
+                                        <div className="flex-1 space-y-2"><Skeleton className="h-3.5 w-2/5" /><Skeleton className="h-3 w-3/5" /></div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </section>
                 </div>
             )}
