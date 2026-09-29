@@ -109,6 +109,7 @@ from resource_fte.chat import (
     CHAT_BILLING_DETAIL_EXPORT_LIMIT,
     CHAT_BILLING_GROUP_BY,
     CHAT_BILLING_MAX_RANGE_DAYS,
+    CHAT_BILLING_METRICS,
     CHAT_BILLING_PER_PAGE_LIMITS,
     CHAT_BILLING_SL_DEFAULT_SECONDS,
     CHAT_BILLING_SL_SECONDS_LIMITS,
@@ -11296,6 +11297,10 @@ _CHAT_BILLING_DAILY_BASE_FMT = '0'
 _CHAT_BILLING_DAILY_RED_HEADER_KEYS = frozenset({'plan_input'})
 # Порог оценки, ниже которого образец красит её тёмно-красным.
 CHAT_BILLING_LOW_RATING = 4.5
+# Парки, которых нет в файле (просьба владельца 29.09.2026); экран «Таксопарков» их
+# по-прежнему показывает. Строка уходит вместе со своим планом и чатами — итог дня
+# остаётся суммой видимых строк, как если бы её удалили в самом Excel.
+_CHAT_BILLING_DAILY_HIDDEN_PARKS = frozenset({'Global'})
 
 # «Отчёт с группировкой по часам»: блок колонок на день. Сотрудники не делятся по паркам,
 # поэтому на листах парков их колонок нет.
@@ -11360,10 +11365,29 @@ def _chat_billing_daily_values(item, day_date=None):
     }
 
 
+def _chat_billing_daily_visible_day(day):
+    """День без _CHAT_BILLING_DAILY_HIDDEN_PARKS: итог и план дня — по оставшимся строкам.
+
+    План дня в книге — SUM колонки планов блока, поэтому его сохранённое значение обязано
+    считаться по тем же строкам. Отчёт не меняется: его же отдаёт экран."""
+    parks = day.get('parks') or []
+    visible = [item for item in parks if item.get('park') not in _CHAT_BILLING_DAILY_HIDDEN_PARKS]
+    if len(visible) == len(parks):
+        return day
+    totals = dict(day.get('totals') or {})
+    for key in CHAT_BILLING_METRICS:
+        totals[key] = sum(item.get(key) or 0 for item in visible)
+    if totals.get('plan_chats') is not None:
+        totals['plan_chats'] = sum(item['plan_chats'] for item in visible
+                                   if item.get('plan_chats') is not None)
+    return {**day, 'parks': visible, 'totals': totals}
+
+
 def _chat_billing_daily_workbook(params, report):
     """«Ежедневный отчёт по чатам» в формате файла СЗоВ: лист на месяц, блок на день.
 
-    В блоке строка на таксопарк и строка итога дня на голубой подложке; дата, часы работы и
+    В блоке строка на таксопарк (кроме _CHAT_BILLING_DAILY_HIDDEN_PARKS) и строка итога дня
+    на голубой подложке; дата, часы работы и
     комментарий объединены на весь блок. План и % совпадения прогноза — формулами файла
     (=C2*$C$16, =SUM(D2:D15), =E2/D2) вместе с посчитанными значениями: поправили долю или
     чаты прошлой недели в «Нужно удалить» — план пересчитается, а предпросмотр, который
@@ -11439,6 +11463,7 @@ def _chat_billing_daily_workbook(params, report):
         ws = workbook.add_worksheet('Ежедневный отчет')
         ws.write(0, 0, 'За выбранный период и окно времени обращений не нашлось')
     for day in days:
+        day = _chat_billing_daily_visible_day(day)
         try:
             day_date = datetime.strptime(day.get('date') or '', '%Y-%m-%d')
         except ValueError:
