@@ -1152,7 +1152,7 @@ const TicketCard = ({
                     <div className="flex items-end gap-2">
                         <button type="button" onClick={() => fileRef.current?.click()}
                                 title="Прикрепить файл"
-                                className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95">
+                                className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95">
                             <Paperclip size={15} />
                         </button>
                         <input ref={fileRef} type="file" className="hidden"
@@ -1184,6 +1184,9 @@ const TicketCard = ({
                                     </button>
                                 </div>
                             )}
+                            {/* block — иначе под строчным textarea остаётся зазор
+                                базовой линии и кнопки по бокам съезжают ниже поля;
+                                leading-5 + py-2.5 из iosInput = 40px, ровно h-10 кнопок. */}
                             <textarea
                                 value={reply}
                                 onChange={(e) => setReply(e.target.value)}
@@ -1194,12 +1197,12 @@ const TicketCard = ({
                                 }}
                                 rows={1}
                                 placeholder="Написать в группу…"
-                                className={`${iosInput} resize-none py-2`}
+                                className={`${iosInput} block resize-none leading-5`}
                             />
                         </div>
                         <button type="button" onClick={send}
                                 disabled={sending || (!reply.trim() && !attachment)}
-                                className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 active:scale-95 disabled:opacity-40">
+                                className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 active:scale-95 disabled:opacity-40">
                             {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
                         </button>
                     </div>
