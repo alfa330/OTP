@@ -221,6 +221,7 @@ const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupCh
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
+const ComplaintsView = lazyWithRetry(() => import('./components/complaints/ComplaintsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
@@ -261,6 +262,7 @@ const SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY = 'supervisor_operators_directio
 const APP_VIEW_QUERY_PARAM = 'view';
 const TASK_ID_QUERY_PARAM = 'task_id';
 const TICKET_ID_QUERY_PARAM = 'ticket_id';
+const COMPLAINT_ID_QUERY_PARAM = 'complaint_id';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
@@ -424,6 +426,9 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     ai_qa: ['szov', 'op', 'tez', 'marketing'],
     // Диалоги
     crm_tickets: ['szov'],
+    // Жалобы принимает СЗоВ, разбирают отделы сотрудников (complaints/catalog.py:
+    // HANDLER_DEPARTMENT_CODES) — пункт виден при выборе любого из них.
+    complaints: ['szov', 'op', 'tez', 'front_office'],
     // Раздел отдела продаж. У СЗоВ своя переписка в Chat2Desk, поэтому в его
     // наборе «Чатов Верификаторов» нет (решение владельца 09.09.2026) —
     // круг доступа при этом не менялся, см. canAccessVerifierChatsForUser.
@@ -688,6 +693,8 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'events',
     'salary',
     'crm_tickets',
+    // «Жалобы» (#297) принимает весь СЗоВ, тренер отдела — наравне с остальными.
+    'complaints',
     'parcels',
     'sign_links',
     'driver_chats',
@@ -2336,6 +2343,28 @@ const canAccessCrmSectionForUser = (userLike) => {
         === CRM_SECTION_DEPARTMENT_CODE;
 };
 
+/* «Жалобы» (задача #297) — три круга людей. Жалобы ПРИНИМАЕТ весь СЗоВ (роль
+   значения не имеет: жалобу заводит тот, кому позвонил водитель), РАЗБИРАЮТ
+   супервайзеры и главы отделов, чьих сотрудников она касается, — подразделения
+   КЦ и фронт-офис, — и глобальный админ видит всё. Здесь решается только
+   «показывать ли пункт меню»; обязательную границу и то, КАКИЕ жалобы человек
+   увидит, держит complaints/access.py (зеркало — can_open_section). */
+const COMPLAINTS_INTAKE_DEPARTMENT_CODE = 'szov';
+const COMPLAINTS_HANDLER_DEPARTMENT_CODES = [
+    'szov', 'op', 'tez', 'remote_cc', 'request_processing_department', 'front_office',
+];
+
+const canAccessComplaintsSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    const headed = isDepartmentHead(userLike) ? aiQaHeadDepartmentCodesOf(userLike) : [];
+    if (headed.some((code) => COMPLAINTS_HANDLER_DEPARTMENT_CODES.includes(code))) return true;
+    const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    if (own === COMPLAINTS_INTAKE_DEPARTMENT_CODE) return true;
+    return isSupervisorRole(role) && COMPLAINTS_HANDLER_DEPARTMENT_CODES.includes(own);
+};
+
 /* «Посылки» — реестр невостребованных посылок фронт-офисов (задача #240).
 
    Два отдела с разными правами на одни и те же записи: фронт-офисы заводят и
@@ -2728,6 +2757,20 @@ const readTicketIdFromUrl = (locationLike = null) => {
         return Number.isInteger(ticketId) && ticketId > 0 ? ticketId : 0;
     } catch (error) {
         console.warn('Failed to read ticket id from URL', error);
+        return 0;
+    }
+};
+
+/* Жалоба, открытая прямой ссылкой: бот ставит её на слова «Жалоба №N» в группе
+   «Жалобы КЦ, регионы, таксопарк» (complaints/telegram.py::complaint_link). */
+const readComplaintIdFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return 0;
+    try {
+        const search = locationLike?.search ?? window.location.search;
+        const complaintId = Number(new URLSearchParams(search || '').get(COMPLAINT_ID_QUERY_PARAM) || 0);
+        return Number.isInteger(complaintId) && complaintId > 0 ? complaintId : 0;
+    } catch (error) {
+        console.warn('Failed to read complaint id from URL', error);
         return 0;
     }
 };
@@ -42166,6 +42209,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => readTicketIdFromUrl(location),
                 [location.search]
             );
+            const requestedComplaintIdFromLocation = useMemo(
+                () => readComplaintIdFromUrl(location),
+                [location.search]
+            );
             const requestedWikiSlugFromLocation = useMemo(
                 () => readWikiArticleSlugFromUrl(location),
                 [location.search]
@@ -42265,6 +42312,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
+            const canAccessComplaintsSection = canAccessComplaintsSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             // «Библиотека» (#282): пока только супер-админ и тренер — решение
             // владельца 28.09.2026 («у других пока даже раздел не будет
@@ -42463,6 +42511,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [crmUnreadCount, setCrmUnreadCount] = useState(0);
             const [crmRealtimePulse, setCrmRealtimePulse] = useState(0);
             const [crmFocusRequest, setCrmFocusRequest] = useState(null);
+            /* «Жалобы» — тот же механизм, что у «Обращений». Бейдж — ответы и
+               вопросы по своим жалобам плюс работа с сотрудником, которая ждёт
+               именно этого супервайзера (notifications/sources.py: complaints). */
+            const [complaintsBadgeCount, setComplaintsBadgeCount] = useState(0);
+            const [complaintsRealtimePulse, setComplaintsRealtimePulse] = useState(0);
+            const [complaintsFocusRequest, setComplaintsFocusRequest] = useState(null);
             /* Статья, которую надо открыть сразу при входе в «Вики» — приходит
                из колокола (уведомление об обязательном ознакомлении). Раздел
                гасит значение, как только его использовал, иначе следующий вход
@@ -45882,7 +45936,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     // «Оплата счетов»: диплинк из Telegram ведёт на ?view=payments&request=<id>.
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
-                    (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection);
+                    (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
+                    // «Жалобы»: ссылка из группы ведёт на ?view=complaints&complaint_id=<id>.
+                    (requestedViewFromUrl !== 'complaints' || canAccessComplaintsSection);
                 if (canOpenRequestedView) {
                     redirectToView(requestedViewFromUrl);
                     return;
@@ -45892,7 +45948,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -45912,6 +45968,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     requestId: Number(prev?.requestId || 0) + 1,
                 }));
             }, [user?.id, requestedViewFromLocation, requestedTicketIdFromLocation]);
+
+            /* Ссылка «Жалоба №N» из Telegram-группы открывает саму жалобу. */
+            useEffect(() => {
+                if (!user?.id || requestedViewFromLocation !== 'complaints'
+                    || !requestedComplaintIdFromLocation) return;
+                setComplaintsFocusRequest((prev) => ({
+                    complaintId: requestedComplaintIdFromLocation,
+                    requestId: Number(prev?.requestId || 0) + 1,
+                }));
+            }, [user?.id, requestedViewFromLocation, requestedComplaintIdFromLocation]);
 
             /* И тем же механизмом — статья вики: ссылку копируют из статьи и
                присылают в переписке, поэтому раздел обязан открыть её сразу
@@ -51521,6 +51587,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Обращения» — свой предикат, не allowlist отдела: раздел общий,
                 // но на время выката открыт СЗоВ, админам и пилотному оператору.
                 if (view === 'crm_tickets' && canAccessCrmSection) return;
+                // «Жалобы» — свой предикат: их разбирают СВ отделов, у которых
+                // есть allowlist (ОП, Тез, фронт-офисы), и проверка по карте
+                // отдела ниже выбросила бы их из раздела сразу после входа.
+                if (view === 'complaints' && canAccessComplaintsSection) return;
                 // «Посылки» — тоже свой предикат: раздел общий для двух отделов
                 // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
                 // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
@@ -51552,7 +51622,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -51625,7 +51695,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // раздел успеет получить 403.
                 if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'driver_chats' || view === 'sign_links'
-                        || view === 'driver_mailings') {
+                        || view === 'driver_mailings' || view === 'complaints') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -51931,7 +52001,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                ответ из группы, нажали «Выполнено», погасили непрочитанное в
                другой вкладке. На чужие тычки раздел не реагирует. */
             const crmDigestRef = useRef('');
+            // «Жалобы» — тот же приём своим отпечатком: раздел перечитывается,
+            // только когда изменился состав ЕГО строк в колоколе.
+            const complaintsDigestRef = useRef('');
             const stableNotificationsDigest = useCallback((digest) => {
+                const nextComplaints = String(digest?.complaints || '');
+                if (nextComplaints !== complaintsDigestRef.current) {
+                    complaintsDigestRef.current = nextComplaints;
+                    setComplaintsRealtimePulse((prev) => prev + 1);
+                }
                 const next = String(digest?.crm || '');
                 if (next === crmDigestRef.current) return;
                 crmDigestRef.current = next;
@@ -51962,6 +52040,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (nextView === 'crm_tickets' && Number(target)) {
                     setCrmFocusRequest((prev) => ({
                         ticketId: Number(target),
+                        requestId: Number(prev?.requestId || 0) + 1,
+                    }));
+                }
+                if (nextView === 'complaints' && Number(target)) {
+                    setComplaintsFocusRequest((prev) => ({
+                        complaintId: Number(target),
                         requestId: Number(prev?.requestId || 0) + 1,
                     }));
                 }
@@ -52035,6 +52119,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                    сервер и так вернёт актуальное число. */
                 if ('crm' in counts) {
                     setCrmUnreadCount(Math.max(0, Number(counts.crm) || 0));
+                }
+                /* «Жалобы» — так же: ответ гасится прочтением карточки, задача
+                   по сотруднику — проведённой работой, а не заходом в раздел. */
+                if ('complaints' in counts) {
+                    setComplaintsBadgeCount(Math.max(0, Number(counts.complaints) || 0));
                 }
                 /* Пульс раздела двигает НЕ сам факт перечитки сводки, а
                    изменение её состава по источнику crm — см. handleBellDigest.
@@ -53535,6 +53624,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {renderDividerIfInner(
                                         canAccessCrmSection && deptAllowsInner('crm_tickets'),
+                                        canAccessComplaintsSection && deptAllowsInner('complaints'),
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
                                         canAccessSignLinksSection && deptAllowsInner('sign_links'),
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
@@ -53592,6 +53682,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {crmUnreadCount > 0 && (
                                                     <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-white/90 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-blue-700">
                                                         {crmUnreadCount}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Жалобы» (#297) — приём жалоб водителей и их разбор.
+                                        Объявлен ОДИН раз в общей части меню, как
+                                        «Обращения»: круг — СЗоВ, СВ и главы отделов
+                                        сотрудников и админы, — не совпадает ни с одной
+                                        ролевой веткой. Бейдж — ответы по своим жалобам и
+                                        работа с сотрудником, которая ждёт этого СВ. */}
+                                    {canAccessComplaintsSection && (
+                                    <SidebarDeptScope section="complaints" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'complaints')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'complaints' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-message-exclamation"></FaIcon>
+                                                <span className="sidebar-text">Жалобы</span>
+                                                {complaintsBadgeCount > 0 && (
+                                                    <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-white/90 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-blue-700">
+                                                        {complaintsBadgeCount}
                                                     </span>
                                                 )}
                                             </button>
@@ -54234,6 +54350,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fourYouUnreadCount,
                 crmUnreadCount,
                 canAccessCrmSection,
+                complaintsBadgeCount,
+                canAccessComplaintsSection,
                 canAccessParcelsSection,
                 canAccessLibrarySection,
                 canAccessSignLinksSection,
@@ -54675,6 +54793,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     realtimePulse={crmRealtimePulse}
                                     onUnreadChange={setCrmUnreadCount}
                                     focusRequest={crmFocusRequest}
+                                />
+                            </Suspense>
+                        ))}
+                        {view === 'complaints' && canAccessComplaintsSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Жалобы"
+                                description="Здесь жалобы водителей с их ФИО и телефонами и разбор работы сотрудников. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка жалоб…</div>}>
+                                <ComplaintsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    realtimePulse={complaintsRealtimePulse}
+                                    onUnreadChange={setComplaintsBadgeCount}
+                                    focusRequest={complaintsFocusRequest}
+                                    user={user}
                                 />
                             </Suspense>
                         ))}
