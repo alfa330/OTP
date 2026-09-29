@@ -23,6 +23,7 @@ export const STATUS_LABELS = Object.freeze({
 export const LIBRARY_TABS = Object.freeze({
     all: 'all',
     saved: 'saved',
+    archive: 'archive',
     monitoring: 'monitoring',
 });
 
@@ -121,9 +122,48 @@ export const currentTocIndex = (toc, page, offset = null) => {
     return found;
 };
 
-export const filterBooks = (books, tab) => {
-    const list = Array.isArray(books) ? books : [];
-    return tab === LIBRARY_TABS.saved ? list.filter((book) => book?.saved) : list;
+/* Книга выдана отделу? Пустой отдел ('' / null) — «Все отделы». */
+export const bookInDepartment = (book, departmentId) => {
+    if (departmentId === '' || departmentId === null || departmentId === undefined) return true;
+    const ids = Array.isArray(book?.department_ids) ? book.department_ids : [];
+    return ids.includes(Number(departmentId));
+};
+
+/*
+ * Что показать на вкладке: книги выбранного отдела, а из них —
+ * «Общий доступ» (всё не из архива), «Сохранённые» (свои закладки не из
+ * архива) или «Архив». Каталог приходит один раз, отдел и вкладка делят его
+ * на месте.
+ */
+export const filterBooks = (books, tab, departmentId = '') => {
+    const list = (Array.isArray(books) ? books : []).filter((book) => bookInDepartment(book, departmentId));
+    if (tab === LIBRARY_TABS.archive) return list.filter((book) => book?.archived);
+    const shelf = list.filter((book) => !book?.archived);
+    return tab === LIBRARY_TABS.saved ? shelf.filter((book) => book?.saved) : shelf;
+};
+
+/* Книг на полке (не в архиве) у каждого отдела — для счётчиков в выборе
+   отдела. Книга нескольких отделов считается у каждого. */
+export const shelfCountByDepartment = (books) => {
+    const counts = new Map();
+    for (const book of Array.isArray(books) ? books : []) {
+        if (book?.archived) continue;
+        for (const id of Array.isArray(book?.department_ids) ? book.department_ids : []) {
+            counts.set(id, (counts.get(id) || 0) + 1);
+        }
+    }
+    return counts;
+};
+
+/* Выбранный отдел запоминается у смотрящего: тренер одного отдела не
+   выбирает его заново при каждом входе. Отдел, которого больше нет в
+   списке, превращается во «Все отделы». */
+export const DEPARTMENT_STORAGE_KEY = 'otp.library.department';
+
+export const restoreDepartment = (stored, departments) => {
+    const id = Number(stored);
+    if (!Number.isInteger(id) || id <= 0) return '';
+    return (Array.isArray(departments) ? departments : []).some((item) => item?.id === id) ? id : '';
 };
 
 /* Дата последней активности для мониторинга. Сервер отдаёт часы Алматы БЕЗ

@@ -1,15 +1,19 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Bookmark, BookOpen, CheckCircle2, Loader2, Trash2, Upload } from 'lucide-react';
+import {
+    Archive, ArchiveRestore, Bookmark, BookOpen, Building2, CheckCircle2, Loader2, Trash2, Upload,
+} from 'lucide-react';
 import { CoverPlaceholder } from './LibraryCover';
 import {
     APPLE_FONT, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard,
 } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import lazyWithRetry from '../../utils/lazyWithRetry';
 import LibraryMonitoring from './LibraryMonitoring';
+import LibraryDepartmentsModal from './LibraryDepartmentsModal';
 import {
-    EPUB_ACCEPT, LIBRARY_TABS, STATUS_FINISHED, STATUS_IN_PROGRESS, STATUS_LABELS,
-    filterBooks, formatPercent, isEpubFile,
+    DEPARTMENT_STORAGE_KEY, EPUB_ACCEPT, LIBRARY_TABS, STATUS_FINISHED, STATUS_IN_PROGRESS, STATUS_LABELS,
+    filterBooks, formatPercent, isEpubFile, restoreDepartment, shelfCountByDepartment,
 } from './libraryMeta';
 
 /* Ридер (распаковка EPUB, движок страниц) — отдельным чанком, не вместе с
@@ -30,6 +34,15 @@ const CATALOG_STALE_MS = 60 * 60 * 1000;
  * подборка, «Мониторинг» — только супер-админу и тренеру. Первые две — один и
  * тот же список с разным фильтром, поэтому каталог приходит одним запросом и
  * делится на месте, без второго похода на сервер.
+ *
+ * Отделы (29.09.2026): у каждого отдела своя библиотека — книга выдаётся
+ * одному или нескольким отделам при публикации. Супер-админ и тренер выбирают
+ * отдел справа от вкладок («Все отделы» — вся библиотека); выбор действует и
+ * на «Мониторинг». Читатель видит только книги своего отдела — их отбирает
+ * сервер, выбирать ему нечего.
+ *
+ * Архив — вкладка управляющих: книга убрана с полки, но не удалена (прогресс
+ * читателей цел, её можно вернуть). Удалить насовсем можно только отсюда.
  *
  * Карточка книги — как в ТЗ (п. 3): обложка, название и автор, прогресс в
  * процентах, статус и кнопка «Сохранить». Цвет только у «Закончено»: это
@@ -58,7 +71,7 @@ const BookStatus = ({ progress }) => {
     return <span className="truncate text-[12px] text-slate-400">{STATUS_LABELS.not_started}</span>;
 };
 
-const BookCard = ({ book, canManage, reading, onOpen, onLift, onToggleSaved, onDelete }) => {
+const BookCard = ({ book, menuItems, reading, onOpen, onLift, onToggleSaved }) => {
     const inProgress = book.progress?.status === STATUS_IN_PROGRESS;
     /* Обложка не загрузилась (подпись истекла, файла нет) — рисуем заглушку,
        а не серый пустой прямоугольник. Новый адрес — новая попытка. */
@@ -131,17 +144,17 @@ const BookCard = ({ book, canManage, reading, onOpen, onLift, onToggleSaved, onD
                 >
                     <Bookmark size={16} fill={book.saved ? 'currentColor' : 'none'} />
                 </button>
-                {canManage && (
-                    <IosMenu
-                        label="Действия с книгой"
-                        items={[{ key: 'delete', label: 'Удалить книгу', icon: Trash2, danger: true, onSelect: () => onDelete(book) }]}
-                    />
-                )}
+                {menuItems?.length > 0 && <IosMenu label="Действия с книгой" items={menuItems} />}
             </div>
             <button type="button" onClick={open} className="block w-full text-left focus:outline-none" tabIndex={-1}>
                 <div className="line-clamp-2 text-[13.5px] font-semibold leading-snug text-slate-900">{book.title}</div>
                 {book.author && <div className="mt-0.5 truncate text-[12px] text-slate-500">{book.author}</div>}
             </button>
+            {/* Книга, которой не осталось ни одного отдела (отдел удалили),
+                не видна никому, кроме управляющих, — об этом и говорит строка. */}
+            {menuItems?.length > 0 && !book.archived && !(book.department_ids?.length > 0) && (
+                <div className="mt-0.5 text-[11.5px] text-amber-600">Не выдана ни одному отделу</div>
+            )}
         </div>
     );
 };
@@ -158,6 +171,10 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const toast = useCallback((message, type) => toastRef.current?.(message, type), []);
 
     const [books, setBooks] = useState([]);
+    const [departments, setDepartments] = useState([]);
+    /* '' — «Все отделы». Восстанавливается из памяти браузера, когда
+       приходит список отделов (restoreDepartment). */
+    const [departmentId, setDepartmentId] = useState('');
     const [canManage, setCanManage] = useState(false);
     const [schemaReady, setSchemaReady] = useState(true);
     const [maxMb, setMaxMb] = useState(DEFAULT_MAX_MB);
@@ -169,11 +186,17 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     /* Чья обложка сейчас в ридере (улетела из карточки). */
     const [liftedId, setLiftedId] = useState(null);
     const [upload, setUpload] = useState(null);
+    /* Окно отделов: { mode: 'publish', files } после выбора файла или
+       { mode: 'edit', book } из меню карточки. */
+    const [sheet, setSheet] = useState(null);
+    const [sheetBusy, setSheetBusy] = useState(false);
     const [toDelete, setToDelete] = useState(null);
     const [deleting, setDeleting] = useState(false);
     const [monitoringKey, setMonitoringKey] = useState(0);
     const fileInputRef = useRef(null);
     const loadedAtRef = useRef(0);
+    const departmentRestoredRef = useRef(false);
+    const tabsRef = useRef(null);
 
     /* silent — тихое обновление (свежие адреса обложек после долгого чтения):
        без спиннера вместо сетки и без потери прокрутки. Прогресс карточки
@@ -200,6 +223,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     });
                 });
                 setCanManage(Boolean(body.can_manage));
+                setDepartments(Array.isArray(body.departments) ? body.departments : []);
                 setSchemaReady(body.schema_ready !== false);
                 if (body.max_upload_mb) setMaxMb(body.max_upload_mb);
             })
@@ -229,19 +253,88 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         return () => document.removeEventListener('visibilitychange', onVisible);
     }, [load, readerId]);
 
-    /* Вкладку «Мониторинг» у того, кому она не положена, не держим. */
+    /* Вкладки «Архив» и «Мониторинг» у того, кому они не положены, не держим. */
     useEffect(() => {
-        if (!canManage && tab === LIBRARY_TABS.monitoring) setTab(LIBRARY_TABS.all);
+        if (!canManage && (tab === LIBRARY_TABS.monitoring || tab === LIBRARY_TABS.archive)) setTab(LIBRARY_TABS.all);
     }, [canManage, tab]);
 
-    const shown = useMemo(() => filterBooks(books, tab), [books, tab]);
-    const savedCount = useMemo(() => books.filter((book) => book.saved).length, [books]);
+    /* Отдел, выбранный в прошлый раз, — как только известен список отделов.
+       Один раз: дальше выбор ведёт человек, а тихое обновление каталога не
+       должно сбрасывать его обратно. */
+    useEffect(() => {
+        if (departmentRestoredRef.current || !departments.length) return;
+        departmentRestoredRef.current = true;
+        let stored = '';
+        try { stored = window.localStorage.getItem(DEPARTMENT_STORAGE_KEY) || ''; } catch { /* хранилище закрыто */ }
+        setDepartmentId(restoreDepartment(stored, departments));
+    }, [departments]);
+
+    /* Выбранная вкладка на телефоне докручивается в видимую часть полосы:
+       иначе «Мониторинг» оставался бы обрезанным у края и после нажатия. */
+    useEffect(() => {
+        const strip = tabsRef.current;
+        const active = strip?.querySelector('[aria-selected="true"]');
+        if (!strip || !active || strip.scrollWidth <= strip.clientWidth) return;
+        const left = active.offsetLeft; // от края полосы: у неё position: relative
+        if (left < strip.scrollLeft || left + active.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+            strip.scrollTo({ left: Math.max(0, left - 8), behavior: 'smooth' });
+        }
+    }, [tab]);
+
+    const pickDepartment = useCallback((value) => {
+        const next = value === '' || value === null || value === undefined ? '' : Number(value);
+        setDepartmentId(next);
+        try { window.localStorage.setItem(DEPARTMENT_STORAGE_KEY, String(next)); } catch { /* хранилище закрыто */ }
+    }, []);
+
+    const shown = useMemo(() => filterBooks(books, tab, departmentId), [books, tab, departmentId]);
+    const counts = useMemo(() => ({
+        all: filterBooks(books, LIBRARY_TABS.all, departmentId).length,
+        saved: filterBooks(books, LIBRARY_TABS.saved, departmentId).length,
+        archive: filterBooks(books, LIBRARY_TABS.archive, departmentId).length,
+    }), [books, departmentId]);
 
     const tabs = useMemo(() => [
-        { value: LIBRARY_TABS.all, label: 'Общий доступ', count: books.length },
-        { value: LIBRARY_TABS.saved, label: 'Сохранённые', count: savedCount },
+        { value: LIBRARY_TABS.all, label: 'Общий доступ', count: counts.all },
+        { value: LIBRARY_TABS.saved, label: 'Сохранённые', count: counts.saved },
+        canManage && { value: LIBRARY_TABS.archive, label: 'Архив', count: counts.archive },
         canManage && { value: LIBRARY_TABS.monitoring, label: 'Мониторинг' },
-    ], [books.length, canManage, savedCount]);
+    ], [canManage, counts]);
+
+    /* Выбор отдела: рядом с каждым — сколько книг у него на полке. Отдел без
+       книг приглушён: выбрать можно (чтобы опубликовать туда первую), но
+       видно, что там пусто. Выключенный отдел в списке, только пока у него
+       есть книги — или пока он выбран: иначе кнопка показала бы «Все отделы»
+       над данными одного отдела (убрали в архив его последнюю книгу). */
+    const departmentOptions = useMemo(() => {
+        const shelf = shelfCountByDepartment(books);
+        const onShelf = books.filter((book) => !book.archived).length;
+        return [
+            { value: '', label: 'Все отделы', meta: onShelf ? String(onShelf) : undefined },
+            ...departments
+                .filter((item) => item.active !== false || shelf.get(item.id) || item.id === departmentId)
+                .map((item) => ({
+                    value: item.id,
+                    label: item.name,
+                    meta: shelf.get(item.id) ? String(shelf.get(item.id)) : undefined,
+                    muted: !shelf.get(item.id),
+                })),
+        ];
+    }, [books, departmentId, departments]);
+    const showDepartments = canManage && departments.length > 0;
+    /* Какие отделы можно выбрать — для строк «По отделам» в мониторинге. */
+    const selectableDepartmentIds = useMemo(
+        () => new Set(departmentOptions.map((item) => item.value).filter((value) => value !== '')),
+        [departmentOptions],
+    );
+
+    /* Отдел пропал из списка (удалён, пока раздел был открыт) — назад во «Все
+       отделы», а не пустая полка под чужим названием. */
+    useEffect(() => {
+        if (departmentId !== '' && departments.length && !departments.some((item) => item.id === departmentId)) {
+            pickDepartment('');
+        }
+    }, [departmentId, departments, pickDepartment]);
 
     const toggleSaved = useCallback((book) => {
         const saved = !book.saved;
@@ -269,20 +362,31 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         if (loadedAtRef.current && Date.now() - loadedAtRef.current > CATALOG_STALE_MS) load({ silent: true });
     }, [load]);
 
-    const uploadFiles = useCallback(async (files) => {
-        const list = Array.from(files || []);
-        for (let index = 0; index < list.length; index += 1) {
-            const file = list[index];
+    /* Файлы выбраны — сначала отсеять не те, потом спросить отделы. Окно
+       публикации открывается с отделом, выбранным сейчас в разделе: тренер,
+       стоящий на полке СЗоВ, публикует в СЗоВ, не отмечая его заново. */
+    const chooseFiles = useCallback((files) => {
+        const accepted = [];
+        for (const file of Array.from(files || [])) {
             if (!isEpubFile(file)) {
                 toast(`«${file.name}» — не EPUB. Загрузить можно только файлы .epub`, 'error');
-                continue;
-            }
-            if (file.size > maxMb * 1024 * 1024) {
+            } else if (file.size > maxMb * 1024 * 1024) {
                 toast(`«${file.name}» больше ${maxMb} МБ`, 'error');
-                continue;
+            } else {
+                accepted.push(file);
             }
+        }
+        if (accepted.length) setSheet((prev) => (prev?.mode === 'publish' ? { ...prev, files: accepted } : { mode: 'publish', files: accepted }));
+    }, [maxMb, toast]);
+
+    const uploadFiles = useCallback(async (list, departmentIds) => {
+        setSheetBusy(true);
+        const failed = [];
+        for (let index = 0; index < list.length; index += 1) {
+            const file = list[index];
             const form = new FormData();
             form.append('file', file);
+            departmentIds.forEach((id) => form.append('department_ids', String(id)));
             setUpload({ name: file.name, percent: 0, index: index + 1, total: list.length });
             try {
                 // eslint-disable-next-line no-await-in-loop
@@ -296,14 +400,75 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 const added = response.data?.book;
                 if (added) {
                     setBooks((prev) => [added, ...prev.filter((item) => item.id !== added.id)]);
-                    toast(`Книга «${added.title}» добавлена`);
+                    toast(`Книга «${added.title}» опубликована`);
                 }
             } catch (error) {
+                failed.push(file);
                 toast(error?.response?.data?.error || `Не удалось загрузить «${file.name}»`, 'error');
             }
         }
         setUpload(null);
-    }, [apiBaseUrl, headers, maxMb, toast]);
+        setSheetBusy(false);
+        setMonitoringKey((value) => value + 1);
+        /* Не легли — окно остаётся с ними и с теми же отделами: повторить
+           одним нажатием, а не выбирать файл и отделы заново. */
+        setSheet(failed.length ? { mode: 'publish', files: failed, departmentIds } : null);
+    }, [apiBaseUrl, headers, toast]);
+
+    /* Правка книги (отделы, архив) — ответ сервера заменяет карточку целиком. */
+    const updateBook = useCallback((book, changes, message) => axios
+        .patch(`${apiBaseUrl}/api/library/books/${book.id}`, changes, { headers: headers() })
+        .then((response) => {
+            const updated = response.data?.book;
+            if (updated) {
+                setBooks((prev) => prev.map((item) => (item.id === updated.id
+                    ? { ...updated, progress: item.progress } : item)));
+            }
+            toast(message);
+            setMonitoringKey((value) => value + 1);
+            return true;
+        })
+        .catch((error) => {
+            toast(error?.response?.data?.error || 'Не удалось изменить книгу', 'error');
+            return false;
+        }), [apiBaseUrl, headers, toast]);
+
+    const submitSheet = useCallback((departmentIds) => {
+        if (!sheet) return;
+        if (sheet.mode === 'publish') {
+            uploadFiles(sheet.files, departmentIds);
+            return;
+        }
+        setSheetBusy(true);
+        updateBook(sheet.book, { department_ids: departmentIds }, `Отделы книги «${sheet.book.title}» сохранены`)
+            .then((ok) => { if (ok) setSheet(null); })
+            .finally(() => setSheetBusy(false));
+    }, [sheet, updateBook, uploadFiles]);
+
+    const menuFor = useCallback((book) => {
+        if (!canManage) return null;
+        const departmentsItem = {
+            key: 'departments', label: 'Отделы', icon: Building2,
+            onSelect: () => setSheet({ mode: 'edit', book }),
+        };
+        if (book.archived) {
+            return [
+                {
+                    key: 'restore', label: 'Вернуть в библиотеку', icon: ArchiveRestore,
+                    onSelect: () => updateBook(book, { archived: false }, `Книга «${book.title}» снова в библиотеке`),
+                },
+                departmentsItem,
+                { key: 'delete', label: 'Удалить навсегда', icon: Trash2, danger: true, onSelect: () => setToDelete(book) },
+            ];
+        }
+        return [
+            departmentsItem,
+            {
+                key: 'archive', label: 'В архив', icon: Archive,
+                onSelect: () => updateBook(book, { archived: true }, `Книга «${book.title}» убрана в архив`),
+            },
+        ];
+    }, [canManage, updateBook]);
 
     const confirmDelete = useCallback(() => {
         if (!toDelete) return;
@@ -319,11 +484,24 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             .finally(() => setDeleting(false));
     }, [apiBaseUrl, headers, toDelete, toast]);
 
+    /* На телефоне окно ещё 300 мс уезжает после закрытия — всё это время оно
+       рисует последнее содержимое, а не «Отделы книги» без файлов. */
+    const lastSheetRef = useRef(null);
+    if (sheet) lastSheetRef.current = sheet;
+    const shownSheet = sheet || lastSheetRef.current;
+
+    /* Окно публикации заранее отмечает отдел, выбранный в разделе, — только
+       действующий: выключенному сервер новую книгу не выдаст. */
+    const publishDefaultIds = useMemo(() => {
+        const current = departments.find((item) => item.id === departmentId);
+        return current && current.active !== false ? [departmentId] : [];
+    }, [departmentId, departments]);
+
     const uploadLabel = upload
         ? (upload.percent < 100
             ? `Загрузка${upload.total > 1 ? ` ${upload.index} из ${upload.total}` : ''} · ${upload.percent} %`
             : 'Обрабатываю книгу…')
-        : 'Загрузить книгу';
+        : '';
 
     return (
         <div className="mx-auto w-full max-w-[1180px] px-3 py-4 sm:px-5 sm:py-6" style={{ fontFamily: APPLE_FONT }}>
@@ -344,18 +522,18 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             className="hidden"
                             onChange={(event) => {
                                 const { files } = event.target;
-                                uploadFiles(files);
+                                chooseFiles(files);
                                 event.target.value = '';
                             }}
                         />
                         <button
                             type="button"
-                            className={`${iosBtnPrimary} min-w-[172px] tabular-nums`}
+                            className={`${iosBtnPrimary} min-w-[172px]`}
                             onClick={() => fileInputRef.current?.click()}
-                            disabled={Boolean(upload)}
+                            disabled={sheetBusy}
                         >
-                            {upload ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
-                            {uploadLabel}
+                            <Upload size={15} />
+                            Загрузить книгу
                         </button>
                         {/* В каком виде нужна книга — до выбора файла, а не
                             сообщением об ошибке после. */}
@@ -364,8 +542,28 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 )}
             </header>
 
-            <div className="mt-4">
-                <IosSegmented value={tab} options={tabs} onChange={setTab} ariaLabel="Вкладки библиотеки" />
+            {/* Вкладки прокручиваются вбок на узком телефоне: у управляющего их
+                четыре, и в 360 точек они не входят. min-w-max — иначе кнопки
+                ужимаются под текст, и счётчик вылезает за край вкладки.
+                Без -mx-*: оболочка телефона гасит отрицательные поля
+                (mobile-shell.css), и полоса съезжала вправо от заголовка. */}
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div ref={tabsRef} className="relative min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    <IosSegmented className="min-w-max" value={tab} options={tabs} onChange={setTab} ariaLabel="Вкладки библиотеки" />
+                </div>
+                {showDepartments && (
+                    <CustomSelect
+                        className="sm:ml-auto sm:w-[280px] sm:shrink-0"
+                        variant="ios"
+                        value={departmentId}
+                        onChange={pickDepartment}
+                        options={departmentOptions}
+                        searchable={departmentOptions.length > 8}
+                        searchPlaceholder="Поиск по названию отдела…"
+                        placeholder="Все отделы"
+                        ariaLabel="Отдел"
+                    />
+                )}
             </div>
 
             <div className="mt-4">
@@ -374,6 +572,9 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
                         reloadKey={monitoringKey}
+                        departmentId={departmentId}
+                        selectableDepartmentIds={selectableDepartmentIds}
+                        onPickDepartment={pickDepartment}
                     />
                 ) : loading ? (
                     <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-slate-500">
@@ -390,14 +591,22 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     </div>
                 ) : !shown.length ? (
                     <div className={`${iosCard} px-4 py-12 text-center`}>
-                        <BookOpen size={28} className="mx-auto text-slate-300" />
+                        {tab === LIBRARY_TABS.archive
+                            ? <Archive size={28} className="mx-auto text-slate-300" />
+                            : <BookOpen size={28} className="mx-auto text-slate-300" />}
                         <p className="mt-3 text-[14px] font-medium text-slate-700">
-                            {tab === LIBRARY_TABS.saved ? 'Сохранённых книг пока нет' : 'В библиотеке пока нет книг'}
+                            {tab === LIBRARY_TABS.saved ? 'Сохранённых книг пока нет'
+                                : tab === LIBRARY_TABS.archive ? 'В архиве пусто'
+                                    : departmentId ? 'У отдела пока нет книг' : 'В библиотеке пока нет книг'}
                         </p>
                         <p className="mt-1 text-[12.5px] text-slate-500">
                             {tab === LIBRARY_TABS.saved
                                 ? 'Нажмите значок закладки под книгой — она появится здесь'
-                                : (canManage ? 'Загрузите первую книгу в формате EPUB' : 'Книги появятся, когда их загрузит тренер')}
+                                : tab === LIBRARY_TABS.archive
+                                    ? 'Сюда попадают книги, убранные с полки: их можно вернуть или удалить насовсем'
+                                    : (canManage
+                                        ? (departmentId ? 'Загрузите книгу и отметьте этот отдел при публикации' : 'Загрузите первую книгу в формате EPUB')
+                                        : 'Книги появятся, когда их загрузит тренер')}
                         </p>
                     </div>
                 ) : (
@@ -406,12 +615,11 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             <BookCard
                                 key={book.id}
                                 book={book}
-                                canManage={canManage}
+                                menuItems={menuFor(book)}
                                 reading={book.id === liftedId}
                                 onOpen={(item, origin) => { setReaderOrigin(origin); setReaderId(item.id); }}
                                 onLift={setLiftedId}
                                 onToggleSaved={toggleSaved}
-                                onDelete={setToDelete}
                             />
                         ))}
                     </div>
@@ -433,10 +641,26 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 </Suspense>
             )}
 
+            <LibraryDepartmentsModal
+                open={Boolean(sheet)}
+                mode={shownSheet?.mode}
+                files={shownSheet?.files}
+                book={shownSheet?.book}
+                departments={departments}
+                initialIds={shownSheet?.mode === 'edit'
+                    ? shownSheet.book.department_ids
+                    : (shownSheet?.departmentIds || publishDefaultIds)}
+                busy={sheetBusy}
+                busyLabel={uploadLabel}
+                onSubmit={submitSheet}
+                onClose={() => setSheet(null)}
+                onPickFiles={() => fileInputRef.current?.click()}
+            />
+
             <IosModal
                 open={Boolean(toDelete)}
                 onClose={() => { if (!deleting) setToDelete(null); }}
-                title="Удалить книгу?"
+                title="Удалить книгу навсегда?"
                 subtitle={toDelete?.title}
                 maxWidth="max-w-md"
                 footer={(
@@ -457,8 +681,8 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 )}
             >
                 <p className="text-[13.5px] leading-relaxed text-slate-600">
-                    Книга пропадёт из каталога у всех, а вместе с ней — закладки и прогресс чтения
-                    сотрудников по ней.
+                    Книга удалится вместе с закладками и прогрессом чтения сотрудников по ней, и в
+                    мониторинге её больше не будет. Вернуть её будет нельзя.
                 </p>
             </IosModal>
         </div>

@@ -5,6 +5,7 @@
 """
 
 import json
+from decimal import ROUND_DOWN, Decimal
 
 from .epub import CHARS_PER_PAGE
 
@@ -19,9 +20,26 @@ ANALYTICS_LIMIT = 1000
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
+# Отделы книги — массивом прямо в строке: книг десятки, подзапрос по индексу
+# дешевле второго похода в базу и склейки в питоне.
 _BOOK_COLUMNS = """
     b.id, b.title, b.author, b.language, b.bucket, b.cover_blob, b.cover_type,
-    b.total_pages, b.created_at
+    b.total_pages, b.created_at, b.archived_at,
+    ARRAY(SELECT bd.department_id FROM library_book_departments bd
+           WHERE bd.book_id = b.id ORDER BY bd.department_id) AS department_ids
+"""
+
+# Что видно читателю: книга не в архиве и выдана ЕГО отделу. Отдел берётся из
+# users тем же запросом, а не отдельным походом: параметр — id смотрящего.
+# Сотрудник без отдела не видит ничего — книга всегда выдана конкретным отделам.
+# Управляющие (супер-админ, тренер) видят всё, включая архив, — условие к ним
+# не применяется (library/routes.py решает по роли).
+_READER_SEES = """
+    b.archived_at IS NULL AND EXISTS (
+        SELECT 1 FROM library_book_departments bd
+          JOIN users viewer ON viewer.department_id = bd.department_id
+         WHERE bd.book_id = b.id AND viewer.id = %s
+    )
 """
 
 
@@ -60,6 +78,9 @@ def book_view(row, cover_url=None):
         'cover_url': cover_url,
         'total_pages': int(row.get('total_pages') or 1),
         'created_at': _iso(row.get('created_at')),
+        'department_ids': [int(value) for value in (row.get('department_ids') or [])],
+        'archived': row.get('archived_at') is not None,
+        'archived_at': _iso(row.get('archived_at')),
         'saved': bool(row.get('saved')),
         'progress': {
             'status': status_of(has_progress, finished_at),
@@ -73,12 +94,15 @@ def book_view(row, cover_url=None):
     }
 
 
-def list_books(cursor, user_id):
-    """Весь каталог с закладкой и прогрессом смотрящего — одним запросом.
+def list_books(cursor, user_id, *, manager):
+    """Каталог с закладкой и прогрессом смотрящего — одним запросом.
 
-    Вкладки «Общий доступ» и «Сохранённые» — это один и тот же список с
-    разным фильтром, поэтому фронт получает его один раз и делит сам.
+    Управляющему — все книги всех отделов вместе с архивом: отдел и вкладку
+    («Общий доступ», «Сохранённые», «Архив») фронт выбирает на месте, без
+    второго похода на сервер. Читателю — только книги его отдела не из архива.
     """
+    where = '' if manager else f'WHERE {_READER_SEES}'
+    params = (user_id, user_id) if manager else (user_id, user_id, user_id)
     cursor.execute(f"""
         SELECT {_BOOK_COLUMNS},
                (s.user_id IS NOT NULL) AS saved,
@@ -86,9 +110,26 @@ def list_books(cursor, user_id):
           FROM library_books b
           LEFT JOIN library_saved s ON s.book_id = b.id AND s.user_id = %s
           LEFT JOIN library_progress p ON p.book_id = b.id AND p.user_id = %s
+          {where}
          ORDER BY b.created_at DESC, b.id DESC
-    """, (user_id, user_id))
+    """, params)
     return _rows(cursor)
+
+
+def open_book(cursor, book_id, user_id, *, manager):
+    """-> число страниц книги, если смотрящему её можно открыть, иначе None.
+
+    Одна дверь для всех ручек одной книги (ридер, файл, закладка, прогресс):
+    чужую по отделу или архивную книгу читатель не получит ни прямым адресом,
+    ни перебором id. Ответ тот же, что у несуществующей, — 404.
+    """
+    if manager:
+        cursor.execute("SELECT b.total_pages FROM library_books b WHERE b.id = %s", (book_id,))
+    else:
+        cursor.execute(f"SELECT b.total_pages FROM library_books b WHERE b.id = %s AND {_READER_SEES}",
+                       (book_id, user_id))
+    row = cursor.fetchone()
+    return int(row[0] or 1) if row else None
 
 
 def get_book(cursor, book_id, user_id):
@@ -133,7 +174,7 @@ def book_file_ref(cursor, book_id):
 
 
 def insert_book(cursor, *, parsed, bucket, file_blob, file_size, original_name,
-                cover_blob, cover_type, uploaded_by):
+                cover_blob, cover_type, uploaded_by, department_ids):
     cursor.execute(f"""
         INSERT INTO library_books (
             title, author, language, bucket, file_blob, file_size, original_name,
@@ -147,27 +188,111 @@ def insert_book(cursor, *, parsed, bucket, file_blob, file_size, original_name,
         json.dumps(parsed['toc'], ensure_ascii=False),
         int(parsed['total_chars']), int(parsed['total_pages']), uploaded_by,
     ))
-    return cursor.fetchone()[0]
+    book_id = cursor.fetchone()[0]
+    set_book_departments(cursor, book_id, department_ids)
+    return book_id
+
+
+def library_departments(cursor):
+    """Отделы для выбора: действующие и те, у кого уже есть книги.
+
+    Второе — чтобы книга, выданная отделу, который потом выключили, не
+    показывала в окне отделов безымянное «№ 42».
+    """
+    cursor.execute("""
+        SELECT d.id, d.name, (d.is_active IS NOT FALSE) AS active
+          FROM departments d
+         WHERE d.is_active IS NOT FALSE
+            OR EXISTS (SELECT 1 FROM library_book_departments bd WHERE bd.department_id = d.id)
+         ORDER BY d.name, d.id
+    """)
+    return [{'id': row[0], 'name': row[1], 'active': bool(row[2])} for row in cursor.fetchall()]
+
+
+def unknown_departments(cursor, department_ids, *, book_id=None):
+    """-> id из списка, которым книгу выдать нельзя (нет такого отдела или он
+    выключен). Выключенный отдел, которому книга УЖЕ выдана, можно оставить:
+    правка названия отделов книги не должна требовать сначала его снять."""
+    ids = sorted({int(value) for value in department_ids})
+    if not ids:
+        return []
+    cursor.execute("""
+        SELECT d.id FROM departments d
+         WHERE d.id = ANY(%s)
+           AND (d.is_active IS NOT FALSE OR EXISTS (
+                SELECT 1 FROM library_book_departments bd
+                 WHERE bd.department_id = d.id AND bd.book_id = %s))
+    """, (ids, book_id))
+    known = {row[0] for row in cursor.fetchall()}
+    return [value for value in ids if value not in known]
+
+
+def set_book_departments(cursor, book_id, department_ids):
+    """Заменяет отделы книги на данный набор (проверенный заранее)."""
+    ids = sorted({int(value) for value in department_ids})
+    cursor.execute("DELETE FROM library_book_departments WHERE book_id = %s AND NOT (department_id = ANY(%s))",
+                   (book_id, ids))
+    cursor.execute("""
+        INSERT INTO library_book_departments (book_id, department_id)
+        SELECT %s, unnest(%s::int[])
+        ON CONFLICT DO NOTHING
+    """, (book_id, ids))
+
+
+def update_book(cursor, book_id, user_id, *, department_ids=None, archived=None):
+    """Отделы и архив книги. -> False, если книги нет.
+
+    Строка книги берётся под замок: две правки подряд (снять отдел и тут же
+    убрать в архив) не должны перемешать наборы отделов.
+    """
+    cursor.execute("SELECT id FROM library_books WHERE id = %s FOR UPDATE", (book_id,))
+    if not cursor.fetchone():
+        return False
+    if department_ids is not None:
+        set_book_departments(cursor, book_id, department_ids)
+    if archived is True:
+        # Повторное «в архив» не переписывает дату: книга в архиве с того
+        # дня, когда её туда убрали впервые.
+        cursor.execute(f"""
+            UPDATE library_books
+               SET archived_at = COALESCE(archived_at, {_NOW}),
+                   archived_by = CASE WHEN archived_at IS NULL THEN %s ELSE archived_by END
+             WHERE id = %s
+        """, (user_id, book_id))
+    elif archived is False:
+        cursor.execute("UPDATE library_books SET archived_at = NULL, archived_by = NULL WHERE id = %s",
+                       (book_id,))
+    return True
+
+
+DELETE_NOT_FOUND = 'not_found'
+DELETE_NOT_ARCHIVED = 'not_archived'
+DELETE_DONE = 'deleted'
 
 
 def delete_book(cursor, book_id):
-    """Удаляет книгу (закладки и прогресс уходят каскадом). -> блобы или None."""
+    """Удаляет книгу насовсем (закладки, прогресс, отделы — каскадом).
+
+    -> (DELETE_*, блобы). Удаляется только книга из архива: книгу на полке
+    сначала убирают в архив — два разных нажатия, и случайное «Удалить»
+    рядом с «Сохранить» не сотрёт прогресс всего отдела.
+    """
+    cursor.execute("SELECT archived_at IS NOT NULL FROM library_books WHERE id = %s FOR UPDATE", (book_id,))
+    row = cursor.fetchone()
+    if not row:
+        return DELETE_NOT_FOUND, []
+    if not row[0]:
+        return DELETE_NOT_ARCHIVED, []
     cursor.execute("""
         DELETE FROM library_books WHERE id = %s
         RETURNING bucket, file_blob, cover_blob
     """, (book_id,))
-    row = cursor.fetchone()
-    if not row:
-        return None
-    bucket, file_blob, cover_blob = row
-    return [(bucket, file_blob), (bucket, cover_blob)]
+    bucket, file_blob, cover_blob = cursor.fetchone()
+    return DELETE_DONE, [(bucket, file_blob), (bucket, cover_blob)]
 
 
 def set_saved(cursor, user_id, book_id, saved):
-    """Добавить в «Сохранённые» или убрать. -> False, если книги нет."""
-    cursor.execute("SELECT 1 FROM library_books WHERE id = %s", (book_id,))
-    if not cursor.fetchone():
-        return False
+    """Добавить в «Сохранённые» или убрать. Доступ к книге проверен open_book."""
     if saved:
         cursor.execute("""
             INSERT INTO library_saved (user_id, book_id) VALUES (%s, %s)
@@ -176,13 +301,6 @@ def set_saved(cursor, user_id, book_id, saved):
     else:
         cursor.execute("DELETE FROM library_saved WHERE user_id = %s AND book_id = %s",
                        (user_id, book_id))
-    return True
-
-
-def book_pages(cursor, book_id):
-    cursor.execute("SELECT total_pages FROM library_books WHERE id = %s", (book_id,))
-    row = cursor.fetchone()
-    return int(row[0]) if row else None
 
 
 def save_progress(cursor, user_id, book_id, *, position, percent, page, at_end):
@@ -209,7 +327,11 @@ def save_progress(cursor, user_id, book_id, *, position, percent, page, at_end):
 
 def analytics(cursor, *, query='', book_id=None, department_id=None, limit=ANALYTICS_LIMIT):
     """Мониторинг: кто что читает. Только те, кто книгу открывал (ТЗ, раздел 5:
-    статусы «В процессе» и «Закончено»)."""
+    статусы «В процессе» и «Закончено»).
+
+    Отдел — отдел ЧИТАТЕЛЯ: «как читает СЗоВ», а не «кто открывал книги
+    полки СЗоВ». Книги из архива остаются: кто их прочитал — уже история.
+    """
     where = []
     params = []
     if query:
@@ -219,9 +341,7 @@ def analytics(cursor, *, query='', book_id=None, department_id=None, limit=ANALY
     if book_id:
         where.append("p.book_id = %s")
         params.append(book_id)
-    if department_id == 'none':
-        where.append("u.department_id IS NULL")
-    elif department_id:
+    if department_id:
         where.append("u.department_id = %s")
         params.append(department_id)
     clause = ('WHERE ' + ' AND '.join(where)) if where else ''
@@ -229,6 +349,7 @@ def analytics(cursor, *, query='', book_id=None, department_id=None, limit=ANALY
         SELECT p.user_id, u.name AS user_name, u.login, u.status AS employment_status,
                d.id AS department_id, d.name AS department_name,
                b.id AS book_id, b.title AS book_title, b.author AS book_author, b.total_pages,
+               (b.archived_at IS NOT NULL) AS book_archived,
                p.percent, p.page, p.started_at, p.finished_at, p.updated_at
           FROM library_progress p
           JOIN users u ON u.id = p.user_id
@@ -250,6 +371,7 @@ def analytics(cursor, *, query='', book_id=None, department_id=None, limit=ANALY
         'book_id': row['book_id'],
         'book_title': row['book_title'],
         'book_author': row['book_author'] or '',
+        'book_archived': bool(row.get('book_archived')),
         'total_pages': int(row['total_pages'] or 1),
         'percent': 100.0 if row['finished_at'] else round(float(row['percent'] or 0), 1),
         'page': int(row['page'] or 1),
@@ -261,16 +383,108 @@ def analytics(cursor, *, query='', book_id=None, department_id=None, limit=ANALY
     } for row in rows[:limit]], truncated
 
 
-def analytics_filters(cursor):
-    """Списки для фильтров мониторинга: книги и отделы, где кто-то читает."""
-    cursor.execute("SELECT id, title FROM library_books ORDER BY title, id")
-    books = [{'id': row[0], 'title': row[1]} for row in cursor.fetchall()]
-    cursor.execute("""
-        SELECT DISTINCT d.id, d.name
+def analytics_books(cursor):
+    """Книги для фильтра мониторинга — все, и архивные тоже: их прогресс
+    по-прежнему в списке, и найти его фильтром должно быть можно."""
+    cursor.execute("SELECT id, title, (archived_at IS NOT NULL) FROM library_books ORDER BY title, id")
+    return [{'id': row[0], 'title': row[1], 'archived': bool(row[2])} for row in cursor.fetchall()]
+
+
+def _reading_stats(readers=0, in_progress=0, finished=0, percent_sum=0):
+    """Строка статистики чтения. Средний прогресс — по всем прочтениям,
+    законченное считается за 100 %: иначе перечитавший начало тянул бы вниз.
+
+    Среднее округляется ВНИЗ: 20 дочитавших и один на 99.9 % дают 99.99, и
+    обычное округление показало бы «100 %» рядом с «В процессе 1» — ровно то,
+    чего ридер и сервер не допускают у одной книги. Decimal — чтобы 65 не
+    превратилось в 64.9 из-за двоичной дроби.
+    """
+    records = int(in_progress or 0) + int(finished or 0)
+    average = None
+    if records:
+        average = float((Decimal(str(percent_sum or 0)) / records).quantize(Decimal('0.1'), rounding=ROUND_DOWN))
+    return {
+        'readers': int(readers or 0),
+        'in_progress': int(in_progress or 0),
+        'finished': int(finished or 0),
+        'avg_percent': average,
+    }
+
+
+def analytics_summary(cursor, *, department_id=None):
+    """Статистика мониторинга: общая или одного отдела.
+
+    -> {'total': {...}, 'departments': [...] или None}.
+
+    `total` — книги на полке и чтение в охвате: весь портал либо люди одного
+    отдела. `departments` — та же статистика по каждому отделу (только для
+    общей): книги — выданные отделу, чтение — его сотрудников. Отдел читателя
+    у человека один, поэтому люди и записи по отделам складываются в общую
+    сумму ровно; книги — нет (одна книга бывает у нескольких отделов), их
+    общий счёт отдельный.
+
+    Три запроса на весь ответ, без запроса на отдел.
+    """
+    params = (department_id,) if department_id else ()
+    reader_clause = 'WHERE u.department_id = %s' if department_id else ''
+    cursor.execute(f"""
+        SELECT u.department_id,
+               COUNT(DISTINCT p.user_id),
+               COUNT(*) FILTER (WHERE p.finished_at IS NULL),
+               COUNT(*) FILTER (WHERE p.finished_at IS NOT NULL),
+               COALESCE(SUM(CASE WHEN p.finished_at IS NOT NULL THEN 100 ELSE p.percent END), 0)
           FROM library_progress p
           JOIN users u ON u.id = p.user_id
-          JOIN departments d ON d.id = u.department_id
-         ORDER BY d.name
+          {reader_clause}
+         GROUP BY u.department_id
+    """, params)
+    reading = {row[0]: row[1:] for row in cursor.fetchall()}
+
+    # Книги на полке (не в архиве): по отделам и всего — одним запросом.
+    cursor.execute("""
+        SELECT bd.department_id, COUNT(*)
+          FROM library_books b
+          JOIN library_book_departments bd ON bd.book_id = b.id
+         WHERE b.archived_at IS NULL
+         GROUP BY bd.department_id
+        UNION ALL
+        SELECT NULL, COUNT(*) FROM library_books WHERE archived_at IS NULL
     """)
-    departments = [{'id': row[0], 'name': row[1]} for row in cursor.fetchall()]
-    return books, departments
+    shelf = {}
+    shelf_total = 0
+    for dept, count in cursor.fetchall():
+        if dept is None:
+            shelf_total = int(count)
+        else:
+            shelf[dept] = int(count)
+
+    readers = sum(int(values[0]) for values in reading.values())
+    in_progress = sum(int(values[1]) for values in reading.values())
+    finished = sum(int(values[2]) for values in reading.values())
+    percent_sum = sum((Decimal(str(values[3] or 0)) for values in reading.values()), Decimal(0))
+    total = {
+        'books': shelf.get(department_id, 0) if department_id else shelf_total,
+        **_reading_stats(readers, in_progress, finished, percent_sum),
+    }
+    if department_id:
+        return {'total': total, 'departments': None}
+
+    cursor.execute("SELECT id, name FROM departments ORDER BY name, id")
+    departments = []
+    for dept_id, name in cursor.fetchall():
+        # Отдел без книг и без читателей — строка из одних нулей: десяток
+        # таких строк заслонил бы те, где что-то происходит.
+        if dept_id not in shelf and dept_id not in reading:
+            continue
+        departments.append({
+            'id': dept_id,
+            'name': name,
+            'books': shelf.get(dept_id, 0),
+            **_reading_stats(*reading.get(dept_id, ())),
+        })
+    # Читают и люди без отдела (управляющие бывают без него) — их строкой в
+    # конце, иначе сумма по отделам не сошлась бы с общей.
+    if None in reading:
+        departments.append({'id': None, 'name': 'Без отдела', 'books': None,
+                            **_reading_stats(*reading[None])})
+    return {'total': total, 'departments': departments}

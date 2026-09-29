@@ -8,6 +8,9 @@
 - отказы: не архив, DRM, пустая книга — понятной причиной, а не пятисоткой;
 - права по ТЗ буквально: загрузка, удаление и мониторинг — только супер-админ
   и тренер;
+- отделы: книга выдаётся одному или нескольким отделам, без отдела её не
+  загрузить, читатель чужую по отделу и архивную книгу не откроет ни одной
+  ручкой; удалить насовсем — только из архива;
 - прогресс: 100 % и «Закончено» ставит только последняя страница;
 - формула страницы одна на сервере и в ридере;
 - раздел доходит до меню и до тренера.
@@ -419,6 +422,7 @@ def book_row(**extra):
     row = {
         'id': 5, 'title': 'Книга', 'author': 'Автор', 'language': 'ru', 'bucket': 'test-bucket',
         'cover_blob': None, 'cover_type': None, 'total_pages': 285, 'created_at': None,
+        'archived_at': None, 'department_ids': [1, 3],
         'saved': False, 'percent': None, 'page': None, 'finished_at': None, 'progress_updated_at': None,
     }
     row.update(extra)
@@ -432,16 +436,23 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(frozenset({'super_admin', 'trainer'}), routes.MANAGER_ROLES)
 
     def test_catalog_reports_manage_right_by_role(self):
+        departments = [{'id': 1, 'name': 'СЗоВ', 'active': True}]
         for role in ('trainer', 'super_admin'):
             with self.subTest(role=role), \
                     mock.patch.object(routes, 'schema_is_ready', return_value=True), \
-                    mock.patch.object(queries, 'list_books', return_value=[book_row()]):
+                    mock.patch.object(queries, 'list_books', return_value=[book_row()]) as list_books, \
+                    mock.patch.object(queries, 'library_departments', return_value=departments):
                 client, _ = client_for(role)
                 response = client.get('/api/library')
                 self.assertEqual(200, response.status_code)
                 body = response.get_json()
                 self.assertIs(True, body['can_manage'])
                 self.assertEqual('not_started', body['books'][0]['progress']['status'])
+                # Управляющему — все книги всех отделов и список отделов для выбора.
+                self.assertIs(True, list_books.call_args.kwargs['manager'])
+                self.assertEqual(departments, body['departments'])
+                self.assertEqual([1, 3], body['books'][0]['department_ids'])
+                self.assertIs(False, body['books'][0]['archived'])
 
     def test_section_is_closed_to_everyone_else_for_now(self):
         """Решение владельца 28.09.2026: пока раздел только у супер-админа и
@@ -463,12 +474,17 @@ class PermissionTests(unittest.TestCase):
                     self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
 
     def test_upload_delete_and_monitoring_are_closed_to_readers(self):
-        for role in ('operator', 'trainee', 'sv', 'admin'):
-            with self.subTest(role=role):
-                client, _ = client_for(role)
-                self.assertEqual(403, client.post('/api/library/books', data={}).status_code)
-                self.assertEqual(403, client.delete('/api/library/books/5').status_code)
-                self.assertEqual(403, client.get('/api/library/analytics').status_code)
+        # Даже когда раздел откроют читателям (READER_ROLES шире) — управление
+        # остаётся за супер-админом и тренером.
+        with mock.patch.object(routes, 'READER_ROLES', frozenset({'operator', 'trainee', 'sv', 'admin'})):
+            for role in ('operator', 'trainee', 'sv', 'admin'):
+                with self.subTest(role=role):
+                    client, _ = client_for(role)
+                    self.assertEqual(403, client.post('/api/library/books', data={}).status_code)
+                    self.assertEqual(403, client.patch('/api/library/books/5', json={'archived': True}).status_code)
+                    self.assertEqual(403, client.delete('/api/library/books/5').status_code)
+                    self.assertEqual(403, client.get('/api/library/analytics').status_code)
+                    self.assertEqual(403, client.get('/api/library/analytics/summary').status_code)
 
     def test_upload_accepts_only_epub_extension(self):
         client, _ = client_for('trainer')
@@ -480,9 +496,10 @@ class PermissionTests(unittest.TestCase):
 
     def test_broken_epub_answers_400_with_reason(self):
         client, fake = client_for('super_admin')
-        response = client.post('/api/library/books', data={
-            'file': (io.BytesIO(b'not a zip'), 'book.epub'),
-        }, content_type='multipart/form-data')
+        with mock.patch.object(queries, 'unknown_departments', return_value=[]):
+            response = client.post('/api/library/books', data={
+                'file': (io.BytesIO(b'not a zip'), 'book.epub'), 'department_ids': ['1'],
+            }, content_type='multipart/form-data')
         self.assertEqual(400, response.status_code)
         self.assertEqual('LIBRARY_EPUB_INVALID', response.get_json()['code'])
         self.assertEqual({}, fake.uploaded)
@@ -496,13 +513,16 @@ class PermissionTests(unittest.TestCase):
 
         client, fake = client_for('trainer')
         with mock.patch.object(queries, 'insert_book', side_effect=insert_book), \
+                mock.patch.object(queries, 'unknown_departments', return_value=[]), \
                 mock.patch.object(queries, 'get_book', return_value=book_row(cover_blob='c', cover_type='image/png')):
             response = client.post('/api/library/books', data={
-                'file': (io.BytesIO(epub3_book()), 'book.epub'),
+                'file': (io.BytesIO(epub3_book()), 'book.epub'), 'department_ids': ['3', '1', '3'],
             }, content_type='multipart/form-data')
         self.assertEqual(201, response.status_code, response.get_json())
         self.assertEqual('Книга', inserted['parsed']['title'])
         self.assertEqual(7, inserted['uploaded_by'])
+        # Повтор поля формы — несколько отделов; дубли схлопываются.
+        self.assertEqual([1, 3], inserted['department_ids'])
         paths = [path for _bucket, path in fake.uploaded]
         self.assertTrue(any(path.startswith('library/books/') for path in paths))
         self.assertTrue(any(path.startswith('library/covers/') for path in paths))
@@ -510,27 +530,62 @@ class PermissionTests(unittest.TestCase):
 
     def test_failed_insert_removes_uploaded_blobs(self):
         client, fake = client_for('trainer')
-        with mock.patch.object(queries, 'insert_book', side_effect=RuntimeError('db down')):
+        with mock.patch.object(queries, 'insert_book', side_effect=RuntimeError('db down')), \
+                mock.patch.object(queries, 'unknown_departments', return_value=[]):
             response = client.post('/api/library/books', data={
-                'file': (io.BytesIO(epub3_book()), 'book.epub'),
+                'file': (io.BytesIO(epub3_book()), 'book.epub'), 'department_ids': ['1'],
             }, content_type='multipart/form-data')
         self.assertEqual(500, response.status_code)
         self.assertEqual(sorted(fake.uploaded), sorted(fake.deleted))
 
+    def test_upload_requires_known_departments_before_any_write(self):
+        """Без отдела книгу не загрузить, и отказ приходит ДО бакета: файл,
+        сохранённый под отказом, остался бы в хранилище навсегда."""
+        cases = (
+            ({}, 'LIBRARY_DEPARTMENTS_REQUIRED', []),
+            ({'department_ids': ['']}, 'LIBRARY_BAD_REQUEST', []),
+            ({'department_ids': ['abc']}, 'LIBRARY_BAD_REQUEST', []),
+            ({'department_ids': ['-1']}, 'LIBRARY_BAD_REQUEST', []),
+            ({'department_ids': ['999']}, 'LIBRARY_DEPARTMENT_UNKNOWN', [999]),
+        )
+        for extra, code, unknown in cases:
+            with self.subTest(extra=extra):
+                client, fake = client_for('trainer')
+                with mock.patch.object(queries, 'unknown_departments', return_value=unknown), \
+                        mock.patch.object(queries, 'insert_book') as insert_book:
+                    response = client.post('/api/library/books', data={
+                        'file': (io.BytesIO(epub3_book()), 'book.epub'), **extra,
+                    }, content_type='multipart/form-data')
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(code, response.get_json()['code'])
+                self.assertEqual({}, fake.uploaded)
+                insert_book.assert_not_called()
+
     def test_delete_drops_blobs_after_the_row(self):
         client, fake = client_for('trainer')
-        with mock.patch.object(queries, 'delete_book',
-                               return_value=[('test-bucket', 'library/books/a.epub'), ('test-bucket', None)]):
+        with mock.patch.object(queries, 'delete_book', return_value=(
+                queries.DELETE_DONE, [('test-bucket', 'library/books/a.epub'), ('test-bucket', None)])):
             response = client.delete('/api/library/books/5')
         self.assertEqual(200, response.status_code)
         self.assertEqual([('test-bucket', 'library/books/a.epub')], fake.deleted)
+
+    def test_only_an_archived_book_is_deleted(self):
+        client, fake = client_for('trainer')
+        with mock.patch.object(queries, 'delete_book', return_value=(queries.DELETE_NOT_ARCHIVED, [])):
+            response = client.delete('/api/library/books/5')
+        self.assertEqual(409, response.status_code)
+        self.assertEqual('LIBRARY_DELETE_NOT_ARCHIVED', response.get_json()['code'])
+        self.assertEqual([], fake.deleted)
+        with mock.patch.object(queries, 'delete_book', return_value=(queries.DELETE_NOT_FOUND, [])):
+            self.assertEqual(404, client.delete('/api/library/books/5').status_code)
 
     def test_book_file_is_cacheable_and_private(self):
         fake = FakeGcs()
         fake.uploaded[('test-bucket', 'library/books/a.epub')] = (b'PK-epub', 'application/epub+zip')
         client, _ = client_for('trainer', gcs=fake)
-        with mock.patch.object(queries, 'book_file_ref', return_value={
-                'bucket': 'test-bucket', 'file_blob': 'library/books/a.epub', 'original_name': 'a.epub'}):
+        with mock.patch.object(queries, 'open_book', return_value=285), \
+                mock.patch.object(queries, 'book_file_ref', return_value={
+                    'bucket': 'test-bucket', 'file_blob': 'library/books/a.epub', 'original_name': 'a.epub'}):
             response = client.get('/api/library/books/5/file')
         self.assertEqual(200, response.status_code)
         self.assertEqual(b'PK-epub', response.data)
@@ -548,7 +603,7 @@ class ProgressTests(unittest.TestCase):
                     'finished_at': 'x' if kwargs['at_end'] else None, 'progress_updated_at': None}
 
         client, _ = client_for('trainer')
-        with mock.patch.object(queries, 'book_pages', return_value=total_pages), \
+        with mock.patch.object(queries, 'open_book', return_value=total_pages), \
                 mock.patch.object(queries, 'save_progress', side_effect=save_progress), \
                 mock.patch.object(queries, '_iso', side_effect=lambda value: value):
             response = client.put('/api/library/books/5/progress', json=payload)
@@ -591,9 +646,121 @@ class ProgressTests(unittest.TestCase):
     def test_saved_flag_must_be_boolean(self):
         client, _ = client_for('trainer')
         self.assertEqual(400, client.put('/api/library/books/5/saved', json={'saved': 'yes'}).status_code)
-        with mock.patch.object(queries, 'set_saved', return_value=True):
+        with mock.patch.object(queries, 'open_book', return_value=285), \
+                mock.patch.object(queries, 'set_saved') as set_saved:
             response = client.put('/api/library/books/5/saved', json={'saved': True})
         self.assertEqual({'status': 'success', 'saved': True}, response.get_json())
+        set_saved.assert_called_once()
+
+
+class DepartmentAccessTests(unittest.TestCase):
+    """Читатель видит книги только своего отдела и не из архива — и каталогом,
+    и каждой ручкой одной книги. Раздел пока закрыт для всех, кроме
+    управляющих, поэтому дверь читателя проверяется с расширенным
+    READER_ROLES — так, как её откроют."""
+
+    def setUp(self):
+        patcher = mock.patch.object(routes, 'READER_ROLES', frozenset({'super_admin', 'trainer', 'operator'}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_reader_catalog_is_filtered_by_the_server_and_has_no_department_list(self):
+        with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                mock.patch.object(queries, 'list_books', return_value=[]) as list_books, \
+                mock.patch.object(queries, 'library_departments') as library_departments:
+            client, _ = client_for('operator')
+            body = client.get('/api/library').get_json()
+        self.assertIs(False, list_books.call_args.kwargs['manager'])
+        library_departments.assert_not_called()
+        self.assertEqual([], body['departments'])
+        self.assertIs(False, body['can_manage'])
+
+    def test_every_book_door_answers_404_for_a_book_of_another_department(self):
+        requests = (
+            ('get', '/api/library/books/5', {}),
+            ('get', '/api/library/books/5/file', {}),
+            ('put', '/api/library/books/5/saved', {'json': {'saved': True}}),
+            ('put', '/api/library/books/5/progress', {'json': {'position': '0:0', 'percent': 1, 'page': 1}}),
+        )
+        for method, url, kwargs in requests:
+            with self.subTest(url=url), \
+                    mock.patch.object(queries, 'open_book', return_value=None) as open_book, \
+                    mock.patch.object(queries, 'get_book') as get_book, \
+                    mock.patch.object(queries, 'book_file_ref') as book_file_ref, \
+                    mock.patch.object(queries, 'set_saved') as set_saved, \
+                    mock.patch.object(queries, 'save_progress') as save_progress:
+                client, _ = client_for('operator')
+                response = getattr(client, method)(url, **kwargs)
+                self.assertEqual(404, response.status_code)
+                self.assertEqual('LIBRARY_BOOK_NOT_FOUND', response.get_json()['code'])
+                self.assertEqual({'manager': False}, open_book.call_args.kwargs)
+                for untouched in (get_book, book_file_ref, set_saved, save_progress):
+                    untouched.assert_not_called()
+
+    def test_reader_sql_hides_archive_and_other_departments(self):
+        text = ' '.join(queries._READER_SEES.split())
+        self.assertIn('b.archived_at IS NULL', text)
+        self.assertIn('viewer.department_id = bd.department_id', text)
+        self.assertIn('viewer.id = %s', text)
+
+
+class BookUpdateTests(unittest.TestCase):
+    def patch(self, payload, *, unknown=(), found=True):
+        client, _ = client_for('trainer')
+        with mock.patch.object(queries, 'unknown_departments', return_value=list(unknown)), \
+                mock.patch.object(queries, 'update_book', return_value=found) as update_book, \
+                mock.patch.object(queries, 'get_book', return_value=book_row(archived_at=datetime(2026, 9, 29, 12, 0))):
+            response = client.patch('/api/library/books/5', json=payload)
+        return response, update_book
+
+    def test_departments_and_archive_change_in_one_request(self):
+        response, update_book = self.patch({'department_ids': [3, 1], 'archived': True})
+        self.assertEqual(200, response.status_code, response.get_json())
+        self.assertEqual({'department_ids': [1, 3], 'archived': True}, update_book.call_args.kwargs)
+        self.assertIs(True, response.get_json()['book']['archived'])
+
+    def test_archive_alone_does_not_touch_departments(self):
+        response, update_book = self.patch({'archived': False})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({'department_ids': None, 'archived': False}, update_book.call_args.kwargs)
+
+    def test_bad_payloads_change_nothing(self):
+        cases = (
+            ({}, 'LIBRARY_BAD_REQUEST', ()),
+            ({'archived': 'yes'}, 'LIBRARY_BAD_REQUEST', ()),
+            ({'department_ids': []}, 'LIBRARY_DEPARTMENTS_REQUIRED', ()),
+            ({'department_ids': '1,2'}, 'LIBRARY_BAD_REQUEST', ()),
+            ({'department_ids': [True]}, 'LIBRARY_BAD_REQUEST', ()),
+            ({'department_ids': [1.5]}, 'LIBRARY_BAD_REQUEST', ()),
+            ({'department_ids': [1, 42]}, 'LIBRARY_DEPARTMENT_UNKNOWN', (42,)),
+            ({'department_ids': ['²']}, 'LIBRARY_BAD_REQUEST', ()),
+        )
+        for payload, code, unknown in cases:
+            with self.subTest(payload=payload):
+                response, update_book = self.patch(payload, unknown=unknown)
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(code, response.get_json()['code'])
+                update_book.assert_not_called()
+
+    def test_unknown_book(self):
+        response, _ = self.patch({'archived': True}, found=False)
+        self.assertEqual(404, response.status_code)
+
+    def test_body_must_be_an_object(self):
+        # Массив и строка — не 500: у строки `in` ищет подстроку, у массива
+        # нет .get.
+        for body in ([1], 'department_ids'):
+            with self.subTest(body=body):
+                response, update_book = self.patch(body)
+                self.assertEqual(400, response.status_code)
+                update_book.assert_not_called()
+
+    def test_parse_department_ids(self):
+        self.assertEqual([1, 2], routes.parse_department_ids(['2', 1, '1']))
+        self.assertEqual([], routes.parse_department_ids([]))
+        for bad in (None, '1', [None], ['1a'], [' '], [False], ['1' * 10], ['²'], ['①'], ['٣']):
+            with self.subTest(bad=bad):
+                self.assertIsNone(routes.parse_department_ids(bad))
 
 
 class QueryViewTests(unittest.TestCase):
@@ -661,12 +828,117 @@ class QueryViewTests(unittest.TestCase):
         self.assertEqual('finished', row['status'])
 
 
+class ScriptedCursor:
+    """Курсор, отвечающий заготовленными строками по порядку запросов."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+
+    def execute(self, sql, params=()):
+        self.calls.append((' '.join(sql.split()), params))
+
+    def fetchall(self):
+        return self.results.pop(0)
+
+    def fetchone(self):
+        return self.results.pop(0)
+
+
+class SummaryTests(unittest.TestCase):
+    def test_overall_and_by_department_add_up(self):
+        from decimal import Decimal
+        cursor = ScriptedCursor(
+            # чтение по отделу читателя: люди, в процессе, закончено, сумма процентов
+            [(1, 3, 4, 2, Decimal('250.5')), (None, 1, 1, 0, Decimal('50')), (2, 1, 0, 1, Decimal('100'))],
+            # книги на полке по отделам и всего (одна книга бывает у двух отделов)
+            [(1, 5), (2, 2), (None, 6)],
+            [(2, 'Отдел продаж'), (1, 'СЗоВ'), (9, 'Отдел без книг и читателей')],
+        )
+        summary = queries.analytics_summary(cursor)
+        # 400.5 / 8 = 50.0625 -> 50.0 (вниз)
+        self.assertEqual({'books': 6, 'readers': 5, 'in_progress': 5, 'finished': 3,
+                          'avg_percent': 50.0}, summary['total'])
+        names = [row['name'] for row in summary['departments']]
+        # Отдел из одних нулей не показывается; люди без отдела — строкой в конце.
+        self.assertEqual(['Отдел продаж', 'СЗоВ', 'Без отдела'], names)
+        szov = summary['departments'][1]
+        # 250.5 / 6 = 41.75 -> 41.7 (вниз, не «банковски» и не вверх)
+        self.assertEqual({'id': 1, 'name': 'СЗоВ', 'books': 5, 'readers': 3, 'in_progress': 4,
+                          'finished': 2, 'avg_percent': 41.7}, szov)
+        for key in ('readers', 'in_progress', 'finished'):
+            self.assertEqual(summary['total'][key], sum(row[key] for row in summary['departments']))
+        self.assertIsNone(summary['departments'][-1]['books'])
+
+    def test_one_department(self):
+        cursor = ScriptedCursor([(1, 2, 1, 1, 130)], [(1, 5), (2, 2), (None, 6)])
+        summary = queries.analytics_summary(cursor, department_id=1)
+        self.assertIsNone(summary['departments'])
+        self.assertEqual({'books': 5, 'readers': 2, 'in_progress': 1, 'finished': 1, 'avg_percent': 65.0},
+                         summary['total'])
+        self.assertEqual((1,), cursor.calls[0][1])
+        self.assertIn('WHERE u.department_id = %s', cursor.calls[0][0])
+        self.assertEqual(2, len(cursor.calls))
+
+    def test_average_never_shows_100_while_someone_is_still_reading(self):
+        """20 дочитавших и один на 99.9 % — это 99.99; обычное округление
+        давало «100 %» рядом с «В процессе 1»."""
+        from decimal import Decimal
+        self.assertEqual(99.9, queries._reading_stats(21, 1, 20, Decimal('2099.9'))['avg_percent'])
+        self.assertEqual(65.0, queries._reading_stats(2, 1, 1, Decimal('130'))['avg_percent'])
+        self.assertEqual(100.0, queries._reading_stats(2, 0, 2, Decimal('200'))['avg_percent'])
+        self.assertIsNone(queries._reading_stats()['avg_percent'])
+
+    def test_empty_library(self):
+        cursor = ScriptedCursor([], [(None, 0)], [])
+        summary = queries.analytics_summary(cursor)
+        self.assertEqual({'books': 0, 'readers': 0, 'in_progress': 0, 'finished': 0, 'avg_percent': None},
+                         summary['total'])
+        self.assertEqual([], summary['departments'])
+
+    def test_summary_route_passes_the_department(self):
+        client, _ = client_for('trainer')
+        with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                mock.patch.object(queries, 'analytics_summary',
+                                  return_value={'total': {'books': 1}, 'departments': None}) as summary:
+            body = client.get('/api/library/analytics/summary?department_id=7').get_json()
+            client.get('/api/library/analytics/summary?department_id=abc')
+            # Юникод-«цифры» проходят isdigit(), но не int(): фильтр
+            # отбрасывается, а не роняет ручку в 500.
+            weird = client.get('/api/library/analytics/summary?department_id=²')
+        self.assertEqual({'books': 1}, body['total'])
+        self.assertEqual(200, weird.status_code)
+        self.assertEqual([{'department_id': 7}, {'department_id': None}, {'department_id': None}],
+                         [call.kwargs for call in summary.call_args_list])
+
+
 class SchemaTests(unittest.TestCase):
+    def test_old_books_get_the_uploader_department_only_once(self):
+        """Книги до разделения по отделам получают отдел загрузившего — один
+        раз, при создании таблицы. Позже книга без отделов — это книга, чей
+        отдел удалили, и раздавать её молча нельзя."""
+        from library import schema as library_schema
+        for existed, backfilled in ((False, True), (True, False)):
+            with self.subTest(existed=existed):
+                cursor = ScriptedCursor((existed,))
+                library_schema.init_library_schema(cursor)
+                sql = [call[0] for call in cursor.calls]
+                self.assertIn('to_regclass', sql[0])
+                self.assertEqual(('public.library_book_departments',), cursor.calls[0][1])
+                self.assertEqual(backfilled, any('INSERT INTO library_book_departments' in text for text in sql))
+
+    def test_readiness_waits_for_the_departments_table(self):
+        from library import schema as library_schema
+        cursor = ScriptedCursor((False,))
+        self.assertFalse(library_schema.schema_is_ready(cursor))
+        self.assertEqual(('public.library_book_departments',), cursor.calls[0][1])
+
     def test_schema_is_idempotent_and_checks_percent(self):
         from library.schema import _STATEMENTS
         text = '\n'.join(_STATEMENTS)
-        for table in ('library_books', 'library_saved', 'library_progress'):
+        for table in ('library_books', 'library_saved', 'library_progress', 'library_book_departments'):
             self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', text)
+        self.assertIn('ADD COLUMN IF NOT EXISTS archived_at', text)
         self.assertNotIn('CREATE TABLE library', text)
         self.assertIn('CHECK (percent >= 0 AND percent <= 100)', text)
         self.assertNotRegex(text, r'--[^\n]*%(?!\(now\)s)')
@@ -752,6 +1024,68 @@ class FrontendWiringTests(unittest.TestCase):
         for name in ('LibraryView.jsx', 'LibraryMonitoring.jsx'):
             source = (ROOT / 'src/components/library' / name).read_text(encoding='utf-8')
             self.assertNotRegex(source, r'\[[^\]]*\bshowToast\b[^\]]*\]\);', name)
+
+
+class DepartmentsUiTests(unittest.TestCase):
+    """Отделы, архив и статистика в интерфейсе (29.09.2026)."""
+
+    @classmethod
+    def setUpClass(cls):
+        base = ROOT / 'src/components/library'
+        cls.view = (base / 'LibraryView.jsx').read_text(encoding='utf-8')
+        cls.monitoring = (base / 'LibraryMonitoring.jsx').read_text(encoding='utf-8')
+        cls.sheet = (base / 'LibraryDepartmentsModal.jsx').read_text(encoding='utf-8')
+
+    def test_publishing_sends_the_chosen_departments(self):
+        self.assertIn("form.append('department_ids', String(id))", self.view)
+        # Без отдела кнопка «Опубликовать» не нажимается — сервер отвечает тем же.
+        self.assertIn('const canSubmit = ids.length > 0', self.sheet)
+
+    def test_single_department_is_named_in_the_select_button(self):
+        """CustomSelect отдаёт выбранное строками: строгое сравнение с числовым
+        id давало в кнопке «Отдел № 70» вместо названия."""
+        self.assertIn('item.id === Number(id)', self.sheet)
+
+    def test_delete_lives_only_in_the_archive(self):
+        self.assertEqual(1, self.view.count("key: 'delete'"))
+        archived_branch = self.view.index('if (book.archived) {')
+        shelf_branch = self.view.index("key: 'archive', label: 'В архив'")
+        self.assertLess(archived_branch, self.view.index("key: 'delete'"))
+        self.assertLess(self.view.index("key: 'delete'"), shelf_branch)
+
+    def test_archive_and_monitoring_tabs_are_for_managers(self):
+        self.assertIn("canManage && { value: LIBRARY_TABS.archive", self.view)
+        self.assertIn("canManage && { value: LIBRARY_TABS.monitoring", self.view)
+
+    def test_stale_scope_is_not_shown_under_a_new_department(self):
+        """Пока считается новый отдел, цифры и строки прежнего не показываются
+        под его подписью (разбор 29.09.2026)."""
+        self.assertIn('summary.scope === departmentId', self.monitoring)
+        self.assertIn('data.scope === departmentId ? data.rows : []', self.monitoring)
+
+    def test_only_selectable_departments_are_clickable_in_stats(self):
+        self.assertIn('selectableIds.has(row.id)', self.monitoring)
+        self.assertIn('|| item.id === departmentId)', self.view)
+
+    def test_publish_preselects_only_an_active_department(self):
+        self.assertIn("current && current.active !== false ? [departmentId] : []", self.view)
+
+    def test_busy_sheet_keeps_its_back_gesture_entry(self):
+        self.assertIn('if (busy) return false;', self.sheet)
+
+    def test_tab_strip_has_no_negative_margin(self):
+        """mobile-shell.css гасит -mx-* внутри .main-content, и полоса вкладок
+        съезжала вправо от заголовка."""
+        start = self.view.index('ref={tabsRef}')
+        self.assertNotIn('-mx-', self.view[start:start + 200])
+
+    def test_monitoring_follows_the_section_department(self):
+        """Один выбор отдела на весь раздел: второй, свой, в мониторинге
+        разъезжался бы с ним."""
+        self.assertNotIn('ariaLabel="Отдел"', self.monitoring)
+        self.assertIn('departmentId={departmentId}', self.view)
+        self.assertIn('/api/library/analytics/summary', self.monitoring)
+        self.assertIn("params.set('department_id', String(departmentId))", self.monitoring)
 
 
 class ReaderRulesTests(unittest.TestCase):

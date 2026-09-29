@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """Схема раздела «Библиотека» (задача #282).
 
-Три таблицы под префиксом `library_`:
+Четыре таблицы под префиксом `library_`:
 
-    library_books     книга: описание, оглавление, разметка страниц, где файл
-    library_saved     «Сохранённые» — личная подборка читателя
-    library_progress  где читатель остановился и сколько прочитал
+    library_books             книга: описание, оглавление, разметка страниц, где
+                              файл; archived_at — книга в архиве
+    library_book_departments  каким отделам книга видна (один или несколько)
+    library_saved             «Сохранённые» — личная подборка читателя
+    library_progress          где читатель остановился и сколько прочитал
 
-Порядок важен: обе личные таблицы ссылаются на library_books, а та — на users.
+Порядок важен: обе личные таблицы и отделы книги ссылаются на library_books, а
+та — на users.
+
+Архив — не удаление: книга пропадает из каталога у читателей, но закладки и
+прогресс остаются, и мониторинг по-прежнему показывает, кто её читал. Удаляется
+насовсем только книга из архива (library/routes.py).
 
 Удаление книги уносит закладки и прогресс каскадом — книги больше нет, и
 строка «читал 45 % книги, которой нет» в мониторинге читалась бы как ошибка.
@@ -74,16 +81,54 @@ _STATEMENTS = (
     # Мониторинг: «кто что читает» по книге и свежесть активности.
     "CREATE INDEX IF NOT EXISTS idx_library_progress_book ON library_progress (book_id)",
     "CREATE INDEX IF NOT EXISTS idx_library_progress_updated ON library_progress (updated_at DESC)",
+    # Архив: книга убрана из каталога, но не удалена. Кто и когда убрал —
+    # чтобы в архиве было видно, откуда книга там взялась.
+    "ALTER TABLE library_books ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
+    "ALTER TABLE library_books ADD COLUMN IF NOT EXISTS archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL",
+    # Отделы книги. Отдельная таблица, а не массив в строке книги: удалённый
+    # отдел уходит из книг каскадом, а вопрос «что видно отделу» — индекс.
+    """
+    CREATE TABLE IF NOT EXISTS library_book_departments (
+        book_id INTEGER NOT NULL REFERENCES library_books(id) ON DELETE CASCADE,
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        PRIMARY KEY (book_id, department_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_library_book_departments_department"
+    " ON library_book_departments (department_id, book_id)",
 )
+
+# Книги, загруженные до разделения по отделам (28–29.09.2026), получают отдел
+# того, кто их загрузил. Выполняется ОДИН раз — в момент создания таблицы
+# отделов: позже книга без отделов — это книга, чей отдел удалили, и молча
+# раздавать её отделу загрузившего было бы решением за управляющего.
+_BACKFILL_DEPARTMENTS = """
+    INSERT INTO library_book_departments (book_id, department_id)
+    SELECT b.id, u.department_id
+      FROM library_books b
+      JOIN users u ON u.id = b.uploaded_by
+     WHERE u.department_id IS NOT NULL
+    ON CONFLICT DO NOTHING
+"""
+
+
+def _table_exists(cursor, name):
+    cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (f'public.{name}',))
+    row = cursor.fetchone()
+    return bool(row and row[0])
 
 
 def init_library_schema(cursor):
     """Разворачивает схему раздела. Идемпотентно."""
+    departments_existed = _table_exists(cursor, 'library_book_departments')
     for statement in _STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
+    if not departments_existed:
+        cursor.execute(_BACKFILL_DEPARTMENTS)
 
 
 def schema_is_ready(cursor):
-    cursor.execute("SELECT to_regclass('public.library_progress') IS NOT NULL")
-    row = cursor.fetchone()
-    return bool(row and row[0])
+    # Последний объект схемы: есть он — есть и всё, что создано до него.
+    # Проверка по library_progress пустила бы запросы с отделами книг на
+    # базу, где до отделов миграция ещё не дошла, — 500 вместо «разворачивается».
+    return _table_exists(cursor, 'library_book_departments')

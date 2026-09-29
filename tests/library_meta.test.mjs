@@ -5,8 +5,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    LIBRARY_TABS, STATUS_LABELS, currentTocIndex, filterBooks, formatActivity, formatDay, formatPercent,
-    formatPosition, isEpubFile, pageAtFraction, pageForOffset, parsePosition, progressFromPosition,
+    LIBRARY_TABS, STATUS_LABELS, bookInDepartment, currentTocIndex, filterBooks, formatActivity, formatDay,
+    formatPercent, formatPosition, isEpubFile, pageAtFraction, pageForOffset, parsePosition, progressFromPosition,
+    restoreDepartment, shelfCountByDepartment,
 } from '../src/components/library/libraryMeta.js';
 
 const PAGE_CASES = [
@@ -158,4 +159,53 @@ test('сохранённое место открывается на той же 
     // Середина экрана (перекладка при смене размера) — тоже на своей странице.
     assert.equal(pageAtFraction(10.5 / 60, 60), 10);
     assert.equal(pageAtFraction(1, 60), 59);
+});
+
+/* Отделы и архив (29.09.2026): каталог приходит один раз, отдел и вкладка
+   делят его на месте. */
+const SHELF = [
+    { id: 1, department_ids: [1, 3], saved: true, archived: false },
+    { id: 2, department_ids: [3], saved: false, archived: false },
+    { id: 3, department_ids: [1], saved: true, archived: true },
+    { id: 4, department_ids: [], saved: false, archived: false },
+];
+
+test('отдел: его книги, «Все отделы» — все', () => {
+    const ids = (tab, dept) => filterBooks(SHELF, tab, dept).map((b) => b.id);
+    assert.deepEqual(ids(LIBRARY_TABS.all, ''), [1, 2, 4]);
+    assert.deepEqual(ids(LIBRARY_TABS.all, 1), [1]);
+    assert.deepEqual(ids(LIBRARY_TABS.all, '3'), [1, 2]);
+    assert.deepEqual(ids(LIBRARY_TABS.all, 99), []);
+});
+
+test('архив — отдельная вкладка, в «Общем доступе» и «Сохранённых» его нет', () => {
+    const ids = (tab, dept) => filterBooks(SHELF, tab, dept).map((b) => b.id);
+    assert.deepEqual(ids(LIBRARY_TABS.archive, ''), [3]);
+    assert.deepEqual(ids(LIBRARY_TABS.archive, 3), []);
+    assert.deepEqual(ids(LIBRARY_TABS.saved, ''), [1]);
+    assert.deepEqual(ids(LIBRARY_TABS.saved, 1), [1]);
+});
+
+test('книга без отделов видна только во «Всех отделах»', () => {
+    assert.equal(bookInDepartment(SHELF[3], ''), true);
+    assert.equal(bookInDepartment(SHELF[3], null), true);
+    assert.equal(bookInDepartment(SHELF[3], 1), false);
+    assert.equal(bookInDepartment({}, 1), false);
+});
+
+test('счётчик отдела — книги на полке, книга двух отделов считается у обоих', () => {
+    const counts = shelfCountByDepartment(SHELF);
+    assert.equal(counts.get(1), 1);
+    assert.equal(counts.get(3), 2);
+    assert.equal(counts.has(99), false);
+});
+
+test('запомненный отдел: только из списка, иначе «Все отделы»', () => {
+    const departments = [{ id: 1 }, { id: 3 }];
+    assert.equal(restoreDepartment('3', departments), 3);
+    assert.equal(restoreDepartment('7', departments), '');
+    assert.equal(restoreDepartment('', departments), '');
+    assert.equal(restoreDepartment('abc', departments), '');
+    assert.equal(restoreDepartment('-1', departments), '');
+    assert.equal(restoreDepartment('3', null), '');
 });
