@@ -205,10 +205,8 @@ def handle_callback(db, *, chat_id, message_id, data, from_user=None):
         return 'Эта кнопка относится к другой жалобе'
 
     action = parsed['action']
-    if complaint['status'] == 'closed':
-        transport.edit_message(chat_id, message_id,
-                               reply_markup=telegram.main_keyboard(complaint))
-        return 'Жалоба уже обработана'
+    # Закрытая жалоба кнопки не теряет: ответ водителю и вопрос оператору
+    # бывают и после итога (см. telegram.main_keyboard).
 
     if action in (telegram.ACTION_ANSWER, telegram.ACTION_QUESTION):
         kind = (telegram.PROMPT_ANSWER if action == telegram.ACTION_ANSWER
@@ -468,6 +466,10 @@ def record_work(db, complaint_id, *, action, comment, outcome=None, need_trainin
     outcome = str(outcome or '').strip()[:2000] or None
     if not comment:
         raise ComplaintError('Опишите, что сделано')
+    # «Результат» — в перечне того, что ТЗ велит видеть в тренинге, поэтому у
+    # ОС и тренинга он обязателен.
+    if spec['training'] and not outcome:
+        raise ComplaintError('Укажите результат — он попадёт в «Тренинги»')
     need_training = bool(need_training) and spec['ask_training']
 
     with db._get_cursor() as cursor:
@@ -475,8 +477,12 @@ def record_work(db, complaint_id, *, action, comment, outcome=None, need_trainin
         if not complaint:
             raise ComplaintError('Жалоба не найдена', 404)
         employee_id = complaint.get('employee_id')
-        if not employee_id:
+        # Без сотрудника записать можно только объяснение, почему работать не
+        # с кем: ОС и тренинг без человека не проводят.
+        if not employee_id and action not in catalog.UNASSIGNED_ACTIONS:
             raise ComplaintError('Сначала определите сотрудника')
+        if not employee_id:
+            need_training = False
         was_done = complaint.get('work_state') == catalog.WORK_DONE
         training_id = None
         if spec['training']:
@@ -508,7 +514,8 @@ def record_work(db, complaint_id, *, action, comment, outcome=None, need_trainin
     if flags['closed'] and not was_done and complaint.get('tg_message_id'):
         summary = catalog.work_summary(feedback_done=flags['feedback_done'],
                                        training_done=flags['training_done'],
-                                       complaint_closed=after == 'closed')
+                                       complaint_closed=after == 'closed',
+                                       employee_known=bool(employee_id))
         result, error = transport.send_message(
             complaint['tg_chat_id'], telegram.build_work_notice(complaint_id, summary),
             reply_to_message_id=complaint['tg_message_id'])

@@ -70,15 +70,20 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
 
 
-def _event_text(value):
-    """'2026-09-28T14:30:00' → '28.09.2026 14:30'. Не дата — как есть."""
+def _event_text(value, with_time=True):
+    """'2026-09-28T14:30:00' → '28.09.2026 14:30'. Не дата — как есть.
+
+    with_time=False — время не называли (complaints.event_time_known): дата без
+    него хранится полуночью, и «00:00» в сообщении было бы выдумкой. Настоящая
+    полночь при этом показывается честно.
+    """
     import re
 
     found = re.match(r'^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?', str(value or ''))
     if not found:
         return str(value or '')
     day = '%s.%s.%s' % (found.group(3), found.group(2), found.group(1))
-    if found.group(4) and (found.group(4), found.group(5)) != ('00', '00'):
+    if with_time and found.group(4):
         return '%s %s:%s' % (day, found.group(4), found.group(5))
     return day
 
@@ -139,7 +144,8 @@ def build_root_message(complaint, *, mentions=None):
     lines.append('<b>Водитель:</b> %s' % _esc(' · '.join(p for p in driver if p)))
     lines.append('<b>Город:</b> %s' % _esc(complaint.get('city')))
     if complaint.get('event_at'):
-        lines.append('<b>Когда:</b> %s' % _esc(_event_text(complaint['event_at'])))
+        lines.append('<b>Когда:</b> %s' % _esc(_event_text(
+            complaint['event_at'], with_time=bool(complaint.get('event_time_known', True)))))
     lines.append('')
     lines.append('<b>Что произошло:</b>')
     lines.append(_esc(_clip(complaint.get('description'), 2500)))
@@ -208,10 +214,13 @@ def parse_callback(data):
 
 
 def main_keyboard(complaint):
-    """Кнопки под жалобой. У закрытой — никаких: разбор окончен, и кнопка,
-    которая ничего не может, в рабочей группе только сбивает."""
-    if complaint.get('status') == 'closed':
-        return {'inline_keyboard': []}
+    """Кнопки под жалобой — одинаковые и у открытой, и у закрытой.
+
+    Раньше закрытая жалоба теряла кнопки, и это обрывало цикл ТЗ: группа
+    ставит итог («предоставлено разъяснение») раньше, чем пишет само
+    разъяснение для водителя, — и отправить его было уже нечем (сверка с ТЗ
+    29.09.2026). Итог тоже можно поправить: проверка иногда уточняется.
+    """
     complaint_id = complaint['id']
     result = catalog.result_title(complaint.get('result_code'))
     return {'inline_keyboard': [

@@ -73,9 +73,19 @@ class KeyboardTest(unittest.TestCase):
         self.assertEqual([[b['text'] for b in row] for row in rows],
                          [['💬 Ответ водителю', '❓ Вопрос оператору'], ['📌 Итог проверки']])
 
-    def test_closed_complaint_has_no_buttons(self):
-        self.assertEqual(telegram.main_keyboard(complaint(status='closed')),
-                         {'inline_keyboard': []})
+    def test_closed_complaint_keeps_its_buttons(self):
+        """Итог ставят раньше, чем пишут разъяснение водителю: закрытая жалоба
+        кнопки «Ответ водителю» и «Вопрос оператору» не теряет (сверка с ТЗ)."""
+        rows = telegram.main_keyboard(complaint(status='closed'))['inline_keyboard']
+        self.assertEqual([b['text'] for b in rows[0]], ['💬 Ответ водителю', '❓ Вопрос оператору'])
+
+    def test_event_without_time_shows_the_date_only(self):
+        text = telegram.build_root_message(complaint(event_at='2026-09-28T00:00:00',
+                                                     event_time_known=False))
+        self.assertIn('<b>Когда:</b> 28.09.2026\n', text)
+        text = telegram.build_root_message(complaint(event_at='2026-09-28T00:00:00',
+                                                     event_time_known=True))
+        self.assertIn('28.09.2026 00:00', text, 'настоящая полночь показывается честно')
 
     def test_result_on_the_button(self):
         rows = telegram.main_keyboard(complaint(result_code='partial'))['inline_keyboard']

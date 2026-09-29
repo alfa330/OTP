@@ -13,7 +13,7 @@ import { IosTimePicker } from '../ui/TimePicker';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
 import { TIME_INPUT } from './styles';
 import {
-    employeeDepartmentId, formPayload, formProblems, officeOptions, submitLabel,
+    DESCRIPTION_LIMIT, employeeDepartmentId, formPayload, formProblems, officeOptions, submitLabel,
     targetByCode, unitDepartments, willProcess,
 } from './complaintRules';
 
@@ -352,7 +352,7 @@ export default function ComplaintForm({ open, onClose, meta, apiBaseUrl, headers
 
                     <div>
                         <Label>Что произошло</Label>
-                        <textarea value={form.description} rows={4}
+                        <textarea value={form.description} rows={4} maxLength={DESCRIPTION_LIMIT}
                                   onChange={(e) => set('description', e.target.value)}
                                   placeholder="Кратко: что случилось, что говорит водитель, чего он ждёт"
                                   className={`${iosInput} resize-y`} />

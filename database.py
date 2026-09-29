@@ -7077,6 +7077,14 @@ class Database:
                     -- сотрудником. При UPDATE — и прежнего ответственного:
                     -- сотрудника поправили, и задача должна погаснуть у старого.
                     targets := ARRAY[NEW.created_by, NEW.responsible_id];
+                    -- Ответственного не нашлось (у отдела нет ни СВ, ни главы
+                    -- у сотрудника) — задача у главы отдела сотрудника.
+                    IF NEW.responsible_id IS NULL AND NEW.target_department_id IS NOT NULL THEN
+                        targets := targets || ARRAY(
+                            SELECT d.head_user_id FROM departments d
+                             WHERE d.id = NEW.target_department_id
+                               AND d.head_user_id IS NOT NULL);
+                    END IF;
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by, OLD.responsible_id];
                     END IF;

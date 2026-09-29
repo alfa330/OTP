@@ -88,6 +88,11 @@ _STATEMENTS = [
         -- Кому поставлена задача провести работу с сотрудником: его СВ, а
         -- если СВ нет — глава его отдела. Снимок на момент определения.
         responsible_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        -- Кого назвал оператор при приёме жалобы. Не меняется, когда СВ по
+        -- итогам проверки ставит другого: ТЗ требует сохранять и «кто был
+        -- определён», и «кто фактически являлся сотрудником».
+        reported_employee_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        reported_employee_name VARCHAR(255),
 
         -- Данные водителя (ТЗ: «оператор указывает основные данные»).
         driver_name           VARCHAR(255) NOT NULL,
@@ -96,6 +101,10 @@ _STATEMENTS = [
         city                  VARCHAR(120) NOT NULL,
         description           TEXT NOT NULL,
         event_at              TIMESTAMP,
+        -- Указано ли время события. Дата без времени хранится полуночью, и без
+        -- этого флага «00:00» в карточке нельзя было бы отличить от настоящей
+        -- полуночи.
+        event_time_known      BOOLEAN NOT NULL DEFAULT FALSE,
 
         -- «Требует обработки» (уходит в группу) или «Жалоба зафиксирована».
         requires_processing   BOOLEAN NOT NULL,

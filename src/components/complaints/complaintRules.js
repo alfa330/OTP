@@ -119,6 +119,10 @@ export const officeOptions = (meta, city) => {
 
 export const REQUIRED_FIELDS = ['driver_name', 'driver_phone', 'city', 'description'];
 
+/* Предел описания — тот же, что у сервера (catalog.LIMITS). Сервер длинное не
+ * режет молча, а отказывает; форма говорит об этом раньше. */
+export const DESCRIPTION_LIMIT = 4000;
+
 const FIELD_MESSAGES = {
     target: 'Выберите, на кого или на что жалоба',
     reason: 'Выберите причину жалобы',
@@ -142,6 +146,9 @@ export const formProblems = (target, form) => {
     if (target.unit_required && !value('unit_id')) problems.unit_id = FIELD_MESSAGES.unit_id;
     for (const key of REQUIRED_FIELDS) {
         if (!value(key)) problems[key] = FIELD_MESSAGES[key];
+    }
+    if (value('description').length > DESCRIPTION_LIMIT) {
+        problems.description = `Описание длиннее ${DESCRIPTION_LIMIT} символов — сократите`;
     }
     return problems;
 };
@@ -180,7 +187,14 @@ export const workSteps = (complaint) => {
         done: Boolean(complaint.employee_id),
         note: complaint.employee_name || null,
     }];
-    if (!complaint.employee_id) return steps;
+    if (!complaint.employee_id) {
+        // Сотрудника так и не нашли, но СВ записал, почему работать не с кем, —
+        // это и есть «указал, почему дополнительная работа не требуется».
+        if (complaint.work_state === WORK_DONE) {
+            steps.push({ key: 'done', label: 'Работа с сотрудником завершена', done: true });
+        }
+        return steps;
+    }
     steps.push({
         key: 'feedback',
         label: complaint.feedback_done ? 'Обратная связь проведена' : 'Обратная связь не проведена',
@@ -209,10 +223,23 @@ const minutes = (value) => {
     return found ? Number(found[1]) * 60 + Number(found[2]) : null;
 };
 
+/* Что можно записать, когда сотрудник не определён: только объяснение, почему
+ * работать не с кем. Тот же список, что catalog.UNASSIGNED_ACTIONS. */
+export const UNASSIGNED_ACTIONS = ['review', 'no_training', 'other'];
+
+export const availableWorkActions = (actions, complaint) => (
+    complaint?.employee_id
+        ? (actions || [])
+        : (actions || []).filter((item) => UNASSIGNED_ACTIONS.includes(item.code)));
+
 export const workProblems = (action, draft, { today = null } = {}) => {
     const problems = {};
     if (!action) return { action: 'Выберите, что сделано' };
     if (!String(draft?.comment || '').trim()) problems.comment = 'Опишите, что сделано';
+    // «Результат» ТЗ велит видеть в тренинге — у ОС и тренинга он обязателен.
+    if (action.training && !String(draft?.outcome || '').trim()) {
+        problems.outcome = 'Укажите результат — он попадёт в «Тренинги»';
+    }
     if (action.training) {
         const day = String(draft?.date || '');
         if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) problems.date = 'Укажите дату занятия';
@@ -303,3 +330,44 @@ export const analyticsQuery = (filters) => {
 /* Повторные жалобы на сотрудника — «повторные жалобы на одного сотрудника»
  * из ТЗ: больше одной за выбранный период. */
 export const isRepeated = (row) => Number(row?.total || 0) > 1;
+
+/* ─── История жалобы ───────────────────────────────────────────────────────── */
+
+const EVENT_TITLES = {
+    created: 'Жалоба принята',
+    sent: 'Отправлена в группу',
+    send_failed: 'Не ушла в группу',
+    answer: 'Ответ для водителя из группы',
+    question: 'Вопрос оператору из группы',
+    operator_reply: 'Ответ оператора в группу',
+    employee: 'Сотрудник',
+    result: 'Итог проверки',
+    work: 'Работа с сотрудником',
+};
+
+/* Строка истории со СМЫСЛОМ события, а не только его видом. «Полная история»
+ * по ТЗ — это кто был определён и кто фактически, какой итог и какая работа;
+ * одна подпись «Сотрудник определён» на смену А→Б и на снятие сотрудника
+ * говорила бы неправду. */
+export const eventText = (event, meta = null) => {
+    const payload = (event && event.payload) || {};
+    const kind = event && event.kind;
+    if (kind === 'employee') {
+        if (payload.from && payload.to) return `Сотрудник изменён: ${payload.from} → ${payload.to}`;
+        if (payload.to) return `Сотрудник определён: ${payload.to}`;
+        if (payload.from) return `Сотрудник снят: ${payload.from}`;
+        return 'Сотрудник не определён';
+    }
+    if (kind === 'result') {
+        const title = ((meta && meta.results) || []).find((item) => item.code === payload.result)?.title;
+        return `Итог проверки: ${title || payload.result || '—'}${payload.via === 'telegram' ? ' · в группе' : ''}`;
+    }
+    if (kind === 'work') {
+        const title = ((meta && meta.work_actions) || []).find((item) => item.code === payload.action)?.title;
+        return `${title || 'Работа с сотрудником'}${payload.closed ? ' · работа завершена' : ''}`;
+    }
+    if (kind === 'created' && payload.employee) {
+        return `Жалоба принята · сотрудник: ${payload.employee}`;
+    }
+    return EVENT_TITLES[kind] || kind || '';
+};

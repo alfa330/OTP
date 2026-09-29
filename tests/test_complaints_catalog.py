@@ -113,10 +113,29 @@ class ClosingRuleTest(unittest.TestCase):
         self.assertTrue(catalog.is_closed(requires_processing=False, result_code=None,
                                           work_state=None))
 
-    def test_unknown_employee_does_not_block_closing(self):
-        """Сотрудника так и не нашли — разбирать некого; итог это объясняет."""
-        self.assertTrue(catalog.is_closed(requires_processing=True, result_code='no_data',
-                                          work_state=catalog.WORK_UNASSIGNED))
+    def test_unknown_employee_does_not_block_an_unconfirmed_complaint(self):
+        """Не подтвердилась, «недостаточно данных» — разбирать некого, итог
+        это и объясняет."""
+        for code in ('no_data', 'not_confirmed', 'out_of_scope', 'explained'):
+            self.assertTrue(catalog.is_closed(requires_processing=True, result_code=code,
+                                              work_state=catalog.WORK_UNASSIGNED), code)
+
+    def test_confirmed_complaint_waits_for_the_employee(self):
+        """Подтверждённая жалоба на сотрудника без сотрудника — это работа,
+        которую никто не провёл: закрывать её одним нажатием «Итог» нельзя
+        (сверка с ТЗ 29.09.2026). Закрыть — определив сотрудника или записав,
+        почему работать не с кем (work_state станет done)."""
+        for code in catalog.CONFIRMED_RESULTS:
+            self.assertFalse(catalog.is_closed(requires_processing=True, result_code=code,
+                                               work_state=catalog.WORK_UNASSIGNED), code)
+        self.assertTrue(catalog.is_closed(requires_processing=True, result_code='confirmed',
+                                          work_state=catalog.WORK_DONE))
+
+    def test_only_explanations_close_the_work_without_an_employee(self):
+        self.assertEqual(set(catalog.UNASSIGNED_ACTIONS), {'review', 'no_training', 'other'})
+        for code in catalog.UNASSIGNED_ACTIONS:
+            spec = catalog.WORK_ACTION_BY_CODE[code]
+            self.assertTrue(spec['closes'] and not spec['training'], code)
 
     def test_work_state_by_facts(self):
         self.assertIsNone(catalog.work_state_for('yandex', None, False))
@@ -186,6 +205,15 @@ class WorkFlagsTest(unittest.TestCase):
         self.assertTrue(flags['training_required'])
         self.assertFalse(flags['closed'])
 
+    def test_assigned_training_is_not_cancelled_by_feedback_or_review(self):
+        """«Назначен тренинг», потом «ОС проведена» — работа НЕ закрыта:
+        тренинг так и не провели (сверка с ТЗ 29.09.2026)."""
+        for code in ('feedback', 'review', 'other'):
+            flags = catalog.next_work_flags(
+                catalog.next_work_flags(self.START, 'training_assigned'), code)
+            self.assertTrue(flags['training_required'], code)
+            self.assertFalse(flags['closed'], code)
+
     def test_no_training_needed_closes_and_explains_why(self):
         """«…либо не указал, почему дополнительная работа не требуется»."""
         flags = catalog.next_work_flags({'training_required': True}, 'no_training')
@@ -212,6 +240,10 @@ class WorkFlagsTest(unittest.TestCase):
             catalog.work_summary(feedback_done=False, training_done=False,
                                  complaint_closed=False),
             'Работа с сотрудником завершена. Сотрудник определён.')
+        self.assertEqual(
+            catalog.work_summary(feedback_done=False, training_done=False,
+                                 complaint_closed=True, employee_known=False),
+            'Жалоба обработана. Сотрудник не определён.')
 
 
 class CleanComplaintTest(unittest.TestCase):
@@ -246,8 +278,27 @@ class CleanComplaintTest(unittest.TestCase):
     def test_event_time_format(self):
         _clean, errors = catalog.clean_complaint(dict(self.BASE, event_at='вчера'))
         self.assertIn('event_at', errors)
-        _clean, errors = catalog.clean_complaint(dict(self.BASE, event_at='2026-09-28T14:30'))
+        # Несуществующая дата — понятная ошибка, а не отказ базы (500).
+        _clean, errors = catalog.clean_complaint(dict(self.BASE, event_at='2026-02-30'))
+        self.assertIn('event_at', errors)
+        clean, errors = catalog.clean_complaint(dict(self.BASE, event_at='2026-09-28T14:30'))
         self.assertEqual(errors, {})
+        self.assertEqual((clean['event_at'], clean['event_time_known']),
+                         ('2026-09-28 14:30:00', True))
+
+    def test_event_without_time_is_marked_so(self):
+        """«Дату / примерное время»: время необязательно, и что его не называли,
+        хранится явно — иначе в карточке появилось бы «00:00»."""
+        clean, errors = catalog.clean_complaint(dict(self.BASE, event_at='2026-09-28'))
+        self.assertEqual(errors, {})
+        self.assertEqual((clean['event_at'], clean['event_time_known']),
+                         ('2026-09-28 00:00:00', False))
+
+    def test_long_description_is_refused_not_cut(self):
+        """Вставленный хвост переписки не должен пропадать молча."""
+        clean, errors = catalog.clean_complaint(dict(self.BASE, description='я' * 4001))
+        self.assertIn('description', errors)
+        self.assertEqual(len(clean['description']), 4001)
 
 
 if __name__ == '__main__':

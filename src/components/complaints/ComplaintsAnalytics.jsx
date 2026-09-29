@@ -8,7 +8,6 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
-import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
 import {
     activeFilterCount, analyticsQuery, bucketLabel, isRepeated, percent,
 } from './complaintRules';
@@ -201,6 +200,7 @@ export default function ComplaintsAnalytics({ apiBaseUrl, headers, showToast, me
         key: row.city, label: row.city, total: row.total,
     })), [data]);
     const dynamics = data?.dynamics || [];
+    const options = data?.options || {};
     const employees = data?.by_employee || [];
 
     const confirmedTotal = (totals.confirmed || 0) + (totals.partial || 0);
@@ -256,8 +256,12 @@ export default function ComplaintsAnalytics({ apiBaseUrl, headers, showToast, me
                         <StatTile label="Всего жалоб" value={totals.total || 0}
                                   note={totals.recorded_only ? `из них зафиксировано ${totals.recorded_only}` : null} />
                         <StatTile label="В работе" value={totals.open || 0} />
+                        {/* Процент — от жалоб, которые вообще разбирали: зафиксированные
+                            (Яндекс, парк без разбора) отработанными не бывают. */}
                         <StatTile label="Отработано" value={totals.closed || 0}
-                                  note={totals.total ? `${percent(totals.closed, totals.total)}%` : null} />
+                                  note={(totals.total - (totals.recorded_only || 0)) > 0
+                                      ? `${percent(totals.closed, totals.total - (totals.recorded_only || 0))}% разобранных`
+                                      : null} />
                         <StatTile label="Подтверждено" value={confirmedTotal}
                                   note={totals.partial ? `из них частично ${totals.partial}` : null} />
                         <StatTile label="Не подтверждено" value={totals.not_confirmed || 0} />
@@ -383,15 +387,19 @@ export default function ComplaintsAnalytics({ apiBaseUrl, headers, showToast, me
                 {draft && (
                     <div className="space-y-3.5">
                         {[
-                            ['city', 'Город', [{ value: '', label: 'Все города' }, ...KAZAKHSTAN_CITY_OPTIONS], true],
+                            // Варианты — только то, что встречалось за период, и без учёта
+                            // уже выбранных фильтров (queries.filter_options): иначе список
+                            // сужался бы сам собой до выбранного значения.
+                            ['city', 'Город', [{ value: '', label: 'Все города' },
+                                ...(options.cities || []).map((city) => ({ value: city, label: city }))], true],
                             ['reason', 'Причина', [{ value: '', label: draftTarget ? 'Все причины' : 'Сначала выберите «на кого»' },
                                 ...((draftTarget?.reasons) || []).map((item) => ({ value: item.code, label: item.title }))]],
                             ['unit', 'Подразделение, офис или парк', [{ value: '', label: 'Все' },
-                                ...((data?.by_unit || []).map((row) => ({ value: row.unit_name, label: row.unit_name })))], true],
+                                ...(options.units || []).map((unit) => ({ value: unit, label: unit }))], true],
                             ['employee_id', 'Сотрудник', [{ value: '', label: 'Все' },
-                                ...employees.map((row) => ({ value: String(row.employee_id), label: row.employee_name }))], true],
+                                ...(options.employees || []).map((row) => ({ value: String(row.id), label: row.name }))], true],
                             ['status', 'Статус', [{ value: '', label: 'Все' }, { value: 'open', label: 'В работе' },
-                                { value: 'closed', label: 'Отработанные' }]],
+                                { value: 'closed', label: 'Отработанные' }, { value: 'recorded', label: 'Зафиксированные' }]],
                             ['result', 'Итог проверки', [{ value: '', label: 'Любой' },
                                 ...((meta?.results || []).map((item) => ({ value: item.code, label: item.title })))]],
                         ].map(([key, label, options, searchable]) => (

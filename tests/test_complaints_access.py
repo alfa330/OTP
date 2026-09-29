@@ -110,9 +110,15 @@ class HandleTest(unittest.TestCase):
         self.assertFalse(access.can_handle(SZOV_SV_OTHER, rental))
         self.assertFalse(access.can_set_employee(SZOV_SV, rental))
 
-    def test_work_needs_an_employee(self):
+    def test_work_can_be_explained_without_an_employee(self):
+        """Сотрудника не нашли — СВ всё равно пишет, почему работать не с кем:
+        иначе подтверждённая жалоба без сотрудника не закрылась бы никогда.
+        Какие именно записи тогда можно, решает service.record_work."""
         self.assertTrue(access.can_record_work(OP_SV, complaint()))
-        self.assertFalse(access.can_record_work(OP_SV, complaint(employee_id=None)))
+        self.assertTrue(access.can_record_work(OP_SV, complaint(employee_id=None)))
+        self.assertFalse(access.can_record_work(AUTHOR, complaint(employee_id=None)))
+        rental = complaint(target='car_rental', target_department_id=None, employee_id=None)
+        self.assertFalse(access.can_record_work(SZOV_SV, rental))
 
     def test_internal_discussion_is_for_handlers_only(self):
         self.assertTrue(access.can_see_internal(OP_SV, complaint()))
@@ -123,6 +129,17 @@ class HandleTest(unittest.TestCase):
         self.assertTrue(access.can_write_to_group(AUTHOR, complaint()))
         self.assertFalse(access.can_write_to_group(AUTHOR, complaint(status='closed')))
         self.assertFalse(access.can_write_to_group(AUTHOR, complaint(tg_message_id=None)))
+
+    def test_open_question_is_answered_even_after_the_result(self):
+        """Итог группа могла поставить раньше, чем оператор ответил на вопрос."""
+        closed = complaint(status='closed', question_open_at='2026-09-29T10:00:00')
+        self.assertTrue(access.can_write_to_group(AUTHOR, closed))
+
+    def test_handlers_do_not_write_as_the_operator(self):
+        """Из iCORE в группу пишет только автор: сообщение СВ уходило бы с
+        подписью «Ответ оператора» и закрывало бы чужой вопрос."""
+        for me in (OP_SV, OP_HEAD, ADMIN):
+            self.assertFalse(access.can_write_to_group(me, complaint()), me['user_id'])
 
     def test_settings_and_delete(self):
         self.assertTrue(access.can_manage_settings(SZOV_SV))

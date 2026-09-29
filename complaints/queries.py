@@ -185,19 +185,27 @@ def employee(cursor, employee_id):
     cursor.execute(
         """
         SELECT u.id, u.name, u.role, u.department_id, u.status,
-               CASE WHEN sv.id IS NOT NULL
+               CASE WHEN sv.id IS NOT NULL AND sv.id <> u.id
                          AND COALESCE(sv.status, 'working') NOT IN ('fired', 'dismissal')
                     THEN sv.id END AS supervisor_id,
-               d.head_user_id AS head_id
+               -- Глава — только работающий и не сам сотрудник: жалоба бывает и
+               -- на главу, и разбирать её себе он не может.
+               CASE WHEN hu.id IS NOT NULL AND hu.id <> u.id
+                         AND COALESCE(hu.status, 'working') NOT IN ('fired', 'dismissal')
+                    THEN hu.id END AS head_id
           FROM users u
           LEFT JOIN users sv ON sv.id = u.supervisor_id
           LEFT JOIN departments d ON d.id = u.department_id AND d.is_active
+          LEFT JOIN users hu ON hu.id = d.head_user_id
          WHERE u.id = %s
         """,
         (int(employee_id),),
     )
     row = _one(cursor)
     if row:
+        # Может остаться пустым: у фронт-офисов на 29.09.2026 нет ни главы, ни
+        # СВ. Тогда жалоба не теряется — её разбирают глобальные админы из
+        # «К разбору», а карточка прямо пишет «ответственный не назначен».
         row['responsible_id'] = row['supervisor_id'] or row['head_id']
     return row
 
@@ -301,7 +309,9 @@ _COLUMNS = """
     c.unit_kind, c.unit_id, c.unit_name,
     c.employee_id, c.employee_name, c.employee_source, c.employee_set_by_name, c.employee_set_at,
     c.responsible_id, ru.name AS responsible_name,
+    c.reported_employee_id, c.reported_employee_name,
     c.driver_name, c.driver_phone, c.driver_ref, c.city, c.description, c.event_at,
+    c.event_time_known,
     c.requires_processing, c.status, c.closed_at,
     c.result_code, c.result_note, c.result_by_name, c.result_via, c.result_at,
     c.work_state, c.feedback_done, c.training_required, c.training_done,
@@ -353,8 +363,9 @@ def create_complaint(cursor, fields):
             target, reason_code, target_department_id, unit_kind, unit_id, unit_name,
             employee_id, employee_name, employee_source, employee_set_by,
             employee_set_by_name, employee_set_at, responsible_id,
+            reported_employee_id, reported_employee_name,
             driver_name, driver_phone, driver_ref, city, description, event_at,
-            requires_processing, status, work_state,
+            event_time_known, requires_processing, status, work_state,
             created_by, created_by_name, creator_department_id,
             delivery_status, last_activity_at
         ) VALUES (
@@ -363,8 +374,10 @@ def create_complaint(cursor, fields):
             %(employee_set_by)s, %(employee_set_by_name)s,
             CASE WHEN %(employee_id)s::int IS NULL THEN NULL ELSE {now} END,
             %(responsible_id)s,
+            %(employee_id)s, %(employee_name)s,
             %(driver_name)s, %(driver_phone)s, %(driver_ref)s, %(city)s, %(description)s,
-            %(event_at)s, %(requires_processing)s, %(status)s, %(work_state)s,
+            %(event_at)s, %(event_time_known)s, %(requires_processing)s, %(status)s,
+            %(work_state)s,
             %(created_by)s, %(created_by_name)s, %(creator_department_id)s,
             %(delivery_status)s, {now}
         )
@@ -375,26 +388,60 @@ def create_complaint(cursor, fields):
     return cursor.fetchone()[0]
 
 
-def get_complaint(cursor, complaint_id, viewer_id=None):
-    """Жалоба + текущие группы её автора (для прав супервайзера)."""
-    cursor.execute(
-        'SELECT ' + _COLUMNS + """,
-               COALESCE((
-                   SELECT array_agg(gom.group_id) FROM group_operator_memberships gom
-                    WHERE gom.operator_id = c.created_by
-                      AND gom.start_date <= CURRENT_DATE
-                      AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
-               ), '{}') AS creator_group_ids
-        """ + _JOINS + ' WHERE c.id = %s',
-        (int(complaint_id),),
-    )
-    row = _one(cursor)
-    if not row:
-        return None
-    groups = list(row.pop('creator_group_ids') or [])
+# Текущие группы автора — нужны праву супервайзера (access.can_handle) по
+# КАЖДОЙ строке, а не только в карточке: без них лента и выгрузка не смогли бы
+# отличить, чьи внутренние поля зритель вправе видеть.
+_CREATOR_GROUPS = """,
+       COALESCE((
+           SELECT array_agg(gom.group_id) FROM group_operator_memberships gom
+            WHERE gom.operator_id = c.created_by
+              AND gom.start_date <= CURRENT_DATE
+              AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
+       ), '{}') AS creator_group_ids
+"""
+
+# «Зафиксирована»: в группу не уходила, итога нет, сотрудника нет — её никто
+# не разбирал. Закрыта она с момента создания, но «отработанной» её считать
+# нельзя: аналитика «отработано» иначе раздувалась бы на все жалобы на Яндекс.
+# Та же формула — у интерфейса (complaintRules.statusView).
+RECORDED_SQL = ("(NOT c.requires_processing AND c.employee_id IS NULL "
+                "AND c.result_code IS NULL)")
+
+
+def _with_groups(row, viewer_id=None):
+    groups = list(row.pop('creator_group_ids', None) or [])
     item = _decorate(row, viewer_id)
     item['creator_group_ids'] = groups
     return item
+
+
+def get_complaint(cursor, complaint_id, viewer_id=None):
+    """Жалоба + текущие группы её автора (для прав супервайзера)."""
+    cursor.execute(
+        'SELECT ' + _COLUMNS + _CREATOR_GROUPS + _JOINS + ' WHERE c.id = %s',
+        (int(complaint_id),),
+    )
+    row = _one(cursor)
+    return _with_groups(row, viewer_id) if row else None
+
+
+# Поля, которые видит только разбирающий: «внутренние детали обратной связи и
+# обучения сотрудника не должны уходить оператору» (ТЗ). Вырезаются в ОДНОМ
+# месте (public_item) для всех ответов — карточки, ленты, отправки сообщения,
+# повторной отправки и выгрузки.
+INTERNAL_FIELDS = ('result_note', 'work_closed_by_name', 'responsible_id', 'responsible_name',
+                   'employee_set_by_name', 'employee_source', 'reported_employee_id',
+                   'reported_employee_name')
+
+
+def public_item(ctx, item):
+    """Жалоба в том виде, в каком её вправе видеть зритель."""
+    if not item or access.can_handle(ctx, item):
+        return item
+    clean = dict(item)
+    for key in INTERNAL_FIELDS:
+        clean.pop(key, None)
+    return clean
 
 
 # Фильтры ленты. «К разбору» — открытые жалобы, которые разбирает сам зритель.
@@ -419,9 +466,14 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
         params.update(handle_params)
         clauses.append(handle)
         clauses.append("c.status = 'open'")
-    if status in catalog_statuses():
-        params['status'] = status
-        clauses.append('c.status = %(status)s')
+    if status == 'open':
+        clauses.append("c.status = 'open'")
+    elif status == 'closed':
+        # «Отработанные» — разобранные, а не просто закрытые: зафиксированные
+        # (Яндекс) видны в «Все», но отработанными не притворяются.
+        clauses.append("c.status = 'closed' AND NOT %s" % RECORDED_SQL)
+    elif status == 'recorded':
+        clauses.append(RECORDED_SQL)
     if target and catalog.target(target):
         params['target'] = target
         clauses.append('c.target = %(target)s')
@@ -448,7 +500,7 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
     params['limit'] = page + 1
     params['offset'] = max(0, int(offset))
     cursor.execute(
-        'SELECT ' + _COLUMNS + _JOINS
+        'SELECT ' + _COLUMNS + _CREATOR_GROUPS + _JOINS
         + ' WHERE ' + ' AND '.join(clauses)
         + ' ORDER BY c.last_activity_at DESC, c.id DESC'
         + ' LIMIT %(limit)s OFFSET %(offset)s',
@@ -456,13 +508,9 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
     )
     rows = _dicts(cursor)
     has_more = len(rows) > page
-    return [_decorate(row, ctx['user_id']) for row in rows[:page]], has_more
-
-
-def catalog_statuses():
-    from .schema import STATUSES
-
-    return STATUSES
+    # Внутренние поля вырезаются по праву зрителя НА КАЖДОЙ строке — лента
+    # отдаёт то же, что и карточка, не больше.
+    return [public_item(ctx, _with_groups(row, ctx['user_id'])) for row in rows[:page]], has_more
 
 
 def counters(cursor, ctx):
@@ -475,10 +523,15 @@ def counters(cursor, ctx):
         """
         SELECT
             (SELECT COUNT(*) FROM complaints
-              WHERE created_by = %(viewer_id)s AND author_unread_at IS NOT NULL),
-            (SELECT COUNT(*) FROM complaints
-              WHERE responsible_id = %(viewer_id)s AND work_state = 'pending'
-                AND employee_id IS DISTINCT FROM %(viewer_id)s)
+              WHERE created_by = %(viewer_id)s AND author_unread_at IS NOT NULL
+                AND employee_id IS DISTINCT FROM %(viewer_id)s),
+            (SELECT COUNT(*) FROM complaints c
+              WHERE c.work_state = 'pending'
+                AND c.employee_id IS DISTINCT FROM %(viewer_id)s
+                AND (c.responsible_id = %(viewer_id)s
+                     OR (c.responsible_id IS NULL AND c.target_department_id IN (
+                         SELECT d.id FROM departments d
+                          WHERE d.head_user_id = %(viewer_id)s AND d.is_active))))
         """,
         {'viewer_id': int(ctx['user_id'])},
     )
@@ -563,6 +616,10 @@ def set_employee(cursor, complaint_id, *, employee_id, employee_name, source, ac
                work_state = %(work_state)s,
                feedback_done = FALSE, training_required = FALSE, training_done = FALSE,
                work_closed_at = NULL, work_closed_by = NULL, work_closed_by_name = NULL,
+               author_unread_at = CASE WHEN %(employee_id)s::int = created_by
+                                       THEN NULL ELSE author_unread_at END,
+               author_unread_count = CASE WHEN %(employee_id)s::int = created_by
+                                          THEN 0 ELSE author_unread_count END,
                last_activity_at = {now}, updated_at = {now}
          WHERE id = %(id)s
         """.format(now=_NOW),
@@ -659,6 +716,9 @@ def notify_author(cursor, complaint_id, kind):
                author_unread_count = author_unread_count + 1,
                last_activity_at = {now}, updated_at = {now}
          WHERE id = %s
+           -- Автора определили сотрудником жалобы — он её больше не видит, и
+           -- «непрочитанное», которое нельзя погасить, ему ни к чему.
+           AND employee_id IS DISTINCT FROM created_by
         """.format(now=_NOW),
         (kind, int(complaint_id)),
     )
@@ -910,12 +970,21 @@ def bell_items(cursor, user_id, limit):
                    c.employee_name
               FROM complaints c
              WHERE c.created_by = %(user_id)s AND c.author_unread_at IS NOT NULL
+               -- Автор, которого СВ определил сотрудником жалобы, её больше не
+               -- видит — и в колоколе она ему тоже не показывается.
+               AND c.employee_id IS DISTINCT FROM %(user_id)s
             UNION ALL
             SELECT c.id, 'work', 'work', COALESCE(c.employee_set_at, c.created_at),
                    c.target, c.reason_code, c.driver_name, c.employee_name
               FROM complaints c
-             WHERE c.responsible_id = %(user_id)s AND c.work_state = 'pending'
+             WHERE c.work_state = 'pending'
                AND c.employee_id IS DISTINCT FROM %(user_id)s
+               AND (c.responsible_id = %(user_id)s
+                    -- Ответственного не нашлось (нет ни СВ, ни главы) — задача
+                    -- глав отдела сотрудника, а не ничья.
+                    OR (c.responsible_id IS NULL AND c.target_department_id IN (
+                        SELECT d.id FROM departments d
+                         WHERE d.head_user_id = %(user_id)s AND d.is_active)))
         )
         SELECT id, role, kind, at, target, reason_code, driver_name, employee_name,
                COUNT(*) OVER () AS total
@@ -967,9 +1036,14 @@ def _filter_sql(ctx, filters):
     if filters.get('employee_id'):
         params['employee_id'] = int(filters['employee_id'])
         clauses.append('c.employee_id = %(employee_id)s')
-    if filters.get('status') in ('open', 'closed'):
-        params['status'] = filters['status']
-        clauses.append('c.status = %(status)s')
+    # Статус — три значения, как в ленте и карточке: в работе, отработанные,
+    # зафиксированные. «Отработанные» — это разобранные, а не просто закрытые.
+    if filters.get('status') == 'open':
+        clauses.append("c.status = 'open'")
+    elif filters.get('status') == 'closed':
+        clauses.append("c.status = 'closed' AND NOT %s" % RECORDED_SQL)
+    elif filters.get('status') == 'recorded':
+        clauses.append(RECORDED_SQL)
     if filters.get('result'):
         params['result'] = filters['result']
         clauses.append('c.result_code = %(result)s')
@@ -1013,8 +1087,8 @@ def analytics(cursor, ctx, filters):
         """
         SELECT COUNT(*) AS total,
                COUNT(*) FILTER (WHERE c.status = 'open') AS open,
-               COUNT(*) FILTER (WHERE c.status = 'closed') AS closed,
-               COUNT(*) FILTER (WHERE NOT c.requires_processing) AS recorded_only,
+               COUNT(*) FILTER (WHERE c.status = 'closed' AND NOT {recorded}) AS closed,
+               COUNT(*) FILTER (WHERE {recorded}) AS recorded_only,
                COUNT(*) FILTER (WHERE c.result_code = 'confirmed') AS confirmed,
                COUNT(*) FILTER (WHERE c.result_code = 'partial') AS partial,
                COUNT(*) FILTER (WHERE c.result_code = ANY(%(not_confirmed_codes)s)) AS not_confirmed,
@@ -1025,7 +1099,7 @@ def analytics(cursor, ctx, filters):
                COUNT(*) FILTER (WHERE c.training_done) AS training_done,
                COUNT(*) FILTER (WHERE c.feedback_done OR c.training_done
                                 OR c.training_required) AS needed_work
-        """ + base,
+        """.format(recorded=RECORDED_SQL) + base,
         params,
     )
     totals = {key: int(value or 0) for key, value in (_one(cursor) or {}).items()}
@@ -1042,7 +1116,9 @@ def analytics(cursor, ctx, filters):
 
     cursor.execute(
         'SELECT c.target, c.reason_code, COUNT(*) AS total ' + base
-        + ' GROUP BY c.target, c.reason_code ORDER BY total DESC, c.target LIMIT 30',
+        # Без лимита: пар «цель + причина» всего 32 (catalog.TARGETS), и лимит
+        # ничего не экономил, а срезать мог как раз причины недовольства парком.
+        + ' GROUP BY c.target, c.reason_code ORDER BY total DESC, c.target',
         params,
     )
     by_reason = [dict(row, target_title=catalog.target_title(row['target']),
@@ -1102,9 +1178,6 @@ def analytics(cursor, ctx, filters):
     )
     by_employee = [{key: _iso(value) for key, value in row.items()} for row in _dicts(cursor)]
 
-    cursor.execute('SELECT DISTINCT c.city ' + base + ' ORDER BY 1', params)
-    cities = [row[0] for row in cursor.fetchall() if row[0]]
-
     return {
         'totals': totals,
         'by_target': by_target,
@@ -1114,8 +1187,42 @@ def analytics(cursor, ctx, filters):
         'dynamics': dynamics,
         'bucket': bucket,
         'by_employee': by_employee,
-        'cities': cities,
+        'options': filter_options(cursor, ctx, filters),
     }
+
+
+def filter_options(cursor, ctx, filters):
+    """Варианты для фильтров «Город», «Подразделение» и «Сотрудник».
+
+    Считаются по периметру и ПЕРИОДУ, без остальных фильтров: иначе, выбрав
+    сотрудника А, в следующий раз в списке нашёлся бы только А (варианты
+    строились бы из уже отфильтрованного ответа), а сотрудники за пределами
+    первой сотни не попали бы в фильтр вовсе. Один запрос на все три списка.
+    """
+    where, params = _filter_sql(ctx, {'date_from': (filters or {}).get('date_from'),
+                                      'date_to': (filters or {}).get('date_to')})
+    base = ' FROM complaints c WHERE ' + where
+    cursor.execute(
+        "SELECT 'unit' AS kind, c.unit_name AS label, NULL::int AS id" + base
+        + ' AND c.unit_name IS NOT NULL GROUP BY c.unit_name'
+        + " UNION ALL SELECT 'employee', MAX(c.employee_name), c.employee_id" + base
+        + ' AND c.employee_id IS NOT NULL GROUP BY c.employee_id'
+        + " UNION ALL SELECT 'city', c.city, NULL::int" + base
+        + " AND COALESCE(c.city, '') <> '' GROUP BY c.city",
+        params,
+    )
+    options = {'units': [], 'employees': [], 'cities': []}
+    for row in _dicts(cursor):
+        if row['kind'] == 'unit':
+            options['units'].append(row['label'])
+        elif row['kind'] == 'city':
+            options['cities'].append(row['label'])
+        else:
+            options['employees'].append({'id': row['id'], 'name': row['label']})
+    options['units'].sort()
+    options['cities'].sort()
+    options['employees'].sort(key=lambda item: str(item['name'] or ''))
+    return options
 
 
 EXPORT_LIMIT = 20000
@@ -1125,11 +1232,14 @@ def export_rows(cursor, ctx, filters):
     where, params = _filter_sql(ctx, filters)
     params['limit'] = EXPORT_LIMIT
     cursor.execute(
-        'SELECT ' + _COLUMNS + _JOINS + ' WHERE ' + where
+        'SELECT ' + _COLUMNS + _CREATOR_GROUPS + _JOINS + ' WHERE ' + where
         + ' ORDER BY c.created_at DESC, c.id DESC LIMIT %(limit)s',
         params,
     )
-    return [_decorate(row) for row in _dicts(cursor)]
+    # Выгрузка отдаёт строку в том виде, в каком её видит зритель: СВ приёма
+    # видит жалобу на сотрудника ОП, но «принятых мер» по ней не видит и в
+    # файле тоже.
+    return [public_item(ctx, _with_groups(row)) for row in _dicts(cursor)]
 
 
 def default_period(today=None):

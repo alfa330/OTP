@@ -263,7 +263,8 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 'driver_name': clean['driver_name'], 'driver_phone': clean['driver_phone'],
                 'driver_ref': clean['driver_ref'], 'city': clean['city'],
                 'description': clean['description'],
-                'event_at': clean['event_at'].replace('T', ' ') if clean['event_at'] else None,
+                'event_at': clean['event_at'],
+                'event_time_known': clean['event_time_known'],
                 'requires_processing': clean['requires_processing'],
                 'status': status, 'work_state': work_state,
                 'created_by': ctx['user_id'], 'created_by_name': ctx.get('name'),
@@ -284,7 +285,8 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
         if clean['requires_processing']:
             delivered, delivery_error = service.deliver(db, complaint_id)
         with db._get_cursor() as cursor:
-            item = queries.get_complaint(cursor, complaint_id, ctx['user_id'])
+            item = queries.public_item(ctx, queries.get_complaint(cursor, complaint_id,
+                                                                  ctx['user_id']))
         return jsonify({'item': item, 'delivered': delivered,
                         'delivery_error': None if delivered else delivery_error}), 201
 
@@ -303,13 +305,10 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 complaint.update(unread=False, unread_kind=None, unread_count=0)
         # Внутреннее — только разбирающему. Оператору из работы с сотрудником
         # не уходит ничего, кроме того, что она проведена: «внутренние детали
-        # обратной связи и обучения не должны уходить оператору».
-        if not permissions['can_handle']:
-            for key in ('result_note', 'work_closed_by_name', 'responsible_name',
-                        'employee_set_by_name'):
-                complaint.pop(key, None)
-        return jsonify({'item': complaint, 'messages': messages, 'work': work,
-                        'permissions': permissions})
+        # обратной связи и обучения не должны уходить оператору». Правило одно
+        # на все ответы раздела — queries.public_item.
+        return jsonify({'item': queries.public_item(ctx, complaint), 'messages': messages,
+                        'work': work, 'permissions': permissions})
 
     @route('/complaints/<int:complaint_id>/events')
     def complaints_events(complaint_id, ctx):
@@ -341,7 +340,7 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
             complaint = queries.get_complaint(cursor, complaint_id, ctx['user_id'])
             messages = queries.list_messages(
                 cursor, complaint_id, include_internal=access.can_see_internal(ctx, complaint))
-        return jsonify({'item': complaint, 'messages': messages})
+        return jsonify({'item': queries.public_item(ctx, complaint), 'messages': messages})
 
     @route('/complaints/<int:complaint_id>/employee', methods=('POST',))
     def complaints_employee(complaint_id, ctx):
@@ -401,7 +400,8 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
         if not ok:
             return jsonify({"error": error}), 502
         with db._get_cursor() as cursor:
-            return jsonify({'item': queries.get_complaint(cursor, complaint_id, ctx['user_id'])})
+            item = queries.get_complaint(cursor, complaint_id, ctx['user_id'])
+        return jsonify({'item': queries.public_item(ctx, item)})
 
     @route('/complaints/<int:complaint_id>/attachments/<int:message_id>')
     def complaints_attachment(complaint_id, message_id, ctx):
@@ -457,7 +457,14 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
         filters = _filters()
         with db._get_cursor() as cursor:
             items = queries.export_rows(cursor, ctx, filters)
-        stream = report.build_workbook(items, filters_note=_filters_note(filters),
+        employee_name = None
+        if filters.get('employee_id'):
+            with db._get_cursor() as cursor:
+                cursor.execute('SELECT name FROM users WHERE id = %s',
+                               (int(filters['employee_id']),))
+                row = cursor.fetchone()
+                employee_name = row[0] if row else None
+        stream = report.build_workbook(items, filters_note=_filters_note(filters, employee_name),
                                        generated_by=ctx.get('name'),
                                        text_warning_patch=excel_text_warning)
         logging.info('complaints: выгрузка %d строк за %s..%s — %s', len(items),
@@ -465,7 +472,7 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
         return send_file(stream, mimetype=report.XLSX_MIME, as_attachment=True,
                          download_name=report.filename(filters['date_from'], filters['date_to']))
 
-    def _filters_note(filters):
+    def _filters_note(filters, employee_name=None):
         parts = ['период %s — %s' % (filters['date_from'], filters['date_to'])]
         if filters.get('target'):
             parts.append('на кого: %s' % catalog.target_title(filters['target']))
@@ -475,8 +482,8 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
             if filters.get(key):
                 parts.append('%s: %s' % (label, filters[key]))
         if filters.get('status'):
-            parts.append('статус: %s' % ('отработанные' if filters['status'] == 'closed'
-                                         else 'в работе'))
+            parts.append('статус: %s' % {'closed': 'отработанные', 'recorded': 'зафиксированные'}
+                         .get(filters['status'], 'в работе'))
         if filters.get('result'):
             parts.append('итог: %s' % catalog.result_title(filters['result']))
         for key, yes, no in (('confirmed', 'подтверждённые', 'неподтверждённые'),
@@ -485,7 +492,9 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
             if filters.get(key) in ('yes', 'no'):
                 parts.append(yes if filters[key] == 'yes' else no)
         if filters.get('employee_id'):
-            parts.append('сотрудник: id %s' % filters['employee_id'])
+            # Именем, а не номером: лист «Контекст» читают через месяц, и
+            # «id 5123» там ничего не объясняет.
+            parts.append('сотрудник: %s' % (employee_name or 'id %s' % filters['employee_id']))
         return '; '.join(parts)
 
     # ── Настройки группы ─────────────────────────────────────────────────

@@ -13,7 +13,7 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosTimePicker } from '../ui/TimePicker';
 import {
-    MESSAGE_KIND_LABELS, driverAnswers, openQuestion, statusView, workPayload,
+    MESSAGE_KIND_LABELS, availableWorkActions, driverAnswers, eventText, openQuestion, statusView, workPayload,
     workProblems, workSteps,
 } from './complaintRules';
 import { TIME_INPUT } from './styles';
@@ -39,6 +39,10 @@ const fmtDateTime = (iso) => (iso
         hour: '2-digit', minute: '2-digit' })
     : '—');
 
+const fmtDate = (iso) => (iso
+    ? new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    : '—');
+
 const fmtShort = (iso) => (iso
     ? new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit',
         minute: '2-digit' })
@@ -49,17 +53,7 @@ const todayIso = () => {
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 };
 
-const EVENT_LABELS = {
-    created: 'Жалоба принята',
-    sent: 'Отправлена в группу',
-    send_failed: 'Не ушла в группу',
-    answer: 'Ответ для водителя из группы',
-    question: 'Вопрос оператору из группы',
-    operator_reply: 'Ответ оператора в группу',
-    employee: 'Сотрудник определён',
-    result: 'Итог проверки',
-    work: 'Работа с сотрудником',
-};
+// Подписи событий истории — в complaintRules.eventText: там же и смысл события.
 
 const UNIT_LABELS = { department: 'Подразделение', office: 'Офис', park: 'Таксопарк' };
 
@@ -135,7 +129,8 @@ const Attachment = ({ message, complaintId, apiBaseUrl, headers, showToast }) =>
 /* ─── Работа с сотрудником: запись ─────────────────────────────────────────── */
 
 const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showToast, onSaved }) => {
-    const actions = meta?.work_actions || [];
+    // Без сотрудника — только объяснение, почему работать не с кем.
+    const actions = availableWorkActions(meta?.work_actions || [], complaint);
     const [code, setCode] = useState('');
     const [draft, setDraft] = useState({});
     const [touched, setTouched] = useState(false);
@@ -152,7 +147,11 @@ const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showTo
         setCode(next);
         const spec = actions.find((item) => item.code === next);
         setDraft((prev) => ({ ...prev, reason: spec?.default_reason || '',
-                              date: prev.date || todayIso() }));
+                              date: prev.date || todayIso(),
+                              // Тренинг уже назначен — галочка стоит сразу: запись ОС
+                              // или разбора его не отменяет, и форма не делает вид,
+                              // что требования нет.
+                              need_training: Boolean(complaint?.training_required) }));
     };
 
     const save = async () => {
@@ -179,7 +178,7 @@ const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showTo
     return (
         <IosModal open={open} onClose={onClose}
                   title="Работа с сотрудником"
-                  subtitle={complaint?.employee_name || ''}
+                  subtitle={complaint?.employee_name || 'Сотрудник не определён — запишите, почему работать не с кем'}
                   footer={(
                       <>
                           <button type="button" onClick={onClose} className={iosBtnSecondary} disabled={busy}>
@@ -262,11 +261,18 @@ const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showTo
                             <div>
                                 <div className={`${iosGroupLabel} mb-1.5`}>Результат</div>
                                 <input value={draft.outcome || ''} onChange={(e) => set('outcome', e.target.value)}
-                                       placeholder="Необязательно: к чему пришли с сотрудником"
+                                       placeholder="К чему пришли с сотрудником"
                                        className={iosInput} />
+                                {shown('outcome') && <div className="mt-1 text-[11.5px] text-rose-600">{problems.outcome}</div>}
                             </div>
                         )}
-                        {action.ask_training && (
+                        {action.ask_training && complaint?.training_required && (
+                            <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] leading-snug text-slate-600">
+                                Тренинг уже назначен — работа останется открытой, пока не запишете
+                                «Проведён тренинг» или «Дополнительное обучение не требуется».
+                            </div>
+                        )}
+                        {action.ask_training && !complaint?.training_required && (
                             <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-slate-50 px-3.5 py-2.5">
                                 <input type="checkbox" checked={Boolean(draft.need_training)}
                                        onChange={(e) => set('need_training', e.target.checked)}
@@ -632,9 +638,30 @@ export default function ComplaintCard({
                                  </button>
                              ) : null}>
                             {item.employee_name || <span className="text-slate-400">Не определён</span>}
+                            {/* «Кто был определён» и «кто фактически» (ТЗ): если СВ
+                                по итогам проверки поставил другого — видно обоих. */}
+                            {permissions.can_handle && item.reported_employee_name
+                                && item.reported_employee_name !== item.employee_name && (
+                                <span className="mt-0.5 block text-[12px] text-slate-500">
+                                    Оператор указал: {item.reported_employee_name}
+                                </span>
+                            )}
                         </Row>
                     )}
-                    {item.event_at && <Row label="Когда произошло">{fmtDateTime(item.event_at)}</Row>}
+                    {employeeTarget && permissions.can_handle && item.employee_id && (
+                        <Row label="Ответственный">
+                            {item.responsible_name || (
+                                <span className="text-slate-500">
+                                    Не назначен — у сотрудника нет ни СВ, ни главы отдела
+                                </span>
+                            )}
+                        </Row>
+                    )}
+                    {item.event_at && (
+                        <Row label="Когда произошло">
+                            {item.event_time_known ? fmtDateTime(item.event_at) : fmtDate(item.event_at)}
+                        </Row>
+                    )}
                     <Row label="Что произошло">
                         <span className="whitespace-pre-wrap break-words">{item.description}</span>
                     </Row>
@@ -733,6 +760,11 @@ export default function ComplaintCard({
                                 )}
                                 <div className="mt-1 text-[11.5px] text-slate-400">
                                     {entry.created_by_name}
+                                    {/* Запись о работе с ДРУГИМ сотрудником (его сменили
+                                        после проверки) — с кем она была, пишем прямо, иначе
+                                        её легко принять за работу с нынешним. */}
+                                    {entry.employee_name && Number(entry.employee_id) !== Number(item.employee_id)
+                                        ? ` · с сотрудником ${entry.employee_name}` : ''}
                                     {entry.training_id && entry.training_date
                                         ? ` · в «Тренингах»: ${new Date(entry.training_date).toLocaleDateString('ru-RU')} ${entry.start_time}–${entry.end_time}`
                                         : ''}
@@ -867,7 +899,7 @@ export default function ComplaintCard({
                                     {fmtShort(event.created_at)}
                                 </span>
                                 <span className="min-w-0 flex-1 text-[13px] text-slate-800">
-                                    {EVENT_LABELS[event.kind] || event.kind}
+                                    {eventText(event, meta)}
                                     {event.actor_name && <span className="text-slate-500"> · {event.actor_name}</span>}
                                 </span>
                             </div>

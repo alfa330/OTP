@@ -49,7 +49,11 @@ COLUMNS = [
     ('На кого / на что', 'target_title', 20),
     ('Причина', 'reason_title', 34),
     ('Подразделение', 'unit_name', 26),
-    ('Сотрудник', 'employee_name', 28),
+    # «Кто был определён» и «кто фактически являлся сотрудником» (ТЗ) — две
+    # колонки: оператор мог назвать одного, а СВ по итогам проверки — другого.
+    ('Сотрудник со слов оператора', 'reported_employee_name', 28),
+    ('Сотрудник по итогам проверки', 'employee_name', 28),
+    ('Ответственный за работу', 'responsible_name', 24),
     ('Город', 'city', 14),
     ('Водитель', 'driver_name', 26),
     ('Телефон', 'driver_phone', 16),
@@ -69,6 +73,16 @@ COLUMNS = [
 ]
 
 TEXT_COLUMNS = ('driver_phone', 'driver_ref')
+
+DATE_ONLY_FORMAT = 'DD.MM.YYYY'
+
+
+def is_recorded(item):
+    """«Зафиксирована»: в группу не уходила, итога и сотрудника нет — её никто
+    не разбирал. Та же формула, что queries.RECORDED_SQL и statusView в
+    интерфейсе: отработанной такая жалоба не называется нигде."""
+    return (not item.get('requires_processing') and not item.get('employee_id')
+            and not item.get('result_code'))
 
 WORK_TITLES = {
     None: '',
@@ -104,9 +118,17 @@ def row_values(item):
     if item.get('work_state') == catalog.WORK_PENDING and item.get('training_required'):
         work = 'Требуется тренинг'
     values = dict(item)
+    recorded = is_recorded(item)
+    if item.get('status') != 'closed':
+        status_title = 'В работе'
+    else:
+        status_title = 'Зафиксирована' if recorded else 'Отработана'
     values.update({
-        'processing': 'Да' if item.get('requires_processing') else 'Зафиксирована',
-        'status_title': 'Отработана' if item.get('status') == 'closed' else 'В работе',
+        'processing': 'Да' if item.get('requires_processing') else 'Нет',
+        'status_title': status_title,
+        # «Отработана» — когда разобрали; у зафиксированной это было бы время
+        # создания, выданное за время разбора.
+        'closed_at': None if recorded else item.get('closed_at'),
         'work_title': work,
         'feedback': 'Да' if item.get('feedback_done') else '',
         'training': 'Да' if item.get('training_done') else '',
@@ -141,8 +163,9 @@ def build_workbook(items, *, filters_note, generated_by, generated_at=None,
         ('Кто выгрузил', generated_by or ''),
         ('Отбор', filters_note or 'без фильтров'),
         ('Строк', len(items)),
-        ('Что в листе «Жалобы»', 'Каждая строка — одна жалоба. «В группу: Зафиксирована» — '
-                                 'жалоба не уходила на разбор (Яндекс, часть жалоб на парк).'),
+        ('Что в листе «Жалобы»', 'Каждая строка — одна жалоба. «Зафиксирована» — жалоба '
+                                 'не уходила на разбор (Яндекс, часть жалоб на парк) и '
+                                 'сохранена для аналитики.'),
         ('Что в листе «По сотрудникам»', 'Жалобы, где сотрудник определён: сколько всего, '
                                          'сколько подтверждено, где проведены ОС и тренинг.'),
     ):
@@ -165,7 +188,11 @@ def build_workbook(items, *, filters_note, generated_by, generated_at=None,
                 value = _as_datetime(value)
             cell = WriteOnlyCell(sheet, value=_clean(value if value is not None else ''))
             if key in date_keys and isinstance(value, datetime):
-                cell.number_format = DATE_FORMAT
+                # Время события необязательно: без него — только дата, а не
+                # «00:00», которого никто не называл.
+                cell.number_format = (DATE_ONLY_FORMAT
+                                      if key == 'event_at' and not item.get('event_time_known')
+                                      else DATE_FORMAT)
             if key in TEXT_COLUMNS:
                 cell.number_format = '@'
             if key == 'description':

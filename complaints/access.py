@@ -174,8 +174,10 @@ def can_set_employee(ctx, complaint):
 
 
 def can_record_work(ctx, complaint):
-    """Записать работу с сотрудником: сотрудник уже определён."""
-    return bool(complaint.get('employee_id')) and can_set_employee(ctx, complaint)
+    """Записать работу с сотрудником. Сотрудник может быть и не определён —
+    тогда записью объясняют, почему работать не с кем (catalog.UNASSIGNED_ACTIONS,
+    состав проверяет service.record_work)."""
+    return can_set_employee(ctx, complaint)
 
 
 def can_see_internal(ctx, complaint):
@@ -188,15 +190,20 @@ def can_see_internal(ctx, complaint):
 def can_write_to_group(ctx, complaint):
     """Написать в группу по жалобе: ответить на вопрос или дополнить.
 
-    Автор — всегда, пока жалоба в работе: «оператор связывается с водителем,
-    получает дополнительные данные и отвечает в рамках этого же обращения».
-    Разбирающий — тоже: ему может понадобиться дописать группе из iCORE.
+    Только автор — «оператор связывается с водителем, получает дополнительные
+    данные и отвечает в рамках этого же обращения». Разбирающий из iCORE в
+    группу не пишет: его сообщение уходило бы подписью «Ответ оператора»,
+    закрывало бы чужой вопрос и попадало в переписку оператора, а внутреннее
+    обсуждение по ТЗ идёт в самой группе.
+
+    Закрытая жалоба ответ на ОТКРЫТЫЙ вопрос не отрезает: итог проверки группа
+    могла поставить раньше, чем оператор ответил.
     """
-    if complaint.get('status') == 'closed' or not complaint.get('tg_message_id'):
+    if not complaint.get('tg_message_id'):
         return False
-    if _same(complaint.get('created_by'), _me(ctx)) and can_view(ctx, complaint):
-        return True
-    return can_handle(ctx, complaint)
+    if complaint.get('status') == 'closed' and not complaint.get('question_open_at'):
+        return False
+    return _same(complaint.get('created_by'), _me(ctx)) and can_view(ctx, complaint)
 
 
 def can_view_analytics(ctx):

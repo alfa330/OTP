@@ -428,7 +428,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     crm_tickets: ['szov'],
     // Жалобы принимает СЗоВ, разбирают отделы сотрудников (complaints/catalog.py:
     // HANDLER_DEPARTMENT_CODES) — пункт виден при выборе любого из них.
-    complaints: ['szov', 'op', 'tez', 'front_office'],
+    complaints: ['szov', 'op', 'tez', 'front_office', 'remote_cc', 'request_processing_department'],
     // Раздел отдела продаж. У СЗоВ своя переписка в Chat2Desk, поэтому в его
     // наборе «Чатов Верификаторов» нет (решение владельца 09.09.2026) —
     // круг доступа при этом не менялся, см. canAccessVerifierChatsForUser.

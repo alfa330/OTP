@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  activeFilterCount, analyticsQuery, bucketLabel, driverAnswers, employeeDepartmentId,
+  activeFilterCount, analyticsQuery, availableWorkActions, bucketLabel, driverAnswers,
+  employeeDepartmentId, eventText,
   formPayload, formProblems, isRepeated, officeOptions, openQuestion, percent, rowBadges,
   rowSubtitle, statusView, submitLabel, willProcess, workPayload, workProblems, workSteps,
 } from '../src/components/complaints/complaintRules.js';
@@ -93,6 +94,8 @@ test('статус: «зафиксирована» — не «отработан
   assert.equal(statusView({ status: 'closed', requires_processing: true, result_code: 'confirmed' }).label,
     'Отработана');
   assert.equal(statusView({ status: 'open' }).label, 'В работе');
+  // «В работе» — штатное состояние: цвета у него нет.
+  assert.equal(statusView({ status: 'open' }).tone, 'slate');
 });
 
 test('бейджи ленты — только то, что ждёт зрителя', () => {
@@ -129,7 +132,7 @@ test('лесенка работы с сотрудником', () => {
 test('запись о работе: время занятия и комментарий', () => {
   const feedback = { code: 'feedback', training: true, ask_training: true, default_reason: 'Обратная связь' };
   const other = { code: 'other', training: false, ask_training: false };
-  assert.deepEqual(Object.keys(workProblems(feedback, {})).sort(), ['comment', 'date', 'time']);
+  assert.deepEqual(Object.keys(workProblems(feedback, {})).sort(), ['comment', 'date', 'outcome', 'time']);
   assert.equal(workProblems(feedback, { comment: 'x', date: '2026-09-28', start: '10:00', end: '09:00' }).time,
     'Окончание должно быть позже начала');
   assert.equal(workProblems(feedback, { comment: 'x', date: '2026-10-05', start: '10:00', end: '11:00' },
@@ -164,4 +167,42 @@ test('аналитика: подписи, проценты, фильтры', () 
     'date_from=2026-09-01&target=yandex');
   assert.equal(isRepeated({ total: 2 }), true);
   assert.equal(isRepeated({ total: 1 }), false);
+});
+
+
+test('запись работы: у ОС и тренинга результат обязателен', () => {
+  const feedback = { code: 'feedback', training: true, ask_training: true };
+  const filled = { comment: 'x', date: '2026-09-28', start: '10:00', end: '10:30' };
+  assert.equal(workProblems(feedback, filled).outcome, 'Укажите результат — он попадёт в «Тренинги»');
+  assert.deepEqual(workProblems(feedback, { ...filled, outcome: 'Признал' }), {});
+});
+
+test('без сотрудника — только объяснение, почему работать не с кем', () => {
+  const actions = ['feedback', 'review', 'training_assigned', 'training', 'no_training', 'other']
+    .map((code) => ({ code }));
+  assert.deepEqual(availableWorkActions(actions, {}).map((a) => a.code), ['review', 'no_training', 'other']);
+  assert.equal(availableWorkActions(actions, { employee_id: 4 }).length, 6);
+  // Лесенка у такой жалобы: сотрудник не определён, но работа закрыта объяснением.
+  assert.deepEqual(workSteps({ work_state: 'done' }).map((s) => [s.key, s.done]),
+    [['employee', false], ['done', true]]);
+});
+
+test('длинное описание — ошибка, а не молчаливая обрезка', () => {
+  const problems = formProblems(target('car_rental'), { ...FILLED, reason: 'terms', description: 'я'.repeat(4001) });
+  assert.ok(problems.description);
+});
+
+test('история говорит, ЧТО произошло', () => {
+  const meta = { results: [{ code: 'confirmed', title: 'Жалоба подтверждена' }],
+    work_actions: [{ code: 'feedback', title: 'Обратная связь проведена' }] };
+  assert.equal(eventText({ kind: 'employee', payload: { from: 'Иванова', to: 'Петров' } }),
+    'Сотрудник изменён: Иванова → Петров');
+  assert.equal(eventText({ kind: 'employee', payload: { from: 'Иванова', to: null } }),
+    'Сотрудник снят: Иванова');
+  assert.equal(eventText({ kind: 'employee', payload: { to: 'Петров' } }), 'Сотрудник определён: Петров');
+  assert.equal(eventText({ kind: 'result', payload: { result: 'confirmed', via: 'telegram' } }, meta),
+    'Итог проверки: Жалоба подтверждена · в группе');
+  assert.equal(eventText({ kind: 'work', payload: { action: 'feedback', closed: true } }, meta),
+    'Обратная связь проведена · работа завершена');
+  assert.equal(eventText({ kind: 'sent', payload: {} }), 'Отправлена в группу');
 });

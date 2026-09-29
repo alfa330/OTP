@@ -290,6 +290,15 @@ WORK_ACTIONS = [
 
 WORK_ACTION_BY_CODE = {item['code']: item for item in WORK_ACTIONS}
 
+# Что снимает требование тренинга: сам проведённый тренинг и прямое «обучение
+# не требуется». Остальное его не касается.
+TRAINING_CLEARING_ACTIONS = (ACTION_TRAINING, ACTION_NO_TRAINING)
+
+# Чем можно закрыть работу, когда сотрудника так и не определили: объяснить,
+# почему дальше работать не с кем, — «указать, почему дополнительная работа не
+# требуется» (ТЗ). ОС и тренинг без сотрудника провести нельзя.
+UNASSIGNED_ACTIONS = (ACTION_REVIEW, ACTION_NO_TRAINING, ACTION_OTHER)
+
 # Вид занятия в журнале «Тренинги». Только литералы из trainings_reason_check —
 # другое значение база не примет. Набор короче полного: «Собрание», «Тех. сбой»
 # и «Мониторинг» к работе по жалобе отношения не имеют.
@@ -317,7 +326,8 @@ def next_work_flags(flags, action_code, need_training=False):
     «обучение не требуется», другие меры), завершает работу, если после неё
     не остаётся требования тренинга. «Требуется тренинг» ставят две вещи —
     «Назначен тренинг» и галочка «Нужен тренинг» у ОС или разбора; снимают —
-    проведённый тренинг или прямое «обучение не требуется».
+    ТОЛЬКО проведённый тренинг или прямое «обучение не требуется»
+    (TRAINING_CLEARING_ACTIONS).
     """
     spec = WORK_ACTION_BY_CODE.get(str(action_code or ''))
     if not spec:
@@ -330,7 +340,10 @@ def next_work_flags(flags, action_code, need_training=False):
         training_required = True
     elif spec['ask_training'] and need_training:
         training_required = True
-    elif spec['closes']:
+    elif action_code in TRAINING_CLEARING_ACTIONS:
+        # Назначенный тренинг снимают ровно две записи. ОС, разбор или
+        # «другие меры» после «назначен тренинг» его не отменяют: иначе
+        # работа закрылась бы без проведённого тренинга (сверка с ТЗ 29.09.2026).
         training_required = False
     return {
         'feedback_done': feedback_done,
@@ -340,7 +353,7 @@ def next_work_flags(flags, action_code, need_training=False):
     }
 
 
-def work_summary(*, feedback_done, training_done, complaint_closed):
+def work_summary(*, feedback_done, training_done, complaint_closed, employee_known=True):
     """Отбивка в группу о проведённой работе — без внутренних деталей.
 
     ТЗ даёт образец: «Жалоба обработана. Сотрудник определён. Обратная связь
@@ -349,7 +362,7 @@ def work_summary(*, feedback_done, training_done, complaint_closed):
     обучения сотрудника не должны уходить оператору для передачи водителю».
     """
     parts = ['Жалоба обработана' if complaint_closed else 'Работа с сотрудником завершена',
-             'Сотрудник определён']
+             'Сотрудник определён' if employee_known else 'Сотрудник не определён']
     if feedback_done:
         parts.append('Обратная связь проведена')
     if training_done:
@@ -399,8 +412,12 @@ def is_closed(*, requires_processing, result_code, work_state):
         пока супервайзер не завершил обязательную работу с сотрудником либо не
         указал, почему дополнительная работа не требуется».
 
-    Сотрудник так и не определён — работа с ним не держит жалобу: разбирать
-    некого, и итог («не подтверждена», «недостаточно данных») это объясняет.
+    Сотрудник так и не определён — работа с ним держит жалобу, только если она
+    ПОДТВЕРДИЛАСЬ: подтверждённая жалоба на сотрудника без сотрудника — это
+    работа, которую никто не провёл. Закрыть её можно, определив сотрудника или
+    записав, почему работать не с кем (UNASSIGNED_ACTIONS: work_state станет
+    done). Не подтвердилась, «недостаточно данных», «не в зоне влияния» —
+    разбирать некого, итог это и объясняет.
 
     Жалоба, которую только зафиксировали (Яндекс, часть жалоб на парк), итога
     не ждёт: её никто не проверяет — она для аналитики.
@@ -408,6 +425,8 @@ def is_closed(*, requires_processing, result_code, work_state):
     if work_state == WORK_PENDING:
         return False
     if requires_processing and not result_code:
+        return False
+    if work_state == WORK_UNASSIGNED and result_code in CONFIRMED_RESULTS:
         return False
     return True
 
@@ -432,9 +451,8 @@ def _text(value, limit):
     return ' '.join(str(value or '').split())[:limit]
 
 
-def _longtext(value, limit):
-    text = str(value or '').replace('\r\n', '\n').strip()
-    return text[:limit]
+def _longtext(value):
+    return str(value or '').replace('\r\n', '\n').strip()
 
 
 def clean_complaint(data):
@@ -462,8 +480,10 @@ def clean_complaint(data):
         'driver_phone': _text(data.get('driver_phone'), LIMITS['driver_phone']),
         'driver_ref': _text(data.get('driver_ref'), LIMITS['driver_ref']) or None,
         'city': _text(data.get('city'), LIMITS['city']),
-        'description': _longtext(data.get('description'), LIMITS['description']),
-        'event_at': str(data.get('event_at') or '').strip() or None,
+        # Описание не обрезается молча: вставленный хвост переписки иначе
+        # пропал бы без предупреждения. Длинное — ошибка с понятной фразой.
+        'description': _longtext(data.get('description')),
+        'event_at': str(data.get('event_at') or '').strip().replace(' ', 'T') or None,
         'unit_id': _int_or_none(data.get('unit_id')),
         'employee_id': _int_or_none(data.get('employee_id')) if spec['employee'] else None,
         'requires_processing': requires_processing(code, _bool(data.get('requires_processing', True))),
@@ -482,15 +502,37 @@ def clean_complaint(data):
             errors[key] = message
     if spec['unit_required'] and not clean['unit_id']:
         errors['unit_id'] = 'Выберите подразделение колл-центра'
-    if clean['event_at'] and not _looks_like_datetime(clean['event_at']):
-        errors['event_at'] = 'Укажите дату и время события'
+    if len(clean['description']) > LIMITS['description']:
+        errors['description'] = 'Описание длиннее %d символов — сократите' % LIMITS['description']
+    # «Дату / примерное время события»: время необязательно, и то, что его не
+    # указали, храним явно. Иначе дата без времени легла бы полуночью, и в
+    # карточке и выгрузке появилось бы «00:00», которого никто не называл.
+    clean['event_time_known'] = False
+    if clean['event_at']:
+        parsed = _parse_event(clean['event_at'])
+        if parsed is None:
+            errors['event_at'] = 'Укажите дату и время события'
+        else:
+            clean['event_at'], clean['event_time_known'] = parsed
     return clean, errors
 
 
-def _looks_like_datetime(value):
-    import re
+def _parse_event(value):
+    """'2026-09-28' или '2026-09-28T14:30' → (значение для базы, указано ли время).
 
-    return bool(re.match(r'^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?$', str(value)))
+    None — не дата или несуществующая дата (30 февраля): такую база отвергла бы
+    ошибкой 500 вместо понятной фразы."""
+    from datetime import datetime as _dt
+
+    text = str(value or '').strip()
+    for pattern, has_time in (('%Y-%m-%dT%H:%M', True), ('%Y-%m-%dT%H:%M:%S', True),
+                              ('%Y-%m-%d', False)):
+        try:
+            moment = _dt.strptime(text, pattern)
+        except ValueError:
+            continue
+        return moment.strftime('%Y-%m-%d %H:%M:%S'), has_time
+    return None
 
 
 def _int_or_none(value):

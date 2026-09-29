@@ -172,12 +172,14 @@ class CallbackTest(ServiceCase):
                          ('prompt', 'answer', 555))
         self.assertEqual(self.db.max_depth, 1)
 
-    def test_closed_complaint_drops_its_buttons(self):
-        self.wire(complaint=dict(self.COMPLAINT, status='closed'))
+    def test_closed_complaint_still_takes_an_answer(self):
+        """Итог поставили раньше разъяснения — «Ответ водителю» всё равно
+        работает, иначе цикл ТЗ обрывался бы на закрытии."""
+        queries, transport = self.wire(complaint=dict(self.COMPLAINT, status='closed'))
         text = service.handle_callback(self.db, chat_id=-100, message_id=900,
-                                       data='cmp:q:12', from_user={'id': 1})
-        self.assertEqual(text, 'Жалоба уже обработана')
-        self.assertEqual(service.transport.sent[0]['reply_markup'], {'inline_keyboard': []})
+                                       data='cmp:a:12', from_user={'id': 1})
+        self.assertIn('ответом', text)
+        self.assertTrue(transport.sent[0]['reply_markup']['force_reply'])
 
 
 class TrainingCommentTest(unittest.TestCase):
