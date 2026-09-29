@@ -34,7 +34,7 @@ from datetime import datetime, time as day_time, timedelta
 # «Вопросы операторов» — сразу за задачами: на той стороне оператор, которому
 # помощник не ответил, и ответ ему нужен сейчас, а не к дедлайну.
 SOURCES = ('wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests',
-           'crm', 'lms', 'surveys', 'events', 'four_you', 'birthdays')
+           'crm', 'complaints', 'lms', 'surveys', 'events', 'four_you', 'birthdays')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -439,6 +439,50 @@ def _crm_queries():
     return crm_queries
 
 
+# ── Жалобы ───────────────────────────────────────────────────────────────────
+def complaints(cursor, viewer, limit):
+    """Жалобы, которые ждут зрителя (задача #297). Две причины:
+
+    * автору — пришёл ответ для водителя или группа задала вопрос. Гаснет
+      открытием карточки, как у обращений: ответ надо прочитать;
+    * ответственному — «на сотрудника поступила жалоба, необходимо провести
+      обратную связь и зафиксировать результат» (ТЗ). Гаснет, когда работа с
+      сотрудником завершена, а не просмотром: это задача, а не новость.
+    """
+    from complaints import catalog as complaint_catalog
+    from complaints import queries as complaint_queries
+
+    total, rows = complaint_queries.bell_items(cursor, viewer['user_id'], limit)
+    items = []
+    for row in rows:
+        reason = complaint_catalog.reason_title(row['target'], row['reason_code'])
+        if row['role'] == 'work':
+            title = 'Жалоба на %s' % (row['employee_name'] or 'сотрудника')
+            body = 'Проведите обратную связь и зафиксируйте результат · %s' % reason
+        else:
+            title = 'Жалоба №%d · %s' % (row['id'], reason)
+            body = _COMPLAINT_UNREAD_LABELS.get(row['kind'], 'Обновление по жалобе')
+        items.append({
+            'source': 'complaints',
+            'id': '%s:%s' % (row['role'], row['id']),
+            'title': title,
+            'body': body,
+            'at': _iso(row['at']),
+            'view': 'complaints',
+            'target': row['id'],
+            # Вопрос группы ждёт оператора, пока он не свяжется с водителем, —
+            # это то, что горит. Ответ и задача по сотруднику — обычный тон.
+            'tone': 'warning' if row['kind'] == 'question' else 'default',
+        })
+    return total, items
+
+
+_COMPLAINT_UNREAD_LABELS = {
+    'answer': 'Пришёл ответ для водителя',
+    'question': 'Группа просит уточнить у водителя',
+}
+
+
 # ── Дни рождения ─────────────────────────────────────────────────────────────
 def birthdays(cursor, viewer, limit):
     """Сегодняшние именинники — и только те, что в отделе зрителя.
@@ -814,6 +858,7 @@ _HANDLERS = {
     'checkpoints': checkpoints,
     'shift_requests': shift_requests,
     'crm': crm,
+    'complaints': complaints,
     'lms': lms,
     'surveys': surveys,
     'events': events,

@@ -482,6 +482,19 @@ except Exception:
     # Раздел не должен уметь уронить бота при старте: без обработчиков
     # обращения по-прежнему уходят в группы, просто ответы не возвращаются.
     logging.exception("Раздел «Обращения»: обработчики бота НЕ подключены")
+
+# ── Обработчики бота для раздела «Жалобы» (задача #297) ─────────────────────
+# Сразу за «Обращениями» и по той же причине — до десятков обработчиков без
+# фильтра по типу чата. Фильтр реплаев у разделов один: «Обращения» получают
+# реплай первыми, не находят своей нити и отдают его сюда (SkipHandler). Пул —
+# тот же crm_pool: оба раздела пишут из группы в свои таблицы по три строки, и
+# отдельный пул ради жалоб держал бы ещё три нити впустую.
+try:
+    import complaints.bot as complaints_bot  # noqa: E402
+
+    complaints_bot.register(dp, db, crm_pool, types)
+except Exception:
+    logging.exception("Раздел «Жалобы»: обработчики бота НЕ подключены")
 auth_maintenance_executor = ThreadPoolExecutor(max_workers=1)
 # Контроль опозданий держит свой пул: опрос Workpace идёт каждые 2 минуты, а
 # отчёт за месяц собирается минутами — в общем пуле из 4 воркеров они бы
@@ -64115,6 +64128,26 @@ try:
     logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
 except Exception:
     logging.exception("Раздел «Обращения»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Жалобы» (задача #297) ────────────────────────────────────────────
+# Тот же приём, что у «Обращений»: Blueprint, зависимости аргументами, ключ
+# QR-подтверждения общий — в жалобе ФИО и телефон живого водителя. Хелпер
+# <ignoredErrors> — для выгрузки: телефоны лежат в ней текстом.
+try:
+    from complaints.routes import build_complaints_blueprint  # noqa: E402
+
+    app.register_blueprint(build_complaints_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+    ))
+    logging.info("Раздел «Жалобы»: Blueprint подключён на /api/complaints")
+except Exception:
+    logging.exception("Раздел «Жалобы»: Blueprint НЕ подключён")
 
 
 # ── Раздел «Посылки» (реестр невостребованных посылок фронт-офисов) ──────────

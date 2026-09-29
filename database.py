@@ -6906,6 +6906,7 @@ class Database:
             self._init_qa_marketing_schema_tx(cursor)
             self._init_payments_schema_tx(cursor)
             self._init_library_schema_tx(cursor)
+            self._init_complaints_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -7070,6 +7071,15 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by];
                     END IF;
+                ELSIF TG_TABLE_NAME = 'complaints' THEN
+                    -- Жалоба будит двоих: автора (пришёл ответ для водителя или
+                    -- вопрос группы) и того, кому поставлена работа с
+                    -- сотрудником. При UPDATE — и прежнего ответственного:
+                    -- сотрудника поправили, и задача должна погаснуть у старого.
+                    targets := ARRAY[NEW.created_by, NEW.responsible_id];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.created_by, OLD.responsible_id];
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'tasks' THEN
                     -- Исполнители и принимающий; при UPDATE — и прежние тоже:
                     -- переназначенная задача должна погаснуть у старого владельца.
@@ -7232,6 +7242,24 @@ class Database:
                     OLD.author_unread_at IS DISTINCT FROM NEW.author_unread_at
                     OR OLD.status IS DISTINCT FROM NEW.status
                     OR OLD.delivery_status IS DISTINCT FROM NEW.delivery_status
+                )""",
+            ),
+            # Жалобы (задача #297). INSERT будит ответственного сразу: сотрудника
+            # мог определить уже оператор, и задача «проведите ОС» появляется в
+            # момент создания жалобы. UPDATE — только по колонкам, которые
+            # меняют сводку колокола, иначе каждый реплай группы (last_activity_at)
+            # слал бы тычок ни за что. Два триггера, а не один: WHEN у
+            # INSERT-триггера не может ссылаться на OLD.
+            ('trg_bell_complaints_insert', 'complaints', 'AFTER INSERT', ''),
+            (
+                'trg_bell_complaints',
+                'complaints',
+                'AFTER UPDATE OF author_unread_at, responsible_id, work_state, status',
+                """WHEN (
+                    OLD.author_unread_at IS DISTINCT FROM NEW.author_unread_at
+                    OR OLD.responsible_id IS DISTINCT FROM NEW.responsible_id
+                    OR OLD.work_state IS DISTINCT FROM NEW.work_state
+                    OR OLD.status IS DISTINCT FROM NEW.status
                 )""",
             ),
             ('trg_bell_tasks', 'tasks', 'AFTER INSERT OR UPDATE', ''),
@@ -7811,6 +7839,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT crm_schema")
+
+    def _init_complaints_schema_tx(self, cursor):
+        """Схема раздела «Жалобы» (таблицы complaint*, задача #297).
+
+        DDL — в пакете complaints/schema.py, импорт локальный (цикл). Вызывается
+        ПОСЛЕ базового DDL: журнал работы с сотрудником ссылается на trainings,
+        а жалоба — на departments и users. Под SAVEPOINT по той же причине, что
+        у «Обращений»: сломанная миграция раздела не должна ронять инициализацию
+        базы — раздел тогда честно скажет о себе через /api/complaints/ping.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT complaints_schema")
+        try:
+            from complaints.schema import init_complaints_schema
+            init_complaints_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT complaints_schema")
+            logging.exception(
+                "Схема раздела «Жалобы» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT complaints_schema")
 
     def _init_payments_schema_tx(self, cursor):
         """Схема раздела «Оплата счетов» (задача #179): заявки, шаги маршрута,

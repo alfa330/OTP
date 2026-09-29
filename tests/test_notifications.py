@@ -1026,6 +1026,9 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'event_reads', 'four_you_reads', 'birthday_reads',
                            'crm_tickets', 'operator_checkpoints',
                            'work_shift_change_requests',
+                           # Жалобы (#297): ответ автору и работа с сотрудником
+                           # ответственному.
+                           'complaints',
                            # Вопросы операторов: вопрос пришёл отделу, ответ —
                            # оператору (wiki/questions.py).
                            'wiki_operator_questions',

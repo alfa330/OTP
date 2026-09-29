@@ -58,16 +58,23 @@ def _call(method, *, json_payload=None, params=None, timeout=DEFAULT_TIMEOUT):
         return None, _error_text(error)
 
 
-def send_message(chat_id, text, *, reply_to_message_id=None, parse_mode='HTML'):
+def send_message(chat_id, text, *, reply_to_message_id=None, parse_mode='HTML',
+                 reply_markup=None):
     """Отправляет сообщение. При отказе разметки повторяет без неё.
 
     Повтор нужен потому, что текст обращения пишет человек: незакрытый «<»
     в описании проблемы Telegram отвергает целиком, и обращение потерялось бы
     из-за одной угловой скобки.
+
+    reply_markup — кнопки под сообщением или ForceReply (раздел «Жалобы»);
+    при повторе без разметки он сохраняется: кнопки к разметке текста
+    отношения не имеют.
     """
     payload = {'chat_id': chat_id, 'text': text, 'disable_web_page_preview': True}
     if parse_mode:
         payload['parse_mode'] = parse_mode
+    if reply_markup is not None:
+        payload['reply_markup'] = reply_markup
     if reply_to_message_id:
         payload['reply_to_message_id'] = reply_to_message_id
         # Реплай на удалённое сообщение иначе отменяет всю отправку.
@@ -81,6 +88,32 @@ def send_message(chat_id, text, *, reply_to_message_id=None, parse_mode='HTML'):
     payload['text'] = re.sub(r'<[^>]+>', '', text)
     payload.pop('parse_mode', None)
     return _call('sendMessage', json_payload=payload)
+
+
+def edit_message(chat_id, message_id, *, text=None, reply_markup=None, parse_mode='HTML'):
+    """Правит своё сообщение: текст (вместе с кнопками) или только кнопки.
+
+    Нужен разделу «Жалобы»: строка состояния под жалобой и кнопки меняются по
+    мере работы, а не добавляются новыми сообщениями в рабочий чат.
+
+    «message is not modified» — не ошибка: так Telegram отвечает, когда правка
+    ничего не меняет (повторное нажатие той же кнопки), и считать это отказом
+    значило бы шуметь в логах на каждом втором клике.
+    """
+    payload = {'chat_id': chat_id, 'message_id': int(message_id)}
+    if reply_markup is not None:
+        payload['reply_markup'] = reply_markup
+    if text is None:
+        result, error = _call('editMessageReplyMarkup', json_payload=payload)
+    else:
+        payload['text'] = text
+        payload['disable_web_page_preview'] = True
+        if parse_mode:
+            payload['parse_mode'] = parse_mode
+        result, error = _call('editMessageText', json_payload=payload)
+    if error and 'message is not modified' in str(error):
+        return {}, None
+    return result, error
 
 
 def set_message_reaction(chat_id, message_id, emoji):
