@@ -271,6 +271,32 @@ DDL = [
     # телефоны и итоги без типов).
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS outcome_subtype_id UUID"
     " REFERENCES dial_list_outcome_subtypes(id) ON DELETE SET NULL",
+    # ИИН и подписание документов (запрос владельца 29.09.2026, см. signing.py и
+    # sign_check.py). ИИН обязателен в файле базы, по нему Sapar говорит, подписал
+    # ли водитель документы за прошлый месяц. '' — строки, загруженные до ИИН.
+    #   sign_status     общий статус пакета документов (signing.SIGN_RANK), '' — не
+    #                   проверяли; CHECK нет намеренно: статусы задаёт Sapar
+    #   sign_docs       номер/статус/время подписи каждого документа — для карточки
+    #   sign_checked_at когда Sapar ответил последний раз (по нему «пора ли снова»)
+    #   signed_at       когда водитель подписал (последняя подпись пакета); не NULL —
+    #                   подписал: из пула ушёл навсегда, больше не проверяется
+    #   success_*       кому засчитана успешка; success_resolved_at — решение принято
+    #                   (NULL при signed_at — ждём конца звонка, начатого до подписи).
+    #                   success_attempt_id без FK: лид → попытки → выдачи → лид был бы
+    #                   кольцом внешних ключей с каскадами навстречу друг другу.
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS iin VARCHAR(12) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sign_status VARCHAR(16) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sign_docs JSONB NOT NULL DEFAULT '[]'::jsonb",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sign_checked_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sign_error TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS signed_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS signed_detected_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS success_attempt_id UUID",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS success_operator_id INTEGER"
+    " REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS success_resolved_at TIMESTAMP WITH TIME ZONE",
+    # Строки файла без ИИН или с ошибкой в нём — не загружаются, считаются отдельно.
+    "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS rows_bad_iin INTEGER NOT NULL DEFAULT 0",
     # Один лид — максимум в одной ОТКРЫТОЙ выдаче: два оператора не должны
     # звонить одному водителю одновременно.
     """
@@ -301,6 +327,28 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_pending_outcome ON dial_list_attempts(operator_id) WHERE outcome_id IS NULL AND leg_answered_at IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_outcome_subtypes_outcome ON dial_list_outcome_subtypes(outcome_id, position)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempts_outcome_subtype ON dial_list_attempts(outcome_subtype_id)",
+    # ИИН уникален в базе месяца отдела, как и номер: один водитель — одна строка,
+    # одна успешка. В DO-блоке: дубль, если он всё же окажется в данных, не должен
+    # выключить весь раздел (схема идёт под одним SAVEPOINT) — без индекса дубли
+    # ловит проверка при загрузке.
+    """
+    DO $$
+    BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_dial_list_leads_period_iin
+            ON dial_list_leads(department_id, period, iin) WHERE iin <> '';
+    EXCEPTION WHEN unique_violation THEN
+        RAISE WARNING 'dial_list: в базах есть повторы ИИН — индекс uq_dial_list_leads_period_iin не создан';
+    END $$
+    """,
+    # Кому пора проверять подписание: только неподписавшие с ИИН.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_sign_due ON dial_list_leads(period, sign_checked_at)"
+    " WHERE iin <> '' AND signed_at IS NULL",
+    # Успешки оператора по дням (сводка «Операторы», аналитика).
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_success_operator"
+    " ON dial_list_leads(success_operator_id, signed_at) WHERE success_attempt_id IS NOT NULL",
+    # Подписавшие, по кому решение об успешке ещё не принято.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_success_pending ON dial_list_leads(signed_at)"
+    " WHERE signed_at IS NOT NULL AND success_resolved_at IS NULL",
 ]
 
 

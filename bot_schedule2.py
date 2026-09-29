@@ -67743,6 +67743,16 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error running tez_op_successes_job: {e}")
 
+    async def dial_list_sign_check_job():
+        # «Обзвон»: подписали ли водители базы документы (Sapar). Джоба лишь ставит
+        # прогон в собственный поток раздела на одно место и ничего не ждёт; каждого
+        # водителя прогон перепроверяет раз в 3 часа (dial_list/sign_check.py).
+        try:
+            if _dial_list_service is not None:
+                _dial_list_service.request_sign_check('планировщик')
+        except Exception as e:
+            logging.exception(f"Error scheduling dial_list sign check: {e}")
+
     async def reg_contest_sync_job():
         # Конкурс «Топ по регистрациям»: срез засчитанных водителей из CRM
         # каждые полчаса — рейтинг живёт сам, без кнопки. После дедлайна
@@ -67837,6 +67847,18 @@ if __name__ == '__main__':
         CronTrigger(hour=1, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='tez_op_successes_daily',
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Обзвон»: проверка подписания документов по базам (Sapar) — каждые полчаса,
+    # в стороне от :05/:35 и :12/:42. Кому пора (проверен ≥ 3 ч назад или ни разу),
+    # решает сам раздел; без SAPAR_API прогон — no-op с предупреждением в логе.
+    scheduler.add_job(
+        dial_list_sign_check_job,
+        CronTrigger(minute='20,50', timezone=ZoneInfo('Asia/Almaty')),
+        id='dial_list_sign_check',
+        misfire_grace_time=600,
         max_instances=1,
         coalesce=True
     )

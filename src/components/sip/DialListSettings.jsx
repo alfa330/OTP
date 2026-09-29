@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosToggle, IosSegmented } from '../ui/ios';
+import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosToggle, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
 
@@ -35,6 +35,28 @@ const numOr = (value, fallback) => {
 const readError = async (resp) => {
     const data = await resp.json().catch(() => ({}));
     return data?.error || `HTTP ${resp.status}`;
+};
+
+/* «строки 5, 17, 23…» — чтобы ошибку можно было найти в файле. */
+const rowsText = (rows = [], total = 0) => {
+    if (!rows.length) return '';
+    const more = total > rows.length ? '…' : '';
+    return `${rows.length === 1 && total <= 1 ? 'строка' : 'строки'} ${rows.join(', ')}${more}`;
+};
+
+/* Итог загрузки одной фразой: что добавилось и что не загрузилось и почему. */
+const uploadSummary = (data, period) => {
+    const parts = [`новых ${data.rows_new ?? 0}`];
+    if (data.rows_duplicate) parts.push(`повторов ${data.rows_duplicate}`);
+    if (data.rows_bad_iin) {
+        const where = rowsText(data.bad_iin_rows, data.rows_bad_iin);
+        parts.push(`без ИИН или с ошибкой в нём ${data.rows_bad_iin}${where ? ` (${where})` : ''}`);
+    }
+    if (data.rows_invalid) {
+        const where = rowsText(data.invalid_rows, data.rows_invalid);
+        parts.push(`без номера ${data.rows_invalid}${where ? ` (${where})` : ''}`);
+    }
+    return `${monthLabel(data.period || period)}: ${parts.join(', ')}`;
 };
 
 const fmtDate = (iso) => {
@@ -256,7 +278,9 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-            toast(`${monthLabel(data.period || shownPeriod)}: новых ${data.rows_new ?? 0}, повторов ${data.rows_duplicate ?? 0}, без номера ${data.rows_invalid ?? 0}`, 'success');
+            // Не загрузилось ничего из-за ИИН — это ошибка файла, а не успех.
+            const failedAll = !data.rows_new && !data.rows_duplicate && (data.rows_bad_iin || data.rows_invalid);
+            toast(uploadSummary(data, shownPeriod), failedAll ? 'error' : 'success');
             onChanged?.();
         } catch (e) {
             toast(e.message || 'Не удалось загрузить список', 'error');
@@ -272,11 +296,14 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
         upload(e.dataTransfer?.files?.[0]);
     };
 
+    // Подписавшие документы — своей плиткой: их больше не обзванивают, и в «Не
+    // звонили» / «В работе» они бы врали (сервер их туда и не считает).
     const tiles = [
         { label: 'Всего', value: summary?.total ?? 0, tone: 'text-slate-900' },
         { label: 'Не звонили', value: summary?.by_status?.new ?? 0, tone: 'text-slate-900' },
         { label: 'В работе', value: summary?.by_status?.in_progress ?? 0, tone: 'text-amber-600' },
-        { label: 'Закрыто', value: summary?.by_status?.done ?? 0, tone: 'text-emerald-600' },
+        { label: 'Закрыто', value: summary?.by_status?.done ?? 0, tone: 'text-slate-900' },
+        { label: 'Подписали', value: summary?.signed ?? 0, tone: 'text-emerald-600' },
         { label: 'Доступно сейчас', value: isActive ? (summary?.pool_available ?? 0) : '—', tone: 'text-blue-600' },
     ];
 
@@ -302,7 +329,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                     Операторы сейчас получают порции из базы за {monthLabel(summary.active_period)}. Чтобы обзванивать этот месяц, переключите его во вкладке «Настройки».
                 </div>
             )}
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                 {tiles.map((t) => (
                     <div key={t.label} className={`${iosCard} px-3 py-3`}>
                         <div className={`text-[20px] font-semibold tabular-nums ${t.tone}`}>{t.value}</div>
@@ -325,8 +352,13 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                     </div>
                     <div className="mt-3 text-[14px] font-semibold text-slate-800">Загрузить список водителей{shownPeriod ? ` за ${monthLabel(shownPeriod)}` : ''}</div>
                     <div className="mt-1 text-[12.5px] text-slate-500">
-                        Перетащите сюда CSV или Excel с колонками <b>fio</b> и <b>phone</b>, или выберите файл.
-                        Внутри месяца повторные номера не дублируются; в базе другого месяца тот же номер допускается.
+                        Перетащите сюда CSV или Excel с колонками <b>fio</b>, <b>phone</b> и <b>iin</b>, или выберите файл.{' '}
+                        <span className="inline-block align-middle">
+                            <IosHint
+                            align="right"
+                                text="ИИН обязателен: по нему раз в 3 часа проверяется, подписал ли водитель документы. Строки без ИИН или с ошибкой в нём не загружаются — после загрузки покажем их номера. В Excel задайте колонке iin текстовый формат: иначе длинный ИИН может превратиться в число вида 5,03E+11. Внутри месяца повторные номера и ИИН не дублируются; в базе другого месяца тот же водитель допускается."
+                            />
+                        </span>
                     </div>
                     <input
                         ref={fileRef}
@@ -356,6 +388,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                             <div className="flex shrink-0 items-center gap-1.5">
                                 <IosBadge tone="green">+{b.rows_new}</IosBadge>
                                 {b.rows_duplicate > 0 && <IosBadge tone="slate">повтор {b.rows_duplicate}</IosBadge>}
+                                {b.rows_bad_iin > 0 && <IosBadge tone="red">без ИИН {b.rows_bad_iin}</IosBadge>}
                                 {b.rows_invalid > 0 && <IosBadge tone="red">без номера {b.rows_invalid}</IosBadge>}
                             </div>
                         </div>

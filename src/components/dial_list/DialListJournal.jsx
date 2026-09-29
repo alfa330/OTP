@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Ban, ChevronRight, Loader2, PhoneCall, PhoneMissed, PhoneOff, PhoneOutgoing, Play, Plus, RefreshCw,
-    Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
+    Ban, Check, ChevronRight, FileCheck2, Loader2, PhoneCall, PhoneMissed, PhoneOff, PhoneOutgoing, Play, Plus,
+    RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert, Undo2, X,
 } from 'lucide-react';
 import {
     iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosHint, IosModal,
@@ -11,6 +11,7 @@ import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import { OutcomeBadge } from './DialListOutcomesPanel';
 import { subtypeChips } from './outcomeFormat';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
+import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
 
 /*
  * Журнал водителей раздела «Обзвон из телефона» (запрос владельца 23.09.2026).
@@ -37,7 +38,15 @@ import { buildPeriodOptions, monthLabel } from './dialListPeriods';
  *
  * Номер телефона здесь — только маска (последние 4 цифры), как и везде в
  * разделе: файл с номерами есть у того, кто его загрузил, а сервер номер наружу
- * не отдаёт вовсе.
+ * не отдаёт вовсе. ИИН — так же, хвостом.
+ *
+ * Подписание документов (запрос владельца 29.09.2026): подписавший — отдельный
+ * этап «Подписали» (галочка, а не точка: зелёная точка уже у «Дозвонились»), у
+ * него видно, кому засчитана успешка. Фильтр «Документы» — в панели фильтров.
+ * В строке остальных этапов состояние документов показывается, только когда оно
+ * меняет действия: «на проверке у Яндекса» (водитель уже подписал) и «срок
+ * подписания истёк» (звонить поздно). Обычное «не подписал» не пишется — это
+ * состояние почти всех строк, и на каждой оно было бы шумом.
  */
 
 const PAGE = 50;
@@ -52,8 +61,12 @@ const STAGES = [
     { value: 'answered', label: 'Дозвонились', dot: 'bg-emerald-500' },
     { value: 'exhausted', label: 'Не дозвонились', dot: 'bg-rose-500' },
     { value: 'excluded', label: 'Исключены', dot: 'bg-slate-300' },
+    { value: 'signed', label: 'Подписали', dot: 'bg-emerald-600', check: true },
 ];
 const STAGE_DOT = Object.fromEntries(STAGES.map((s) => [s.value, s.dot]));
+
+/* Состояние документов, которое стоит показать в строке (см. шапку файла). */
+const SIGN_NOTE = { processing: 'на проверке у Яндекса', expired: 'срок подписания истёк', no_iin: 'нет ИИН' };
 
 const RESULT_LABEL = {
     answered: 'Дозвонились', busy: 'Занято', no_answer: 'Не ответил', other: 'Не состоялся', failed: 'Ошибка АТС',
@@ -215,16 +228,37 @@ const stageDetail = (lead) => {
             return lead.attempts_total
                 ? `${lead.attempts_total} ${plural(lead.attempts_total, 'попытка', 'попытки', 'попыток')} без ответа`
                 : result;
+        case 'signed':
+            return successText(lead.sign);
         default:
             return '';
     }
 };
 
+/** Кому засчитано подписание: оператор / «подписал сам» / ждём конца звонка. */
+const successText = (sign) => {
+    if (!sign) return '';
+    if (sign.success) return `успешка · ${sign.success.operator?.name || 'оператор'}`;
+    if (!sign.resolved) return 'ждём конца звонка';
+    return 'подписал сам, без разговора';
+};
+
+/** Этап и его подробность одной строкой + состояние документов, когда оно важно. */
+const detailWithSign = (lead) => {
+    const detail = stageDetail(lead);
+    const note = lead.stage !== 'signed' ? SIGN_NOTE[lead.sign?.status] : '';
+    return [detail, note].filter(Boolean).join(' · ');
+};
+
 /* ─── мелкие детали ─────────────────────────────────────────────────────── */
 
-const Dot = ({ stage, className = '' }) => (
+const Dot = ({ stage, className = '' }) => (stage === 'signed' ? (
+    <span className={`inline-grid h-3 w-3 shrink-0 place-items-center rounded-full bg-emerald-600 text-white ${className}`}>
+        <Check size={8} strokeWidth={4} />
+    </span>
+) : (
     <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${STAGE_DOT[stage] || 'bg-slate-300'} ${className}`} />
-);
+));
 
 const Avatar = ({ name, dim = false }) => (
     <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-[12px] font-semibold ${dim ? 'text-slate-400' : 'text-slate-500'}`}>
@@ -244,7 +278,7 @@ const GRID = 'lg:grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.3
 
 const LeadRow = ({ lead, onOpen, showMonth }) => {
     const excluded = lead.stage === 'excluded';
-    const detail = stageDetail(lead);
+    const detail = detailWithSign(lead);
     const operatorSub = lead.responsible_is_current ? 'в списке сейчас' : fmtWhen(lead.last_call?.at);
     const name = lead.full_name || 'Без имени';
     return (
@@ -348,7 +382,9 @@ const StageStrip = ({ value, onChange, counts }) => {
                                 : `font-medium hover:bg-white/60 ${item.count ? 'text-slate-600' : 'text-slate-400'}`
                         }`}
                     >
-                        {item.dot && <span className={`h-2 w-2 shrink-0 rounded-full ${item.dot} ${item.count || active ? '' : 'opacity-40'}`} />}
+                        {item.check ? (
+                            <span className={`${item.count || active ? '' : 'opacity-40'}`}><Dot stage="signed" /></span>
+                        ) : item.dot && <span className={`h-2 w-2 shrink-0 rounded-full ${item.dot} ${item.count || active ? '' : 'opacity-40'}`} />}
                         {item.label}
                         <span className={`tabular-nums ${active ? 'text-slate-500' : 'text-slate-400'}`}>{item.count}</span>
                     </button>
@@ -473,6 +509,14 @@ const AttemptItem = ({ attempt, recording, onRecording }) => {
             <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
                     <span className="text-[14px] font-semibold text-slate-900">{title}</span>
+                    {attempt.is_success && (
+                        <span
+                            className="inline-flex items-center gap-1 self-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11.5px] font-medium text-emerald-700 ring-1 ring-emerald-100"
+                            title="Водитель подписал документы после этого разговора — успешка засчитана оператору"
+                        >
+                            <FileCheck2 size={11} /> Успешка
+                        </span>
+                    )}
                     {/* Ответ АТС — служебный текст на английском; нужен, только когда
                         разбираются, почему звонок не ушёл, поэтому он под «i». */}
                     {attempt.api_error && <span className="self-center"><IosHint text={attempt.api_error} label="Ответ АТС" /></span>}
@@ -627,6 +671,84 @@ const NoteSection = ({ lead, canEdit, busy, draft, setDraft, onSave }) => {
     );
 };
 
+/* Сколько документов в каком статусе: «подписан ×2 · ждёт подписи водителя». */
+const docsSummary = (docs = []) => {
+    if (!docs.length) return '';
+    const counts = new Map();
+    docs.forEach((d) => counts.set(d.label || d.status, (counts.get(d.label || d.status) || 0) + 1));
+    const parts = [...counts.entries()].map(([label, n]) => (n > 1 ? `${label} ×${n}` : label));
+    return `${docs.length} ${plural(docs.length, 'документ', 'документа', 'документов')}: ${parts.join(' · ')}`;
+};
+
+/* Подписание документов по Sapar: статус, ИИН хвостом, когда проверяли, кому
+   засчитано. «Проверить сейчас» — один запрос в Sapar, для случая «водитель
+   говорит, что уже подписал». Подписавшего не перепроверяем: он из обзвона ушёл. */
+const SignSection = ({ lead, canEdit, checking, onCheck }) => {
+    const sign = lead.sign || {};
+    const meta = signMeta(sign.status);
+    const signed = sign.status === 'signed';
+    const title = sign.doc_month_label ? `Документы за ${sign.doc_month_label.toLowerCase()}` : 'Документы';
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>{title}</span>
+                <IosHint text="Подписание проверяется по ИИН в Sapar раз в 3 часа. Документы месяца приходят в следующем, поэтому база месяца проверяется по документам прошлого. Общий статус — худший из документов. Успешка — оператору, который последним поговорил с водителем не меньше 10 секунд до подписи." />
+            </div>
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="ml-4 divide-y divide-slate-100">
+                    {/* У подписавшего статус уже назван этапом выше — вместо второго
+                        «Подписал» строка «Успешка» с временем подписи. */}
+                    {!signed && (
+                        <InfoRow label="Статус" sub={docsSummary(sign.documents)} subTitle={docsSummary(sign.documents)}>
+                            <span className="inline-flex items-center gap-1.5">
+                                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: meta.color }} />
+                                {sign.label || meta.label}
+                            </span>
+                        </InfoRow>
+                    )}
+                    {signed && (
+                        <InfoRow
+                            label="Успешка"
+                            sub={[sign.signed_at ? `подписал ${fmtWhen(sign.signed_at)}` : '',
+                                sign.documents?.length ? `${sign.documents.length} ${plural(sign.documents.length, 'документ', 'документа', 'документов')}` : '']
+                                .filter(Boolean).join(' · ')}
+                        >
+                            {sign.success ? sign.success.operator?.name || 'Оператор'
+                                : <span className="text-slate-500">{successText(sign)}</span>}
+                        </InfoRow>
+                    )}
+                    <InfoRow label="ИИН">
+                        {lead.iin_masked ? <span className="tabular-nums">{lead.iin_masked}</span>
+                            : <span className="text-slate-400">не указан</span>}
+                    </InfoRow>
+                    {lead.has_iin && !signed && (
+                        <div className="flex items-center justify-between gap-4 py-2.5 pr-4">
+                            <div className="min-w-0">
+                                <div className="text-[13.5px] text-slate-500">Проверено</div>
+                                {sign.error && <div className="truncate text-[12px] text-rose-600" title={sign.error}>Sapar не ответил</div>}
+                            </div>
+                            <div className="flex shrink-0 items-center gap-3">
+                                <span className="text-[13.5px] text-slate-900">{sign.checked_at ? fmtWhen(sign.checked_at) : 'ещё нет'}</span>
+                                {canEdit && sign.can_check !== false && (
+                                    <button
+                                        type="button"
+                                        onClick={onCheck}
+                                        disabled={checking}
+                                        className="inline-flex items-center gap-1 text-[13.5px] font-medium text-blue-600 transition hover:text-blue-700 disabled:opacity-60"
+                                    >
+                                        {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                                        Проверить
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </section>
+    );
+};
+
 const CONFIRM_TEXT = {
     exclude: 'Исключить водителя из обзвона? Операторы больше его не получат.',
     requeue: 'Вернуть водителя в список? Попытки обнулятся. Если его строка ещё на экране у оператора — '
@@ -636,7 +758,7 @@ const CONFIRM_TEXT = {
 
 const LeadSheet = ({
     open, lead, loading, error, canEdit, busy, recordings,
-    onClose, onRetry, onRequeue, onExclude, onSaveNote, onRecording,
+    onClose, onRetry, onRequeue, onExclude, onSaveNote, onRecording, onSignCheck, checking,
 }) => {
     const [confirm, setConfirm] = useState(null); // 'requeue' | 'restore' | 'exclude' | null
     const [reason, setReason] = useState('');
@@ -677,7 +799,8 @@ const LeadSheet = ({
 
     const historyReady = Array.isArray(lead?.attempts);
     const canRequeue = canEdit && historyReady && ['answered', 'exhausted', 'waiting', 'excluded'].includes(lead.stage);
-    const canExclude = canEdit && historyReady && lead.stage !== 'excluded';
+    // Подписавшему ни возврат, ни исключение не нужны: обзвон для него окончен.
+    const canExclude = canEdit && historyReady && lead.stage !== 'excluded' && lead.stage !== 'signed';
     const requeueKind = lead?.stage === 'excluded' ? 'restore' : 'requeue';
 
     const submit = async () => {
@@ -786,6 +909,10 @@ const LeadSheet = ({
                         </div>
                     </div>
 
+                    {historyReady && lead.sign && (
+                        <SignSection lead={lead} canEdit={canEdit} checking={checking} onCheck={onSignCheck} />
+                    )}
+
                     <NoteSection lead={lead} canEdit={canEdit && historyReady} busy={busy} draft={noteDraft} setDraft={setNoteDraft} onSave={saveNote} />
 
                     <section className="space-y-1.5">
@@ -822,17 +949,21 @@ const LeadSheet = ({
 
 const DialListJournal = ({
     apiBaseUrl, authHeaders, departmentId, batches = [], periods = [], activePeriod = '',
-    period = '', onPeriodChange, canEdit = true, showToast, onChanged,
+    period = '', onPeriodChange, canEdit = true, showToast, onChanged, preset = null,
 }) => {
     const [q, setQ] = useState('');
     const [qDebounced, setQDebounced] = useState('');
-    const [stage, setStage] = useState('');
-    const [operatorId, setOperatorId] = useState('');
+    // Отбор из «Аналитики» применяется сразу при открытии — без запроса с пустыми фильтрами.
+    const [stage, setStage] = useState(() => preset?.stage || '');
+    const [operatorId, setOperatorId] = useState(() => preset?.operatorId || '');
     const [batchId, setBatchId] = useState('');
     const [outcomeId, setOutcomeId] = useState('');
     // Тип итога: '' — все, uuid — тип, 'none' — «Без типа». Имеет смысл только при outcomeId.
     const [outcomeSubtypeId, setOutcomeSubtypeId] = useState('');
     const [range, setRange] = useState({ from: '', to: '' });
+    // Подписание документов: '' — любые, иначе ключ service.JOURNAL_SIGN_FILTERS.
+    const [sign, setSign] = useState(() => preset?.sign || '');
+    const appliedPreset = useRef(preset?.nonce || 0);
     const [sort, setSort] = useState('activity');
     const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -851,6 +982,7 @@ const DialListJournal = ({
     const [cardLoading, setCardLoading] = useState(false);
     const [cardError, setCardError] = useState('');
     const [busy, setBusy] = useState(false);
+    const [checking, setChecking] = useState(false);
     const [recordings, setRecordings] = useState({});
     const requestSeq = useRef(0);
     const summarySeq = useRef(0);
@@ -867,6 +999,19 @@ const DialListJournal = ({
         const t = setTimeout(() => setQDebounced(q.trim()), 300);
         return () => clearTimeout(t);
     }, [q]);
+
+    /* Переход из «Аналитики»: журнал открывается ровно с тем отбором, по которому
+       нажали (этап, документы или оператор), остальные фильтры снимаются — иначе
+       число в журнале не совпало бы с числом, на которое нажали. */
+    useEffect(() => {
+        if (!preset?.nonce || preset.nonce === appliedPreset.current) return;
+        appliedPreset.current = preset.nonce;
+        setQ(''); setQDebounced(''); setBatchId(''); setOutcomeId(''); setOutcomeSubtypeId(''); setRange({ from: '', to: '' });
+        setStage(preset.stage || '');
+        setSign(preset.sign || '');
+        setOperatorId(preset.operatorId || '');
+        setFiltersOpen(false);
+    }, [preset?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
         let cancelled = false;
@@ -897,8 +1042,9 @@ const DialListJournal = ({
         if (period) qs.set('period', period);
         if (range.from) qs.set('date_from', range.from);
         if (range.to) qs.set('date_to', range.to);
+        if (sign) qs.set('sign', sign);
         return qs;
-    }, [qDebounced, stage, operatorId, batchId, outcomeId, outcomeSubtypeId, period, range.from, range.to, sort]);
+    }, [qDebounced, stage, operatorId, batchId, outcomeId, outcomeSubtypeId, period, range.from, range.to, sort, sign]);
 
     const applySummary = (data) => {
         setTotal(Number(data.total) || 0);
@@ -1015,6 +1161,32 @@ const DialListJournal = ({
         }
     };
 
+    /* «Проверить сейчас»: ответ — обновлённая карточка; тост называет итог. */
+    const checkSign = async () => {
+        const leadId = openId;
+        if (!leadId || checking) return;
+        setChecking(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${leadId}/sign_check`, {
+                method: 'POST', credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{}',
+            });
+            if (!resp.ok) throw new Error(await readError(resp));
+            const data = await resp.json();
+            if (data.lead) {
+                if (openIdRef.current === leadId) setCard(data.lead);
+                setItems((cur) => cur.map((it) => (it.id === data.lead.id ? { ...it, ...data.lead, attempts: undefined, events: undefined } : it)));
+                if (data.lead.stage === 'signed') { load(0, { keepSize: true }); onChanged?.(); }
+                const label = data.lead.sign?.label || '';
+                toast(data.lead.stage === 'signed' ? `Подписал документы — ${lower(successText(data.lead.sign))}` : `Sapar: ${lower(label)}`, 'success');
+            }
+        } catch (e) {
+            toast(e.message || 'Не удалось проверить', 'error');
+        } finally {
+            setChecking(false);
+        }
+    };
+
     const fetchRecording = async (attemptId) => {
         setRecordings((cur) => ({ ...cur, [attemptId]: { loading: true } }));
         try {
@@ -1059,11 +1231,17 @@ const DialListJournal = ({
             key: 'range', name: 'Звонили', label: rangeLabel(range.from, range.to),
             clear: () => setRange({ from: '', to: '' }),
         },
+        sign && {
+            key: 'sign', name: 'Документы',
+            label: SIGN_FILTER_OPTIONS.find((o) => o.value === sign)?.label || sign,
+            clear: () => setSign(''),
+        },
     ].filter(Boolean);
 
     const hasFilters = Boolean(qDebounced || stage || outcomeId || outcomeSubtypeId || chips.length);
     const resetFilters = () => {
         setQ(''); setStage(''); setOperatorId(''); setBatchId(''); setOutcomeId(''); setOutcomeSubtypeId(''); setRange({ from: '', to: '' });
+        setSign('');
     };
     /* Тип принадлежит итогу: сменили итог — тип сбрасываем здесь же, в
        обработчике, а не эффектом (эффект дал бы лишний запрос со старым типом). */
@@ -1083,7 +1261,7 @@ const DialListJournal = ({
                         type="search"
                         value={q}
                         onChange={(e) => setQ(e.target.value)}
-                        placeholder="ФИО или последние цифры номера"
+                        placeholder="ФИО, последние цифры номера или ИИН"
                         className={`${iosInput} pl-9`}
                         aria-label="Поиск по журналу"
                     />
@@ -1136,7 +1314,7 @@ const DialListJournal = ({
                     ))}
                     <button
                         type="button"
-                        onClick={() => { setOperatorId(''); setBatchId(''); setRange({ from: '', to: '' }); }}
+                        onClick={() => { setOperatorId(''); setBatchId(''); setRange({ from: '', to: '' }); setSign(''); }}
                         className="px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 transition hover:text-slate-700"
                     >
                         сбросить всё
@@ -1149,7 +1327,7 @@ const DialListJournal = ({
                    подпись внутри <label> занимала строку высотой со шрифт самого
                    label (~24 px), а подпись-блок — свою (18 px), и поле дат
                    стояло на 6 px выше соседей. */
-                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-3`}>
+                <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-4`}>
                     <label className="block space-y-1.5">
                         <span className={FIELD_HEAD}>Оператор</span>
                         <CustomSelect value={operatorId} onChange={setOperatorId} options={operatorOptions} variant="ios" searchable={users.length > 8} ariaLabel="Оператор" />
@@ -1157,6 +1335,10 @@ const DialListJournal = ({
                     <label className="block space-y-1.5">
                         <span className={FIELD_HEAD}>Файл загрузки</span>
                         <CustomSelect value={batchId} onChange={setBatchId} options={batchOptions} variant="ios" ariaLabel="Файл загрузки" />
+                    </label>
+                    <label className="block space-y-1.5">
+                        <span className={FIELD_HEAD}>Документы</span>
+                        <CustomSelect value={sign} onChange={setSign} options={SIGN_FILTER_OPTIONS} variant="ios" ariaLabel="Подписание документов" />
                     </label>
                     {/* div, а не label: календарь раскрывается внутри, и label
                         отдавал бы щелчок по пустому месту календаря кнопке-чипу —
@@ -1274,6 +1456,8 @@ const DialListJournal = ({
                 onExclude={(note) => act('exclude', 'POST', { note }, 'Водитель исключён из обзвона')}
                 onSaveNote={(note) => act('note', 'PUT', { note }, note.trim() ? 'Заметка сохранена' : 'Заметка удалена')}
                 onRecording={fetchRecording}
+                onSignCheck={checkSign}
+                checking={checking}
             />
         </section>
     );

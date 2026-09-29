@@ -400,7 +400,13 @@ class LeadsJournalTests(unittest.TestCase):
                          "l.attempts_total >= %(max_attempts)s", "l.status = 'excluded'"):
             self.assertIn(fragment, sql)
         self.assertEqual(set(dial_service.LEAD_STAGES),
-                         {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded'})
+                         {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded', 'signed'})
+        # Подписавший — первым: из пула он ушёл (signed_at в _POOL_SQL), и «В очереди»
+        # у него было бы неправдой (владелец, 29.09.2026).
+        case = sql[sql.index('CASE'):sql.index('END AS stage')]
+        self.assertLess(case.index("WHEN l.signed_at IS NOT NULL THEN 'signed'"),
+                        case.index("WHEN l.status = 'excluded'"))
+        self.assertIn('AND l.signed_at IS NULL', dial_service.DialListService._POOL_SQL)
         svc = dial_service.DialListService(db=None)
         with self.assertRaises(dial_service.DialListError):
             svc.department_settings = lambda d: {"max_attempts": 3, "retry_after_hours": 24,
@@ -578,7 +584,8 @@ class LeadsJournalTests(unittest.TestCase):
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         journal_part = src[src.index('# ── журнал водителей'):src.index("@bp.route('/api/dial_list/overview'")]
         routes = [chunk for chunk in journal_part.split('@bp.route(')[1:]]
-        self.assertEqual(len(routes), 6)
+        # Карточка, «вернуть», «исключить», «проверить подписание», заметка, запись, список.
+        self.assertEqual(len(routes), 7)
         for chunk in routes:
             self.assertIn('_manager(', chunk, 'ручка журнала без проверки зоны руководителя')
             self.assertIn('@require_api_key', chunk)
@@ -1212,8 +1219,12 @@ class OutcomeSubtypesTests(unittest.TestCase):
         return svc.leads_journal(1, **kwargs), cur
 
     def test_journal_rows_types_counts_and_total(self):
-        self.assertEqual(dial_service.DialListService._JOURNAL_COLUMNS.split(',')[-2:],
-                         [' last_outcome_subtype_id', ' last_outcome_subtype_name'])   # новые — в конце
+        columns = [c.strip() for c in dial_service.DialListService._JOURNAL_COLUMNS.split(',')]
+        # Новые — в конце: типы итога, за ними подписание документов (29.09.2026).
+        self.assertEqual(columns[37:39], ['last_outcome_subtype_id', 'last_outcome_subtype_name'])
+        self.assertEqual(columns[39:], ['iin', 'sign_status', 'sign_checked_at', 'sign_error', 'signed_at',
+                                        'success_attempt_id', 'success_operator_id', 'success_operator_name',
+                                        'success_resolved_at'])
         # stage, outcome, subtype, for_stage, for_outcome
         summary = [['answered', self.R, self.S1, 2, 3], ['answered', self.R, None, 1, 1],
                    ['exhausted', self.R, self.S2, 0, 2], ['queue', None, None, 5, 5],

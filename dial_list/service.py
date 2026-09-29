@@ -38,8 +38,19 @@ from datetime import datetime, timedelta, timezone
 
 import hmac
 
+import psycopg2
+import psycopg2.errors
+from psycopg2.extras import execute_values
+
 from binotel import client as binotel
 from common.kz_phone import normalize_kz_phone  # noqa: F401 — нормализация номеров списка
+# Проверка ИИН — та же, что у «Ссылки на подписание»: 12 цифр, дата, контрольная
+# цифра. Чистая логика без базы и сети, двойник на фронте сторожит её тест.
+from sign_links import iin as iin_rules
+from crm import sapar as sapar_api
+
+from . import signing
+from .sign_check import SignChecker
 
 log = logging.getLogger(__name__)
 
@@ -238,6 +249,32 @@ def _subtypes_from_json(value):
             for s in (value or []) if isinstance(s, dict)]
 
 
+# Сколько номеров строк с ошибкой возвращать загрузившему («строки 5, 17, 23…»):
+# этого хватает, чтобы найти их в файле, а ответ не растёт с размером файла.
+ROW_SAMPLE_MAX = 10
+
+
+def clean_iin(raw):
+    """ИИН из файла → 12 цифр либо '' (нет или с ошибкой). 11 цифр — ведущий ноль,
+    потерянный по дороге через Excel/CSV у родившихся в 2000-х: дополняем, если
+    дополненный сходится по контрольной цифре."""
+    value, error = iin_rules.validate(raw)
+    if value:
+        return value
+    digits = iin_rules.normalize(raw)
+    if error == "length" and digits.isdigit() and len(digits) == iin_rules.IIN_LENGTH - 1:
+        value, _ = iin_rules.validate("0" + digits)
+        if value:
+            return value
+    return ""
+
+
+def mask_iin(iin):
+    """ИИН для руководителя — только хвост, как и номер: полный есть в файле загрузки."""
+    digits = "".join(ch for ch in str(iin or "") if ch.isdigit())
+    return f"•••• •••• {digits[-4:]}" if len(digits) >= 4 else ""
+
+
 def mask_phone(phone_norm):
     """Номер для журнала руководителя: только хвост. Полный номер из раздела не
     выходит ни в одну ручку — ни оператору, ни руководителю: руководитель
@@ -315,6 +352,21 @@ LEAD_STAGES = {
     "answered": "Дозвонились",
     "exhausted": "Не дозвонились",
     "excluded": "Исключён",
+    # Подписал документы (Sapar) — обзвон для него окончен, в пул не вернётся.
+    "signed": "Подписал документы",
+}
+# Фильтр журнала «Документы» — по состоянию подписания (signing.py). «Не подписал»
+# собирает всё, где подписи нет и она ещё возможна или уже не будет по вине
+# документов (не сформированы / отклонены); истёкший срок — отдельно: звонить поздно.
+JOURNAL_SIGN_FILTERS = {
+    "success": "signed_at IS NOT NULL AND success_attempt_id IS NOT NULL",
+    "self": "signed_at IS NOT NULL AND success_resolved_at IS NOT NULL AND success_attempt_id IS NULL",
+    "processing": "signed_at IS NULL AND iin <> '' AND sign_status = 'processing'",
+    "unsigned": "signed_at IS NULL AND iin <> '' AND sign_status IN ('unsigned', 'not_formed', 'rejected')",
+    "expired": "signed_at IS NULL AND iin <> '' AND sign_status = 'expired'",
+    "no_docs": "signed_at IS NULL AND iin <> '' AND sign_status = 'no_docs'",
+    "not_checked": "signed_at IS NULL AND iin <> '' AND sign_status = ''",
+    "no_iin": "iin = ''",
 }
 JOURNAL_SORTS = {
     "activity": "activity_at DESC, created_at DESC",
@@ -328,11 +380,13 @@ JOURNAL_MAX_LIMIT = 200
 class DialListService:
     """Вся логика раздела. `db` — экземпляр Database из database.py."""
 
-    def __init__(self, db, client_factory=None):
+    def __init__(self, db, client_factory=None, sign_checker=None):
         self.db = db
         self._client_factory = client_factory or self._default_client
         self._clients = {}
         self._clients_lock = threading.Lock()
+        # Проверка подписания в Sapar: свой поток, запросы склеиваются (sign_check.py).
+        self.sign_checker = sign_checker or SignChecker(db)
 
     # ------------------------------------------------------------ доступ и отделы
     _DEPARTMENTS_SQL = """
@@ -343,7 +397,8 @@ class DialListService:
                COALESCE(s.portion_size, %s),
                (SELECT COUNT(*) FROM dial_list_leads l WHERE l.department_id = d.id) AS leads_total,
                (SELECT COUNT(*) FROM dial_list_leads l
-                 WHERE l.department_id = d.id AND l.status IN ('new', 'in_progress')) AS leads_open
+                 WHERE l.department_id = d.id AND l.status IN ('new', 'in_progress')
+                   AND l.signed_at IS NULL) AS leads_open
         FROM departments d
         LEFT JOIN sip_department_config dc ON dc.department_id = d.id
         LEFT JOIN dial_list_department_settings s ON s.department_id = d.id
@@ -786,45 +841,92 @@ class DialListService:
         return client
 
     # ------------------------------------------------------------ лиды отдела
+    # Повторная загрузка того же номера с ДРУГИМ ИИН переписывает ИИН (и сбрасывает
+    # проверку), пока водитель не подписал: подписавший остаётся как был.
+    _IMPORT_SQL = """
+        INSERT INTO dial_list_leads (department_id, phone_norm, full_name, first_batch_id, last_batch_id,
+                                     period, iin)
+        VALUES %s
+        ON CONFLICT (department_id, period, phone_norm) DO UPDATE SET
+            full_name = CASE WHEN EXCLUDED.full_name <> '' THEN EXCLUDED.full_name
+                             ELSE dial_list_leads.full_name END,
+            last_batch_id = EXCLUDED.last_batch_id,
+            upload_count = dial_list_leads.upload_count + 1,
+            updated_at = CURRENT_TIMESTAMP,
+            iin = CASE WHEN dial_list_leads.signed_at IS NULL THEN EXCLUDED.iin ELSE dial_list_leads.iin END,
+            sign_status = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
+                               THEN '' ELSE dial_list_leads.sign_status END,
+            sign_docs = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
+                             THEN '[]'::jsonb ELSE dial_list_leads.sign_docs END,
+            sign_error = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
+                              THEN '' ELSE dial_list_leads.sign_error END,
+            sign_checked_at = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
+                                   THEN NULL ELSE dial_list_leads.sign_checked_at END
+        RETURNING (xmax = 0) AS inserted
+    """
+
     def import_leads(self, department_id, uploaded_by, file_name, rows, period=None):
-        """rows — из common.leads_file.parse_leads_file: (row_number, fio, phone_raw, phone_norm).
-        period — база какого месяца (date, первый день); пусто — месяц, который обзванивается."""
+        """rows — из common.leads_file.parse_leads_file(..., with_iin=True):
+        (row_number, fio, phone_raw, phone_norm, iin_raw). period — база какого месяца
+        (date, первый день); пусто — месяц, который обзванивается.
+
+        ИИН обязателен (запрос владельца 29.09.2026): строка без него или с ошибкой
+        в нём не загружается — без ИИН не проверить подписание. Внутри месяца ИИН,
+        как и номер, уникален: тот же водитель с другим номером — повтор."""
         department_id = int(department_id)
         period = period or self.department_settings(department_id)["_period"]
         counts = {"rows_total": len(rows), "rows_new": 0, "rows_duplicate": 0, "rows_invalid": 0,
-                  "period": period.isoformat()}
+                  "rows_bad_iin": 0, "bad_iin_rows": [], "invalid_rows": [], "period": period.isoformat()}
         with self.db._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO dial_list_lead_batches (department_id, uploaded_by, file_name, rows_total, period)
                 VALUES (%s, %s, %s, %s, %s) RETURNING id
             """, (department_id, uploaded_by, str(file_name or "")[:255], len(rows), period))
             batch_id = str(cur.fetchone()[0])
-            seen = set()
-            for _row_number, fio, _phone_raw, phone_norm in rows:
+            # Чей ИИН уже в базе месяца: второй номер того же водителя — повтор, а
+            # не вторая строка (и не падение на уникальном индексе посреди загрузки).
+            cur.execute("""
+                SELECT phone_norm, iin FROM dial_list_leads
+                WHERE department_id = %s AND period = %s AND iin <> ''
+            """, (department_id, period))
+            iin_owner = {r[1]: r[0] for r in cur.fetchall()}
+            seen_phones, seen_iins, values = set(), set(), []
+            for row in rows:
+                row_number, fio, _phone_raw, phone_norm = row[0], row[1], row[2], row[3]
                 if not phone_norm:
                     counts["rows_invalid"] += 1
+                    if len(counts["invalid_rows"]) < ROW_SAMPLE_MAX:
+                        counts["invalid_rows"].append(int(row_number))
                     continue
-                if phone_norm in seen:
+                iin = clean_iin(row[4] if len(row) > 4 else "")
+                if not iin:
+                    counts["rows_bad_iin"] += 1
+                    if len(counts["bad_iin_rows"]) < ROW_SAMPLE_MAX:
+                        counts["bad_iin_rows"].append(int(row_number))
+                    continue
+                owner = iin_owner.get(iin)
+                if phone_norm in seen_phones or iin in seen_iins or (owner and owner != phone_norm):
                     counts["rows_duplicate"] += 1
                     continue
-                seen.add(phone_norm)
-                cur.execute("""
-                    INSERT INTO dial_list_leads (department_id, phone_norm, full_name, first_batch_id, last_batch_id, period)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (department_id, period, phone_norm) DO UPDATE SET
-                        full_name = CASE WHEN EXCLUDED.full_name <> '' THEN EXCLUDED.full_name
-                                         ELSE dial_list_leads.full_name END,
-                        last_batch_id = EXCLUDED.last_batch_id,
-                        upload_count = dial_list_leads.upload_count + 1,
-                        updated_at = CURRENT_TIMESTAMP
-                    RETURNING (xmax = 0) AS inserted
-                """, (department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id, period))
-                inserted = cur.fetchone()[0]
-                counts["rows_new" if inserted else "rows_duplicate"] += 1
+                seen_phones.add(phone_norm)
+                seen_iins.add(iin)
+                values.append((department_id, phone_norm, str(fio or "").strip()[:255], batch_id, batch_id,
+                               period, iin))
+            if values:
+                try:
+                    inserted = execute_values(cur, self._IMPORT_SQL, values, page_size=1000, fetch=True)
+                except psycopg2.errors.UniqueViolation:
+                    # Две загрузки одного месяца одновременно: вторая увидела базу до первой.
+                    raise DialListError("Одновременно идёт другая загрузка базы за этот месяц — "
+                                        "повторите через минуту", 409)
+                new = sum(1 for r in inserted if r[0])
+                counts["rows_new"] += new
+                counts["rows_duplicate"] += len(inserted) - new
             cur.execute("""
                 UPDATE dial_list_lead_batches
-                SET rows_new = %s, rows_duplicate = %s, rows_invalid = %s WHERE id = %s
-            """, (counts["rows_new"], counts["rows_duplicate"], counts["rows_invalid"], batch_id))
+                SET rows_new = %s, rows_duplicate = %s, rows_invalid = %s, rows_bad_iin = %s WHERE id = %s
+            """, (counts["rows_new"], counts["rows_duplicate"], counts["rows_invalid"], counts["rows_bad_iin"],
+                  batch_id))
         counts["batch_id"] = batch_id
         return counts
 
@@ -836,11 +938,18 @@ class DialListService:
         active = settings["_period"]
         period = period or active
         with self.db._get_cursor() as cur:
+            # Подписавшие — отдельной строкой, а не в своём статусе: их больше не
+            # обзванивают, и «Не звонили» / «В работе» с ними врали бы.
             cur.execute("""
-                SELECT status, COUNT(*) FROM dial_list_leads
-                WHERE department_id = %s AND period = %s GROUP BY status
+                SELECT CASE WHEN signed_at IS NOT NULL THEN 'signed' ELSE status END, COUNT(*),
+                       COUNT(*) FILTER (WHERE iin = '')
+                FROM dial_list_leads
+                WHERE department_id = %s AND period = %s GROUP BY 1
             """, (department_id, period))
-            by_status = {row[0]: int(row[1]) for row in cur.fetchall()}
+            by_status, without_iin = {}, 0
+            for row in cur.fetchall():
+                by_status[row[0]] = int(row[1])
+                without_iin += int(row[2] or 0)
             # «Доступно сейчас» имеет смысл только для обзваниваемого месяца.
             pool = 0
             if period == active:
@@ -848,27 +957,30 @@ class DialListService:
                     department_id, active, settings["retry_after_hours"], settings["max_attempts"]))
                 pool = len(cur.fetchall())
             cur.execute("""
-                SELECT id, file_name, rows_total, rows_new, rows_duplicate, rows_invalid, created_at
+                SELECT id, file_name, rows_total, rows_new, rows_duplicate, rows_invalid, created_at,
+                       rows_bad_iin
                 FROM dial_list_lead_batches WHERE department_id = %s AND period = %s
                 ORDER BY created_at DESC LIMIT 20
             """, (department_id, period))
             batches = [{
                 "id": _sid(r[0]), "file_name": r[1], "rows_total": r[2], "rows_new": r[3],
                 "rows_duplicate": r[4], "rows_invalid": r[5], "created_at": _iso(r[6]),
+                "rows_bad_iin": int(r[7] or 0),
             } for r in cur.fetchall()]
             cur.execute("""
                 SELECT period, COUNT(*),
                        COUNT(*) FILTER (WHERE status = 'done' AND answered_at IS NOT NULL),
-                       COUNT(*) FILTER (WHERE status IN ('new', 'in_progress'))
+                       COUNT(*) FILTER (WHERE status IN ('new', 'in_progress') AND signed_at IS NULL),
+                       COUNT(*) FILTER (WHERE signed_at IS NOT NULL)
                 FROM dial_list_leads WHERE department_id = %s
                 GROUP BY period ORDER BY period DESC
             """, (department_id,))
             periods = [{"period": r[0].isoformat(), "label": period_label(r[0]), "total": int(r[1]),
-                        "answered": int(r[2]), "open": int(r[3]), "active": r[0] == active}
+                        "answered": int(r[2]), "open": int(r[3]), "signed": int(r[4]), "active": r[0] == active}
                        for r in cur.fetchall()]
         if not any(p["period"] == active.isoformat() for p in periods):
             periods.insert(0, {"period": active.isoformat(), "label": period_label(active), "total": 0,
-                               "answered": 0, "open": 0, "active": True})
+                               "answered": 0, "open": 0, "signed": 0, "active": True})
         return {
             "department_id": department_id,
             "period": period.isoformat(),
@@ -877,6 +989,8 @@ class DialListService:
             "is_active_period": period == active,
             "total": sum(by_status.values()),
             "by_status": {k: by_status.get(k, 0) for k in ("new", "in_progress", "done", "excluded")},
+            "signed": by_status.get("signed", 0),
+            "without_iin": without_iin,
             "pool_available": pool,
             "batches": batches,
             "periods": periods,
@@ -1211,7 +1325,11 @@ class DialListService:
                    lt.api_error AS last_api_error, tu.name AS last_call_operator_name,
                    GREATEST(l.created_at, COALESCE(lt.requested_at, l.created_at),
                             COALESCE(lb.created_at, l.created_at)) AS activity_at,
+                   l.iin, l.sign_status, l.sign_checked_at, l.sign_error, l.signed_at,
+                   l.success_attempt_id, l.success_operator_id, su.name AS success_operator_name,
+                   l.success_resolved_at,
                    CASE
+                       WHEN l.signed_at IS NOT NULL THEN 'signed'
                        WHEN l.status = 'excluded' THEN 'excluded'
                        WHEN oa.operator_id IS NOT NULL THEN 'issued'
                        WHEN l.status = 'done' AND l.answered_at IS NOT NULL THEN 'answered'
@@ -1249,10 +1367,11 @@ class DialListService:
             LEFT JOIN users tu ON tu.id = lt.operator_id
             LEFT JOIN dial_list_outcomes lo ON lo.id = lt.outcome_id
             LEFT JOIN dial_list_outcome_subtypes ls ON ls.id = lt.outcome_subtype_id
+            LEFT JOIN users su ON su.id = l.success_operator_id
             WHERE {scope}
         )
     """
-    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[38]).
+    # Порядок колонок строки журнала — на него опирается _journal_row (r[0]…r[47]).
     # Новые колонки — только в конец: за ними страница добавляет total, rn и сводку.
     _JOURNAL_COLUMNS = """
                id, department_id, full_name, phone_norm, status, attempts_total, last_attempt_at,
@@ -1262,7 +1381,9 @@ class DialListService:
                last_result, last_done_at, last_call_at, last_call_state, last_disposition,
                last_billsec, last_api_error, last_call_operator_name, activity_at, stage, next_retry_at,
                period, last_outcome_id, last_outcome_name, last_outcome_color, last_comment,
-               last_cancelled, last_outcome_subtype_id, last_outcome_subtype_name"""
+               last_cancelled, last_outcome_subtype_id, last_outcome_subtype_name,
+               iin, sign_status, sign_checked_at, sign_error, signed_at, success_attempt_id,
+               success_operator_id, success_operator_name, success_resolved_at"""
     # Сколько колонок у строки журнала: сразу за ними идёт total (индекс не
     # зашит числом — иначе новая колонка молча сдвигала бы «всего» на rn).
     _JOURNAL_COLUMN_COUNT = len([c for c in _JOURNAL_COLUMNS.split(",") if c.strip()])
@@ -1357,15 +1478,38 @@ class DialListService:
                          "subtype": ({"id": _sid(r[37]), "name": r[38] or ""} if r[37] is not None else None)}
                         if r[32] is not None else None),
             "comment": r[35] or "",
+            # ИИН — только хвост (как номер). Подписание по Sapar и кому засчитана успешка.
+            "iin_masked": mask_iin(r[39]),
+            "has_iin": bool(r[39]),
+            "sign": self._sign_block(r[39], r[40], r[41], r[42], r[43], r[44], r[45], r[46], r[47]),
+        }
+
+    @staticmethod
+    def _sign_block(iin, sign_status, checked_at, sign_error, signed_at, success_attempt_id,
+                    success_operator_id, success_operator_name, success_resolved_at):
+        code = signing.status_code(iin, sign_status, signed_at)
+        return {
+            "status": code,
+            "label": signing.SIGN_STATUS_LABELS.get(code, code),
+            "checked_at": _iso(checked_at),
+            # Ошибка последней проверки важна, пока водитель не подписал.
+            "error": (sign_error or "")[:200] if signed_at is None else "",
+            "signed_at": _iso(signed_at),
+            # Подписал, а решение по успешке ещё не принято — ждём конца звонка.
+            "resolved": success_resolved_at is not None,
+            "success": ({"attempt_id": _sid(success_attempt_id),
+                         "operator": {"id": success_operator_id, "name": success_operator_name or ""}}
+                        if success_attempt_id is not None else None),
         }
 
     def leads_journal(self, department_id, q="", stage="", operator_id=None, batch_id=None,
                       date_from=None, date_to=None, sort="activity", limit=50, offset=0,
-                      period=None, outcome_id=None, outcome_subtype_id=None):
+                      period=None, outcome_id=None, outcome_subtype_id=None, sign=""):
         """Журнал водителей отдела: страница строк + всего. Все фильтры необязательны.
         period — date первого дня месяца, 'all' — все месяцы, пусто — обзваниваемый.
         outcome_subtype_id — тип итога (uuid) либо 'none' — «без типа»; имеет смысл
-        только вместе с outcome_id, без него не учитывается."""
+        только вместе с outcome_id, без него не учитывается. sign — состояние
+        подписания документов (JOURNAL_SIGN_FILTERS)."""
         department_id = int(department_id)
         settings = self.department_settings(department_id)
         if period is None:
@@ -1399,11 +1543,18 @@ class DialListService:
             digits = "".join(ch for ch in q if ch.isdigit())
             params["q_name"] = f"%{q}%"
             if len(digits) >= 3 and len(digits) >= len(q) - 3:
-                # Поиск по хвосту номера (маска показывает 4 цифры) — сам номер всё равно не отдаём.
+                # Поиск по хвосту номера или ИИН (маски показывают по 4 цифры; ИИН
+                # целиком — тоже хвост) — сами номер и ИИН всё равно не отдаём.
                 params["q_tail"] = f"%{digits}"
-                filters.append("(full_name ILIKE %(q_name)s OR phone_norm LIKE %(q_tail)s)")
+                filters.append("(full_name ILIKE %(q_name)s OR phone_norm LIKE %(q_tail)s"
+                               " OR iin LIKE %(q_tail)s)")
             else:
                 filters.append("full_name ILIKE %(q_name)s")
+        sign = str(sign or "").strip()
+        if sign:
+            if sign not in JOURNAL_SIGN_FILTERS:
+                raise DialListError("sign: неизвестное состояние подписания")
+            filters.append(f"({JOURNAL_SIGN_FILTERS[sign]})")
         stage = str(stage or "").strip()
         if stage:
             if stage not in LEAD_STAGES:
@@ -1570,6 +1721,9 @@ class DialListService:
                                 if r[19] is not None else None),
                     "comment": r[22] or "",
                     "outcome_at": _iso(r[23]),
+                    # Этому разговору засчитана успешка за подписание документов.
+                    "is_success": bool(lead["sign"]["success"])
+                                  and lead["sign"]["success"]["attempt_id"] == _sid(r[0]),
                 })
             cur.execute("""
                 SELECT e.id, e.kind, e.note, e.created_at, e.actor_id, COALESCE(u.name, '')
@@ -1599,6 +1753,20 @@ class DialListService:
             """, (lead_id, lead_id))
             batches = [{"id": _sid(r[0]), "file_name": r[1] or "", "uploaded_at": _iso(r[2]),
                         "uploaded_by": r[3]} for r in cur.fetchall()]
+            cur.execute("SELECT sign_docs FROM dial_list_leads WHERE id = %s", (lead_id,))
+            docs_row = cur.fetchone()
+        docs = docs_row[0] if docs_row else []
+        if isinstance(docs, str):
+            docs = json.loads(docs or "[]")
+        lead["sign"]["documents"] = [
+            {"id": d.get("id"), "status": d.get("status") or "", "group": d.get("group") or "",
+             "label": sapar_api.status_label(d.get("status")), "signed_at": d.get("signed_at")}
+            for d in (docs or []) if isinstance(d, dict)]
+        if lead.get("period"):
+            month, year = signing.doc_month_for(datetime.strptime(lead["period"], "%Y-%m-%d").date())
+            lead["sign"]["doc_month"] = f"{year:04d}-{month:02d}-01"
+            lead["sign"]["doc_month_label"] = period_label(datetime(year, month, 1).date())
+        lead["sign"]["can_check"] = bool(lead.get("has_iin")) and lead["sign"]["signed_at"] is None
         lead.update({"attempts": attempts, "events": events, "assignments": assignments, "batches": batches,
                      "retry_after_hours": settings["retry_after_hours"]})
         return lead
@@ -1621,10 +1789,14 @@ class DialListService:
         ближайшей порцией."""
         lead_id = str(lead_id)
         with self.db._get_cursor() as cur:
-            cur.execute("SELECT department_id, status FROM dial_list_leads WHERE id = %s FOR UPDATE", (lead_id,))
+            cur.execute("SELECT department_id, status, signed_at FROM dial_list_leads WHERE id = %s FOR UPDATE",
+                        (lead_id,))
             row = cur.fetchone()
             if not row:
                 raise DialListError("Водитель не найден в журнале", 404)
+            if row[2] is not None:
+                # Правило владельца 29.09.2026: подписавший в список не возвращается.
+                raise DialListError("Водитель уже подписал документы — звонить ему незачем", 409)
             cur.execute("SELECT 1 FROM dial_list_assignments WHERE lead_id = %s AND state = 'issued'", (lead_id,))
             if cur.fetchone():
                 raise DialListError("Строка сейчас у оператора — она и так в списке", 409)
@@ -1757,13 +1929,15 @@ class DialListService:
 
     # Пул: лиды отдела, которые можно выдать сейчас. Один и тот же текст для
     # выдачи (с блокировкой) и для подсчёта (без неё), чтобы цифра «доступно»
-    # совпадала с тем, что реально выдаётся.
+    # совпадала с тем, что реально выдаётся. Подписавший документы (signed_at) в
+    # пул не возвращается никогда: обрабатывать его незачем (владелец, 29.09.2026).
     _POOL_SQL = """
         SELECT l.id
         FROM dial_list_leads l
         WHERE l.department_id = %s
           AND l.period = %s
           AND l.status IN ('new', 'in_progress')
+          AND l.signed_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM dial_list_assignments a
                           WHERE a.lead_id = l.id AND a.state = 'issued')
           AND (l.last_attempt_at IS NULL
@@ -2161,7 +2335,7 @@ class DialListService:
         )
         SELECT s.id, s.lead_id, l.full_name, s.state, s.result, s.done_at, s.created_at,
                t.outcome_id, t.outcome_at, t.operator_comment, t.state,
-               o.name, o.color, o.position, l.status, st.name
+               o.name, o.color, o.position, l.status, st.name, (l.signed_at IS NOT NULL)
         FROM latest s
         JOIN dial_list_leads l ON l.id = s.lead_id
         LEFT JOIN LATERAL (
@@ -2195,8 +2369,9 @@ class DialListService:
             tab = worked_tab(r[3], r[4], r[7], r[10])
             if tab is None:
                 continue
-            if tab == WORKED_NO_ANSWER and r[4] == "other" and r[14] == "excluded":
-                # Строку закрыл руководитель («Исключить»), а не АТС: это не недозвон.
+            if tab == WORKED_NO_ANSWER and r[4] == "other" and (r[14] == "excluded" or r[16]):
+                # Строку закрыл руководитель («Исключить») или сервер, увидев подпись
+                # документов (sign_check), а не АТС: это не недозвон.
                 continue
             if tab != WORKED_NO_ANSWER and tab not in tabs:
                 # Итог выключили уже после звонка — вкладка живёт, пока по ней кто-то есть.
@@ -2817,11 +2992,61 @@ class DialListService:
             """, (WEBHOOK_LOG_KEEP_DAYS,))
         return {"matched": matched, "general_call_id": general_call_id, "disposition": disposition}
 
+    # ------------------------------------------------------------ подписание документов
+    def request_sign_check(self, reason=""):
+        """Поставить проверку подписания в очередь своего потока, не дожидаясь её
+        (планировщик раз в полчаса, загрузка базы). См. sign_check.py."""
+        return self.sign_checker.request(reason)
+
+    def check_lead_signature(self, lead_id):
+        """«Проверить сейчас» в карточке водителя: один запрос в Sapar, сразу, из
+        базы любого месяца. Подписавшего не перепроверяем — он из обзвона ушёл."""
+        lead_id = str(lead_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT iin, signed_at FROM dial_list_leads WHERE id = %s", (lead_id,))
+            row = cur.fetchone()
+        if not row:
+            raise DialListError("Водитель не найден в журнале", 404)
+        if not row[0]:
+            raise DialListError("У водителя нет ИИН — подписание не проверить. Загрузите его заново "
+                                "в файле с колонкой iin", 409)
+        if row[1] is None:
+            if not self.sign_checker.configured():
+                raise DialListError("Проверка подписания не настроена на сервере", 503)
+            summary = self.sign_checker.run(reason="карточка водителя", lead_ids=[lead_id], force=True,
+                                            budget_sec=30)
+            if summary.get("errors") and not summary.get("checked"):
+                card = self.lead_card(lead_id)
+                raise DialListError(f"Sapar не ответил: {card['sign']['error'] or 'повторите позже'}", 502)
+        return self.lead_card(lead_id)
+
+    def analytics(self, department_id, period=None):
+        """Вкладка «Аналитика»: воронка, дни, операторы и проверка подписания за
+        базу месяца (period — date первого дня; пусто — обзваниваемый месяц)."""
+        from . import analytics as dial_analytics
+        department_id = int(department_id)
+        settings = self.department_settings(department_id)
+        period = period or settings["_period"]
+        with self.db._get_cursor() as cur:
+            data = dial_analytics.department_analytics(cur, department_id, period,
+                                                       configured=self.sign_checker.configured())
+        doc_month = datetime.strptime(data["sign_check"]["doc_month"], "%Y-%m-%d").date()
+        data["sign_check"]["doc_month_label"] = period_label(doc_month)
+        data.update({
+            "department_id": department_id,
+            "period": period.isoformat(),
+            "period_label": period_label(period),
+            "active_period": settings["period"],
+            "is_active_period": period == settings["_period"],
+        })
+        return data
+
     # ------------------------------------------------------------ руководитель
     def overview(self, department_ids, day):
         """Сводка за день по операторам: сколько строк выдано/обработано, попыток,
-        дозвонов, секунд разговора. department_ids=None — все отделы."""
-        params = [day, day]
+        дозвонов, секунд разговора, успешек (водитель подписал в этот день и
+        подпись засчитана оператору). department_ids=None — все отделы."""
+        params = [day, day, day]
         dept_filter = ""
         if department_ids is not None:
             dept_filter = "AND u.department_id = ANY(%s)"
@@ -2846,16 +3071,25 @@ class DialListService:
                     FROM dial_list_assignments a
                     WHERE (a.created_at AT TIME ZONE 'Asia/Almaty')::date = %s
                     GROUP BY a.operator_id
+                ), suc AS (
+                    SELECT l.success_operator_id AS operator_id, COUNT(*) AS successes
+                    FROM dial_list_leads l
+                    WHERE l.success_attempt_id IS NOT NULL
+                      AND (l.signed_at AT TIME ZONE 'Asia/Almaty')::date = %s
+                    GROUP BY l.success_operator_id
                 )
                 SELECT u.id, u.name, u.department_id, dep.name,
                        COALESCE(asg.issued, 0), COALESCE(asg.done, 0),
                        COALESCE(att.attempts, 0), COALESCE(att.answered, 0),
-                       COALESCE(att.talk_sec, 0), COALESCE(att.failed, 0), COALESCE(att.cancelled, 0)
+                       COALESCE(att.talk_sec, 0), COALESCE(att.failed, 0), COALESCE(att.cancelled, 0),
+                       COALESCE(suc.successes, 0)
                 FROM users u
                 LEFT JOIN departments dep ON dep.id = u.department_id
                 LEFT JOIN att ON att.operator_id = u.id
                 LEFT JOIN asg ON asg.operator_id = u.id
-                WHERE (att.operator_id IS NOT NULL OR asg.operator_id IS NOT NULL) {dept_filter}
+                LEFT JOIN suc ON suc.operator_id = u.id
+                WHERE (att.operator_id IS NOT NULL OR asg.operator_id IS NOT NULL
+                       OR suc.operator_id IS NOT NULL) {dept_filter}
                 ORDER BY dep.name NULLS LAST, u.name
             """, params)
             rows = [{
@@ -2864,6 +3098,7 @@ class DialListService:
                 "attempts": int(r[6]), "answered": int(r[7]), "talk_sec": int(r[8]), "failed": int(r[9]),
                 # Отменённые оператором до ответа водителя — в attempts входят, но не в счёт лидам.
                 "cancelled": int(r[10]),
+                "successes": int(r[11]),
             } for r in cur.fetchall()]
         return rows
 

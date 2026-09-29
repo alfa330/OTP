@@ -93,23 +93,27 @@ def reset_cache():
         _ready_cache.clear()
 
 
-def _call(path, *, body=None, params=None):
-    """Возвращает (Response-часть ответа, ошибка). Исключений не бросает."""
+def _request(path, *, body=None, params=None, session=None, timeout=None):
+    """(Response-часть ответа, ошибка, systemic). Исключений не бросает.
+
+    systemic=True — Sapar недоступен целиком (нет токена, сеть, не-JSON): дальше
+    спрашивать его бессмысленно. False при ошибке — Sapar ответил, но отказал
+    именно на этот запрос (Code ≥ 400 в конверте)."""
     if not _token():
-        return None, 'SAPAR_API не настроен'
+        return None, 'SAPAR_API не настроен', True
     try:
-        response = requests.request(
+        response = (session or requests).request(
             'POST' if body is not None else 'GET', base_url() + path,
             json=body, params=params,
             headers={'Authorization': 'Bearer ' + _token(), 'Accept': 'application/json'},
-            timeout=TIMEOUT,
+            timeout=timeout or TIMEOUT,
         )
         payload = response.json()
     except Exception as error:  # noqa: BLE001
         logging.warning('sapar: %s не ответил: %s', path, error)
-        return None, str(error)
+        return None, str(error), True
     if not isinstance(payload, dict):
-        return None, 'неожиданный ответ Sapar'
+        return None, 'неожиданный ответ Sapar', True
     # Конверт свой: HTTP 200 приходит и на отказ, настоящий код лежит внутри.
     code = payload.get('Code')
     try:
@@ -117,8 +121,35 @@ def _call(path, *, body=None, params=None):
     except (TypeError, ValueError):
         failed = False
     if failed:
-        return None, payload.get('Message') or ('код %s' % code)
-    return payload.get('Response'), None
+        return None, payload.get('Message') or ('код %s' % code), False
+    return payload.get('Response'), None, False
+
+
+def _call(path, *, body=None, params=None):
+    """Возвращает (Response-часть ответа, ошибка). Исключений не бросает."""
+    payload, error, _systemic = _request(path, body=body, params=params)
+    return payload, error
+
+
+def driver_documents(iin, month, year, *, session=None, timeout=None):
+    """Документы водителя за отчётный месяц — сырые строки Sapar, без толкования.
+
+    Для массовой проверки подписания («Обзвон», dial_list/sign_check.py): один
+    запрос на водителя (~0,04 с), общий `session` держит соединение между ними.
+    Ручка «все документы парка» (get-driver-service-documents) здесь хуже: за
+    08.2026 это 56 тыс. + 41 тыс. строк по ~8 с на страницу.
+
+    Возвращает {'ok', 'yandex', 'park', 'error', 'systemic'}; ok=False — см. _request.
+    """
+    payload, error, systemic = _request(
+        '/taxipark-api/get-driver-documents-by-iin',
+        body={'DriverIin': str(iin or '').strip(), 'Month': int(month), 'Year': int(year)},
+        session=session, timeout=timeout)
+    if error:
+        return {'ok': False, 'yandex': [], 'park': [], 'error': error, 'systemic': systemic}
+    payload = payload if isinstance(payload, dict) else {}
+    return {'ok': True, 'yandex': list(payload.get('YandexDocuments') or []),
+            'park': list(payload.get('TaxiParkDocuments') or []), 'error': None, 'systemic': False}
 
 
 def signing_period_open(month, year):

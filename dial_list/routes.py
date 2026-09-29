@@ -30,8 +30,11 @@
     GET     /api/dial_list/departments                       отделы раздела в моей зоне
     GET/PUT /api/dial_list/departments/<id>/settings         настройки отдела
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
-    POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО+телефон (+period=YYYY-MM)
-    GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле (?period=)
+    POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
+                                                             ИИН обязателен, после загрузки — проверка подписания
+    GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
+    GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
+                                                             проверка подписания (?period=)
     GET/PUT /api/dial_list/departments/<id>/outcomes         справочник итогов звонка; у итога subtypes —
                                                              его типы (в PUT ключа нет — типы не трогаются)
     GET/PUT /api/dial_list/departments/<id>/script           скрипт разговора и быстрые вопросы
@@ -41,9 +44,11 @@
                                                              outcome_subtype_id — тип итога или none
                                                              (только вместе с outcome_id),
                                                              date_from/date_to — дни звонков, period,
+                                                             sign — состояние подписания документов,
                                                              sort, limit, offset)
-    GET     /api/dial_list/leads/<lead_id>                   карточка: попытки, действия, загрузки
-    POST    /api/dial_list/leads/<lead_id>/requeue           вернуть в список  {note}
+    GET     /api/dial_list/leads/<lead_id>                   карточка: попытки, действия, загрузки, документы
+    POST    /api/dial_list/leads/<lead_id>/sign_check        проверить подписание в Sapar сейчас
+    POST    /api/dial_list/leads/<lead_id>/requeue           вернуть в список  {note} (подписавшего — нельзя)
     POST    /api/dial_list/leads/<lead_id>/exclude           исключить         {note}
     PUT     /api/dial_list/leads/<lead_id>/note              заметка руководителя
     GET     /api/dial_list/attempts/<attempt_id>/recording   ссылка на запись разговора (Binotel)
@@ -344,13 +349,18 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         # База какого месяца: поле формы period=YYYY-MM; пусто — обзваниваемый месяц.
         period = parse_period(request.form.get('period'))
         # Общий разбор файла «fio + phone» и общая нормализация номера — одна
-        # точка правды для всей телефонии проекта.
+        # точка правды для всей телефонии проекта. ИИН в базе обзвона обязателен
+        # (владелец, 29.09.2026): по нему проверяется подписание документов.
         from common.leads_file import parse_leads_file
         try:
-            rows = parse_leads_file(raw_bytes, file_ext)
+            rows = parse_leads_file(raw_bytes, file_ext, with_iin=True)
         except ValueError as exc:
             raise DialListError(str(exc))
         counts = svc.import_leads(department_id, requester_id, file_name, rows, period=period)
+        # Свежую базу проверяем сразу, не дожидаясь получасового прогона: подписавшие
+        # ещё до загрузки не должны уйти операторам. Проверка идёт в своём потоке.
+        if counts.get("rows_new") or counts.get("rows_duplicate"):
+            svc.request_sign_check("загрузка базы")
         return jsonify({"status": "success", **counts}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/summary', methods=['GET', 'OPTIONS'])
@@ -360,6 +370,15 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         _manager(department_id)
         period = parse_period(request.args.get('period'))
         return jsonify({"status": "success", **svc.leads_summary(department_id, period=period)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/analytics', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def analytics(department_id):
+        """Вкладка «Аналитика»: показатели базы месяца (?period=YYYY-MM)."""
+        _manager(department_id)
+        period = parse_period(request.args.get('period'))
+        return jsonify({"status": "success", **svc.analytics(department_id, period=period)}), 200
 
     # ── итоги звонка ────────────────────────────────────────────────────────
     @bp.route('/api/dial_list/departments/<int:department_id>/outcomes', methods=['GET', 'PUT', 'OPTIONS'])
@@ -437,7 +456,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             date_from=args.get('date_from') or None, date_to=args.get('date_to') or None,
             sort=args.get('sort', 'activity'), limit=args.get('limit', 50), offset=args.get('offset', 0),
             period=parse_period(args.get('period'), allow_all=True), outcome_id=outcome_id,
-            outcome_subtype_id=outcome_subtype_id,
+            outcome_subtype_id=outcome_subtype_id, sign=args.get('sign', ''),
         )}), 200
 
     @bp.route('/api/dial_list/leads/<lead_id>', methods=['GET', 'OPTIONS'])
@@ -467,6 +486,15 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         payload = request.get_json(silent=True) or {}
         return jsonify({"status": "success",
                         "lead": svc.exclude_lead(lead_id, requester_id, note=payload.get('note', ''))}), 200
+
+    @bp.route('/api/dial_list/leads/<lead_id>/sign_check', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lead_sign_check(lead_id):
+        """«Проверить сейчас»: подписание документов водителя в Sapar, сразу."""
+        lead_id = _uuid_or_404(lead_id, "Водитель")
+        _manager(svc.lead_department(lead_id))
+        return jsonify({"status": "success", "lead": svc.check_lead_signature(lead_id)}), 200
 
     @bp.route('/api/dial_list/leads/<lead_id>/note', methods=['PUT', 'OPTIONS'])
     @require_api_key

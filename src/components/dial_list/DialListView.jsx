@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge, IosHint, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
@@ -6,6 +6,7 @@ import IosDatePicker from '../ui/DatePicker';
 import { DialListLeadsPanel, DialListOperatorsPanel, DialListSettingsPanel, useDialListDepartment } from '../sip/DialListSettings';
 import DialListLinesPanel from './DialListLinesPanel';
 import DialListJournal from './DialListJournal';
+import DialListAnalytics from './DialListAnalytics';
 import DialListOutcomesPanel from './DialListOutcomesPanel';
 import DialListScriptPanel from './DialListScriptPanel';
 import { monthLabel } from './dialListPeriods';
@@ -13,9 +14,13 @@ import { monthLabel } from './dialListPeriods';
 /*
  * Раздел «Обзвон из телефона» — экран руководителя удалённого колл-центра.
  *
- * Три вкладки: «Операторы» (кто сколько сделал за день), «База водителей»
- * (сколько загружено, загрузка файла) и «Настройки» (режим, порция, повторы,
- * номер для линии оператора). Отдел выбирается в шапке; если он один — выбора нет.
+ * Вкладки: «Операторы» (кто сколько сделал за день), «Аналитика» (показатели базы
+ * месяца: воронка, подписание документов, дни, операторы), «Линии», «База
+ * водителей» (загрузка файла ФИО + телефон + ИИН), «Журнал», «Настройки» и
+ * «Скрипт». Отдел выбирается в шапке; если он один — выбора нет.
+ *
+ * Сводки над вкладками нет (просьба владельца 29.09.2026: «сверху сводку убрать,
+ * чтобы не отвлекала») — показатели живут во вкладке «Аналитика».
  *
  * Как считается: строка выдачи закрывается после первой попытки с исходом,
  * подтверждённым Binotel (вебхук или опрос по generalCallID) — телефон оператора
@@ -25,6 +30,7 @@ import { monthLabel } from './dialListPeriods';
 
 const TABS = [
     { value: 'operators', label: 'Операторы', icon: <FaIcon className="fas fa-users" /> },
+    { value: 'analytics', label: 'Аналитика', icon: <FaIcon className="fas fa-chart-bar" /> },
     { value: 'lines', label: 'Линии', icon: <FaIcon className="fas fa-phone" /> },
     { value: 'leads', label: 'База водителей', icon: <FaIcon className="fas fa-address-book" /> },
     { value: 'journal', label: 'Журнал', icon: <FaIcon className="fas fa-clock-rotate-left" /> },
@@ -98,6 +104,11 @@ const OperatorRow = ({ row, showDepartment }) => {
                     {row.answered}{answered != null ? ` · ${answered}%` : ''}
                 </IosBadge>
                 <IosBadge tone="slate" title="Разговоры">{fmtTalk(row.talk_sec)}</IosBadge>
+                {row.successes > 0 && (
+                    <IosBadge tone="green" title="Успешки: водитель подписал документы в этот день после разговора с оператором">
+                        успешки {row.successes}
+                    </IosBadge>
+                )}
                 {row.failed > 0 && <IosBadge tone="red" title="Отказы АТС">АТС {row.failed}</IosBadge>}
                 {row.cancelled > 0 && (
                     <IosBadge tone="slate" title="Оператор завершил звонок до ответа водителя — попытки не засчитаны">
@@ -125,6 +136,14 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     // ('' — обзваниваемый месяц отдела). Сбрасывается при смене отдела.
     const [period, setPeriod] = useState('');
     const [date, setDate] = useState(todayIso);
+    // Переход из «Аналитики» в журнал с готовым отбором: { sign | stage | operatorId, nonce }.
+    const [journalPreset, setJournalPreset] = useState(null);
+    const presetSeq = useRef(0);
+    const openJournal = useCallback((preset) => {
+        presetSeq.current += 1;
+        setJournalPreset({ ...preset, nonce: presetSeq.current });
+        setTab('journal');
+    }, []);
     const [rows, setRows] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -227,16 +246,6 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const dept = useDialListDepartment({ apiBaseUrl, authHeaders, departmentId: departmentId || null, period: period === 'all' ? '' : period });
     const selected = (departments || []).find((d) => String(d.department_id) === String(departmentId));
 
-    const totals = useMemo(() => rows.reduce((acc, r) => ({
-        issued: acc.issued + (r.issued || 0),
-        done: acc.done + (r.done || 0),
-        attempts: acc.attempts + (r.attempts || 0),
-        answered: acc.answered + (r.answered || 0),
-        talk_sec: acc.talk_sec + (r.talk_sec || 0),
-        failed: acc.failed + (r.failed || 0),
-        cancelled: acc.cancelled + (r.cancelled || 0),
-    }), { issued: 0, done: 0, attempts: 0, answered: 0, talk_sec: 0, failed: 0, cancelled: 0 }), [rows]);
-
     const sortedRows = useMemo(() => [...rows].sort((a, b) => (b.done - a.done) || (b.attempts - a.attempts)
         || String(a.operator_name || '').localeCompare(String(b.operator_name || ''), 'ru')), [rows]);
 
@@ -316,21 +325,6 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                     </div>
                 )}
 
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-                    {[
-                        { label: isToday ? 'Выдано сегодня' : 'Выдано', value: totals.issued },
-                        { label: 'Обработано', value: totals.done },
-                        { label: 'Попыток', value: totals.attempts },
-                        { label: 'Дозвонились', value: pct(totals.answered, totals.attempts) == null ? totals.answered : `${totals.answered} · ${pct(totals.answered, totals.attempts)}%` },
-                        { label: 'Разговоры', value: fmtTalk(totals.talk_sec) },
-                        { label: 'В базе доступно', value: dept.summary?.pool_available ?? selected?.leads_open ?? '—' },
-                    ].map((item) => (
-                        <div key={item.label} className="rounded-xl bg-slate-50 px-3 py-2">
-                            <div className="text-[11px] uppercase tracking-wide text-slate-500">{item.label}</div>
-                            <div className="text-[15px] font-semibold tabular-nums text-slate-900">{item.value}</div>
-                        </div>
-                    ))}
-                </div>
             </div>
 
             {error && <div className="rounded-xl bg-rose-50 px-4 py-3 text-[13px] text-rose-700">{error}</div>}
@@ -409,6 +403,19 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                         </section>
                     )}
 
+                    {tab === 'analytics' && (
+                        <DialListAnalytics
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
+                            periods={dept.summary?.periods || []}
+                            activePeriod={dept.summary?.active_period || dept.settings?.period || ''}
+                            period={period}
+                            onPeriodChange={setPeriod}
+                            onOpenJournal={openJournal}
+                        />
+                    )}
+
                     {tab === 'lines' && (
                         <DialListLinesPanel
                             apiBaseUrl={apiBaseUrl}
@@ -446,6 +453,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             onChanged={dept.reload}
                             canEdit={canEdit}
                             showToast={showToast}
+                            preset={journalPreset}
                         />
                     )}
 
