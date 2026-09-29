@@ -22,6 +22,7 @@ import {
   needsSaparCheck, nextStop, openStop, pairRows, periodLabel, periodOptions,
   blockedLabel, previousStop, routeNote, saparGroup, saparKey,
   lookupInputs, lookupIsReady, lookupKey, needsLookup, officeOptions,
+  attachmentAccept, groupHeading,
 } from '../src/components/crm/wizardRules.js';
 
 /* Эти тесты написаны по следам реальной поломки: шаг с вложением никогда не
@@ -732,4 +733,34 @@ test('варианты «адреса офиса» берутся из сним�
   assert.deepEqual(officeOptions(office, null), []);
   // Другому вопросу список офисов не достаётся.
   assert.equal(officeOptions(city, snapshot), null);
+});
+
+/* ─── ТЗ #297: «Сотрудничество» ─────────────────────────────────────────── */
+
+test('группа из одной темы с тем же названием заголовка не получает', () => {
+  const solo = { code: 'cooperation', title: 'Сотрудничество',
+    items: [{ key: 'cooperation', title: 'Сотрудничество' }] };
+  const regions = { code: 'regions', title: 'Регионы',
+    items: [{ key: 'a', title: 'Уточнение посылки' }, { key: 'b', title: 'Статус работы офиса' }] };
+  const delivery = { code: 'yandex_delivery', title: 'Яндекс Доставка',
+    items: [{ key: 'termobox', title: 'Термокороб: выдача или замена' }] };
+  assert.equal(groupHeading(solo, 3), null);
+  assert.equal(groupHeading(regions, 3), 'Регионы');
+  // Одна тема, но название другое — заголовок говорит, КОМУ уйдёт, и нужен.
+  assert.equal(groupHeading(delivery, 3), 'Яндекс Доставка');
+  // Единственная группа во всём списке заголовка не получает никогда.
+  assert.equal(groupHeading(regions, 1), null);
+  assert.equal(groupHeading({ ...regions, entry: {} }, 3), null);
+});
+
+test('поле файла ограничено тем, что нужно тематике', () => {
+  assert.equal(attachmentAccept({ attachment: 'image' }), 'image/*');
+  assert.equal(attachmentAccept({ attachment: 'media' }), 'image/*,video/*');
+  // Коммерческое предложение — PDF или Word: ограничений нет вовсе.
+  assert.equal(attachmentAccept({ attachment: 'any' }), undefined);
+});
+
+test('необязательное вложение не держит экран', () => {
+  const scenario = { attachment: 'any', steps: [{ key: 'coop_file', kind: 'attachment', optional: true }] };
+  assert.equal(stepIsComplete(scenario.steps[0], { attachment: null, scenario }), true);
 });

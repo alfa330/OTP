@@ -212,7 +212,8 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
     return '%s\n\n%s' % (text, tail)
 
 
-def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None):
+def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None,
+                       mentions=None):
     """Подпись к карточке-картинке: то, чего в картинке физически быть не может.
 
     Две вещи. Ссылка — с картинки не нажать, а специалисту из группы нужен не
@@ -239,7 +240,14 @@ def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None
     for row in data_rows or ():
         lines.append('<b>%s:</b> %s' % (html.escape(str(row['label'])),
                                         html.escape(str(row['value']))))
-    return _clip(chr(10).join(lines), CAPTION_LIMIT)
+
+    # Теги ответственных — последней строкой и вне обрезки, по той же причине,
+    # что и в текстовом сообщении: у длинной подписи обрезался бы именно хвост,
+    # и обращение ушло бы без уведомления тому, кому оно адресовано.
+    tail = mentions_line(mentions)
+    if not tail:
+        return _clip(chr(10).join(lines), CAPTION_LIMIT)
+    return '%s\n\n%s' % (_clip(chr(10).join(lines), CAPTION_LIMIT - len(tail) - 2), tail)
 
 
 def build_reply_message(*, ticket_id, author_name, body, iin=None):

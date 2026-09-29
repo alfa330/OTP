@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 from crm import scenarios as sc
+from crm import schema
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,7 +125,7 @@ class CatalogTest(unittest.TestCase):
             [item['key'] for item in sc.SCENARIOS],
             ['sapar_docs_missing', 'sapar_sign_error', 'sapar_payment_required',
              'sapar_sign_status', 'sapar_service_error', 'parcel_location',
-             'office_status', 'yandex_termobox'],
+             'office_status', 'yandex_termobox', 'cooperation'],
         )
 
     def test_sapar_topics_go_to_the_sapar_group(self):
@@ -158,9 +159,91 @@ class CatalogTest(unittest.TestCase):
             'parcel_location': sc.ATTACH_NONE,
             'office_status': sc.ATTACH_NONE,                # вопрос по таблице, прикладывать нечего
             'yandex_termobox': sc.ATTACH_IMAGE,             # фото имеющегося термокороба
+            # «Загрузить файл» (#297): коммерческое предложение — PDF или Word,
+            # картинкой его не ограничишь.
+            'cooperation': sc.ATTACH_ANY,
         }
         for key, kind in expected.items():
             self.assertEqual(sc.get(key)['attachment'], kind, key)
+
+
+class CooperationTest(unittest.TestCase):
+    """ТЗ задачи #297: обращения по направлению «Сотрудничество».
+
+    Поля в ТЗ перечислены одним списком, и «Номер для обратного звонка» стоит в
+    нём дважды — после «С Яндексом» и между «Названием компании» и «Предлагаемой
+    услугой». Это две ветки одного вопроса «Тип сотрудничества»; тесты ниже
+    держат обе ветки буква в букву.
+    """
+
+    KEY = 'cooperation'
+
+    def keys(self, answers):
+        return [step['key'] for step in sc.visible_steps(sc.get(self.KEY), answers)]
+
+    def test_goes_to_its_own_group(self):
+        self.assertEqual(sc.get(self.KEY)['queue_code'], 'cooperation')
+        self.assertIn('cooperation', {code for code, *_ in schema._SEED_QUEUES})
+
+    def test_fields_before_the_type_are_asked_always(self):
+        self.assertEqual(self.keys({})[:4],
+                         ['coop_channel', 'coop_park', 'coop_city', 'coop_type'])
+        self.assertEqual(sc.get(self.KEY)['steps'][0]['options'], ['Звонок', 'Чат'])
+        self.assertEqual(sc.get(self.KEY)['steps'][3]['options'],
+                         [sc.COOP_WITH_YANDEX, sc.COOP_WITH_PARKS])
+
+    def test_yandex_branch_asks_only_the_callback_number(self):
+        answers = {'coop_type': sc.COOP_WITH_YANDEX}
+        self.assertEqual(self.keys(answers)[4:], ['coop_phone', 'coop_file'])
+
+    def test_parks_branch_asks_company_number_and_service_in_that_order(self):
+        answers = {'coop_type': sc.COOP_WITH_PARKS}
+        self.assertEqual(self.keys(answers)[4:],
+                         ['coop_company', 'coop_phone', 'coop_service', 'coop_file'])
+
+    def test_file_is_optional(self):
+        """«Загрузить файл» без слова «обязательно»: менеджер Яндекса диктует
+        номер голосом, и прикладывать ему нечего."""
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX)
+        self.assertEqual(verdict(self.KEY, answers, has_attachment=False)['outcome'],
+                         sc.READY)
+
+    def test_parks_branch_is_not_ready_without_company_and_service(self):
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_PARKS)
+        answers.pop('coop_company')
+        answers.pop('coop_service')
+        result = verdict(self.KEY, answers, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.INCOMPLETE)
+        self.assertEqual(set(result['missing']), {'coop_company', 'coop_service'})
+
+    def test_callback_number_is_required_in_both_branches(self):
+        for kind in (sc.COOP_WITH_YANDEX, sc.COOP_WITH_PARKS):
+            answers = full(self.KEY, coop_type=kind)
+            answers.pop('coop_phone')
+            self.assertIn('coop_phone',
+                          verdict(self.KEY, answers, has_attachment=False)['missing'], kind)
+
+    def test_group_message_carries_type_company_and_number(self):
+        """Тема в группу не уходит (заголовок — просьба), поэтому тип обязан
+        стоять в самом сообщении, а не только в теме обращения."""
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_PARKS, coop_channel='Чат',
+                       coop_company='ТОО Альфа', coop_phone='+77011234567',
+                       coop_service='Подключение водителей')
+        body = sc.render_body(self.KEY, answers)
+        for line in ('Тип сотрудничества: С таксопарками', 'Название компании: ТОО Альфа',
+                     'Номер для обратного звонка: +77011234567',
+                     'Канал обращения: Чат', 'Предлагаемая услуга: Подключение водителей'):
+            self.assertIn(line, body)
+        self.assertEqual(sc.render_subject(self.KEY, answers),
+                         'Сотрудничество с таксопарками · ТОО Альфа')
+
+    def test_yandex_subject_has_no_dangling_separator(self):
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX)
+        self.assertEqual(sc.render_subject(self.KEY, answers), 'Сотрудничество с Яндексом')
+        self.assertNotIn('Название компании', sc.render_body(self.KEY, answers))
+
+    def test_goes_as_text_not_as_a_picture(self):
+        self.assertFalse(sc.sends_card(self.KEY))
 
 
 class CommonMandatoryDataTest(unittest.TestCase):

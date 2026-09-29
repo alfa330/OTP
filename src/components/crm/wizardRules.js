@@ -225,6 +225,31 @@ export const groupCatalog = (catalog, entries = []) => {
     return groups;
 };
 
+/* Заголовок группы в картотеке «Новое обращение». null — заголовка не нужно.
+ *
+ * Его нет у единственной группы (заголовок над всем списком ничего не делит), у
+ * входа по ИИН (строка и есть тематика) и у группы из ОДНОЙ темы с тем же
+ * названием: «СОТРУДНИЧЕСТВО» над строкой «Сотрудничество» — одно слово дважды
+ * подряд, то есть шум, а не навигация.
+ */
+export const groupHeading = (group, total) => {
+    if (!group || total <= 1 || !group.title || group.entry) return null;
+    const items = group.items || [];
+    if (items.length === 1 && String(items[0].title || '').trim().toLowerCase()
+        === String(group.title).trim().toLowerCase()) return null;
+    return group.title;
+};
+
+/* Что можно выбрать в поле файла. Тематика говорит, КАКОЙ файл нужен:
+ * скриншот, скриншот или запись экрана — либо любой документ (коммерческое
+ * предложение приходит PDF-ом или Word). undefined — ограничений нет. */
+export const attachmentAccept = (scenario) => {
+    const kind = scenario && scenario.attachment;
+    if (kind === 'image') return 'image/*';
+    if (kind === 'any') return undefined;
+    return 'image/*,video/*';
+};
+
 /* Telegram-группа темы, если это НЕ группа её тематики. null — уйдёт «к себе»,
  * и писать это в строке не нужно: чат по умолчанию один на весь раздел
  * картотеки, а повторённый в каждой строке заголовок читать перестают.

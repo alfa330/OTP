@@ -33,9 +33,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 # Строка очереди в порядке queries._QUEUE_COLUMNS.
-def queue_row(queue_id, code, title, chat_id=-100, is_active=True):
+def queue_row(queue_id, code, title, chat_id=-100, is_active=True, mentions=None):
     return (queue_id, title, None, chat_id, 'Чат «%s»' % title, None,
-            None, 100, is_active, None, code)
+            None, 100, is_active, None, code, mentions)
 
 
 # Строка реестра чатов бота в порядке queries.bot_chats.

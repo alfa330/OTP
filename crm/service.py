@@ -79,7 +79,11 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
     # не сохраняются в обращение при создании: между «оператор заполнил форму» и
     # «повторили отправку через час» ник офиса мог смениться, и правильный тот,
     # что в справочнике сейчас.
-    mentions = _office_mentions(db, payload)
+    #
+    # К офисам добавляются ответственные самой тематики — ники, заданные на
+    # очереди (ТЗ #297: «при поступлении обращения в Telegram необходимо
+    # автоматически тегать ответственное лицо»). Повторы снимает mentions_line.
+    mentions = _office_mentions(db, payload) + list(payload.get('queue_mentions') or [])
     heading = (scenario.get('group_title') or payload['subject'] or '').strip()
     subtitle = 'Обращение %s · %s' % (telegram.ticket_number(ticket_id),
                                       payload['queue_title'] or '')
@@ -100,7 +104,7 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
     if picture is not None:
         caption = telegram.build_card_caption(
             ticket_id=ticket_id, data_rows=data_rows,
-            priority=payload['priority'], due_text=due_text)
+            priority=payload['priority'], due_text=due_text, mentions=mentions)
         result, error = transport.send_attachment(
             payload['chat_id'], file_name='ticket-%d.png' % ticket_id,
             stream=io.BytesIO(picture), mimetype='image/png',

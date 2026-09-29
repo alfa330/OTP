@@ -115,7 +115,8 @@ def visibility_sql(ctx):
 
 _QUEUE_COLUMNS = """
     q.id, q.title, q.description, q.chat_id, q.chat_title, q.department_id,
-    q.sla_minutes, q.sort_order, q.is_active, q.created_at, q.code
+    q.sla_minutes, q.sort_order, q.is_active, q.created_at, q.code,
+    q.mention_usernames
 """
 
 
@@ -140,7 +141,18 @@ def _queue_row(row, expose_chat_id=False):
         # chat_id — служебный идентификатор чужого чата, обычному сотруднику он
         # ни к чему; отдаём только тем, кто настраивает очереди.
         item['chat_id'] = row[3]
+        # Кого бот отмечает в группе — тоже настройка, а не то, что оператору
+        # нужно видеть при выборе тематики.
+        item['mention_usernames'] = _split_usernames(row[11])
     return item
+
+
+def _split_usernames(value):
+    """Ники очереди списком. Разбор тот же, что у офисов вики: хранятся они
+    одинаково, и второй разборщик одного формата однажды разошёлся бы с первым."""
+    from wiki import offices as wiki_offices
+
+    return wiki_offices.split_telegram_usernames(value)
 
 
 def list_queues(cursor, include_inactive=False, expose_chat_id=False):
@@ -202,7 +214,7 @@ def create_queue(cursor, *, title, description=None, chat_id=None, chat_title=No
 
 
 _QUEUE_EDITABLE = ('title', 'description', 'chat_id', 'chat_title', 'department_id',
-                   'sla_minutes', 'sort_order', 'is_active')
+                   'sla_minutes', 'sort_order', 'is_active', 'mention_usernames')
 
 
 def update_queue(cursor, queue_id, changes):
@@ -1079,7 +1091,8 @@ def delivery_payload(cursor, ticket_id):
                t.created_by, t.created_by_name,
                t.delivery_status, t.tg_message_id,
                COALESCE(t.tg_chat_id, q.chat_id), q.title, tp.title, d.name,
-               t.answers ->> 'iin', t.scenario_key, t.answers, t.flags
+               t.answers ->> 'iin', t.scenario_key, t.answers, t.flags,
+               q.mention_usernames
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
@@ -1108,6 +1121,10 @@ def delivery_payload(cursor, ticket_id):
         'answers': row[17] or {},
         'flags': row[18] or [],
         'department_name': row[14],
+        # Ответственные очереди — их бот отмечает в группе (ТЗ #297). Ники
+        # читаются В МОМЕНТ ОТПРАВКИ, как и ники офисов: сменили ответственного —
+        # «Отправить ещё раз» отметит уже нового.
+        'queue_mentions': [{'username': name} for name in _split_usernames(row[19])],
     }
 
 

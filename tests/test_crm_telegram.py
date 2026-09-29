@@ -460,6 +460,16 @@ class EveryGroupMessageCarriesTheIinTest(unittest.TestCase):
                        {'label': 'Таксопарк', 'value': 'iTaxi'}])
         self.assertIn(self.IIN, text)
 
+    def test_card_caption_tags_the_owner_last_and_uncut(self):
+        """ТЗ #297: ответственного отмечают и под картинкой. Тег — последней
+        строкой и вне обрезки: у длинной подписи обрезался бы именно хвост."""
+        text = telegram.build_card_caption(
+            ticket_id=10,
+            data_rows=[{'label': 'Длинное поле', 'value': 'я' * 2000}],
+            mentions=[{'username': 'sapar_owner'}])
+        self.assertTrue(text.endswith('@sapar_owner'))
+        self.assertLessEqual(len(text), telegram.CAPTION_LIMIT)
+
     def test_no_other_group_message_builder_appeared(self):
         """Список видов сообщений закрыт: появится новый — этот тест упадёт, и
         про ИИН в нём не забудут."""

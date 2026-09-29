@@ -195,12 +195,31 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                         expose_chat_id=manage)
         return jsonify({"items": items})
 
+    def _mention_changes(data):
+        """Ники ответственных из тела запроса → ({'mention_usernames': …}, ошибка).
+
+        Разбор и проверка — те же, что у ников офисов в вики: «@a, t.me/b» и
+        список равноправны, а опечатку в нике лучше отбить сразу, чем узнать о
+        ней по молчанию группы (ТЗ #297: ответственного бот отмечает сам).
+        """
+        if 'mention_usernames' not in data:
+            return {}, None
+        from wiki import offices as wiki_offices
+
+        names, problem = wiki_offices.clean_telegram_usernames(data.get('mention_usernames'))
+        if problem:
+            return None, problem
+        return {'mention_usernames': wiki_offices.join_telegram_usernames(names)}, None
+
     @crm_route('/queues', methods=('POST',), manage=True)
     def crm_queue_create(ctx):
         data = _payload()
         title = str(data.get('title') or '').strip()
         if not title:
             return jsonify({"error": "Укажите название очереди"}), 400
+        mentions, problem = _mention_changes(data)
+        if problem:
+            return jsonify({"error": problem}), 400
         chat_id = data.get('chat_id')
         with db._get_cursor() as cursor:
             if chat_id:
@@ -225,6 +244,8 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 sort_order=_int_or_none(data.get('sort_order')) or 100,
                 created_by=ctx['user_id'],
             )
+            if mentions:
+                item = queries.update_queue(cursor, item['id'], mentions)
         return jsonify({"item": item}), 201
 
     @crm_route('/queues/<int:queue_id>', methods=('PATCH', 'DELETE'), manage=True)
@@ -249,6 +270,10 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                     changes[field] = _int_or_none(data[field])
             if 'is_active' in data:
                 changes['is_active'] = _bool(data['is_active'])
+            mentions, problem = _mention_changes(data)
+            if problem:
+                return jsonify({"error": problem}), 400
+            changes.update(mentions)
             if 'chat_id' in data:
                 chat_id = _int_or_none(data['chat_id'])
                 if chat_id is not None:
@@ -727,9 +752,12 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 # ФИО и телефон водителя — то, чем обращение ищут. У тематик
                 # регионов ИИН не спрашивают (его нет в ТЗ), и без этих двух
                 # полей обращение находилось бы только по своему номеру.
-                client_name=(str(scenarios._value(answers, 'driver_name') or '').strip()
-                             or None),
-                client_phone=_answer_text(answers, 'contact_number', 'driver_phone'),
+                #
+                # У «Сотрудничества» водителя нет, зато есть компания и номер для
+                # обратного звонка — ими такое обращение и ищут.
+                client_name=_answer_text(answers, 'driver_name', 'coop_company'),
+                client_phone=_answer_text(answers, 'contact_number', 'driver_phone',
+                                          'coop_phone'),
                 created_by=ctx['user_id'], created_by_name=ctx['name'],
                 department_id=ctx.get('department_id'),
                 due_at=service.compute_due_at(queue.get('sla_minutes')),

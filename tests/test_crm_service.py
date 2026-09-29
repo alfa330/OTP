@@ -485,6 +485,28 @@ class OfficeMentionTest(ServiceCase):
         service.deliver_ticket(self.db, 42)
         self.assertEqual(queries.find('office_mentions'), [])
 
+    def test_queue_owner_is_tagged_in_any_queue(self):
+        """ТЗ #297: «при поступлении обращения в Telegram необходимо
+        автоматически тегать ответственное лицо». Ответственный задан на
+        очереди — и отмечается в любой тематике, не только у офисов."""
+        queries, transport = self.wire(payload=dict(PARCEL_PAYLOAD, queue_mentions=[
+            {'username': 'coop_owner'}]), mentions=[])
+        ok, error = service.deliver_ticket(self.db, 42)
+        self.assertTrue(ok, error)
+        self.assertIn('@coop_owner', transport.sent[0]['text'])
+        sent = [event for event in queries.find('add_event') if event['kind'] == 'sent']
+        self.assertEqual(sent[0]['payload'].get('mentions'), ['@coop_owner'])
+
+    def test_queue_owner_and_office_are_tagged_once_each(self):
+        queries, transport = self.wire(
+            payload=dict(self.OFFICE_PAYLOAD, queue_mentions=[{'username': 'itaxi_jambyla'},
+                                                              {'username': 'head'}]),
+            mentions=[{'username': 'itaxi_jambyla'}])
+        service.deliver_ticket(self.db, 42)
+        text = transport.sent[0]['text']
+        self.assertEqual(text.count('@itaxi_jambyla'), 1)
+        self.assertIn('@head', text)
+
     def test_directory_is_read_outside_the_network_call(self):
         """Ник читается в момент отправки, но не с открытым на сеть курсором:
         пул делят SSE колокола и аукциона."""

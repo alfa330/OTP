@@ -1545,6 +1545,12 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, scenarios, onReload
                                 <span>{queue.chat_title || 'Telegram-группа не выбрана'}</span>
                                 <span className="text-slate-300">·</span>
                                 <span>Срок ответа: {fmtSla(queue.sla_minutes)}</span>
+                                {!!queue.mention_usernames?.length && (
+                                    <>
+                                        <span className="text-slate-300">·</span>
+                                        <span>Отмечает: {queue.mention_usernames.map((name) => `@${name}`).join(' ')}</span>
+                                    </>
+                                )}
                             </div>
                             {queue.description && (
                                 <div className="mt-1 text-[11.5px] leading-snug text-slate-500">{queue.description}</div>
@@ -1628,6 +1634,18 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, scenarios, onReload
                             <div className="mt-1.5 px-1 text-[11.5px] text-slate-500">
                                 Показывается в сообщении группы и подсвечивает просроченные обращения.
                             </div>
+                        </div>
+                        <div>
+                            {/* Ники ответственных. Список с сервера приходит
+                                массивом, в поле он — строкой через пробел: так
+                                его и вставляют из Telegram. */}
+                            <div className={iosGroupLabel}>Кого отмечать в группе</div>
+                            <input value={Array.isArray(editing.mention_usernames)
+                                       ? editing.mention_usernames.map((name) => `@${name}`).join(' ')
+                                       : (editing.mention_usernames || '')}
+                                   onChange={(e) => setEditing((p) => ({ ...p, mention_usernames: e.target.value }))}
+                                   placeholder="@ник ответственного — можно несколько через пробел"
+                                   className={`mt-1.5 ${iosInput}`} />
                         </div>
                     </div>
                 )}

@@ -12,8 +12,9 @@ import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
     CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterCategory, afterChecks, answerValue,
-    blockedLabel, carryOver, checksAreComplete, checksPayload, describeSnapshot,
-    entryCategories, entryIsComplete, groupCatalog, groupIsComplete, groupsOf, hasChecks,
+    attachmentAccept, blockedLabel, carryOver, checksAreComplete, checksPayload,
+    describeSnapshot, entryCategories, entryIsComplete, groupCatalog, groupHeading,
+    groupIsComplete, groupsOf, hasChecks,
     localVerdict, lookupKey, missingGroup, needsLookup, needsSaparCheck, nextStop,
     officeOptions, openStop, pairRows, periodLabel, periodOptions, previousStop,
     referenceOptions, routeNote, rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
@@ -1080,7 +1081,7 @@ export default function TicketWizard({
                             названия в каждой строке. */}
                         {catalogGroups.map((group) => (
                             <div key={group.code}>
-                                {catalogGroups.length > 1 && group.title && !group.entry && (
+                                {groupHeading(group, catalogGroups.length) && (
                                     <div className={`${iosGroupLabel} mb-1.5`}>{group.title}</div>
                                 )}
                                 <div className="space-y-1.5">
@@ -1333,6 +1334,9 @@ export default function TicketWizard({
                                         {scenario.attachment_hint && (
                                             <InfoHint side="left">{scenario.attachment_hint}</InfoHint>
                                         )}
+                                        {step.optional && (
+                                            <span className="text-[11px] text-slate-400">необязательно</span>
+                                        )}
                                     </div>
                                     <button type="button" onClick={() => fileRef.current?.click()}
                                             className={`${iosCard} flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:bg-slate-50`}>
@@ -1352,10 +1356,12 @@ export default function TicketWizard({
                                         )}
                                     </button>
                                     <input ref={fileRef} type="file" className="hidden"
-                                           accept={scenario.attachment === 'image'
-                                               ? 'image/*' : 'image/*,video/*'}
+                                           accept={attachmentAccept(scenario)}
                                            onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
-                                    {!attachment && (
+                                    {/* Предупреждение — только там, где без файла
+                                        обращение правда не уйдёт. У необязательного
+                                        вложения это была бы неправда. */}
+                                    {!attachment && !step.optional && (
                                         <div className="mt-1 text-[11.5px] text-amber-600">
                                             {missing[MISSING_ATTACHMENT] || 'Без вложения обращение отправить нельзя'}
                                         </div>
