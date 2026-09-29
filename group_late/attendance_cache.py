@@ -81,7 +81,7 @@ def row_from_cache(record: dict) -> dict:
         when = mark.get("at")
         if when and (last_mark is None or str(when) > str(last_mark)):
             last_mark = when
-    return {
+    row = {
         "date": _as_date(record.get("day")).isoformat(),
         "employee_id": record.get("employee_id") or "",
         "employee": record.get("employee_name") or "—",
@@ -109,6 +109,10 @@ def row_from_cache(record: dict) -> dict:
         "marks": marks,
         "cached": True,
     }
+    # Недоработка и переработка не хранятся: они выводятся из плана и факта строки,
+    # и так их получают и дни, собранные до появления этих колонок.
+    row.update(attendance.work_balance(row))
+    return row
 
 
 def _plan_inputs(db):

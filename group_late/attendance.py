@@ -39,6 +39,7 @@ from group_late.helpers import (
     net_work_seconds,
     parse_dt,
     presence_seconds,
+    work_deviation_seconds,
 )
 from group_late.workpace import workpace_client
 
@@ -102,6 +103,64 @@ def early_minutes(plan_end_dt, fact_out_dt) -> int:
     if not plan_end_dt or not fact_out_dt:
         return 0
     return max(0, int((plan_end_dt - fact_out_dt).total_seconds() // 60))
+
+
+# Смена не длиннее 16 часов — то же допущение, что у окончательности дня в кэше
+# (attendance_cache.SETTLE_NEXT_DAY_HOUR): вход старше этого — уже не «ещё на месте».
+OPEN_DAY_MAX = timedelta(hours=16)
+
+
+def _still_at_work(row, now_local) -> bool:
+    """Человек вышел и вернулся — последняя отметка дня вход позже ухода, — и это
+    было недавно. Тогда «уход» был обедом, а не концом дня: сравнивать день с
+    нормой рано, иначе вернувшийся с обеда числится недоработавшим полсмены.
+    Только для живого «сейчас»: у прошедшего дня такой хвост — забытый уход, и
+    число там считается так же, как в Excel-отчёте."""
+    if now_local is None:
+        return False
+    if now_local.tzinfo is None:
+        now_local = now_local.replace(tzinfo=config.TZ)
+    fact_out = parse_dt(row.get("fact_out"))
+    last = None
+    for mark in row.get("marks") or []:
+        when = parse_dt(mark.get("at"))
+        if when and (last is None or when > last[0]):
+            last = (when, mark.get("kind"))
+    if not fact_out or not last or last[1] != "in" or last[0] <= fact_out:
+        return False
+    return now_local - last[0] < OPEN_DAY_MAX
+
+
+def work_balance(row, now_local=None) -> dict:
+    """Недоработка и переработка дня в минутах — колонки раздела «Отметки».
+
+    Считается по готовой строке, а не по сырым записям: так же выходит и у дня
+    из кэша, и старые дни не приходится пересобирать из Workpace. Формула — та
+    же, что у колонки «Отклонение» Excel-отчёта (`work_deviation_seconds`). День
+    без прихода или ухода не сравнивается: он ещё идёт или отметки нет, и
+    «недоработка на всю смену» повторила бы статус «Не отметился». Так же не
+    сравнивается день, где человек сейчас на месте после выхода (`now_local`,
+    см. `_still_at_work`)."""
+    empty = {"underwork_minutes": 0, "overwork_minutes": 0}
+    if not row.get("fact_in") or not row.get("fact_out"):
+        return empty
+    if _still_at_work(row, now_local):
+        return empty
+    if row.get("plan_mode") == plan_rules.MODE_HOURS:
+        deviation = work_deviation_seconds(row.get("work_seconds"),
+                                           hours_norm=row.get("hours_norm") or 0)
+    else:
+        deviation = work_deviation_seconds(
+            row.get("work_seconds"),
+            plan_in=parse_dt(row.get("plan_in")), plan_out=parse_dt(row.get("plan_out")),
+            lunch_sec=row.get("lunch_seconds") or 0)
+    if deviation is None:
+        return empty
+    # Минуты — вниз, как у опоздания: 59 секунд сверх нормы переработкой не считаем.
+    minutes = int(abs(deviation) // 60)
+    if deviation < 0:
+        return {"underwork_minutes": minutes, "overwork_minutes": 0}
+    return {"underwork_minutes": 0, "overwork_minutes": minutes}
 
 
 def _raw_marks_for(record, marks_by_key):
@@ -315,7 +374,7 @@ def _row(record, raw_marks, employee_lookup, date_iso, now_local, rules=None) ->
             last_mark = when
     last_at = parse_dt(last_mark) or fact_out or fact_in
 
-    return {
+    row = {
         "date": date_iso,
         "employee_id": employee_id,
         "employee": employee,
@@ -342,6 +401,8 @@ def _row(record, raw_marks, employee_lookup, date_iso, now_local, rules=None) ->
         "status_label": STATUS_LABELS.get(status, status),
         "marks": [_mark_out(mark) for mark in raw_marks],
     }
+    row.update(work_balance(row, now_local))
+    return row
 
 
 def _mark_out(mark) -> dict:
@@ -515,6 +576,9 @@ SORT_KEYS = {
     "fact_in": lambda r: (r.get("fact_in") is None, str(r.get("fact_in") or "")),
     "fact_out": lambda r: (r.get("fact_out") is None, str(r.get("fact_out") or "")),
     "late_minutes": lambda r: -int(r.get("late_minutes") or 0),
+    "early_out_minutes": lambda r: -int(r.get("early_out_minutes") or 0),
+    "underwork_minutes": lambda r: -int(r.get("underwork_minutes") or 0),
+    "overwork_minutes": lambda r: -int(r.get("overwork_minutes") or 0),
     "work_seconds": lambda r: -int(r.get("work_seconds") or 0),
     "status": lambda r: STATUS_ORDER.get(r.get("status"), 99),
     "date": lambda r: str(r.get("date") or ""),

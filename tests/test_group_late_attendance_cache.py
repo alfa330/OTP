@@ -92,6 +92,14 @@ class RowShapeTests(unittest.TestCase):
         self.assertEqual(row["status_label"], "Опоздание")
         self.assertEqual(row["system_label"], "Клокстер")
 
+    def test_old_days_get_the_balance_without_rebuild(self):
+        # Недоработка не хранится в кэше — она выводится из плана и факта строки.
+        day = date(2026, 9, 10)
+        row = attendance_cache.row_from_cache(_cached_record(
+            day, fact_out=datetime(2026, 9, 10, 19, 0, tzinfo=TZ),
+            work_seconds=7 * 3600 + 45 * 60, lunch_seconds=3600))
+        self.assertEqual((row["underwork_minutes"], row["overwork_minutes"]), (15, 0))
+
     def test_last_mark_is_taken_from_marks(self):
         row = attendance_cache.row_from_cache(_cached_record(date(2026, 9, 10)))
         self.assertEqual(row["last_mark_at"], "2026-09-10T10:15:00+05:00")

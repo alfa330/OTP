@@ -37,6 +37,7 @@ from group_late.helpers import (
     net_work_seconds as _net_work_seconds,
     parse_dt as _parse_dt,
     presence_seconds as _presence_seconds,
+    work_deviation_seconds as _work_deviation_seconds,
 )
 from group_late.workpace import workpace_client
 
@@ -614,31 +615,22 @@ def generate_report(
                         work_time_str = f"{h:02d}:{m:02d}"
 
                 deviation_str = "—"
+                diff_sec = None
                 if is_hours:
                     # Отклонение у часовика считается от нормы часов, а не от смены.
-                    norm_hours = (span or {}).get("hoursNorm")
-                    norm_sec = int(float(norm_hours) * 3600) if norm_hours else 0
-                    if norm_sec > 0:
-                        diff_sec = work_seconds - norm_sec
-                        sign = "+" if diff_sec >= 0 else "-"
-                        abs_diff = abs(diff_sec)
-                        deviation_str = (f"{sign}{int(abs_diff // 3600):02d}:"
-                                         f"{int((abs_diff % 3600) // 60):02d}")
+                    diff_sec = _work_deviation_seconds(
+                        work_seconds, hours_norm=(span or {}).get("hoursNorm") or 0)
                 elif span and fact_in_dt and fact_out_dt:
-                    plan_in_dt = _parse_dt(span.get("workTimeStart"))
-                    plan_out_dt = _parse_dt(span.get("workTimeEnd"))
-                    if plan_in_dt and plan_out_dt:
-                        # Норму берём тоже без обеда: план смены его включает, и
-                        # сравнение «факт без обеда» с «планом с обедом» давало бы
-                        # минус час у всех, кто отработал ровно по графику.
-                        norm_sec = (plan_out_dt - plan_in_dt).total_seconds() - lunch_sec
-                        if norm_sec > 0:
-                            diff_sec = work_seconds - norm_sec
-                            sign = "+" if diff_sec >= 0 else "-"
-                            abs_diff = abs(diff_sec)
-                            h = int(abs_diff // 3600)
-                            m = int((abs_diff % 3600) // 60)
-                            deviation_str = f"{sign}{h:02d}:{m:02d}"
+                    diff_sec = _work_deviation_seconds(
+                        work_seconds,
+                        plan_in=_parse_dt(span.get("workTimeStart")),
+                        plan_out=_parse_dt(span.get("workTimeEnd")),
+                        lunch_sec=lunch_sec)
+                if diff_sec is not None:
+                    sign = "+" if diff_sec >= 0 else "-"
+                    abs_diff = abs(diff_sec)
+                    deviation_str = (f"{sign}{int(abs_diff // 3600):02d}:"
+                                     f"{int((abs_diff % 3600) // 60):02d}")
 
                 # Update Period Aggregated Statistics
                 emp_key = (dept_name, name)

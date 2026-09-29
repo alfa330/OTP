@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
     Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Bell, BellOff, Building2,
-    CalendarClock, CalendarRange, CheckCircle2, ChevronDown, ChevronRight, Clock, Download, FileSpreadsheet,
+    CalendarClock, CalendarRange, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Clock, Download, FileSpreadsheet,
     Loader2, Link2, LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send,
     ShieldAlert, Timer, Trash2, User, Users, UserX, X, Zap,
 } from 'lucide-react';
@@ -67,9 +67,73 @@ const ATTENDANCE_STATUS_CHIPS = [
 /* Точка цвета у чипа — только у проблемных статусов. */
 const STATUS_DOT = { red: 'bg-rose-500', amber: 'bg-amber-500' };
 
-/* Колонки списка отметок на компьютере — одна строка на шапку и на строки,
- * иначе они разъедутся при первой же правке ширины. */
-const ATTENDANCE_GRID = 'grid-cols-[minmax(0,2.3fr)_minmax(0,1.1fr)_72px_72px_76px_minmax(0,1.5fr)_16px]';
+/* Колонки таблицы отметок — одна строка на шапку и на строки, иначе они
+ * разъедутся при первой же правке ширины. Нижние границы замерены по тексту:
+ * «Недоработка» — 74 px (шапка 11 px), «09:00–18:00» — 78, «Приход» — 42, плюс
+ * поля ячейки и ~12 px слева под стрелку сортировки (см. шапку);
+ * в сумме 980 px — столько остаётся на экране 1366 при развёрнутом сайдбаре и
+ * полосе прокрутки Windows. Длинное ФИО обрезается многоточием (целиком — в
+ * подсказке и в карточке дня). Числовые колонки фиксированные: на широком экране
+ * простор уходит ФИО и статусу, а не пустоте слева от «17 мин».
+ *
+ * Таблица или список — решает ширина САМОЙ карточки (контейнерный запрос), а не
+ * окна: сайдбар бывает развёрнут (300 px) и свёрнут (80 px), и 1280 px окна —
+ * это то 900, то 1140 px под таблицу. Уже 980 px — список, как на телефоне:
+ * сжатые колонки с «Васильева Ольг…» читаются хуже строки списка. Классы
+ * написаны целиком — иначе Tailwind их не найдёт при сборке. */
+const ATTENDANCE_GRID = 'grid-cols-[minmax(146px,2fr)_100px_66px_66px_74px_repeat(4,96px)_minmax(112px,1fr)_20px]';
+const ATTENDANCE_TABLE_ONLY = 'hidden [@container(min-width:980px)]:grid';
+const ATTENDANCE_LIST_ONLY = '[@container(min-width:980px)]:hidden';
+
+/* Шапка таблицы. `sort` — ключ сортировки сервера: колонку можно нажать, как в
+ * Finder. Направление у ключа одно (сервер его не разворачивает): ФИО и время
+ * прихода/ухода — по возрастанию, минуты и статус — сначала большие. */
+const ATTENDANCE_COLUMNS = [
+    { label: 'Сотрудник', sort: 'employee' },
+    { label: 'График' },
+    { label: 'Приход', sort: 'fact_in', align: 'center' },
+    { label: 'Уход', sort: 'fact_out', align: 'center' },
+    { label: 'В работе', sort: 'work_seconds', align: 'right' },
+    { label: 'Опоздание', sort: 'late_minutes', align: 'right' },
+    { label: 'Ранний уход', sort: 'early_out_minutes', align: 'right' },
+    { label: 'Недоработка', sort: 'underwork_minutes', align: 'right' },
+    { label: 'Переработка', sort: 'overwork_minutes', align: 'right' },
+    { label: 'Статус', sort: 'status' },
+];
+const ASCENDING_SORTS = new Set(['employee', 'fact_in', 'fact_out']);
+
+/* Ячейка таблицы: между колонками — волосяная линия, как в таблицах macOS. В шапке
+ * линия чуть темнее: по ней глаз находит границы колонок, не читая строк. */
+const ATTENDANCE_CELL = 'flex min-w-0 items-center border-l border-slate-200/60 px-2 py-1 first:border-l-0';
+const ATTENDANCE_HEAD_CELL = 'flex h-8 min-w-0 items-center border-l border-slate-200 px-2 first:border-l-0';
+const CELL_ALIGN = { center: 'justify-center text-center', right: 'justify-end text-right' };
+/* Ячейка «Приход» при опоздании и «Уход» при раннем уходе — красная целиком
+ * (просьба владельца 29.09.2026): нарушение видно прямо во времени, глазу не
+ * нужно сверять его с колонкой минут. */
+const ATTENDANCE_ALERT_CELL = 'bg-rose-50';
+
+/* Минуты отклонения. Ноль — прочерком, как пустое время: вопросов к дню нет.
+ * Цвет только у нехватки времени; переработка — не нарушение, её не красим. */
+const DEVIATION_TONES = { red: 'font-medium text-rose-600', amber: 'font-medium text-amber-600' };
+/* Телефонный список (и узкое окно компьютера): те же минуты, что колонки таблицы,
+ * и того же тона — строкой под статусом. Минуты, которые уже стоят в плашке
+ * статуса («Опоздание · 17 мин»), не повторяем; нулевые не показываем. */
+const attendanceMetrics = (row) => [
+    { label: 'Опоздание', minutes: row.status === 'late' ? 0 : row.late_minutes, tone: 'red' },
+    { label: 'Ранний уход', minutes: row.status === 'early_out' ? 0 : row.early_out_minutes, tone: 'amber' },
+    { label: 'Недоработка', minutes: row.underwork_minutes, tone: 'amber' },
+    { label: 'Переработка', minutes: row.overwork_minutes },
+].filter((item) => item.minutes > 0);
+
+/* Время в строке списка: при опоздании или раннем уходе — красной плашкой, как
+ * ячейка таблицы (ATTENDANCE_ALERT_CELL). */
+const ListTime = ({ late, children }) => (late
+    ? <span className="rounded bg-rose-50 px-1 font-medium text-rose-700">{children}</span>
+    : children);
+
+const DeviationCell = ({ minutes, tone = null }) => (minutes > 0
+    ? <span className={`truncate text-[13px] tabular-nums ${DEVIATION_TONES[tone] || 'text-slate-700'}`}>{fmtMinutes(minutes)}</span>
+    : <span className="text-[13px] text-slate-300">—</span>);
 
 /* Оси сортировки из постановки: подразделение, локация, приход/уход. Остальные
  * добавлены потому, что таблицу читают ради них же.
@@ -86,6 +150,9 @@ const ATTENDANCE_SORTS = [
     { value: 'fact_in', label: 'По времени прихода' },
     { value: 'fact_out', label: 'По времени ухода' },
     { value: 'late_minutes', label: 'По опозданию' },
+    { value: 'early_out_minutes', label: 'По раннему уходу' },
+    { value: 'underwork_minutes', label: 'По недоработке' },
+    { value: 'overwork_minutes', label: 'По переработке' },
     { value: 'work_seconds', label: 'По времени в работе' },
     { value: 'system', label: 'По системе отметки' },
 ];
@@ -289,12 +356,14 @@ const Avatar = ({ name, size = 'md' }) => (
     </span>
 );
 
-/* Статус дня одной плашкой: опоздание сразу с минутами — отдельная колонка
- * «Опоздание» рядом со статусом «Опоздание» говорила одно и то же дважды. */
-const AttendanceStatusPill = ({ row }) => {
+/* Статус дня одной плашкой. В телефонном списке опоздание — сразу с минутами:
+ * колонок там нет. В таблице минуты стоят в своих колонках, и плашка их не
+ * повторяет (`withMinutes={false}`) — иначе одно и то же читалось бы дважды. */
+const AttendanceStatusPill = ({ row, withMinutes = true }) => {
     const tone = ATTENDANCE_STATUS_TONES[row.status] || 'slate';
-    const minutes = row.status === 'late' ? row.late_minutes
-        : row.status === 'early_out' ? row.early_out_minutes : 0;
+    const minutes = !withMinutes ? 0
+        : row.status === 'late' ? row.late_minutes
+            : row.status === 'early_out' ? row.early_out_minutes : 0;
     return (
         <IosBadge tone={tone} className="max-w-full whitespace-nowrap">
             <span className="truncate">{row.status_label}{minutes > 0 ? ` · ${fmtMinutes(minutes)}` : ''}</span>
@@ -308,11 +377,14 @@ const retyped = (mark) => (mark.terminal_kind && mark.terminal_kind !== mark.kin
     ? `на терминале — ${mark.terminal_kind === 'in' ? 'вход' : 'выход'}`
     : null);
 
-/* Колонка узкая: дата ухода ночной смены — второй строкой, а не переносом. */
-const TimeCell = ({ fact, day }) => {
+/* Колонка узкая: дата ухода ночной смены — второй строкой, а не переносом.
+ * `late` — время нарушило график (приход с опозданием, ранний уход): красным
+ * тогда и время, и фон всей ячейки — см. ATTENDANCE_ALERT_CELL. */
+const TimeCell = ({ fact, day, late = false }) => {
     const other = otherFactDay(fact, day);
+    const tone = late ? 'font-medium text-rose-700' : fact ? 'text-slate-900' : 'text-slate-300';
     return (
-        <div className={`text-center text-[13.5px] tabular-nums ${fact ? 'text-slate-900' : 'text-slate-300'}`}>
+        <div className={`text-center text-[13px] tabular-nums ${tone}`}>
             {fmtTime(fact)}
             {other && <div className="text-[11px] leading-tight text-slate-400">{other}</div>}
         </div>
@@ -1607,70 +1679,109 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const renderAttendanceRow = (row, index, showDate) => {
         const meta = [row.position, row.department, row.system_label].filter(Boolean).join(' · ');
+        const metrics = attendanceMetrics(row);
         return (
             <button key={`${row.date}:${row.employee_id}:${index}`} type="button"
                     onClick={() => setAttendanceDetail(row)}
-                    className="group block w-full px-4 py-2.5 text-left transition hover:bg-slate-50/80 active:bg-slate-100">
-                {/* Телефон: имя и время прихода–ухода сверху, статус — строкой ниже.
-                    Рядом с именем плашка «Ранний уход · 25 мин» съедала само имя. */}
-                <div className="flex items-center gap-3 lg:hidden">
+                    className="group block w-full text-left transition hover:bg-slate-50/80 active:bg-slate-100">
+                {/* Телефон и узкое окно, по строкам: ФИО во всю ширину; время
+                    прихода–ухода и «в работе»; статус и минуты, которых нет в
+                    плашке; должность. ФИО отдельной строкой: рядом с ним время с
+                    красными плашками или «Ранний уход · 25 мин» съедали само имя. */}
+                <div className={`flex items-center gap-3 px-4 py-2.5 ${ATTENDANCE_LIST_ONLY}`}>
                     <Avatar name={row.employee} />
                     <div className="min-w-0 flex-1">
-                        <div className="flex items-baseline gap-2">
-                            <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-slate-900">
-                                {row.employee || '—'}
-                            </span>
-                            <span className={`shrink-0 text-[12.5px] tabular-nums ${row.fact_in ? 'text-slate-600' : 'text-slate-400'}`}>
-                                {row.fact_in && row.fact_out
-                                    ? `${fmtTime(row.fact_in)}–${fmtFactTime(row.fact_out, row.date)}`
-                                    : row.fact_in ? `с ${fmtTime(row.fact_in)}`
-                                        : (planRangeLabel(row) ? `план ${planRangeLabel(row)}` : '')}
-                            </span>
-                        </div>
-                        <div className="mt-1 flex min-w-0 items-center gap-2">
+                        <div className="truncate text-[14px] font-medium text-slate-900">{row.employee || '—'}</div>
+                        {(row.fact_in || planRangeLabel(row)) && (
+                            <div className="mt-0.5 truncate text-[12.5px] tabular-nums text-slate-600">
+                                {row.fact_in ? (
+                                    <>
+                                        {!row.fact_out && 'с '}
+                                        <ListTime late={row.late_minutes > 0}>{fmtTime(row.fact_in)}</ListTime>
+                                        {row.fact_out && (
+                                            <>–<ListTime late={row.early_out_minutes > 0}>{fmtFactTime(row.fact_out, row.date)}</ListTime></>
+                                        )}
+                                        {row.work_seconds > 0 && (
+                                            <span className="text-slate-400"> · {fmtWorked(row.work_seconds)} в работе</span>
+                                        )}
+                                    </>
+                                ) : <span className="text-slate-400">план {planRangeLabel(row)}</span>}
+                            </div>
+                        )}
+                        {/* Ряд переносится: на узком телефоне «Ранний уход» и
+                            «Недоработка» встают под плашку, а не под шеврон. */}
+                        <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
                             <AttendanceStatusPill row={row} />
-                            {row.work_seconds > 0 && (
-                                <span className="shrink-0 text-[12px] tabular-nums text-slate-400">
-                                    {fmtWorked(row.work_seconds)} в работе
+                            {metrics.map((item) => (
+                                <span key={item.label} className="whitespace-nowrap text-[12px] tabular-nums">
+                                    <span className="text-slate-400">{item.label} </span>
+                                    <span className={DEVIATION_TONES[item.tone] || 'text-slate-600'}>{fmtMinutes(item.minutes)}</span>
                                 </span>
-                            )}
+                            ))}
                         </div>
-                        <div className="mt-0.5 truncate text-[12px] text-slate-400">
+                        <div className="mt-1 truncate text-[12px] text-slate-400">
                             {showDate ? `${fmtDay(row.date)} · ` : ''}{meta || '—'}
                         </div>
                     </div>
                     <ChevronRight size={15} className="shrink-0 text-slate-300" />
                 </div>
 
-                {/* Компьютер: те же сведения колонками, без горизонтальной прокрутки. */}
-                <div className={`hidden items-center gap-4 lg:grid ${ATTENDANCE_GRID}`}>
-                    <div className="flex min-w-0 items-center gap-3">
-                        <Avatar name={row.employee} />
+                {/* Компьютер: таблица. Каждое число — в своей колонке, без
+                    горизонтальной прокрутки; линии между колонками ведут глаз по
+                    строке, а не только по столбцу. */}
+                <div className={`min-h-[42px] px-1.5 ${ATTENDANCE_TABLE_ONLY} ${ATTENDANCE_GRID}`}>
+                    <div className={ATTENDANCE_CELL}>
                         <div className="min-w-0">
-                            <div className="truncate text-[13.5px] font-medium text-slate-900">{row.employee || '—'}</div>
-                            <div className="truncate text-[12px] text-slate-500">
+                            <div className="truncate text-[13px] font-medium text-slate-900" title={row.employee || undefined}>{row.employee || '—'}</div>
+                            <div className="truncate text-[11.5px] text-slate-500">
                                 {showDate ? `${fmtDay(row.date)} · ` : ''}{meta || 'должность не указана'}
                             </div>
                         </div>
                     </div>
-                    <div className="min-w-0">
-                        <div className="truncate text-[13px] tabular-nums text-slate-700">{scheduleLabel(row)}</div>
-                        {/* Откуда план, кадровик обязан видеть: с ручным графиком
-                            опоздание считается от него, а не от смены в системе. */}
-                        {row.plan_source === 'rule' && (
-                            <div className="text-[11.5px] text-slate-400">наш график</div>
-                        )}
+                    <div className={ATTENDANCE_CELL}>
+                        <div className="min-w-0">
+                            <div className="truncate text-[12.5px] tabular-nums text-slate-600" title={scheduleLabel(row)}>{scheduleLabel(row)}</div>
+                            {/* Откуда план, кадровик обязан видеть: с ручным графиком
+                                опоздание считается от него, а не от смены в системе. */}
+                            {row.plan_source === 'rule' && (
+                                <div className="text-[11px] text-slate-400">наш график</div>
+                            )}
+                        </div>
                     </div>
-                    <TimeCell fact={row.fact_in} day={row.date} />
-                    <TimeCell fact={row.fact_out} day={row.date} />
-                    <div className="text-right tabular-nums">
-                        <div className="text-[13.5px] text-slate-800">{fmtWorked(row.work_seconds)}</div>
-                        {row.plan_mode === 'hours' && row.hours_norm > 0 && (
-                            <div className="text-[11.5px] text-slate-400">из {hoursLabel(row.hours_norm)}</div>
-                        )}
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.center} ${row.late_minutes > 0 ? ATTENDANCE_ALERT_CELL : ''}`}>
+                        <TimeCell fact={row.fact_in} day={row.date} late={row.late_minutes > 0} />
                     </div>
-                    <div className="min-w-0"><AttendanceStatusPill row={row} /></div>
-                    <ChevronRight size={15} className="text-slate-300 transition group-hover:text-slate-400" />
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.center} ${row.early_out_minutes > 0 ? ATTENDANCE_ALERT_CELL : ''}`}>
+                        <TimeCell fact={row.fact_out} day={row.date} late={row.early_out_minutes > 0} />
+                    </div>
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.right} tabular-nums`}>
+                        <div>
+                            <div className={`text-[13px] ${row.work_seconds > 0 ? 'text-slate-900' : 'text-slate-300'}`}>
+                                {fmtWorked(row.work_seconds)}
+                            </div>
+                            {row.plan_mode === 'hours' && row.hours_norm > 0 && (
+                                <div className="text-[11px] text-slate-400">из {hoursLabel(row.hours_norm)}</div>
+                            )}
+                        </div>
+                    </div>
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.right}`}>
+                        <DeviationCell minutes={row.late_minutes} tone="red" />
+                    </div>
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.right}`}>
+                        <DeviationCell minutes={row.early_out_minutes} tone="amber" />
+                    </div>
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.right}`}>
+                        <DeviationCell minutes={row.underwork_minutes} tone="amber" />
+                    </div>
+                    <div className={`${ATTENDANCE_CELL} ${CELL_ALIGN.right}`}>
+                        <DeviationCell minutes={row.overwork_minutes} />
+                    </div>
+                    <div className={ATTENDANCE_CELL}>
+                        <AttendanceStatusPill row={row} withMinutes={false} />
+                    </div>
+                    <div className="flex items-center justify-center">
+                        <ChevronRight size={14} className="text-slate-300 transition group-hover:text-slate-400" />
+                    </div>
                 </div>
             </button>
         );
@@ -1779,43 +1890,76 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 )}
 
                 <div className={`${iosCard} overflow-hidden`}>
-                    <div className={`hidden gap-4 border-b border-slate-100 px-4 py-2 text-[11.5px] font-medium text-slate-400 lg:grid ${ATTENDANCE_GRID}`}>
-                        <span className="pl-11">Сотрудник</span>
-                        <span>График</span>
-                        <span className="text-center">Приход</span>
-                        <span className="text-center">Уход</span>
-                        <span className="text-right">В работе</span>
-                        <span>Статус</span>
-                        <span />
-                    </div>
+                    {/* Контейнер запроса ширины — только шапка и строки: у подвала
+                        выпадающий список, ему ограничения контейнера ни к чему. */}
+                    <div className="[container-type:inline-size]">
+                        <div className={`border-b border-slate-200/70 bg-slate-50/80 px-1.5 ${ATTENDANCE_TABLE_ONLY} ${ATTENDANCE_GRID}`}>
+                            {ATTENDANCE_COLUMNS.map((column) => {
+                                const align = CELL_ALIGN[column.align] || '';
+                                if (!column.sort) {
+                                    return (
+                                        <div key={column.label} className={`${ATTENDANCE_HEAD_CELL} ${align}`}>
+                                            <span className="truncate text-[11px] font-medium text-slate-500">{column.label}</span>
+                                        </div>
+                                    );
+                                }
+                                const active = attendanceFilters.sort === column.sort;
+                                const Arrow = ASCENDING_SORTS.has(column.sort) ? ChevronUp : ChevronDown;
+                                /* У узких колонок (время, минуты) текст занимает почти всю
+                                   ширину — стрелка в потоке обрезала бы «Недоработку» до
+                                   «Недорабо…». Там она стоит в левом поле ячейки, вне текста;
+                                   у широких («Сотрудник», «Статус») — сразу за подписью. */
+                                const arrowOutside = Boolean(column.align);
+                                return (
+                                    <div key={column.label} className={`${ATTENDANCE_HEAD_CELL} ${align} relative`}>
+                                        {active && arrowOutside && (
+                                            <Arrow size={10} strokeWidth={2.75} aria-hidden
+                                                   className="pointer-events-none absolute left-px top-1/2 -translate-y-1/2 text-slate-500" />
+                                        )}
+                                        <button type="button" title={column.label}
+                                                onClick={() => { if (!active) applyAttendanceFilters({ sort: column.sort }); }}
+                                                aria-pressed={active}
+                                                className={`inline-flex min-w-0 items-center gap-0.5 text-[11px] font-medium transition ${
+                                                    active ? 'text-slate-900' : 'text-slate-500 hover:text-slate-800'}`}>
+                                            <span className="truncate">{column.label}</span>
+                                            {active && !arrowOutside && <Arrow size={12} strokeWidth={2.5} className="shrink-0 text-slate-500" />}
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                            <span />
+                        </div>
 
-                    {attendanceError ? <ErrorBlock>{attendanceError}</ErrorBlock>
-                        : attendance === null ? (
-                            <div className="flex items-center justify-center gap-2 p-10 text-[13px] text-slate-500">
-                                <Loader2 className="h-4 w-4 animate-spin" /> Загружаем отметки…
-                            </div>
-                        ) : rows.length === 0 ? (
-                            <EmptyBlock icon={Clock}>
-                                {attendanceFilters.status || attendanceFilters.q || attendanceFilters.departments.length
-                                    ? 'Под выбранные условия никто не подходит'
-                                    : 'За выбранный период отметок нет'}
-                            </EmptyBlock>
-                        ) : grouped ? (
-                            groups.map((group) => (
-                                <div key={group.date}>
-                                    <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-1.5 text-[12px] font-semibold text-slate-500">
-                                        {fmtDayLong(group.date)}
-                                    </div>
-                                    <div className="divide-y divide-slate-100">
-                                        {group.items.map(([row, index]) => renderAttendanceRow(row, index, false))}
-                                    </div>
+                        {attendanceError ? <ErrorBlock>{attendanceError}</ErrorBlock>
+                            : attendance === null ? (
+                                <div className="flex items-center justify-center gap-2 p-10 text-[13px] text-slate-500">
+                                    <Loader2 className="h-4 w-4 animate-spin" /> Загружаем отметки…
                                 </div>
-                            ))
-                        ) : (
-                            <div className="divide-y divide-slate-100">
-                                {rows.map((row, index) => renderAttendanceRow(row, index, multiDay))}
-                            </div>
-                        )}
+                            ) : rows.length === 0 ? (
+                                <EmptyBlock icon={Clock}>
+                                    {attendanceFilters.status || attendanceFilters.q || attendanceFilters.departments.length
+                                        ? 'Под выбранные условия никто не подходит'
+                                        : 'За выбранный период отметок нет'}
+                                </EmptyBlock>
+                            ) : grouped ? (
+                                groups.map((group) => (
+                                    <div key={group.date}>
+                                        <div className="border-b border-slate-200/60 bg-slate-50/80 px-4 py-1.5 text-[12px] font-semibold text-slate-500">
+                                            {fmtDayLong(group.date)}
+                                        </div>
+                                        <div className="divide-y divide-slate-200/60">
+                                            {group.items.map(([row, index]) => renderAttendanceRow(row, index, false))}
+                                        </div>
+                                    </div>
+                                ))
+                            ) : (
+                                <div className="divide-y divide-slate-200/60">
+                                    {/* Линии строк — того же тона, что линии колонок: сетка одна. Без
+                                        контейнерного варианта: тёмная тема узнаёт класс по имени. */}
+                                    {rows.map((row, index) => renderAttendanceRow(row, index, multiDay))}
+                                </div>
+                            )}
+                    </div>
 
                     {attendance !== null && rows.length > 0 && (
                         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
@@ -1901,6 +2045,12 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         {!hours && row.present_seconds > 0 && row.present_seconds !== row.work_seconds && (
                             <DetailRow label="На месте" value={fmtWorked(row.present_seconds)}
                                        hint="сумма отрезков «вход → выход»" />
+                        )}
+                        {row.underwork_minutes > 0 && (
+                            <DetailRow label="Недоработка" value={fmtMinutes(row.underwork_minutes)} tone="amber" />
+                        )}
+                        {row.overwork_minutes > 0 && (
+                            <DetailRow label="Переработка" value={fmtMinutes(row.overwork_minutes)} />
                         )}
                         <DetailRow label="Система" value={row.system_label || '—'}
                                    hint={row.location || null} />

@@ -133,7 +133,7 @@ class CacheTests(unittest.TestCase):
 class ScreenTests(unittest.TestCase):
     def test_next_day_departure_is_dated(self):
         self.assertIn("const otherFactDay = (iso, day) =>", VIEW_SRC)
-        self.assertIn("<TimeCell fact={row.fact_out} day={row.date} />", VIEW_SRC)
+        self.assertIn("<TimeCell fact={row.fact_out} day={row.date}", VIEW_SRC)
         self.assertIn("value={fmtFactTime(row.fact_out, row.date)}", VIEW_SRC)
 
 

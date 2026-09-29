@@ -15,10 +15,11 @@
 """
 
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from group_late import config
-from group_late.helpers import lunch_seconds, net_work_seconds
+from group_late.helpers import lunch_seconds, net_work_seconds, work_deviation_seconds
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS_SRC = (ROOT / "group_late" / "reports.py").read_text(encoding="utf-8-sig")
@@ -107,10 +108,13 @@ class ReportUsesTheDeductionTests(unittest.TestCase):
 
     def test_norm_is_net_of_lunch_too(self):
         # Иначе у отработавшего ровно по графику «Отклонение» показывало бы −1:00.
-        self.assertIn(
-            "norm_sec = (plan_out_dt - plan_in_dt).total_seconds() - lunch_sec",
-            REPORTS_SRC,
-        )
+        plan_in, plan_out = datetime(2026, 9, 29, 9, 0), datetime(2026, 9, 29, 18, 0)
+        lunch = lunch_seconds(9 * HOUR)
+        self.assertEqual(work_deviation_seconds(
+            net_work_seconds(9 * HOUR), plan_in=plan_in, plan_out=plan_out, lunch_sec=lunch), 0)
+        # Отчёт и раздел «Отметки» считают отклонение одной функцией с тем же обедом.
+        self.assertIn("lunch_sec=lunch_sec)", REPORTS_SRC)
+        self.assertIn("_work_deviation_seconds(", REPORTS_SRC)
 
     def test_columns_say_that_lunch_is_deducted(self):
         # Число без подписи читается как «отработал столько», и HR сверяет его

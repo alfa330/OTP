@@ -92,6 +92,26 @@ def net_work_seconds(span_seconds: float, planned_break_seconds=None) -> int:
     return max(0, int(span_seconds) - lunch_seconds(span_seconds, planned_break_seconds))
 
 
+def work_deviation_seconds(work_seconds, plan_in=None, plan_out=None, lunch_sec=0,
+                           hours_norm=None):
+    """Отклонение отработанного от нормы дня: плюс — переработка, минус — недоработка.
+
+    Одна формула на Excel-отчёт (колонка «Отклонение») и раздел «Отметки»: числа
+    кадровик сверяет в одном окне. У часовика норма — его часы (`hours_norm`). По
+    графику — длина смены без того же обеда, что вычтен из факта: план смены обед
+    включает, и «факт без обеда» против «плана с обедом» давал бы минус час у всех,
+    кто отработал ровно по графику. `None` — сравнивать не с чем."""
+    if hours_norm is not None:
+        norm = int(float(hours_norm) * 3600) if hours_norm else 0
+    elif plan_in and plan_out:
+        norm = (plan_out - plan_in).total_seconds() - (lunch_sec or 0)
+    else:
+        return None
+    if norm <= 0:
+        return None
+    return (work_seconds or 0) - norm
+
+
 def presence_seconds(marks) -> int:
     """Сколько человек РЕАЛЬНО был на месте: сумма отрезков «вход → выход».
 

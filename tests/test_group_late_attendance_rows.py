@@ -221,5 +221,65 @@ class SearchAndSortTests(unittest.TestCase):
         self.assertEqual(len(attendance.sort_rows(self.ROWS, "нет такой")), 2)
 
 
+
+class WorkBalanceTests(unittest.TestCase):
+    """Недоработка и переработка — колонки таблицы «Отметок». Формула та же, что у
+    «Отклонения» в Excel-отчёте: смена минус обед против времени в работе."""
+
+    def _row(self, **over):
+        rows = attendance.build_rows([_span(**over)], [], EMPTY_LOOKUP, DAY, _dt(23))
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_day_by_schedule_has_no_deviation(self):
+        row = self._row(inMark=_iso(9), outMark=_iso(18))
+        self.assertEqual((row["underwork_minutes"], row["overwork_minutes"]), (0, 0))
+
+    def test_late_arrival_is_underwork(self):
+        row = self._row(inMark=_iso(9, 30), outMark=_iso(18))
+        self.assertEqual((row["underwork_minutes"], row["overwork_minutes"]), (30, 0))
+
+    def test_staying_longer_is_overwork(self):
+        row = self._row(inMark=_iso(8, 50), outMark=_iso(18, 40))
+        self.assertEqual((row["underwork_minutes"], row["overwork_minutes"]), (0, 50))
+
+    def test_open_day_is_not_compared(self):
+        # Без ухода «недоработка на всю смену» повторила бы статус дня.
+        row = self._row(inMark=_iso(9))
+        self.assertEqual((row["underwork_minutes"], row["overwork_minutes"]), (0, 0))
+
+    def test_hours_mode_compares_with_the_norm(self):
+        row = {"plan_mode": "hours", "hours_norm": 8, "fact_in": _iso(9), "fact_out": _iso(19),
+               "work_seconds": 9 * 3600, "plan_in": None, "plan_out": None, "lunch_seconds": 0}
+        self.assertEqual(attendance.work_balance(row), {"underwork_minutes": 0, "overwork_minutes": 60})
+        row["work_seconds"] = 7 * 3600 + 15 * 60
+        self.assertEqual(attendance.work_balance(row), {"underwork_minutes": 45, "overwork_minutes": 0})
+
+    def test_back_from_lunch_is_not_underwork_yet(self):
+        # Разбор 29.09.2026: вышел на обед и вернулся — последняя отметка «вход».
+        # «Уход» 13:00 — не конец дня, и недоработку сейчас считать рано.
+        marks = [_mark(9, 0, 0), _mark(13, 0, 1), _mark(14, 0, 0)]
+        now_row = attendance.build_rows([_span()], marks, EMPTY_LOOKUP, DAY, _dt(15))[0]
+        self.assertEqual(now_row["fact_out"], _iso(13))
+        self.assertEqual((now_row["underwork_minutes"], now_row["overwork_minutes"]), (0, 0))
+
+    def test_forgotten_leave_of_a_past_day_is_counted_like_excel(self):
+        # Тот же хвост у прошедшего дня — забытый уход: число считается, как в отчёте.
+        marks = [_mark(9, 0, 0), _mark(13, 0, 1), _mark(14, 0, 0)]
+        row = attendance.build_rows([_span()], marks, EMPTY_LOOKUP, DAY, _dt(15, day=3))[0]
+        self.assertGreater(row["underwork_minutes"], 0)
+
+    def test_seconds_are_floored(self):
+        row = self._row(inMark=_iso(9), outMark=_dt(18).replace(second=59).isoformat())
+        self.assertEqual(row["overwork_minutes"], 0)
+
+    def test_sorts_put_the_largest_first(self):
+        rows = [{"employee": "А", "underwork_minutes": 5, "overwork_minutes": 0, "early_out_minutes": 0},
+                {"employee": "Б", "underwork_minutes": 40, "overwork_minutes": 0, "early_out_minutes": 20},
+                {"employee": "В", "underwork_minutes": 0, "overwork_minutes": 30, "early_out_minutes": 0}]
+        self.assertEqual(attendance.sort_rows(rows, "underwork_minutes")[0]["employee"], "Б")
+        self.assertEqual(attendance.sort_rows(rows, "overwork_minutes")[0]["employee"], "В")
+        self.assertEqual(attendance.sort_rows(rows, "early_out_minutes")[0]["employee"], "Б")
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,6 +70,46 @@ class RedesignTests(unittest.TestCase):
         self.assertNotIn("<table", block)
         self.assertNotIn("overflow-x-auto", block)
 
+    def test_table_has_deviation_columns_after_work_time(self):
+        # 29.09.2026: после «Приход · Уход · В работе» — четыре колонки отклонений,
+        # у каждой своя сортировка кликом по шапке.
+        block = VIEW[VIEW.index("const ATTENDANCE_COLUMNS = ["):]
+        block = block[:block.index("];")]
+        labels = re.findall(r"label: '([^']+)'", block)
+        start = labels.index("Приход")
+        self.assertEqual(labels[start:start + 7], [
+            "Приход", "Уход", "В работе", "Опоздание", "Ранний уход", "Недоработка", "Переработка"])
+        for key in ("early_out_minutes", "underwork_minutes", "overwork_minutes"):
+            self.assertIn(f"sort: '{key}'", block)
+            self.assertIn(f"{{ value: '{key}',", VIEW)
+        self.assertIn("<DeviationCell minutes={row.underwork_minutes}", VIEW)
+        self.assertIn("<DeviationCell minutes={row.overwork_minutes} />", VIEW)
+        # Минуты — в колонках; плашка статуса в таблице их не повторяет.
+        self.assertIn("<AttendanceStatusPill row={row} withMinutes={false} />", VIEW)
+
+    def test_late_arrival_and_early_leave_cells_are_red(self):
+        # 29.09.2026: опоздание и ранний уход красят саму ячейку времени.
+        self.assertIn("const ATTENDANCE_ALERT_CELL = 'bg-rose-50';", VIEW)
+        self.assertIn("<TimeCell fact={row.fact_in} day={row.date} late={row.late_minutes > 0} />", VIEW)
+        self.assertIn("<TimeCell fact={row.fact_out} day={row.date} late={row.early_out_minutes > 0} />", VIEW)
+        self.assertIn("row.late_minutes > 0 ? ATTENDANCE_ALERT_CELL", VIEW)
+        self.assertIn("row.early_out_minutes > 0 ? ATTENDANCE_ALERT_CELL", VIEW)
+
+    def test_list_shows_the_same_red_times_and_minutes(self):
+        # Телефон и окно уже 980 px видят список: красное время и минуты отклонений
+        # там обязаны быть те же, что в таблице (разбор 29.09.2026).
+        self.assertIn("<ListTime late={row.late_minutes > 0}>", VIEW)
+        self.assertIn("<ListTime late={row.early_out_minutes > 0}>", VIEW)
+        block = VIEW[VIEW.index("const attendanceMetrics = (row) => ["):]
+        block = block[:block.index("].filter(")]
+        for key in ("late_minutes", "early_out_minutes", "underwork_minutes", "overwork_minutes"):
+            self.assertIn(f"row.{key}", block)
+
+    def test_sort_arrow_does_not_eat_narrow_headers(self):
+        # Стрелка в потоке обрезала «Недоработку» до «Недорабо…».
+        self.assertIn("const arrowOutside = Boolean(column.align);", VIEW)
+        self.assertIn("title={column.label}", VIEW)
+
     def test_neutral_statuses_are_not_colored(self):
         # «Вне графика» — больше половины строк дня; цветом его не выделяем.
         self.assertIn("off_schedule: 'slate',", VIEW)
