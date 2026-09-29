@@ -1,13 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Building2, Car, CarTaxiFront, Headset, Smartphone } from 'lucide-react';
-import { iosGroupLabel, iosInput, IosToggle } from '../ui/ios';
+import { Building2, Car, CarTaxiFront, Headset, Loader2, Search, Smartphone } from 'lucide-react';
+import { iosBtnSecondary, iosGroupLabel, iosInput } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosTimePicker } from '../ui/TimePicker';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
 import { DATE_TRIGGER, TIME_INPUT } from './styles';
+// Разбор ссылки на аккаунт и вид телефона — те же, что у «Реестра посылок»:
+// оператор вставляет ту же ссылку из Флита, что и там.
+import { extractAccountId, fmtPhone } from '../parcels/parcelMeta';
 import {
     DESCRIPTION_LIMIT, employeeDepartmentId, formPayload, formProblems, officeOptions,
     targetByCode, unitDepartments, willProcess,
@@ -34,10 +37,11 @@ export const TARGET_ICONS = {
     yandex: Smartphone,
 };
 
+/* driver_link — только помощник заполнения: в тело жалобы он не входит
+ * (formPayload его не берёт), и в группу ссылка не уходит (владелец, 29.09.2026). */
 const EMPTY = {
-    reason: '', unit_id: '', employee_id: '', driver_name: '', driver_phone: '',
+    reason: '', unit_id: '', employee_id: '', driver_link: '', driver_name: '', driver_phone: '',
     driver_ref: '', city: '', description: '', event_day: '', event_time: '',
-    requires_processing: true,
 };
 
 const todayIso = () => {
@@ -59,26 +63,89 @@ export function useComplaintDraft({ open, meta, targetCode, apiBaseUrl, headers,
     // Сотрудники по отделу — кэш на время открытого окна: переключая
     // подразделение туда-обратно, оператор не должен ждать тот же список дважды.
     const [employees, setEmployees] = useState({});
+    // Поиск водителя по ссылке: идёт ли он и что не так. Номер запроса — чтобы
+    // ответ на прежнюю ссылку не перезаписал данные новой.
+    const [lookup, setLookup] = useState({ loading: false, error: '' });
+    const lookupSeq = useRef(0);
 
     const target = targetByCode(meta, targetCode);
     const problems = useMemo(() => formProblems(target, form), [target, form]);
     const departmentId = employeeDepartmentId(target, form, meta);
     const groupReady = Boolean(meta?.group?.ready);
-    const processing = willProcess(target, form.requires_processing);
+    const processing = willProcess(target);
+    const accountId = useMemo(() => extractAccountId(form.driver_link), [form.driver_link]);
+    /* Варианты выпадающих списков — стабильными ссылками. CustomSelect
+       пересчитывает подсветку на каждую смену массива вариантов, и новый
+       массив на каждую букву в соседнем поле давал лишний setState на каждое
+       нажатие (при тяжёлой странице за окном React ругался «Maximum update
+       depth exceeded»). */
+    const employeeOptions = useMemo(() => [{ value: '', label: 'Не удалось определить' }].concat(
+        (employees[departmentId] || []).map((person) => ({
+            value: String(person.id),
+            label: person.name,
+            groupLabel: person.group_name || 'Без группы',
+        })),
+    ), [employees, departmentId]);
+    const officeChoices = useMemo(() => [{ value: '', label: 'Не знаю' }]
+        .concat(officeOptions(meta, form.city)), [meta, form.city]);
+    const parkChoices = useMemo(() => [{ value: '', label: 'Не указан' }]
+        .concat((meta?.parks || []).map((park) => ({ value: String(park.id), label: park.name }))),
+    [meta]);
 
     useEffect(() => {
         if (open) return;
         setForm(EMPTY);
         setTouched(false);
         setServerProblems({});
+        setLookup({ loading: false, error: '' });
+        lookupSeq.current += 1;
     }, [open]);
 
     useEffect(() => {
-        setForm((prev) => ({ ...prev, reason: '', unit_id: '', employee_id: '',
-                             requires_processing: true }));
+        setForm((prev) => ({ ...prev, reason: '', unit_id: '', employee_id: '' }));
         setTouched(false);
         setServerProblems({});
     }, [targetCode]);
+
+    /* ФИО, телефон и ВУ из CRM — как в «Реестре посылок». Из CRM берём то,
+       что она знает; чего не знает — оставляем, как вписал оператор. */
+    const lookupDriver = useCallback(async (link) => {
+        if (!extractAccountId(link)) {
+            setLookup({ loading: false, error: 'Вставьте ссылку на аккаунт водителя или его ID' });
+            return;
+        }
+        const seq = ++lookupSeq.current;
+        setLookup({ loading: true, error: '' });
+        try {
+            const response = await axios.post(`${apiBaseUrl}/api/complaints/driver-lookup`,
+                { link }, { headers: headers() });
+            if (seq !== lookupSeq.current) return;
+            const found = response.data?.driver || {};
+            setForm((prev) => ({
+                ...prev,
+                driver_name: found.name || prev.driver_name,
+                driver_phone: fmtPhone(found.phone) || prev.driver_phone,
+                driver_ref: found.license || prev.driver_ref,
+            }));
+            setServerProblems((prev) => ({ ...prev, driver_name: undefined, driver_phone: undefined }));
+            setLookup({ loading: false, error: '' });
+        } catch (error) {
+            if (seq !== lookupSeq.current) return;
+            setLookup({ loading: false,
+                        error: errorText(error, 'Не удалось получить данные водителя') });
+        }
+    }, [apiBaseUrl, headers]);
+
+    // Ищем сами, как только ссылка разобралась: её вставляют целиком, и
+    // отдельное нажатие «Найти» было бы лишним шагом посреди разговора.
+    useEffect(() => {
+        if (!open || !accountId) return undefined;
+        const timer = setTimeout(() => lookupDriver(form.driver_link), 250);
+        return () => clearTimeout(timer);
+        // form.driver_link — вне зависимостей: таймер держится за разобранный
+        // id, а не за каждую букву вокруг него.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, accountId, lookupDriver]);
 
     useEffect(() => {
         if (!open || !departmentId || employees[departmentId]) return undefined;
@@ -141,12 +208,9 @@ export function useComplaintDraft({ open, meta, targetCode, apiBaseUrl, headers,
         // Отправить некуда: группа не выбрана. «Только зафиксировать» при этом
         // работает — в группу такая жалоба и не уходит.
         blocked: processing && !groupReady,
-        employeeOptions: (employees[departmentId] || []).map((person) => ({
-            value: String(person.id),
-            label: person.name,
-            groupLabel: person.group_name || 'Без группы',
-        })),
+        employeeOptions,
         departmentId,
+        lookup, lookupDriver, accountId, officeChoices, parkChoices,
     };
 }
 
@@ -163,9 +227,11 @@ const Problem = ({ text }) => (text
 
 /* Поля черновика. Кнопки внизу рисует тот, кто показывает поля (мастер). */
 export function ComplaintFields({ draft, meta }) {
-    const { target, form, set, shown, serverProblems, blocked, employeeOptions, departmentId } = draft;
+    const {
+        target, form, set, shown, serverProblems, blocked, employeeOptions, departmentId,
+        lookup, lookupDriver, accountId, officeChoices, parkChoices,
+    } = draft;
     if (!target) return null;
-    const parkOptions = (meta?.parks || []).map((park) => ({ value: String(park.id), label: park.name }));
 
     return (
         <div className="space-y-4">
@@ -199,8 +265,7 @@ export function ComplaintFields({ draft, meta }) {
                                   value={form.employee_id || ''}
                                   disabled={!departmentId}
                                   onChange={(value) => set('employee_id', value)}
-                                  options={[{ value: '', label: 'Не удалось определить' },
-                                      ...employeeOptions]}
+                                  options={employeeOptions}
                                   placeholder={departmentId ? 'Не удалось определить'
                                       : 'Сначала выберите подразделение'}
                                   searchPlaceholder="Поиск по ФИО"
@@ -214,8 +279,7 @@ export function ComplaintFields({ draft, meta }) {
                     <Label optional>Офис</Label>
                     <CustomSelect variant="ios" searchable value={form.unit_id || ''}
                                   onChange={(value) => set('unit_id', value)}
-                                  options={[{ value: '', label: 'Не знаю' },
-                                      ...officeOptions(meta, form.city)]}
+                                  options={officeChoices}
                                   placeholder="Не знаю" searchPlaceholder="Поиск офиса"
                                   ariaLabel="Офис" />
                 </div>
@@ -226,7 +290,7 @@ export function ComplaintFields({ draft, meta }) {
                     <Label optional>Таксопарк</Label>
                     <CustomSelect variant="ios" searchable value={form.unit_id || ''}
                                   onChange={(value) => set('unit_id', value)}
-                                  options={[{ value: '', label: 'Не указан' }, ...parkOptions]}
+                                  options={parkChoices}
                                   placeholder="Не указан" ariaLabel="Таксопарк" />
                 </div>
             )}
@@ -249,6 +313,25 @@ export function ComplaintFields({ draft, meta }) {
             </div>
 
             <div className={iosGroupLabel}>Водитель</div>
+            {/* Ссылка на аккаунт — как в «Реестре посылок»: ФИО, телефон и ВУ
+                подтягиваются из CRM сами. Необязательна (водитель мог не дать
+                ни ссылки, ни ID), и в группу не уходит. */}
+            <div>
+                <Label optional
+                       hint="Вставьте адрес карточки водителя во Флите или его ID — ФИО, телефон и ВУ подтянутся сами. В группу ссылка не уходит.">
+                    Ссылка на аккаунт или ID
+                </Label>
+                <div className="flex gap-2">
+                    <input value={form.driver_link} onChange={(e) => set('driver_link', e.target.value)}
+                           placeholder="https://fleet.yandex.kz/contractors/…" className={iosInput} />
+                    <button type="button" onClick={() => lookupDriver(form.driver_link)}
+                            disabled={!accountId || lookup.loading} aria-label="Найти водителя"
+                            className={`${iosBtnSecondary} shrink-0`}>
+                        {lookup.loading ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />}
+                    </button>
+                </div>
+                <Problem text={lookup.error} />
+            </div>
             {/* Поля — от верха ячейки: подписи в строке одной высоты, а строка
                 ошибки под одним полем не должна сдвигать соседнее. */}
             <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2">
@@ -306,24 +389,6 @@ export function ComplaintFields({ draft, meta }) {
                           className={`${iosInput} resize-y`} />
                 <Problem text={shown('description')} />
             </div>
-
-            {/* У парка оператор решает сам: «даже если конкретная жалоба не
-                требует отдельной отработки в Telegram, она должна
-                фиксироваться». Выключатель есть только там, где выбор есть. */}
-            {target.processing === 'optional' && (
-                <div className="flex items-start justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
-                    <div className="min-w-0">
-                        <div className="text-[13.5px] font-medium text-slate-900">Отправить в группу на разбор</div>
-                        {!form.requires_processing && (
-                            <div className="mt-0.5 text-[12px] leading-snug text-slate-500">
-                                Жалоба сохранится для аналитики и в группу не уйдёт
-                            </div>
-                        )}
-                    </div>
-                    <IosToggle checked={form.requires_processing !== false}
-                               onChange={(value) => set('requires_processing', value)} />
-                </div>
-            )}
 
             {target.processing === 'never' && (
                 <div className="px-1 text-[12px] leading-snug text-slate-500">

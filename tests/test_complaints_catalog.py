@@ -86,18 +86,29 @@ class TargetsTest(unittest.TestCase):
 class ProcessingTest(unittest.TestCase):
     """«Жалоба зафиксирована» против «Требует обработки»."""
 
+    def _clean(self, target, reason, **extra):
+        data = {'target': target, 'reason': reason, 'driver_name': 'Сериков',
+                'driver_phone': '+77011234567', 'city': 'Алматы', 'description': 'x'}
+        data.update(extra)
+        clean, errors = catalog.clean_complaint(data)
+        self.assertEqual(errors, {})
+        return clean
+
     def test_yandex_never_goes_to_the_group(self):
         """«В Telegram-группу не передаём обращения „для Яндекса“» — даже если
         клиент прислал обратное."""
-        self.assertFalse(catalog.requires_processing('yandex', True))
+        self.assertFalse(catalog.requires_processing('yandex'))
+        self.assertFalse(self._clean('yandex', 'tariffs', requires_processing=True)['requires_processing'])
 
-    def test_taxi_park_is_the_operators_choice(self):
-        self.assertTrue(catalog.requires_processing('taxi_park', True))
-        self.assertFalse(catalog.requires_processing('taxi_park', False))
-
-    def test_employees_and_rental_always_go(self):
-        for code in ('call_center', 'front_office', 'car_rental'):
-            self.assertTrue(catalog.requires_processing(code, False), code)
+    def test_operator_cannot_keep_a_complaint_out_of_the_group(self):
+        """Владелец, 29.09.2026: «у оператора не должно быть возможности не
+        отправлять в группу» — и у таксопарка тоже; присланное «не отправлять»
+        сервер не слушает."""
+        for code, reason in (('taxi_park', 'commission'), ('car_rental', 'terms')):
+            self.assertTrue(catalog.requires_processing(code), code)
+            self.assertTrue(self._clean(code, reason, requires_processing=False)['requires_processing'],
+                            code)
+        self.assertEqual({t['processing'] for t in catalog.TARGETS} - {'always', 'never'}, set())
 
 
 class ClosingRuleTest(unittest.TestCase):

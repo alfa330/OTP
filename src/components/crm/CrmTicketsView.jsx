@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, Check, CheckCircle2, ChevronRight,
+    AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, Check, CheckCircle2, ChevronRight, Copy,
     CornerDownRight, CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
     XCircle,
@@ -25,10 +25,9 @@ import {
 } from './ticketList';
 import { fitHeight, measureShell } from './layout';
 import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds, withSortRank } from './feedMerge';
-import ComplaintCard from '../complaints/ComplaintCard';
 import { TARGET_ICONS } from '../complaints/ComplaintDraft';
 import {
-    rowBadges as complaintRowBadges, rowSubtitle as complaintRowSubtitle,
+    openQuestion, rowBadges as complaintRowBadges, rowSubtitle as complaintRowSubtitle, statusView,
 } from '../complaints/complaintRules';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
@@ -343,7 +342,7 @@ const TicketRow = memo(function TicketRow({
  * ссылку — и обязательно освобождаем её при размонтировании, иначе открытая
  * переписка на сотню фото просто не отдаст память обратно.
  */
-const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light }) => {
+const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light, url: fileUrl = null }) => {
     const kind = attachmentKind(message.attachment);
     const inline = kind === 'image' || kind === 'video' || kind === 'audio';
     const [url, setUrl] = useState(null);
@@ -352,12 +351,13 @@ const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light
     const [downloading, setDownloading] = useState(false);
 
     const fetchFile = useCallback(async () => {
+        // fileUrl — у жалоб в общей ленте свой адрес вложения, остальное то же.
         const response = await axios.get(
-            `${apiBaseUrl}/api/crm/tickets/${ticketId}/attachments/${message.id}`,
+            fileUrl || `${apiBaseUrl}/api/crm/tickets/${ticketId}/attachments/${message.id}`,
             { headers: headers(), responseType: 'blob' },
         );
         return URL.createObjectURL(response.data);
-    }, [apiBaseUrl, headers, message.id, ticketId]);
+    }, [apiBaseUrl, headers, message.id, ticketId, fileUrl]);
 
     useEffect(() => {
         if (!inline) return undefined;
@@ -433,8 +433,12 @@ const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light
     );
 };
 
+/* tag и attachmentUrl — для переписки жалобы в той же ленте: у её сообщений
+ * есть смысл, который надо видеть сразу («Ответ для водителя» — его оператор
+ * озвучивает, «Вопрос группы» — ждёт его), и свой адрес вложений. */
 const MessageBubble = ({
     message, quote, grouped, apiBaseUrl, ticketId, headers, showToast, onReply, onJumpTo,
+    tag = null, attachmentUrl = null,
 }) => {
     const outgoing = message.direction === 'out';
     const note = message.direction === 'note';
@@ -508,6 +512,12 @@ const MessageBubble = ({
                         </span>
                     </button>
                 )}
+                {tag && (
+                    <div className="mb-1 flex items-center gap-1.5">
+                        <IosBadge tone={tag.tone} className="!py-0 !text-[10px]">{tag.label}</IosBadge>
+                        {tag.action}
+                    </div>
+                )}
                 {author && !grouped && (
                     /* Подпись у обеих сторон. На синем пузыре цвет из палитры
                        не читается, поэтому там имя белёсое — различать по цвету
@@ -529,7 +539,8 @@ const MessageBubble = ({
                     ))}
                 {message.attachment && (
                     <MessageMedia message={message} apiBaseUrl={apiBaseUrl} ticketId={ticketId}
-                                  headers={headers} showToast={showToast} light={outgoing} />
+                                  headers={headers} showToast={showToast} light={outgoing}
+                                  url={attachmentUrl} />
                 )}
                 <BubbleTime message={message} outgoing={outgoing} />
             </div>
@@ -1371,6 +1382,416 @@ const TicketCard = ({
  * many меняет ровно два слова. Не мелочь: «Обращение и вся переписка по нему»
  * над списком из трёх строк читается как «удалится одно», то есть подтверждение
  * описывает не то, что произойдёт. */
+/* ─── Своя жалоба — в формате обращения ───────────────────────────────────── */
+
+/* Жалобу оператор заводит и ведёт в «Обращениях», и выглядеть она обязана как
+ * обращение (владелец, 29.09.2026): переписка с группой — пузырями по дням,
+ * данные жалобы — в начале переписки и уезжают при прокрутке, а открыть их
+ * снова можно кнопкой «Жалоба» в шапке — той же панелью, что у обращения.
+ *
+ * Видно автору только то, что ему положено (сервер: OPERATOR_VISIBLE_KINDS):
+ * ответ для водителя, вопрос группы и свои ответы. Внутреннего обсуждения и
+ * работы с сотрудником здесь нет — это раздел «Жалобы». */
+const COMPLAINT_TAGS = {
+    answer: { label: 'Ответ для водителя', tone: 'blue' },
+    question: { label: 'Вопрос группы', tone: 'amber' },
+};
+
+const complaintBubble = (message) => ({
+    ...message,
+    // Свои ответы — справа, как у обращения; всё из группы — слева.
+    direction: message.kind === 'operator_reply' ? 'out' : 'in',
+});
+
+const CopyText = ({ text, showToast }) => (
+    <button type="button" title="Скопировать"
+            onClick={async () => {
+                try {
+                    await navigator.clipboard.writeText(text || '');
+                    showToast?.('Скопировано', 'success');
+                } catch (err) {
+                    showToast?.('Не удалось скопировать', 'error');
+                }
+            }}
+            className="inline-flex items-center gap-1 rounded-md px-1 text-[10.5px] font-medium text-slate-400 transition hover:bg-slate-100 hover:text-slate-600">
+        <Copy size={11} /> Копировать
+    </button>
+);
+
+const ComplaintFacts = ({ item, showToast }) => {
+    const rows = [
+        ['На кого', [item.target_title, item.unit_name].filter(Boolean).join(' · ')],
+        ['Причина', item.reason_title],
+        item.employee_name ? ['Сотрудник', item.employee_name] : null,
+        item.event_at ? ['Когда', item.event_time_known ? fmtDateTime(item.event_at)
+            : new Date(item.event_at).toLocaleDateString('ru-RU')] : null,
+        ['Водитель', [item.driver_name, item.city].filter(Boolean).join(' · ')],
+        ['Телефон', item.driver_phone, <CopyText key="copy" text={item.driver_phone} showToast={showToast} />],
+        item.driver_ref ? ['ID / ВУ', item.driver_ref] : null,
+        item.result_title ? ['Итог', item.result_title] : null,
+    ].filter(Boolean);
+    return (
+        <div className="space-y-2.5">
+            <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-slate-800">
+                {item.description}
+            </div>
+            <dl className="space-y-1 text-[12.5px]">
+                {rows.map(([label, value, action]) => (
+                    <div key={label} className="flex items-baseline gap-2">
+                        <dt className="w-[76px] shrink-0 text-slate-400">{label}</dt>
+                        <dd className="min-w-0 flex-1 break-words text-slate-700">
+                            {value || '—'} {action}
+                        </dd>
+                    </div>
+                ))}
+            </dl>
+            <div className="text-[11.5px] leading-snug text-slate-400">
+                Принял {item.created_by_name || '—'} · {fmtDateTime(item.created_at)}
+                {item.requires_processing === false
+                    ? ' · зафиксирована для аналитики, в группу не отправлялась'
+                    : item.tg_chat_title ? ` · в группе «${item.tg_chat_title}»` : ''}
+            </div>
+        </div>
+    );
+};
+
+const ComplaintThreadCard = ({
+    complaintId, apiBaseUrl, headers, showToast, onChanged, onSeen, onBack, pulse,
+}) => {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [reply, setReply] = useState('');
+    const [attachment, setAttachment] = useState(null);
+    const [sending, setSending] = useState(false);
+    const [resending, setResending] = useState(false);
+    // Панель с данными — та же настройка, что у обращения: человек выбрал
+    // держать её открытой или нет, и между обращением и жалобой это не меняется.
+    const [asideOpen, setAsideOpen] = useState(readAsidePreference);
+    const [atBottom, setAtBottom] = useState(true);
+    const fileRef = useRef(null);
+    const threadRef = useRef(null);
+
+    const load = useCallback(async (silent = false) => {
+        if (!silent) setLoading(true);
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/complaints/complaints/${complaintId}`,
+                { headers: headers() });
+            setData(response.data);
+            setError(null);
+            // Открытие гасит «непрочитано» на сервере — и в ленте тоже.
+            onSeen?.(Number(complaintId));
+        } catch (err) {
+            setError(err?.response?.status === 404 || err?.response?.status === 403
+                ? 'Жалоба удалена или больше вам не видна'
+                : errorText(err, 'Не удалось открыть жалобу'));
+        } finally {
+            setLoading(false);
+        }
+    }, [apiBaseUrl, headers, complaintId, onSeen]);
+
+    useEffect(() => { load(); }, [load]);
+    useEffect(() => { if (pulse) load(true); }, [pulse]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const item = data?.item;
+    const permissions = data?.permissions || {};
+    const messages = data?.messages;
+    const days = useMemo(() => groupByDay((messages || []).map(complaintBubble)), [messages]);
+    const question = useMemo(() => openQuestion(item, messages || []), [item, messages]);
+
+    // Как у обращения: доезжаем к свежему, только если человек и так внизу.
+    useEffect(() => {
+        const node = threadRef.current;
+        if (node && atBottom) node.scrollTop = node.scrollHeight;
+    }, [messages?.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => { setAtBottom(true); }, [complaintId]);
+
+    const onThreadScroll = useCallback((event) => {
+        const node = event.currentTarget;
+        setAtBottom(node.scrollHeight - node.scrollTop - node.clientHeight < NEAR_BOTTOM);
+    }, []);
+
+    const toggleAside = useCallback(() => {
+        setAsideOpen((open) => {
+            writeAsidePreference(!open);
+            return !open;
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!asideOpen) return undefined;
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            setAsideOpen(false);
+            writeAsidePreference(false);
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [asideOpen]);
+
+    const send = async () => {
+        const body = reply.trim();
+        if (!body && !attachment) return;
+        setSending(true);
+        try {
+            const form = new FormData();
+            form.append('body', body);
+            if (attachment) form.append('attachment', attachment);
+            const response = await axios.post(
+                `${apiBaseUrl}/api/complaints/complaints/${complaintId}/messages`, form,
+                { headers: headers() });
+            setData((prev) => (prev ? { ...prev, item: response.data.item || prev.item,
+                                        messages: response.data.messages || prev.messages } : prev));
+            setReply('');
+            setAttachment(null);
+            if (fileRef.current) fileRef.current.value = '';
+            setAtBottom(true);
+            onChanged?.();
+        } catch (err) {
+            showToast?.(errorText(err, 'Сообщение не ушло'), 'error');
+        } finally {
+            setSending(false);
+        }
+    };
+
+    const resend = async () => {
+        setResending(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/complaints/complaints/${complaintId}/resend`, {}, { headers: headers() });
+            setData((prev) => (prev ? { ...prev, item: response.data.item || prev.item } : prev));
+            onChanged?.();
+            showToast?.('Жалоба отправлена в группу', 'success');
+        } catch (err) {
+            showToast?.(errorText(err, 'Отправить не получилось'), 'error');
+        } finally {
+            setResending(false);
+        }
+    };
+
+    if (loading) return <LoadingBlock />;
+    if (error || !item) {
+        return (
+            <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-slate-400">
+                <Inbox size={15} /> {error || 'Жалоба удалена или больше вам не видна'}
+            </div>
+        );
+    }
+
+    const status = statusView(item);
+    const Icon = TARGET_ICONS[item.target] || AlertTriangle;
+    const undelivered = item.requires_processing !== false && item.delivery_status !== 'sent';
+    const facts = <ComplaintFacts item={item} showToast={showToast} />;
+
+    return (
+        <div className="flex h-full min-h-0 flex-col">
+            <div className="shrink-0 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl">
+                <div className="flex items-start gap-2">
+                    {onBack && (
+                        <button type="button" onClick={onBack} aria-label="К списку"
+                                className="-ml-1 mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 lg:hidden">
+                            <ArrowLeft size={16} />
+                        </button>
+                    )}
+                    <span className="mt-0.5 hidden h-[34px] w-[34px] shrink-0 place-items-center rounded-[11px] bg-slate-100 text-slate-600 ring-1 ring-slate-200/70 sm:grid">
+                        <Icon size={16} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[12px] font-semibold tabular-nums text-slate-400">
+                                Жалоба №{item.id}
+                            </span>
+                            <h3 className="line-clamp-2 text-[15px] font-semibold leading-tight text-slate-900">
+                                {item.reason_title}
+                            </h3>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-slate-500">
+                            <span>{item.target_title}</span>
+                            {/* Группа — только на широком: на телефоне строка
+                                переносилась в три с висящей точкой, а группа
+                                у жалоб одна и та же. */}
+                            {item.tg_chat_title && (
+                                <span className="hidden items-center gap-2 sm:inline-flex">
+                                    <span className="text-slate-300">·</span>
+                                    <span className="truncate">{item.tg_chat_title}</span>
+                                </span>
+                            )}
+                            <span className="text-slate-300">·</span>
+                            <span className="tabular-nums">{fmtDateTime(item.created_at)}</span>
+                        </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                        {status.tone === 'green'
+                            ? <IosBadge tone="green">{status.label}</IosBadge>
+                            : <span className="text-[11.5px] text-slate-400">{status.label}</span>}
+                        <button type="button" onClick={toggleAside} aria-pressed={asideOpen}
+                                title={asideOpen ? 'Скрыть данные жалобы' : 'Показать данные жалобы'}
+                                className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[12.5px] font-semibold transition-all active:scale-[0.98] ${
+                                    asideOpen
+                                        ? 'bg-blue-600 text-white shadow-sm hover:bg-blue-700'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                }`}>
+                            <FileText size={14} />
+                            <span className="hidden sm:inline">Жалоба</span>
+                        </button>
+                    </div>
+                </div>
+                {undelivered && (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-rose-50 px-3 py-2 text-[12px] text-rose-700 ring-1 ring-rose-100">
+                        <span>Жалоба не ушла в группу: {item.delivery_error || 'причина неизвестна'}</span>
+                        <button type="button" onClick={resend} disabled={resending}
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1 text-[12px] font-semibold text-rose-700 transition hover:bg-rose-100">
+                            {resending ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                            Отправить ещё раз
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                <div className="relative flex min-h-0 min-w-0 flex-1">
+                    <div ref={threadRef} onScroll={onThreadScroll}
+                         className="crm-thread crm-scroll min-h-0 w-full overflow-y-auto px-4 pb-4">
+                        {/* Данные жалобы — в начале переписки, уезжают при
+                            прокрутке. При открытой панели — одной строкой: тот
+                            же текст дважды рядом — это съеденное место. */}
+                        {asideOpen ? (
+                            <button type="button" onClick={toggleAside} title="Свернуть данные жалобы"
+                                    className="mt-3 flex w-full items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-left ring-1 ring-slate-200/70 transition hover:bg-white">
+                                <FileText size={12} className="shrink-0 text-slate-400" />
+                                <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                    Жалоба
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-[12px] text-slate-500">
+                                    {[item.driver_name, item.city, item.description].filter(Boolean).join(' · ')}
+                                </span>
+                            </button>
+                        ) : (
+                            <div className="mt-3 rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.06)]">
+                                <div className="mb-2 flex items-center gap-1.5">
+                                    <FileText size={12} className="text-slate-400" />
+                                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                        Жалоба
+                                    </span>
+                                    <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+                                        {fmtDateTime(item.created_at)}
+                                    </span>
+                                </div>
+                                {facts}
+                            </div>
+                        )}
+
+                        {days.map((day) => (
+                            <div key={day.key}>
+                                <DayChip>{day.label}</DayChip>
+                                {day.items.map((message, index) => (
+                                    <MessageBubble key={message.id} message={message} ticketId={item.id}
+                                                   grouped={continuesRun(day.items[index - 1], message)}
+                                                   apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                                                   attachmentUrl={`${apiBaseUrl}/api/complaints/complaints/${item.id}/attachments/${message.id}`}
+                                                   tag={COMPLAINT_TAGS[message.kind] ? {
+                                                       ...COMPLAINT_TAGS[message.kind],
+                                                       action: message.kind === 'answer' && message.body
+                                                           ? <CopyText text={message.body} showToast={showToast} />
+                                                           : null,
+                                                   } : null} />
+                                ))}
+                            </div>
+                        ))}
+                        {!days.length && item.requires_processing !== false && (
+                            <div className="mt-6 text-center text-[12px] text-slate-400">
+                                {item.delivery_status === 'sent'
+                                    ? 'Группа ещё не ответила — ответ появится здесь'
+                                    : 'Жалоба ещё не в группе'}
+                            </div>
+                        )}
+                        {item.status === 'closed' && item.closed_at && item.requires_processing !== false && (
+                            <div className="mt-3 flex items-center justify-center text-[11.5px] font-medium text-emerald-700">
+                                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 ring-1 ring-emerald-100">
+                                    <CheckCircle2 size={13} /> Отработана · {fmtDateTime(item.closed_at)}
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                    {!atBottom && (
+                        <button type="button" title="К свежим сообщениям"
+                                onClick={() => threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: 'smooth' })}
+                                className="absolute bottom-4 left-1/2 z-10 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full bg-white text-slate-500 shadow-[0_4px_14px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/70 transition hover:text-slate-800 active:scale-95">
+                            <ArrowDown size={16} />
+                        </button>
+                    )}
+                </div>
+
+                {asideOpen && (
+                    <button type="button" aria-label="Скрыть данные жалобы" onClick={toggleAside}
+                            className="absolute inset-0 z-10 bg-slate-900/25 lg:hidden" />
+                )}
+                <aside className={`crm-aside ${asideOpen ? 'is-open' : ''}`}
+                       aria-hidden={!asideOpen} aria-label="Данные жалобы">
+                    <div className="crm-aside-body">
+                        <div className="flex shrink-0 items-center gap-2 border-b border-slate-200/70 px-3.5 py-2.5">
+                            <FileText size={13} className="text-slate-400" />
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                Жалоба №{item.id}
+                            </span>
+                            <button type="button" onClick={toggleAside} aria-label="Скрыть данные жалобы"
+                                    className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600">
+                                <X size={13} />
+                            </button>
+                        </div>
+                        <div className="crm-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-3">
+                            {facts}
+                        </div>
+                    </div>
+                </aside>
+            </div>
+
+            <div className="shrink-0 border-t border-slate-200/70 bg-white px-4 py-3">
+                {permissions.can_write ? (
+                    <div className="flex items-end gap-2">
+                        <button type="button" onClick={() => fileRef.current?.click()} title="Прикрепить файл"
+                                className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95">
+                            <Paperclip size={15} />
+                        </button>
+                        <input ref={fileRef} type="file" className="hidden"
+                               onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
+                        <div className="min-w-0 flex-1">
+                            {attachment && (
+                                <div className="mb-1.5 inline-flex items-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1 text-[11.5px] text-slate-600">
+                                    <Paperclip size={11} /> {attachment.name}
+                                    <button type="button" aria-label="Убрать файл"
+                                            onClick={() => { setAttachment(null); if (fileRef.current) fileRef.current.value = ''; }}
+                                            className="text-slate-400 hover:text-slate-600">
+                                        <X size={11} />
+                                    </button>
+                                </div>
+                            )}
+                            <textarea value={reply} onChange={(e) => setReply(e.target.value)}
+                                      onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+                                      }}
+                                      rows={1}
+                                      placeholder={question ? 'Ответ на вопрос группы…' : 'Написать в группу…'}
+                                      className={`${iosInput} block resize-none leading-5`} />
+                        </div>
+                        <button type="button" onClick={send} aria-label="Отправить"
+                                disabled={sending || (!reply.trim() && !attachment)}
+                                className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-600 text-white transition hover:bg-blue-700 active:scale-95 disabled:opacity-40">
+                            {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+                        </button>
+                    </div>
+                ) : (
+                    <div className="text-center text-[12px] text-slate-400">
+                        {item.requires_processing === false
+                            ? 'Жалоба зафиксирована для аналитики — в группу не отправлялась'
+                            : item.status === 'closed' ? 'Жалоба отработана' : 'Писать в группу по этой жалобе нельзя'}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
 const DeleteWarning = ({ many = false }) => (
     <div className="space-y-2 text-[13px] leading-relaxed text-slate-600">
         <p>
@@ -2451,11 +2872,9 @@ export default function CrmTicketsView({
                                        Разбор и работа с сотрудником — в разделе
                                        «Жалобы», у тех, кто разбирает. */
                                     <div className="h-full min-h-0 w-full">
-                                        <ComplaintCard
+                                        <ComplaintThreadCard
                                             key={`complaint:${selectedComplaintId}`}
-                                            mode="author"
                                             complaintId={selectedComplaintId}
-                                            meta={complaintsMeta}
                                             apiBaseUrl={apiBaseUrl}
                                             headers={headers}
                                             showToast={showToast}

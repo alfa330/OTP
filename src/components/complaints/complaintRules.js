@@ -9,8 +9,9 @@
  * Тесты: tests/complaints_rules.test.mjs (node --test).
  */
 
+// Выбора «отправлять ли в группу» у оператора нет ни у одной цели (владелец,
+// 29.09.2026): Яндекс только фиксируется, всё остальное уходит в группу.
 export const PROCESS_ALWAYS = 'always';
-export const PROCESS_OPTIONAL = 'optional';
 export const PROCESS_NEVER = 'never';
 
 export const WORK_UNASSIGNED = 'unassigned';
@@ -73,30 +74,24 @@ export const rowSubtitle = (complaint, { handler = false } = {}) => {
 export const targetByCode = (meta, code) => (
     ((meta && meta.targets) || []).find((item) => item.code === code) || null);
 
-/* Уйдёт ли жалоба в группу при текущем выборе. Отсюда и подпись кнопки:
- * «Отправить в группу» или «Зафиксировать» — оператор должен знать, кого
- * побеспокоит его нажатие, ДО нажатия. */
-export const willProcess = (target, wanted = true) => {
-    if (!target) return false;
-    if (target.processing === PROCESS_NEVER) return false;
-    if (target.processing === PROCESS_ALWAYS) return true;
-    return Boolean(wanted);
-};
+/* Уйдёт ли жалоба в группу. Решает цель, а не оператор. Отсюда и подпись
+ * кнопки: «Отправить в группу» или «Зафиксировать» — оператор должен знать,
+ * кого побеспокоит его нажатие, ДО нажатия. */
+export const willProcess = (target) => Boolean(target) && target.processing !== PROCESS_NEVER;
 
-export const submitLabel = (target, wanted = true) => (
-    willProcess(target, wanted) ? 'Отправить в группу' : 'Зафиксировать');
+export const submitLabel = (target) => (
+    willProcess(target) ? 'Отправить в группу' : 'Зафиксировать');
 
-/* Направления жалобы на первом экране мастера «Обращений» — там их выбирают
- * среди тематик (решение владельца 29.09.2026). Как у тематик: то, что без
- * группы отправить нельзя, стоит неактивным с пометкой «Нет группы».
- * «Только зафиксировать» (Яндекс) и «по выбору» (парк) работают и без неё. */
+/* Типы жалобы в мастере «Обращений» (решение владельца 29.09.2026). Как у
+ * тематик: то, что без группы отправить нельзя, стоит неактивным с пометкой
+ * «Нет группы». Без неё работает только «зафиксировать» — Яндекс. */
 export const wizardTargets = (meta) => {
     const groupReady = Boolean(meta && meta.group && meta.group.ready);
     return ((meta && meta.targets) || []).map((item) => ({
         code: item.code,
         title: item.title,
         hint: item.hint,
-        is_ready: groupReady || item.processing !== PROCESS_ALWAYS,
+        is_ready: groupReady || !willProcess(item),
     }));
 };
 
@@ -180,7 +175,6 @@ export const formPayload = (target, form) => {
         city: clean('city'),
         description: clean('description'),
         event_at: clean('event_at') || null,
-        requires_processing: willProcess(target, form?.requires_processing !== false),
     };
     if (target.unit && clean('unit_id')) payload.unit_id = Number(clean('unit_id'));
     if (target.employee && clean('employee_id')) payload.employee_id = Number(clean('employee_id'));

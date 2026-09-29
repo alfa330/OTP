@@ -82,7 +82,9 @@ class ComplaintsWiringTest(unittest.TestCase):
         view = (ROOT / 'src' / 'components' / 'complaints' / 'ComplaintsView.jsx').read_text(encoding='utf-8')
         self.assertNotIn('Новая жалоба', view)
         crm = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
-        self.assertIn('mode="author"', crm)
+        # Своя жалоба в ленте — в формате обращения: пузыри и панель данных.
+        self.assertIn('<ComplaintThreadCard', crm)
+        self.assertIn('attachmentUrl={`${apiBaseUrl}/api/complaints/complaints/', crm)
         self.assertIn("complaints={complaintsEnabled ? complaintsMeta : null}", crm)
 
     def test_deeplink_parameter_matches_the_bot_link(self):

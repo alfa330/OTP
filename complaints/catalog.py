@@ -33,15 +33,13 @@ TARGET_YANDEX = 'yandex'
 #
 #   never     — Яндекс. «В Telegram-группу не передаём обращения „для
 #               Яндекса“ … достаточно зафиксировать в iCore для аналитики».
-#   optional  — таксопарк. «Даже если конкретная жалоба не требует отдельной
-#               отработки в Telegram, она должна фиксироваться как причина
-#               недовольства водителя» — значит, бывает и так и так, и решает
-#               оператор, говоривший с водителем.
-#   always    — сотрудники КЦ, фронт-офис и аренда авто. У жалобы на сотрудника
-#               ТЗ требует «обязательно довести процесс до обратной связи», а
-#               жалобу на аренду без группы проверить некому.
+#   always    — все остальные: сотрудники КЦ, фронт-офис, аренда авто и
+#               таксопарк. У жалобы на сотрудника ТЗ требует «обязательно
+#               довести процесс до обратной связи», жалобу на аренду без группы
+#               проверить некому. Таксопарк был «по выбору оператора», но
+#               владелец 29.09.2026: «у оператора не должно быть возможности не
+#               отправлять в группу» — выбора у оператора нет ни у одной цели.
 PROCESS_ALWAYS = 'always'
-PROCESS_OPTIONAL = 'optional'
 PROCESS_NEVER = 'never'
 
 # Чем уточняется адресат жалобы («конкретного сотрудника / подразделение, если
@@ -124,7 +122,7 @@ TARGETS = [
         'unit': UNIT_PARK,
         'unit_required': False,
         'employee': False,
-        'processing': PROCESS_OPTIONAL,
+        'processing': PROCESS_ALWAYS,
         'reasons': _reasons(
             ('commission', 'Комиссия'),
             ('terms', 'Условия работы'),
@@ -394,14 +392,10 @@ def processing_mode(target_code):
     return (target(target_code) or {}).get('processing') or PROCESS_ALWAYS
 
 
-def requires_processing(target_code, wanted=True):
-    """Уходит ли жалоба в группу. wanted — выбор оператора, где он у цели есть."""
-    mode = processing_mode(target_code)
-    if mode == PROCESS_NEVER:
-        return False
-    if mode == PROCESS_ALWAYS:
-        return True
-    return bool(wanted)
+def requires_processing(target_code):
+    """Уходит ли жалоба в группу. Решает цель, а не оператор: присланный
+    клиентом requires_processing сервер не слушает (владелец, 29.09.2026)."""
+    return processing_mode(target_code) != PROCESS_NEVER
 
 
 def is_closed(*, requires_processing, result_code, work_state):
@@ -488,7 +482,7 @@ def clean_complaint(data):
         'event_at': str(data.get('event_at') or '').strip().replace(' ', 'T') or None,
         'unit_id': _int_or_none(data.get('unit_id')),
         'employee_id': _int_or_none(data.get('employee_id')) if spec['employee'] else None,
-        'requires_processing': requires_processing(code, _bool(data.get('requires_processing', True))),
+        'requires_processing': requires_processing(code),
     }
     if not spec['unit']:
         clean['unit_id'] = None
@@ -545,12 +539,6 @@ def _int_or_none(value):
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
-
-
-def _bool(value):
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def public_meta():

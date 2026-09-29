@@ -22,7 +22,7 @@ const META = {
     { code: 'front_office', unit: 'office', unit_required: false, employee: true,
       processing: 'always', reasons: [{ code: 'rude' }] },
     { code: 'taxi_park', unit: 'park', unit_required: false, employee: false,
-      processing: 'optional', reasons: [{ code: 'commission' }] },
+      processing: 'always', reasons: [{ code: 'commission' }] },
     { code: 'yandex', unit: null, unit_required: false, employee: false,
       processing: 'never', reasons: [{ code: 'tariffs' }] },
   ],
@@ -43,14 +43,13 @@ const FILLED = {
 };
 
 test('Яндекс только фиксируется — и кнопка говорит об этом до нажатия', () => {
-  assert.equal(willProcess(target('yandex'), true), false);
+  assert.equal(willProcess(target('yandex')), false);
   assert.equal(submitLabel(target('yandex')), 'Зафиксировать');
   assert.equal(submitLabel(target('call_center')), 'Отправить в группу');
-  // У парка решает оператор.
-  assert.equal(submitLabel(target('taxi_park'), false), 'Зафиксировать');
-  assert.equal(submitLabel(target('taxi_park'), true), 'Отправить в группу');
-  // «Всегда» выключателем не отменяется.
-  assert.equal(willProcess(target('car_rental'), false), true);
+  // Выбора у оператора нет ни у одной цели (владелец, 29.09.2026): парк —
+  // тоже в группу.
+  assert.equal(submitLabel(target('taxi_park')), 'Отправить в группу');
+  assert.equal(willProcess(target('car_rental')), true);
 });
 
 test('обязательные поля — как у сервера', () => {
@@ -68,13 +67,14 @@ test('в запрос не уезжает то, чего у цели нет', ()
   const payload = formPayload(target('car_rental'), { ...FILLED, reason: 'terms' });
   assert.equal(payload.unit_id, undefined);
   assert.equal(payload.employee_id, undefined);
-  assert.equal(payload.requires_processing, true);
+  // «Отправлять ли в группу» решает сервер по цели — клиент его не шлёт.
+  assert.equal('requires_processing' in payload, false);
   const call = formPayload(target('call_center'), FILLED);
   assert.equal(call.unit_id, 367);
   assert.equal(call.employee_id, 40);
-  assert.equal(formPayload(target('yandex'), { ...FILLED, reason: 'tariffs' }).requires_processing, false);
-  assert.equal(formPayload(target('taxi_park'), { ...FILLED, reason: 'commission',
-    requires_processing: false }).requires_processing, false);
+  // Ссылка на аккаунт — только помощник заполнения: в жалобу она не уходит.
+  const withLink = formPayload(target('call_center'), { ...FILLED, driver_link: 'https://fleet.yandex.kz/contractors/x' });
+  assert.equal(JSON.stringify(withLink).includes('fleet'), false);
 });
 
 test('сотрудников предлагаем из отдела цели', () => {
@@ -213,11 +213,11 @@ test('направления жалобы в мастере «Обращений
   assert.deepEqual(ready.map((t) => t.code),
     ['call_center', 'car_rental', 'front_office', 'taxi_park', 'yandex']);
   assert.ok(ready.every((t) => t.is_ready));
-  // Группа не выбрана: «всегда в группу» отправить некуда, а Яндекс и парк
-  // (только фиксация или по выбору оператора) работают и так.
+  // Группа не выбрана: отправить некуда никого, кроме Яндекса — он только
+  // фиксируется.
   const noGroup = Object.fromEntries(wizardTargets({ ...META, group: { ready: false } })
     .map((t) => [t.code, t.is_ready]));
   assert.deepEqual(noGroup, { call_center: false, car_rental: false, front_office: false,
-    taxi_park: true, yandex: true });
+    taxi_park: false, yandex: true });
   assert.deepEqual(wizardTargets(null), []);
 });

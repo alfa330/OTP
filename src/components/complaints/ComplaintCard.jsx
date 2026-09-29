@@ -391,15 +391,13 @@ const EmployeeModal = ({ open, onClose, complaint, meta, apiBaseUrl, headers, sh
 
 export const COMPLAINT_GONE = 'Жалоба удалена или больше вам не видна';
 
-/* mode — чьими глазами карточка:
- *   handler — раздел «Жалобы»: разбор, итог, работа с сотрудником (по правам);
- *   author  — «Обращения»: автор видит ответ для водителя, вопрос группы и
- *             отвечает на него. Инструментов разбора здесь нет даже у того,
- *             кому они положены (админ сам завёл жалобу) — разбирают в разделе
- *             «Жалобы», а не в ленте обращений. */
+/* Карточка раздела «Жалобы» — для тех, кто разбирает: итог, работа с
+ * сотрудником, внутреннее обсуждение (по правам). Автор видит свою жалобу в
+ * «Обращениях» — карточкой в формате обращения (CrmTicketsView:
+ * ComplaintThreadCard). */
 export default function ComplaintCard({
     complaintId, meta, apiBaseUrl, headers, showToast, onBack, onChanged, onSeen,
-    onDeleted, pulse, mode = 'handler',
+    onDeleted, pulse,
 }) {
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
@@ -437,10 +435,7 @@ export default function ComplaintCard({
     useEffect(() => { if (pulse) load(true); }, [pulse]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const item = data?.item;
-    const serverPermissions = data?.permissions || {};
-    const permissions = mode === 'author'
-        ? { can_write: Boolean(serverPermissions.can_write) }
-        : serverPermissions;
+    const permissions = data?.permissions || {};
     const messages = data?.messages || [];
     const answers = useMemo(() => driverAnswers(messages), [messages]);
     const question = useMemo(() => openQuestion(item, messages), [item, messages]);

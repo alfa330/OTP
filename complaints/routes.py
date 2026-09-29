@@ -175,6 +175,27 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
             items = queries.employees(cursor, department_id)
         return jsonify({'items': items})
 
+    # ── Водитель по ссылке на аккаунт ────────────────────────────────────
+    @route('/driver-lookup', methods=('POST',))
+    def complaints_driver_lookup(ctx):
+        """Ссылка на аккаунт водителя (или его ID) → ФИО, телефон и ВУ из CRM.
+
+        Тот же поиск, что у «Реестра посылок» (parcels/drivers.py), — как там,
+        чтобы данные водителя не набирали руками. Сама ссылка в жалобу и в
+        группу не уходит (владелец, 29.09.2026): форма берёт из ответа только
+        поля жалобы, поэтому и отдаём только их, без снимка CRM целиком.
+        """
+        if not access.can_create(ctx):
+            return jsonify({"error": "Заводить жалобы вам не разрешено"}), 403
+        from parcels import drivers
+
+        data = _payload()
+        try:
+            found = drivers.lookup(data.get('link') or data.get('account_id'))
+        except drivers.DriverLookupError as exc:
+            return jsonify({"error": exc.message, "code": exc.code}), exc.status
+        return jsonify({'driver': {key: found.get(key) for key in ('name', 'phone', 'license')}})
+
     # ── Лента ────────────────────────────────────────────────────────────
     @route('/complaints')
     def complaints_list(ctx):

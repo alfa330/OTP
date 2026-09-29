@@ -1064,7 +1064,7 @@ export default function TicketWizard({
             );
         }
         if (phase === 'complaint') {
-            const { busy: sending, blocked, form } = complaintDraft;
+            const { busy: sending, blocked } = complaintDraft;
             return (
                 <>
                     <button type="button" onClick={backToComplaintTargets} disabled={sending}
@@ -1077,7 +1077,7 @@ export default function TicketWizard({
                             title={blocked ? 'Telegram-группа для жалоб ещё не выбрана' : undefined}
                             className={iosBtnPrimary}>
                         {sending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                        {complaintSubmitLabel(complaintDraft.target, form.requires_processing)}
+                        {complaintSubmitLabel(complaintDraft.target)}
                     </button>
                 </>
             );
@@ -1216,8 +1216,8 @@ export default function TicketWizard({
                         {/* Жалоба — одна строка среди тематик; «на кого или на
                             что» — следующим экраном (ТЗ: «оператор сначала должен
                             определить, на кого или на что поступила жалоба»).
-                            Строка активна всегда: Яндекс и таксопарк
-                            фиксируются и без группы. */}
+                            Строка активна всегда: жалоба на Яндекс
+                            фиксируется и без группы. */}
                         {!!complaintTargets.length && (
                             <PickRow title="Жалоба" ready onPick={() => setPhase('complaint_target')}
                                      hint={`Водитель жалуется на оператора колл-центра, аренду авто, фронт-офис, таксопарк или Яндекс. ${
