@@ -10,7 +10,7 @@ import {
 } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
-import { ComplaintFields, useComplaintDraft } from '../complaints/ComplaintDraft';
+import { ComplaintFields, TARGET_ICONS, useComplaintDraft } from '../complaints/ComplaintDraft';
 import {
     submitLabel as complaintSubmitLabel, wizardTargets as complaintWizardTargets,
 } from '../complaints/complaintRules';
@@ -299,8 +299,11 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null,
  * кнопке — невалидная разметка, которую браузер разбирает как попало (React
  * ругался на неё в консоли на каждом открытии мастера). Клавиатура работает
  * так же: Tab доходит до строки, Enter и пробел выбирают. Нажатие по «i»
- * строку не выбирает. */
-const PickRow = ({ title, hint, ready, blocked, onPick, children = null }) => (
+ * строку не выбирает.
+ *
+ * icon — плитка слева, как у типов жалобы (раньше — первый экран раздела
+ * «Жалобы»): «на кого» узнаётся по картинке быстрее, чем по подписи. */
+const PickRow = ({ title, hint, ready, blocked, onPick, icon: Icon = null, children = null }) => (
     <div role="button" tabIndex={ready ? 0 : -1} aria-disabled={!ready}
          onClick={() => { if (ready) onPick(); }}
          onKeyDown={(e) => {
@@ -308,11 +311,18 @@ const PickRow = ({ title, hint, ready, blocked, onPick, children = null }) => (
              e.preventDefault();
              onPick();
          }}
-         className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+         className={`flex w-full items-center rounded-2xl px-4 py-3 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+             Icon ? 'gap-3' : 'gap-2'
+         } ${
              ready
                  ? 'cursor-pointer bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
                  : 'cursor-not-allowed bg-slate-50/60 opacity-60'
          }`}>
+        {Icon && (
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-slate-600 ring-1 ring-slate-200/70">
+                <Icon size={17} />
+            </span>
+        )}
         <span className="min-w-0 flex-1">
             <span className="block truncate text-[14px] font-medium text-slate-900">{title}</span>
             {children}
@@ -527,11 +537,13 @@ export default function TicketWizard({
     showToast, onCreated, complaints = null, onComplaintCreated,
 }) {
     const [scenarioKey, setScenarioKey] = useState('');
-    // pick | entry | category | checks | form | preview | closed | handoff | complaint
+    // pick | entry | category | checks | form | preview | closed | handoff
+    // | complaint_target | complaint
     const [phase, setPhase] = useState('pick');
-    /* Жалоба — направление среди тематик (решение владельца 29.09.2026):
-       «на кого или на что» выбирают на первом экране мастера, дальше — её
-       поля. complaints — справочник раздела жалоб (/api/complaints/meta), и
+    /* Жалоба — направление среди тематик (решение владельца 29.09.2026): на
+       первом экране одна строка «Жалоба», за ней экран «на кого или на что»
+       с иконками (как был первый экран раздела «Жалобы»), дальше — её поля.
+       complaints — справочник раздела жалоб (/api/complaints/meta), и
        приходит он только тому, кто вправе жалобы заводить. */
     const [complaintTarget, setComplaintTarget] = useState(null);
     const complaintDraft = useComplaintDraft({
@@ -616,6 +628,15 @@ export default function TicketWizard({
     const startComplaint = (code) => {
         setComplaintTarget(code);
         setPhase('complaint');
+    };
+
+    /* «Назад» с полей — к выбору «на кого», а не к тематикам: оператор
+       ошибся типом жалобы, а не тем, что это жалоба. Данные водителя и
+       описание остаются (useComplaintDraft обнуляет только то, что
+       принадлежит цели). */
+    const backToComplaintTargets = () => {
+        setComplaintTarget(null);
+        setPhase('complaint_target');
     };
 
     const submitComplaint = async () => {
@@ -1035,11 +1056,19 @@ export default function TicketWizard({
         if (phase === 'pick' || phase === 'closed' || phase === 'handoff') {
             return <button type="button" onClick={onClose} className={iosBtnSecondary}>Закрыть</button>;
         }
+        if (phase === 'complaint_target') {
+            return (
+                <button type="button" onClick={reset} className={iosBtnSecondary}>
+                    <ArrowLeft size={14} /> Назад
+                </button>
+            );
+        }
         if (phase === 'complaint') {
             const { busy: sending, blocked, form } = complaintDraft;
             return (
                 <>
-                    <button type="button" onClick={reset} disabled={sending} className={iosBtnSecondary}>
+                    <button type="button" onClick={backToComplaintTargets} disabled={sending}
+                            className={iosBtnSecondary}>
                         <ArrowLeft size={14} /> Назад
                     </button>
                     {/* Подпись называет последствие: «Отправить в группу» или
@@ -1125,6 +1154,7 @@ export default function TicketWizard({
     })();
 
     const subtitle = phase === 'pick' ? 'Выберите тематику — дальше система задаст вопросы'
+        : phase === 'complaint_target' ? 'На кого или на что поступила жалоба'
         : phase === 'complaint' ? 'Жалоба — данные, как их назвал водитель'
         : phase === 'entry' ? 'Данные водителя — проверим документы за период'
             : phase === 'category' ? 'Выберите категорию обращения'
@@ -1139,7 +1169,8 @@ export default function TicketWizard({
 
     return (
         <IosModal open={open} onClose={onClose}
-                  title={phase === 'complaint' ? (complaintDraft.target?.title || 'Жалоба')
+                  title={phase === 'complaint_target' ? 'Жалоба'
+                      : phase === 'complaint' ? (complaintDraft.target?.title || 'Жалоба')
                       : (phase === 'entry' || phase === 'category')
                       ? (entry ? entry.title : 'Новое обращение')
                       : scenario ? scenario.title
@@ -1182,30 +1213,37 @@ export default function TicketWizard({
                                 </div>
                             </div>
                         ))}
-                        {/* Жалоба — такое же направление, как тематики: заголовок
-                            группы и «на кого или на что» строками (ТЗ: «оператор
-                            сначала должен определить, на кого или на что поступила
-                            жалоба»). Уходят жалобы в свою группу, поэтому и
-                            заголовок у них свой. */}
+                        {/* Жалоба — одна строка среди тематик; «на кого или на
+                            что» — следующим экраном (ТЗ: «оператор сначала должен
+                            определить, на кого или на что поступила жалоба»).
+                            Строка активна всегда: Яндекс и таксопарк
+                            фиксируются и без группы. */}
                         {!!complaintTargets.length && (
-                            <div>
-                                {catalogGroups.length > 0 && (
-                                    <div className={`${iosGroupLabel} mb-1.5`}>Жалобы</div>
-                                )}
-                                <div className="space-y-1.5">
-                                    {complaintTargets.map((item) => (
-                                        <PickRow key={item.code} title={item.title} hint={item.hint}
-                                                 ready={item.is_ready} blocked="Нет группы"
-                                                 onPick={() => startComplaint(item.code)} />
-                                    ))}
-                                </div>
-                            </div>
+                            <PickRow title="Жалоба" ready onPick={() => setPhase('complaint_target')}
+                                     hint={`Водитель жалуется на оператора колл-центра, аренду авто, фронт-офис, таксопарк или Яндекс. ${
+                                         complaints?.group?.chat_title
+                                             ? `Жалобы на разбор уходят в группу «${complaints.group.chat_title}», ответ вернётся сюда.`
+                                             : 'Жалобы на разбор уходят в группу жалоб, ответ вернётся сюда.'}`} />
                         )}
                         {!catalogGroups.length && !complaintTargets.length && (
                             <div className="py-10 text-center text-[13px] text-slate-400">
                                 Тематики не настроены
                             </div>
                         )}
+                    </div>
+                )}
+
+                {/* На кого или на что — с иконками, как был первый экран
+                    раздела «Жалобы». Тип, который без группы отправить
+                    некуда, стоит с «Нет группы», как тематика без группы. */}
+                {phase === 'complaint_target' && (
+                    <div className="space-y-1.5">
+                        {complaintTargets.map((item) => (
+                            <PickRow key={item.code} title={item.title} hint={item.hint}
+                                     icon={TARGET_ICONS[item.code] || AlertTriangle}
+                                     ready={item.is_ready} blocked="Нет группы"
+                                     onPick={() => startComplaint(item.code)} />
+                        ))}
                     </div>
                 )}
 

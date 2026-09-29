@@ -73,6 +73,12 @@ class ComplaintsWiringTest(unittest.TestCase):
         """Заводят жалобу в мастере «Обращений», а не в разделе «Жалобы»."""
         wizard = (ROOT / 'src' / 'components' / 'crm' / 'TicketWizard.jsx').read_text(encoding='utf-8')
         self.assertIn('<ComplaintFields draft={complaintDraft} meta={complaints} />', wizard)
+        # Среди тематик — одна строка «Жалоба»; типы с иконками — своим экраном
+        # (просьба владельца 29.09.2026), «Назад» с полей ведёт к типам.
+        self.assertEqual(wizard.count('<PickRow title="Жалоба" ready'), 1)
+        self.assertIn("icon={TARGET_ICONS[item.code] || AlertTriangle}", wizard)
+        self.assertIn("{phase === 'complaint_target' && (", wizard)
+        self.assertIn('onClick={backToComplaintTargets}', wizard)
         view = (ROOT / 'src' / 'components' / 'complaints' / 'ComplaintsView.jsx').read_text(encoding='utf-8')
         self.assertNotIn('Новая жалоба', view)
         crm = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
