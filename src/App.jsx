@@ -49710,7 +49710,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setUserHistory(await loadUserHistory(userId));
                     setShowHistoryModal(true);
                 } catch (error) {
-                    addToast('Не удалось загрузить историю', 'error');
+                    // addToast в области App нет (он у ContestsApp): тост не
+                    // показывался вовсе, а в консоли падал ReferenceError.
+                    showToast('Не удалось загрузить историю', 'error');
                 } finally {
                     setLoadingHistoryId(null);
                 }
@@ -50811,8 +50813,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 employeeEditAction(employee),
                 employeeHistoryAction(employee),
                 // Повышать может только админ: у остальных пункт
-                // заканчивался бы отказом уже после нажатия.
-                (isAdminLikeRole || isEmployeeAccountingManager) && {
+                // заканчивался бы отказом уже после нажатия. По той же причине —
+                // только оператора: стажёра и бэк-офис сервер не повышает
+                // («Only operators can be promoted to supervisor»).
+                (isAdminLikeRole || isEmployeeAccountingManager)
+                    && normalizeRole(employee?.role) === 'operator' && {
                     key: 'promote',
                     label: promotingUserId === Number(employee?.id) ? 'Повышение…' : 'Перевести в супервайзеры',
                     short: 'В супервайзеры',
@@ -50926,7 +50931,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     title: 'Изменить данные',
                     tone: 'plain',
                     guard: true,
-                    onOpen: (employee) => setUserToEdit(employee),
+                    // Справочники — свежими, как при открытии отдельного окна
+                    // правки: там их перечитывает эффект по showUserEditModal.
+                    onOpen: (employee) => {
+                        setUserToEdit(employee);
+                        fetchUserModalGroups();
+                        fetchDepartments();
+                    },
                     render: ({ back }) => (
                         <UserEditModal
                             embedded
@@ -51052,7 +51063,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const name = employee?.name || '';
                     return [
                         employeeEditAction(employee),
-                        employeeHistoryAction(employee),
+                        // Историю админа сервер кадровику без админской роли не
+                        // отдаёт (get_user_history → 403) — пункт был бы отказом.
+                        !(role === 'admin' && isEmployeeAccountingManager && !isAdminLikeRoleFn(currentUserRole))
+                            && employeeHistoryAction(employee),
                         canDemoteSupervisor && !isDismissed && {
                             key: 'demote',
                             label: 'Перевести в операторы',
@@ -56098,7 +56112,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     emptyText: 'Админы не найдены.',
                                     emptySearchText: 'Админы по запросу не найдены.',
                                     countLabel: 'админов',
-                                    canDismissAdmin: true,
+                                    // Увольняет админа только супер-админ (dismissAdminUser);
+                                    // кадровику кнопка заканчивалась бы отказом.
+                                    canDismissAdmin: isSuperAdmin,
                                 })}
 
                                 {false && view === 'manage_admins' && (isSuperAdmin || isEmployeeAccountingManager) && (

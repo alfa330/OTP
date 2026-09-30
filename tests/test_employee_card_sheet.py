@@ -121,12 +121,59 @@ class OneWindowTests(unittest.TestCase):
         self.assertIn("if (action.page) {\n            pushPage(action.page);", SHEET)
         self.assertIn('setConfirmKey((current) => (current === action.key ? null : action.key));', SHEET)
 
+    def test_each_visit_to_a_screen_is_a_fresh_instance(self):
+        """«Отмена» в правке и сразу «Изменить» (пока экран ещё уезжает)
+        возвращали отменённый черновик: ключ разметки был одним на оба входа."""
+        self.assertIn('key={`${renderedPage}:${pageSeq}`}', SHEET)
+        self.assertIn('setPageSeq((seq) => seq + 1);', SHEET)
+
+    def test_late_back_does_not_pop_someone_elses_screen(self):
+        """Сохранение формы кончается позже, чем человек мог уйти на другой
+        экран: «назад» из него снимает только свой вход."""
+        self.assertIn('back: backFrom(pageSeq)', SHEET)
+        self.assertIn('if (pageSeqRef.current === seq && pageKeyRef.current) popPage();', SHEET)
+        self.assertIn('const leftKey = pageKeyRef.current;', SHEET)
+
     def test_card_is_desktop_only(self):
         """На телефоне у раздела своя карточка экраном; метка otp-modal-root
         потребовала бы жеста «назад» (test_mobile_shell)."""
         self.assertNotIn('otp-modal-root', SHEET)
         self.assertIn("lazyWithRetry(() => import('./components/employees/EmployeeCardSheet'))", APP)
         self.assertEqual(APP.count('<EmployeeCardSheet'), 1)
+
+
+class ReviewFindingsTests(unittest.TestCase):
+    """Находки разбора 30.09.2026 (перед выкладкой) — чтобы не вернулись."""
+
+    def test_tab_trap_skips_untabbable_back_button(self):
+        self.assertIn('.filter((node) => node.tabIndex >= 0', SHEET)
+        self.assertIn("!node.closest('[inert], [aria-hidden=\"true\"]')", SHEET)
+
+    def test_height_ceiling_is_recomputed_on_open(self):
+        effect = SHEET[SHEET.index('const onResize = () => setMaxStage(maxStageHeight());'):]
+        self.assertTrue(effect.split('\n', 2)[1].strip() == 'onResize();', effect[:200])
+        self.assertIn('max-height: calc(100vh - 48px);', SHEET_CSS)
+
+    def test_edit_screen_refreshes_groups_and_departments(self):
+        pages = APP[APP.index('const employeeCardPages = {'):APP.index('const employeeCardDeptFields')]
+        onopen = pages[pages.index('onOpen: (employee) => {'):pages.index('render:')]
+        for call in ('setUserToEdit(employee);', 'fetchUserModalGroups();', 'fetchDepartments();'):
+            self.assertIn(call, onopen)
+        self.assertNotIn('setShowUserEditModal', onopen)
+
+    def test_actions_that_would_be_refused_are_hidden(self):
+        promote = APP[APP.index('const manageUsersActionsFor = (employee) => ['):]
+        promote = promote[:promote.index('].filter(Boolean);')]
+        self.assertIn("normalizeRole(employee?.role) === 'operator'", promote)
+        self.assertIn('canDismissAdmin: isSuperAdmin,', APP)
+        self.assertNotIn('canDismissAdmin: true,', APP)
+        self.assertIn("!(role === 'admin' && isEmployeeAccountingManager && !isAdminLikeRoleFn(currentUserRole))", directory_source())
+
+    def test_history_error_toast_exists_in_app_scope(self):
+        start = APP.index('const fetchUserHistory = async (userId) => {')
+        body = APP[start:APP.index('};', start)]
+        self.assertNotIn('addToast(', body)
+        self.assertIn("showToast('Не удалось загрузить историю', 'error');", body)
 
 
 class EmbeddedEditFormTests(unittest.TestCase):
@@ -142,6 +189,13 @@ class EmbeddedEditFormTests(unittest.TestCase):
         """Кадр фото — поверх формы; Escape карточки его не перешагивает."""
         self.assertIn('data-uem-crop=""', EDIT)
         self.assertIn('[data-uem-crop]', SHEET)
+
+    def test_escape_closes_the_crop_inside_the_card(self):
+        start = EDIT.index('if (!embedded || !avatarCropState) return undefined;')
+        effect = EDIT[start:start + 400]
+        self.assertIn("if (event.key !== 'Escape') return;", effect)
+        self.assertIn('closeAvatarCropEditor();', effect)
+        self.assertLess(start, EDIT.index('if (!isOpen) return null;'))
 
     def test_embedded_focus_does_not_scroll_the_sliding_screen(self):
         self.assertIn('nameRef.current?.focus(embedded ? { preventScroll: true } : undefined);', EDIT)

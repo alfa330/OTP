@@ -703,6 +703,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         closeAvatarCropEditor();
     };
 
+    /* Внутри карточки сотрудника Escape формы отключён (его держит карточка,
+       а она уступает, пока открыт кадр) — кадр фото закрывается своим. */
+    useEffect(() => {
+        if (!embedded || !avatarCropState) return undefined;
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            closeAvatarCropEditor();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [embedded, avatarCropState, closeAvatarCropEditor]);
+
     const handleAvatarCropApply = async () => {
         if (!avatarCropState?.sourceFile) return;
         setAvatarError("");

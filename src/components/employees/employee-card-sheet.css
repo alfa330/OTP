@@ -95,6 +95,8 @@ html[data-otp-theme="dark"] .ecs {
     display: flex;
     flex-direction: column;
     width: min(540px, 100%);
+    /* Страховка к потолку высоты из компонента: шапка с «Закрыть» видна всегда. */
+    max-height: calc(100vh - 48px);
     border-radius: 20px;
     overflow: hidden;
     background: var(--ecs-bg);

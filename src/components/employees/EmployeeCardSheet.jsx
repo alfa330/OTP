@@ -323,6 +323,14 @@ export default function EmployeeCardSheet({
     const [pageKey, setPageKey] = React.useState(null);
     const [renderedPage, setRenderedPage] = React.useState(null);
     const [pageIn, setPageIn] = React.useState(false);
+    /* Номер входа на экран — ключ его разметки. Повторный вход, пока прежний
+       экран ещё уезжает, получает НОВЫЙ экземпляр: иначе «Отмена» в правке и
+       сразу «Изменить» вернули бы отменённый черновик формы. */
+    const [pageSeq, setPageSeq] = React.useState(0);
+    const pageKeyRef = React.useRef(null);
+    const pageSeqRef = React.useRef(0);
+    pageKeyRef.current = pageKey;
+    pageSeqRef.current = pageSeq;
     const [confirmKey, setConfirmKey] = React.useState(null);
     const [runningKey, setRunningKey] = React.useState(null);
     const [heights, setHeights] = React.useState({ root: 0, page: 0 });
@@ -411,7 +419,10 @@ export default function EmployeeCardSheet({
 
     React.useEffect(() => {
         if (!mounted) return undefined;
+        // Сразу при открытии: пока карточка была закрыта, окно браузера могло
+        // стать ниже — со старым потолком шапка и низ формы ушли бы за экран.
         const onResize = () => setMaxStage(maxStageHeight());
+        onResize();
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
     }, [mounted]);
@@ -430,7 +441,7 @@ export default function EmployeeCardSheet({
         if (rootBodyRef.current) observer.observe(rootBodyRef.current);
         if (pageBodyRef.current) observer.observe(pageBodyRef.current);
         return () => observer.disconnect();
-    }, [mounted, renderedPage, employeeId]);
+    }, [mounted, renderedPage, pageSeq, employeeId]);
 
     /* Въезд экрана: стартовая позиция должна попасть в расчёт стилей до
        смены класса, иначе браузер не увидит перехода и экран просто
@@ -441,7 +452,7 @@ export default function EmployeeCardSheet({
         setPageIn(true);
         // Фокус — в новый экран: кнопка, открывшая его, осталась под ним.
         pageScrollRef.current.focus({ preventScroll: true });
-    }, [pageKey, pageIn, renderedPage]);
+    }, [pageKey, pageIn, renderedPage, pageSeq]);
 
     /* Уехавший экран живёт в дереве до конца перехода. */
     React.useEffect(() => {
@@ -469,14 +480,17 @@ export default function EmployeeCardSheet({
         setConfirmKey(null);
         setRenderedPage(key);
         setPageKey(key);
+        setPageSeq((seq) => seq + 1);
         setPageIn(false);
         syncBar(null, false);
     };
 
+    /* По ref, а не по замыканию: «назад» зовут и из долгих операций экрана
+       (сохранение формы), а к их концу на экране может быть уже другое. */
     const popPage = React.useCallback(() => {
-        if (!pageKey) return;
-        pageDef(pageKey)?.onLeave?.();
-        const leftKey = pageKey;
+        const leftKey = pageKeyRef.current;
+        if (!leftKey) return;
+        pageDef(leftKey)?.onLeave?.();
         setPageKey(null);
         setPageIn(false);
         syncBar(rootScrollRef.current, true);
@@ -484,7 +498,14 @@ export default function EmployeeCardSheet({
         requestAnimationFrame(() => {
             panelRef.current?.querySelector(`[data-ecs-action="${leftKey}"]`)?.focus({ preventScroll: true });
         });
-    }, [pageDef, pageKey, syncBar]);
+    }, [pageDef, syncBar]);
+
+    /* «Назад» для экрана — только пока на экране ИМЕННО этот его вход: форма,
+       сохранявшаяся, пока человек ушёл на «Историю» или открыл правку заново,
+       по окончании не снимет чужой экран. */
+    const backFrom = (seq) => () => {
+        if (pageSeqRef.current === seq && pageKeyRef.current) popPage();
+    };
 
     const requestClose = React.useCallback(() => {
         if (pageKey) pageDef(pageKey)?.onLeave?.();
@@ -526,8 +547,13 @@ export default function EmployeeCardSheet({
                 return;
             }
             if (event.key !== 'Tab' || !panel.contains(document.activeElement)) return;
+            /* Только то, что Tab и так посещает: «Назад» на корне — tabIndex -1 и
+               aria-hidden; взяв её первой, ловушка отпускала Shift+Tab с
+               «Закрыть» в страницу под окном. */
             const items = Array.from(panel.querySelectorAll(FOCUSABLE))
-                .filter((node) => !node.closest('[inert]') && node.getClientRects().length > 0);
+                .filter((node) => node.tabIndex >= 0
+                    && !node.closest('[inert], [aria-hidden="true"]')
+                    && node.getClientRects().length > 0);
             if (!items.length) return;
             const first = items[0];
             const last = items[items.length - 1];
@@ -748,7 +774,7 @@ export default function EmployeeCardSheet({
 
                     {renderedPage && (
                         <div
-                            key={renderedPage}
+                            key={`${renderedPage}:${pageSeq}`}
                             ref={pageScrollRef}
                             className={`ecs-page is-sub thin-scroll${activeDef?.tone === 'plain' ? ' is-plain' : ''}${pageIn ? ' is-in' : ''}`}
                             onScroll={(event) => syncBar(event.currentTarget, false)}
@@ -767,7 +793,7 @@ export default function EmployeeCardSheet({
                                                 valueOf={historyValueOf}
                                             />
                                         )
-                                        : activeDef?.render?.({ employee: person, back: popPage })}
+                                        : activeDef?.render?.({ employee: person, back: backFrom(pageSeq) })}
                                 </React.Suspense>
                             </div>
                         </div>
