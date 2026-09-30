@@ -5,7 +5,7 @@ import {
     Database, Search, Timer, Hash, AlertTriangle,
     MessageSquare, Paperclip, ImageOff, Users,
 } from 'lucide-react';
-import { APPLE_FONT, iosCard, IosBadge, scoreTone } from '../ui/ios';
+import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
 import CriteriaReviewPanel from './CriteriaReviewPanel';
 import { CHAT_SUBJECTS } from './subjects';
@@ -257,7 +257,10 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
            телефоне колонка одна, и страница едет как прежде — там `lg:`-классы
            не действуют, а sticky-панели держатся за прокрутчик страницы. */
         <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[1.05fr_1fr]">
-            <div className="flex min-w-0 flex-col gap-3 lg:min-h-0">
+            {/* Левая колонка сама прокручивается, только если верхняя карточка
+                (сделка раскрыта, много меток) не оставляет транскрипту его минимума:
+                раньше транскрипт сжимался до пары строк, и его не было видно. */}
+            <div className="thin-scroll flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
                 <div className={`${iosCard} shrink-0 p-4`}>
                     <div className="flex items-start justify-between gap-3">
                         <div>
@@ -333,9 +336,17 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                     мессенджере, а прокручивается только их область. На широком
                     экране она добирает всю оставшуюся высоту колонки, на телефоне
                     ограничена 60vh, чтобы страница не превращалась в один транскрипт. */}
-                <div className="flex min-h-0 flex-1 flex-col">
-                    <div className="px-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                        {isChat ? 'Переписка · эпизод' : 'Транскрипт · диаризация'}
+                <div className="flex min-h-0 flex-1 flex-col lg:min-h-[20rem]">
+                    {/* Пояснение к подсветке — под «i» у заголовка: строкой под
+                        транскриптом оно занимало место всё время, а нужно один раз. */}
+                    <div className="flex items-center gap-1.5 px-1 pb-1.5">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                            {isChat ? 'Переписка · эпизод' : 'Транскрипт · диаризация'}
+                        </span>
+                        <IosHint label={isChat ? 'Как читать переписку' : 'Что значит жёлтая подсветка'}
+                                 text={isChat
+                                     ? 'Фото открываются в лайтбоксе, голосовые — плеером; под ними серым — транскрипт или описание, которые видела модель.'
+                                     : 'Жёлтым подсвечены слова, которые распознаны неуверенно: там ИИ не уверен в распознавании, и против оператора это не учитывается. Время у реплики — переход к этому месту записи.'} />
                     </div>
                     {chatSnapshot ? (
                         <ChatThread snapshot={chatSnapshot} quotes={[]}
@@ -352,11 +363,6 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                                   </div>}
                         </div>
                     )}
-                    <div className="shrink-0 px-1 pt-2 text-[11px] text-slate-500">
-                        {isChat
-                            ? 'Фото открываются в лайтбоксе, голосовые — плеером; под ними серым — транскрипт/описание, которые видела модель.'
-                            : (<><mark className="rounded bg-amber-100 px-1 text-amber-800">жёлтым</mark> — где ИИ не уверен в распознавании (не учитывается против оператора)</>)}
-                    </div>
                 </div>
             </div>
 

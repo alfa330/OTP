@@ -676,6 +676,10 @@ export default function CallQaView(props) {
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-4">
+            {/* Шапка раздела — только над списками. В открытой карточке разговора
+                она отнимала высоту у транскрипта и оценки, а вкладок и выбора отдела
+                там всё равно нет; заголовок для экранного диктора — в строке «Назад». */}
+            {!selected && (
             <div className="flex flex-wrap items-center gap-3">
                 <div className="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm">
                     <Sparkles size={20} />
@@ -690,13 +694,14 @@ export default function CallQaView(props) {
                 </div>
                 {/* Селектор показываем только тем, кому открыт больше одного отдела:
                     у главы и СВ он был бы одной неактивной кнопкой. */}
-                {canSwitchDepartment && !selected && (
+                {canSwitchDepartment && (
                     <div className="ml-auto">
                         <IosSegmented value={department} options={departmentOptions}
                                       onChange={changeDepartment} ariaLabel="Отдел" />
                     </div>
                 )}
             </div>
+            )}
 
             {departments === null ? (
                 <Spinner text="Загружаю отделы…" />
@@ -740,6 +745,7 @@ export default function CallQaView(props) {
                 <div ref={reviewShellRef} className="flex flex-col gap-3"
                      style={shellHeight ? { height: shellHeight } : undefined}>
                     <div className="flex shrink-0 items-center justify-between gap-2">
+                        <h1 className="sr-only">ИИ-оценка</h1>
                         <button type="button" onClick={requestCloseCall} disabled={reviewInteraction.busy}
                             className={`${iosBtnGhost} disabled:cursor-not-allowed disabled:opacity-50`}>
                             <ChevronLeft size={16} />Назад
