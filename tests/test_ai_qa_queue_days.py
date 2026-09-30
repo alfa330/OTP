@@ -135,6 +135,19 @@ class DayPageTests(unittest.TestCase):
         self.assertNotIn("_sev", page["items"][0])
         self.assertEqual([i["id"] for i in none_page["items"]], [4])
 
+    def test_pages_of_a_day_add_up_without_gaps(self):
+        """Страницы дня складываются в весь день без пропусков и повторов, а равные
+        по времени строки (у переписок в подписи только дата) упорядочены самим
+        разговором, а не порядком оценки ИИ, который «Переоценить» меняет."""
+        day = [_item(i, "2026-09-23", ["critical"] if i in (7, 3) else ["lowconf"], 80,
+                     time="10:00" if i % 2 else f"09:{i:02d}") for i in range(11, -1, -1)]
+        with mock.patch.object(api.config, "connect_ro", return_value=_Conn(_Cursor([]))), \
+                mock.patch.object(api, "_flag_stale_evaluations", side_effect=lambda rows: None), \
+                mock.patch.object(api, "_queue_items", side_effect=lambda *a, **k: [dict(i) for i in day]):
+            pages = [api.review_queue_day("2026-09-23", limit=5, offset=offset) for offset in (0, 5, 10)]
+        ids = [item["id"] for page in pages for item in page["items"]]
+        self.assertEqual(ids, [3, 7, 0, 2, 4, 6, 8, 10, 1, 5, 9, 11])
+
 
 class QueueItemsColumnsTests(unittest.TestCase):
     """Колонки выборки очереди: день и id сотрудника встали перед колонками

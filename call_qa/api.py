@@ -845,7 +845,11 @@ def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_directi
         items = [item for item in items if (item.get("day") or QUEUE_NO_DAY) == day]
         # Внутри дня — сначала серьёзное, а дальше по времени разговора: день читают
         # сверху вниз, как ленту («09:23, 10:40»), а не в порядке, в каком их оценил ИИ.
-        items.sort(key=lambda item: (item["_sev"], str(item.get("datetime") or "")))
+        # Последний ключ — сам разговор: у переписок время в подписи — только дата, и
+        # без него равные строки шли бы в порядке оценки ИИ, а его меняет «Переоценить»
+        # — «Показать ещё» со смещением тогда пропускала бы или повторяла строки.
+        items.sort(key=lambda item: (item["_sev"], str(item.get("datetime") or ""),
+                                     str(item.get("subject") or ""), item.get("id") or 0))
         return {"items": _queue_page(items, offset, limit), "total": len(items)}
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
