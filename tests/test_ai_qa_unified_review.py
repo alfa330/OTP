@@ -68,6 +68,74 @@ class ModelVerdictTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "Error")
 
 
+class LegacyRunTests(unittest.TestCase):
+    """Прогоны до нормализации: в снимке «Error» и балл, не узнавший крит. ошибку."""
+
+    def _card(self, ai_score=59):
+        return {"ai_score": ai_score, "criteria": [
+            {"idx": 0, "ai": "Correct", "is_critical": False},
+            {"idx": 16, "ai": "Error", "is_critical": True},
+            {"idx": 21, "ai": "Error", "is_critical": False},
+        ]}
+
+    def test_error_is_read_as_incorrect_and_zeroes_the_score(self):
+        card = self._card()
+        self.assertTrue(api._normalise_legacy_ai_verdicts(card))
+        self.assertEqual([c["ai"] for c in card["criteria"]], ["Correct", "Incorrect", "Incorrect"])
+        self.assertEqual(card["ai_score"], 0)
+
+    def test_incomplete_score_stays_absent_and_clean_runs_are_untouched(self):
+        card = self._card(ai_score=None)
+        api._normalise_legacy_ai_verdicts(card)
+        self.assertIsNone(card["ai_score"])
+        clean = {"ai_score": 80, "criteria": [{"idx": 0, "ai": "Incorrect", "is_critical": False}]}
+        self.assertFalse(api._normalise_legacy_ai_verdicts(clean))
+        self.assertEqual(clean["ai_score"], 80)
+        # Некритическое «Error» балл не меняет: веса оно и раньше не давало.
+        plain = {"ai_score": 70, "criteria": [{"idx": 0, "ai": "Error", "is_critical": False}]}
+        self.assertTrue(api._normalise_legacy_ai_verdicts(plain))
+        self.assertEqual(plain["ai_score"], 70)
+
+    def test_score_and_queue_know_legacy_error(self):
+        from call_qa.review import queue
+        direction = {"criteria": [_crit(0, 100), _crit(1, None, critical=True)]}
+        result = {"per_criterion": [{"idx": 0, "verdict": "Correct", "source": "transcript"},
+                                    {"idx": 1, "verdict": "Error", "source": "transcript"}]}
+        self.assertEqual(api._ai_score(direction, result), 0)
+        reasons = queue.review_reasons([{"idx": 1, "ai": "Error", "is_critical": True,
+                                         "source": "transcript", "conf": 0.9}], 0.95)
+        self.assertIn("critical", reasons)
+
+
+class ScaleShapeTests(unittest.TestCase):
+    """Критичность и недочёт задают кнопки: их смена — тоже изменившаяся шкала."""
+
+    def _attach(self, card_criteria, live_criteria):
+        payload = {"direction_id": 1, "criteria": card_criteria}
+        with mock.patch.object(api.criteria_mod, "load_direction",
+                               return_value={"id": 1, "criteria": live_criteria}):
+            api._attach_scale(payload)
+        return payload
+
+    def test_same_shape_is_not_a_change(self):
+        crit = {"idx": 0, "name": "Лояльность", "is_critical": True, "deficiency": None, "weight": None}
+        self.assertFalse(self._attach([dict(crit)], [dict(crit)])["scale_changed"])
+
+    def test_criticality_or_deficiency_change_is_a_change(self):
+        card = {"idx": 0, "name": "Лояльность", "is_critical": True, "deficiency": None}
+        live = {"idx": 0, "name": "Лояльность", "is_critical": False, "deficiency": None, "weight": 5}
+        self.assertTrue(self._attach([dict(card)], [live])["scale_changed"])
+        card = {"idx": 0, "name": "Выявление", "is_critical": False, "deficiency": {"weight": 5}}
+        live = {"idx": 0, "name": "Выявление", "is_critical": False, "deficiency": None, "weight": 10}
+        self.assertTrue(self._attach([dict(card)], [live])["scale_changed"])
+
+    def test_state_payload_without_flags_is_not_compared(self):
+        # human_review_state собирает карточку из одних idx — сравнивать там нечего.
+        live = {"idx": 0, "name": "Лояльность", "is_critical": True, "deficiency": None, "weight": None}
+        payload = self._attach([{"idx": 0, "name": "Лояльность"}], [live])
+        self.assertFalse(payload["scale_changed"])
+
+
 class VerdictFromAiTests(unittest.TestCase):
     def test_legacy_error_maps_by_criticality(self):
         critical = {"idx": 3, "name": "К", "is_critical": True, "deficiency": None}

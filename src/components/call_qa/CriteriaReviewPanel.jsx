@@ -46,6 +46,8 @@ const VERDICT_UI = {
 const fieldCls = 'w-full resize-y rounded-xl border-0 bg-slate-100 px-3 py-2 text-[12.5px] leading-snug '
     + 'text-slate-900 placeholder-slate-400 transition focus:bg-white focus:outline-none '
     + 'focus:ring-2 focus:ring-blue-500/70 disabled:cursor-not-allowed disabled:opacity-60';
+// Карточка критерия — iosCard без его рамки: рамку ставит сама строка, по состоянию.
+const cardCls = 'rounded-2xl bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]';
 const chipCls = 'inline-flex min-h-7 items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 '
     + 'text-[11.5px] font-medium text-slate-500 transition-all hover:bg-slate-200 hover:text-slate-700 '
     + 'active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 '
@@ -77,7 +79,11 @@ const kbSignature = (kb) => JSON.stringify(Object.keys(kb || {}).sort().map((key
 /* Правило и цитата для ИИ — необязательное уточнение исправления. Без него в
  * черновик базы знаний уходит комментарий человека и честная отметка «без
  * цитаты»; с ним — правило для похожих случаев и дословный фрагмент разговора. */
-function KnowledgeDetails({ c, value, comment, extra, onChange, disabled, transcriptText, onRefine }) {
+function KnowledgeDetails({
+    c, value, comment, extra: saved, onChange, disabled, transcriptText, onRefine, forceOpen = false, ruleRequired = false,
+}) {
+    // Открытым блок бывает и без своих данных (forceOpen у закрытой на чтение оценки).
+    const extra = saved || {};
     const [refining, setRefining] = useState(false);
     const [note, setNote] = useState(null);
     const [showSituation, setShowSituation] = useState(false);
@@ -89,7 +95,7 @@ function KnowledgeDetails({ c, value, comment, extra, onChange, disabled, transc
 
     const hint = 'Исправление уходит в черновики базы знаний: одобренные правила ИИ применяет к похожим '
         + 'разговорам. Без правила в черновик пойдёт ваш комментарий, без цитаты — отметка «без подтверждения».';
-    if (!extra?.open) {
+    if (!extra.open && !forceOpen) {
         return (
             <div className="mt-2 flex items-center gap-1.5">
                 <button type="button" onClick={() => onChange({ open: true })} disabled={disabled} className={chipCls}>
@@ -154,8 +160,10 @@ function KnowledgeDetails({ c, value, comment, extra, onChange, disabled, transc
             <textarea rows={2} value={extra.rule || ''} disabled={busy}
                 aria-label={`Правило для ИИ по критерию «${c.name}»`}
                 onChange={(e) => onChange({ rule: e.target.value })}
-                placeholder="Правило для похожих случаев. Пусто — возьмём ваш комментарий"
-                className={fieldCls} />
+                placeholder={ruleRequired
+                    ? 'Почему не так, как у ИИ, — правило для похожих случаев'
+                    : 'Правило для похожих случаев. Пусто — возьмём ваш комментарий'}
+                className={`${fieldCls} ${ruleRequired ? 'ring-1 ring-rose-200' : ''}`} />
             {situationOpen && (
                 <textarea rows={2} value={extra.situation || ''} disabled={busy}
                     aria-label="Ситуация — когда правило действует"
@@ -238,9 +246,14 @@ const CriterionReview = memo(function CriterionReview({
     const aiComment = String(c.comment || '').trim();
     const commentFromAi = Boolean(aiComment) && text.trim() === aiComment;
     const negative = value != null && NEGATIVE.has(value);
-    const needText = !text.trim() && ((value != null && COMMENT_REQUIRED.has(value))
+    const needText = !locked && !text.trim() && ((value != null && COMMENT_REQUIRED.has(value))
         || (corrected && !String(extra?.rule || '').trim()));
-    const showComment = negative || corrected || commentOpen || Boolean(text.trim());
+    // Своя оценка закрыта на чтение (уже в журнале, прав на переоценку нет), а прогон
+    // ИИ не разобран: исправление объясняют правилом для ИИ — пустое закрытое поле
+    // комментария было бы тупиком.
+    const reasonViaRule = locked && corrected && transcript && kbEnabled && !text.trim();
+    const showComment = (negative || corrected || commentOpen || Boolean(text.trim()))
+        && !(locked && !text.trim());
     // Комментарий ИИ к его же ошибке — тихая заметка, а не поле: согласному с ИИ
     // править нечего, а шесть заполненных полей подряд читались бы как анкета.
     // Поле появляется по «Изменить» или когда человек исправил вердикт.
@@ -253,12 +266,14 @@ const CriterionReview = memo(function CriterionReview({
     const conf = c.conf != null ? Math.round(Number(c.conf) * 100) : null;
     const critError = value === ERROR;
 
+    // Рамка — ровно одна: серая рамка iosCard стоит в CSS позже цветных и молча
+    // перебивала бы их (крит. ошибка, «исправлено», подсветка незаполненного).
     const ring = highlight ? 'ring-2 ring-amber-300/80'
         : critError ? 'ring-1 ring-rose-200'
-            : corrected ? 'ring-2 ring-blue-400/50' : '';
+            : corrected ? 'ring-2 ring-blue-400/50' : 'ring-1 ring-slate-200/70';
 
     return (
-        <div id={`qa-criterion-${c.idx ?? index}`} className={`${iosCard} scroll-mt-16 p-3 ${ring}`}>
+        <div id={`qa-criterion-${c.idx ?? index}`} className={`${cardCls} scroll-mt-16 p-3 ${ring}`}>
             <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 text-[13.5px] font-medium leading-snug text-slate-800">
                     {c.name}
@@ -343,6 +358,22 @@ const CriterionReview = memo(function CriterionReview({
                 })}
             </div>
 
+            {/* Пустой критерий, по которому у ИИ есть вердикт (своя оценка сохранена
+                частичной или ИИ дооценил после «Переоценить»), — вердикт ИИ виден и
+                ставится одним нажатием. */}
+            {value == null && aiHuman != null && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5 text-[11.5px]">
+                    <span className={aiHuman === ERROR ? 'font-medium text-rose-600' : 'text-slate-400'}>
+                        у ИИ: {VERDICT_LABEL[aiHuman]}
+                    </span>
+                    {!locked && (
+                        <button type="button" onClick={() => onPick(index, aiHuman)} className={linkCls}>
+                            <Check size={12} />Поставить
+                        </button>
+                    )}
+                </div>
+            )}
+
             {corrected && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5 text-[11.5px]">
                     <span className="font-medium text-blue-600">Исправлено</span>
@@ -379,7 +410,9 @@ const CriterionReview = memo(function CriterionReview({
             {corrected && transcript && kbEnabled && (
                 <KnowledgeDetails c={c} value={value} comment={text} extra={extra}
                                   onChange={(patch) => onExtra(c.idx, patch)} disabled={kbLocked}
-                                  transcriptText={transcriptText} onRefine={onRefine} />
+                                  transcriptText={transcriptText} onRefine={onRefine}
+                                  forceOpen={reasonViaRule}
+                                  ruleRequired={reasonViaRule && !String(extra?.rule || '').trim()} />
             )}
         </div>
     );
@@ -433,6 +466,9 @@ export default function CriteriaReviewPanel({
     // Вердикты правятся, пока есть что сохранить: своя оценка или разбор ИИ.
     const verdictsLocked = saving || humanLocked || (!humanCanSave && !aiPending);
     const toggleBlockedByOther = journalByOther && !canCorrectJournal;
+    // Общий комментарий и отметки журнала принадлежат своей оценке: их правят, только
+    // когда её можно сохранить (при «шкала изменилась» вердикты открыты ради разбора ИИ).
+    const settingsLocked = saving || !humanCanSave;
     const toggleDisabled = saving || !humanCanSave || inJournal || toggleBlockedByOther;
 
     const correctionIdx = useMemo(
@@ -442,9 +478,13 @@ export default function CriteriaReviewPanel({
     const baseline = useMemo(() => stateFrom(criteria, lastSaved), [criteria, lastSaved]);
     const humanDirty = humanSignature(state) !== humanSignature(baseline);
     const humanChanged = !lastSaved || humanDirty;
-    // Несохранённое — своя оценка, а пока прогон не разобран — ещё и исправления ИИ:
-    // закрыв карточку, их потеряли бы, даже если своя оценка уже сохранена.
-    const dirty = humanDirty || (aiPending && (correctionIdx.length > 0 || kbSignature(state.kb) !== '[]'));
+    // Несохранённое — своя оценка и, пока прогон не разобран, уточнения для базы
+    // знаний. Исправления, совпадающие с сохранённой оценкой, не теряются: при
+    // открытии они выводятся из неё заново, и спрашивать «потерять?» было бы ложью.
+    const dirty = humanDirty || (aiPending && kbSignature(state.kb) !== '[]');
+    // Где оценка расходится с ИИ или пуста при его вердикте — это возвращает «Как у ИИ».
+    const blankAiIdx = criteria.map((c, i) => (state.scores[i] == null && verdictFromAi(c, c.ai) != null ? i : -1))
+        .filter((i) => i >= 0);
 
     useEffect(() => { onInteractionChange?.({ dirty, busy: saving }); }, [dirty, saving, onInteractionChange]);
     useEffect(() => () => onInteractionChange?.({ dirty: false, busy: false }), [onInteractionChange]);
@@ -485,10 +525,14 @@ export default function CriteriaReviewPanel({
         if (before && String(comments[i] || '').trim() === before) comments[i] = '';
         const after = aiCommentFor(c, v);
         if (after && !String(comments[i] || '').trim()) comments[i] = after;
-        // Правило, сформулированное ИИ под другой вердикт, противоречило бы новому.
+        // Совпало с ИИ — уточнять для базы знаний нечего; правило, сформулированное
+        // ИИ под другой вердикт, противоречило бы новому.
         let { kb } = s;
         const extra = kb[c.idx];
-        if (extra?.refinedFor && extra.refinedFor !== v) {
+        if (extra && !isCorrection(c, v)) {
+            kb = { ...kb };
+            delete kb[c.idx];
+        } else if (extra?.refinedFor && extra.refinedFor !== v) {
             kb = { ...kb, [c.idx]: { ...extra, rule: '', situation: '', not_covered: '', refinedFor: null } };
         }
         return { ...s, scores, comments, kb };
@@ -513,7 +557,8 @@ export default function CriteriaReviewPanel({
         const scores = s.scores.slice();
         const comments = s.comments.slice();
         criteria.forEach((c, i) => {
-            if (!isCorrection(c, s.scores[i])) return;
+            const blank = s.scores[i] == null && verdictFromAi(c, c.ai) != null;
+            if (!blank && !isCorrection(c, s.scores[i])) return;
             scores[i] = verdictFromAi(c, c.ai);
             comments[i] = aiCommentFor(c, scores[i]);
         });
@@ -636,8 +681,8 @@ export default function CriteriaReviewPanel({
                         <span className="hidden sm:inline">Оценка по критериям</span>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
-                        {correctionIdx.length > 1 && !verdictsLocked && (
-                            <button type="button" onClick={revertAll} title="Вернуть все исправленные критерии к оценке ИИ"
+                        {correctionIdx.length + blankAiIdx.length > 1 && !verdictsLocked && (
+                            <button type="button" onClick={revertAll} title="Поставить все критерии так, как оценил ИИ"
                                     className={chipCls}>
                                 <RotateCcw size={11} />Как у ИИ
                             </button>
@@ -695,37 +740,38 @@ export default function CriteriaReviewPanel({
                 ))}
             </div>
 
-            {/* Общий комментарий — по чипу, а не пустым полем: нужен не всегда. */}
-            {humanCanSave && (
+            {/* Общий комментарий — по чипу, а не пустым полем: нужен не всегда. Закрытая
+                на чтение оценка показывает сохранённое — без полей для правки. */}
+            {(humanCanSave || state.comment) && (
                 <div className="mt-2.5 px-1">
                     {showComment || state.comment ? (
-                        <textarea rows={2} value={state.comment} disabled={verdictsLocked}
+                        <textarea rows={2} value={state.comment} disabled={settingsLocked}
                             aria-label="Комментарий к оценке"
                             onChange={(e) => update({ comment: e.target.value })}
                             placeholder="Комментарий к оценке в целом"
                             className={fieldCls} />
                     ) : (
-                        <button type="button" onClick={() => setShowComment(true)} disabled={verdictsLocked} className={chipCls}>
+                        <button type="button" onClick={() => setShowComment(true)} disabled={settingsLocked} className={chipCls}>
                             <Plus size={11} strokeWidth={2.5} />Комментарий к оценке
                         </button>
                     )}
                 </div>
             )}
 
-            {/* Что ещё знает строка журнала — только когда оценка туда уходит. */}
-            {state.countInQuality && humanCanSave && (
+            {/* Что ещё знает строка журнала — только когда оценка туда уходит (или уже там). */}
+            {state.countInQuality && (humanCanSave || inJournal) && (
                 <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
                             className={`${iosCard} mt-2.5 divide-y divide-slate-100 px-3.5`}>
                     <SettingRow label="Показывать комментарии оператору" checked={state.commentVisible}
-                                onChange={(v) => update({ commentVisible: v })} disabled={verdictsLocked}
+                                onChange={(v) => update({ commentVisible: v })} disabled={settingsLocked}
                                 hint="Как в журнале: оператор увидит комментарии к критериям и к оценке в «Моих оценках». Выключите, если это заметки для супервайзера." />
                     <SettingRow label="Вопрос решён" checked={state.questionResolved}
                                 onChange={(v) => update({ questionResolved: v, firstContact: v ? state.firstContact : false })}
-                                disabled={verdictsLocked}
+                                disabled={settingsLocked}
                                 hint="Отметка журнала: обращение клиента решено в этом разговоре." />
                     {state.questionResolved && (
                         <SettingRow label="С первого обращения" checked={state.firstContact}
-                                    onChange={(v) => update({ firstContact: v })} disabled={verdictsLocked} />
+                                    onChange={(v) => update({ firstContact: v })} disabled={settingsLocked} />
                     )}
                 </motion.div>
             )}

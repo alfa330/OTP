@@ -30,7 +30,7 @@ def review_reasons(criteria, asr_mean_conf=None, media_stats=None) -> list[str]:
             conf = cr.get("conf")
             if conf is not None and conf <= config.REVIEW_MODEL_CONF:
                 reasons.add("lowconf")
-            if cr.get("is_critical") and v == "Incorrect":
+            if cr.get("is_critical") and v in ("Incorrect", "Error"):
                 reasons.add("critical")
     return [r for r in REASON_PRIORITY if r in reasons]
 
@@ -46,7 +46,7 @@ def needs_review(result, direction: dict, asr_mean_conf: float | None) -> bool:
             return True   # системный (нет API) или ручной критерий
         if v["source"] == "transcript" and v["confidence"] is not None and v["confidence"] <= config.REVIEW_MODEL_CONF:
             return True  # порог включительно: ровно 0.6 — тоже сомнение
-        if v["idx"] in crit_idx and v["verdict"] == "Incorrect":
+        if v["idx"] in crit_idx and v["verdict"] in ("Incorrect", "Error"):
             return True   # критический «Incorrect» — всегда подтверждает человек
     return False
 

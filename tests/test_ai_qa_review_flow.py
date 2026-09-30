@@ -110,6 +110,9 @@ class ReviewFlowContractTests(unittest.TestCase):
         cls.batch_src = (ROOT / "call_qa" / "batch_eval.py").read_text(encoding="utf-8-sig")
         cls.runtime_src = (ROOT / "call_qa" / "evaluation" / "runtime_store.py").read_text(encoding="utf-8-sig")
         cls.view_src = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(encoding="utf-8-sig")
+        # Оценка по критериям одна на ИИ и человека: исправления ИИ собирает панель,
+        # отправляет контейнер (saveReview).
+        cls.panel_src = (ROOT / "src" / "components" / "call_qa" / "CriteriaReviewPanel.jsx").read_text(encoding="utf-8-sig")
         # Строка очереди общая для вкладок «Очередь ревью» и «Чаты».
         cls.queue_src = (ROOT / "src" / "components" / "call_qa" / "QueueList.jsx").read_text(encoding="utf-8-sig")
         cls.schema_src = (ROOT / "call_qa" / "rag" / "schema.sql").read_text(encoding="utf-8-sig")
@@ -121,15 +124,20 @@ class ReviewFlowContractTests(unittest.TestCase):
 
     def test_frontend_always_posts_review_result(self):
         self.assertNotIn("items.length &&", self.view_src.replace("call && items.length", ""))
-        self.assertIn("'Подтверждено'", self.view_src)
-        self.assertIn("карточка оставлена открытой", self.view_src)
+        # Неразобранный прогон отправляется всегда — без исправлений это подтверждение.
+        self.assertIn("const doAi = aiPending;", self.panel_src)
+        self.assertIn("Оценка ИИ подтверждена", self.view_src)
+        # При отказе карточка остаётся открытой: закрывает её только успешный ответ.
+        self.assertIn("return { ok: false, state };", self.view_src)
+        self.assertLess(self.view_src.index("/api/ai-qa/adjudicate`"),
+                        self.view_src.index("return { ok: true, closed: true"))
 
     def test_frontend_binds_review_to_exact_run_scale_and_criterion(self):
         for field in ("evaluation_run_id: call._evaluation_run_id",
                       "scale_revision_id: call._scale_revision_id",
                       "evaluation_fingerprint: call._evaluation_fingerprint",
                       "criterion_id: c.criterion_id"):
-            self.assertIn(field, self.view_src)
+            self.assertIn(field, self.view_src + self.panel_src)
 
     def test_all_run_publishers_fail_closed_without_primary_lock(self):
         self.assertIn("conn = config.connect_rw()", self.runtime_src)

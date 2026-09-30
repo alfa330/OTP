@@ -1372,9 +1372,19 @@ def _attach_scale(payload: dict) -> None:
         c["weight"] = meta.get("weight")
         c["description"] = meta.get("description") or ""
     payload["scale_size"] = len(direction["criteria"])
+    # Набор кнопок у критерия задают его критичность и недочёт. Карточка берёт их из
+    # снимка прогона, а сервер проверяет оценку по живой шкале: сняли критичность
+    # без переименования — и «Критич. ошибка» из карточки отвергалась бы, а с ней и
+    # подтверждение ИИ в том же сохранении. Такая шкала — тоже изменившаяся.
+    def verdict_shape(c):
+        return (bool(c.get("is_critical")), human_review_mod.has_deficiency(c))
+
     payload["scale_changed"] = (
         len(direction["criteria"]) != len(criteria)
         or any(by_idx.get(c.get("idx"), {}).get("name") not in (None, c.get("name"))
+               for c in criteria)
+        or any("is_critical" in c and c.get("idx") in by_idx
+               and verdict_shape(by_idx[c["idx"]]) != verdict_shape(c)
                for c in criteria))
 
 
@@ -1512,6 +1522,29 @@ def human_review_state(subject_kind: str, call_id: int, direction_id: int,
     }
 
 
+def _normalise_legacy_ai_verdicts(card: dict) -> bool:
+    """Прогоны до нормализации вердиктов модели (evaluator._collect_verdicts) могли
+    нести «Error» — GLM писал его вне схемы по критическим критериям. Для ИИ это
+    Incorrect, и балл такого прогона — 0: в immutable-снимке застыло число, которое
+    _ai_score насчитал, не узнав критическую ошибку (звонок 5568: «ИИ: 59»).
+
+    Правится только отдаваемая копия карточки; immutable-прогон не трогаем. Разбор
+    это не ломает: сервер сверяет исправление с вердиктом из самого прогона, а
+    карточка не присылает исправление там, где человек согласен с ИИ. Возвращает,
+    было ли что поправить."""
+    changed = False
+    critical_error = False
+    for c in card.get("criteria") or []:
+        if c.get("ai") == "Error":
+            c["ai"] = "Incorrect"
+            changed = True
+            critical_error = critical_error or bool(c.get("is_critical"))
+    # Балла нет (None) — оценка неполная, его и не выдумываем.
+    if critical_error and card.get("ai_score") not in (None, 0):
+        card["ai_score"] = 0
+    return changed
+
+
 def _ai_score(direction: dict, result: dict):
     """Балл ИИ по той же формуле, что и человеческий (main.jsx): критический Incorrect → 0;
     иначе сумма весов НЕкритических критериев со статусом Correct/N/A; Deficiency даёт
@@ -1525,7 +1558,8 @@ def _ai_score(direction: dict, result: dict):
     verdict = {r["idx"]: r["verdict"] for r in rows}
     crits = direction.get("criteria", [])
     for c in crits:
-        if c.get("is_critical") and verdict.get(c["idx"]) == "Incorrect":
+        # «Error» — вердикт вне схемы из старых прогонов (GLM): то же критическое нарушение.
+        if c.get("is_critical") and verdict.get(c["idx"]) in ("Incorrect", "Error"):
             return 0
     total = 0.0
     for c in crits:
@@ -2149,9 +2183,11 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
                     scale_revision_id=scale_revision_id, snapshot=snapshot,
                     primary_run_id=cached_run["id"], pair_id=cached_run.get("pair_id"),
                     refresh=False, department=department_code)
+            legacy_fixed = _normalise_legacy_ai_verdicts(cached)
             # Keep the legacy queue projection available, but adjudication itself
-            # is bound only to the immutable run metadata hydrated above.
-            if not _cache_get(call_id, model, subject_kind):
+            # is bound only to the immutable run metadata hydrated above. Прогон с
+            # «Error» заодно чинит свою проекцию: списки и очередь читают балл оттуда.
+            if legacy_fixed or not _cache_get(call_id, model, subject_kind):
                 _cache_put(call_id, model, cached, subject_kind=subject_kind)
             return cached
 
