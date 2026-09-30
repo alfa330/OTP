@@ -91,6 +91,10 @@ def verdict_from_ai(criterion: dict, ai_verdict) -> str | None:
     if verdict is None:
         return None
     allowed = allowed_verdicts(criterion)
+    # «Error» от модели бывал в старых прогонах (GLM вне схемы) — по некритическому
+    # критерию это обычная ошибка.
+    if verdict == ERROR:
+        verdict = INCORRECT
     if verdict == INCORRECT and criterion.get("is_critical"):
         verdict = ERROR
     if verdict == DEFICIENCY and DEFICIENCY not in allowed:

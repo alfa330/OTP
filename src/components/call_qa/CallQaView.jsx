@@ -451,29 +451,48 @@ export default function CallQaView(props) {
         }
     };
 
-    /* «Моя оценка» из карточки: пер-критерийная оценка проверяющего по шкале
-     * сотрудника. Ответ сервера — то же состояние, что карточка получает при
-     * открытии (балл человека, кто оценил, моя оценка, вердикты человека по
-     * критериям), и оно вливается в открытую карточку без повторного прогона.
-     * Имена критериев уходят вместе с оценкой: сервер сверяет их со шкалой, чтобы
-     * устаревшая карточка не положила баллы в журнал со смещением. */
-    const saveMyReview = async (body) => {
+    /* Сохранение карточки — одно на оценку человека и ревью ИИ.
+     *
+     * `human` — оценка проверяющего по шкале сотрудника (ai_human_reviews, а с
+     * «Учитывать в качестве» — ещё и строка журнала). Ответ сервера — то же
+     * состояние, что карточка получает при открытии (балл человека, кто оценил,
+     * моя оценка, вердикты человека по критериям), и оно вливается в открытую
+     * карточку без повторного прогона. Имена критериев уходят вместе с оценкой:
+     * сервер сверяет их со шкалой, чтобы устаревшая карточка не положила баллы в
+     * журнал со смещением.
+     *
+     * `ai` — итог ревью прогона, пока он не разобран: без исправлений это
+     * подтверждение (тоже результат ревью: звонок уходит из очереди и остаётся
+     * сигналом качества модели), с исправлениями — черновики базы знаний.
+     *
+     * Порядок — сначала своя оценка: она важнее и её не отвергают из-за того, что
+     * прогон успели переоценить. Карточка закрывается только после ответа на ревью
+     * ИИ — при сбое введённое не теряется, а уже сохранённая оценка повторно не
+     * отправляется (панель сверяет её с сохранённой). */
+    const saveReview = async ({ human, ai }) => {
         const call = callData;
-        if (!call) return null;
+        if (!call) return { ok: false };
         if (!apiBaseUrl) {
             showToast?.('Бэкенд недоступен — оценка не сохранена', 'error');
-            return null;
+            return { ok: false };
         }
-        try {
-            const r = await axios.post(`${apiBaseUrl}/api/ai-qa/human-review`, {
-                call_id: call.id, subject_kind: call.subject_kind || 'call',
-                direction_id: call.direction_id, evaluation_run_id: call._evaluation_run_id,
-                criteria_names: (call.criteria || []).map((c) => c.name),
-                ...body,
-            }, { headers: headers() });
-            const state = r.data || {};
+        const kind = call.subject_kind || 'call';
+        let state = null;
+        if (human) {
+            try {
+                const r = await axios.post(`${apiBaseUrl}/api/ai-qa/human-review`, {
+                    call_id: call.id, subject_kind: kind,
+                    direction_id: call.direction_id, evaluation_run_id: call._evaluation_run_id,
+                    criteria_names: (call.criteria || []).map((c) => c.name),
+                    ...human,
+                }, { headers: headers() });
+                state = r.data || {};
+            } catch (error) {
+                showToast?.(error?.response?.data?.error || 'Не удалось сохранить оценку', 'error');
+                return { ok: false };
+            }
             setCallData((current) => {
-                if (!current || current.id !== call.id || (current.subject_kind || 'call') !== (call.subject_kind || 'call')) return current;
+                if (!current || current.id !== call.id || (current.subject_kind || 'call') !== kind) return current;
                 const humanByIdx = new Map((state.criteria || []).map((h) => [h.idx, h]));
                 return {
                     ...current,
@@ -487,59 +506,45 @@ export default function CallQaView(props) {
                     }),
                 };
             });
-            showToast?.(body.count_in_quality
-                ? (state.journal_call_id ? `Оценка учтена в журнале (№${state.journal_call_id})` : 'Оценка учтена в журнале')
-                : 'Моя оценка сохранена', 'success');
-            return state;
-        } catch (error) {
-            showToast?.(error?.response?.data?.error || 'Не удалось сохранить оценку', 'error');
-            return null;
         }
-    };
-
-    // Отправляется ВСЕГДА (даже без исправлений): «Подтвердить» — тоже результат ревью,
-    // он убирает звонок из очереди и остаётся сигналом качества модели. Карточка
-    // закрывается только после успешного ответа — при сбое введённый разбор не теряется.
-    const saveAdjud = async (decisions) => {
-        const call = callData;
-        if (!call) { resetCall(); return false; }
-        const items = (call.criteria || [])
-            .filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai)
-            .map((c) => ({ criterion_id: c.criterion_id, criterion_idx: c.idx,
-                           criterion_name: c.name, ai_verdict: c.ai,
-                           correct_verdict: decisions[c.idx].verdict, reason: decisions[c.idx].reason || '',
-                           not_covered: decisions[c.idx].not_covered || null,
-                           situation: decisions[c.idx].situation || null,
-                           excerpt: decisions[c.idx].excerpt || '',
-                           excerpt_verified: decisions[c.idx].excerpt_verified === true,
-                           evidence_status: decisions[c.idx].evidence_status || null }));
-        if (!apiBaseUrl) {
-            showToast?.('Бэкенд недоступен — разбор не сохранён', 'error');
-            return false;
+        const inJournal = human?.count_in_quality
+            ? ` · в журнале${state?.journal_call_id ? ` №${state.journal_call_id}` : ''}` : '';
+        if (!ai) {
+            showToast?.(human?.count_in_quality
+                ? `Оценка учтена в качестве${state?.journal_call_id ? ` (№${state.journal_call_id})` : ''}`
+                : 'Оценка сохранена', 'success');
+            return { ok: true, state };
         }
+        const items = ai.items || [];
         try {
             await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
-                { call_id: call.id, direction_id: call.direction_id,
-                  subject_kind: call.subject_kind || 'call',
+                { call_id: call.id, direction_id: call.direction_id, subject_kind: kind,
                   evaluation_run_id: call._evaluation_run_id,
                   scale_revision_id: call._scale_revision_id,
                   evaluation_fingerprint: call._evaluation_fingerprint,
                   items }, { headers: headers() });
-            showToast?.(items.length ? 'Разбор сохранён как черновик' : 'Подтверждено', 'success');
-            setQueue((current) => {
-                if (!Array.isArray(current)) return current;
-                const kind = call.subject_kind || 'call';
-                const next = current.filter(
-                    (item) => item.id !== call.id || (item.subject || 'call') !== kind);
-                if (next.length !== current.length) setQueueTotal((t) => Math.max(0, t - 1));
-                return next;
-            });
-            resetCall();
-            return true;
         } catch (error) {
-            showToast?.(error?.response?.data?.error || 'Не удалось сохранить — карточка оставлена открытой', 'error');
-            return false;
+            const message = error?.response?.data?.error || 'не удалось сохранить разбор';
+            // Прогон успел разобрать кто-то другой: дальше карточка сохраняет только
+            // свою оценку, а не упирается в тот же отказ на каждом нажатии.
+            if (/уже проверена/.test(message)) {
+                setCallData((current) => (current && current.id === call.id && (current.subject_kind || 'call') === kind
+                    ? { ...current, ai_review: { outcome: 'reviewed', reviewer: null, reviewed_at: null } } : current));
+            }
+            showToast?.(human ? `Оценка сохранена, а разбор ИИ — нет: ${message}` : message, 'error');
+            return { ok: false, state };
         }
+        showToast?.(items.length
+            ? `Исправлений: ${items.length} — в черновики базы знаний${inJournal}`
+            : `Оценка ИИ подтверждена${inJournal}`, 'success');
+        setQueue((current) => {
+            if (!Array.isArray(current)) return current;
+            const next = current.filter((item) => item.id !== call.id || (item.subject || 'call') !== kind);
+            if (next.length !== current.length) setQueueTotal((t) => Math.max(0, t - 1));
+            return next;
+        });
+        resetCall();
+        return { ok: true, closed: true, state };
     };
 
     return (
@@ -648,8 +653,8 @@ export default function CallQaView(props) {
                         <ErrorCard text={callErr} onRetry={() => openCall(selected)} />
                     ) : (
                         <CallReviewCard key={callData?._evaluation_run_id || callData?.id} call={callData || undefined} onSkip={requestCloseCall}
-                                        onSave={saveAdjud} onRefine={refineAdjud}
-                                        onSaveMine={saveMyReview} canCorrectJournal={canCorrectJournal}
+                                        onSave={saveReview} onRefine={refineAdjud}
+                                        canCorrectJournal={canCorrectJournal}
                                         onInteractionChange={setReviewInteraction} />
                     )}
                     </div>

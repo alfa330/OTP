@@ -1,17 +1,13 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useMemo, useRef } from 'react';
 import DealBadge from './DealBadge';
-import { motion } from 'framer-motion';
 import {
-    Check, X, Minus, Clock, Sparkles, Server, User2, Headphones,
-    Quote, ShieldAlert, ChevronDown, Languages, Save, RotateCcw, Plus, Loader2,
-    Database, Search, Timer, Hash, AlertTriangle, ShieldCheck,
+    Sparkles, User2, Headphones, Languages,
+    Database, Search, Timer, Hash, AlertTriangle,
     MessageSquare, Paperclip, ImageOff, Users,
 } from 'lucide-react';
-import {
-    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, IosHint, IosSegmented, scoreTone,
-} from '../ui/ios';
+import { APPLE_FONT, iosCard, IosBadge, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
-import MyReviewPanel from './MyReviewPanel';
+import CriteriaReviewPanel from './CriteriaReviewPanel';
 import { CHAT_SUBJECTS } from './subjects';
 
 /* Карточка ревью одного субъекта оценки — центральный экран взаимодействия с ИИ.
@@ -66,88 +62,6 @@ const formatTimestamp = (ms) => {
     const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 };
-
-// Клиентская предпроверка цитаты повторяет нормализацию сервера
-// (call_qa/review/evidence.py: NFKC + приведение регистра, только буквы/цифры,
-// схлопывание пробелов). Нужна, чтобы «Подтверждаю» не пропускал цитату, которой
-// нет в транскрипте дословно, — иначе отказ пришёл бы только при сохранении.
-const normalizeForMatch = (value) => (value || '')
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim();
-
-const excerptFoundInTranscript = (excerpt, transcriptText) => {
-    const needle = normalizeForMatch(excerpt);
-    if (needle.length < 4) return false;   // сервер тоже отклоняет фрагменты короче 4 символов
-    return normalizeForMatch(transcriptText).includes(needle);
-};
-
-const VERDICT = {
-    Correct:    { tone: 'green', label: 'Верно',   Icon: Check },
-    Deficiency: { tone: 'amber', label: 'Недочёт', Icon: AlertTriangle },
-    Incorrect:  { tone: 'red',   label: 'Неверно', Icon: X },
-    'N/A':      { tone: 'slate', label: 'N/A',     Icon: Minus },
-    Pending:    { tone: 'amber', label: 'Ожидает', Icon: Clock },
-    // «Критич. ошибка» ставит только человек (журнал / панель «Моя оценка»).
-    Error:      { tone: 'red',   label: 'Критич. ошибка', Icon: ShieldAlert },
-};
-
-const SOURCE = {
-    transcript: { tone: 'blue',  label: 'ИИ',     Icon: Sparkles },
-    system_api: { tone: 'amber', label: 'ПО-API', Icon: Server,   hint: 'нужна проверка данных в ПО' },
-    manual:     { tone: 'slate', label: 'Ручная', Icon: User2,    hint: 'только ручная проверка' },
-};
-
-const HUMAN_OPTS = [
-    { v: 'Correct',   label: 'Верно',   Icon: Check },
-    { v: 'Incorrect', label: 'Неверно', Icon: X },
-    { v: 'N/A',       label: 'N/A',     Icon: Minus },
-];
-// «Недочёт» доступен только критериям, у которых он предусмотрен шкалой (c.deficiency).
-const DEFICIENCY_OPT = { v: 'Deficiency', label: 'Недочёт', Icon: AlertTriangle };
-
-// Закреплённые переключатели под «Оценка по критериям»: вердикты ИИ (и разбор
-// расхождений) либо собственная оценка проверяющего по той же шкале.
-const PANELS = [
-    { key: 'ai',   label: 'ИИ',         Icon: Sparkles },
-    { key: 'mine', label: 'Моя оценка', Icon: User2 },
-];
-
-function ConfidenceBar({ value }) {
-    if (value == null) return <span className="text-[11px] text-slate-400">—</span>;
-    const pct = Math.round(value * 100);
-    const color = value >= 0.8 ? 'bg-emerald-500' : value >= 0.6 ? 'bg-amber-500' : 'bg-rose-500';
-    return (
-        <div className="flex items-center gap-1.5">
-            <div className="h-1.5 w-12 overflow-hidden rounded-full bg-slate-200">
-                <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-            </div>
-            <span className="tabular-nums text-[11px] font-medium text-slate-500">{pct}%</span>
-        </div>
-    );
-}
-
-function VerdictChip({ verdict }) {
-    if (verdict == null) {
-        return <IosBadge tone="slate"><Minus size={12} strokeWidth={2.5} />Нет оценки</IosBadge>;
-    }
-    const v = VERDICT[verdict] || VERDICT['N/A'];
-    return <IosBadge tone={v.tone}><v.Icon size={12} strokeWidth={2.5} />{v.label}</IosBadge>;
-}
-
-/* Вердикт человека из журнала — рядом с вердиктом ИИ по тому же критерию, чтобы
- * расхождение было видно на месте, без переключения панели. Серый: это справка,
- * решение по критерию принимают кнопками ниже. */
-function HumanChip({ verdict, comment }) {
-    if (verdict == null) return null;
-    const v = VERDICT[verdict] || VERDICT['N/A'];
-    return (
-        <IosBadge tone="slate" className="!py-0.5" title={comment ? `Человек: ${comment}` : 'Оценка человека в журнале'}>
-            <User2 size={11} />Человек: {v.label}
-        </IosBadge>
-    );
-}
 
 // Кто говорит: у звонка две стороны, у чата к ним добавляются чужой сотрудник
 // (в эпизоде мог ответить кто-то ещё — за него оператор не отвечает) и рассылка.
@@ -256,13 +170,6 @@ function ChatMeta({ call }) {
     );
 }
 
-const fieldCls = `${iosInput} px-3 py-2 text-[12.5px]`;
-// Чип «добавить поле»: необязательные части разбора не занимают место, пока не нужны.
-const chipCls = 'inline-flex min-h-7 items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 '
-    + 'text-[11.5px] font-medium text-slate-500 transition-all hover:bg-slate-200 hover:text-slate-700 '
-    + 'active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 '
-    + 'disabled:opacity-50';
-
 function EvaluationMeta({ evaluation }) {
     if (!evaluation) return null;
     const retrievalStatus = String(evaluation.retrieval_status || '').toLowerCase();
@@ -300,311 +207,8 @@ function EvaluationMeta({ evaluation }) {
     );
 }
 
-function EvidenceReview({ c, decision, onEdit, disabled, transcriptText }) {
-    const [notFound, setNotFound] = useState(false);
-    const evidenceStatus = decision?.evidence_status || null;
-    const noEvidence = evidenceStatus === 'no_evidence';
-    const excerpt = decision?.excerpt ?? c.evidence ?? '';
-    const hasEvidence = !noEvidence && Boolean(excerpt.trim());
-    const verified = evidenceStatus === 'verified' && decision?.excerpt_verified === true && excerpt.trim().length > 0;
-
-    const chooseEvidence = () => onEdit(c.idx, {
-        excerpt: excerpt || c.evidence || '',
-        excerpt_verified: false,
-        evidence_status: null,
-    });
-    const chooseNoEvidence = () => {
-        setNotFound(false);
-        onEdit(c.idx, { excerpt: '', excerpt_verified: false, evidence_status: 'no_evidence' });
-    };
-    const updateExcerpt = (value) => {
-        setNotFound(false);
-        onEdit(c.idx, { excerpt: value, excerpt_verified: false, evidence_status: null });
-    };
-    const verifyExcerpt = () => {
-        const normalized = excerpt.trim();
-        if (!normalized) return;
-        // Не подтверждаем цитату, которой нет в транскрипте дословно: сервер её
-        // всё равно отклонит, а так проверяющий узнаёт об этом сразу, а не при сохранении.
-        if (!excerptFoundInTranscript(normalized, transcriptText)) {
-            setNotFound(true);
-            onEdit(c.idx, { excerpt: normalized, excerpt_verified: false, evidence_status: null });
-            return;
-        }
-        setNotFound(false);
-        onEdit(c.idx, { excerpt: normalized, excerpt_verified: true, evidence_status: 'verified' });
-    };
-
-    // Тонировка всей рамки убрана: янтарный фон кричал на каждом исправлении, хотя
-    // сообщал ровно то же, что строка «подтвердите цитату» под полем. Цветом помечено
-    // только подтверждённое состояние — там цвет действительно несёт смысл.
-    return (
-        <fieldset className={`rounded-xl p-3 ring-1 ${verified ? 'bg-emerald-50/50 ring-emerald-200' : 'bg-slate-50/70 ring-slate-200/80'}`}>
-            <div className="mb-1.5 flex items-center gap-1.5">
-                <span className="text-[12.5px] font-semibold text-slate-600">Подтверждение цитатой</span>
-                <IosHint label="Зачем подтверждать цитату"
-                    text="Сверьте цитату с транскриптом: текст, предложенный ИИ, не считается подтверждённым автоматически. Если подтверждения в транскрипте нет — отметьте «Цитаты нет», и сохранится честная отметка, а не сочинённый моделью текст." />
-            </div>
-            <div className={disabled ? 'pointer-events-none opacity-50' : ''}>
-                <IosSegmented
-                    ariaLabel="Наличие подтверждающей цитаты"
-                    value={hasEvidence ? 'quote' : noEvidence ? 'none' : null}
-                    onChange={(v) => (v === 'none' ? chooseNoEvidence() : chooseEvidence())}
-                    options={[
-                        { value: 'quote', label: 'Цитата есть', icon: <Quote size={12} /> },
-                        { value: 'none', label: 'Цитаты нет', icon: <Minus size={12} /> },
-                    ]}
-                />
-            </div>
-            {!noEvidence && (
-                <div className="mt-2 space-y-1.5">
-                    <textarea rows={2} value={excerpt} disabled={disabled}
-                        aria-label="Точная цитата из транскрипта"
-                        onChange={(event) => updateExcerpt(event.target.value)}
-                        placeholder="Точная цитата: скопируйте фрагмент из транскрипта без пересказа"
-                        className={`${fieldCls} resize-y ${verified ? '!bg-white ring-1 ring-emerald-200' : ''}`} />
-                    {verified ? (
-                        <p className="flex items-center gap-1.5 text-[11.5px] font-medium text-emerald-700">
-                            <ShieldCheck size={13} className="shrink-0" />Цитата сверена с транскриптом
-                        </p>
-                    ) : (
-                        <button type="button" onClick={verifyExcerpt} disabled={disabled || !excerpt.trim()}
-                            className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-[12px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-50 hover:text-slate-800 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50">
-                            <Check size={13} />Цитата дословно есть в транскрипте
-                        </button>
-                    )}
-                    {notFound && (
-                        <p className="flex items-start gap-1.5 text-[11.5px] font-medium text-rose-600">
-                            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                            Такой цитаты в транскрипте нет дословно. Скопируйте фрагмент слева или отметьте «Цитаты нет».
-                        </p>
-                    )}
-                </div>
-            )}
-            {!verified && !noEvidence && !notFound && (
-                <p className="mt-2 flex items-start gap-1.5 text-[11.5px] text-amber-700">
-                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />Без подтверждения цитаты исправление не сохранится.
-                </p>
-            )}
-        </fieldset>
-    );
-}
-
-const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine, disabled = false, transcriptText }) {
-    const [open, setOpen] = useState(false);
-    const [refining, setRefining] = useState(false);
-    const [aiNote, setAiNote] = useState(null);
-    // Необязательные части разбора скрыты, пока в них нечего показывать. Заполнил ИИ
-    // или человек — поле открывается само, поэтому это производное, а не второй флаг.
-    const [showSituation, setShowSituation] = useState(false);
-    const [showBounds, setShowBounds] = useState(false);
-    const refineRequest = useRef(0);
-    const src = SOURCE[c.source] || SOURCE.transcript;
-    const editable = c.source === 'transcript';
-    const chosen = decision?.verdict ?? c.ai;
-    const chosenRef = useRef(chosen);
-    chosenRef.current = chosen;
-    const corrected = editable && chosen !== c.ai;
-    const rowDisabled = disabled || refining;
-    const situationOpen = showSituation || Boolean(decision?.situation);
-    const boundsOpen = showBounds || Boolean(decision?.not_covered);
-    const verdictOpts = c.deficiency
-        ? [HUMAN_OPTS[0], HUMAN_OPTS[1], DEFICIENCY_OPT, HUMAN_OPTS[2]]
-        : HUMAN_OPTS;
-
-    useEffect(() => () => { refineRequest.current += 1; }, []);
-
-    const pick = (v) => {
-        if (v === chosen) return;
-        const patch = { verdict: v };
-        if (!decision && v !== c.ai) {
-            patch.excerpt = c.evidence || '';
-            patch.excerpt_verified = false;
-            patch.evidence_status = null;
-        }
-        // Текст от ИИ формулировался под другой вердикт — сбрасываем, чтобы не сохранить противоречие.
-        if (decision && v !== chosen) {
-            patch.reason = ''; patch.situation = ''; patch.not_covered = ''; patch._refined_for = null;
-            setAiNote(null);
-            setShowSituation(false); setShowBounds(false);
-        }
-        onEdit(c.idx, patch);
-    };
-
-    const refine = async () => {
-        if (!onRefine || refining || disabled) return;
-        const requestId = ++refineRequest.current;
-        const requestedVerdict = chosen;
-        setRefining(true);
-        try {
-            const p = await onRefine(c, {
-                ...decision,
-                verdict: chosen,
-                reason: decision?.reason || '',
-                excerpt: decision?.excerpt ?? c.evidence ?? '',
-                excerpt_verified: decision?.excerpt_verified === true,
-                evidence_status: decision?.evidence_status || null,
-            });
-            if (p && requestId === refineRequest.current && chosenRef.current === requestedVerdict) {
-                onEdit(c.idx, {
-                    reason: p.rule || decision?.reason || '',
-                    situation: p.situation || decision?.situation || '',
-                    not_covered: p.not_covered || decision?.not_covered || '',
-                    _refined_for: chosen,
-                });
-                setAiNote(p.note_to_reviewer || null);
-            }
-        } finally {
-            if (requestId === refineRequest.current) setRefining(false);
-        }
-    };
-
-    return (
-        <div className={`${iosCard} p-3 ${corrected ? 'ring-2 ring-blue-400/60' : ''}`}>
-            <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                        {c.is_critical && <ShieldAlert size={13} className="shrink-0 text-rose-500" title="Критический критерий" />}
-                        <span className="text-[13.5px] font-medium leading-snug text-slate-800">{c.name}</span>
-                    </div>
-                    <div className="mt-1 flex items-center gap-1.5">
-                        <IosBadge tone={src.tone} className="!px-2 !py-0.5"><src.Icon size={11} />{src.label}</IosBadge>
-                        {editable && <ConfidenceBar value={c.conf} />}
-                    </div>
-                </div>
-                {/* Вердикт ИИ и под ним — вердикт человека из журнала, если разговор
-                    уже оценивали: расхождение видно сразу, на одном критерии. */}
-                <div className="flex shrink-0 flex-col items-end gap-1">
-                    <VerdictChip verdict={chosen} />
-                    <HumanChip verdict={c.human} comment={c.human_comment} />
-                </div>
-            </div>
-
-            {editable ? (
-                <>
-                    {(c.evidence || c.comment) && (
-                        <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
-                                className="mt-2 flex items-center gap-1 rounded-md text-[12px] font-medium text-slate-500 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
-                            <ChevronDown size={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
-                            Обоснование ИИ
-                        </button>
-                    )}
-                    {open && (
-                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
-                                    className="mt-1.5 space-y-1.5 overflow-hidden">
-                            {c.comment && <p className="text-[12.5px] text-slate-500">{c.comment}</p>}
-                            {c.evidence && (
-                                <p className="flex gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[12.5px] italic text-slate-600 ring-1 ring-slate-100">
-                                    <Quote size={13} className="mt-0.5 shrink-0 text-slate-300" />«{c.evidence}»
-                                </p>
-                            )}
-                        </motion.div>
-                    )}
-
-                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                        <div className="flex rounded-xl bg-slate-100 p-0.5" role="group" aria-label={`Решение по критерию «${c.name}»`}>
-                            {verdictOpts.map((o) => {
-                                const active = chosen === o.v;
-                                return (
-                                    <button key={o.v} type="button" onClick={() => pick(o.v)} disabled={rowDisabled} aria-pressed={active}
-                                            className={`flex min-h-9 items-center gap-1 rounded-lg px-2.5 py-1.5 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
-                                                 active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-                                        <o.Icon size={12} strokeWidth={2.5} />{o.label}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        {corrected && <span className="text-[11px] font-medium text-blue-500">исправлено</span>}
-                    </div>
-
-                    {corrected && (
-                        <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mt-2 space-y-2">
-                            {/* Видимым оставлено только обязательное поле. «Ситуация» и «Границы»
-                              * открываются чипами: они нужны не всегда, а три поля с крупными
-                              * подписями подряд читались как анкета. Объяснение, зачем всё это
-                              * и что кнопка — лишь подсказка, ушло под «i» (IosHint). */}
-                            <div className="space-y-1.5">
-                                <div className="flex items-center justify-between gap-2">
-                                    <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-600">
-                                        Правило
-                                        <IosHint label="Зачем правило" text="Это правило ИИ-оценщик применит к похожим случаям в будущих звонках. Пишите от решения: что считать нарушением, а что нет. «Сформулировать» — только подсказка: ИИ предложит текст, финальную формулировку сохраняете вы." />
-                                    </span>
-                                    {onRefine && (
-                                        <button type="button" onClick={refine} disabled={refining || disabled}
-                                            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium text-slate-500 transition-all hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50">
-                                            {refining ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
-                                            {refining ? 'Формулирую…' : 'Сформулировать'}
-                                        </button>
-                                    )}
-                                </div>
-                                <textarea rows={3} value={decision?.reason || ''} disabled={rowDisabled}
-                                    aria-label="Правило для похожих случаев"
-                                    onChange={(e) => onEdit(c.idx, { reason: e.target.value })}
-                                    placeholder="Почему так правильно? Правило для похожих случаев"
-                                    className={`${fieldCls} resize-y`} />
-                            </div>
-
-                            {/* Многострочные: ИИ пишет здесь по два-три предложения, и в
-                              * однострочном поле человек не видел, что именно предложено. */}
-                            {situationOpen && (
-                                <label className="block">
-                                    <span className="mb-0.5 block text-[11.5px] text-slate-500">Ситуация — когда правило действует</span>
-                                    <textarea rows={2} value={decision?.situation || ''} disabled={rowDisabled}
-                                        onChange={(e) => onEdit(c.idx, { situation: e.target.value })}
-                                        placeholder="Обобщённо, без имён и названий из этого звонка"
-                                        className={`${fieldCls} resize-y`} />
-                                </label>
-                            )}
-                            {boundsOpen && (
-                                <label className="block">
-                                    <span className="mb-0.5 block text-[11.5px] text-slate-500">Границы — чего правило не оправдывает</span>
-                                    <textarea rows={2} value={decision?.not_covered || ''} disabled={rowDisabled}
-                                        onChange={(e) => onEdit(c.idx, { not_covered: e.target.value })}
-                                        placeholder="Нарушения, которые этим правилом не прощаются"
-                                        className={`${fieldCls} resize-y`} />
-                                </label>
-                            )}
-                            {(!situationOpen || !boundsOpen) && (
-                                <div className="flex flex-wrap gap-1.5">
-                                    {!situationOpen && (
-                                        <button type="button" onClick={() => setShowSituation(true)} disabled={rowDisabled} className={chipCls}>
-                                            <Plus size={11} strokeWidth={2.5} />Ситуация
-                                        </button>
-                                    )}
-                                    {!boundsOpen && (
-                                        <button type="button" onClick={() => setShowBounds(true)} disabled={rowDisabled} className={chipCls}>
-                                            <Plus size={11} strokeWidth={2.5} />Границы
-                                        </button>
-                                    )}
-                                </div>
-                            )}
-
-                            {aiNote && (
-                                <p className="flex items-start gap-1.5 rounded-lg bg-amber-50/70 px-2.5 py-1.5 text-[11.5px] leading-snug text-slate-600 ring-1 ring-amber-100">
-                                    <AlertTriangle size={12} className="mt-[3px] shrink-0 text-amber-500" />{aiNote}
-                                </p>
-                            )}
-                            <EvidenceReview c={c} decision={decision} onEdit={onEdit} disabled={rowDisabled} transcriptText={transcriptText} />
-                        </motion.div>
-                    )}
-                </>
-            ) : (
-                <p className="mt-2 flex items-center gap-1.5 text-[12px] text-amber-600">
-                    <Server size={13} />{src.hint} — будет проверено автоматически, когда подключат API.
-                </p>
-            )}
-        </div>
-    );
-});
-
 export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInteractionChange,
-                                         onSaveMine, canCorrectJournal = false }) {
-    const [decisions, setDecisions] = useState({});
-    const [saving, setSaving] = useState(false);
-    const [panel, setPanel] = useState('ai');
-    // Несохранённые правки панели «Моя оценка» — часть «грязного» состояния карточки.
-    const [mine, setMine] = useState({ dirty: false, busy: false });
-    const onMineDirty = useCallback((dirty, busy) => setMine({ dirty: Boolean(dirty), busy: Boolean(busy) }), []);
+                                         canCorrectJournal = false }) {
     const audioRef = useRef(null);
 
     const seekAudio = useCallback((startMs) => {
@@ -613,21 +217,12 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
         audioRef.current.focus();
     }, []);
 
-    const onEdit = useCallback((idx, patch) => {
-        setDecisions((d) => ({ ...d, [idx]: { ...(d[idx] || {}), ...patch } }));
-    }, []);
-
     // Все хуки — до раннего return: иначе появление call между рендерами меняет
     // количество хуков и React падает («Rendered more hooks…»).
-    const corrections = useMemo(
-        () => (call?.criteria || []).filter((c) => c.source === 'transcript' && decisions[c.idx] && decisions[c.idx].verdict !== c.ai),
-        [decisions, call],
-    );
-    // Текст транскрипта для клиентской сверки цитаты (тот же источник, что видит проверяющий).
     // Текст для предпроверки цитаты обязан совпадать с авторитетным транскриптом,
     // по которому сервер валидирует разбор. У строк чата время входит в строку
     // («[26.07 21:17] Оператор (…): …»), и модель цитирует её вместе с ним —
-    // без префикса «Подтверждаю» отвергало бы цитату, которую сервер принимает.
+    // без префикса предпроверка отвергала бы цитату, которую сервер принимает.
     const transcriptText = useMemo(
         () => (call?.transcript || [])
             .map((line) => {
@@ -637,39 +232,13 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
             .join('\n'),
         [call],
     );
-    const incompleteCorrections = useMemo(() => corrections.filter((c) => {
-        const decision = decisions[c.idx] || {};
-        const evidenceReady = decision.evidence_status === 'no_evidence' || (
-            decision.evidence_status === 'verified' && decision.excerpt_verified === true && Boolean(decision.excerpt?.trim())
-        );
-        return !decision.reason?.trim() || !evidenceReady;
-    }), [corrections, decisions]);
-    const hasCriteria = Boolean(call?.criteria?.length);
-    const hasTranscript = Boolean(call?.transcript?.length);
-    const canSubmit = hasCriteria && hasTranscript;
     const chatSnapshot = useMemo(
         () => (isChatSubject(call?.subject_kind) && call?.transcript?.length
             ? chatLinesToSnapshot(call.transcript, call.operator) : null),
         [call],
     );
-    useEffect(() => {
-        onInteractionChange?.({ dirty: corrections.length > 0 || mine.dirty, busy: saving || mine.busy });
-    }, [corrections.length, saving, mine.dirty, mine.busy, onInteractionChange]);
-
-    useEffect(() => () => onInteractionChange?.({ dirty: false, busy: false }), [onInteractionChange]);
-
-    const submit = async () => {
-        if (saving || !canSubmit || incompleteCorrections.length > 0) return;
-        setSaving(true);
-        try {
-            await onSave?.(decisions);
-        } finally {
-            setSaving(false);
-        }
-    };
     if (!call) return null;
 
-    const pendingCount = (call.criteria || []).filter((c) => c.source !== 'transcript').length;
     const isChat = isChatSubject(call.subject_kind);
     const journal = call.human_review || null;
     const myReview = call.my_review || null;
@@ -792,89 +361,14 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
             </div>
 
             {/* Правая колонка — свой прокрутчик на широком экране: липкие панели
-                (переключатель ИИ/Моя оценка сверху, действия снизу) держатся за
+                (итог сверху, «Учитывать в качестве» и сохранение снизу) держатся за
                 него, а не за страницу. overflow-x спрятан: подсказки «i» у правого
                 края иначе дали бы горизонтальную полосу. */}
             <div className="thin-scroll flex min-w-0 flex-col lg:min-h-0 lg:overflow-y-auto lg:overflow-x-hidden lg:pr-1.5">
-                <div className="mobile-sticky-top sticky top-0 z-10 mb-2 rounded-2xl bg-white/95 px-2.5 py-2 ring-1 ring-slate-200/70 backdrop-blur-xl">
-                    <div className="flex items-center justify-between gap-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                            Оценка по критериям
-                        </div>
-                        {pendingCount > 0 && <IosBadge tone="amber"><Server size={11} />{pendingCount} ждут API</IosBadge>}
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                        <div className="flex rounded-xl bg-slate-100 p-0.5" role="group" aria-label="Чья оценка показана по критериям">
-                            {PANELS.map((p) => {
-                                const active = panel === p.key;
-                                return (
-                                    <button key={p.key} type="button" onClick={() => setPanel(p.key)} aria-pressed={active}
-                                            className={`flex min-h-8 items-center gap-1 rounded-lg px-2.5 py-1 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
-                                                active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-                                        <p.Icon size={12} strokeWidth={2.5} />{p.label}
-                                        {/* Точка — есть несохранённое или уже сохранённое своё. */}
-                                        {p.key === 'mine' && (mine.dirty || myReview) && (
-                                            <span className={`ml-0.5 inline-block h-1.5 w-1.5 rounded-full ${mine.dirty ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                                                  aria-label={mine.dirty ? 'есть несохранённые изменения' : 'оценка сохранена'} />
-                                        )}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        {panel === 'mine' && (
-                            <span className="text-[11px] text-slate-400">по шкале сотрудника, как в журнале</span>
-                        )}
-                    </div>
-                </div>
-
-                {panel === 'mine' ? (
-                    hasCriteria ? (
-                        <MyReviewPanel call={call} canCorrectJournal={canCorrectJournal}
-                                       onSave={onSaveMine} onDirtyChange={onMineDirty} disabled={saving} />
-                    ) : (
-                        <div className={`${iosCard} flex min-h-32 items-center justify-center px-5 text-center text-[13px] text-rose-600`} role="alert">
-                            Критерии оценки не загрузились. Своя оценка по этой карточке недоступна.
-                        </div>
-                    )
-                ) : (
-                <>
-                <div className="space-y-2.5">
-                    {hasCriteria ? call.criteria.map((c) => (
-                            <CriterionRow key={c.idx} c={c} decision={decisions[c.idx]}
-                                          onEdit={onEdit} onRefine={onRefine} disabled={saving}
-                                          transcriptText={transcriptText} />
-                        )) : (
-                            <div className={`${iosCard} flex min-h-32 items-center justify-center px-5 text-center text-[13px] text-rose-600`} role="alert">
-                                Критерии оценки не загрузились. Подтверждение этой карточки недоступно.
-                            </div>
-                        )}
-                </div>
-
-                <div className="sticky bottom-0 mt-3 flex flex-col gap-2 rounded-2xl bg-white/95 px-3 py-2.5 ring-1 ring-slate-200/70 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between" aria-live="polite">
-                    <span className={`text-[12.5px] ${incompleteCorrections.length ? 'font-medium text-amber-700' : 'text-slate-500'}`}>
-                        {!canSubmit
-                            ? `Подтверждение недоступно: ${!hasCriteria ? 'нет критериев'
-                                : isChat ? 'нет переписки' : 'нет транскрипта'}`
-                            : incompleteCorrections.length > 0
-                            ? <>Нужно завершить: <b>{incompleteCorrections.length}</b> — заполните правило и подтверждение</>
-                            : corrections.length > 0
-                                ? <>Исправлений: <b className="text-blue-600">{corrections.length}</b> → в черновики базы знаний</>
-                                : 'Согласен с оценкой ИИ'}
-                    </span>
-                    <div className="flex items-center gap-2">
-                        {onSkip && (
-                            <button type="button" onClick={onSkip} disabled={saving} className={iosBtnGhost}>
-                                <RotateCcw size={14} />Пропустить без сохранения
-                            </button>
-                        )}
-                        <button type="button" onClick={submit} disabled={saving || !canSubmit || incompleteCorrections.length > 0} className={iosBtnPrimary}>
-                            {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-                            {saving ? 'Сохраняю…' : corrections.length > 0 ? 'Сохранить разбор' : 'Подтвердить оценку ИИ'}
-                        </button>
-                    </div>
-                </div>
-                </>
-                )}
+                <CriteriaReviewPanel call={call} transcriptText={transcriptText}
+                                     canCorrectJournal={canCorrectJournal}
+                                     onSave={onSave} onSkip={onSkip} onRefine={onRefine}
+                                     onInteractionChange={onInteractionChange} />
             </div>
         </div>
     );

@@ -157,7 +157,8 @@ class PhoneRulesMirrorTheDesktopTests(unittest.TestCase):
         self.assertIn("!['pending', 'approved'].includes(String(requestStatus || 'none'))", RULES)
 
     def test_verdict_labels_match_the_reviewers_screen(self):
-        reviewer = (ROOT / 'src' / 'components' / 'call_qa' / 'CallReviewCard.jsx').read_text(encoding='utf-8')
+        # Подписи кнопок оценки в карточке ИИ-оценки живут в её правилах (VERDICT_LABEL).
+        reviewer = (ROOT / 'src' / 'components' / 'call_qa' / 'humanReview.js').read_text(encoding='utf-8')
         for label in ("'Верно'", "'Неверно'", "'Недочёт'"):
             self.assertIn(label, reviewer)
             self.assertIn(label, RULES)

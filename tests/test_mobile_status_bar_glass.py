@@ -58,7 +58,7 @@ MARKED = (
     ('src/components/wiki/WikiAudit.jsx', 'sticky top-0 z-10 border-b border-slate-100 bg-white/90', 'mobile-sticky-top'),
     ('src/components/driver_mailings/MailingJournal.jsx', 'sticky top-0 z-10 border-b border-slate-100 bg-white/90', 'mobile-sticky-top'),
     ('src/components/surveys/SurveysView.jsx', 'sticky top-0 z-10 -mx-1 space-y-2 rounded-xl', 'mobile-sticky-top'),
-    ('src/components/call_qa/CallReviewCard.jsx', 'sticky top-0 z-10 mb-2 rounded-2xl', 'mobile-sticky-top'),
+    ('src/components/call_qa/CriteriaReviewPanel.jsx', 'sticky top-0 z-10 mb-2 rounded-2xl', 'mobile-sticky-top'),
     ('src/App.jsx', 'bg-white border-b border-gray-200 shadow-sm sticky top-0 z-10', 'mobile-sticky-top'),
 )
 

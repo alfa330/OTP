@@ -288,6 +288,23 @@ def _needs_escalation(v: dict, crit: dict) -> bool:
     return False
 
 
+# Схему ответа соблюдают не все провайдеры: GLM (zai) время от времени пишет «Error» —
+# так названы критические критерии шкалы («…_Error с точки зрения бизнеса»). Такой
+# вердикт проходил в карточку как есть: кнопки его не знали, а балл ИИ не обнулялся
+# (у ИИ критическое нарушение — это Incorrect по критическому критерию, так считают
+# _ai_score и карточка). Регистр и пробелы — тоже не повод терять вердикт. Всё прочее
+# вне схемы не угадываем: критерий считается невернувшимся и уходит на повтор.
+_MODEL_VERDICTS = {
+    "correct": "Correct", "incorrect": "Incorrect", "n/a": "N/A", "na": "N/A",
+    "deficiency": "Deficiency",
+    "error": "Incorrect", "critical": "Incorrect", "critical error": "Incorrect",
+}
+
+
+def _model_verdict(value) -> str | None:
+    return _MODEL_VERDICTS.get(str(value or "").strip().lower())
+
+
 def _collect_verdicts(items) -> dict:
     """per_criterion → {idx: verdict}. Дубли одного idx: одинаковый вердикт — берём с большей
     уверенностью; ПРОТИВОРЕЧАЩИЕ вердикты — не доверяем ни одному (критерий пойдёт на повтор).
@@ -297,6 +314,11 @@ def _collect_verdicts(items) -> dict:
         idx = v.get("idx")
         if idx is None or idx in conflicted:
             continue
+        verdict = _model_verdict(v.get("verdict"))
+        if verdict is None:
+            continue
+        if verdict != v.get("verdict"):
+            v = {**v, "verdict": verdict}
         cur = by.get(idx)
         if cur is None:
             by[idx] = v

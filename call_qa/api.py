@@ -1455,6 +1455,46 @@ def _attach_human_review(payload: dict, reviewer_id=None) -> dict:
     return payload
 
 
+def _attach_ai_review(payload: dict) -> dict:
+    """Разобран ли уже этот прогон ИИ человеком (confirmed / adjudicated).
+
+    Оценка в карточке одна: человек соглашается с ИИ, ничего не меняя, или правит
+    критерий. Сохранение отправляет его оценку и — пока прогон не разобран — итог
+    ревью ИИ (подтверждение или исправления в черновики базы знаний). Разобранный
+    прогон второй раз не принимается (_validated_adjudication_items), поэтому
+    карточка должна знать это заранее, а не узнавать отказом. Связка та же, что у
+    проверки разбора: мета прогона по его subject_kind/call_id/model. Ошибка не
+    роняет карточку — без признака фронт считает прогон неразобранным, а повторный
+    разбор всё равно отвергнет сервер."""
+    payload["ai_review"] = None
+    run_id = payload.get("_evaluation_run_id")
+    if not run_id:
+        return payload
+    try:
+        conn = config.connect_ro()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT m.review_outcome,
+                               TO_CHAR({_local('m.reviewed_at')}, 'DD.MM.YYYY HH24:MI'), u.name
+                          FROM ai_evaluation_runs e
+                          JOIN ai_evaluation_meta m
+                            ON m.subject_kind = e.subject_kind AND m.call_id = e.call_id
+                           AND m.model = e.model
+                          LEFT JOIN users u ON u.id = m.reviewed_by
+                         WHERE e.id = %s""", (str(run_id),))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        logging.exception("ai-qa: не удалось прочитать итог ревью прогона %s", run_id)
+        return payload
+    if row and row[0]:
+        payload["ai_review"] = {"outcome": row[0], "reviewed_at": row[1],
+                                "reviewer": row[2] or "—"}
+    return payload
+
+
 def human_review_state(subject_kind: str, call_id: int, direction_id: int,
                        criteria_count: int, reviewer_id) -> dict:
     """То же, что карточка получает при открытии, — после сохранения «Моей оценки»,
@@ -1767,9 +1807,10 @@ def review_payload(call_id: int, refresh: bool = False,
                 raise RuntimeError("не удалось заблокировать субъект для безопасной оценки")
             payload = _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh,
                                          subject_kind=subject_kind)
-    # Пер-критерийная оценка человека и «Моя оценка» проверяющего — поверх
-    # результата, вне immutable-кэша.
-    return _attach_human_review(payload, reviewer_id=reviewer_id)
+    # Пер-критерийная оценка человека, «Моя оценка» проверяющего и итог ревью
+    # прогона — поверх результата, вне immutable-кэша.
+    _attach_human_review(payload, reviewer_id=reviewer_id)
+    return _attach_ai_review(payload)
 
 
 def _resolve_call_source(subject: dict, model: str) -> dict:
