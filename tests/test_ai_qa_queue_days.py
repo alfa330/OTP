@@ -136,6 +136,56 @@ class DayPageTests(unittest.TestCase):
         self.assertEqual([i["id"] for i in none_page["items"]], [4])
 
 
+class QueueItemsColumnsTests(unittest.TestCase):
+    """Колонки выборки очереди: день и id сотрудника встали перед колонками
+    сделки — сдвиг на одну колонку молча переписал бы сделку в строке."""
+
+    def test_row_maps_to_item_and_undated_row_gets_the_card_key(self):
+        stamp = dt.datetime(2026, 9, 23, 7, 4, tzinfo=dt.timezone.utc)
+        base = (5, "Основа ОП", "Оператор", "23.09 12:04", None, [], 0.9, stamp, 71, "fp", {},
+                "imported_call", {}, 90, {"unchecked_weight": 10})
+        dated = base + (dt.date(2026, 9, 23), 7) + (None,) * api._DEAL_COLUMN_COUNT
+        undated = (6,) + base[1:] + (None, None) + ("D-1",) + (None,) * (api._DEAL_COLUMN_COUNT - 1)
+        cursor = _Cursor([dated, undated])
+        items = api._queue_items(cursor, with_deals=False)
+        by_id = {item["id"]: item for item in items}
+        self.assertEqual(by_id[5]["day"], "2026-09-23")
+        self.assertEqual(by_id[5]["_operator_id"], 7)
+        self.assertEqual(by_id[5]["unchecked_weight"], 10)
+        self.assertEqual(by_id[5]["ai_score"], 90)
+        self.assertIsNone(by_id[5]["deal"])
+        # Без даты — тот же ключ, что у карточки «Без даты»: по нему фронт находит день.
+        self.assertEqual(by_id[6]["day"], api.QUEUE_NO_DAY)
+        self.assertEqual(by_id[6]["deal"]["id"], "D-1")
+        sql = cursor.sql[-1][0]
+        self.assertLess(sql.index(api._SUBJECT_DAY), sql.index("FROM ai_review_cache rc"))
+
+
+class CompatModeTests(unittest.TestCase):
+    """До миграции меты очередь не пустеет («Всё проверено» было бы неправдой), а
+    показывает последние звонки одним днём «Без даты» — как прежний список."""
+
+    def test_days_and_day_fall_back_to_recent_calls(self):
+        compat = RuntimeError("нет таблицы")
+        compat.pgcode = "42P01"
+        recent = [{"id": 1, "direction": "Основа ОП", "operator": "А", "datetime": "23.09 10:00",
+                   "human_score": None, "reasons": ["new"]},
+                  {"id": 2, "direction": "Поток", "operator": "Б", "datetime": "23.09 11:00",
+                   "human_score": None, "reasons": ["new"]}]
+        with mock.patch.object(api.config, "connect_ro", return_value=_Conn(_Cursor([]))), \
+                mock.patch.object(api, "_queue_items", side_effect=compat), \
+                mock.patch.object(api, "_recent_calls_fallback", return_value=recent):
+            summary = api.review_queue_days()
+            day = api.review_queue_day(api.QUEUE_NO_DAY, limit=1)
+            other = api.review_queue_day("2026-09-23")
+        self.assertTrue(summary["compat"])
+        self.assertEqual([d["day"] for d in summary["days"]], ["none"])
+        self.assertEqual(summary["days"][0]["open"], 2)
+        self.assertEqual(summary["days"][0]["reasons"], {"new": 2})
+        self.assertEqual((day["total"], [i["id"] for i in day["items"]]), (2, [1]))
+        self.assertEqual(other, {"items": [], "total": 0})
+
+
 class RouteWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -24,8 +24,8 @@ const TONE_TEXT = { green: 'text-emerald-700', amber: 'text-amber-700', red: 'te
  * На телефоне четыре плитки идут одной плотной строкой: подпись короче (`short`),
  * пояснение — только если оно важно сейчас (`subOnPhone`), иначе карточка дня
  * занимала бы полэкрана. */
-function Stat({ label, short, value, tone = null, sub = null, subCls = 'text-slate-400', subOnPhone = false,
-                progress = null, title }) {
+function Stat({ label, short, value, valueShort = null, tone = null, sub = null, subShort = null,
+                subCls = 'text-slate-400', subOnPhone = false, progress = null, title }) {
     return (
         <div className="min-w-0 rounded-xl bg-slate-50 px-2 py-2 ring-1 ring-slate-100 sm:px-3 sm:py-2.5" title={title}>
             <div className="truncate text-[10.5px] font-medium text-slate-500 sm:text-[11px]">
@@ -33,7 +33,9 @@ function Stat({ label, short, value, tone = null, sub = null, subCls = 'text-sla
                 <span className="hidden sm:inline">{label}</span>
             </div>
             <div className={`mt-0.5 truncate text-[15px] font-semibold leading-tight tabular-nums sm:text-[18px] ${tone ? TONE_TEXT[tone] : 'text-slate-900'}`}>
-                {value}
+                {valueShort != null ? (
+                    <><span className="sm:hidden">{valueShort}</span><span className="hidden sm:inline">{value}</span></>
+                ) : value}
             </div>
             {progress != null && (
                 <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-200" aria-hidden="true">
@@ -41,7 +43,13 @@ function Stat({ label, short, value, tone = null, sub = null, subCls = 'text-sla
                          style={{ width: `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` }} />
                 </div>
             )}
-            {sub && <div className={`mt-1 truncate text-[11px] ${subCls} ${subOnPhone ? '' : 'hidden sm:block'}`}>{sub}</div>}
+            {sub && (
+                <div className={`mt-1 truncate text-[11px] ${subCls} ${subOnPhone ? '' : 'hidden sm:block'}`}>
+                    {subShort != null ? (
+                        <><span className="sm:hidden">{subShort}</span><span className="hidden sm:inline">{sub}</span></>
+                    ) : sub}
+                </div>
+            )}
         </div>
     );
 }
@@ -57,9 +65,11 @@ function DayStats({ day }) {
                       : day.critical ? `${day.critical} ${plural(day.critical, 'критический', 'критических', 'критических')}`
                           : 'без критических'}
                   subCls={done ? 'text-emerald-600' : day.critical ? 'font-medium text-rose-600' : 'text-slate-400'}
+                  subShort={day.critical && !done ? `${day.critical} крит.` : null}
                   subOnPhone={Boolean(day.critical) && !done}
                   title="Разговоры дня, которые ИИ оценил, а человек ещё не проверил" />
             <Stat label="Проверено" value={`${day.reviewed} из ${day.evaluated}`}
+                  valueShort={`${day.reviewed}/${day.evaluated}`}
                   progress={day.evaluated ? day.reviewed / day.evaluated : 0}
                   sub={day.corrected ? `с исправлениями ИИ: ${day.corrected}` : null}
                   title="Сколько разговоров дня, оценённых ИИ, уже проверил человек" />
@@ -104,8 +114,10 @@ function DayCard({ day, open, onToggle, state, reviewedKeys, onOpen, onLoadMore,
         day.operators ? `${day.operators} ${plural(day.operators, 'сотрудник', 'сотрудника', 'сотрудников')}` : null,
         directions.length ? directions.slice(0, 2).join(', ') + (directions.length > 2 ? ` +${directions.length - 2}` : '') : null,
     ].filter(Boolean).join(' · ');
-    // «Показать ещё» — только к уже показанным строкам: при сбое загрузки кнопка «Повторить».
-    const hasMore = Boolean(state) && !state.loading && !state.error && items.length > 0 && items.length < day.open;
+    // Сколько ещё не показано — по ответу самого дня (на момент запроса и докуда
+    // дочитали), а не по сводке: её могли обогнать проверки. При сбое — «Повторить».
+    const remaining = state?.total != null ? Math.max(0, state.total - (state.end || 0)) : 0;
+    const hasMore = Boolean(state) && !state.loading && !state.error && remaining > 0;
     const done = day.open === 0;
     const bodyId = `qa-day-${day.day}`;
 
@@ -156,7 +168,7 @@ function DayCard({ day, open, onToggle, state, reviewedKeys, onOpen, onLoadMore,
                     {hasMore && (
                         <button type="button" onClick={onLoadMore}
                                 className="w-full border-t border-slate-100 py-2.5 text-[12.5px] font-medium text-blue-600 transition hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none">
-                            Показать ещё — {day.open - items.length}
+                            Показать ещё — {remaining}
                         </button>
                     )}
                     {items.some((c) => c.stale) && (

@@ -61,11 +61,30 @@ test('проверенный разговор меняет сводку свое
         { key: 'call-9', day: null, reasons: ['lowconf'] },      // открыт не из очереди — день неизвестен
     ]);
     assert.deepEqual(next[0], { day: '2026-09-23', open: 1, critical: 0, reasons: { lowconf: 1 },
-                                evaluated: 4, reviewed: 3, corrected: 1 });
+                                evaluated: 4, reviewed: 3, corrected: 1,
+                                open_ai_min: null, human_n: 0, human_avg: null });
     assert.equal(next[1], days[1]);
     // Проверили всех — день остаётся, но ждущих нет.
     const done = applyReviewed(days, [{ key: 'call-2', day: '2026-09-22', reasons: ['lowconf'] }]);
     assert.equal(done[1].open, 0);
     assert.equal(done[1].reviewed, 1);
     assert.deepEqual(queueSummary(done), { open: 2, critical: 1, days: 1 });
+});
+
+test('новый балл человека входит в средний дня, а «мин. в очереди» снимается', () => {
+    const day = { day: '2026-09-23', open: 3, critical: 0, reasons: { lowconf: 3 }, evaluated: 3, reviewed: 0,
+                  corrected: 0, open_ai_min: 40, human_avg: 80, human_n: 2 };
+    const [next] = applyReviewed([day], [
+        { key: 'call-1', day: '2026-09-23', reasons: ['lowconf'], human: 50 },
+        { key: 'call-2', day: '2026-09-23', reasons: ['lowconf'], human: null },   // балл у разговора уже был
+    ]);
+    assert.equal(next.open, 1);
+    assert.equal(next.open_ai_min, null);
+    assert.equal(next.human_n, 3);
+    assert.equal(next.human_avg, 70);
+    // Первая оценка дня — средний из неё одной.
+    const [first] = applyReviewed([{ ...day, human_avg: null, human_n: 0 }],
+        [{ key: 'call-1', day: '2026-09-23', reasons: [], human: 64 }]);
+    assert.equal(first.human_avg, 64);
+    assert.equal(first.human_n, 1);
 });

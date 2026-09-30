@@ -183,6 +183,7 @@ def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
 
 
 _QUEUE_FETCH_CAP = 3000  # верх глобальной сортировки по критичности до постраничной нарезки
+QUEUE_NO_DAY = "none"    # день очереди у разговора без даты (карточка «Без даты»)
 
 # Один субъект оценки на строку кэша: звонок из журнала, звонок из АТС,
 # эпизод Wazzup/ChatApp или заявка Chat2Desk. Соединения намеренно LEFT +
@@ -691,7 +692,9 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
                       "unchecked_weight": breakdown.get("unchecked_weight") or 0,
                       # День разговора — тот же, что у фильтра периода и подписи
                       # строки (_SUBJECT_DAY): по нему очередь раскладывается по дням.
-                      "day": r[15].isoformat() if r[15] else None,
+                      # Без даты — тот же ключ, что у карточки «Без даты»: по нему
+                      # фронт находит день проверенного разговора.
+                      "day": r[15].isoformat() if r[15] else QUEUE_NO_DAY,
                       "deal": _deal_row(r, 17),
                       "_operator_id": r[16],
                       "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
@@ -797,6 +800,9 @@ def review_queue_count(allowed_direction_ids=None, subject_kind=None, department
                 pass
 
 
+_COMPAT_QUEUE_ROWS = 100  # «последние звонки» режима совместимости
+
+
 def _queue_page(items: list[dict], offset: int, limit: int) -> list[dict]:
     """Страница очереди: пометка «устарела» и без служебных полей."""
     page = items[offset:offset + limit]
@@ -815,8 +821,6 @@ def _queue_score(value):
         return None
 
 
-QUEUE_NO_DAY = "none"
-
 
 def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_direction_ids=None,
                      subject_kind=None, department=None, filters=None,
@@ -828,8 +832,8 @@ def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_directi
     обязано совпасть с числом строк под ней."""
     empty = {"items": [], "total": 0}
     conn = None
+    limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
     try:
-        limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         items = _queue_items(cur, allowed_direction_ids=allowed_direction_ids,
@@ -845,7 +849,10 @@ def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_directi
         return {"items": _queue_page(items, offset, limit), "total": len(items)}
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
-            return empty
+            if day != QUEUE_NO_DAY:
+                return empty
+            rows = _recent_calls_fallback(_COMPAT_QUEUE_ROWS, allowed_direction_ids, department)
+            return {"items": rows[offset:offset + limit], "total": len(rows)}
         logging.exception("ai-qa: день очереди ревью недоступен")
         raise
     finally:
@@ -960,7 +967,21 @@ def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=
         return {"days": out, "total": len(items), "truncated": len(items) >= _QUEUE_FETCH_CAP}
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
-            return empty
+            # Без меты очередь не знает, что проверено. Пустая сводка читалась бы как
+            # «Всё проверено» — честнее показать последние звонки, как прежний список,
+            # одним днём «Без даты» (строки отдаст review_queue_day(QUEUE_NO_DAY)).
+            logging.warning("ai-qa: очередь по дням в режиме совместимости без evaluation meta")
+            rows = _recent_calls_fallback(_COMPAT_QUEUE_ROWS, allowed_direction_ids, department)
+            if not rows:
+                return empty
+            directions = Counter(r["direction"] for r in rows if r.get("direction"))
+            return {"days": [{
+                "day": QUEUE_NO_DAY, "open": len(rows), "critical": 0, "reasons": {"new": len(rows)},
+                "directions": [{"name": name, "n": n} for name, n in directions.most_common()],
+                "operators": len({r.get("operator") for r in rows}), "open_ai_min": None,
+                "evaluated": len(rows), "reviewed": 0, "corrected": 0,
+                "ai_avg": None, "human_avg": None, "human_n": 0,
+            }], "total": len(rows), "truncated": False, "compat": True}
         logging.exception("ai-qa: очередь ревью по дням недоступна")
         raise
     finally:

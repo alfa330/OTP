@@ -70,8 +70,13 @@ export const rowReasons = (reasons, common) => {
 
 /* Только что проверенные разговоры (карточка закрылась после сохранения) — до
  * перезагрузки очереди. Сводка дня честно меняется на месте: ждут на один меньше,
- * проверено на один больше. День, где проверили всех, остаётся — с отметкой, что
- * всё проверено, — чтобы было видно, чем закончилась работа. */
+ * проверено на один больше, новый балл человека входит в средний. «Мин. в
+ * очереди» пересчитать нечем (баллов остальных ждущих здесь нет) — он снимается,
+ * а не врёт про разговор, которого в очереди уже нет. День, где проверили всех,
+ * остаётся — с отметкой, что всё проверено, — чтобы было видно, чем закончилась
+ * работа. */
+const isScore = (value) => Number.isFinite(value) && value >= 0 && value <= 100;
+
 export const applyReviewed = (days, reviewed) => {
     const byDay = new Map();
     (reviewed || []).forEach((entry) => {
@@ -88,6 +93,12 @@ export const applyReviewed = (days, reviewed) => {
             if (reasons[key]) reasons[key] -= 1;
             if (!reasons[key]) delete reasons[key];
         }));
+        // null — балла нет (Number(null) дал бы 0 и уронил бы средний).
+        const added = done.filter((entry) => entry.human != null && entry.human !== '')
+            .map((entry) => Number(entry.human)).filter((value) => isScore(value));
+        const humanN = (day.human_n || 0) + added.length;
+        const humanSum = (day.human_avg != null ? day.human_avg * (day.human_n || 0) : 0)
+            + added.reduce((sum, value) => sum + value, 0);
         return {
             ...day,
             open: Math.max(0, day.open - done.length),
@@ -95,6 +106,10 @@ export const applyReviewed = (days, reviewed) => {
             reasons,
             reviewed: Math.min(day.evaluated || 0, (day.reviewed || 0) + done.length),
             corrected: (day.corrected || 0) + done.filter((entry) => entry.corrected).length,
+            open_ai_min: null,
+            human_n: humanN,
+            human_avg: humanN && (day.human_avg != null || added.length)
+                ? Math.round((humanSum / humanN) * 10) / 10 : day.human_avg ?? null,
         };
     });
 };
