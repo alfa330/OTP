@@ -223,6 +223,7 @@ const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/Gro
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const ComplaintsView = lazyWithRetry(() => import('./components/complaints/ComplaintsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
+const WaterView = lazyWithRetry(() => import('./components/water/WaterView'));
 const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
@@ -407,6 +408,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
+ *   water — WATER_SECTION_DEPARTMENT_CODES;
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
@@ -474,6 +476,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     contests: ['szov'],
     // Реестры
     parcels: ['front_office', 'szov'],
+    water: ['front_office', 'szov'],
     sign_links: ['front_office', 'szov', 'op'],
 };
 
@@ -743,6 +746,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     fleet_edm: 'EDM provider',
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
+    water: 'Water accounting',
     sign_links: 'Signing links',
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
@@ -2393,6 +2397,38 @@ const canAccessParcelsSectionForUser = (userLike) => {
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isParcelsSectionDepartmentHead(userLike)) return true;
     return PARCELS_SECTION_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+    );
+};
+
+/* «Учёт воды» — остатки питьевой воды во фронт-офисах и выдача водителям.
+
+   Периметр тот же, что у «Посылок»: фронт-офисы выдают, колл-центр СЗоВ
+   проверяет право водителя и смотрит остатки, глобальный админ — всё. Своим
+   разделом, а не вкладкой «Посылок» — решение владельца 30.09.2026.
+
+   Здесь решается только «показывать ли пункт меню»; кто выдаёт и кто ведёт
+   учёт, считает water/access.py. */
+const WATER_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
+
+/* ПИЛОТ (30.09.2026): владелец проверяет раздел сам — пока флаг стоит, пункт
+   меню и экран есть только у супер-админа. Сервер закрыт тем же флагом
+   (water/access.py: PILOT_SUPER_ADMIN_ONLY); снимать — в обоих местах. */
+const WATER_PILOT_SUPER_ADMIN_ONLY = true;
+
+const canAccessWaterSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (WATER_PILOT_SUPER_ADMIN_ONLY) return false;
+    // Тренер раздел не просил — правило владельца «буквально и не расширять»,
+    // как у «Касаний» и «Воронки ОП» (#360 открывал тренеру только названное).
+    if (role === 'trainer') return false;
+    // Глава чужого отдела с базовой admin-ролью — не глобальный админ.
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some(
+        (code) => WATER_SECTION_DEPARTMENT_CODES.includes(code),
+    )) return true;
+    return WATER_SECTION_DEPARTMENT_CODES.includes(
         normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
     );
 };
@@ -42315,6 +42351,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessComplaintsSection = canAccessComplaintsSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
+            const canAccessWaterSection = canAccessWaterSectionForUser(user);
             // «Библиотека» (#282): пока только супер-админ и тренер — решение
             // владельца 28.09.2026 («у других пока даже раздел не будет
             // отображаться»). Сервер закрыт тем же правилом (library/routes.py:
@@ -51614,6 +51651,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
                 // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
                 if (view === 'parcels' && canAccessParcelsSection) return;
+                // «Учёт воды» — тот же периметр и та же причина.
+                if (view === 'water' && canAccessWaterSection) return;
                 // «Ссылка на подписание» — тот же периметр и та же причина.
                 if (view === 'sign_links' && canAccessSignLinksSection) return;
                 // «Чаты водителей» — свой предикат: раздел живёт в одном отделе,
@@ -51641,7 +51680,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -51713,7 +51752,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
                 // раздел успеет получить 403.
                 if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
-                        || view === 'driver_chats' || view === 'sign_links'
+                        || view === 'water' || view === 'driver_chats' || view === 'sign_links'
                         || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
@@ -53656,6 +53695,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canAccessCrmSection && deptAllowsInner('crm_tickets'),
                                         canAccessComplaintsSection && deptAllowsInner('complaints'),
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
+                                        canAccessWaterSection && deptAllowsInner('water'),
                                         canAccessSignLinksSection && deptAllowsInner('sign_links'),
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
                                         canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
@@ -53760,6 +53800,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-box"></FaIcon>
                                                 <span className="sidebar-text">Посылки</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Учёт воды» — выдача воды водителям и остатки по
+                                        фронт-офисам. Аудитория та же, что у «Посылок»,
+                                        поэтому пункт объявлен ОДИН раз здесь, в общей части
+                                        меню, рядом с ними. Кто выдаёт и кто ведёт учёт,
+                                        считает бэкенд (water/access.py). */}
+                                    {canAccessWaterSection && (
+                                    <SidebarDeptScope section="water" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'water')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'water' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-droplet"></FaIcon>
+                                                <span className="sidebar-text">Учёт воды</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -54383,6 +54443,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 complaintsBadgeCount,
                 canAccessComplaintsSection,
                 canAccessParcelsSection,
+                canAccessWaterSection,
                 canAccessLibrarySection,
                 canAccessSignLinksSection,
                 canAccessTouchesSection,
@@ -54865,6 +54926,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ) : (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка реестра…</div>}>
                                 <ParcelsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        ))}
+                        {view === "water" && canAccessWaterSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Учёт воды"
+                                description="На экране ФИО и телефоны живых водителей. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка учёта воды…</div>}>
+                                <WaterView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
