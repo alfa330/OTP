@@ -214,8 +214,9 @@ class WiringTests(unittest.TestCase):
         self.assertIn('from .marketing import filters as mkt', src)
         # Списки — с колонками сделки, счётчики — с той же связкой при отборе.
         self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=with_deals)'), 2)
-        # Счётчик очереди, фильтр подтяжки, набор субъектов и очередь «Обзора».
-        self.assertEqual(src.count('_marketing_join(cur, filters)'), 4)
+        # Счётчик очереди, итоги дней очереди, фильтр подтяжки, набор субъектов
+        # и очередь «Обзора».
+        self.assertEqual(src.count('_marketing_join(cur, filters)'), 5)
         self.assertIn("marketing = filters.get('marketing')", src)
         self.assertIn('def marketing_options(', src)
         self.assertIn('def deal_for_subject(', src)

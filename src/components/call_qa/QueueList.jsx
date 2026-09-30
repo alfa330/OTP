@@ -2,9 +2,10 @@ import React from 'react';
 import DealBadge from './DealBadge';
 import {
     ShieldAlert, Clock, Server, Volume1, ImageOff, CheckCircle2, Sparkles,
-    RotateCcw, MessageSquare, PhoneCall, Users,
+    RotateCcw, MessageSquare, PhoneCall, Users, ChevronRight,
 } from 'lucide-react';
-import { iosCard, IosBadge, scoreTone } from '../ui/ios';
+import { IosBadge, scoreTone } from '../ui/ios';
+import { itemKey, rowReasons, timeOf } from './queueDayRules';
 
 /* Строка очереди ревью — общая для вкладок «Очередь ревью» и «Чаты»: там один и
  * тот же список /api/ai-qa/review-queue, отличается только фильтр по субъекту.
@@ -70,52 +71,63 @@ function ReasonChips({ reasons }) {
     );
 }
 
-export default function QueueList({ items, onOpen }) {
+/* Строки одного дня очереди — внутри карточки дня, списком с разделителями, как
+ * таблица в iOS: карточка в карточке была бы лишней рамкой. День уже в заголовке,
+ * поэтому у строки — только время. Причины, общие для всех ждущих разговоров дня
+ * (`common`), названы на карточке дня и здесь не повторяются. */
+export default function QueueList({ items, onOpen, common = [] }) {
     return (
-        <div className="space-y-2.5">
+        <ul className="divide-y divide-slate-100">
             {items.map((c) => {
                 const Icon = isChat(c.subject) ? MessageSquare : PhoneCall;
+                const time = timeOf(c.datetime);
                 return (
-                    <button key={`${c.subject || 'call'}-${c.id}`} type="button" onClick={() => onOpen?.(c)}
-                        className={`${iosCard} flex w-full flex-col items-stretch justify-between gap-2.5 p-3.5 text-left transition hover:ring-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.995] sm:flex-row sm:items-center`}>
-                        <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                                <Icon size={14} className="shrink-0 text-slate-400" aria-hidden="true" />
-                                <span className="truncate text-[14px] font-semibold text-slate-900">
-                                    {subjectTitle(c.subject, c.id)}
+                    <li key={itemKey(c)}>
+                        <button type="button" onClick={() => onOpen?.(c)}
+                            className="flex w-full flex-col items-stretch gap-2 px-4 py-3 text-left transition hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none active:bg-slate-100 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="flex min-w-0 items-start gap-3">
+                                {/* Время — в своей колонке: по нему глаз идёт вниз по дню. */}
+                                <span className="w-10 shrink-0 pt-px text-[12.5px] font-medium tabular-nums text-slate-400">
+                                    {time || '—'}
                                 </span>
-                                {/* id у calls и imported_calls — независимые последовательности,
-                                    и у СЗоВ/Тез КЦ в одной очереди встречаются оба вида: без
-                                    пометки две соседние строки читались бы как один звонок. */}
-                                {c.subject === SUBJECT_IMPORTED_CALL && (
-                                    <IosBadge tone="blue" title={SOURCE_LABEL[c.subject]}>из АТС</IosBadge>
-                                )}
-                                {c.stale && (
-                                    <IosBadge tone="amber" title="Конфигурация ИИ (промпт, критерии или база знаний) изменилась после этой оценки. При открытии показывается прежняя оценка; пересчёт — только кнопкой «Переоценить» в карточке.">
-                                        <RotateCcw size={11} aria-hidden="true" />устарела
+                                <div className="min-w-0">
+                                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                        <Icon size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
+                                        <span className="truncate text-[13.5px] font-medium text-slate-900">{c.operator}</span>
+                                        {/* id у calls и imported_calls — независимые последовательности,
+                                            и у СЗоВ/Тез КЦ в одной очереди встречаются оба вида: без
+                                            пометки две соседние строки читались бы как один звонок. */}
+                                        {c.subject === SUBJECT_IMPORTED_CALL && (
+                                            <IosBadge tone="blue" title={SOURCE_LABEL[c.subject]} className="!px-2 !py-0.5">из АТС</IosBadge>
+                                        )}
+                                        {c.stale && (
+                                            <IosBadge tone="amber" className="!px-2 !py-0.5"
+                                                      title="Конфигурация ИИ (промпт, критерии или база знаний) изменилась после этой оценки. При открытии показывается прежняя оценка; пересчёт — только кнопкой «Переоценить» в карточке.">
+                                                <RotateCcw size={11} aria-hidden="true" />устарела
+                                            </IosBadge>
+                                        )}
+                                        <DealBadge deal={c.deal} />
+                                    </div>
+                                    <p className="mt-0.5 truncate text-[12px] text-slate-400">
+                                        {subjectTitle(c.subject, c.id)} · {c.direction}
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 pl-[3.25rem] sm:shrink-0 sm:justify-end sm:pl-0">
+                                <ScoreChip score={c.ai_score} unchecked={c.unchecked_weight || 0} />
+                                {c.human_score != null && (
+                                    <IosBadge tone="green" title="Балл человека по этой же шкале"
+                                              className="tabular-nums">
+                                        <Users size={11} aria-hidden="true" />{c.human_score}
                                     </IosBadge>
                                 )}
-                                <DealBadge deal={c.deal} />
+                                <ReasonChips reasons={rowReasons(c.reasons, common)} />
+                                <ChevronRight size={15} className="hidden text-slate-300 sm:block" aria-hidden="true" />
                             </div>
-                            {/* Направление ушло в подпись: в строке остаются только метки,
-                                по которым выбирают, что смотреть. */}
-                            <p className="mt-0.5 truncate text-[12px] text-slate-400">
-                                {c.operator} · {c.direction} · {c.datetime}
-                            </p>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1.5 sm:shrink-0 sm:justify-end">
-                            <ScoreChip score={c.ai_score} unchecked={c.unchecked_weight || 0} />
-                            {c.human_score != null && (
-                                <IosBadge tone="green" title="Балл человека по этой же шкале"
-                                          className="tabular-nums">
-                                    <Users size={11} aria-hidden="true" />{c.human_score}
-                                </IosBadge>
-                            )}
-                            <ReasonChips reasons={c.reasons} />
-                        </div>
-                    </button>
+                        </button>
+                    </li>
                 );
             })}
-        </div>
+        </ul>
     );
 }

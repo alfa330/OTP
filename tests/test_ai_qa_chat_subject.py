@@ -598,7 +598,7 @@ class QueueRowTests(unittest.TestCase):
         """Балл — то, по чему выбирают, что открывать первым; без него в очереди
         видно только флаги, а они есть почти у каждой карточки."""
         api = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8")
-        head = api[api.index("def review_queue_list"):api.index("def review_queue_count")]
+        head = api[api.index("def _queue_items"):api.index("def review_queue_count")]
         self.assertIn("rc.payload->'ai_score'", head)
         self.assertIn("rc.payload->'score_breakdown'", head)
         self.assertIn('"ai_score": r[13]', head)
@@ -616,8 +616,13 @@ class QueueRowTests(unittest.TestCase):
             encoding="utf-8")
         view = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(
             encoding="utf-8")
-        self.assertIn("from './QueueList'", view)
-        self.assertIn("<QueueList items=", view)
+        # Очередь раскладывается по дням: строки дня рисует QueueList внутри QueueDays.
+        days = (ROOT / "src" / "components" / "call_qa" / "QueueDays.jsx").read_text(
+            encoding="utf-8")
+        self.assertIn("from './QueueDays'", view)
+        self.assertIn("<QueueDays days=", view)
+        self.assertIn("<QueueList items=", days)
+        self.assertNotIn("QueueDays", chat)
         self.assertNotIn("QueueList", chat)
         self.assertNotIn("review-queue", chat)
 

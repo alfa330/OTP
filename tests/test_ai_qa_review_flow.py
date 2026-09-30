@@ -166,7 +166,8 @@ class ReviewFlowContractTests(unittest.TestCase):
         self.assertIn("run.fingerprint_components", self.api_src)
         self.assertIn("c.stale &&", self.queue_src)
         self.assertIn("устарела", self.queue_src)
-        self.assertIn("Оценка устарела", self.view_src)
+        # Бейдж в шапке карточки; пояснение к строкам — в карточке дня очереди.
+        self.assertIn("оценка устарела", self.view_src)
 
     def test_reevaluation_of_stale_card_is_labeled_on_open(self):
         # Открытие, повлёкшее переоценку ранее оценённого звонка, помечается явно.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import logging
+from collections import Counter
 import re
 import tempfile
 import threading
@@ -625,6 +626,84 @@ def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department
     return sql, tuple(params)
 
 
+def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, department=None,
+                 filters=None, with_deals=True):
+    """Все открытые субъекты очереди (не больше _QUEUE_FETCH_CAP) в её порядке:
+    сначала критичное, внутри — свежее. None — скоуп или фильтр невыполним.
+
+    Один источник на список и на сводку по дням (review_queue_days): иначе карточка
+    дня обещала бы «ждут 5», а раскрытый день показывал бы четыре строки."""
+    scope_sql, scope_params = _direction_predicate(
+        cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+    if scope_sql is None:
+        return None
+    kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+    filter_sql, filter_params = _list_filters_predicate(
+        cur, filters, allowed_direction_ids, department)
+    if filter_sql is None:
+        return None
+    # Сделка показывается в строке очереди, а не только фильтрует: маркетолог
+    # выбирает, что смотреть, именно по каналу и парку, и открывать карточку
+    # ради этих двух слов — лишний шаг на каждой строке.
+    # Сделка в строке — только тем, кому открыт модуль маркетинга
+    # (`with_deals`, решает маршрут): остальным ни колонок, ни семи JOIN'ов.
+    deal_join = _marketing_join(cur, filters, need_columns=with_deals)
+    cur.execute(
+        f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
+                  rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
+                  {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
+                  run.fingerprint_components, rc.subject_kind, rc.payload->'media',
+                  rc.payload->'ai_score', rc.payload->'score_breakdown', {_SUBJECT_DAY},
+                  {_SUBJECT_OPERATOR_ID}"""
+        + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
+             FROM ai_review_cache rc""" + _SUBJECT_JOIN + deal_join + """
+             LEFT JOIN ai_evaluation_meta m
+                    ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                       AND m.model = rc.model
+             LEFT JOIN LATERAL (
+                 SELECT r.evaluation_fingerprint, r.fingerprint_components
+                   FROM ai_evaluation_runs r
+                  WHERE r.subject_kind = rc.subject_kind AND r.call_id = rc.call_id
+                    AND r.status = 'succeeded'
+                    AND r.run_kind IN ('standard','force','batch')
+                  ORDER BY r.created_at DESC, r.id::text DESC
+                  LIMIT 1
+             ) run ON true
+            WHERE rc.model = %s AND m.review_outcome IS NULL"""
+        + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + """
+            ORDER BY rc.created_at DESC LIMIT %s""",
+        (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params,
+         _QUEUE_FETCH_CAP),
+    )
+    rows = cur.fetchall()
+    prio = review_queue.REASON_PRIORITY
+    items = []
+    for r in rows:
+        reasons = review_queue.review_reasons(r[5] or [], r[6], r[12] or {})
+        breakdown = r[14] if isinstance(r[14], dict) else {}
+        items.append({"id": r[0], "direction": r[1], "operator": r[2] or "—",
+                      "datetime": r[3], "human_score": r[4], "reasons": reasons or ["ok"],
+                      "subject": r[11] or config.SUBJECT_CALL,
+                      # Балл ИИ и та его часть, которую ИИ не проверял: в очереди
+                      # решают, что смотреть первым, и 90 из зачтённых баллов —
+                      # совсем не то же самое, что 90 проверенных.
+                      "ai_score": r[13],
+                      "unchecked_weight": breakdown.get("unchecked_weight") or 0,
+                      # День разговора — тот же, что у фильтра периода и подписи
+                      # строки (_SUBJECT_DAY): по нему очередь раскладывается по дням.
+                      "day": r[15].isoformat() if r[15] else None,
+                      "deal": _deal_row(r, 17),
+                      "_operator_id": r[16],
+                      "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
+                      "_ts": r[7], "_direction_id": r[8],
+                      "_run_fp": r[9], "_run_components": r[10]})
+    items.sort(key=lambda i: (i["_sev"], -(i["_ts"].timestamp() if i["_ts"] else 0)))
+    return items
+
+
+_QUEUE_PRIVATE_KEYS = ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components", "_operator_id")
+
+
 def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
                       subject_kind=None, department=None, filters=None,
                       with_deals=True) -> list[dict]:
@@ -635,80 +714,22 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
     знаний/RAG-режим изменились или immutable-прогона нет); открытие покажет прежнюю
     оценку с пометкой «устарела», переоценка — только кнопкой «Переоценить» (исключение —
     карточки без immutable-прогона: их открытие оценит звонок заново). Если миграция меты
-    ещё не прошла — fallback на «последние звонки»."""
+    ещё не прошла — fallback на «последние звонки».
+
+    Строки одного дня — тот же список с периодом «с этого дня по этот день»: так
+    раскрывается карточка дня в очереди (review_queue_days)."""
     conn = None
     try:
         limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        scope_sql, scope_params = _direction_predicate(
-            cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
-        if scope_sql is None:
-            cur.close(); conn.close()
+        items = _queue_items(cur, allowed_direction_ids=allowed_direction_ids,
+                             subject_kind=subject_kind, department=department,
+                             filters=filters, with_deals=with_deals)
+        cur.close(); conn.close()
+        if items is None:
             return []
-        kind_sql, kind_params = _subject_kind_predicate(subject_kind)
-        filter_sql, filter_params = _list_filters_predicate(
-            cur, filters, allowed_direction_ids, department)
-        if filter_sql is None:
-            cur.close(); conn.close()
-            return []
-        # Сделка показывается в строке очереди, а не только фильтрует: маркетолог
-        # выбирает, что смотреть, именно по каналу и парку, и открывать карточку
-        # ради этих двух слов — лишний шаг на каждой строке.
-        # Сделка в строке — только тем, кому открыт модуль маркетинга
-        # (`with_deals`, решает маршрут): остальным ни колонок, ни семи JOIN'ов.
-        deal_join = _marketing_join(cur, filters, need_columns=with_deals)
-        cur.execute(
-            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
-                      rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
-                      {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
-                      run.fingerprint_components, rc.subject_kind, rc.payload->'media',
-                      rc.payload->'ai_score', rc.payload->'score_breakdown'"""
-            + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
-                 FROM ai_review_cache rc""" + _SUBJECT_JOIN + deal_join + """
-                 LEFT JOIN ai_evaluation_meta m
-                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
-                           AND m.model = rc.model
-                 LEFT JOIN LATERAL (
-                     SELECT r.evaluation_fingerprint, r.fingerprint_components
-                       FROM ai_evaluation_runs r
-                      WHERE r.subject_kind = rc.subject_kind AND r.call_id = rc.call_id
-                        AND r.status = 'succeeded'
-                        AND r.run_kind IN ('standard','force','batch')
-                      ORDER BY r.created_at DESC, r.id::text DESC
-                      LIMIT 1
-                 ) run ON true
-                WHERE rc.model = %s AND m.review_outcome IS NULL"""
-            + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + """
-                ORDER BY rc.created_at DESC LIMIT %s""",
-            (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params,
-             _QUEUE_FETCH_CAP),
-        )
-        rows = cur.fetchall(); cur.close(); conn.close()
-        prio = review_queue.REASON_PRIORITY
-        items = []
-        for r in rows:
-            reasons = review_queue.review_reasons(r[5] or [], r[6], r[12] or {})
-            breakdown = r[14] if isinstance(r[14], dict) else {}
-            items.append({"id": r[0], "direction": r[1], "operator": r[2] or "—",
-                          "datetime": r[3], "human_score": r[4], "reasons": reasons or ["ok"],
-                          "subject": r[11] or config.SUBJECT_CALL,
-                          # Балл ИИ и та его часть, которую ИИ не проверял: в очереди
-                          # решают, что смотреть первым, и 90 из зачтённых баллов —
-                          # совсем не то же самое, что 90 проверенных.
-                          "ai_score": r[13],
-                          "unchecked_weight": breakdown.get("unchecked_weight") or 0,
-                          "deal": _deal_row(r, 15),
-                          "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
-                          "_ts": r[7], "_direction_id": r[8],
-                          "_run_fp": r[9], "_run_components": r[10]})
-        items.sort(key=lambda i: (i["_sev"], -(i["_ts"].timestamp() if i["_ts"] else 0)))
-        items = items[offset:offset + limit]
-        _flag_stale_evaluations(items)
-        for i in items:
-            for key in ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components"):
-                i.pop(key, None)
-        return items
+        return _queue_page(items, offset, limit)
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
             # Режим совместимости отдаёт «последние звонки» и фильтров не знает
@@ -768,6 +789,180 @@ def review_queue_count(allowed_direction_ids=None, subject_kind=None, department
             return 0
         logging.exception("ai-qa: счётчик очереди недоступен")
         return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _queue_page(items: list[dict], offset: int, limit: int) -> list[dict]:
+    """Страница очереди: пометка «устарела» и без служебных полей."""
+    page = items[offset:offset + limit]
+    _flag_stale_evaluations(page)
+    for item in page:
+        for key in _QUEUE_PRIVATE_KEYS:
+            item.pop(key, None)
+    return page
+
+
+def _queue_score(value):
+    """Балл ИИ из JSON карточки → число; мусор и 'null' — None."""
+    try:
+        return float(value) if value is not None and str(value).strip() not in ("", "null") else None
+    except (TypeError, ValueError):
+        return None
+
+
+QUEUE_NO_DAY = "none"
+
+
+def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_direction_ids=None,
+                     subject_kind=None, department=None, filters=None,
+                     with_deals=True) -> dict:
+    """Строки одного дня очереди — карточка дня раскрывается ими.
+
+    Отбор — из той же выборки, что и сводка (_queue_items), а не периодом в SQL:
+    день без даты (QUEUE_NO_DAY) периодом не выразить, а «ждут 5» на карточке дня
+    обязано совпасть с числом строк под ней."""
+    empty = {"items": [], "total": 0}
+    conn = None
+    try:
+        limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        items = _queue_items(cur, allowed_direction_ids=allowed_direction_ids,
+                             subject_kind=subject_kind, department=department,
+                             filters=filters, with_deals=with_deals)
+        cur.close(); conn.close()
+        if not items:
+            return empty
+        items = [item for item in items if (item.get("day") or QUEUE_NO_DAY) == day]
+        # Внутри дня — сначала серьёзное, а дальше по времени разговора: день читают
+        # сверху вниз, как ленту («09:23, 10:40»), а не в порядке, в каком их оценил ИИ.
+        items.sort(key=lambda item: (item["_sev"], str(item.get("datetime") or "")))
+        return {"items": _queue_page(items, offset, limit), "total": len(items)}
+    except Exception as exc:
+        if runtime_store.is_schema_compat_error(exc):
+            return empty
+        logging.exception("ai-qa: день очереди ревью недоступен")
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=None,
+                      filters=None) -> dict:
+    """Очередь ревью по дням разговора — сводка для карточек дней.
+
+    Строк дня здесь нет: день раскрывается review_queue_day. Сводка отвечает на два
+    вопроса. Что ждёт человека — сколько, почему (причины очереди), по каким
+    направлениям, сколько сотрудников и самый низкий балл ИИ среди ждущих. И каким
+    был день целиком — сколько разговоров оценил ИИ, сколько из них уже проверено
+    (из них с исправлениями ИИ), средние баллы ИИ и человека. Вторая половина
+    считается по ВСЕМ оценённым разговорам дня тем же скоупом и фильтрами, иначе
+    «проверено 2 из 5» не с чем было бы сравнить.
+
+    День — день разговора (_SUBJECT_DAY), как у фильтра периода и подписи строки.
+    Дни — только те, где кто-то ждёт проверки, от свежих к старым."""
+    empty = {"days": [], "total": 0, "truncated": False}
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        items = _queue_items(cur, allowed_direction_ids=allowed_direction_ids,
+                             subject_kind=subject_kind, department=department,
+                             filters=filters, with_deals=False)
+        if not items:
+            cur.close(); conn.close()
+            return empty
+
+        days: dict[str, dict] = {}
+        for item in items:
+            key = item.get("day") or QUEUE_NO_DAY
+            day = days.setdefault(key, {"day": key, "open": 0, "reasons": Counter(),
+                                        "directions": Counter(), "operators": set(),
+                                        "scores": []})
+            day["open"] += 1
+            day["reasons"].update(item.get("reasons") or [])
+            if item.get("direction"):
+                day["directions"][item["direction"]] += 1
+            day["operators"].add(item.get("_operator_id") or item.get("operator"))
+            score = _queue_score(item.get("ai_score"))
+            if score is not None:
+                day["scores"].append(score)
+
+        totals = {}
+        dated = [key for key in days if key != QUEUE_NO_DAY]
+        if dated:
+            scope_sql, scope_params = _direction_predicate(
+                cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+            kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+            filter_sql, filter_params = _list_filters_predicate(
+                cur, filters, allowed_direction_ids, department)
+            if scope_sql is not None and filter_sql is not None:
+                cur.execute(
+                    f"""SELECT day, COUNT(*),
+                               COUNT(*) FILTER (WHERE outcome IS NOT NULL),
+                               COUNT(*) FILTER (WHERE outcome = 'adjudicated'),
+                               AVG(ai), AVG(human), COUNT(human)
+                          FROM (SELECT {_SUBJECT_DAY} AS day, m.review_outcome AS outcome,
+                                       {_SUBJECT_AI_SCORE} AS ai, {_SUBJECT_HUMAN_SCORE} AS human
+                                  FROM ai_review_cache rc""" + _SUBJECT_JOIN
+                    + _marketing_join(cur, filters) + """
+                                  LEFT JOIN ai_evaluation_meta m
+                                         ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                                            AND m.model = rc.model
+                                 WHERE rc.model = %s""" + _SUBJECT_EXISTS + scope_sql + kind_sql
+                    + filter_sql + f""" AND {_SUBJECT_DAY} = ANY(%s::date[])) t
+                         GROUP BY day""",
+                    (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params, dated))
+                for day, evaluated, reviewed, corrected, ai_avg, human_avg, human_n in cur.fetchall():
+                    totals[day.isoformat()] = {
+                        "evaluated": int(evaluated or 0), "reviewed": int(reviewed or 0),
+                        "corrected": int(corrected or 0),
+                        "ai_avg": round(float(ai_avg), 1) if ai_avg is not None else None,
+                        "human_avg": round(float(human_avg), 1) if human_avg is not None else None,
+                        "human_n": int(human_n or 0),
+                    }
+        cur.close(); conn.close()
+
+        prio = review_queue.REASON_PRIORITY
+        out = []
+        for key, day in days.items():
+            total = totals.get(key) or {}
+            scores = day["scores"]
+            out.append({
+                "day": key,
+                "open": day["open"],
+                "critical": day["reasons"].get("critical", 0),
+                # Порядок — по серьёзности, как у меток строки.
+                "reasons": {reason: day["reasons"][reason]
+                            for reason in [*prio, "ok"] if day["reasons"].get(reason)},
+                "directions": [{"name": name, "n": n} for name, n in day["directions"].most_common()],
+                "operators": len(day["operators"]),
+                "open_ai_min": round(min(scores)) if scores else None,
+                # Без строки итогов (день без даты или сбой запроса) — хотя бы то,
+                # что известно по ждущим: оценено не меньше, чем ждёт.
+                "evaluated": total.get("evaluated", day["open"]),
+                "reviewed": total.get("reviewed", 0),
+                "corrected": total.get("corrected", 0),
+                "ai_avg": total.get("ai_avg", round(sum(scores) / len(scores), 1) if scores else None),
+                "human_avg": total.get("human_avg"),
+                "human_n": total.get("human_n", 0),
+            })
+        out.sort(key=lambda d: (d["day"] != QUEUE_NO_DAY, d["day"]), reverse=True)
+        return {"days": out, "total": len(items), "truncated": len(items) >= _QUEUE_FETCH_CAP}
+    except Exception as exc:
+        if runtime_store.is_schema_compat_error(exc):
+            return empty
+        logging.exception("ai-qa: очередь ревью по дням недоступна")
+        raise
     finally:
         if conn is not None:
             try:

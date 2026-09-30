@@ -146,7 +146,7 @@ test('разборы без переписки Верификаторов раз
         new URL('../src/components/call_qa/CallQaView.jsx', import.meta.url), 'utf8');
     assert.ok(!view.includes('/api/wazzup/'),
         'экран «ИИ-оценки» зовёт ручку Верификаторов — закрытая переписка его сломает');
-    for (const name of ['ChatQueue', 'EvaluationsList', 'QaDashboard', 'QueueList',
+    for (const name of ['ChatQueue', 'EvaluationsList', 'QaDashboard', 'QueueList', 'QueueDays',
                         'CriteriaClassification', 'AdjudicationsRag', 'CallReviewCard']) {
         const child = readFileSync(
             new URL(`../src/components/call_qa/${name}.jsx`, import.meta.url), 'utf8');

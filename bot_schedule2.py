@@ -6034,6 +6034,19 @@ def api_ai_qa_review_queue():
         filters, filters_err = _ai_qa_list_filters()
         if filters_err:
             return filters_err
+        # Строки одной карточки дня очереди: день — как в сводке (/review-queue/days),
+        # «none» — разговоры без даты.
+        day = (request.args.get('day') or '').strip()
+        if day:
+            from call_qa.api import review_queue_day, QUEUE_NO_DAY
+            if day != QUEUE_NO_DAY and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day):
+                return jsonify({"error": "day: ожидается ГГГГ-ММ-ДД"}), 400
+            page = review_queue_day(day, limit=limit, offset=offset, allowed_direction_ids=scope,
+                                    subject_kind=subject, department=department,
+                                    filters=filters,
+                                    with_deals=_ai_qa_can_use_marketing(requester_id))
+            return jsonify({"status": "success", **page, "day": day, "subject": subject,
+                            "department": department, "limit": limit, "offset": offset}), 200
         items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                   subject_kind=subject, department=department,
                                   filters=filters,
@@ -6045,6 +6058,36 @@ def api_ai_qa_review_queue():
                         "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa review-queue failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/review-queue/days', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_review_queue_days():
+    """Очередь ревью по дням разговора: сводка каждого дня для карточек дней
+    (сколько ждёт и почему, оценено/проверено за день, средние баллы). Скоуп,
+    отдел и фильтры — те же, что у самой очереди."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import review_queue_days
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        scope = _ai_qa_direction_scope(requester_id)
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
+        summary = review_queue_days(allowed_direction_ids=scope, subject_kind=subject,
+                                    department=department, filters=filters)
+        return jsonify({"status": "success", **summary, "subject": subject,
+                        "department": department}), 200
+    except Exception as error:
+        logging.exception("ai-qa review-queue days failed")
         return jsonify({"error": str(error)}), 500
 
 

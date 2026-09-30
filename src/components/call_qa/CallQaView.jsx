@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
@@ -17,7 +17,9 @@ import EvaluationsList from './EvaluationsList';
 import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
 import ChatQueue from './ChatQueue';
-import QueueList, { isChat } from './QueueList';
+import { isChat } from './QueueList';
+import QueueDays from './QueueDays';
+import { applyReviewed, itemKey } from './queueDayRules';
 import QaFilters from './QaFilters';
 import FindSubjectModal from './FindSubjectModal';
 import AudioPendingCard from './AudioPendingCard';
@@ -54,6 +56,7 @@ const TABS = [
    отбору) и «База разборов» (только оси сделки: правило отбирается по сделке
    разговора, из которого его вывели). Кому открыт модуль, говорит сервер. */
 const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
+const EMPTY_QUEUE = { days: [], total: 0, truncated: false };
 const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];
 const EXPORT_TABS = ['chats', 'evals'];
 
@@ -143,10 +146,15 @@ export default function CallQaView(props) {
     const [tab, setTab] = useState('queue');
     const [sectionInteraction, setSectionInteraction] = useState({ editing: false, busy: false });
     const [reviewInteraction, setReviewInteraction] = useState({ dirty: false, busy: false });
-    const [queue, setQueue] = useState(null);      // null = загрузка
+    const [queue, setQueue] = useState(null);      // сводка дней { days, total, truncated }; null = загрузка
     const [queueErr, setQueueErr] = useState(false);
-    const [queueTotal, setQueueTotal] = useState(0);
-    const [queueMoreBusy, setQueueMoreBusy] = useState(false);
+    const [queueDayItems, setQueueDayItems] = useState({});   // день → { items, loading, error }
+    const [queueOpenDays, setQueueOpenDays] = useState(null); // null — раскрыт самый свежий день
+    // Проверенные с последней загрузки: из дня пропадают сразу, сводка дня меняется на месте.
+    const [queueReviewed, setQueueReviewed] = useState([]);
+    const queueGeneration = useRef(0);
+    const queueReviewedKeys = useMemo(() => new Set(queueReviewed.map((entry) => entry.key)), [queueReviewed]);
+    const queueDays = useMemo(() => applyReviewed(queue?.days || [], queueReviewed), [queue, queueReviewed]);
     const [departmentsReload, setDepartmentsReload] = useState(0);
 
     /* Отбор живёт в контейнере, а не в каждом списке: панель стоит под
@@ -270,36 +278,81 @@ export default function CallQaView(props) {
     const canSwitchDepartment = departmentOptions.length > 1;
     const departmentName = (departments || []).find((item) => item.code === department)?.name || '';
 
-    const QUEUE_PAGE = 30;
-    const loadQueue = (offset = 0, append = false) => {
-        if (append) setQueueMoreBusy(true); else { setQueue(null); setQueueErr(false); }
-        if (!apiBaseUrl) { setQueueErr(true); setQueue([]); setQueueMoreBusy(false); return; }
+    /* Очередь — по дням разговора: сначала сводка дней (/review-queue/days), строки
+     * дня — по раскрытию его карточки (/review-queue?day=…). Состояние живёт здесь, а
+     * не в QueueDays: пока открыта карточка разговора, список не смонтирован, и
+     * человек вернулся бы к свёрнутой, заново загруженной очереди. */
+    const QUEUE_DAY_PAGE = 50;
+    const loadQueue = () => {
+        queueGeneration.current += 1;
+        setQueue(null); setQueueErr(false);
+        setQueueDayItems({}); setQueueOpenDays(null); setQueueReviewed([]);
+        if (!apiBaseUrl) { setQueueErr(true); setQueue(EMPTY_QUEUE); return; }
         // Отмена + сверка номера запроса: при смене отдела в полёте остаётся
-        // запрос прежнего, и его поздний ответ дорисовал бы чужие строки в уже
+        // запрос прежнего, и его поздний ответ дорисовал бы чужие дни в уже
         // переключённую очередь. Тот же приём, что у запроса карточки.
         queueRequest.current.controller?.abort();
         const controller = new AbortController();
         const requestId = queueRequest.current.id + 1;
         queueRequest.current = { id: requestId, controller };
-        axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`,
-            { params: { limit: QUEUE_PAGE, offset, ...(department ? { department } : {}),
-                        ...filtersToParams(filters) },
+        axios.get(`${apiBaseUrl}/api/ai-qa/review-queue/days`,
+            { params: { ...(department ? { department } : {}), ...filtersToParams(filters) },
               headers: headers(), signal: controller.signal })
             .then((r) => {
                 if (requestId !== queueRequest.current.id) return;
-                const page = r.data.items || [];
-                setQueueTotal(typeof r.data.total === 'number' ? r.data.total : page.length);
-                setQueue((prev) => (append && Array.isArray(prev) ? [...prev, ...page] : page));
+                setQueue({ days: r.data.days || [], total: Number(r.data.total) || 0,
+                           truncated: Boolean(r.data.truncated) });
             })
             .catch((error) => {
                 if (axios.isCancel(error) || requestId !== queueRequest.current.id) return;
-                if (append) showToast?.('Не удалось подгрузить ещё', 'error');
-                else { setQueue([]); setQueueErr(true); }
-            })
-            .finally(() => {
-                if (requestId === queueRequest.current.id) setQueueMoreBusy(false);
+                setQueue(EMPTY_QUEUE); setQueueErr(true);
             });
     };
+
+    const loadQueueDay = (day, { more = false } = {}) => {
+        if (!apiBaseUrl) return;
+        const generation = queueGeneration.current;
+        const prev = queueDayItems[day];
+        // Проверенные после загрузки строки сервер уже не отдаёт — смещение считаем
+        // по оставшимся, иначе «Показать ещё» перескочило бы через разговоры.
+        const offset = more && prev
+            ? prev.items.filter((item) => !queueReviewedKeys.has(itemKey(item))).length : 0;
+        setQueueDayItems((map) => ({ ...map, [day]: { items: more ? (map[day]?.items || []) : [],
+                                                     loading: true, error: false } }));
+        axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`,
+            { params: { day, limit: QUEUE_DAY_PAGE, offset, ...(department ? { department } : {}),
+                        ...filtersToParams(filters) },
+              headers: headers() })
+            .then((r) => {
+                if (generation !== queueGeneration.current) return;
+                setQueueDayItems((map) => {
+                    const known = new Set((more ? map[day]?.items || [] : []).map(itemKey));
+                    const fresh = (r.data.items || []).filter((item) => !known.has(itemKey(item)));
+                    return { ...map, [day]: { items: [...(more ? map[day]?.items || [] : []), ...fresh],
+                                              loading: false, error: false } };
+                });
+            })
+            .catch(() => {
+                if (generation !== queueGeneration.current) return;
+                setQueueDayItems((map) => ({ ...map, [day]: { items: map[day]?.items || [],
+                                                             loading: false, error: true } }));
+            });
+    };
+
+    // Самый свежий день раскрыт сразу, пока человек сам не сворачивал и не раскрывал.
+    const queueExpanded = useMemo(() => (queueOpenDays
+        || new Set(queue?.days?.[0] ? [queue.days[0].day] : [])), [queueOpenDays, queue]);
+    const toggleQueueDay = (day) => setQueueOpenDays(() => {
+        const next = new Set(queueExpanded);
+        if (next.has(day)) next.delete(day); else next.add(day);
+        return next;
+    });
+    // Строки раскрытого дня подгружаются один раз; повтор — кнопкой в карточке дня.
+    useEffect(() => {
+        if (!queue?.days?.length) return;
+        queueExpanded.forEach((day) => { if (!queueDayItems[day]) loadQueueDay(day); });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [queue, queueExpanded]);
 
     useEffect(() => {
         // department === null означает «отдел ещё не известен»: запрос без него
@@ -319,7 +372,7 @@ export default function CallQaView(props) {
         if (queueFiltersRef.current === filtersSignature) return;
         queueFiltersRef.current = filtersSignature;
         if (department === null || tab !== 'queue') { setQueue(null); return; }
-        loadQueue(0, false);
+        loadQueue();
         // eslint-disable-next-line
     }, [filtersSignature, tab, department]);
 
@@ -537,12 +590,14 @@ export default function CallQaView(props) {
         showToast?.(items.length
             ? `Исправлений: ${items.length} — в черновики базы знаний${inJournal}`
             : `Оценка ИИ подтверждена${inJournal}`, 'success');
-        setQueue((current) => {
-            if (!Array.isArray(current)) return current;
-            const next = current.filter((item) => item.id !== call.id || (item.subject || 'call') !== kind);
-            if (next.length !== current.length) setQueueTotal((t) => Math.max(0, t - 1));
-            return next;
-        });
+        // Разговор уходит из своего дня очереди сразу, а сводка дня меняется на месте.
+        // День и причины берём у строки очереди (открыт из неё) или у загруженного дня.
+        const key = `${kind}-${call.id}`;
+        const row = Object.values(queueDayItems).flatMap((entry) => entry.items || [])
+            .find((item) => itemKey(item) === key)
+            || (selected && itemKey(selected) === key ? selected : null);
+        setQueueReviewed((list) => (list.some((entry) => entry.key === key) ? list
+            : [...list, { key, day: row?.day || null, reasons: row?.reasons || [], corrected: items.length > 0 }]));
         resetCall();
         return { ok: true, closed: true, state };
     };
@@ -664,7 +719,7 @@ export default function CallQaView(props) {
                 {tab === 'queue' ? (
                 queue === null ? <Spinner text="Загружаю очередь…" />
                     : queueErr ? <ErrorCard text="Не удалось загрузить очередь" onRetry={loadQueue} />
-                    : queue.length === 0 ? (
+                    : queue.days.length === 0 ? (
                         /* «Всё проверено» при активном отборе — неправда: очередь
                            не пуста, пуст её срез. Сказать это прямо важнее, чем
                            похвалить: иначе человек уходит, не сняв фильтр. */
@@ -689,26 +744,12 @@ export default function CallQaView(props) {
                             )}
                         </div>
                     ) : (
-                        <div className="space-y-2.5">
-                            <QueueList items={queue} onOpen={openCall} />
-                            {queue.some((c) => c.stale) && (
-                                <p className="px-1 text-[11.5px] text-slate-500">
-                                    «Оценка устарела» — после оценки изменилась конфигурация ИИ (промпт, критерии или база знаний);
-                                    при открытии показывается прежняя оценка, пересчёт запускается только кнопкой «Переоценить» в карточке.
-                                </p>
-                            )}
-                            <div className="flex flex-col items-center gap-2 pt-1">
-                                {queue.length < queueTotal && (
-                                    <button type="button" onClick={() => loadQueue(queue.length, true)}
-                                        disabled={queueMoreBusy} className={iosBtnSecondary}>
-                                        {queueMoreBusy ? 'Загрузка…' : `Показать ещё (осталось ${queueTotal - queue.length})`}
-                                    </button>
-                                )}
-                                <p className="px-1 text-[11.5px] text-slate-400">
-                                    Показано {queue.length} из {queueTotal} · сначала критичные
-                                </p>
-                            </div>
-                        </div>
+                        <QueueDays days={queueDays} total={queue.total} truncated={queue.truncated}
+                                   expanded={queueExpanded} onToggle={toggleQueueDay}
+                                   dayItems={queueDayItems} reviewedKeys={queueReviewedKeys}
+                                   onOpen={openCall} onRefresh={loadQueue}
+                                   onLoadMore={(day) => loadQueueDay(day, { more: true })}
+                                   onRetryDay={(day) => loadQueueDay(day)} />
                     )
             ) : tab === 'chats' ? (
                 <ChatQueue apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
