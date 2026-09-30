@@ -582,8 +582,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     useEffect(() => {
         if (isOpen) {
         setTimeout(() => {
-            // Внутри карточки форма въезжает сдвигом: фокус с прокруткой
-            // дёрнул бы окно вбок посреди этого движения.
+            // На странице сотрудника форма въезжает сдвигом, а страница сама
+            // встаёт к началу: фокус с прокруткой дёрнул бы её посреди въезда.
             nameRef.current?.focus(embedded ? { preventScroll: true } : undefined);
         }, 50);
         }
@@ -703,8 +703,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         closeAvatarCropEditor();
     };
 
-    /* Внутри карточки сотрудника Escape формы отключён (его держит карточка,
-       а она уступает, пока открыт кадр) — кадр фото закрывается своим. */
+    /* На странице сотрудника Escape формы отключён (Escape держит страница, и
+       с формы она по нему не уходит) — кадр фото закрывается своим. */
     useEffect(() => {
         if (!embedded || !avatarCropState) return undefined;
         const onKey = (event) => {
@@ -1113,10 +1113,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         </div>
     );
 
-    /* embedded — форма экраном внутри карточки сотрудника (EmployeeCardSheet):
-       без своего фона, рамки окна и шапки — шапку со стрелкой назад и Escape
-       держит карточка, а «Отмена» и сохранение возвращают на неё же. Так
-       правка не ложится вторым окном поверх первого. */
+    /* embedded — форма страницей внутри страницы сотрудника (EmployeeCardPage):
+       без своего фона, рамки окна и шапки — шапку «‹ Имя» держит страница, а
+       «Отмена» и сохранение возвращают на неё же. Никакого окна поверх. */
     return (
         <>
         {/* Backdrop */}

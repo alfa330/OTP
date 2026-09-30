@@ -1,0 +1,261 @@
+"""Страница сотрудника на компьютере — «Учет сотрудников».
+
+Решения владельца 30.09.2026, в два захода: (1) «три точки» в конце строки
+убрать, нажатие на строку — карточка для чтения, «Править», «В супервайзеры»,
+«История» — её кнопки, стиль iOS/macOS, без второй модалки; (2) «модалка
+слишком маленькая — без модалки, переход как на страницу и кнопка назад, чтобы
+там была вся информация». Подробности — в шапке
+src/components/employees/EmployeeCardPage.jsx.
+
+Всё это держится на тексте, который легко вернуть одной правкой: меню «⋮» в
+строке, окно поверх списка, window.confirm перед повышением. Сборка при этом
+проходит, и разница видна только в браузере.
+"""
+import re
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+EMPLOYEES = ROOT / 'src' / 'components' / 'employees'
+PAGE = (EMPLOYEES / 'EmployeeCardPage.jsx').read_text(encoding='utf-8')
+PAGE_CSS = (EMPLOYEES / 'employee-card-page.css').read_text(encoding='utf-8')
+EDIT = (ROOT / 'src' / 'components' / 'modals' / 'UserEditModal.jsx').read_text(encoding='utf-8-sig')
+
+
+def without_comments(source):
+    source = re.sub(r'\{/\*.*?\*/\}', '', source, flags=re.S)
+    return re.sub(r'/\*.*?\*/', '', source, flags=re.S)
+
+
+PAGE_CODE = without_comments(PAGE)
+
+
+def css_block(selector):
+    text = without_comments(PAGE_CSS)
+    start = text.index(selector + ' {')
+    return text[start:text.index('}', start)]
+
+
+def directory_source():
+    start = APP.index('const renderEmployeeDirectorySection = ({')
+    return APP[start:APP.index('const changeSvTable = async', start)]
+
+
+def employees_desktop_source():
+    start = APP.index("{(view === 'manage_users' || view === 'employees') && (\n")
+    return APP[start:APP.index("{view === 'manage_admins' && (isSuperAdmin || isEmployeeAccountingManager) && renderEmployeeDirectorySection({", start)]
+
+
+class RowsOpenThePageTests(unittest.TestCase):
+    def test_no_three_dots_in_the_four_lists(self):
+        """Супервайзеры, тренеры, админы — общий renderEmployeeDirectorySection;
+        сотрудники — своя таблица. Ни в одной нет меню в конце строки."""
+        for name, source in (('directory', directory_source()), ('employees', employees_desktop_source())):
+            self.assertNotIn('fa-ellipsis-v', source, name)
+            self.assertNotIn('openMenuId', source, name)
+            self.assertNotIn('<th className="px-6 py-3"></th>', source, name)
+        self.assertNotIn('const openRowActionMenu', APP)
+        self.assertNotIn('rowActionMenuPos', APP)
+
+    def test_row_click_and_keyboard_open_the_page(self):
+        directory = directory_source()
+        self.assertIn('onClick={(event) => openEmployeeCardFromRow(event, employee.id)}', directory)
+        self.assertIn('onKeyDown={(event) => handleEmployeeRowKeyDown(event, employee.id)}', directory)
+        employees = employees_desktop_source()
+        self.assertIn('onClick={(event) => handleManageUserRowClick(event, u.id)}', employees)
+        self.assertIn('onKeyDown={(event) => handleEmployeeRowKeyDown(event, u.id)}', employees)
+        for source in (directory, employees):
+            self.assertIn('tabIndex={0}', source)
+            self.assertEqual(source.count('renderEmployeeCardPage({'), 1)
+
+    def test_page_takes_the_place_of_the_list(self):
+        """Не окно поверх списка, а страница вместо него."""
+        directory = directory_source()
+        self.assertLess(directory.index('if (employeeCardId != null) {\n                    return renderEmployeeCardPage({'),
+                        directory.index('<table'))
+        self.assertIn("backLabel: title,", directory)
+        employees = employees_desktop_source()
+        self.assertTrue(employees.split('\n', 1)[1].lstrip().startswith(
+            '!isMobileShell && (employeeCardId != null ? renderEmployeeCardPage({'))
+        self.assertIn("backLabel: 'Сотрудники',", employees)
+
+    def test_ctrl_click_still_selects_for_bulk_edit(self):
+        start = APP.index('const handleManageUserRowClick = useCallback((event, userId) => {')
+        handler = APP[start:APP.index('}, [openEmployeeCardFromRow, toggleManageUsersSelection]);', start)]
+        self.assertLess(handler.index('if (event?.ctrlKey || event?.metaKey) {'),
+                        handler.index('openEmployeeCardFromRow(event, userId);'))
+        self.assertIn('toggleManageUsersSelection(userId);\n                    return;', handler)
+
+    def test_links_and_selected_text_do_not_open_the_page(self):
+        start = APP.index('const openEmployeeCardFromRow = useCallback((event, userId) => {')
+        body = APP[start:APP.index('}, [openEmployeeCard]);', start)]
+        self.assertIn("closest?.('a, button, input, select, textarea, label')", body)
+        self.assertIn('window.getSelection', body)
+
+    def test_footer_spans_one_column_less(self):
+        """Колонки меню больше нет — итог строки не должен вылезать за шапку."""
+        self.assertIn('colSpan={Math.max(1, columns.length - 1)}', directory_source())
+        self.assertIn('colSpan={Math.max(1, manageUsersSectionColumns.length - 1)}', employees_desktop_source())
+
+    def test_back_returns_to_the_same_place_in_the_list(self):
+        """Список и страница делят одно прокручиваемое поле (main-content):
+        назад — туда, где человек был, с фокусом на его строке."""
+        self.assertIn('employeeListScrollRef.current = mainContentRef.current?.scrollTop || 0;', APP)
+        self.assertIn('root.scrollTop = employeeListScrollRef.current;', APP)
+        self.assertIn('root.querySelector(`tr[data-employee-id="${employeeListFocusIdRef.current}"]`)', APP)
+        self.assertIn('data-employee-id={employee.id}', directory_source())
+        self.assertIn('data-employee-id={u.id}', employees_desktop_source())
+        self.assertIn('getScrollRoot={() => mainContentRef.current}', APP)
+        self.assertEqual(APP.count("${employeeListReturn ? ' ecp-in-left' : ''}"), 2)
+
+    def test_page_closes_with_the_section(self):
+        self.assertIn(
+            'useEffect(() => {\n                setEmployeeCardId(null);\n'
+            '                setEmployeeListReturn(false);\n', APP)
+        self.assertIn('}, [view, isMobileShell]);', APP)
+
+
+class NoWindowTests(unittest.TestCase):
+    def test_page_opens_no_window(self):
+        for banned in ('role="dialog"', 'aria-modal', 'createPortal', 'window.confirm', 'IosModal',
+                       'MobileActionSheet', 'HistoryModal', 'otp-modal-root'):
+            self.assertNotIn(banned, PAGE_CODE, banned)
+        self.assertNotIn('position: fixed', without_comments(PAGE_CSS))
+
+    def test_actions_are_one_list_for_both_layouts(self):
+        """Телефон и страница читают один список действий: разойтись в правах
+        (кому повышать, кого увольнять) им негде."""
+        self.assertEqual(APP.count('promoteUserToSupervisor(employee, { skipConfirm: true })'), 1)
+        self.assertEqual(APP.count('removeSv(employee.id, { skipConfirm: true })'), 1)
+        self.assertEqual(APP.count('dismissAdminUser(employee, { skipConfirm: true })'), 1)
+        self.assertEqual(APP.count('actionsFor: manageUsersActionsFor,'), 2)
+
+    def test_edit_history_and_demote_are_pages_of_the_next_level(self):
+        for key in ("page: 'edit'", "page: 'history'", "page: 'demote'"):
+            self.assertEqual(APP.count(key), 1, key)
+        pages = APP[APP.index('const employeeCardPages = {'):APP.index('const employeeCardDeptFields')]
+        self.assertIn('<UserEditModal\n                            embedded', pages)
+        self.assertIn('onClose={back}', pages)
+        self.assertIn('renderDemotionForm()', pages)
+        self.assertEqual(pages.count('guard: true'), 2)
+        self.assertIn("<span className=\"ecp-back-label\">{pageKey ? person?.name : backLabel}</span>", PAGE)
+
+    def test_demotion_window_does_not_open_over_the_page(self):
+        self.assertIn('open={!!demotionTarget && employeeCardId == null}', APP)
+        self.assertEqual(APP.count('{renderDemotionForm()}'), 2)
+
+    def test_questions_unfold_on_the_page(self):
+        self.assertIn('<Reveal open={isOpen}>', PAGE)
+        self.assertIn("if (action.page) {\n            pushPage(action.page);", PAGE)
+        self.assertIn('setConfirmKey((current) => (current === action.key ? null : action.key));', PAGE)
+
+    def test_escape_never_drops_a_form(self):
+        self.assertIn('if (pageKey && pageDef(pageKey)?.guard) return;', PAGE)
+        self.assertIn('if (isTypingTarget(document.activeElement)) return;', PAGE)
+
+    def test_page_is_desktop_only_and_lazy(self):
+        self.assertIn("lazyWithRetry(() => import('./components/employees/EmployeeCardPage'))", APP)
+        self.assertEqual(APP.count('<EmployeeCardPage'), 1)
+        self.assertNotIn('EmployeeCardSheet', APP)
+        self.assertFalse((EMPLOYEES / 'EmployeeCardSheet.jsx').exists())
+
+
+class ReviewFindingsTests(unittest.TestCase):
+    """Находки разбора 30.09.2026 — чтобы не вернулись и на странице."""
+
+    def test_each_visit_to_a_page_is_a_fresh_instance(self):
+        """«Отмена» в правке и сразу «Изменить» возвращали отменённый черновик."""
+        self.assertIn("key={`${pageKey || 'card'}:${pageSeq}`}", PAGE)
+        self.assertIn('setPageSeq((seq) => seq + 1);', PAGE)
+
+    def test_late_back_does_not_pop_someone_elses_page(self):
+        self.assertIn('back: backFrom(pageSeq)', PAGE)
+        self.assertIn('if (pageSeqRef.current === seq && pageKeyRef.current) popPage();', PAGE)
+        self.assertIn('const leftKey = pageKeyRef.current;', PAGE)
+
+    def test_edit_page_refreshes_groups_and_departments(self):
+        pages = APP[APP.index('const employeeCardPages = {'):APP.index('const employeeCardDeptFields')]
+        onopen = pages[pages.index('onOpen: (employee) => {'):pages.index('render:')]
+        for call in ('setUserToEdit(employee);', 'fetchUserModalGroups();', 'fetchDepartments();'):
+            self.assertIn(call, onopen)
+        self.assertNotIn('setShowUserEditModal', onopen)
+
+    def test_actions_that_would_be_refused_are_hidden(self):
+        promote = APP[APP.index('const manageUsersActionsFor = (employee) => ['):]
+        promote = promote[:promote.index('].filter(Boolean);')]
+        self.assertIn("normalizeRole(employee?.role) === 'operator'", promote)
+        self.assertIn('canDismissAdmin: isSuperAdmin,', APP)
+        self.assertNotIn('canDismissAdmin: true,', APP)
+        self.assertIn("!(role === 'admin' && isEmployeeAccountingManager && !isAdminLikeRoleFn(currentUserRole))", directory_source())
+
+    def test_history_error_toast_exists_in_app_scope(self):
+        start = APP.index('const fetchUserHistory = async (userId) => {')
+        body = APP[start:APP.index('};', start)]
+        self.assertNotIn('addToast(', body)
+        self.assertIn("showToast('Не удалось загрузить историю', 'error');", body)
+
+
+class EmbeddedEditFormTests(unittest.TestCase):
+    def test_embedded_form_has_no_backdrop_frame_or_header(self):
+        self.assertIn('onOpenSipSettings = null, embedded = false }) => {', EDIT)
+        self.assertIn('{!embedded && (\n        <div\n            className="otp-modal-dim', EDIT)
+        self.assertIn("className={embedded ? 'uem-embedded' : 'otp-modal-root fixed inset-0", EDIT)
+        self.assertIn("role={embedded ? undefined : 'dialog'}", EDIT)
+        self.assertIn('{embedded ? null : isMobileShell ? (', EDIT)
+        self.assertIn('if (!embedded && e.key === "Escape") {', EDIT)
+
+    def test_escape_closes_the_crop_inside_the_page(self):
+        start = EDIT.index('if (!embedded || !avatarCropState) return undefined;')
+        effect = EDIT[start:start + 400]
+        self.assertIn("if (event.key !== 'Escape') return;", effect)
+        self.assertIn('closeAvatarCropEditor();', effect)
+        self.assertLess(start, EDIT.index('if (!isOpen) return null;'))
+        self.assertIn('data-uem-crop=""', EDIT)
+        self.assertIn('[data-uem-crop]', PAGE)
+
+    def test_embedded_focus_does_not_scroll_the_sliding_page(self):
+        self.assertIn('nameRef.current?.focus(embedded ? { preventScroll: true } : undefined);', EDIT)
+
+
+class LayoutAndThemeTests(unittest.TestCase):
+    def test_bar_sticks_to_the_very_top_of_the_section(self):
+        """Липкость считается от края содержимого main-content (за его p-8):
+        с top: 0 шапка висела на 32 px ниже и резала верх страницы."""
+        bar = css_block('.ecp-bar')
+        self.assertIn('position: sticky;', bar)
+        self.assertIn('top: -32px;', bar)
+        root = css_block('.ecp')
+        self.assertIn('margin: -32px -32px 0;', root)
+        self.assertIn('min-height: calc(100vh - 32px);', root)
+
+    def test_dark_layer_repaints_the_tokens(self):
+        light = PAGE_CSS[PAGE_CSS.index('.ecp {'):PAGE_CSS.index('html[data-otp-theme="dark"] .ecp {')]
+        dark = PAGE_CSS[PAGE_CSS.index('html[data-otp-theme="dark"] .ecp {'):]
+        dark = dark[:dark.index('}')]
+        for token in re.findall(r'(--ecp-[\w-]+):', light):
+            if token == '--ecp-ease':
+                continue
+            self.assertIn(token + ':', dark, token)
+
+    def test_screens_keep_no_transform_after_entering(self):
+        """Иначе экран стал бы контейнером для fixed-потомков: кадр фото в
+        форме правки съёжился бы до его размеров."""
+        self.assertRegex(PAGE_CSS, r'animation: ecp-in-forward 380ms var\(--ecp-ease\) backwards;')
+        self.assertIn('animation: ecp-in-back 380ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;', PAGE_CSS)
+
+    def test_two_columns_of_fields_that_never_split_a_group(self):
+        self.assertIn('columns: 2 400px;', css_block('.ecp-sections'))
+        self.assertIn('break-inside: avoid;', css_block('.ecp-sections .ecp-group'))
+
+    def test_reduced_motion_is_honoured(self):
+        self.assertIn('@media (prefers-reduced-motion: reduce)', PAGE_CSS)
+
+    def test_scrollbar_styling_stays_webkit_only(self):
+        """scrollbar-width/color выключили бы в Chrome всю ::-webkit-scrollbar
+        стилизацию (tests/test_thin_scroll.py)."""
+        self.assertNotRegex(without_comments(PAGE_CSS), r'scrollbar-(width|color)')
+
+
+if __name__ == '__main__':
+    unittest.main()

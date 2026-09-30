@@ -198,7 +198,7 @@ const SessionUserModal = lazyWithRetry(() => import('./components/sessions/Sessi
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
 const RegContestCeremony = lazyWithRetry(() => import('./components/contests/RegContestCeremony'));
 const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
-const EmployeeCardSheet = lazyWithRetry(() => import('./components/employees/EmployeeCardSheet'));
+const EmployeeCardPage = lazyWithRetry(() => import('./components/employees/EmployeeCardPage'));
 const HoursAccountingMobileView = lazyWithRetry(() => import('./components/hours/HoursAccountingMobile'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
@@ -42708,9 +42708,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // сразу в раздел его отдела.
             const [sipSettingsProvider, setSipSettingsProvider] = useState('');
             const [userToEdit, setUserToEdit] = useState(null);
-            // Карточка сотрудника на компьютере (EmployeeCardSheet): id того,
-            // чья карточка открыта в списке «Учета сотрудников».
+            // Страница сотрудника на компьютере (EmployeeCardPage): id того,
+            // чья страница открыта вместо списка «Учета сотрудников».
             const [employeeCardId, setEmployeeCardId] = useState(null);
+            // Вернулись со страницы в список — он въезжает слева, а прокрутка
+            // встаёт туда, где человек был в списке.
+            const [employeeListReturn, setEmployeeListReturn] = useState(false);
+            const employeeListScrollRef = useRef(0);
+            const employeeListRestoreRef = useRef(false);
+            const employeeListFocusIdRef = useRef(null);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
             const [userModalGroups, setUserModalGroups] = useState([]);
@@ -50189,12 +50195,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setSelectedManageUsersIds(new Set());
             }, []);
 
-            const closeEmployeeCard = useCallback(() => setEmployeeCardId(null), []);
+            // Список и страница живут в одном прокручиваемом поле (main-content):
+            // уходя на страницу, запоминаем, где был список.
+            const openEmployeeCard = useCallback((userId) => {
+                employeeListScrollRef.current = mainContentRef.current?.scrollTop || 0;
+                employeeListFocusIdRef.current = Number(userId);
+                setEmployeeCardId(Number(userId));
+            }, []);
 
-            // Раздел сменился или окно стало телефонным — карточка закрывается:
+            const closeEmployeeCard = useCallback(() => {
+                employeeListRestoreRef.current = true;
+                setEmployeeListReturn(true);
+                setEmployeeCardId(null);
+            }, []);
+
+            useLayoutEffect(() => {
+                if (employeeCardId != null || !employeeListRestoreRef.current) return;
+                employeeListRestoreRef.current = false;
+                const root = mainContentRef.current;
+                if (!root) return;
+                root.scrollTop = employeeListScrollRef.current;
+                // Фокус — на строку того, от кого вернулись: с клавиатуры
+                // человек продолжает со своего места, как в списках macOS.
+                root.querySelector(`tr[data-employee-id="${employeeListFocusIdRef.current}"]`)
+                    ?.focus({ preventScroll: true });
+            }, [employeeCardId]);
+
+            // Раздел сменился или окно стало телефонным — страница закрывается:
             // строк, из которых её открыли, на экране больше нет.
             useEffect(() => {
                 setEmployeeCardId(null);
+                setEmployeeListReturn(false);
+                employeeListRestoreRef.current = false;
+            }, [view, isMobileShell]);
+
+            // Кусок страницы — заранее, пока человек смотрит на список: иначе
+            // первый переход ждал бы его загрузки на пустом месте.
+            useEffect(() => {
+                if (isMobileShell || !['manage_users', 'employees', 'sv_list', 'manage_trainers', 'manage_admins'].includes(view)) return;
+                import('./components/employees/EmployeeCardPage').catch(() => {});
             }, [view, isMobileShell]);
 
             // Строка открывает карточку сотрудника (решение владельца 30.09.2026:
@@ -50204,16 +50243,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const openEmployeeCardFromRow = useCallback((event, userId) => {
                 if (event?.target?.closest?.('a, button, input, select, textarea, label')) return;
                 if (String(window.getSelection?.() || '').trim()) return;
-                setEmployeeCardId(Number(userId));
-            }, []);
+                openEmployeeCard(userId);
+            }, [openEmployeeCard]);
 
             // С клавиатуры — так же: Tab до строки, Enter или пробел.
             const handleEmployeeRowKeyDown = useCallback((event, userId) => {
                 if (event.target !== event.currentTarget) return;
                 if (event.key !== 'Enter' && event.key !== ' ') return;
                 event.preventDefault();
-                setEmployeeCardId(Number(userId));
-            }, []);
+                openEmployeeCard(userId);
+            }, [openEmployeeCard]);
 
             const handleManageUserRowClick = useCallback((event, userId) => {
                 if (event?.ctrlKey || event?.metaKey) {
@@ -50783,8 +50822,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             /* Действия над сотрудником — ОДИН список на обе раскладки. Телефон
                (EmployeesMobileView) читает label, confirm и onClick; карточка на
-               компьютере (EmployeeCardSheet) — ещё short и icon для плитки и
-               page: экран внутри того же окна вместо второго окна поверх. */
+               компьютере (EmployeeCardPage) — ещё short и icon для кнопки и
+               page: страница следующего уровня вместо окна поверх. */
             const employeeEditAction = (employee) => ({
                 key: 'edit',
                 label: 'Изменить',
@@ -50964,7 +51003,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="flex justify-end gap-2">{renderDemotionButtons(back)}</div>
                         </div>
                     ) : (
-                        <div className="ecs-loading"><span className="ecs-spinner" aria-hidden="true" /></div>
+                        <div className="ecp-loading"><span className="ecp-spinner" aria-hidden="true" /></div>
                     )),
                 },
             };
@@ -50990,14 +51029,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return value;
             };
 
-            // Карточка сотрудника на компьютере — одна на все списки раздела.
-            const renderEmployeeCardSheet = ({ rows, columnsFor, subtitleOf, actionsFor }) => (
-                <Suspense fallback={null}>
-                    <EmployeeCardSheet
+            // Страница сотрудника на компьютере — одна на все списки раздела;
+            // открыта — стоит на месте списка (backLabel — его заголовок).
+            const renderEmployeeCardPage = ({ rows, backLabel, columnsFor, subtitleOf, actionsFor }) => (
+                <Suspense fallback={<div className="py-24 text-center text-sm text-slate-400">Загрузка…</div>}>
+                    <EmployeeCardPage
                         employeeId={employeeCardId}
                         rows={rows}
                         loading={isAdminDataLoading}
-                        onClose={closeEmployeeCard}
+                        onBack={closeEmployeeCard}
+                        backLabel={backLabel}
+                        getScrollRoot={() => mainContentRef.current}
                         cardSectionList={EMPLOYEE_TABLE_SECTIONS}
                         columnsFor={columnsFor}
                         renderValue={renderEmployeePhoneValue}
@@ -51130,8 +51172,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const searchedRows = filteredByStatus.filter((employee) => matchesEmployeeSearchQuery(employee, searchQuery));
                 const sortedRows = [...searchedRows].sort((a, b) => compareUsersByField(a, b, usersSortField));
 
+                if (employeeCardId != null) {
+                    return renderEmployeeCardPage({
+                        rows: allRows,
+                        backLabel: title,
+                        columnsFor: (tableSection, employee) => buildEmployeeColumnsOfSection(
+                            tableSection,
+                            columnsVariant,
+                            employeeCardDeptFields(employee, employeeDeptFieldsOfViewer()),
+                        ),
+                        subtitleOf: (employee) => [employee?.job_title, departmentNameOfEmployee(employee)]
+                            .filter(Boolean).join(' · '),
+                        actionsFor,
+                    });
+                }
+
                 return (
-                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                    <div className={`bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg${employeeListReturn ? ' ecp-in-left' : ''}`}>
                         <div className="flex items-center justify-between mb-6">
                             <h2 className="text-2xl font-semibold text-gray-800">{title}</h2>
 
@@ -51228,6 +51285,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {sortedRows.map((employee) => (
                                                 <tr
                                                     key={employee.id}
+                                                    data-employee-id={employee.id}
                                                     onClick={(event) => openEmployeeCardFromRow(event, employee.id)}
                                                     onKeyDown={(event) => handleEmployeeRowKeyDown(event, employee.id)}
                                                     tabIndex={0}
@@ -51262,17 +51320,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
 
                         {renderEmployeeTableSectionSwitcher()}
-                        {renderEmployeeCardSheet({
-                            rows: allRows,
-                            columnsFor: (tableSection, employee) => buildEmployeeColumnsOfSection(
-                                tableSection,
-                                columnsVariant,
-                                employeeCardDeptFields(employee, employeeDeptFieldsOfViewer()),
-                            ),
-                            subtitleOf: (employee) => [employee?.job_title, departmentNameOfEmployee(employee)]
-                                .filter(Boolean).join(' · '),
-                            actionsFor,
-                        })}
                     </div>
                 );
             };
@@ -55794,8 +55841,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     actionsFor: manageUsersActionsFor,
                                 })}
                                 {(view === 'manage_users' || view === 'employees') && (
-                                !isMobileShell && (
-                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                !isMobileShell && (employeeCardId != null ? renderEmployeeCardPage({
+                                    rows: operatorUsers,
+                                    backLabel: 'Сотрудники',
+                                    columnsFor: (tableSection, employee) => buildEmployeeColumnsOfSection(
+                                        tableSection,
+                                        'operator',
+                                        employeeCardDeptFields(employee, manageUsersDeptFields),
+                                    ),
+                                    subtitleOf: (employee) => [
+                                        employee?.job_title || employee?.direction,
+                                        departmentNameOfEmployee(employee),
+                                    ].filter(Boolean).join(' · '),
+                                    actionsFor: manageUsersActionsFor,
+                                }) : (
+                                <div className={`bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg${employeeListReturn ? ' ecp-in-left' : ''}`}>
                                     <div className="flex items-center justify-between mb-6">
                                     <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
 
@@ -56036,6 +56096,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         return (
                                                         <tr
                                                             key={u.id}
+                                                            data-employee-id={u.id}
                                                             onClick={(event) => handleManageUserRowClick(event, u.id)}
                                                             onKeyDown={(event) => handleEmployeeRowKeyDown(event, u.id)}
                                                             tabIndex={0}
@@ -56077,21 +56138,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     })()
                                     )}
                                     {renderEmployeeTableSectionSwitcher()}
-                                    {renderEmployeeCardSheet({
-                                        rows: operatorUsers,
-                                        columnsFor: (tableSection, employee) => buildEmployeeColumnsOfSection(
-                                            tableSection,
-                                            'operator',
-                                            employeeCardDeptFields(employee, manageUsersDeptFields),
-                                        ),
-                                        subtitleOf: (employee) => [
-                                            employee?.job_title || employee?.direction,
-                                            departmentNameOfEmployee(employee),
-                                        ].filter(Boolean).join(' · '),
-                                        actionsFor: manageUsersActionsFor,
-                                    })}
                                 </div>
-                                ))}
+                                )))}
                                 {view === 'manage_admins' && (isSuperAdmin || isEmployeeAccountingManager) && renderEmployeeDirectorySection({
                                     title: 'Админы',
                                     addLabel: 'Добавить админа',
