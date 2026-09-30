@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, ArrowLeft, Check, CheckCircle2, Circle, Copy, History, Loader2,
+    AlertCircle, ArrowLeft, CalendarClock, Check, CheckCircle2, Circle, Copy, History, Loader2,
     Paperclip, RefreshCw, Send, Trash2, UserRoundPen, X,
 } from 'lucide-react';
 import {
@@ -13,8 +13,11 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosTimePicker } from '../ui/TimePicker';
 import {
-    MESSAGE_KIND_LABELS, availableWorkActions, driverAnswers, eventText, openQuestion, statusView, workPayload,
-    workProblems, workSteps,
+    ACTION_HELD, ACTION_OTHER, ACTION_PLAN, MESSAGE_KIND_LABELS, REVIEW_PENDING, REVIEW_RESOLVED,
+    REVIEW_SENT,
+    activePlan, clockOf, driverAnswers, eventText, heldDraft, isPickedShift, isRecorded, openQuestion,
+    pickShift, planText, shiftKey, shiftLabel, statusView, workButtons, workPayload, workProblems,
+    workSteps,
 } from './complaintRules';
 import { DATE_TRIGGER, TIME_INPUT } from './styles';
 
@@ -47,11 +50,6 @@ const fmtShort = (iso) => (iso
     ? new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit',
         minute: '2-digit' })
     : '');
-
-const todayIso = () => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-};
 
 // Подписи событий истории — в complaintRules.eventText: там же и смысл события.
 
@@ -126,33 +124,73 @@ const Attachment = ({ message, complaintId, apiBaseUrl, headers, showToast }) =>
     );
 };
 
-/* ─── Работа с сотрудником: запись ─────────────────────────────────────────── */
+/* ─── Работа с сотрудником: три окна ──────────────────────────────────────────
+ *
+ * «Назначить тренинг», «Проведён тренинг», «Приняты другие меры» — три кнопки
+ * внизу блока (владелец, 30.09.2026, вместо одной «Записать работу»). Окно
+ * одно, содержимое — по кнопке: проверка и тело запроса живут в
+ * complaintRules.js под node --test. */
 
-const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showToast, onSaved }) => {
-    // Без сотрудника — только объяснение, почему работать не с кем.
-    const actions = availableWorkActions(meta?.work_actions || [], complaint);
-    const [code, setCode] = useState('');
+const WORK_TITLES = {
+    [ACTION_PLAN]: { title: 'Назначить тренинг', save: 'Назначить', done: 'Тренинг назначен' },
+    [ACTION_HELD]: { title: 'Проведён тренинг', save: 'Записать',
+                     done: 'Записано — занятие добавлено в «Тренинги»' },
+    [ACTION_OTHER]: { title: 'Приняты другие меры', save: 'Записать', done: 'Записано' },
+};
+
+const FieldLabel = ({ children }) => (
+    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">{children}</label>
+);
+
+const Problem = ({ text }) => (text ? <div className="text-[11.5px] text-rose-600">{text}</div> : null);
+
+const WorkModal = ({ code: liveCode, onClose, complaint, apiBaseUrl, headers, showToast, onSaved }) => {
+    const open = Boolean(liveCode);
+    // На телефоне окно ещё ~300 мс уезжает после закрытия (IosModal) — и всё
+    // это время рисуется с текущими пропсами. Без памяти о последнем режиме
+    // уезжающий экран на глазах менял бы заголовок на «Приняты другие меры» и
+    // пустел. Тот же приём, что в SupervisorDayMarksModal.
+    const lastCode = useRef(liveCode);
+    if (liveCode) lastCode.current = liveCode;
+    const code = liveCode || lastCode.current;
     const [draft, setDraft] = useState({});
     const [touched, setTouched] = useState(false);
     const [busy, setBusy] = useState(false);
-    const action = actions.find((item) => item.code === code) || null;
-    const problems = workProblems(action, draft, { today: todayIso() });
+    // Ближайшие смены — только окну «Назначить тренинг». null — ещё грузятся.
+    const [shifts, setShifts] = useState(null);
+    // «Сегодня» и «сейчас» — на момент открытия окна: проверка не должна
+    // менять мнение, пока человек выбирает время.
+    const [clock, setClock] = useState(clockOf);
+    const plan = activePlan(complaint);
 
     useEffect(() => {
-        if (!open) { setCode(''); setDraft({}); setTouched(false); }
-    }, [open]);
+        if (!open) return;
+        const now = clockOf();
+        setClock(now);
+        setTouched(false);
+        setDraft(liveCode === ACTION_HELD ? heldDraft(complaint, now)
+            : liveCode === ACTION_PLAN ? { date: now.today } : {});
+    }, [open, liveCode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const complaintId = complaint?.id;
+    useEffect(() => {
+        if (liveCode !== ACTION_PLAN || !complaintId) return undefined;
+        let cancelled = false;
+        setShifts(null);
+        axios.get(`${apiBaseUrl}/api/complaints/complaints/${complaintId}/shifts`,
+            { headers: headers() })
+            .then((response) => { if (!cancelled) setShifts(response.data.items || []); })
+            .catch(() => { if (!cancelled) setShifts([]); });
+        return () => { cancelled = true; };
+    }, [liveCode, complaintId, apiBaseUrl, headers]);
 
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
-    const pick = (next) => {
-        setCode(next);
-        const spec = actions.find((item) => item.code === next);
-        setDraft((prev) => ({ ...prev, reason: spec?.default_reason || '',
-                              date: prev.date || todayIso(),
-                              // Тренинг уже назначен — галочка стоит сразу: запись ОС
-                              // или разбора его не отменяет, и форма не делает вид,
-                              // что требования нет.
-                              need_training: Boolean(complaint?.training_required) }));
-    };
+    const problems = workProblems(code, draft, clock);
+    const shown = (key) => (touched ? problems[key] : null);
+    const titles = WORK_TITLES[code] || WORK_TITLES[ACTION_OTHER];
+
+    // Что подставляет смена и где галочка — complaintRules.pickShift.
+    const chooseShift = (shift) => setDraft((prev) => pickShift(prev, shift, clock));
 
     const save = async () => {
         setTouched(true);
@@ -161,135 +199,173 @@ const WorkModal = ({ open, onClose, meta, complaint, apiBaseUrl, headers, showTo
         try {
             const response = await axios.post(
                 `${apiBaseUrl}/api/complaints/complaints/${complaint.id}/work`,
-                workPayload(action, draft), { headers: headers() });
-            showToast?.(action.training ? 'Записано — занятие добавлено в «Тренинги»' : 'Записано',
-                'success');
+                workPayload(code, draft), { headers: headers() });
+            showToast?.(titles.done, 'success');
             onSaved?.(response.data);
             onClose();
         } catch (error) {
-            showToast?.(errorText(error, 'Не удалось записать работу'), 'error');
+            showToast?.(errorText(error, 'Не удалось записать'), 'error');
         } finally {
             setBusy(false);
         }
     };
 
-    const shown = (key) => (touched ? problems[key] : null);
-
     return (
-        <IosModal open={open} onClose={onClose}
-                  title="Работа с сотрудником"
-                  subtitle={complaint?.employee_name || 'Сотрудник не определён — запишите, почему работать не с кем'}
+        <IosModal open={open} onClose={onClose} title={titles.title}
+                  subtitle={complaint?.employee_name || 'Сотрудник не определён'}
+                  maxWidth="max-w-md"
                   footer={(
                       <>
                           <button type="button" onClick={onClose} className={iosBtnSecondary} disabled={busy}>
                               Отмена
                           </button>
-                          <button type="button" onClick={save} disabled={busy || !action} className={iosBtnPrimary}>
+                          <button type="button" onClick={save} disabled={busy} className={iosBtnPrimary}>
                               {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                              Записать
+                              {titles.save}
                           </button>
                       </>
                   )}>
-            <div className="space-y-4">
-                <div>
-                    <div className={`${iosGroupLabel} mb-1.5`}>Что сделано</div>
-                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {actions.map((item) => (
-                            <button key={item.code} type="button" onClick={() => pick(item.code)}
-                                    className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition hover:bg-slate-50">
-                                <span className="min-w-0 flex-1 text-[13.5px] text-slate-900">{item.title}</span>
-                                {code === item.code && <Check size={15} className="shrink-0 text-blue-600" />}
-                            </button>
-                        ))}
-                    </div>
-                    {shown('action') && <div className="mt-1 text-[11.5px] text-rose-600">{problems.action}</div>}
-                </div>
-
-                {action?.training && (
-                    <div className="space-y-3">
-                        <div className="flex items-center gap-1.5">
-                            <span className={iosGroupLabel}>Занятие</span>
+            {code === ACTION_PLAN && (
+                <div className="space-y-4">
+                    <div>
+                        <div className="mb-1.5 flex items-center gap-1.5">
+                            <span className={iosGroupLabel}>Ближайшие смены</span>
                             <InfoHint side="left">
-                                Запись появится в разделе «Тренинги»: по сотруднику, с номером и темой
-                                жалобы. Время занятия идёт в его часы — так же, как обратная связь по
-                                оценке звонка.
+                                В день тренинга супервайзерам отдела и самому сотруднику придёт
+                                уведомление. Работа с сотрудником останется открытой, пока тренинг
+                                не проведут.
                             </InfoHint>
                         </div>
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                            <div>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Дата</label>
-                                <IosDatePicker value={draft.date || ''} max={todayIso()} className="w-full"
-                                               triggerClassName={DATE_TRIGGER}
-                                               onChange={(value) => set('date', value)} ariaLabel="Дата занятия" />
-                            </div>
-                            <div>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Начало</label>
-                                <IosTimePicker value={draft.start || ''} onChange={(value) => set('start', value)}
-                                               step={5} className="w-full" inputClassName={TIME_INPUT}
-                                               ariaLabel="Начало занятия" />
-                            </div>
-                            <div>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Конец</label>
-                                <IosTimePicker value={draft.end || ''} onChange={(value) => set('end', value)}
-                                               step={5} className="w-full" inputClassName={TIME_INPUT}
-                                               ariaLabel="Окончание занятия" />
-                            </div>
-                        </div>
-                        {(shown('date') || shown('time')) && (
-                            <div className="text-[11.5px] text-rose-600">{problems.date || problems.time}</div>
-                        )}
-                        <CustomSelect variant="ios" value={draft.reason || action.default_reason || ''}
-                                      onChange={(value) => set('reason', value)}
-                                      options={(meta?.training_reasons || []).map((item) => ({ value: item, label: item }))}
-                                      ariaLabel="Вид занятия" />
-                    </div>
-                )}
-
-                {action && (
-                    <>
-                        <div>
-                            <div className={`${iosGroupLabel} mb-1.5`}>
-                                {action.code === 'feedback' ? 'Какая обратная связь проведена'
-                                    : action.code === 'no_training' ? 'Почему обучение не требуется'
-                                        : 'Что сделано'}
-                            </div>
-                            <textarea value={draft.comment || ''} rows={3}
-                                      onChange={(e) => set('comment', e.target.value)}
-                                      className={`${iosInput} resize-y`} />
-                            {shown('comment') && <div className="mt-1 text-[11.5px] text-rose-600">{problems.comment}</div>}
-                        </div>
-                        {action.training && (
-                            <div>
-                                <div className={`${iosGroupLabel} mb-1.5`}>Результат</div>
-                                <input value={draft.outcome || ''} onChange={(e) => set('outcome', e.target.value)}
-                                       placeholder="К чему пришли с сотрудником"
-                                       className={iosInput} />
-                                {shown('outcome') && <div className="mt-1 text-[11.5px] text-rose-600">{problems.outcome}</div>}
-                            </div>
-                        )}
-                        {action.ask_training && complaint?.training_required && (
-                            <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] leading-snug text-slate-600">
-                                Тренинг уже назначен — работа останется открытой, пока не запишете
-                                «Проведён тренинг» или «Дополнительное обучение не требуется».
-                            </div>
-                        )}
-                        {action.ask_training && !complaint?.training_required && (
-                            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-slate-50 px-3.5 py-2.5">
-                                <input type="checkbox" checked={Boolean(draft.need_training)}
-                                       onChange={(e) => set('need_training', e.target.checked)}
-                                       className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600" />
-                                <span className="text-[13px] leading-snug text-slate-800">
-                                    Нужен тренинг
-                                    {draft.need_training && (
-                                        <span className="block text-[12px] text-slate-500">
-                                            Работа останется открытой, пока тренинг не проведут
-                                        </span>
+                        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                            {shifts === null && (
+                                <div className="flex items-center gap-2 px-4 py-2.5 text-[12.5px] text-slate-400">
+                                    <Loader2 size={13} className="animate-spin" /> Загрузка смен…
+                                </div>
+                            )}
+                            {shifts && !shifts.length && (
+                                <div className="px-4 py-2.5 text-[12.5px] text-slate-400">
+                                    Ближайших смен в графике нет
+                                </div>
+                            )}
+                            {(shifts || []).map((shift) => (
+                                <button key={shiftKey(shift)} type="button"
+                                        onClick={() => chooseShift(shift)}
+                                        className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition hover:bg-slate-50">
+                                    <CalendarClock size={15} className="shrink-0 text-slate-400" />
+                                    <span className="min-w-0 flex-1 text-[13.5px] tabular-nums text-slate-900">
+                                        {shiftLabel(shift)}
+                                        {shift.ongoing && <span className="text-slate-500"> · идёт сейчас</span>}
+                                    </span>
+                                    {isPickedShift(draft, shift, clock) && (
+                                        <Check size={15} className="shrink-0 text-blue-600" />
                                     )}
-                                </span>
-                            </label>
-                        )}
-                    </>
-                )}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                        <div>
+                            <FieldLabel>День</FieldLabel>
+                            <IosDatePicker value={draft.date || ''} min={clock.today} className="w-full"
+                                           triggerClassName={DATE_TRIGGER}
+                                           onChange={(value) => set('date', value)} ariaLabel="День тренинга" />
+                        </div>
+                        <div>
+                            <FieldLabel>Время</FieldLabel>
+                            <IosTimePicker value={draft.time || ''} onChange={(value) => set('time', value)}
+                                           step={5} className="w-full" inputClassName={TIME_INPUT}
+                                           ariaLabel="Время тренинга" />
+                        </div>
+                    </div>
+                    <Problem text={shown('date') || shown('time')} />
+                </div>
+            )}
+
+            {code === ACTION_HELD && (
+                <div className="space-y-3">
+                    <div className="flex items-center gap-1.5">
+                        <span className={iosGroupLabel}>Занятие</span>
+                        <InfoHint side="left">
+                            Запись сразу появится в «Тренингах» — по сотруднику, с номером и темой
+                            жалобы — и пойдёт в его часы, как обратная связь по оценке звонка.
+                        </InfoHint>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <div>
+                            <FieldLabel>Дата</FieldLabel>
+                            <IosDatePicker value={draft.date || ''} max={clock.today} className="w-full"
+                                           triggerClassName={DATE_TRIGGER}
+                                           onChange={(value) => set('date', value)} ariaLabel="Дата занятия" />
+                        </div>
+                        <div>
+                            <FieldLabel>Начало</FieldLabel>
+                            <IosTimePicker value={draft.start || ''} onChange={(value) => set('start', value)}
+                                           step={5} className="w-full" inputClassName={TIME_INPUT}
+                                           ariaLabel="Начало занятия" />
+                        </div>
+                        <div>
+                            <FieldLabel>Конец</FieldLabel>
+                            <IosTimePicker value={draft.end || ''} onChange={(value) => set('end', value)}
+                                           step={5} className="w-full" inputClassName={TIME_INPUT}
+                                           ariaLabel="Окончание занятия" />
+                        </div>
+                    </div>
+                    <Problem text={shown('date') || shown('time')} />
+                </div>
+            )}
+
+            {code === ACTION_OTHER && (
+                <div className="space-y-3">
+                    <div>
+                        <div className={`${iosGroupLabel} mb-1.5`}>Что сделано</div>
+                        <textarea value={draft.comment || ''} rows={4}
+                                  onChange={(e) => set('comment', e.target.value)}
+                                  className={`${iosInput} resize-y`} />
+                        <Problem text={shown('comment')} />
+                    </div>
+                    {/* Последствие называем до нажатия: «другие меры» снимают
+                        назначенный тренинг (catalog.TRAINING_CLEARING_ACTIONS). */}
+                    {complaint?.training_required && (
+                        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12.5px] leading-snug text-slate-600">
+                            {plan
+                                ? `Назначенный на ${planText(plan)} тренинг будет снят, и работа с сотрудником завершится.`
+                                : 'Требование тренинга будет снято, и работа с сотрудником завершится.'}
+                        </div>
+                    )}
+                </div>
+            )}
+        </IosModal>
+    );
+};
+
+/* ─── Жалоба на проверке: «Решено» с итогом ─────────────────────────────────── */
+
+const ResolveModal = ({ open, onClose, onResolve, busy }) => {
+    const [note, setNote] = useState('');
+    const [touched, setTouched] = useState(false);
+    useEffect(() => { if (!open) { setNote(''); setTouched(false); } }, [open]);
+    const empty = !note.trim();
+    return (
+        <IosModal open={open} onClose={onClose} title="Решено" maxWidth="max-w-md"
+                  subtitle="Жалоба закроется с вашим итогом и в группу не уйдёт"
+                  footer={(
+                      <>
+                          <button type="button" onClick={onClose} className={iosBtnSecondary} disabled={busy}>
+                              Отмена
+                          </button>
+                          <button type="button" disabled={busy} className={iosBtnPrimary}
+                                  onClick={() => { setTouched(true); if (!empty) onResolve(note.trim()); }}>
+                              {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                              Сохранить
+                          </button>
+                      </>
+                  )}>
+            <div>
+                <div className={`${iosGroupLabel} mb-1.5`}>Итог</div>
+                <textarea value={note} rows={4} onChange={(e) => setNote(e.target.value)}
+                          placeholder="Что выяснили и что сделали"
+                          className={`${iosInput} resize-y`} />
+                <Problem text={touched && empty ? 'Напишите итог' : null} />
             </div>
         </IosModal>
     );
@@ -407,7 +483,10 @@ export default function ComplaintCard({
     const [sending, setSending] = useState(false);
     const [resultDraft, setResultDraft] = useState(null);
     const [savingResult, setSavingResult] = useState(false);
-    const [workOpen, setWorkOpen] = useState(false);
+    // Какое окно работы с сотрудником открыто: код действия или null.
+    const [workCode, setWorkCode] = useState(null);
+    const [resolveOpen, setResolveOpen] = useState(false);
+    const [reviewBusy, setReviewBusy] = useState(false);
     const [employeeOpen, setEmployeeOpen] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [events, setEvents] = useState(null);
@@ -520,6 +599,30 @@ export default function ComplaintCard({
         }
     };
 
+    /* Решение по жалобе на проверке (Яндекс). «В группу» может лечь, а
+       доставка — нет (бота выгнали, группа не выбрана): тогда жалоба уже
+       отправлена супервайзером, а повтор — обычной «Отправить ещё раз». */
+    const review = async (decision, note = '') => {
+        setReviewBusy(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/complaints/complaints/${complaintId}/review`,
+                { decision, note }, { headers: headers() });
+            applyItem(response.data);
+            setResolveOpen(false);
+            if (decision === 'resolve') showToast?.('Решено — жалоба закрыта', 'success');
+            else if (response.data.delivered) showToast?.('Жалоба отправлена в группу', 'success');
+            else showToast?.(`В группу не ушла: ${response.data.delivery_error || 'ошибка Telegram'}`, 'error');
+        } catch (err) {
+            showToast?.(errorText(err, 'Не удалось сохранить решение'), 'error');
+            // Решение уже принял другой: окно «Решено» закрываем — его
+            // «Сохранить» отдало бы тот же отказ ещё раз.
+            if (err?.response?.status === 409) { setResolveOpen(false); load(true); }
+        } finally {
+            setReviewBusy(false);
+        }
+    };
+
     const remove = async () => {
         try {
             await axios.delete(`${apiBaseUrl}/api/complaints/complaints/${complaintId}`, { headers: headers() });
@@ -555,6 +658,8 @@ export default function ComplaintCard({
     const showResult = permissions.can_handle
         ? (item.requires_processing !== false || Boolean(item.result_code))
         : Boolean(item.result_code);
+    const underReview = item.review_state === REVIEW_PENDING;
+    const buttons = workButtons(meta, item);
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -722,15 +827,10 @@ export default function ComplaintCard({
                     </Section>
                 ) : null}
 
-                {/* Работа с сотрудником — лесенка фактов ТЗ и журнал. */}
+                {/* Работа с сотрудником — лесенка фактов, журнал и три кнопки
+                    внизу (владелец, 30.09.2026, вместо «Записать работу»). */}
                 {employeeTarget && permissions.can_handle && (
-                    <Section title="Работа с сотрудником"
-                             right={permissions.can_record_work ? (
-                                 <button type="button" onClick={() => setWorkOpen(true)}
-                                         className="px-1 text-[12.5px] font-semibold text-blue-600 transition hover:text-blue-700">
-                                     Записать работу
-                                 </button>
-                             ) : null}>
+                    <Section title="Работа с сотрудником">
                         <div className="space-y-2 px-4 py-3">
                             {steps.map((step) => (
                                 <div key={step.key} className="flex items-center gap-2.5">
@@ -770,13 +870,31 @@ export default function ComplaintCard({
                                         её легко принять за работу с нынешним. */}
                                     {entry.employee_name && Number(entry.employee_id) !== Number(item.employee_id)
                                         ? ` · с сотрудником ${entry.employee_name}` : ''}
-                                    {entry.training_id && entry.training_date
-                                        ? ` · в «Тренингах»: ${new Date(entry.training_date).toLocaleDateString('ru-RU')} ${entry.start_time}–${entry.end_time}`
-                                        : ''}
+                                    {/* Даты занятия — если их нет в самой записи: у
+                                        «Проведён тренинг» с 30.09.2026 они уже в тексте. */}
+                                    {entry.training_id ? (() => {
+                                        const day = entry.training_date
+                                            ? new Date(entry.training_date).toLocaleDateString('ru-RU') : '';
+                                        return day && !String(entry.comment || '').includes(day)
+                                            ? ` · в «Тренингах»: ${day} ${entry.start_time}–${entry.end_time}`
+                                            : ' · в «Тренингах»';
+                                    })() : ''}
                                     {entry.need_training ? ' · нужен тренинг' : ''}
                                 </div>
                             </div>
                         ))}
+                        {permissions.can_record_work && (
+                            <div className="grid grid-cols-1 gap-2 px-4 py-3 sm:grid-cols-3">
+                                {buttons.map((action) => (
+                                    <button key={action.code} type="button"
+                                            onClick={() => setWorkCode(action.code)}
+                                            disabled={action.disabled} title={action.hint || undefined}
+                                            className={`${iosBtnSecondary} !px-2 !py-2 !text-[12.5px]`}>
+                                        {action.button}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
                     </Section>
                 )}
 
@@ -826,8 +944,23 @@ export default function ComplaintCard({
                 {/* Служебное: кто принял, куда ушло. Мелко, внизу — это справка. */}
                 <div className="space-y-1 px-1 pb-2 text-[11.5px] leading-snug text-slate-400">
                     <div>Принял {item.created_by_name || '—'} · {fmtDateTime(item.created_at)}</div>
-                    {item.requires_processing === false ? (
-                        <div>Жалоба зафиксирована для аналитики — в группу не отправлялась</div>
+                    {/* Решённую при проверке подписывает блок «Итог проверки»
+                        (кто и когда) — второй строкой о том же моменте здесь
+                        она не повторяется. */}
+                    {item.review_state === REVIEW_SENT && item.review_by_name && item.review_at && (
+                        <div>
+                            Проверил {item.review_by_name} · {fmtDateTime(item.review_at)} — отправил в группу
+                        </div>
+                    )}
+                    {underReview ? (
+                        // У проверяющего внизу панель решения — там всё сказано.
+                        permissions.can_review ? null : (
+                            <div>Ждёт проверки супервайзером — в группу уйдёт, только если он решит</div>
+                        )
+                    ) : item.requires_processing === false ? (
+                        isRecorded(item)
+                            ? <div>Жалоба зафиксирована для аналитики — в группу не отправлялась</div>
+                            : null
                     ) : item.delivery_status === 'sent' ? (
                         <div>В группе «{item.tg_chat_title || 'Жалобы'}»</div>
                     ) : (
@@ -840,11 +973,40 @@ export default function ComplaintCard({
                             </button>
                         </div>
                     )}
-                    {item.closed_at && item.status === 'closed' && item.requires_processing !== false && (
+                    {item.closed_at && item.status === 'closed' && !isRecorded(item)
+                        && item.review_state !== REVIEW_RESOLVED && (
                         <div>Отработана {fmtDateTime(item.closed_at)}</div>
                     )}
                 </div>
             </div>
+
+            {/* Решение по жалобе на проверке (Яндекс, владелец 30.09.2026): стоит
+                внимания — в группу, нет — «Решено» с итогом. Внизу, на месте поля
+                ответа: это главное, что здесь можно сделать. */}
+            {permissions.can_review && (
+                <div className="shrink-0 border-t border-slate-100 px-4 py-3">
+                    <div className="mb-2 flex items-center gap-1.5">
+                        <span className="text-[12.5px] font-medium text-slate-600">Проверка супервайзером</span>
+                        <InfoHint side="left">
+                            Стоит внимания — отправьте в группу: дальше она пойдёт как любая жалоба.
+                            Нет — «Решено» с итогом: жалоба закроется и в группу не уйдёт.
+                        </InfoHint>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                        <button type="button" onClick={() => setResolveOpen(true)} disabled={reviewBusy}
+                                className={iosBtnSecondary}>
+                            <CheckCircle2 size={14} /> Решено
+                        </button>
+                        <button type="button" onClick={() => review('send')}
+                                disabled={reviewBusy || (meta?.group && !meta.group.ready)}
+                                title={meta?.group && !meta.group.ready ? 'Telegram-группа для жалоб не выбрана' : undefined}
+                                className={iosBtnPrimary}>
+                            {reviewBusy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                            Отправить в группу
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* Ответ в группу: на открытый вопрос — или дополнение. */}
             {permissions.can_write && (
@@ -879,9 +1041,11 @@ export default function ComplaintCard({
                 </div>
             )}
 
-            <WorkModal open={workOpen} onClose={() => setWorkOpen(false)} meta={meta} complaint={item}
+            <WorkModal code={workCode} onClose={() => setWorkCode(null)} complaint={item}
                        apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
                        onSaved={(next) => applyItem(next)} />
+            <ResolveModal open={resolveOpen} onClose={() => setResolveOpen(false)} busy={reviewBusy}
+                          onResolve={(note) => review('resolve', note)} />
             <EmployeeModal open={employeeOpen} onClose={() => setEmployeeOpen(false)} complaint={item}
                            meta={meta} apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
                            onSaved={(next) => { applyItem(next); load(true); }} />

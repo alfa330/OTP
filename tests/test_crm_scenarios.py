@@ -95,6 +95,8 @@ def full(scenario_key, **overrides):
             answers[key] = 'yes' if kind == sc.YESNO else {'value': 'no'}
         elif kind == sc.DATETIME:
             answers[key] = '2026-07-15T10:00'
+        elif kind == sc.EMAIL:
+            answers[key] = 'partner@company.kz'
         elif kind == sc.CITY:
             # Тот же город, что в снимке офисов: у статуса офиса они обязаны
             # совпадать, иначе тест проверял бы несуществующую пару.
@@ -188,9 +190,44 @@ class CooperationTest(unittest.TestCase):
     def test_fields_before_the_type_are_asked_always(self):
         self.assertEqual(self.keys({})[:4],
                          ['coop_channel', 'coop_park', 'coop_city', 'coop_type'])
-        self.assertEqual(sc.get(self.KEY)['steps'][0]['options'], ['Звонок', 'Чат'])
-        self.assertEqual(sc.get(self.KEY)['steps'][3]['options'],
+        # «После Звонок, Чат — электронная почта» (владелец, 30.09.2026).
+        self.assertEqual(sc.get(self.KEY)['steps'][0]['options'],
+                         ['Звонок', 'Чат', 'Электронная почта'])
+        self.assertEqual(sc.get(self.KEY)['steps'][4]['options'],
                          [sc.COOP_WITH_YANDEX, sc.COOP_WITH_PARKS])
+
+    def test_email_is_asked_right_after_the_channel_and_only_for_email(self):
+        """«Возможность ввести эл. почту»: поле встаёт сразу под выбором и
+        только у письма — у звонка и чата его нет."""
+        for channel in ('Звонок', 'Чат'):
+            self.assertNotIn('coop_email', self.keys({'coop_channel': channel}), channel)
+        keys = self.keys({'coop_channel': sc.COOP_BY_EMAIL})
+        self.assertEqual(keys[:2], ['coop_channel', 'coop_email'])
+        # Нового экрана поле не заводит: всё на «Данных обращения».
+        self.assertEqual(sc.all_groups(sc.get(self.KEY)), ['Данные обращения', 'Вложение'])
+
+    def test_email_must_be_an_address(self):
+        base = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX, coop_channel=sc.COOP_BY_EMAIL)
+        for bad in ('', 'partner', 'partner@company', 'partner company.kz', 'a@b@c.kz'):
+            answers = dict(base, coop_email=bad)
+            self.assertIn('coop_email', verdict(self.KEY, answers)['missing'], repr(bad))
+        self.assertEqual(verdict(self.KEY, base)['outcome'], sc.READY)
+
+    def test_email_reaches_the_group_next_to_the_number(self):
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX, coop_channel=sc.COOP_BY_EMAIL,
+                       coop_phone='+77011234567', coop_email='partner@company.kz')
+        body = sc.render_body(self.KEY, answers)
+        self.assertIn('Канал обращения: Электронная почта', body)
+        self.assertIn('Электронная почта: partner@company.kz', body)
+        self.assertLess(body.index('Номер для обратного звонка'), body.index('partner@company.kz'))
+
+    def test_email_of_another_channel_is_dropped(self):
+        """Выбрал «Электронная почта», ввёл адрес, переключил на «Звонок» —
+        адрес в группу не уходит (visible_answers)."""
+        answers = full(self.KEY, coop_type=sc.COOP_WITH_YANDEX, coop_channel='Звонок',
+                       coop_email='partner@company.kz')
+        self.assertNotIn('coop_email', sc.visible_answers(self.KEY, answers))
+        self.assertNotIn('partner@company.kz', sc.render_body(self.KEY, answers))
 
     def test_yandex_branch_asks_the_number_and_a_comment(self):
         """Одного номера группе мало: не видно, кто звонил и о чём просит

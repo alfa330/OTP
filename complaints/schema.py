@@ -315,10 +315,51 @@ _STATEMENTS = [
     """ % {'now': _NOW},
 ]
 
-# Столбцы, появившиеся после первого выката. Пока пусто — список заведён
-# сразу, чтобы порядок «таблицы → ALTER → индексы» был виден с первого дня
-# (crm/schema.py поплатился за обратный порядок падением прода 17.08.2026).
-_MIGRATIONS = []
+# Столбцы, появившиеся после первого выката. Порядок «таблицы → ALTER →
+# индексы» обязателен (crm/schema.py поплатился за обратный падением прода
+# 17.08.2026): индексы ниже ссылаются на эти столбцы.
+_MIGRATIONS = [
+    # Проверка супервайзером до группы (Яндекс, владелец 30.09.2026):
+    # catalog.REVIEW_*. NULL — жалоба проверки не проходит (или заведена до
+    # неё — тогда она «зафиксирована»). Кто и когда решил — для карточки и
+    # строки в сообщении группы «передал после проверки».
+    """
+    ALTER TABLE complaints
+        ADD COLUMN IF NOT EXISTS review_state   VARCHAR(16),
+        ADD COLUMN IF NOT EXISTS review_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS review_by_name VARCHAR(255),
+        ADD COLUMN IF NOT EXISTS review_at      TIMESTAMP
+    """,
+    # На когда назначен тренинг («Назначить тренинг», 30.09.2026). Хранится в
+    # жалобе, а не только в журнале: по нему колокол в этот день будит
+    # супервайзеров отдела и самого сотрудника, и искать последнюю запись
+    # журнала на каждый запрос сводки было бы джойном ради одного поля.
+    # Действует, пока training_required: проведённый тренинг или «другие меры»
+    # снимают требование, и уведомление гаснет само.
+    """
+    ALTER TABLE complaints
+        ADD COLUMN IF NOT EXISTS training_planned_at TIMESTAMP
+    """,
+    # У записи «Назначен тренинг» — на когда назначали: переназначение пишет
+    # новую запись, и в журнале видны обе даты.
+    """
+    ALTER TABLE complaint_work_log
+        ADD COLUMN IF NOT EXISTS planned_at TIMESTAMP
+    """,
+    # Очередь проверки у супервайзера — единицы строк среди всех жалоб.
+    """
+    CREATE INDEX IF NOT EXISTS idx_complaints_review_pending
+        ON complaints(created_by, created_at DESC)
+        WHERE review_state = 'pending'
+    """,
+    # Колокол «тренинг сегодня» спрашивает его у каждого зрителя на каждую
+    # сводку — частичный индекс по действующим назначениям.
+    """
+    CREATE INDEX IF NOT EXISTS idx_complaints_training_planned
+        ON complaints(training_planned_at)
+        WHERE training_required AND training_planned_at IS NOT NULL
+    """,
+]
 
 
 def _is_table(statement):

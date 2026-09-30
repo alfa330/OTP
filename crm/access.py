@@ -170,6 +170,18 @@ def can_manage_queues(ctx):
     return is_global_admin(ctx) or is_department_head(ctx) or is_supervisor(ctx)
 
 
+def can_export(ctx):
+    """Выгрузить обращения в Excel за период (владелец, 30.09.2026).
+
+    Тем же, кто настраивает очереди: глобальному админу, главе отдела и
+    супервайзеру. Выгрузка — это все обращения периода с ИИН и телефонами
+    водителей одним файлом; оператору в разделе они видны по одному, а файл
+    уносится с рабочего места целиком. Как и у очередей, проверяется ПОСЛЕ
+    can_open_section: супервайзер чужого отдела до выгрузки не доходит.
+    """
+    return is_global_admin(ctx) or is_department_head(ctx) or is_supervisor(ctx)
+
+
 def can_create_ticket(ctx):
     """Создавать обращения может каждый, кого пустили в раздел.
 
@@ -249,6 +261,7 @@ def capabilities(ctx):
         'can_open': can_open_section(ctx),
         'can_create': can_create_ticket(ctx),
         'can_manage_queues': can_manage_queues(ctx),
+        'can_export': can_export(ctx),
         'is_global_admin': is_global_admin(ctx),
         'is_department_head': is_department_head(ctx),
         'is_supervisor': is_supervisor(ctx),

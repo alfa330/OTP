@@ -2,7 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import axios from 'axios';
 import {
     AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, Check, CheckCircle2, ChevronRight, Copy,
-    CornerDownRight, CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
+    CornerDownRight, CornerUpLeft, Download, FileText, Inbox, ListChecks, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
     XCircle,
 } from 'lucide-react';
@@ -12,6 +12,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import TicketWizard from './TicketWizard';
+import TicketsExport from './TicketsExport';
 import {
     BLOCK_CHECKS, BLOCK_CONTEXT, BLOCK_WARNING, bodyDigest, describeBody,
 } from './ticketBody';
@@ -27,7 +28,8 @@ import { fitHeight, measureShell } from './layout';
 import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds, withSortRank } from './feedMerge';
 import { TARGET_ICONS } from '../complaints/ComplaintDraft';
 import {
-    openQuestion, rowBadges as complaintRowBadges, rowSubtitle as complaintRowSubtitle, statusView,
+    isRecorded, openQuestion, rowBadges as complaintRowBadges,
+    rowSubtitle as complaintRowSubtitle, statusView, whereabouts,
 } from '../complaints/complaintRules';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
@@ -1447,9 +1449,7 @@ const ComplaintFacts = ({ item, showToast }) => {
             </dl>
             <div className="text-[11.5px] leading-snug text-slate-400">
                 Принял {item.created_by_name || '—'} · {fmtDateTime(item.created_at)}
-                {item.requires_processing === false
-                    ? ' · зафиксирована для аналитики, в группу не отправлялась'
-                    : item.tg_chat_title ? ` · в группе «${item.tg_chat_title}»` : ''}
+                {whereabouts(item) ? ` · ${whereabouts(item)}` : ''}
             </div>
         </div>
     );
@@ -1705,7 +1705,7 @@ const ComplaintThreadCard = ({
                                     : 'Жалоба ещё не в группе'}
                             </div>
                         )}
-                        {item.status === 'closed' && item.closed_at && item.requires_processing !== false && (
+                        {item.status === 'closed' && item.closed_at && !isRecorded(item) && (
                             <div className="mt-3 flex items-center justify-center text-[11.5px] font-medium text-emerald-700">
                                 <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 ring-1 ring-emerald-100">
                                     <CheckCircle2 size={13} /> Отработана · {fmtDateTime(item.closed_at)}
@@ -1783,7 +1783,7 @@ const ComplaintThreadCard = ({
                 ) : (
                     <div className="text-center text-[12px] text-slate-400">
                         {item.requires_processing === false
-                            ? 'Жалоба зафиксирована для аналитики — в группу не отправлялась'
+                            ? `Жалоба ${whereabouts(item) || 'не в группе'}`
                             : item.status === 'closed' ? 'Жалоба отработана' : 'Писать в группу по этой жалобе нельзя'}
                     </div>
                 )}
@@ -2174,6 +2174,7 @@ export default function CrmTicketsView({
     const [error, setError] = useState(null);
     const [selectedId, setSelectedId] = useState(null);
     const [composerOpen, setComposerOpen] = useState(false);
+    const [exportOpen, setExportOpen] = useState(false);
 
     /* Свои жалобы — в той же ленте (решение владельца 29.09.2026). Справочник
        раздела жалоб приезжает только тому, кто вправе их заводить; у остальных
@@ -2634,6 +2635,16 @@ export default function CrmTicketsView({
                             ))}
                         </div>
                     )}
+                    {/* Выгрузка в Excel за период — у СВ, главы и админа
+                        (capabilities.can_export). В режиме отбора её нет: там
+                        идёт чистка, и третья кнопка в шапке — лишняя. */}
+                    {tab === 'tickets' && capabilities?.can_export && !selectMode && (
+                        <button type="button" onClick={() => setExportOpen(true)}
+                                title="Выгрузить обращения за период в Excel"
+                                className={iosBtnGhost}>
+                            <Download size={14} /> Выгрузить
+                        </button>
+                    )}
                     {/* Отбор к удалению — только у администратора и только на
                         вкладке обращений. Пока он идёт, «Новое обращение» с
                         экрана убрано: заводить обращение посреди чистки никто
@@ -2968,6 +2979,9 @@ export default function CrmTicketsView({
                     </div>
                 </div>
             </IosModal>
+
+            <TicketsExport open={exportOpen} onClose={() => setExportOpen(false)}
+                           apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
 
             <TicketWizard
                 open={composerOpen}

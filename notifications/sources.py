@@ -34,7 +34,8 @@ from datetime import datetime, time as day_time, timedelta
 # «Вопросы операторов» — сразу за задачами: на той стороне оператор, которому
 # помощник не ответил, и ответ ему нужен сейчас, а не к дедлайну.
 SOURCES = ('wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests',
-           'crm', 'complaints', 'lms', 'surveys', 'events', 'four_you', 'birthdays')
+           'crm', 'complaints', 'training_plans', 'lms', 'surveys', 'events', 'four_you',
+           'birthdays')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -461,10 +462,12 @@ def _crm_queries():
 
 # ── Жалобы ───────────────────────────────────────────────────────────────────
 def complaints(cursor, viewer, limit):
-    """Задачи раздела «Жалобы» (задача #297): «на сотрудника поступила жалоба,
-    необходимо провести обратную связь и зафиксировать результат» (ТЗ).
-    Гаснет, когда работа с сотрудником завершена, а не просмотром: это
-    задача, а не новость.
+    """Задачи раздела «Жалобы» (задача #297). Гаснут действием, а не
+    просмотром: это задачи, а не новости.
+
+      work    на сотрудника поступила жалоба — назначьте или проведите
+              тренинг, запишите принятые меры (три кнопки карточки);
+      review  жалоба на Яндекс ждёт проверки — в группу или «Решено».
 
     Ответы и вопросы по своим жалобам автор получает в источнике crm — он
     работает с ними в «Обращениях», а не здесь.
@@ -473,17 +476,91 @@ def complaints(cursor, viewer, limit):
     from complaints import queries as complaint_queries
 
     total, rows = complaint_queries.work_bell_items(cursor, viewer['user_id'], limit)
-    return total, [{
-        'source': 'complaints',
-        'id': 'work:%s' % row['id'],
-        'title': 'Жалоба на %s' % (row['employee_name'] or 'сотрудника'),
-        'body': 'Проведите обратную связь и зафиксируйте результат · %s'
-                % complaint_catalog.reason_title(row['target'], row['reason_code']),
-        'at': _iso(row['at']),
-        'view': 'complaints',
-        'target': row['id'],
-        'tone': 'default',
-    } for row in rows]
+    items = []
+    for row in rows:
+        reason = complaint_catalog.reason_title(row['target'], row['reason_code'])
+        if row.get('kind') == 'review':
+            items.append({
+                'source': 'complaints',
+                'id': 'review:%s' % row['id'],
+                'title': 'Жалоба на Яндекс №%s' % row['id'],
+                'body': 'Проверьте: отправить в группу или решено · %s' % reason,
+                'at': _iso(row['at']),
+                'view': 'complaints',
+                'target': row['id'],
+                'tone': 'default',
+            })
+            continue
+        planned = row.get('training_planned_at') if row.get('training_required') else None
+        if planned:
+            todo = 'Тренинг назначен на %s' % planned.strftime('%d.%m в %H:%M')
+        elif row.get('training_required'):
+            todo = 'Назначьте тренинг'
+        else:
+            todo = 'Назначьте тренинг или запишите принятые меры'
+        items.append({
+            'source': 'complaints',
+            'id': 'work:%s' % row['id'],
+            'title': 'Жалоба на %s' % (row['employee_name'] or 'сотрудника'),
+            'body': '%s · %s' % (todo, reason),
+            'at': _iso(row['at']),
+            'view': 'complaints',
+            'target': row['id'],
+            'tone': 'default',
+        })
+    return total, items
+
+
+# ── Назначенные тренинги ─────────────────────────────────────────────────────
+def training_plans(cursor, viewer, limit):
+    """Тренинг, назначенный на сегодня кнопкой «Назначить тренинг» в жалобе:
+    «в этот день супервайзерам этого отдела приходит уведомление о наличии
+    запланированного тренинга, оператору тоже» (владелец, 30.09.2026).
+
+    Своим источником, а не строкой «Жалоб»: сотруднику жалоба на него не видна
+    НИКОГДА (complaints/access.can_view), и подпись «Жалобы» над его строкой
+    выдала бы её. Поэтому ему — только время, без номера, темы и перехода.
+    Супервайзер отдела переходит в карточку жалобы.
+
+    Строка живёт один день — день тренинга: появляется в полночь (момент
+    отдаёт next_change_at) и гаснет, как только тренинг проведён или приняты
+    другие меры. Погасить её просмотром нельзя: она про дело, а не новость.
+    """
+    from complaints import queries as complaint_queries
+
+    total, rows = complaint_queries.training_day_bell_items(
+        cursor, viewer['user_id'], _almaty_now().date(), limit)
+    items = []
+    for row in rows:
+        at = row['training_planned_at'].strftime('%H:%M')
+        if row['side'] == 'self':
+            items.append({
+                'source': 'training_plans',
+                # Ключ строки — время тренинга, а не номер жалобы: id уходит в
+                # клиент (отпечаток сводки), и номер выдал бы жалобу, которая
+                # сотруднику не видна.
+                'id': 'self:%s' % row['training_planned_at'].strftime('%Y%m%d%H%M'),
+                'title': 'Тренинг сегодня в %s' % at,
+                'body': 'Вам назначен тренинг — подойдите к супервайзеру',
+                'at': None,
+                # Перехода нет: вести сотрудника некуда — карточка, из которой
+                # тренинг назначен, ему закрыта.
+                'view': None,
+                'target': None,
+                'tone': 'default',
+            })
+        else:
+            items.append({
+                'source': 'training_plans',
+                'id': 'team:%s' % row['id'],
+                'title': row['employee_name'] or 'Сотрудник',
+                'body': 'Тренинг сегодня в %s' % at,
+                'at': None,
+                'view': 'complaints',
+                'target': row['id'],
+                'tone': 'default',
+            })
+    return total, items
 
 
 def _complaint_author_items(cursor, viewer, limit):
@@ -893,6 +970,7 @@ _HANDLERS = {
     'shift_requests': shift_requests,
     'crm': crm,
     'complaints': complaints,
+    'training_plans': training_plans,
     'lms': lms,
     'surveys': surveys,
     'events': events,
@@ -1037,6 +1115,13 @@ def next_change_at(cursor, viewer):
              WHERE c.status = 'open'
                AND c.due_date::timestamp > %(now)s"""
             + scope_clause(viewer.get('checkpoints') or {}, params))
+
+    if 'training_plans' not in hidden:
+        # Назначенный тренинг виден ровно в свой день: строка появляется в
+        # полночь дня тренинга и уходит в следующую полночь. Записи в базе в
+        # эти моменты нет — триггер не разбудит, нужен таймер.
+        from complaints import queries as complaint_queries
+        parts.append(complaint_queries.training_day_changes_sql('user_id', 'now'))
 
     if 'wiki_ack' not in hidden:
         # Срок ознакомления: счётчик не меняет, но документ становится горящим

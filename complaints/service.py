@@ -386,6 +386,53 @@ def set_employee(db, complaint_id, employee_id, *, ctx):
         return queries.get_complaint(cursor, complaint_id, ctx['user_id'])
 
 
+def review_send(db, complaint_id, *, ctx):
+    """Супервайзер проверил жалобу на Яндекс, и она стоит внимания — в группу.
+
+    Решение записывается ДО отправки и отдельно от неё: Telegram может не
+    принять сообщение (бота выгнали, группа не выбрана), и тогда жалоба уже
+    «отправлена супервайзером», но «не доставлена» — повтор идёт той же
+    кнопкой «Отправить ещё раз», что у любой жалобы. Возвращает (жалоба,
+    ошибка доставки или None).
+    """
+    with db._get_cursor() as cursor:
+        if not queries.set_review(cursor, complaint_id, state=catalog.REVIEW_SENT,
+                                  actor_id=ctx['user_id'], actor_name=ctx.get('name')):
+            raise ComplaintError('Жалоба уже не ждёт проверки — обновите карточку', 409)
+        _, after = queries.recompute_status(cursor, complaint_id)
+        queries.add_event(cursor, complaint_id=complaint_id, kind='review_sent',
+                          actor_user_id=ctx['user_id'], actor_name=ctx.get('name'),
+                          payload={'status': after})
+    delivered, error = deliver(db, complaint_id)
+    with db._get_cursor() as cursor:
+        return queries.get_complaint(cursor, complaint_id, ctx['user_id']), (
+            None if delivered else error)
+
+
+def review_resolve(db, complaint_id, note, *, ctx):
+    """Супервайзер проверил жалобу на Яндекс и решил её сам: «Решено» с итогом.
+
+    Итог — то, что он пишет словами; код итога — «Вопрос решён», это и есть
+    «Решено» для аналитики. В группу ничего не уходит: жалоба туда не
+    отправлялась, и отбивать там нечего.
+    """
+    note = str(note or '').strip()[:4000]
+    if not note:
+        raise ComplaintError('Напишите итог — что выяснили и что сделали')
+    with db._get_cursor() as cursor:
+        if not queries.set_review(cursor, complaint_id, state=catalog.REVIEW_RESOLVED,
+                                  actor_id=ctx['user_id'], actor_name=ctx.get('name')):
+            raise ComplaintError('Жалоба уже не ждёт проверки — обновите карточку', 409)
+        queries.set_result(cursor, complaint_id, code=catalog.REVIEW_RESOLVED_RESULT,
+                           note=note, actor_id=ctx['user_id'], actor_name=ctx.get('name'),
+                           via='icore')
+        _, after = queries.recompute_status(cursor, complaint_id)
+        queries.add_event(cursor, complaint_id=complaint_id, kind='review_resolved',
+                          actor_user_id=ctx['user_id'], actor_name=ctx.get('name'),
+                          payload={'result': catalog.REVIEW_RESOLVED_RESULT, 'status': after})
+        return queries.get_complaint(cursor, complaint_id, ctx['user_id'])
+
+
 def set_result(db, complaint_id, code, note, *, ctx):
     if code not in catalog.RESULT_BY_CODE:
         raise ComplaintError('Выберите итог проверки')
@@ -430,47 +477,75 @@ def _parse_training(raw, default_reason):
     return day, start_time, end_time, reason
 
 
-def training_comment(complaint, *, action, comment, outcome, need_training):
-    """Текст записи в «Тренингах». ТЗ перечисляет, что там должно быть видно:
-    что причиной была жалоба, её номер и тема, какая обратная связь проведена,
-    проводилось ли доп. обучение и результат. Сотрудник, дата и кто провёл —
-    это поля самой записи, в текст они не дублируются."""
-    lines = ['Жалоба %s · %s · %s' % (
+def _parse_plan(raw, now=None):
+    """День и время, на которые назначают тренинг. Назначать можно только
+    вперёд: назначение на прошедшее время — это уже проведённый тренинг, и
+    уведомление о нём пришло бы, когда всё кончилось."""
+    raw = raw or {}
+    try:
+        day = date.fromisoformat(str(raw.get('date') or '').strip())
+    except ValueError:
+        raise ComplaintError('Укажите день тренинга')
+    time_text = str(raw.get('time') or '').strip()
+    if not _TIME_RE.match(time_text):
+        raise ComplaintError('Укажите время тренинга')
+    moment = datetime.combine(day, day_time(*map(int, time_text.split(':'))))
+    if moment <= (now or datetime.now()):
+        raise ComplaintError('Это время уже прошло — назначьте тренинг вперёд')
+    return moment
+
+
+def _day_text(moment):
+    return moment.strftime('%d.%m.%Y')
+
+
+def training_comment(complaint):
+    """Текст записи в «Тренингах»: что причиной была жалоба, её номер и тема
+    (ТЗ). Сотрудник, дата, время и кто провёл — поля самой записи, в текст они
+    не дублируются. Что именно разбирали, окно «Проведён тренинг» не
+    спрашивает (владелец, 30.09.2026: «такое же окно с указанием начала и
+    конца»), поэтому и в тексте этого нет."""
+    return 'Жалоба %s · %s · %s' % (
         telegram.complaint_number(complaint['id']),
         catalog.target_title(complaint['target']),
-        catalog.reason_title(complaint['target'], complaint['reason_code']))]
-    label = 'Обратная связь' if action == catalog.ACTION_FEEDBACK else 'Тренинг'
-    lines.append('%s: %s' % (label, comment))
-    if action == catalog.ACTION_TRAINING:
-        lines.append('Дополнительное обучение: проведено')
-    else:
-        lines.append('Дополнительное обучение: %s'
-                     % ('назначено' if need_training else 'не требуется'))
-    if outcome:
-        lines.append('Результат: %s' % outcome)
-    return '\n'.join(lines)
+        catalog.reason_title(complaint['target'], complaint['reason_code']))
 
 
-def record_work(db, complaint_id, *, action, comment, outcome=None, need_training=False,
-                training=None, ctx):
-    """Запись о работе с сотрудником. ОС и тренинг ложатся ещё и в «Тренинги».
+def record_work(db, complaint_id, *, action, comment=None, training=None, plan=None,
+                ctx, now=None):
+    """Запись о работе с сотрудником — одна из трёх кнопок
+    (catalog.ACTIVE_WORK_ACTIONS):
+
+      Назначить тренинг    plan {date, time}: на когда. Колокол в этот день
+                           будит супервайзеров отдела и сотрудника.
+      Проведён тренинг     training {date, start, end}: занятие ложится в
+                           «Тренинги» и идёт в часы сотрудника.
+      Приняты другие меры  comment: что сделано.
 
     Всё — одной транзакцией: запись в журнале жалобы без записи в тренингах
-    (или наоборот) означала бы, что ТЗ-шная цепочка «жалоба → ОС → тренинг»
-    рвётся ровно там, где её потом будут проверять.
+    (или наоборот) означала бы, что цепочка «жалоба → тренинг» рвётся ровно
+    там, где её потом будут проверять.
     """
-    spec = catalog.WORK_ACTION_BY_CODE.get(str(action or ''))
-    if not spec:
+    action = str(action or '')
+    spec = catalog.WORK_ACTION_BY_CODE.get(action)
+    if not spec or action not in catalog.ACTIVE_WORK_ACTIONS:
         raise ComplaintError('Выберите, что сделано')
     comment = str(comment or '').strip()[:4000]
-    outcome = str(outcome or '').strip()[:2000] or None
-    if not comment:
+    if action == catalog.ACTION_OTHER and not comment:
         raise ComplaintError('Опишите, что сделано')
-    # «Результат» — в перечне того, что ТЗ велит видеть в тренинге, поэтому у
-    # ОС и тренинга он обязателен.
-    if spec['training'] and not outcome:
-        raise ComplaintError('Укажите результат — он попадёт в «Тренинги»')
-    need_training = bool(need_training) and spec['ask_training']
+    planned_at = _parse_plan(plan, now) if spec.get('plan') else None
+    session = (_parse_training(training, spec.get('default_reason'))
+               if spec['training'] else None)
+    # Журналу нужна строка «что сделано» у каждой записи. У тренинга её
+    # составляет сервер из того, что спросило окно, — только «когда»: запись и
+    # так подписана «Назначен тренинг» / «Проведён тренинг», и повторять эти
+    # слова строкой ниже было бы шумом.
+    if planned_at:
+        comment = 'на %s в %s' % (_day_text(planned_at), planned_at.strftime('%H:%M'))
+    elif session:
+        day, start, end, _reason = session
+        comment = '%s, %s–%s' % (day.strftime('%d.%m.%Y'), start.strftime('%H:%M'),
+                                  end.strftime('%H:%M'))
 
     with db._get_cursor() as cursor:
         complaint = queries.get_complaint(cursor, complaint_id)
@@ -478,34 +553,48 @@ def record_work(db, complaint_id, *, action, comment, outcome=None, need_trainin
             raise ComplaintError('Жалоба не найдена', 404)
         employee_id = complaint.get('employee_id')
         # Без сотрудника записать можно только объяснение, почему работать не
-        # с кем: ОС и тренинг без человека не проводят.
+        # с кем: тренинг без человека не назначить и не провести.
         if not employee_id and action not in catalog.UNASSIGNED_ACTIONS:
             raise ComplaintError('Сначала определите сотрудника')
-        if not employee_id:
-            need_training = False
         was_done = complaint.get('work_state') == catalog.WORK_DONE
         training_id = None
-        if spec['training']:
-            day, start, end, reason = _parse_training(training, spec.get('default_reason'))
-            if queries.training_slot_taken(cursor, employee_id, day, start, end):
-                raise ComplaintError('На это время у сотрудника уже есть тренинг', 409)
-            training_id = queries.create_training(
-                cursor, operator_id=employee_id, day=day, start=start, end=end,
-                reason=reason, created_by=ctx['user_id'],
-                comment=training_comment(complaint, action=action, comment=comment,
-                                         outcome=outcome, need_training=need_training))
-        flags = catalog.next_work_flags(complaint, action, need_training)
+        if session:
+            day, start, end, reason = session
+            # Занятие в этот слот уже есть — значит, на нём разобрали и эту
+            # жалобу: две жалобы на одного сотрудника СВ закрывает одним
+            # тренингом. Второй записи в «Тренингах» быть не может (слот
+            # уникален) и не нужно — это те же полчаса в часах сотрудника;
+            # жалоба привязывается к тому же занятию и дописывается в его текст.
+            # Раньше здесь был отказ 409, и вторую жалобу нечем было закрыть.
+            existing = queries.training_at_slot(cursor, employee_id, day, start, end)
+            if existing:
+                training_id, text = existing
+                line = training_comment(complaint)
+                if line not in str(text or ''):
+                    queries.append_training_comment(cursor, training_id, line)
+            else:
+                training_id = queries.create_training(
+                    cursor, operator_id=employee_id, day=day, start=start, end=end,
+                    reason=reason, created_by=ctx['user_id'],
+                    comment=training_comment(complaint))
+        flags = catalog.next_work_flags(complaint, action)
         queries.add_work_record(cursor, complaint_id=complaint_id, action=action,
-                                comment=comment, outcome=outcome, need_training=need_training,
+                                comment=comment, outcome=None, need_training=False,
                                 training_id=training_id, employee_id=employee_id,
-                                actor_id=ctx['user_id'], actor_name=ctx.get('name'))
+                                actor_id=ctx['user_id'], actor_name=ctx.get('name'),
+                                planned_at=planned_at)
+        if planned_at:
+            queries.set_training_plan(cursor, complaint_id, planned_at)
         queries.set_work_flags(cursor, complaint_id, flags=flags, actor_id=ctx['user_id'],
                                actor_name=ctx.get('name'))
         _, after = queries.recompute_status(cursor, complaint_id)
+        payload = {'action': action, 'training_id': training_id,
+                   'closed': flags['closed'], 'status': after}
+        if planned_at:
+            payload['planned_at'] = planned_at.isoformat()
         queries.add_event(cursor, complaint_id=complaint_id, kind='work',
                           actor_user_id=ctx['user_id'], actor_name=ctx.get('name'),
-                          payload={'action': action, 'training_id': training_id,
-                                   'closed': flags['closed'], 'status': after})
+                          payload=payload)
 
     # «Результат внутренней отработки можно автоматически отправлять в
     # Telegram-группу, чтобы руководители видели, что работа с сотрудником

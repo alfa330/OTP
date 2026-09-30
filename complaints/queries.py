@@ -313,8 +313,10 @@ _COLUMNS = """
     c.driver_name, c.driver_phone, c.driver_ref, c.city, c.description, c.event_at,
     c.event_time_known,
     c.requires_processing, c.status, c.closed_at,
+    c.review_state, c.review_by_name, c.review_at,
     c.result_code, c.result_note, c.result_by_name, c.result_via, c.result_at,
     c.work_state, c.feedback_done, c.training_required, c.training_done,
+    c.training_planned_at,
     c.work_closed_at, c.work_closed_by_name,
     c.created_by, c.created_by_name, c.creator_department_id, cd.name AS creator_department_name,
     c.tg_chat_id, c.tg_chat_title, c.tg_message_id, c.delivery_status, c.delivery_error,
@@ -365,7 +367,7 @@ def create_complaint(cursor, fields):
             employee_set_by_name, employee_set_at, responsible_id,
             reported_employee_id, reported_employee_name,
             driver_name, driver_phone, driver_ref, city, description, event_at,
-            event_time_known, requires_processing, status, work_state,
+            event_time_known, requires_processing, review_state, status, work_state,
             created_by, created_by_name, creator_department_id,
             delivery_status, last_activity_at
         ) VALUES (
@@ -376,8 +378,8 @@ def create_complaint(cursor, fields):
             %(responsible_id)s,
             %(employee_id)s, %(employee_name)s,
             %(driver_name)s, %(driver_phone)s, %(driver_ref)s, %(city)s, %(description)s,
-            %(event_at)s, %(event_time_known)s, %(requires_processing)s, %(status)s,
-            %(work_state)s,
+            %(event_at)s, %(event_time_known)s, %(requires_processing)s, %(review_state)s,
+            %(status)s, %(work_state)s,
             %(created_by)s, %(created_by_name)s, %(creator_department_id)s,
             %(delivery_status)s, {now}
         )
@@ -400,12 +402,15 @@ _CREATOR_GROUPS = """,
        ), '{}') AS creator_group_ids
 """
 
-# «Зафиксирована»: в группу не уходила, итога нет, сотрудника нет — её никто
-# не разбирал. Закрыта она с момента создания, но «отработанной» её считать
-# нельзя: аналитика «отработано» иначе раздувалась бы на все жалобы на Яндекс.
-# Та же формула — у интерфейса (complaintRules.statusView).
-RECORDED_SQL = ("(NOT c.requires_processing AND c.employee_id IS NULL "
-                "AND c.result_code IS NULL)")
+# «Зафиксирована»: в группу не уходила, на проверку не ставилась, итога нет,
+# сотрудника нет — её никто не разбирал. Так до 30.09.2026 сохранялись жалобы
+# на Яндекс. Закрыта она с момента создания, но «отработанной» её считать
+# нельзя: аналитика «отработано» иначе раздувалась бы на все такие жалобы.
+# Жалоба на проверке у супервайзера (review_state) сюда не попадает никогда:
+# она в работе, а решённая им — отработана его итогом. Та же формула — у
+# интерфейса (complaintRules.statusView) и выгрузки (report.is_recorded).
+RECORDED_SQL = ("(NOT c.requires_processing AND c.review_state IS NULL "
+                "AND c.employee_id IS NULL AND c.result_code IS NULL)")
 
 
 def _with_groups(row, viewer_id=None):
@@ -431,7 +436,7 @@ def get_complaint(cursor, complaint_id, viewer_id=None):
 # повторной отправки и выгрузки.
 INTERNAL_FIELDS = ('result_note', 'work_closed_by_name', 'responsible_id', 'responsible_name',
                    'employee_set_by_name', 'employee_source', 'reported_employee_id',
-                   'reported_employee_name')
+                   'reported_employee_name', 'training_planned_at')
 
 
 def public_item(ctx, item):
@@ -518,8 +523,15 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
     order = ('(c.author_unread_at IS NULL), c.last_activity_at DESC, c.id DESC'
              if unread_first and segment == SEGMENT_MINE
              else 'c.last_activity_at DESC, c.id DESC')
+    # «Ждёт МОЕЙ проверки» — тем же правилом, что счётчик «К разбору» и
+    # колокол (reviewer_sql): бейдж строки горит ровно у того, чья это задача,
+    # а не у каждого, кому жалоба видна (глава, админ). CASE — чтобы
+    # подзапросы правила считались только у жалоб на проверке.
+    review_mine = (",\n       CASE WHEN c.review_state = 'pending'"
+                   " AND c.created_by IS DISTINCT FROM %(viewer_id)s THEN "
+                   + reviewer_sql('viewer_id') + ' ELSE FALSE END AS review_mine')
     cursor.execute(
-        'SELECT ' + _COLUMNS + _CREATOR_GROUPS + _JOINS
+        'SELECT ' + _COLUMNS + _CREATOR_GROUPS + review_mine + _JOINS
         + ' WHERE ' + ' AND '.join(clauses)
         + ' ORDER BY ' + order
         + ' LIMIT %(limit)s OFFSET %(offset)s',
@@ -532,11 +544,43 @@ def list_complaints(cursor, ctx, *, segment=SEGMENT_ALL, status=None, target=Non
     return [public_item(ctx, _with_groups(row, ctx['user_id'])) for row in rows[:page]], has_more
 
 
+def reviewer_sql(param='viewer_id'):
+    """Условие «зритель проверяет эту жалобу до группы» (catalog.REVIEW_*).
+
+    Проверяет супервайзер текущей группы автора — он отвечает за приём; у
+    автора нет группы с супервайзером — глава отдела автора, иначе жалобу не
+    увидел бы никто. Та же граница, что у access.can_handle для жалоб без
+    отдела, только адресная: колокол и счётчик будят того, чья это задача, а
+    не всех, кому жалоба видна. Одна строка на счётчик раздела и колокол,
+    чтобы бейдж и список не разошлись. Триггер колокола (database.py) будит
+    этот же круг шире — всех СВ групп автора и главу, — лишний тычок стоит
+    одной перечитки сводки, а недобуженный стоил бы пропущенной задачи.
+    """
+    current = ('{alias}.start_date <= CURRENT_DATE AND ({alias}.end_date IS NULL '
+               'OR {alias}.end_date >= CURRENT_DATE)')
+    supervised = """
+        SELECT 1 FROM group_operator_memberships gom
+          JOIN group_supervisor_memberships gsm ON gsm.group_id = gom.group_id
+          JOIN groups g ON g.id = gom.group_id AND g.status = 'active'
+         WHERE gom.operator_id = c.created_by
+           AND {gom} AND {gsm}""".format(gom=current.format(alias='gom'),
+                                         gsm=current.format(alias='gsm'))
+    return """(
+        EXISTS ({supervised} AND gsm.supervisor_id = %({param})s)
+        OR (NOT EXISTS ({supervised})
+            AND c.creator_department_id IN (
+                SELECT d.id FROM departments d
+                 WHERE d.head_user_id = %({param})s AND d.is_active))
+    )""".format(supervised=supervised, param=param)
+
+
 def counters(cursor, ctx):
     """Два числа для раздела: непрочитанное у автора и открытая работа у СВ.
 
-    Оба по частичным индексам (idx_complaints_unread, idx_complaints_work_pending):
-    условие «мой автор» / «мой ответственный» отсекает всё остальное сразу.
+    Работа — это и работа с сотрудником, и жалобы на проверке (Яндекс). Все
+    три подсчёта — по частичным индексам (idx_complaints_unread,
+    idx_complaints_work_pending, idx_complaints_review_pending): условие
+    «мой автор» / «мой ответственный» / «на проверке» отсекает всё остальное.
     """
     cursor.execute(
         """
@@ -551,6 +595,10 @@ def counters(cursor, ctx):
                      OR (c.responsible_id IS NULL AND c.target_department_id IN (
                          SELECT d.id FROM departments d
                           WHERE d.head_user_id = %(viewer_id)s AND d.is_active))))
+            + (SELECT COUNT(*) FROM complaints c
+                WHERE c.review_state = 'pending'
+                  AND c.created_by IS DISTINCT FROM %(viewer_id)s
+                  AND """ + reviewer_sql('viewer_id') + """)
         """,
         {'viewer_id': int(ctx['user_id'])},
     )
@@ -634,6 +682,7 @@ def set_employee(cursor, complaint_id, *, employee_id, employee_name, source, ac
                unit_kind = %(unit_kind)s, unit_id = %(unit_id)s, unit_name = %(unit_name)s,
                work_state = %(work_state)s,
                feedback_done = FALSE, training_required = FALSE, training_done = FALSE,
+               training_planned_at = NULL,
                work_closed_at = NULL, work_closed_by = NULL, work_closed_by_name = NULL,
                author_unread_at = CASE WHEN %(employee_id)s::int = created_by
                                        THEN NULL ELSE author_unread_at END,
@@ -679,8 +728,8 @@ def recompute_status(cursor, complaint_id):
     было бы закрыть в обход обязательной работы с ним.
     """
     cursor.execute(
-        'SELECT status, requires_processing, result_code, work_state FROM complaints '
-        'WHERE id = %s FOR UPDATE',
+        'SELECT status, requires_processing, result_code, work_state, review_state '
+        'FROM complaints WHERE id = %s FOR UPDATE',
         (int(complaint_id),),
     )
     row = cursor.fetchone()
@@ -688,7 +737,7 @@ def recompute_status(cursor, complaint_id):
         return None, None
     before = row[0]
     closed = catalog.is_closed(requires_processing=row[1], result_code=row[2],
-                               work_state=row[3])
+                               work_state=row[3], review_state=row[4])
     after = 'closed' if closed else 'open'
     if after != before:
         cursor.execute(
@@ -702,6 +751,42 @@ def recompute_status(cursor, complaint_id):
             (after, after, int(complaint_id)),
         )
     return before, after
+
+
+def set_review(cursor, complaint_id, *, state, actor_id, actor_name):
+    """Решение супервайзера по жалобе на проверке. «В группу» заодно ставит
+    requires_processing: дальше жалоба идёт обычным путём и ждёт итога, а
+    отправку (и её повтор) сервис делает как у любой другой жалобы.
+
+    Меняется только жалоба, которая ЕЩЁ ждёт проверки: два супервайзера,
+    нажавшие разное одновременно, не должны перезаписать решение друг друга.
+    Возвращает True, если решение легло.
+    """
+    to_group = state == catalog.REVIEW_SENT
+    cursor.execute(
+        """
+        UPDATE complaints
+           SET review_state = %(state)s, review_by = %(actor_id)s,
+               review_by_name = %(actor_name)s, review_at = {now},
+               requires_processing = requires_processing OR %(to_group)s,
+               delivery_status = CASE WHEN %(to_group)s THEN 'pending' ELSE delivery_status END,
+               last_activity_at = {now}, updated_at = {now}
+         WHERE id = %(id)s AND review_state = 'pending'
+        """.format(now=_NOW),
+        {'id': int(complaint_id), 'state': state, 'actor_id': actor_id,
+         'actor_name': actor_name, 'to_group': to_group},
+    )
+    return cursor.rowcount > 0
+
+
+def set_training_plan(cursor, complaint_id, planned_at):
+    """На когда назначен тренинг. Переназначение перезаписывает: действует
+    последнее назначение, а прежнее остаётся в журнале работы."""
+    cursor.execute(
+        'UPDATE complaints SET training_planned_at = %s, updated_at = {now} WHERE id = %s'
+        .format(now=_NOW),
+        (planned_at, int(complaint_id)),
+    )
 
 
 def set_delivery(cursor, complaint_id, *, status, chat_id=None, chat_title=None,
@@ -878,16 +963,17 @@ def message_attachment(cursor, complaint_id, message_id, kinds):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_work_record(cursor, *, complaint_id, action, comment, outcome, need_training,
-                    training_id, employee_id, actor_id, actor_name):
+                    training_id, employee_id, actor_id, actor_name, planned_at=None):
     cursor.execute(
         """
         INSERT INTO complaint_work_log (complaint_id, action, comment, outcome, need_training,
-                                        training_id, employee_id, created_by, created_by_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                        training_id, employee_id, created_by, created_by_name,
+                                        planned_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (int(complaint_id), action, comment, outcome, bool(need_training), training_id,
-         employee_id, actor_id, actor_name),
+         employee_id, actor_id, actor_name, planned_at),
     )
     return cursor.fetchone()[0]
 
@@ -896,6 +982,7 @@ def work_log(cursor, complaint_id):
     cursor.execute(
         """
         SELECT w.id, w.action, w.comment, w.outcome, w.need_training, w.training_id,
+               w.planned_at,
                t.training_date, t.start_time, t.end_time, t.reason AS training_reason,
                w.employee_id, eu.name AS employee_name,
                w.created_by_name, w.created_at
@@ -918,16 +1005,29 @@ def work_log(cursor, complaint_id):
     return items
 
 
-def training_slot_taken(cursor, operator_id, day, start, end):
+def training_at_slot(cursor, operator_id, day, start, end):
+    """Занятие сотрудника ровно в этот слот: (id, текст) или None. Слот в
+    «Тренингах» уникален (operator_id, дата, начало, конец), значит это то
+    самое занятие, которое провели."""
     cursor.execute(
         """
-        SELECT 1 FROM trainings
+        SELECT id, comment FROM trainings
          WHERE operator_id = %s AND training_date = %s AND start_time = %s AND end_time = %s
          LIMIT 1
         """,
         (int(operator_id), day, start, end),
     )
-    return cursor.fetchone() is not None
+    row = cursor.fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def append_training_comment(cursor, training_id, line):
+    """Дописать в текст занятия ещё одну строку (вторая жалоба, разобранная
+    на том же занятии)."""
+    cursor.execute(
+        "UPDATE trainings SET comment = CONCAT_WS(E'\\n', NULLIF(comment, ''), %s) WHERE id = %s",
+        (line, int(training_id)),
+    )
 
 
 def create_training(cursor, *, operator_id, day, start, end, reason, comment, created_by):
@@ -1002,26 +1102,36 @@ def author_bell_items(cursor, user_id, limit):
 
 
 def work_bell_items(cursor, user_id, limit):
-    """«На сотрудника поступила жалоба. Необходимо провести обратную связь и
-    зафиксировать результат» (ТЗ) — задачи зрителя в разделе «Жалобы».
+    """Задачи зрителя в разделе «Жалобы» — две ветки одного списка:
 
-    Возвращает (всего, строки). Условие — дословно как у counters()['work'].
+      work    «на сотрудника поступила жалоба» (ТЗ): работа с сотрудником
+              ждёт ответственного — назначить или провести тренинг, записать
+              принятые меры;
+      review  жалоба на Яндекс ждёт проверки: в группу или «Решено»
+              (владелец, 30.09.2026).
+
+    Возвращает (всего, строки). Условия — дословно как у counters()['work'].
     """
     cursor.execute(
         """
-        SELECT c.id, 'work' AS role, 'work' AS kind,
+        SELECT c.id, 'work' AS role,
+               CASE WHEN c.review_state = 'pending' THEN 'review' ELSE 'work' END AS kind,
                COALESCE(c.employee_set_at, c.created_at) AS at,
                c.target, c.reason_code, c.driver_name, c.employee_name,
+               c.training_required, c.training_planned_at,
                COUNT(*) OVER () AS total
           FROM complaints c
-         WHERE c.work_state = 'pending'
-           AND c.employee_id IS DISTINCT FROM %(user_id)s
-           AND (c.responsible_id = %(user_id)s
-                -- Ответственного не нашлось (нет ни СВ, ни главы) — задача
-                -- глав отдела сотрудника, а не ничья.
-                OR (c.responsible_id IS NULL AND c.target_department_id IN (
-                    SELECT d.id FROM departments d
-                     WHERE d.head_user_id = %(user_id)s AND d.is_active)))
+         WHERE (c.work_state = 'pending'
+                AND c.employee_id IS DISTINCT FROM %(user_id)s
+                AND (c.responsible_id = %(user_id)s
+                     -- Ответственного не нашлось (нет ни СВ, ни главы) — задача
+                     -- глав отдела сотрудника, а не ничья.
+                     OR (c.responsible_id IS NULL AND c.target_department_id IN (
+                         SELECT d.id FROM departments d
+                          WHERE d.head_user_id = %(user_id)s AND d.is_active))))
+            OR (c.review_state = 'pending'
+                AND c.created_by IS DISTINCT FROM %(user_id)s
+                AND """ + reviewer_sql('user_id') + """)
          ORDER BY at DESC, c.id DESC
          LIMIT %(limit)s
         """,
@@ -1030,6 +1140,115 @@ def work_bell_items(cursor, user_id, limit):
     rows = _dicts(cursor)
     total = int(rows[0]['total']) if rows else 0
     return total, rows
+
+
+def training_day_bell_items(cursor, user_id, day, limit):
+    """Тренинг, назначенный на этот день, — «в этот день супервайзерам этого
+    отдела приходит уведомление о наличии запланированного тренинга, оператору
+    тоже» (владелец, 30.09.2026). Две стороны одного назначения:
+
+      team  зритель — супервайзер отдела сотрудника: видит, у кого из его
+            отдела сегодня тренинг и когда;
+      self  зритель — сам сотрудник: ему сегодня назначен тренинг.
+
+    Сотруднику приходит только время: сама жалоба ему не видна никогда
+    (access.can_view), и строка про неё выдала бы то, что от него скрыто.
+    Строки нет, как только требование тренинга снято — провели или приняли
+    другие меры. Возвращает (всего, строки).
+    """
+    start = datetime.combine(day, datetime.min.time())
+    cursor.execute(
+        """
+        SELECT * , COUNT(*) OVER () AS total FROM (
+            SELECT c.id, 'team' AS side, c.employee_name, c.training_planned_at
+              FROM complaints c
+             WHERE c.training_required
+               AND c.training_planned_at >= %(start)s AND c.training_planned_at < %(end)s
+               AND c.employee_id IS NOT NULL AND c.employee_id <> %(user_id)s
+               AND EXISTS (SELECT 1 FROM users v
+                            WHERE v.id = %(user_id)s
+                              AND lower(COALESCE(v.role, '')) IN ('sv', 'supervisor')
+                              AND v.department_id = c.target_department_id)
+            UNION ALL
+            -- Одна строка на ВРЕМЯ, а не на жалобу: две жалобы на одного
+            -- сотрудника СВ разбирает одним занятием, и сотруднику нужен один
+            -- тренинг в 14:00, а не два одинаковых — и не намёк числом «2»,
+            -- что причин две. Номер жалобы (MIN) — только для порядка.
+            SELECT MIN(c.id), 'self', NULL, c.training_planned_at
+              FROM complaints c
+             WHERE c.training_required
+               AND c.training_planned_at >= %(start)s AND c.training_planned_at < %(end)s
+               AND c.employee_id = %(user_id)s
+             GROUP BY c.training_planned_at
+        ) today
+         ORDER BY training_planned_at, id
+         LIMIT %(limit)s
+        """,
+        {'user_id': int(user_id), 'start': start, 'end': start + timedelta(days=1),
+         'limit': int(limit)},
+    )
+    rows = _dicts(cursor)
+    total = int(rows[0]['total']) if rows else 0
+    return total, rows
+
+
+def training_day_changes_sql(param='user_id', now_param='now'):
+    """Моменты, когда список «тренинг сегодня» у зрителя меняется САМ, по
+    часам: наступает день назначенного тренинга (строка появляется) и
+    кончается (строка уходит). Для notifications.sources.next_change_at —
+    без этого строка появилась бы только по возврату фокуса во вкладку."""
+    mine = """
+        (c.employee_id = %({p})s
+         OR (c.employee_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM users v
+                 WHERE v.id = %({p})s
+                   AND lower(COALESCE(v.role, '')) IN ('sv', 'supervisor')
+                   AND v.department_id = c.target_department_id)))""".format(p=param)
+    return """
+        SELECT MIN(moment) FROM (
+            SELECT date_trunc('day', c.training_planned_at) AS moment
+              FROM complaints c
+             WHERE c.training_required AND c.training_planned_at IS NOT NULL AND {mine}
+            UNION ALL
+            SELECT date_trunc('day', c.training_planned_at) + INTERVAL '1 day'
+              FROM complaints c
+             WHERE c.training_required AND c.training_planned_at IS NOT NULL AND {mine}
+        ) plan WHERE moment > %({now})s""".format(mine=mine, now=now_param)
+
+
+def upcoming_shifts(cursor, employee_id, now, limit=2):
+    """Ближайшие смены сотрудника — «было бы хорошо, если бы на сайте сразу
+    отображались ближайшие 2 смены этого опера» (владелец, 30.09.2026): тренинг
+    назначают на время, когда человек на работе.
+
+    Идущая сейчас смена — тоже ближайшая. Ночная смена кончается на
+    следующий день (end_time <= start_time), поэтому вчерашняя ночная ещё
+    может идти — её берём с запасом в день и отсекаем по концу в Python.
+    """
+    cursor.execute(
+        """
+        SELECT shift_date, start_time, end_time, shift_type
+          FROM work_shifts
+         WHERE operator_id = %s AND shift_date >= %s
+         ORDER BY shift_date, start_time
+         LIMIT %s
+        """,
+        (int(employee_id), (now - timedelta(days=1)).date(), int(limit) + 4),
+    )
+    items = []
+    for day, start, end, kind in cursor.fetchall():
+        begins = datetime.combine(day, start)
+        ends = datetime.combine(day, end)
+        if ends <= begins:
+            ends += timedelta(days=1)
+        if ends <= now:
+            continue
+        items.append({'date': day.isoformat(), 'start': start.strftime('%H:%M'),
+                      'end': end.strftime('%H:%M'), 'type': kind,
+                      'ongoing': begins <= now})
+        if len(items) >= limit:
+            break
+    return items
 
 
 # ─────────────────────────────────────────────────────────────────────────────

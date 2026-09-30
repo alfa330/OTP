@@ -180,6 +180,15 @@ def can_handle(ctx, complaint):
     return False
 
 
+def can_review(ctx, complaint):
+    """Решить по жалобе на проверке (Яндекс): «Отправить в группу» или
+    «Решено». Решает тот, кто её разбирает (can_handle: для жалоб без отдела
+    это супервайзер группы оператора и глава его отдела), и только пока она
+    ждёт проверки."""
+    return (complaint.get('review_state') == catalog.REVIEW_PENDING
+            and can_handle(ctx, complaint))
+
+
 def can_set_employee(ctx, complaint):
     """Проставить или поправить сотрудника — только у целей, где он бывает."""
     spec = catalog.target(complaint.get('target')) or {}

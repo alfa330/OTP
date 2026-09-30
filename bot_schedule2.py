@@ -64172,6 +64172,8 @@ try:
         # Тот же ключ, что у вики и «Моих оценок»: подтверждение сессии
         # оператора QR-кодом у админа или супервайзера.
         sensitive_access_granted=_sensitive_access_granted_for_user,
+        # <ignoredErrors> для выгрузки: ИИН и телефоны лежат в ней текстом.
+        excel_text_warning=_excel_suppress_number_as_text_warning,
     ))
     logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
 except Exception:

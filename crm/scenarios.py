@@ -54,6 +54,7 @@ CITY = 'city'               # город Казахстана из справо�
 # справочнике фронта: они зависят от ответа на предыдущий вопрос (город) и
 # приезжают вместе со статусами — вопроса «какой офис» без города не существует.
 OFFICE = 'office'           # офис города со статусом работы на сегодня
+EMAIL = 'email'             # адрес электронной почты: имя@домен.зона
 
 # Почему TAXI_PARK и CITY — отдельные типы, а не CHOICE со списком в options.
 #
@@ -100,6 +101,9 @@ FLAG_LABELS = {FLAG_MASS_OUTAGE: 'Возможный массовый сбой'}
 # а такой «ИИН» сохранился бы в обращении и не нашёлся бы потом никаким поиском.
 _IIN_RE = re.compile(r'^[0-9]{12}$')
 _PERIOD_RE = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')  # YYYY-MM
+# Почта — без полной RFC-строгости: адрес диктуют по телефону или копируют из
+# письма, и отказать нужно только явной опечатке (нет «@», нет зоны, пробел).
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')
 
 
 def step(key, label, kind, **extra):
@@ -745,6 +749,12 @@ YANDEX_TERMOBOX = {
 COOP_WITH_YANDEX = 'С Яндексом'
 COOP_WITH_PARKS = 'С таксопарками'
 
+# Откуда пришло обращение. «Электронная почта» — третьим, после звонка и чата
+# (владелец, 30.09.2026), и с ним — поле для самого адреса: по нему группа
+# ответит тому, кто написал.
+COOP_BY_EMAIL = 'Электронная почта'
+COOP_CHANNELS = ['Звонок', 'Чат', COOP_BY_EMAIL]
+
 COOPERATION = {
     'key': 'cooperation',
     'queue_code': 'cooperation',
@@ -763,7 +773,13 @@ COOPERATION = {
     # обращения в iCORE, и «Сотрудничество с Яндексом» читается там сразу.
     'subject_template': 'Сотрудничество {coop_type!l} · {coop_company}',
     'steps': [
-        step('coop_channel', 'Звонок или чат', CHOICE, options=['Звонок', 'Чат']),
+        step('coop_channel', 'Звонок, чат или почта', CHOICE, options=COOP_CHANNELS),
+        # Адрес — сразу под выбором канала и только при «Электронной почте»:
+        # написали письмом — адрес у оператора есть всегда, и без него группе
+        # некуда ответить. У звонка и чата поля нет вовсе.
+        step('coop_email', 'Электронная почта', EMAIL,
+             placeholder='Например: partner@company.kz',
+             depends_on=('coop_channel', COOP_BY_EMAIL)),
         step('coop_park', 'Таксопарк', TAXI_PARK, half=True,
              hint='Таксопарк, на линию которого обратились'),
         step('coop_city', 'Город', CITY, half=True),
@@ -884,6 +900,7 @@ STEP_GROUPS = {
     # из них вообще нужны: разнеся поля по двум экранам, оператор выбирал бы
     # тип, не видя, что за ним спросят.
     'coop_channel': 'Данные обращения',
+    'coop_email': 'Данные обращения',
     'coop_park': 'Данные обращения',
     'coop_city': 'Данные обращения',
     'coop_type': 'Данные обращения',
@@ -980,7 +997,9 @@ BODY_DATA = ('iin', 'driver_name', 'driver_licence', 'contact_number',
              # Сотрудничество: тип — первым, потому что в группе он и есть суть
              # обращения (тема обращения туда не уходит, заголовок — просьба), а
              # номер — последним, как в ТЗ: им заканчивается ветка «С Яндексом».
-             'coop_type', 'coop_park', 'coop_city', 'coop_company', 'coop_phone')
+             'coop_type', 'coop_park', 'coop_city', 'coop_company', 'coop_phone',
+             # Почта — следом за номером: оба про то, как ответить обратившемуся.
+             'coop_email')
 BODY_DATA_LABELS = {
     'iin': 'ИИН',
     'driver_name': 'ФИО водителя',
@@ -1000,6 +1019,7 @@ BODY_DATA_LABELS = {
     'coop_city': 'Город',
     'coop_company': 'Название компании',
     'coop_phone': 'Номер для обратного звонка',
+    'coop_email': 'Электронная почта',
 }
 
 # Что в перечень ответов отдельной строкой не идёт. Данные водителя — потому
@@ -1676,6 +1696,8 @@ def validate_step(item, answers):
         return 'ИИН должен состоять ровно из 12 цифр'
     if kind == PERIOD and not _PERIOD_RE.match(str(value).strip()):
         return 'Укажите месяц и год отчётного периода'
+    if kind == EMAIL and not _EMAIL_RE.match(str(value).strip()):
+        return 'Укажите почту целиком, например partner@company.kz'
     if kind == CHOICE and str(value) not in (item.get('options') or []):
         return 'Выберите вариант из списка'
     # Единственный тип, у которого членство в списке проверяется по-настоящему:

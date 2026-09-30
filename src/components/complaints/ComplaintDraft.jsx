@@ -13,7 +13,7 @@ import { DATE_TRIGGER, TIME_INPUT } from './styles';
 import { extractAccountId, fmtPhone } from '../parcels/parcelMeta';
 import {
     DESCRIPTION_LIMIT, employeeDepartmentId, formPayload, formProblems, officeOptions,
-    targetByCode, unitDepartments, willProcess,
+    needsReview, targetByCode, unitDepartments, willProcess,
 } from './complaintRules';
 
 /* Черновик жалобы (ТЗ задачи #297): состояние, проверка и отправка — отдельно,
@@ -191,7 +191,8 @@ export function useComplaintDraft({ open, meta, targetCode, apiBaseUrl, headers,
                 showToast?.(`Жалоба сохранена, но в группу не ушла: ${deliveryError || 'ошибка Telegram'}`, 'error');
             } else {
                 showToast?.(item?.requires_processing ? 'Жалоба отправлена в группу'
-                    : 'Жалоба зафиксирована', 'success');
+                    : item?.review_state ? 'Жалоба отправлена на проверку супервайзеру'
+                        : 'Жалоба зафиксирована', 'success');
             }
             return item || null;
         } catch (error) {
@@ -205,8 +206,8 @@ export function useComplaintDraft({ open, meta, targetCode, apiBaseUrl, headers,
 
     return {
         target, form, set, shown, serverProblems, submit, busy, processing,
-        // Отправить некуда: группа не выбрана. «Только зафиксировать» при этом
-        // работает — в группу такая жалоба и не уходит.
+        // Отправить некуда: группа не выбрана. Жалоба на проверку (Яндекс) при
+        // этом уходит — группа понадобится, только если её отправит супервайзер.
         blocked: processing && !groupReady,
         employeeOptions,
         departmentId,
@@ -390,9 +391,10 @@ export function ComplaintFields({ draft, meta }) {
                 <Problem text={shown('description')} />
             </div>
 
-            {target.processing === 'never' && (
+            {needsReview(target) && (
                 <div className="px-1 text-[12px] leading-snug text-slate-500">
-                    Жалобы на Яндекс в группу не отправляются: сохраним для аналитики.
+                    Жалобу на Яндекс сначала проверит ваш супервайзер: в группу она уйдёт,
+                    только если он решит, что она того стоит.
                 </div>
             )}
 

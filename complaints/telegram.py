@@ -156,6 +156,11 @@ def build_root_message(complaint, *, mentions=None):
     if author:
         lines.append('')
         lines.append('🙍 <b>Принял:</b> %s' % _esc(author))
+    # Жалобу на Яндекс в группу отправляет не оператор, а супервайзер после
+    # проверки: группе видно, что она уже просмотрена и кем, — и почему
+    # пришла позже, чем её приняли.
+    if complaint.get('review_state') == catalog.REVIEW_SENT and complaint.get('review_by_name'):
+        lines.append('🔎 <b>Проверил и передал:</b> %s' % _esc(complaint['review_by_name']))
 
     status = status_lines(complaint)
     if status:

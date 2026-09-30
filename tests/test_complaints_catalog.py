@@ -94,11 +94,20 @@ class ProcessingTest(unittest.TestCase):
         self.assertEqual(errors, {})
         return clean
 
-    def test_yandex_never_goes_to_the_group(self):
-        """«В Telegram-группу не передаём обращения „для Яндекса“» — даже если
-        клиент прислал обратное."""
+    def test_yandex_waits_for_the_supervisor_first(self):
+        """Владелец, 30.09.2026: жалоба на Яндекс сначала попадает на проверку
+        супервайзеру и в группу уходит только по его решению — оператор её туда
+        не отправляет, даже если клиент прислал обратное."""
         self.assertFalse(catalog.requires_processing('yandex'))
-        self.assertFalse(self._clean('yandex', 'tariffs', requires_processing=True)['requires_processing'])
+        self.assertTrue(catalog.requires_review('yandex'))
+        clean = self._clean('yandex', 'tariffs', requires_processing=True)
+        self.assertFalse(clean['requires_processing'])
+        self.assertEqual(clean['review_state'], catalog.REVIEW_PENDING)
+
+    def test_other_targets_skip_the_review(self):
+        for code, reason in (('taxi_park', 'commission'), ('call_center', 'rude')):
+            self.assertFalse(catalog.requires_review(code), code)
+            self.assertIsNone(self._clean(code, reason, unit_id=3)['review_state'], code)
 
     def test_operator_cannot_keep_a_complaint_out_of_the_group(self):
         """Владелец, 29.09.2026: «у оператора не должно быть возможности не
@@ -108,7 +117,7 @@ class ProcessingTest(unittest.TestCase):
             self.assertTrue(catalog.requires_processing(code), code)
             self.assertTrue(self._clean(code, reason, requires_processing=False)['requires_processing'],
                             code)
-        self.assertEqual({t['processing'] for t in catalog.TARGETS} - {'always', 'never'}, set())
+        self.assertEqual({t['processing'] for t in catalog.TARGETS} - {'always', 'review'}, set())
 
 
 class ClosingRuleTest(unittest.TestCase):
@@ -127,8 +136,32 @@ class ClosingRuleTest(unittest.TestCase):
                                           work_state=catalog.WORK_DONE))
 
     def test_recorded_only_complaint_is_closed_at_once(self):
+        """Так до 30.09.2026 сохранялись жалобы на Яндекс: проверки у них нет
+        (review_state пуст), и они остаются закрытыми."""
         self.assertTrue(catalog.is_closed(requires_processing=False, result_code=None,
                                           work_state=None))
+
+    def test_complaint_under_review_stays_open(self):
+        self.assertFalse(catalog.is_closed(requires_processing=False, result_code=None,
+                                           work_state=None,
+                                           review_state=catalog.REVIEW_PENDING))
+
+    def test_resolved_review_is_closed_by_its_result(self):
+        self.assertTrue(catalog.is_closed(requires_processing=False,
+                                          result_code=catalog.REVIEW_RESOLVED_RESULT,
+                                          work_state=None,
+                                          review_state=catalog.REVIEW_RESOLVED))
+
+    def test_complaint_sent_after_review_waits_for_the_group(self):
+        """Супервайзер отправил в группу — дальше обычный путь: без итога
+        жалоба не закрыта."""
+        self.assertFalse(catalog.is_closed(requires_processing=True, result_code=None,
+                                           work_state=None, review_state=catalog.REVIEW_SENT))
+        self.assertTrue(catalog.is_closed(requires_processing=True, result_code='explained',
+                                          work_state=None, review_state=catalog.REVIEW_SENT))
+
+    def test_resolved_result_is_a_known_result(self):
+        self.assertIn(catalog.REVIEW_RESOLVED_RESULT, catalog.RESULT_BY_CODE)
 
     def test_unknown_employee_does_not_block_an_unconfirmed_complaint(self):
         """Не подтвердилась, «недостаточно данных» — разбирать некого, итог
@@ -153,6 +186,9 @@ class ClosingRuleTest(unittest.TestCase):
         for code in catalog.UNASSIGNED_ACTIONS:
             spec = catalog.WORK_ACTION_BY_CODE[code]
             self.assertTrue(spec['closes'] and not spec['training'], code)
+        # Из трёх кнопок без сотрудника работает одна — «другие меры».
+        self.assertEqual(set(catalog.ACTIVE_WORK_ACTIONS) & set(catalog.UNASSIGNED_ACTIONS),
+                         {'other'})
 
     def test_work_state_by_facts(self):
         self.assertIsNone(catalog.work_state_for('yandex', None, False))
@@ -174,18 +210,36 @@ class ResultsAndWorkTest(unittest.TestCase):
         self.assertEqual(catalog.CONFIRMED_RESULTS, ('confirmed', 'partial'))
         self.assertEqual(catalog.NOT_CONFIRMED_RESULTS, ('not_confirmed',))
 
-    def test_work_actions_cover_the_specification(self):
-        """«обратная связь проведена; проведён дополнительный разбор ситуации;
-        назначен / проведён тренинг; дополнительное обучение не требуется;
-        приняты другие меры» — «назначен / проведён» разведены на два факта."""
-        self.assertEqual([item['title'] for item in catalog.WORK_ACTIONS], [
-            'Обратная связь проведена', 'Проведён дополнительный разбор ситуации',
-            'Назначен тренинг', 'Проведён тренинг',
-            'Дополнительное обучение не требуется', 'Приняты другие меры'])
+    def test_three_buttons(self):
+        """Владелец, 30.09.2026: вместо «Записать работу» — три кнопки внизу:
+        «Назначить тренинг», «Проведён тренинг», «Приняты другие меры»."""
+        self.assertEqual(catalog.ACTIVE_WORK_ACTIONS, ('training_assigned', 'training', 'other'))
+        self.assertEqual([item['button'] for item in catalog.public_meta()['work_buttons']],
+                         ['Назначить тренинг', 'Проведён тренинг', 'Приняты другие меры'])
+        # Кнопка — только у действующих: выведенные варианты остаются подписями
+        # старых записей журнала.
+        self.assertEqual({item['code'] for item in catalog.WORK_ACTIONS if item.get('button')},
+                         set(catalog.ACTIVE_WORK_ACTIONS))
 
-    def test_only_feedback_and_training_write_to_trainings(self):
-        writes = {item['code'] for item in catalog.WORK_ACTIONS if item['training']}
-        self.assertEqual(writes, {'feedback', 'training'})
+    def test_old_records_keep_their_titles(self):
+        """Работа до 30.09.2026 записана шестью вариантами ТЗ — их подписи
+        нужны журналу, хоть кнопок у них больше нет."""
+        self.assertEqual({item['code']: item['title'] for item in catalog.WORK_ACTIONS}, {
+            'feedback': 'Обратная связь проведена',
+            'review': 'Проведён дополнительный разбор ситуации',
+            'training_assigned': 'Назначен тренинг',
+            'training': 'Проведён тренинг',
+            'no_training': 'Дополнительное обучение не требуется',
+            'other': 'Приняты другие меры',
+        })
+
+    def test_only_the_held_training_writes_to_trainings(self):
+        writes = {code for code in catalog.ACTIVE_WORK_ACTIONS
+                  if catalog.WORK_ACTION_BY_CODE[code]['training']}
+        self.assertEqual(writes, {'training'})
+        plans = {code for code in catalog.ACTIVE_WORK_ACTIONS
+                 if catalog.WORK_ACTION_BY_CODE[code].get('plan')}
+        self.assertEqual(plans, {'training_assigned'})
 
     def test_training_reasons_are_allowed_by_the_trainings_check(self):
         """Вид занятия уходит в trainings.reason под CHECK из 11 литералов."""
@@ -223,13 +277,28 @@ class WorkFlagsTest(unittest.TestCase):
         self.assertFalse(flags['closed'])
 
     def test_assigned_training_is_not_cancelled_by_feedback_or_review(self):
-        """«Назначен тренинг», потом «ОС проведена» — работа НЕ закрыта:
-        тренинг так и не провели (сверка с ТЗ 29.09.2026)."""
-        for code in ('feedback', 'review', 'other'):
+        """«Назначен тренинг», потом «ОС проведена» (старые записи) — работа НЕ
+        закрыта: тренинг так и не провели (сверка с ТЗ 29.09.2026)."""
+        for code in ('feedback', 'review'):
             flags = catalog.next_work_flags(
                 catalog.next_work_flags(self.START, 'training_assigned'), code)
             self.assertTrue(flags['training_required'], code)
             self.assertFalse(flags['closed'], code)
+
+    def test_other_measures_replace_an_assigned_training(self):
+        """С 30.09.2026 кнопок три, и «Приняты другие меры» — единственный
+        способ закрыть работу, если назначенный тренинг так и не состоялся.
+        Иначе жалоба висела бы открытой навсегда."""
+        flags = catalog.next_work_flags(
+            catalog.next_work_flags(self.START, 'training_assigned'), 'other')
+        self.assertFalse(flags['training_required'])
+        self.assertTrue(flags['closed'])
+
+    def test_assigned_then_held_training_closes(self):
+        flags = catalog.next_work_flags(
+            catalog.next_work_flags(self.START, 'training_assigned'), 'training')
+        self.assertEqual(flags, {'feedback_done': False, 'training_required': False,
+                                 'training_done': True, 'closed': True})
 
     def test_no_training_needed_closes_and_explains_why(self):
         """«…либо не указал, почему дополнительная работа не требуется»."""

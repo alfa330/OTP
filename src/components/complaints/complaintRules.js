@@ -10,33 +10,77 @@
  */
 
 // Выбора «отправлять ли в группу» у оператора нет ни у одной цели (владелец,
-// 29.09.2026): Яндекс только фиксируется, всё остальное уходит в группу.
+// 29.09.2026). Жалоба на Яндекс сначала идёт на проверку супервайзеру и в
+// группу уходит только по его решению (владелец, 30.09.2026); остальные —
+// в группу сразу.
 export const PROCESS_ALWAYS = 'always';
-export const PROCESS_NEVER = 'never';
+export const PROCESS_REVIEW = 'review';
+
+// Проверка супервайзером — те же значения, что catalog.REVIEW_*.
+export const REVIEW_PENDING = 'pending';
+export const REVIEW_SENT = 'sent';
+export const REVIEW_RESOLVED = 'resolved';
 
 export const WORK_UNASSIGNED = 'unassigned';
 export const WORK_PENDING = 'pending';
 export const WORK_DONE = 'done';
 
-/* Статус жалобы для человека. Три вида, а не два: жалоба, которую только
- * зафиксировали (Яндекс, часть жалоб на парк), закрыта с момента создания, и
- * «Отработана» про неё было бы неправдой — её никто не разбирал. */
+/* «Зафиксирована»: в группу не уходила, на проверку не ставилась, итога и
+ * сотрудника нет. Так до 30.09.2026 сохранялись жалобы на Яндекс. Та же формула,
+ * что queries.RECORDED_SQL и report.is_recorded на сервере. */
+export const isRecorded = (complaint) => Boolean(complaint)
+    && complaint.requires_processing === false && !complaint.review_state
+    && !complaint.result_code && !complaint.employee_id;
+
+/* Статус жалобы для человека. «Отработана» про зафиксированную было бы
+ * неправдой — её никто не разбирал; жалоба на проверке — «На проверке»: она
+ * ещё не в группе, и «В работе» обещало бы, что группа уже занята ею. */
 export const statusView = (complaint) => {
     if (!complaint) return { label: '—', tone: 'slate' };
     if (complaint.status === 'closed') {
-        return complaint.requires_processing === false && !complaint.result_code
-            && !complaint.employee_id
+        return isRecorded(complaint)
             ? { label: 'Зафиксирована', tone: 'slate' }
             : { label: 'Отработана', tone: 'green' };
     }
+    if (complaint.review_state === REVIEW_PENDING) return { label: 'На проверке', tone: 'slate' };
     // «В работе» — штатное состояние, и красить его нечем: цвет у того, что
     // ждёт действия, а это решают бейджи (rowBadges), а не статус.
     return { label: 'В работе', tone: 'slate' };
 };
 
+/* Где жалоба сейчас — одной фразой для автора (карточка в «Обращениях»):
+ * в группе, на проверке у супервайзера, решена им без группы или только
+ * зафиксирована. Пустая строка — сказать нечего (в группу ещё не ушла:
+ * об этом говорит красная плашка с повтором). */
+export const whereabouts = (complaint) => {
+    if (!complaint) return '';
+    if (complaint.review_state === REVIEW_PENDING) return 'на проверке у супервайзера';
+    if (complaint.review_state === REVIEW_RESOLVED) {
+        return 'решена супервайзером, в группу не отправлялась';
+    }
+    if (isRecorded(complaint)) return 'зафиксирована для аналитики, в группу не отправлялась';
+    return complaint.tg_chat_title && complaint.delivery_status === 'sent'
+        ? `в группе «${complaint.tg_chat_title}»` : '';
+};
+
+/* «2026-10-02T14:00:00» → «02.10 в 14:00». Время наивное (Алматы), поэтому
+ * разбираем строку, а не Date: браузер в другом поясе сдвинул бы часы. */
+export const planText = (iso) => {
+    const found = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(String(iso || ''));
+    return found ? `${found[3]}.${found[2]} в ${found[4]}:${found[5]}` : '';
+};
+
+/* Назначенный тренинг, который ещё в силе: требование не снято. */
+export const activePlan = (complaint) => (
+    complaint && complaint.training_required && complaint.training_planned_at
+        ? complaint.training_planned_at : null);
+
 /* Бейджи строки ленты — только исключения, как в «Обращениях»: штатное «в
  * работе» у сорока строк подряд превращает ленту в светофор. Горит то, что
- * ждёт действия ЗРИТЕЛЯ. */
+ * ждёт действия ЗРИТЕЛЯ. Жалоба на Яндекс, которая ждёт ЕГО проверки, —
+ * по флагу сервера review_mine: тем же правилом считаются счётчик «К
+ * разбору» и колокол, и бейдж не горит у главы или админа, которым жалоба
+ * просто видна. */
 export const rowBadges = (complaint, viewerId) => {
     const badges = [];
     if (!complaint) return badges;
@@ -49,10 +93,18 @@ export const rowBadges = (complaint, viewerId) => {
     } else if (complaint.unread && complaint.unread_kind === 'answer') {
         badges.push({ key: 'answer', label: 'Есть ответ', tone: 'blue' });
     }
+    if (complaint.review_mine && complaint.review_state === REVIEW_PENDING) {
+        badges.push({ key: 'review', label: 'Ждёт проверки', tone: 'amber' });
+    }
     if (Number(complaint.responsible_id) === Number(viewerId)
         && complaint.work_state === WORK_PENDING) {
-        badges.push({ key: 'work', label: complaint.training_required ? 'Нужен тренинг' : 'Нужна ОС',
-                      tone: 'amber' });
+        const plan = activePlan(complaint);
+        badges.push({
+            key: 'work',
+            label: plan ? `Тренинг ${planText(plan).split(' в ')[0]}`
+                : complaint.training_required ? 'Нужен тренинг' : 'Ждёт работы',
+            tone: 'amber',
+        });
     }
     return badges;
 };
@@ -74,17 +126,22 @@ export const rowSubtitle = (complaint, { handler = false } = {}) => {
 export const targetByCode = (meta, code) => (
     ((meta && meta.targets) || []).find((item) => item.code === code) || null);
 
-/* Уйдёт ли жалоба в группу. Решает цель, а не оператор. Отсюда и подпись
- * кнопки: «Отправить в группу» или «Зафиксировать» — оператор должен знать,
- * кого побеспокоит его нажатие, ДО нажатия. */
-export const willProcess = (target) => Boolean(target) && target.processing !== PROCESS_NEVER;
+/* Уйдёт ли жалоба в группу СРАЗУ. Решает цель, а не оператор. Отсюда и
+ * подпись кнопки: «Отправить в группу» или «Отправить на проверку» — оператор
+ * должен знать, кого побеспокоит его нажатие, ДО нажатия. */
+export const willProcess = (target) => Boolean(target) && target.processing === PROCESS_ALWAYS;
 
-export const submitLabel = (target) => (
-    willProcess(target) ? 'Отправить в группу' : 'Зафиксировать');
+export const needsReview = (target) => Boolean(target) && target.processing === PROCESS_REVIEW;
+
+export const submitLabel = (target) => {
+    if (willProcess(target)) return 'Отправить в группу';
+    return needsReview(target) ? 'Отправить на проверку' : 'Зафиксировать';
+};
 
 /* Типы жалобы в мастере «Обращений» (решение владельца 29.09.2026). Как у
  * тематик: то, что без группы отправить нельзя, стоит неактивным с пометкой
- * «Нет группы». Без неё работает только «зафиксировать» — Яндекс. */
+ * «Нет группы». Без неё работает Яндекс: он сначала идёт на проверку
+ * супервайзеру, а группа понадобится, только если тот решит отправить. */
 export const wizardTargets = (meta) => {
     const groupReady = Boolean(meta && meta.group && meta.group.ready);
     return ((meta && meta.targets) || []).map((item) => ({
@@ -183,10 +240,12 @@ export const formPayload = (target, form) => {
 
 /* ─── Работа с сотрудником ─────────────────────────────────────────────────── */
 
-/* Цепочка ТЗ одной лесенкой: «сотрудник определён → обратная связь →
- * тренинг → работа завершена». Шаг «тренинг» показывается, только если он
- * вообще понадобился — иначе у каждой жалобы висел бы серый «тренинг не
- * проведён», которого никто не требовал. */
+/* Цепочка одной лесенкой: «сотрудник определён → тренинг → работа завершена».
+ * Шаг «тренинг» показывается, только если он вообще понадобился — иначе у
+ * каждой жалобы висел бы серый «тренинг не проведён», которого никто не
+ * требовал. Обратная связь — только у жалоб, где её записали до 30.09.2026:
+ * отдельной кнопки у неё больше нет, и серый шаг «ОС не проведена» висел бы
+ * вечно. */
 export const workSteps = (complaint) => {
     if (!complaint) return [];
     const steps = [{
@@ -203,17 +262,16 @@ export const workSteps = (complaint) => {
         }
         return steps;
     }
-    steps.push({
-        key: 'feedback',
-        label: complaint.feedback_done ? 'Обратная связь проведена' : 'Обратная связь не проведена',
-        done: Boolean(complaint.feedback_done),
-    });
-    if (complaint.training_required || complaint.training_done) {
-        steps.push({
-            key: 'training',
-            label: complaint.training_done ? 'Тренинг проведён' : 'Требуется тренинг',
-            done: Boolean(complaint.training_done),
-        });
+    if (complaint.feedback_done) {
+        steps.push({ key: 'feedback', label: 'Обратная связь проведена', done: true });
+    }
+    const plan = activePlan(complaint);
+    if (plan) {
+        steps.push({ key: 'training', label: `Тренинг назначен на ${planText(plan)}`, done: false });
+    } else if (complaint.training_required) {
+        steps.push({ key: 'training', label: 'Требуется тренинг', done: false });
+    } else if (complaint.training_done) {
+        steps.push({ key: 'training', label: 'Тренинг проведён', done: true });
     }
     steps.push({
         key: 'done',
@@ -223,57 +281,122 @@ export const workSteps = (complaint) => {
     return steps;
 };
 
-/* Проверка записи о работе — та же, что у сервера (service.record_work). */
+/* ─── Три кнопки работы с сотрудником ─────────────────────────────────────────
+ *
+ * «Назначить тренинг», «Проведён тренинг», «Приняты другие меры» (владелец,
+ * 30.09.2026). Проверка — та же, что у сервера (service.record_work,
+ * _parse_plan, _parse_training): расходиться им нельзя, иначе кнопка активна,
+ * а сервер отказывает. */
+
+export const ACTION_PLAN = 'training_assigned';
+export const ACTION_HELD = 'training';
+export const ACTION_OTHER = 'other';
+
 export const TIME_PATTERN = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const minutes = (value) => {
     const found = TIME_PATTERN.exec(String(value || ''));
     return found ? Number(found[1]) * 60 + Number(found[2]) : null;
 };
 
-/* Что можно записать, когда сотрудник не определён: только объяснение, почему
- * работать не с кем. Тот же список, что catalog.UNASSIGNED_ACTIONS. */
-export const UNASSIGNED_ACTIONS = ['review', 'no_training', 'other'];
+const pad = (value) => String(value).padStart(2, '0');
 
-export const availableWorkActions = (actions, complaint) => (
-    complaint?.employee_id
-        ? (actions || [])
-        : (actions || []).filter((item) => UNASSIGNED_ACTIONS.includes(item.code)));
+/* Сегодня и «сейчас» в виде, в каком их сравнивает форма: день ISO и минуты
+ * от полуночи. Отдельной функцией — чтобы тест подставлял своё время. */
+export const clockOf = (date = new Date()) => ({
+    today: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    minute: date.getHours() * 60 + date.getMinutes(),
+});
 
-export const workProblems = (action, draft, { today = null } = {}) => {
+/* Кнопки блока — в порядке сервера (meta.work_buttons). Без сотрудника
+ * тренинг не назначить и не провести: кнопки стоят, но неактивны и говорят
+ * почему — «другие меры» остаются, ими объясняют, почему работать не с кем. */
+export const workButtons = (meta, complaint) => (
+    ((meta && meta.work_buttons) || []).map((action) => {
+        const needsEmployee = action.code !== ACTION_OTHER;
+        const blocked = needsEmployee && !(complaint && complaint.employee_id);
+        return {
+            ...action,
+            disabled: blocked,
+            hint: blocked ? 'Сначала определите сотрудника' : null,
+        };
+    }));
+
+/* Смена в окне «Назначить тренинг» подставляет свой день, а если ещё не
+ * началась — и время начала: тренинг обычно ставят на начало смены. Идущая
+ * смена — это «сегодня», даже ночная, начавшаяся вчера вечером: день её
+ * начала уже прошёл, и назначить на него тренинг нельзя. Галочка — у той
+ * смены, которую выбрали, пока день не поменяли руками. */
+export const shiftKey = (shift) => `${shift?.date}-${shift?.start}`;
+
+export const shiftDay = (shift, clock = clockOf()) => (shift?.ongoing ? clock.today : shift?.date);
+
+export const pickShift = (draft, shift, clock = clockOf()) => ({
+    ...draft,
+    shift: shiftKey(shift),
+    date: shiftDay(shift, clock),
+    time: shift?.ongoing ? draft?.time : shift?.start,
+});
+
+export const isPickedShift = (draft, shift, clock = clockOf()) => (
+    draft?.shift === shiftKey(shift) && draft?.date === shiftDay(shift, clock));
+
+/* Черновик окна «Проведён тренинг»: если тренинг назначали и его день
+ * наступил — подставляем день и время начала, остаётся проставить конец. */
+export const heldDraft = (complaint, clock = clockOf()) => {
+    const found = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(String(activePlan(complaint) || ''));
+    if (found && found[1] <= clock.today) return { date: found[1], start: found[2] };
+    return { date: clock.today };
+};
+
+export const workProblems = (code, draft, clock = clockOf()) => {
     const problems = {};
-    if (!action) return { action: 'Выберите, что сделано' };
-    if (!String(draft?.comment || '').trim()) problems.comment = 'Опишите, что сделано';
-    // «Результат» ТЗ велит видеть в тренинге — у ОС и тренинга он обязателен.
-    if (action.training && !String(draft?.outcome || '').trim()) {
-        problems.outcome = 'Укажите результат — он попадёт в «Тренинги»';
-    }
-    if (action.training) {
-        const day = String(draft?.date || '');
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) problems.date = 'Укажите дату занятия';
-        else if (today && day > today) problems.date = 'Занятие ещё не прошло';
+    const day = String(draft?.date || '');
+    if (code === ACTION_PLAN) {
+        if (!DAY_PATTERN.test(day)) problems.date = 'Укажите день тренинга';
+        else if (day < clock.today) problems.date = 'Этот день уже прошёл';
+        const at = minutes(draft?.time);
+        if (at === null) problems.time = 'Укажите время тренинга';
+        else if (day === clock.today && at <= clock.minute) {
+            problems.time = 'Это время уже прошло';
+        }
+    } else if (code === ACTION_HELD) {
+        if (!DAY_PATTERN.test(day)) problems.date = 'Укажите дату занятия';
+        else if (day > clock.today) problems.date = 'Занятие ещё не прошло';
         const start = minutes(draft?.start);
         const end = minutes(draft?.end);
         if (start === null || end === null) problems.time = 'Укажите время начала и окончания';
         else if (end <= start) problems.time = 'Окончание должно быть позже начала';
+    } else if (code === ACTION_OTHER) {
+        if (!String(draft?.comment || '').trim()) problems.comment = 'Опишите, что сделано';
+    } else {
+        problems.action = 'Выберите, что сделано';
     }
     return problems;
 };
 
-export const workPayload = (action, draft) => {
-    const payload = {
-        action: action.code,
-        comment: String(draft?.comment || '').trim(),
-        outcome: String(draft?.outcome || '').trim() || null,
-        need_training: Boolean(action.ask_training && draft?.need_training),
-    };
-    if (action.training) {
-        payload.training = {
-            date: draft.date, start: draft.start, end: draft.end,
-            reason: draft.reason || action.default_reason,
-        };
+export const workPayload = (code, draft) => {
+    if (code === ACTION_PLAN) return { action: code, plan: { date: draft.date, time: draft.time } };
+    if (code === ACTION_HELD) {
+        return { action: code, training: { date: draft.date, start: draft.start, end: draft.end } };
     }
-    return payload;
+    return { action: code, comment: String(draft?.comment || '').trim() };
+};
+
+/* Смена в окне «Назначить тренинг»: «Чт, 02.10 · 09:00–18:00». Дата — строкой
+ * ISO без часового пояса, поэтому день недели считаем от полудня: так браузер
+ * в любом поясе не уедет на соседний день. */
+const WEEKDAYS = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+const SHIFT_TYPES = { office_practice: 'практика в офисе', phone_shift: 'телефонная смена' };
+
+export const shiftLabel = (shift) => {
+    const found = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(shift?.date || ''));
+    if (!found) return '';
+    const weekday = WEEKDAYS[new Date(`${shift.date}T12:00:00`).getDay()];
+    const parts = [`${weekday}, ${found[3]}.${found[2]}`, `${shift.start}–${shift.end}`];
+    if (SHIFT_TYPES[shift.type]) parts.push(SHIFT_TYPES[shift.type]);
+    return parts.join(' · ');
 };
 
 /* ─── Переписка ────────────────────────────────────────────────────────────── */
@@ -351,6 +474,8 @@ const EVENT_TITLES = {
     employee: 'Сотрудник',
     result: 'Итог проверки',
     work: 'Работа с сотрудником',
+    review_sent: 'Проверена супервайзером и отправлена в группу',
+    review_resolved: 'Проверена супервайзером — решено',
 };
 
 /* Строка истории со СМЫСЛОМ события, а не только его видом. «Полная история»
@@ -372,7 +497,8 @@ export const eventText = (event, meta = null) => {
     }
     if (kind === 'work') {
         const title = ((meta && meta.work_actions) || []).find((item) => item.code === payload.action)?.title;
-        return `${title || 'Работа с сотрудником'}${payload.closed ? ' · работа завершена' : ''}`;
+        const plan = payload.planned_at ? ` на ${planText(payload.planned_at)}` : '';
+        return `${title || 'Работа с сотрудником'}${plan}${payload.closed ? ' · работа завершена' : ''}`;
     }
     if (kind === 'created' && payload.employee) {
         return `Жалоба принята · сотрудник: ${payload.employee}`;

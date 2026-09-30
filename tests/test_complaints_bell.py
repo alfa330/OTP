@@ -10,6 +10,7 @@ complaints остаются только задачи разбора. Разой
 
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 from complaints import queries as complaint_queries
 from notifications import sources
@@ -106,6 +107,131 @@ class BellSplitTest(unittest.TestCase):
         self.assertEqual((items[0]['id'], items[0]['view'], items[0]['target']),
                          ('work:5', 'complaints', 5))
         self.assertEqual(items[0]['title'], 'Жалоба на Иванова')
+
+
+class TrainingPlansTest(unittest.TestCase):
+    """«В этот день супервайзерам отдела приходит уведомление о наличии
+    запланированного тренинга, оператору тоже» (владелец, 30.09.2026)."""
+
+    def setUp(self):
+        self._today = complaint_queries.training_day_bell_items
+
+    def tearDown(self):
+        complaint_queries.training_day_bell_items = self._today
+
+    def wire(self, rows):
+        seen = {}
+
+        def fake(cursor, user_id, day, limit):
+            seen.update(user_id=user_id, day=day)
+            return len(rows), list(rows)[:limit]
+
+        complaint_queries.training_day_bell_items = fake
+        return seen
+
+    def test_employee_sees_only_the_time(self):
+        """Жалоба на сотрудника ему не видна никогда — строка не выдаёт её ни
+        номером, ни темой, ни переходом в раздел."""
+        self.wire([{'id': 12, 'side': 'self', 'employee_name': None,
+                    'training_planned_at': datetime(2026, 9, 30, 14, 0)}])
+        total, items = sources.training_plans(FakeCursor(), {'user_id': 40}, 5)
+        self.assertEqual(total, 1)
+        item = items[0]
+        self.assertEqual((item['source'], item['title']), ('training_plans', 'Тренинг сегодня в 14:00'))
+        self.assertIsNone(item['view'])
+        self.assertIsNone(item['target'])
+        text = ' '.join(str(value) for value in item.values())
+        for word in ('Жалоб', 'жалоб', '12'):
+            self.assertNotIn(word, text)
+
+    def test_supervisor_goes_to_the_complaint(self):
+        seen = self.wire([{'id': 12, 'side': 'team', 'employee_name': 'Иванова',
+                           'training_planned_at': datetime(2026, 9, 30, 9, 30)}])
+        _total, items = sources.training_plans(FakeCursor(), {'user_id': 50}, 5)
+        item = items[0]
+        self.assertEqual((item['title'], item['body']), ('Иванова', 'Тренинг сегодня в 09:30'))
+        self.assertEqual((item['view'], item['target']), ('complaints', 12))
+        self.assertEqual(seen['day'], sources._almaty_now().date(), 'строка живёт в свой день')
+
+    def test_source_is_registered_and_labelled(self):
+        self.assertIn('training_plans', sources.SOURCES)
+        bell = (Path(__file__).resolve().parents[1] / 'src' / 'components' / 'notifications'
+                / 'NotificationsBell.jsx').read_text(encoding='utf-8')
+        self.assertIn("training_plans: { label: 'Тренинги'", bell)
+
+    def test_one_row_per_training_time_for_the_employee(self):
+        """Две жалобы, один тренинг в 14:00 — у сотрудника одна строка и
+        счётчик 1: иначе две одинаковые строки с одним ключом и намёк, что
+        причин две."""
+        import inspect
+        source = inspect.getsource(complaint_queries.training_day_bell_items)
+        self_branch = source[source.index("'self'"):]
+        self.assertIn('GROUP BY c.training_planned_at', self_branch)
+
+    def test_plan_is_internal_for_the_author(self):
+        """Когда коллеге назначили тренинг — деталь работы с ним: оператору,
+        заведшему жалобу, не уходит (queries.public_item)."""
+        self.assertIn('training_planned_at', complaint_queries.INTERNAL_FIELDS)
+
+    def test_day_change_is_scheduled(self):
+        """Строка появляется в полночь дня тренинга — записи в базе в этот
+        момент нет, триггер не разбудит, нужен момент в next_change_at."""
+        class Cursor(FakeCursor):
+            def __init__(self):
+                super().__init__()
+                self.sql = ''
+
+            def execute(self, sql, params=None):
+                self.sql += sql
+                super().execute(sql, params)
+
+            def fetchone(self):
+                return (None,)
+
+        cursor = Cursor()
+        hidden = tuple(name for name in sources.SOURCES if name != 'training_plans')
+        sources.next_change_at(cursor, {'user_id': 1, 'hidden_sources': hidden})
+        self.assertIn("date_trunc('day', c.training_planned_at)", cursor.sql)
+
+
+class ReviewBellTest(unittest.TestCase):
+    """Жалоба на Яндекс ждёт проверки — задача супервайзера группы оператора."""
+
+    def setUp(self):
+        self._work = complaint_queries.work_bell_items
+
+    def tearDown(self):
+        complaint_queries.work_bell_items = self._work
+
+    def test_review_item_reads_as_a_task(self):
+        complaint_queries.work_bell_items = lambda cursor, user_id, limit: (1, [{
+            'id': 30, 'role': 'work', 'kind': 'review', 'at': datetime(2026, 9, 30, 9, 0),
+            'target': 'yandex', 'reason_code': 'tariffs', 'driver_name': 'Сериков',
+            'employee_name': None, 'training_required': False, 'training_planned_at': None}])
+        total, items = sources.complaints(FakeCursor(), {'user_id': 50}, 5)
+        self.assertEqual(total, 1)
+        self.assertEqual(items[0]['id'], 'review:30')
+        self.assertEqual(items[0]['title'], 'Жалоба на Яндекс №30')
+        self.assertIn('отправить в группу или решено', items[0]['body'])
+
+    def test_work_item_names_the_next_step(self):
+        row = {'id': 5, 'role': 'work', 'kind': 'work', 'at': datetime(2026, 9, 29, 9, 0),
+               'target': 'call_center', 'reason_code': 'rude', 'driver_name': 'Сериков',
+               'employee_name': 'Иванова', 'training_required': True,
+               'training_planned_at': datetime(2026, 10, 2, 14, 0)}
+        complaint_queries.work_bell_items = lambda cursor, user_id, limit: (1, [row])
+        _total, items = sources.complaints(FakeCursor(), {'user_id': 50}, 5)
+        self.assertTrue(items[0]['body'].startswith('Тренинг назначен на 02.10 в 14:00'))
+        row.update(training_required=False, training_planned_at=None)
+        _total, items = sources.complaints(FakeCursor(), {'user_id': 50}, 5)
+        self.assertTrue(items[0]['body'].startswith('Назначьте тренинг или запишите принятые меры'))
+
+    def test_counter_and_bell_share_the_reviewer_rule(self):
+        """Бейдж «Жалоб» и строки колокола считаются одним условием —
+        иначе цифра и список разойдутся молча."""
+        import inspect
+        self.assertIn("reviewer_sql('viewer_id')", inspect.getsource(complaint_queries.counters))
+        self.assertIn("reviewer_sql('user_id')", inspect.getsource(complaint_queries.work_bell_items))
 
 
 if __name__ == '__main__':

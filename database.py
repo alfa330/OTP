@@ -7089,6 +7089,44 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.created_by, OLD.responsible_id];
                     END IF;
+                    -- Жалоба на проверке (Яндекс): решают супервайзеры текущих
+                    -- групп автора, а без них — глава его отдела
+                    -- (complaints/queries.py::reviewer_sql). Будим круг шире
+                    -- точного — лишний тычок стоит одной перечитки сводки.
+                    IF NEW.review_state IS NOT NULL THEN
+                        targets := targets || ARRAY(
+                            SELECT gsm.supervisor_id
+                              FROM group_operator_memberships gom
+                              JOIN group_supervisor_memberships gsm
+                                ON gsm.group_id = gom.group_id
+                             WHERE gom.operator_id = NEW.created_by
+                               AND gom.start_date <= CURRENT_DATE
+                               AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
+                               AND gsm.start_date <= CURRENT_DATE
+                               AND (gsm.end_date IS NULL OR gsm.end_date >= CURRENT_DATE)
+                        ) || ARRAY(
+                            SELECT d.head_user_id FROM departments d
+                             WHERE d.id = NEW.creator_department_id
+                               AND d.head_user_id IS NOT NULL);
+                    END IF;
+                    -- Назначенный тренинг: в его день строка в колоколе у самого
+                    -- сотрудника и у супервайзеров его отдела (источник
+                    -- training_plans). При смене сотрудника назначение снимается —
+                    -- будим и прежнего.
+                    IF NEW.training_planned_at IS NOT NULL THEN
+                        targets := targets || ARRAY[NEW.employee_id] || ARRAY(
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = NEW.target_department_id
+                               AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                               AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor'));
+                    END IF;
+                    IF TG_OP = 'UPDATE' AND OLD.training_planned_at IS NOT NULL THEN
+                        targets := targets || ARRAY[OLD.employee_id] || ARRAY(
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = OLD.target_department_id
+                               AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                               AND lower(COALESCE(u.role, '')) IN ('sv', 'supervisor'));
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'tasks' THEN
                     -- Исполнители и принимающий; при UPDATE — и прежние тоже:
                     -- переназначенная задача должна погаснуть у старого владельца.
@@ -7260,15 +7298,23 @@ class Database:
             # слал бы тычок ни за что. Два триггера, а не один: WHEN у
             # INSERT-триггера не может ссылаться на OLD.
             ('trg_bell_complaints_insert', 'complaints', 'AFTER INSERT', ''),
+            # review_state — проверка жалобы на Яндекс супервайзером (решение
+            # гасит задачу у всех проверяющих); training_planned_at и
+            # training_required — назначенный тренинг и его снятие (строка
+            # «тренинг сегодня» у сотрудника и СВ его отдела).
             (
                 'trg_bell_complaints',
                 'complaints',
-                'AFTER UPDATE OF author_unread_at, responsible_id, work_state, status',
+                'AFTER UPDATE OF author_unread_at, responsible_id, work_state, status, '
+                'review_state, training_planned_at, training_required',
                 """WHEN (
                     OLD.author_unread_at IS DISTINCT FROM NEW.author_unread_at
                     OR OLD.responsible_id IS DISTINCT FROM NEW.responsible_id
                     OR OLD.work_state IS DISTINCT FROM NEW.work_state
                     OR OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.review_state IS DISTINCT FROM NEW.review_state
+                    OR OLD.training_planned_at IS DISTINCT FROM NEW.training_planned_at
+                    OR OLD.training_required IS DISTINCT FROM NEW.training_required
                 )""",
             ),
             ('trg_bell_tasks', 'tasks', 'AFTER INSERT OR UPDATE', ''),

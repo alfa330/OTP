@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  activeFilterCount, analyticsQuery, availableWorkActions, bucketLabel, driverAnswers,
-  employeeDepartmentId, eventText,
+  activeFilterCount, analyticsQuery, bucketLabel, driverAnswers,
+  employeeDepartmentId, eventText, heldDraft, isPickedShift, isRecorded, needsReview, pickShift,
+  planText, shiftLabel,
   formPayload, formProblems, isRepeated, officeOptions, openQuestion, percent, rowBadges,
-  rowSubtitle, statusView, submitLabel, willProcess, wizardTargets, workPayload, workProblems,
-  workSteps,
+  rowSubtitle, statusView, submitLabel, whereabouts, willProcess, wizardTargets, workButtons,
+  workPayload, workProblems, workSteps,
 } from '../src/components/complaints/complaintRules.js';
 
 /* Правила раздела «Жалобы» (ТЗ задачи #297). Обязательность формы и правило
@@ -24,7 +25,7 @@ const META = {
     { code: 'taxi_park', unit: 'park', unit_required: false, employee: false,
       processing: 'always', reasons: [{ code: 'commission' }] },
     { code: 'yandex', unit: null, unit_required: false, employee: false,
-      processing: 'never', reasons: [{ code: 'tariffs' }] },
+      processing: 'review', reasons: [{ code: 'tariffs' }] },
   ],
   departments: [
     { id: 1, code: 'szov', call_center: true }, { id: 367, code: 'op', call_center: true },
@@ -42,9 +43,10 @@ const FILLED = {
   driver_phone: '+7 701', city: 'Алматы', description: 'Нагрубил',
 };
 
-test('Яндекс только фиксируется — и кнопка говорит об этом до нажатия', () => {
+test('Яндекс идёт на проверку супервайзеру — и кнопка говорит об этом до нажатия', () => {
   assert.equal(willProcess(target('yandex')), false);
-  assert.equal(submitLabel(target('yandex')), 'Зафиксировать');
+  assert.equal(needsReview(target('yandex')), true);
+  assert.equal(submitLabel(target('yandex')), 'Отправить на проверку');
   assert.equal(submitLabel(target('call_center')), 'Отправить в группу');
   // Выбора у оператора нет ни у одной цели (владелец, 29.09.2026): парк —
   // тоже в группу.
@@ -99,14 +101,45 @@ test('статус: «зафиксирована» — не «отработан
   assert.equal(statusView({ status: 'open' }).tone, 'slate');
 });
 
+test('жалоба на проверке: «На проверке», решённая — «Отработана», не «Зафиксирована»', () => {
+  const pending = { status: 'open', requires_processing: false, review_state: 'pending' };
+  assert.equal(statusView(pending).label, 'На проверке');
+  assert.equal(isRecorded(pending), false);
+  const resolved = { status: 'closed', requires_processing: false, review_state: 'resolved',
+    result_code: 'solved' };
+  assert.equal(statusView(resolved).label, 'Отработана');
+  assert.equal(isRecorded({ requires_processing: false }), true, 'старые жалобы на Яндекс');
+});
+
+test('где жалоба — одной фразой для автора', () => {
+  assert.equal(whereabouts({ review_state: 'pending', requires_processing: false }),
+    'на проверке у супервайзера');
+  assert.equal(whereabouts({ review_state: 'resolved', requires_processing: false, result_code: 'solved' }),
+    'решена супервайзером, в группу не отправлялась');
+  assert.equal(whereabouts({ requires_processing: false }),
+    'зафиксирована для аналитики, в группу не отправлялась');
+  assert.equal(whereabouts({ requires_processing: true, delivery_status: 'sent', tg_chat_title: 'Жалобы' }),
+    'в группе «Жалобы»');
+  // Не ушла — об этом говорит красная плашка с повтором, а не эта строка.
+  assert.equal(whereabouts({ requires_processing: true, delivery_status: 'failed', tg_chat_title: 'Жалобы' }), '');
+});
+
 test('бейджи ленты — только то, что ждёт зрителя', () => {
   const base = { created_by: 10, responsible_id: 50, work_state: 'pending' };
   assert.deepEqual(rowBadges({ ...base, question_open: true }, 10).map((b) => b.key), ['question']);
   assert.deepEqual(rowBadges({ ...base, unread: true, unread_kind: 'answer' }, 10).map((b) => b.key),
     ['answer']);
-  assert.deepEqual(rowBadges(base, 50).map((b) => b.label), ['Нужна ОС']);
+  assert.deepEqual(rowBadges(base, 50).map((b) => b.label), ['Ждёт работы']);
   assert.deepEqual(rowBadges({ ...base, training_required: true }, 50).map((b) => b.label),
     ['Нужен тренинг']);
+  assert.deepEqual(rowBadges({ ...base, training_required: true,
+    training_planned_at: '2026-10-02T14:00:00' }, 50).map((b) => b.label), ['Тренинг 02.10']);
+  // Жалоба на проверке горит тому, чья это проверка (флаг сервера — то же
+  // правило, что у счётчика и колокола), а не каждому, кому она видна.
+  const review = { created_by: 10, review_state: 'pending' };
+  assert.deepEqual(rowBadges({ ...review, review_mine: true }, 50).map((b) => b.key), ['review']);
+  assert.deepEqual(rowBadges({ ...review, review_mine: false }, 50), []);
+  assert.deepEqual(rowBadges({ ...review, review_state: 'resolved', review_mine: true }, 50), []);
   // Штатное «в работе» не рисуется никак.
   assert.deepEqual(rowBadges(base, 99), []);
   assert.deepEqual(rowBadges({ ...base, delivery_status: 'failed' }, 99).map((b) => b.key), ['failed']);
@@ -121,30 +154,78 @@ test('вторая строка ленты: разбирающему — сот�
 test('лесенка работы с сотрудником', () => {
   assert.deepEqual(workSteps({}).map((s) => s.label), ['Сотрудник не определён']);
   const pending = { employee_id: 40, employee_name: 'Иванова', work_state: 'pending' };
-  assert.deepEqual(workSteps(pending).map((s) => s.key), ['employee', 'feedback', 'done']);
-  const training = { ...pending, feedback_done: true, training_required: true };
-  assert.deepEqual(workSteps(training).map((s) => s.label),
-    ['Сотрудник определён', 'Обратная связь проведена', 'Требуется тренинг',
-      'Работа с сотрудником завершена']);
-  const done = { ...pending, feedback_done: true, training_done: true, work_state: 'done' };
-  assert.ok(workSteps(done).every((s) => s.done));
+  // Кнопки «ОС» больше нет — и серого шага «ОС не проведена» тоже.
+  assert.deepEqual(workSteps(pending).map((s) => s.key), ['employee', 'done']);
+  const planned = { ...pending, training_required: true, training_planned_at: '2026-10-02T14:00:00' };
+  assert.deepEqual(workSteps(planned).map((s) => s.label),
+    ['Сотрудник определён', 'Тренинг назначен на 02.10 в 14:00', 'Работа с сотрудником завершена']);
+  assert.deepEqual(workSteps({ ...pending, training_required: true }).map((s) => s.label)[1],
+    'Требуется тренинг');
+  // Старая запись ОС остаётся видна фактом.
+  const old = { ...pending, feedback_done: true, training_done: true, work_state: 'done' };
+  assert.deepEqual(workSteps(old).map((s) => s.key), ['employee', 'feedback', 'training', 'done']);
+  assert.ok(workSteps(old).every((s) => s.done));
 });
 
-test('запись о работе: время занятия и комментарий', () => {
-  const feedback = { code: 'feedback', training: true, ask_training: true, default_reason: 'Обратная связь' };
-  const other = { code: 'other', training: false, ask_training: false };
-  assert.deepEqual(Object.keys(workProblems(feedback, {})).sort(), ['comment', 'date', 'outcome', 'time']);
-  assert.equal(workProblems(feedback, { comment: 'x', date: '2026-09-28', start: '10:00', end: '09:00' }).time,
+const CLOCK = { today: '2026-09-30', minute: 12 * 60 };
+
+test('«Назначить тренинг»: день и время — только вперёд', () => {
+  assert.deepEqual(Object.keys(workProblems('training_assigned', {}, CLOCK)).sort(), ['date', 'time']);
+  assert.equal(workProblems('training_assigned', { date: '2026-09-29', time: '10:00' }, CLOCK).date,
+    'Этот день уже прошёл');
+  assert.equal(workProblems('training_assigned', { date: '2026-09-30', time: '11:55' }, CLOCK).time,
+    'Это время уже прошло');
+  assert.deepEqual(workProblems('training_assigned', { date: '2026-09-30', time: '12:05' }, CLOCK), {});
+  assert.deepEqual(workPayload('training_assigned', { date: '2026-10-02', time: '14:00' }),
+    { action: 'training_assigned', plan: { date: '2026-10-02', time: '14:00' } });
+});
+
+test('«Проведён тренинг»: дата, начало и конец — в «Тренинги»', () => {
+  assert.equal(workProblems('training', { date: '2026-09-28', start: '10:00', end: '09:00' }, CLOCK).time,
     'Окончание должно быть позже начала');
-  assert.equal(workProblems(feedback, { comment: 'x', date: '2026-10-05', start: '10:00', end: '11:00' },
-    { today: '2026-09-29' }).date, 'Занятие ещё не прошло');
-  assert.deepEqual(workProblems(other, { comment: 'x' }), {});
-  const payload = workPayload(feedback, { comment: ' ОС ', date: '2026-09-28', start: '10:00',
-    end: '10:30', need_training: true });
-  assert.deepEqual(payload.training, { date: '2026-09-28', start: '10:00', end: '10:30',
-    reason: 'Обратная связь' });
-  assert.equal(payload.need_training, true);
-  assert.equal(workPayload(other, { comment: 'x', need_training: true }).need_training, false);
+  assert.equal(workProblems('training', { date: '2026-10-05', start: '10:00', end: '11:00' }, CLOCK).date,
+    'Занятие ещё не прошло');
+  assert.deepEqual(workProblems('training', { date: '2026-09-28', start: '10:00', end: '10:30' }, CLOCK), {});
+  assert.deepEqual(workPayload('training', { date: '2026-09-28', start: '10:00', end: '10:30' }),
+    { action: 'training', training: { date: '2026-09-28', start: '10:00', end: '10:30' } });
+  // Назначенный и наступивший тренинг подставляет свой день и начало.
+  const planned = { training_required: true, training_planned_at: '2026-09-30T09:00:00' };
+  assert.deepEqual(heldDraft(planned, CLOCK), { date: '2026-09-30', start: '09:00' });
+  const future = { training_required: true, training_planned_at: '2026-10-03T09:00:00' };
+  assert.deepEqual(heldDraft(future, CLOCK), { date: '2026-09-30' });
+});
+
+test('«Приняты другие меры»: нужен комментарий', () => {
+  assert.equal(workProblems('other', { comment: '  ' }, CLOCK).comment, 'Опишите, что сделано');
+  assert.deepEqual(workProblems('other', { comment: 'Беседа' }, CLOCK), {});
+  assert.deepEqual(workPayload('other', { comment: ' Беседа ' }), { action: 'other', comment: 'Беседа' });
+  assert.equal(workProblems('feedback', {}, CLOCK).action, 'Выберите, что сделано');
+});
+
+test('смена в окне назначения: идущая ночная — это «сегодня»', () => {
+  const night = { date: '2026-09-29', start: '20:00', end: '08:00', ongoing: true };
+  const clock = { today: '2026-09-30', minute: 2 * 60 };
+  const picked = pickShift({}, night, clock);
+  // День начала смены уже прошёл — подставляем сегодня, время не трогаем.
+  assert.equal(picked.date, '2026-09-30');
+  assert.equal(picked.time, undefined);
+  assert.equal(workProblems('training_assigned', { ...picked, time: '04:00' }, clock).date, undefined);
+  assert.ok(isPickedShift(picked, night, clock));
+  const next = { date: '2026-10-01', start: '09:00', end: '18:00', ongoing: false };
+  const second = pickShift(picked, next, clock);
+  assert.deepEqual([second.date, second.time], ['2026-10-01', '09:00']);
+  assert.ok(isPickedShift(second, next, clock));
+  assert.ok(!isPickedShift(second, night, clock), 'галочка — у одной смены');
+  assert.ok(!isPickedShift({ ...second, date: '2026-10-02' }, next, clock), 'день поменяли руками');
+});
+
+test('смена в окне назначения и время плана', () => {
+  assert.equal(shiftLabel({ date: '2026-10-01', start: '09:00', end: '18:00', type: 'regular' }),
+    'Чт, 01.10 · 09:00–18:00');
+  assert.equal(shiftLabel({ date: '2026-10-03', start: '10:00', end: '14:00', type: 'office_practice' }),
+    'Сб, 03.10 · 10:00–14:00 · практика в офисе');
+  assert.equal(planText('2026-10-02T14:05:00'), '02.10 в 14:05');
+  assert.equal(planText(null), '');
 });
 
 test('ответы для водителя — свежий первым; вопрос — последний', () => {
@@ -171,18 +252,14 @@ test('аналитика: подписи, проценты, фильтры', () 
 });
 
 
-test('запись работы: у ОС и тренинга результат обязателен', () => {
-  const feedback = { code: 'feedback', training: true, ask_training: true };
-  const filled = { comment: 'x', date: '2026-09-28', start: '10:00', end: '10:30' };
-  assert.equal(workProblems(feedback, filled).outcome, 'Укажите результат — он попадёт в «Тренинги»');
-  assert.deepEqual(workProblems(feedback, { ...filled, outcome: 'Признал' }), {});
-});
-
-test('без сотрудника — только объяснение, почему работать не с кем', () => {
-  const actions = ['feedback', 'review', 'training_assigned', 'training', 'no_training', 'other']
-    .map((code) => ({ code }));
-  assert.deepEqual(availableWorkActions(actions, {}).map((a) => a.code), ['review', 'no_training', 'other']);
-  assert.equal(availableWorkActions(actions, { employee_id: 4 }).length, 6);
+test('без сотрудника — тренинг недоступен, «другие меры» объясняют почему', () => {
+  const meta = { work_buttons: ['training_assigned', 'training', 'other']
+    .map((code) => ({ code, button: code })) };
+  assert.deepEqual(workButtons(meta, {}).map((a) => [a.code, a.disabled]),
+    [['training_assigned', true], ['training', true], ['other', false]]);
+  assert.equal(workButtons(meta, {})[0].hint, 'Сначала определите сотрудника');
+  assert.ok(workButtons(meta, { employee_id: 4 }).every((a) => !a.disabled));
+  assert.deepEqual(workButtons(null, {}), []);
   // Лесенка у такой жалобы: сотрудник не определён, но работа закрыта объяснением.
   assert.deepEqual(workSteps({ work_state: 'done' }).map((s) => [s.key, s.done]),
     [['employee', false], ['done', true]]);
@@ -206,6 +283,11 @@ test('история говорит, ЧТО произошло', () => {
   assert.equal(eventText({ kind: 'work', payload: { action: 'feedback', closed: true } }, meta),
     'Обратная связь проведена · работа завершена');
   assert.equal(eventText({ kind: 'sent', payload: {} }), 'Отправлена в группу');
+  assert.equal(eventText({ kind: 'work', payload: { action: 'feedback', planned_at: '2026-10-02T14:00:00' } },
+    meta), 'Обратная связь проведена на 02.10 в 14:00');
+  assert.equal(eventText({ kind: 'review_resolved', payload: {} }), 'Проверена супервайзером — решено');
+  assert.equal(eventText({ kind: 'review_sent', payload: {} }),
+    'Проверена супервайзером и отправлена в группу');
 });
 
 test('направления жалобы в мастере «Обращений»: без группы — как тематика без группы', () => {
@@ -213,8 +295,8 @@ test('направления жалобы в мастере «Обращений
   assert.deepEqual(ready.map((t) => t.code),
     ['call_center', 'car_rental', 'front_office', 'taxi_park', 'yandex']);
   assert.ok(ready.every((t) => t.is_ready));
-  // Группа не выбрана: отправить некуда никого, кроме Яндекса — он только
-  // фиксируется.
+  // Группа не выбрана: отправить некуда никого, кроме Яндекса — он сначала
+  // идёт на проверку супервайзеру.
   const noGroup = Object.fromEntries(wizardTargets({ ...META, group: { ready: false } })
     .map((t) => [t.code, t.is_ready]));
   assert.deepEqual(noGroup, { call_center: false, car_rental: false, front_office: false,

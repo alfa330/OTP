@@ -608,6 +608,48 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
     return items, has_more
 
 
+# Потолок одной выгрузки — как у жалоб. На 30.09.2026 обращений за всё время
+# меньше сотни, но период выбирает человек, и «с 2020 года» не должно стоить
+# процесса waitress с полумиллионом строк в памяти.
+EXPORT_LIMIT = 20000
+
+
+def export_tickets(cursor, ctx, *, date_from, date_to, limit=EXPORT_LIMIT):
+    """Обращения, заведённые за период (обе даты включительно), в периметре
+    зрителя — для выгрузки в Excel. Возвращает (строки, упёрлись ли в потолок).
+
+    Период — по дате СОЗДАНИЯ: «обращения за сентябрь» — это заведённые в
+    сентябре, а не те, где в сентябре кто-то ответил. Порядок — хронология.
+    Одна лишняя строка отвечает на вопрос «вошло ли всё», как has_more в ленте.
+    """
+    where, params = visibility_sql(ctx)
+    params.update({'date_from': date_from, 'date_to': date_to, 'limit': int(limit) + 1})
+    cursor.execute(
+        """
+        SELECT %s, q.chat_title, d.name
+          FROM crm_tickets t
+          JOIN crm_queues q ON q.id = t.queue_id
+          LEFT JOIN crm_topics tp ON tp.id = t.topic_id
+          LEFT JOIN departments d ON d.id = t.department_id
+         WHERE %s
+           AND t.created_at >= %%(date_from)s::date
+           AND t.created_at < (%%(date_to)s::date + INTERVAL '1 day')
+         ORDER BY t.created_at, t.id
+         LIMIT %%(limit)s
+        """ % (_TICKET_COLUMNS, where),
+        params,
+    )
+    rows = cursor.fetchall()
+    truncated = len(rows) > int(limit)
+    items = []
+    for row in rows[:int(limit)]:
+        item = _ticket_row(row, ctx['user_id'])
+        item['queue_chat_title'] = row[35]
+        item['department_name'] = row[36]
+        items.append(item)
+    return items, truncated
+
+
 def attach_previews(cursor, items):
     """Дописывает в строки списка последнюю реплику нити — как в мессенджере.
 

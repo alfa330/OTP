@@ -78,11 +78,24 @@ DATE_ONLY_FORMAT = 'DD.MM.YYYY'
 
 
 def is_recorded(item):
-    """«Зафиксирована»: в группу не уходила, итога и сотрудника нет — её никто
-    не разбирал. Та же формула, что queries.RECORDED_SQL и statusView в
-    интерфейсе: отработанной такая жалоба не называется нигде."""
-    return (not item.get('requires_processing') and not item.get('employee_id')
-            and not item.get('result_code'))
+    """«Зафиксирована»: в группу не уходила, на проверку не ставилась, итога и
+    сотрудника нет — её никто не разбирал. Та же формула, что
+    queries.RECORDED_SQL и statusView в интерфейсе: отработанной такая жалоба
+    не называется нигде."""
+    return (not item.get('requires_processing') and not item.get('review_state')
+            and not item.get('employee_id') and not item.get('result_code'))
+
+
+def processing_title(item):
+    """Колонка «В группу»: ушла ли жалоба в группу, а если нет — почему."""
+    if item.get('requires_processing'):
+        return 'Да'
+    review = item.get('review_state')
+    if review == catalog.REVIEW_PENDING:
+        return 'На проверке у СВ'
+    if review == catalog.REVIEW_RESOLVED:
+        return 'Нет — решена при проверке'
+    return 'Нет'
 
 WORK_TITLES = {
     None: '',
@@ -124,7 +137,7 @@ def row_values(item):
     else:
         status_title = 'Зафиксирована' if recorded else 'Отработана'
     values.update({
-        'processing': 'Да' if item.get('requires_processing') else 'Нет',
+        'processing': processing_title(item),
         'status_title': status_title,
         # «Отработана» — когда разобрали; у зафиксированной это было бы время
         # создания, выданное за время разбора.
@@ -164,8 +177,9 @@ def build_workbook(items, *, filters_note, generated_by, generated_at=None,
         ('Отбор', filters_note or 'без фильтров'),
         ('Строк', len(items)),
         ('Что в листе «Жалобы»', 'Каждая строка — одна жалоба. «Зафиксирована» — жалоба '
-                                 'не уходила на разбор (Яндекс, часть жалоб на парк) и '
-                                 'сохранена для аналитики.'),
+                                 'не уходила на разбор и сохранена для аналитики (так до '
+                                 '30.09.2026 сохранялись жалобы на Яндекс; теперь их сначала '
+                                 'проверяет супервайзер — колонка «В группу»).'),
         ('Что в листе «По сотрудникам»', 'Жалобы, где сотрудник определён: сколько всего, '
                                          'сколько подтверждено, где проведены ОС и тренинг.'),
     ):

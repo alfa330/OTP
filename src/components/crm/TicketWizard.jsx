@@ -247,6 +247,16 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null,
                        className={iosInput} />
             );
         }
+        if (step.kind === 'email') {
+            // Почта — своей клавиатурой с «@» на телефоне; проверку формата
+            // делает сервер (scenarios.validate_step), как у ИИН.
+            return (
+                <input ref={inputRef} type="email" inputMode="email" autoComplete="off"
+                       value={current || ''} placeholder={step.placeholder || undefined}
+                       onChange={(e) => onChange(e.target.value.trim())}
+                       className={iosInput} />
+            );
+        }
         return (
             <input ref={inputRef} type="text" value={current || ''}
                    /* Пример показываем подсказкой в самом поле: он виден, пока
@@ -1072,7 +1082,7 @@ export default function TicketWizard({
                         <ArrowLeft size={14} /> Назад
                     </button>
                     {/* Подпись называет последствие: «Отправить в группу» или
-                        «Зафиксировать» — оператор знает, кого побеспокоит. */}
+                        «Отправить на проверку» — оператор знает, кого побеспокоит. */}
                     <button type="button" onClick={submitComplaint} disabled={sending || blocked}
                             title={blocked ? 'Telegram-группа для жалоб ещё не выбрана' : undefined}
                             className={iosBtnPrimary}>

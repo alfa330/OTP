@@ -18,12 +18,13 @@ OPTIONS и первым делом отдаётся preflight, авториза�
 
 import json
 import logging
+from datetime import date
 from functools import wraps
 from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, queries, sapar, scenarios, schema, service, telegram, transport
+from . import access, queries, report, sapar, scenarios, schema, service, telegram, transport
 
 # Вложение к обращению. Предел Telegram для загрузки ботом — 20 МБ, больше не
 # примет ни при каких условиях, поэтому отсекаем на входе с понятным текстом.
@@ -31,7 +32,7 @@ ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 
 
 def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                        resolve_requester, sensitive_access_granted):
+                        resolve_requester, sensitive_access_granted, excel_text_warning=None):
     """Собирает Blueprint раздела.
 
     sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ
@@ -1006,7 +1007,49 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                            for code in schema.TICKET_PRIORITIES],
         })
 
+    @crm_route('/export')
+    def crm_export(ctx):
+        """Обращения за период одним xlsx (владелец, 30.09.2026). Период —
+        по дате создания, обе даты включительно; в выгрузку идёт ровно то, что
+        зрителю видно в разделе (queries.visibility_sql)."""
+        if not access.can_export(ctx):
+            return jsonify({"error": "Выгрузка открыта супервайзерам и руководителям",
+                            "code": "CRM_FORBIDDEN"}), 403
+        date_from, date_to, problem = _period(request.args.get('date_from'),
+                                              request.args.get('date_to'))
+        if problem:
+            return jsonify({"error": problem}), 400
+        with db._get_cursor() as cursor:
+            items, truncated = queries.export_tickets(cursor, ctx, date_from=date_from,
+                                                      date_to=date_to)
+        stream = report.build_workbook(items, date_from=date_from, date_to=date_to,
+                                       generated_by=ctx.get('name'), truncated=truncated,
+                                       text_warning_patch=excel_text_warning)
+        logging.info('crm: выгрузка %d обращений за %s..%s — %s', len(items), date_from,
+                     date_to, ctx.get('name'))
+        return send_file(stream, mimetype=report.XLSX_MIME, as_attachment=True,
+                         download_name=report.filename(date_from, date_to))
+
     return bp
+
+
+# Больше года одним файлом не выгружаем: столько обращений человек глазами не
+# разберёт, а процесс waitress держал бы их все в памяти.
+EXPORT_MAX_DAYS = 366
+
+
+def _period(raw_from, raw_to):
+    """Период выгрузки → (с, по, ошибка). Даты ISO; «по» не раньше «с»."""
+    try:
+        start = date.fromisoformat(str(raw_from or '').strip())
+        end = date.fromisoformat(str(raw_to or '').strip())
+    except ValueError:
+        return None, None, 'Укажите период: дату начала и дату окончания'
+    if end < start:
+        return None, None, 'Дата окончания раньше даты начала'
+    if (end - start).days + 1 > EXPORT_MAX_DAYS:
+        return None, None, 'Период длиннее года — выгрузите по частям'
+    return start.isoformat(), end.isoformat(), None
 
 
 def _int_or_none(value):

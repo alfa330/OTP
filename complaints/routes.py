@@ -16,6 +16,7 @@ preflight, авторизация, контекст доступа, гейт р�
 
 import json
 import logging
+from datetime import datetime
 from functools import wraps
 from io import BytesIO
 
@@ -120,6 +121,7 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
     def _permissions(ctx, complaint):
         return {
             'can_handle': access.can_handle(ctx, complaint),
+            'can_review': access.can_review(ctx, complaint),
             'can_set_employee': access.can_set_employee(ctx, complaint),
             'can_record_work': access.can_record_work(ctx, complaint),
             'can_see_internal': access.can_see_internal(ctx, complaint),
@@ -278,7 +280,7 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
             work_state = catalog.work_state_for(clean['target'], employee_id, False)
             status = 'closed' if catalog.is_closed(
                 requires_processing=clean['requires_processing'], result_code=None,
-                work_state=work_state) else 'open'
+                work_state=work_state, review_state=clean['review_state']) else 'open'
             complaint_id = queries.create_complaint(cursor, {
                 'target': clean['target'], 'reason': clean['reason'],
                 'target_department_id': target_department_id,
@@ -294,6 +296,7 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 'event_at': clean['event_at'],
                 'event_time_known': clean['event_time_known'],
                 'requires_processing': clean['requires_processing'],
+                'review_state': clean['review_state'],
                 'status': status, 'work_state': work_state,
                 'created_by': ctx['user_id'], 'created_by_name': ctx.get('name'),
                 'creator_department_id': ctx.get('department_id'),
@@ -303,6 +306,7 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                               actor_user_id=ctx['user_id'], actor_name=ctx.get('name'),
                               payload={'target': clean['target'], 'reason': clean['reason'],
                                        'requires_processing': clean['requires_processing'],
+                                       'review': bool(clean['review_state']),
                                        'employee': employee_name})
             if status == 'closed':
                 cursor.execute(
@@ -392,6 +396,44 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
                                   data.get('result_note'), ctx=ctx)
         return jsonify({'item': item})
 
+    @route('/complaints/<int:complaint_id>/review', methods=('POST',))
+    def complaints_review(complaint_id, ctx):
+        """Решение по жалобе на проверке (Яндекс): «Отправить в группу» или
+        «Решено» с итогом. Решает тот, кто разбирает жалобу, — супервайзер
+        группы оператора, глава его отдела, админ."""
+        data = _payload()
+        with db._get_cursor() as cursor:
+            complaint = _load(cursor, complaint_id, ctx)
+        if not access.can_handle(ctx, complaint):
+            return jsonify({"error": "Проверяет жалобу супервайзер оператора"}), 403
+        if complaint.get('review_state') != catalog.REVIEW_PENDING:
+            return jsonify({"error": "Жалоба уже не ждёт проверки — обновите карточку"}), 409
+        decision = str(data.get('decision') or '')
+        delivery_error = None
+        if decision == 'send':
+            item, delivery_error = service.review_send(db, complaint_id, ctx=ctx)
+        elif decision == 'resolve':
+            item = service.review_resolve(db, complaint_id, data.get('note'), ctx=ctx)
+        else:
+            return jsonify({"error": "Выберите: в группу или «Решено»"}), 400
+        return jsonify({'item': queries.public_item(ctx, item),
+                        'permissions': _permissions(ctx, item),
+                        'delivered': delivery_error is None,
+                        'delivery_error': delivery_error})
+
+    @route('/complaints/<int:complaint_id>/shifts')
+    def complaints_employee_shifts(complaint_id, ctx):
+        """Две ближайшие смены сотрудника жалобы — для окна «Назначить
+        тренинг»: тренинг назначают на время, когда человек на работе."""
+        with db._get_cursor() as cursor:
+            complaint = _load(cursor, complaint_id, ctx)
+            if not access.can_record_work(ctx, complaint):
+                return jsonify({"error": "Смены сотрудника вам не открыты"}), 403
+            if not complaint.get('employee_id'):
+                return jsonify({'items': []})
+            items = queries.upcoming_shifts(cursor, complaint['employee_id'], datetime.now())
+        return jsonify({'items': items})
+
     @route('/complaints/<int:complaint_id>/work', methods=('POST',))
     def complaints_work(complaint_id, ctx):
         data = _payload()
@@ -399,16 +441,10 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
             complaint = _load(cursor, complaint_id, ctx)
         if not access.can_record_work(ctx, complaint):
             return jsonify({"error": "Записать работу с сотрудником вам нельзя"}), 403
-        training = data.get('training')
-        if isinstance(training, str):
-            try:
-                training = json.loads(training or '{}')
-            except ValueError:
-                training = {}
         item = service.record_work(
             db, complaint_id, action=data.get('action'), comment=data.get('comment'),
-            outcome=data.get('outcome'), need_training=_bool(data.get('need_training')),
-            training=training if isinstance(training, dict) else None, ctx=ctx)
+            training=_json_dict(data.get('training')), plan=_json_dict(data.get('plan')),
+            ctx=ctx)
         with db._get_cursor() as cursor:
             work = queries.work_log(cursor, complaint_id)
         return jsonify({'item': item, 'work': work})
@@ -423,7 +459,10 @@ def build_complaints_blueprint(*, db, require_api_key, build_cors_preflight_resp
         if complaint['delivery_status'] == 'sent':
             return jsonify({"error": "Жалоба уже в группе"}), 409
         if not complaint['requires_processing']:
-            return jsonify({"error": "Эта жалоба только фиксируется и в группу не уходит"}), 409
+            if complaint.get('review_state') == catalog.REVIEW_PENDING:
+                return jsonify({"error": "Жалоба ждёт проверки: в группу её отправит "
+                                         "супервайзер"}), 409
+            return jsonify({"error": "Эта жалоба в группу не уходит"}), 409
         ok, error = service.deliver(db, complaint_id)
         if not ok:
             return jsonify({"error": error}), 502
@@ -571,7 +610,12 @@ def _int_or_none(value):
         return None
 
 
-def _bool(value):
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+def _json_dict(value):
+    """Вложенный объект тела запроса. Из формы (multipart) он приезжает
+    строкой JSON — разбираем; всё, что не объект, — «не прислали»."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or '{}')
+        except ValueError:
+            return None
+    return value if isinstance(value, dict) else None
