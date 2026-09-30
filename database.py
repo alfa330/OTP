@@ -6907,6 +6907,7 @@ class Database:
             self._init_payments_schema_tx(cursor)
             self._init_library_schema_tx(cursor)
             self._init_complaints_schema_tx(cursor)
+            self._init_water_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -63603,6 +63604,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT library_schema")
+
+    def _init_water_schema_tx(self, cursor):
+        """Схема раздела «Учёт воды» — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете water/schema.py, как у посылок; импорт локальный,
+        иначе цикл. Стоит ПОСЛЕ _init_wiki_schema_tx: `water_offices.office_id`
+        — внешний ключ на `wiki_offices`. Не развернулась — раздел честно
+        скажет о себе через /api/water/ping (schema_ready=false), остальное
+        приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT water_schema")
+        try:
+            from water.schema import init_water_schema
+            init_water_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT water_schema")
+            logging.exception(
+                "Схема раздела «Учёт воды» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT water_schema")
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и

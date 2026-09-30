@@ -64184,6 +64184,28 @@ except Exception:
     logging.exception("Раздел «Посылки»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Учёт воды» (остатки воды во фронт-офисах и выдача водителям) ─────
+# Тот же приём и тот же ключ QR, что у «Посылок»: на экране ФИО и телефон
+# живого водителя из CRM. Telegram «Требуется закупка» уходит тем же
+# отправителем, что у задач и «Оплаты счетов»; ссылка — на ?view=water.
+try:
+    from water.routes import build_water_blueprint  # noqa: E402
+
+    app.register_blueprint(build_water_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+        send_telegram=_send_telegram_text_message,
+        web_app_base_url=TASK_WEB_APP_BASE_URL,
+    ))
+    logging.info("Раздел «Учёт воды»: Blueprint подключён на /api/water")
+except Exception:
+    logging.exception("Раздел «Учёт воды»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Оплата счетов» (бизнес-процесс «Согласование — Оплата счетов», #179) ──
 # Тот же приём, что у вики, обращений и посылок. Периметр на время выката —
 # один человек (payments/access.py), поэтому QR-гейта здесь нет: раздел открыт

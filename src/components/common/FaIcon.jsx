@@ -44,6 +44,7 @@ import {
     Crown,
     DoorOpen,
     Download,
+    Droplet,
     EllipsisVertical,
     Eraser,
     ExternalLink,
@@ -321,6 +322,7 @@ const TOKEN_TO_ICON = {
     'fa-object-group': 'Boxes',
     'fa-box-archive': 'Archive',
     'fa-box': 'Package',
+    'fa-droplet': 'Droplet',
     'fa-rotate-left': 'RotateCcw',
     'fa-sitemap': 'Workflow',
     // Переключатель телефонии отдела в «Настройках SIP»: локальная АТС и облако.
@@ -503,6 +505,7 @@ const ICON_COMPONENTS = {
     Crown,
     DoorOpen,
     Download,
+    Droplet,
     EllipsisVertical,
     Eraser,
     ExternalLink,
