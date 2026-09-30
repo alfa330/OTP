@@ -1,10 +1,6 @@
 import React, { memo, useCallback, useMemo, useRef } from 'react';
 import DealBadge from './DealBadge';
-import {
-    Sparkles, User2, Headphones, Languages,
-    Database, Search, Timer, Hash, AlertTriangle,
-    MessageSquare, Paperclip, ImageOff, Users,
-} from 'lucide-react';
+import { Languages, AlertTriangle, MessageSquare, Paperclip } from 'lucide-react';
 import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
 import CriteriaReviewPanel from './CriteriaReviewPanel';
@@ -123,87 +119,127 @@ const TranscriptLine = memo(function TranscriptLine({ line, onSeek }) {
     );
 });
 
-/* Метаданные эпизода вместо языков/уверенности ASR: проверяющему важны клиент,
- * доля ответов оцениваемого оператора (порог атрибуции) и судьба вложений. */
+const SCORE_TEXT = { green: 'text-emerald-600', amber: 'text-amber-600', red: 'text-rose-600' };
+
+/* Балл в шапке карточки — как колонки списка разговоров: подпись, крупное число в
+ * цвет балла, под ним пояснение. Три пилюли столбиком читались как три кнопки. */
+function ScoreStat({ label, value, sub = null, title }) {
+    return (
+        <div className="min-w-[3.5rem] text-right" title={title}>
+            <div className="text-[11px] font-medium text-slate-500">{label}</div>
+            <div className={`text-[22px] font-semibold leading-tight tabular-nums ${
+                value == null ? 'text-slate-300' : SCORE_TEXT[scoreTone(value)] || 'text-slate-900'}`}>
+                {value ?? '—'}
+            </div>
+            {sub && <div className="whitespace-nowrap text-[11px] text-slate-400">{sub}</div>}
+        </div>
+    );
+}
+
+const RETRIEVAL_LABEL = {
+    ready: 'retrieval готов', ok: 'retrieval готов', complete: 'retrieval завершён', completed: 'retrieval завершён',
+    degraded: 'retrieval ограничен', partial: 'retrieval частичный', stale: 'retrieval устарел',
+    failed: 'ошибка retrieval', error: 'ошибка retrieval', unavailable: 'retrieval недоступен',
+    disabled: 'retrieval отключён', skipped: 'retrieval пропущен',
+};
+const RETRIEVAL_PROBLEM = ['failed', 'error', 'unavailable', 'degraded', 'partial'];
+
+/* Технические данные прогона (отпечаток, ревизия базы, retrieval) нужны при
+ * разборе самой оценки, а не при проверке разговора — поэтому под «i», а не
+ * рядом меток на каждой карточке. На виду остаётся только то, что меняет доверие
+ * к оценке: устаревший снимок базы и сбой retrieval. */
+const evaluationDetails = (evaluation) => {
+    if (!evaluation) return null;
+    const status = String(evaluation.retrieval_status || '').toLowerCase();
+    const retrieved = evaluation.retrieved_count ?? evaluation.retrieved;
+    const included = evaluation.included_count ?? evaluation.included;
+    const parts = [
+        evaluation.fingerprint_short && `Отпечаток оценки ${evaluation.fingerprint_short}`,
+        evaluation.knowledge_revision != null && `база знаний r${evaluation.knowledge_revision}`,
+        status && (RETRIEVAL_LABEL[status] || `retrieval: ${status}`),
+        (retrieved != null || included != null) && `правил в промпте ${included ?? '—'} из ${retrieved ?? '—'}`,
+        evaluation.retrieval_ms != null && `${Math.round(evaluation.retrieval_ms)} мс`,
+    ].filter(Boolean);
+    return parts.length ? `${parts.join(' · ')}.` : null;
+};
+
+/* Нижняя строка шапки: слева — о записи или переписке, справа — тревоги оценки и
+ * «i» с техническими данными. */
+function MetaRow({ evaluation, children }) {
+    const details = evaluationDetails(evaluation);
+    const status = String(evaluation?.retrieval_status || '').toLowerCase();
+    return (
+        <div className="flex items-center gap-3 px-4 py-2.5 text-[12px] text-slate-500 sm:px-5">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">{children}</div>
+            {evaluation?.stale && (
+                <IosBadge tone="amber" className="shrink-0 !px-2 !py-0.5"><AlertTriangle size={10} aria-hidden="true" />Устаревший снимок</IosBadge>
+            )}
+            {RETRIEVAL_PROBLEM.includes(status) && (
+                <IosBadge tone="amber" className="shrink-0 !px-2 !py-0.5">{RETRIEVAL_LABEL[status]}</IosBadge>
+            )}
+            {details && <IosHint text={details} label="Технические данные оценки" align="right" />}
+        </div>
+    );
+}
+
+const LANGUAGE = { ru: 'русский', kk: 'казахский', en: 'английский', uz: 'узбекский', ky: 'киргизский', tr: 'турецкий' };
+
+/* Звонок: на каком языке говорили и насколько уверенно распознано. */
+function CallMeta({ call }) {
+    const langs = Object.entries(call.languages || {}).sort((a, b) => b[1] - a[1]);
+    const text = langs.length === 1 ? LANGUAGE[langs[0][0]] || langs[0][0].toUpperCase()
+        : langs.map(([code, pct]) => `${LANGUAGE[code] || code.toUpperCase()} ${pct}%`).join(', ');
+    return (
+        <MetaRow evaluation={call.evaluation}>
+            {text && (
+                <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <Languages size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
+                    <span className="truncate">{text}</span>
+                </span>
+            )}
+            {call.asr_mean_conf != null && <span>распознавание {Math.round(call.asr_mean_conf * 100)}%</span>}
+        </MetaRow>
+    );
+}
+
+/* Переписка вместо языков/уверенности ASR: проверяющему важны клиент, доля
+ * ответов оцениваемого оператора (порог атрибуции) и судьба вложений. Цветом —
+ * только то, что тревожит: доля ниже порога и непрочитанные вложения. */
 function ChatMeta({ call }) {
     const chat = call.chat || {};
     const media = call.media || {};
     const share = chat.operator_share != null ? Math.round(Number(chat.operator_share) * 100) : null;
     const expired = media.source === 'expired';
     return (
-        <div className="mt-3 space-y-1.5">
-            <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-slate-500">
-                <MessageSquare size={13} className="text-slate-400" />
-                <span>{chat.contact_name || chat.contact_phone || 'клиент без имени'}</span>
-                {chat.messages_count != null && (
-                    <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-medium">
-                        {chat.messages_count} сообщений
-                    </span>
-                )}
+        <>
+            <MetaRow evaluation={call.evaluation}>
+                <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <MessageSquare size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
+                    <span className="truncate">{chat.contact_name || chat.contact_phone || 'клиент без имени'}</span>
+                </span>
+                {chat.messages_count != null && <span>{chat.messages_count} сообщений</span>}
                 {share != null && (
-                    <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium ${
-                        share >= 90 ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}
+                    <span className={share >= 90 ? '' : 'font-medium text-amber-700'}
                           title="Доля ответов оцениваемого оператора среди всех ответов сотрудников в эпизоде">
-                        <Users size={11} />ответы оператора · {share}%
+                        ответы оператора {share}%
                     </span>
                 )}
-            </div>
-            {(media.total ? (
-                <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-slate-500">
-                    <Paperclip size={13} className="text-slate-400" />
-                    <span>вложений {media.total}: прочитано {media.ready || 0}</span>
-                    {media.failed ? (
-                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
-                            <ImageOff size={11} />не прочитано {media.failed}
-                        </span>
-                    ) : null}
-                </div>
-            ) : null)}
+                {media.total ? (
+                    <span className="inline-flex items-center gap-1">
+                        <Paperclip size={12} className="text-slate-400" aria-hidden="true" />
+                        вложений {media.total}, прочитано {media.ready || 0}
+                        {media.failed ? <span className="font-medium text-amber-700">, не прочитано {media.failed}</span> : null}
+                    </span>
+                ) : null}
+            </MetaRow>
             {expired && (
-                <p className="rounded-xl bg-amber-50 px-2.5 py-1.5 text-[11.5px] text-amber-800">
+                <p className="bg-amber-50/70 px-4 py-2.5 text-[12px] text-amber-800 sm:px-5">
                     Сырые сообщения этого чата уже удалены ретеншном (45 дней): содержимое
                     вложений недоступно, оценка сделана по тексту переписки. Не штрафуйте
                     оператора за то, чего не видно.
                 </p>
             )}
-        </div>
-    );
-}
-
-function EvaluationMeta({ evaluation }) {
-    if (!evaluation) return null;
-    const retrievalStatus = String(evaluation.retrieval_status || '').toLowerCase();
-    const retrievalTone = ['ready', 'ok', 'complete', 'completed'].includes(retrievalStatus)
-        ? 'green' : ['degraded', 'partial', 'stale'].includes(retrievalStatus) ? 'amber'
-            : ['failed', 'error', 'unavailable'].includes(retrievalStatus) ? 'red' : 'slate';
-    const retrievalLabel = {
-        ready: 'Retrieval готов', ok: 'Retrieval готов', complete: 'Retrieval завершён', completed: 'Retrieval завершён',
-        degraded: 'Retrieval ограничен', partial: 'Retrieval частичный', stale: 'Retrieval устарел',
-        failed: 'Ошибка retrieval', error: 'Ошибка retrieval', unavailable: 'Retrieval недоступен',
-        disabled: 'Retrieval отключён', skipped: 'Retrieval пропущен',
-    }[retrievalStatus] || (retrievalStatus ? `Retrieval: ${retrievalStatus}` : null);
-    const retrieved = evaluation.retrieved_count ?? evaluation.retrieved;
-    const included = evaluation.included_count ?? evaluation.included;
-
-    return (
-        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2.5" aria-label="Метаданные оценки">
-            {evaluation.fingerprint_short && (
-                <IosBadge tone="slate" className="font-mono" title={`Fingerprint оценки: ${evaluation.fingerprint_short}`}>
-                    <Hash size={10} />{evaluation.fingerprint_short}
-                </IosBadge>
-            )}
-            {evaluation.knowledge_revision != null && (
-                <IosBadge tone="blue"><Database size={10} />База r{evaluation.knowledge_revision}</IosBadge>
-            )}
-            {retrievalLabel && <IosBadge tone={retrievalTone}><Search size={10} />{retrievalLabel}</IosBadge>}
-            {(retrieved != null || included != null) && (
-                <IosBadge tone="slate"><Search size={10} />Правила: {included ?? '—'} из {retrieved ?? '—'}</IosBadge>
-            )}
-            {evaluation.retrieval_ms != null && (
-                <IosBadge tone="slate"><Timer size={10} />{Math.round(evaluation.retrieval_ms)} мс</IosBadge>
-            )}
-            {evaluation.stale && <IosBadge tone="amber"><AlertTriangle size={10} />Устаревший снимок</IosBadge>}
-        </div>
+        </>
     );
 }
 
@@ -257,86 +293,71 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
            телефоне колонка одна, и страница едет как прежде — там `lg:`-классы
            не действуют, а sticky-панели держатся за прокрутчик страницы. */
         <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[1.05fr_1fr]">
-            {/* Левая колонка сама прокручивается, только если верхняя карточка
-                (сделка раскрыта, много меток) не оставляет транскрипту его минимума:
-                раньше транскрипт сжимался до пары строк, и его не было видно. */}
-            <div className="thin-scroll flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
-                <div className={`${iosCard} shrink-0 p-4`}>
-                    <div className="flex items-start justify-between gap-3">
-                        <div>
-                            <div className="flex items-center gap-2">
-                                {isChat && <MessageSquare size={15} className="shrink-0 text-blue-500" />}
-                                <span className="text-[15px] font-semibold text-slate-900">
-                                    {isChat ? `Чат #${call.id}` : `Звонок #${call.id}`}
-                                </span>
-                                <IosBadge tone="slate">{call.direction}</IosBadge>
+            {/* Прокручивается только транскрипт: собственный скролл у колонки
+                давал второй, вложенный. Место транскрипту даёт низкая шапка. */}
+            <div className="flex min-w-0 flex-col gap-3 lg:min-h-0">
+                {/* Шапка: кто и когда, баллы справа, запись; ниже тонкими строками
+                    через волосяные линии, как ячейки настроек iOS, — сделка
+                    (свёрнута в строку) и сведения о записи. Технические данные
+                    оценки — под «i». Шапка низкая намеренно: всё, что она не
+                    занимает, достаётся транскрипту. */}
+                <div className={`${iosCard} shrink-0 overflow-hidden`}>
+                    <div className="px-4 pb-3.5 pt-4 sm:px-5">
+                        <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 pt-0.5">
+                                <div className="flex items-center gap-2">
+                                    {isChat && <MessageSquare size={16} className="shrink-0 text-blue-500" aria-hidden="true" />}
+                                    <h2 className="truncate text-[18px] font-semibold leading-tight text-slate-900">
+                                        {isChat ? `Чат #${call.id}` : `Звонок #${call.id}`}
+                                    </h2>
+                                </div>
+                                <p className="mt-1 text-[13px] text-slate-500 sm:truncate">
+                                    {[call.operator, call.direction, call.datetime].filter(Boolean).join(' · ')}
+                                </p>
                             </div>
-                            <p className="mt-0.5 text-[12.5px] text-slate-500">{call.operator} · {call.datetime}</p>
+                            <div className="flex shrink-0 items-start gap-4 sm:gap-6">
+                                {/* Балл намеренно зачитывает непроверяемые критерии; без
+                                    пометки «ИИ 85» выглядит как полноценная оценка, хотя
+                                    часть веса ИИ не проверял (у Верификаторов это
+                                    «Регистрация», 30). */}
+                                <ScoreStat label="ИИ" value={call.ai_score != null ? Math.round(call.ai_score) : null}
+                                           sub={call.score_breakdown?.unchecked_weight > 0
+                                               ? `${call.score_breakdown.unchecked_weight} не проверено` : null}
+                                           title={call.score_breakdown?.unchecked_weight > 0
+                                               ? 'ИИ не проверял: '
+                                                 + (call.score_breakdown.unchecked || []).map((c) => `${c.name} (${c.weight})`).join(', ')
+                                                 + '. Эти баллы зачтены по умолчанию — проверьте их вручную.'
+                                               : 'Балл ИИ — все критерии проверены по транскрипту'} />
+                                {call.human_score != null && (
+                                    <ScoreStat label="Человек" value={Math.round(call.human_score)}
+                                               title={journal ? `Оценка в журнале: ${journal.evaluator || '—'}${journal.datetime ? `, ${journal.datetime}` : ''}` : 'Оценка человека в журнале'} />
+                                )}
+                                {showMyBadge && (
+                                    <ScoreStat label="Моя" value={Math.round(myReview.score)}
+                                               title={myReview.counted_in_quality ? 'Моя оценка — учтена в журнале' : 'Моя оценка — калибровочная, в качество не идёт'} />
+                                )}
+                            </div>
                         </div>
-                        <div className="flex flex-col items-end gap-1.5">
-                            {call.ai_score != null && (
-                                <IosBadge tone={scoreTone(call.ai_score)}><Sparkles size={11} />ИИ: {Math.round(call.ai_score)}</IosBadge>
-                            )}
-                            {/* Балл намеренно зачитывает непроверяемые критерии; без этой
-                                пометки «ИИ: 85» выглядит как полноценная оценка, хотя часть
-                                веса ИИ не проверял (у Верификаторов это «Регистрация», 30). */}
-                            {call.score_breakdown?.unchecked_weight > 0 && (
-                                <IosBadge tone="slate"
-                                    title={'ИИ не проверял: '
-                                        + (call.score_breakdown.unchecked || [])
-                                            .map((c) => `${c.name} (${c.weight})`).join(', ')
-                                        + '. Эти баллы зачтены по умолчанию — проверьте их вручную.'}>
-                                    из них {call.score_breakdown.unchecked_weight} не проверено
-                                </IosBadge>
-                            )}
-                            {call.human_score != null && (
-                                <IosBadge tone={scoreTone(call.human_score)}
-                                          title={journal ? `Оценка в журнале: ${journal.evaluator || '—'}${journal.datetime ? `, ${journal.datetime}` : ''}` : 'Оценка человека в журнале'}>
-                                    <User2 size={11} />Человек: {Math.round(call.human_score)}
-                                </IosBadge>
-                            )}
-                            {showMyBadge && (
-                                <IosBadge tone={scoreTone(myReview.score)}
-                                          title={myReview.counted_in_quality ? 'Моя оценка — учтена в журнале' : 'Моя оценка — калибровочная, в качество не идёт'}>
-                                    <User2 size={11} />Моя: {Math.round(myReview.score)}
-                                </IosBadge>
-                            )}
-                        </div>
-                    </div>
-                    {/* Сделка amoCRM этого разговора (ТЗ #317) — под строкой
-                        заголовка, во всю ширину карточки: в строке рядом с
-                        баллами её сжимало, и значения обрезались до многоточия.
-                        Только когда связь есть: пустой блок «сделка не найдена» на
-                        каждой карточке СЗоВ — шум для отдела без сделок. */}
-                    {call.deal && <DealBadge deal={call.deal} full className="mt-3" />}
-                    {isChat ? <ChatMeta call={call} /> : (
-                        <div className="mt-3 flex items-center gap-2 text-[11.5px] text-slate-500">
-                            <Languages size={13} />
-                            {Object.entries(call.languages || {}).map(([l, p]) => (
-                                <span key={l} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-medium text-slate-500">
-                                    {l.toUpperCase()} {p}%
-                                </span>
-                            ))}
-                            {call.asr_mean_conf != null && (
-                                <span className="ml-auto">распознавание · {Math.round(call.asr_mean_conf * 100)}%</span>
-                            )}
-                        </div>
-                    )}
-                    {call.audio_url && (
-                        <div className="mt-3 flex items-center gap-2">
-                            <Headphones size={15} className="shrink-0 text-slate-400" />
-                            <audio ref={audioRef} controls preload="none" src={call.audio_url} className="h-9 w-full"
+                        {call.audio_url && (
+                            <audio ref={audioRef} controls preload="none" src={call.audio_url} className="mt-3.5 h-10 w-full"
                                    aria-label={`Запись звонка ${call.id}`} />
-                        </div>
-                    )}
-                    <EvaluationMeta evaluation={call.evaluation} />
+                        )}
+                    </div>
+                    <div className="divide-y divide-slate-100 border-t border-slate-100">
+                        {/* Сделка amoCRM этого разговора (ТЗ #317) — под строкой
+                            заголовка, а не рядом с баллами: там её сжимало. Только
+                            когда связь есть: пустая «сделка не найдена» на каждой
+                            карточке СЗоВ — шум для отдела без сделок. */}
+                        {call.deal && <DealBadge deal={call.deal} full />}
+                        {isChat ? <ChatMeta call={call} /> : <CallMeta call={call} />}
+                    </div>
                 </div>
 
                 {/* Транскрипт без карточки-рамки: реплики лежат прямо на фоне, как в
                     мессенджере, а прокручивается только их область. На широком
                     экране она добирает всю оставшуюся высоту колонки, на телефоне
                     ограничена 60vh, чтобы страница не превращалась в один транскрипт. */}
-                <div className="flex min-h-0 flex-1 flex-col lg:min-h-[20rem]">
+                <div className="flex min-h-0 flex-1 flex-col">
                     {/* Пояснение к подсветке — под «i» у заголовка: строкой под
                         транскриптом оно занимало место всё время, а нужно один раз. */}
                     <div className="flex items-center gap-1.5 px-1 pb-1.5">

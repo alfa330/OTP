@@ -671,7 +671,7 @@ class DealBlockLookTests(unittest.TestCase):
         header = card.split('<div className="flex items-start justify-between gap-3">', 1)[1]
         # Не в строке с баллами (там её сжимало), а под ней.
         self.assertLess(header.index('{isChat ? <ChatMeta'), len(header))
-        self.assertIn('{call.deal && <DealBadge deal={call.deal} full className="mt-3" />}', card)
+        self.assertIn('{call.deal && <DealBadge deal={call.deal} full />}', card)
         badge = _read('src', 'components', 'call_qa', 'DealBadge.jsx')
         self.assertNotIn('152px', badge)
         self.assertIn('2xl:grid-cols-2', badge)

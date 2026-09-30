@@ -44,9 +44,10 @@ export default function DealBadge({ deal, full = false, className = '' }) {
     );
 }
 
-/* Сделка в карточке разговора. Свёрнута в одну строку «Сделка № … · канал ·
-   этап»: развёрнутая таблица занимала треть левой колонки, и транскрипту
-   оставалась пара строк. Раскрывается по нажатию, выбор запоминается. */
+/* Сделка в карточке разговора — строкой шапки, без своей рамки (рамка в рамке
+   читалась как отдельная карточка). Свёрнута в «Сделка № … · канал · этап»:
+   развёрнутая таблица занимала треть левой колонки, и транскрипту оставалась
+   пара строк. Раскрывается по нажатию, выбор запоминается. */
 function DealCard({ deal, className = '' }) {
     const [open, setOpen] = useState(readDealOpen);
     const bodyId = useId();
@@ -75,7 +76,7 @@ function DealCard({ deal, className = '' }) {
         ['Ответственный', deal.responsible],
     ].filter(([, value, placeholder]) => value || placeholder);
     const column = (rows, className = '') => (
-        <dl className={`divide-y divide-slate-200/60 ${className}`}>
+        <dl className={`divide-y divide-slate-100 ${className}`}>
             {rows.map(([name, value, placeholder]) => (
                 <div key={name} className="grid grid-cols-[minmax(0,9.5rem)_minmax(0,1fr)] gap-x-3 py-1.5 text-[12.5px]">
                     <dt className="text-slate-400">{name}</dt>
@@ -86,14 +87,14 @@ function DealCard({ deal, className = '' }) {
         </dl>
     );
     return (
-        <section className={`rounded-xl bg-slate-50/80 ring-1 ring-slate-200/60 ${className}`}>
+        <section className={className}>
             <h3 className="m-0">
                 <button type="button" onClick={toggle} aria-expanded={open} aria-controls={bodyId}
-                        className="flex w-full min-w-0 items-center gap-2 rounded-xl px-3 py-2 text-left transition hover:bg-slate-100/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
+                        className="flex w-full min-w-0 items-center gap-2 px-4 py-2.5 text-left text-[12.5px] transition hover:bg-slate-50 focus-visible:bg-blue-50/60 focus-visible:outline-none sm:px-5">
                     <Tag size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
-                    <span className="shrink-0 text-[13px] font-semibold text-slate-700">Сделка № {deal.id}</span>
+                    <span className="shrink-0 font-medium text-slate-700">Сделка № {deal.id}</span>
                     {/* Свёрнутой — главное одной строкой: откуда лид и чем кончилось. */}
-                    {!open && summary && <span className="min-w-0 truncate text-[12.5px] text-slate-500">· {summary}</span>}
+                    {!open && summary && <span className="min-w-0 truncate text-slate-500">· {summary}</span>}
                     {/* Связь по телефону у повторной заявки всегда спорна: человек
                         должен видеть, что номер делят несколько сделок, а не верить
                         привязке вслепую, — поэтому метка видна и у свёрнутой. */}
@@ -111,11 +112,11 @@ function DealCard({ deal, className = '' }) {
                 ревью занимает половину экрана, и на ноутбуке две колонки по
                 ~200 px оставляли значениям несколько пикселей. */}
             {open && (
-                <div id={bodyId} className="grid grid-cols-1 gap-x-6 px-3.5 pb-2 2xl:grid-cols-2">
+                <div id={bodyId} className="grid grid-cols-1 gap-x-6 px-4 pb-2.5 sm:px-5 2xl:grid-cols-2">
                     {column(origin)}
                     {/* В одну колонку половины идут подряд — на стыке нужна та же
                         линия, что между строками; в две колонки она не нужна. */}
-                    {column(fate, origin.length ? 'border-t border-slate-200/60 2xl:border-t-0' : '')}
+                    {column(fate, origin.length ? 'border-t border-slate-100 2xl:border-t-0' : '')}
                 </div>
             )}
         </section>
