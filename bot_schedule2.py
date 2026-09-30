@@ -9726,25 +9726,29 @@ def api_group_late_bot_attendance():
             except ValueError:
                 raise ValueError('Дата должна быть в формате ГГГГ-ММ-ДД')
 
-        now_local = datetime.now(group_late.TZ)
-        today = now_local.date()
-        date_start = _as_day(request.args.get('date_start'), today)
-        date_end = _as_day(request.args.get('date_end'), date_start)
-        if date_end < date_start:
-            date_start, date_end = date_end, date_start
-        if (date_end - date_start).days > GROUP_LATE_ATTENDANCE_MAX_DAYS:
-            return jsonify({
-                "error": f"Период не должен превышать "
-                         f"{GROUP_LATE_ATTENDANCE_MAX_DAYS + 1} дн.",
-                "code": "PERIOD_TOO_LONG",
-            }), 400
-
         from group_late import attendance_cache as _attendance_cache
-        payload = _attendance_cache.rows_for(
-            db, date_start, date_end,
-            department=scope or request.args.get('department'),
-            refresh=str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes'),
-        )
+        department = scope or request.args.get('department')
+        refresh = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+        # «Последние отметки» (30.09.2026): без периода — каждый сотрудник один
+        # раз, днём своей последней отметки, от самых свежих.
+        latest = str(request.args.get('mode') or '').strip().lower() == 'latest'
+        if latest:
+            date_start = date_end = None
+            payload = _attendance_cache.latest_rows(db, department=department, refresh=refresh)
+        else:
+            today = datetime.now(group_late.TZ).date()
+            date_start = _as_day(request.args.get('date_start'), today)
+            date_end = _as_day(request.args.get('date_end'), date_start)
+            if date_end < date_start:
+                date_start, date_end = date_end, date_start
+            if (date_end - date_start).days > GROUP_LATE_ATTENDANCE_MAX_DAYS:
+                return jsonify({
+                    "error": f"Период не должен превышать "
+                             f"{GROUP_LATE_ATTENDANCE_MAX_DAYS + 1} дн.",
+                    "code": "PERIOD_TOO_LONG",
+                }), 400
+            payload = _attendance_cache.rows_for(
+                db, date_start, date_end, department=department, refresh=refresh)
         rows = _attendance.search_rows(payload['rows'], request.args.get('q'))
         rows = _attendance.sort_rows(rows, request.args.get('sort'))
 
@@ -9784,8 +9788,9 @@ def api_group_late_bot_attendance():
             'status': 'success',
             'rows': rows[offset:offset + limit],
             'total': total,
-            'date_start': date_start.isoformat(),
-            'date_end': date_end.isoformat(),
+            'mode': 'latest' if latest else 'period',
+            'date_start': date_start.isoformat() if date_start else None,
+            'date_end': date_end.isoformat() if date_end else None,
             'department_scope': scope,
             'clockster_error': payload.get('clockster_error'),
             'pending_days': payload.get('pending_days') or [],

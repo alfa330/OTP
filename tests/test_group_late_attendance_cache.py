@@ -57,6 +57,14 @@ class FakeDb:
         self.built.add(day)
         return len(rows)
 
+    def glb_latest_attendance_rows(self, day_before):
+        self.latest_before = day_before
+        marked = [r for r in self.cached if r["day"] < day_before and (r["fact_in"] or r["fact_out"])]
+        last_day = {}
+        for record in marked:
+            last_day[record["employee_id"]] = max(last_day.get(record["employee_id"], record["day"]), record["day"])
+        return [r for r in marked if r["day"] == last_day[r["employee_id"]]]
+
     def glb_forget_attendance_days(self, day_from=None, day_to=None):
         self.forgotten.append((day_from, day_to))
         self.built = {d for d in self.built if not (day_from <= d <= day_to)}
@@ -177,6 +185,85 @@ class DayRoutingTests(unittest.TestCase):
         ])
         result = attendance_cache.rows_for(db, yesterday, yesterday, department="кц 3")
         self.assertEqual([r["employee"] for r in result["rows"]], ["Петров"])
+
+
+class LatestMarksTests(unittest.TestCase):
+    """Режим «Последние отметки» (30.09.2026): без периода, один человек — одна строка."""
+
+    TODAY = date(2026, 9, 14)
+
+    def setUp(self):
+        now = datetime(2026, 9, 14, 12, 0, tzinfo=TZ)
+        patcher = mock.patch.object(attendance_cache, "_now", return_value=now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _latest(self, db, live_rows=(), **kwargs):
+        with mock.patch.object(attendance_cache.attendance, "collect",
+                               return_value={"rows": list(live_rows), "clockster_error": None}) as collect:
+            result = attendance_cache.latest_rows(db, **kwargs)
+        return result, collect
+
+    def test_each_person_once_on_the_day_of_the_last_mark(self):
+        yesterday = self.TODAY - timedelta(days=1)
+        old, older = self.TODAY - timedelta(days=3), self.TODAY - timedelta(days=5)
+        db = FakeDb(built=[yesterday], cached=[
+            _cached_record(older), _cached_record(old),
+            _cached_record(older, employee_id="wp:2", employee_name="Петров"),
+        ])
+        today_row = {**_live_row(self.TODAY, name="Петров"), "employee_id": "wp:2",
+                     "last_mark_at": f"{self.TODAY.isoformat()}T09:02:00+05:00"}
+        result, _ = self._latest(db, [today_row])
+        by_person = {r["employee_id"]: r["date"] for r in result["rows"]}
+        self.assertEqual(by_person, {"clockster:1": old.isoformat(), "wp:2": self.TODAY.isoformat()})
+
+    def test_day_without_a_mark_does_not_hide_an_older_one(self):
+        # Сегодня человек ещё не пришёл («ждём прихода») — он всё равно в списке,
+        # днём своей последней отметки: «день не важен».
+        old = self.TODAY - timedelta(days=4)
+        db = FakeDb(built=[self.TODAY - timedelta(days=1)], cached=[_cached_record(old)])
+        pending = {**_live_row(self.TODAY, name="Иванов Иван"), "employee_id": "clockster:1",
+                   "status": attendance.STATUS_PENDING, "last_mark_at": None}
+        result, _ = self._latest(db, [pending])
+        self.assertEqual([r["date"] for r in result["rows"]], [old.isoformat()])
+
+    def test_yesterday_and_today_go_through_the_period_rules(self):
+        # Вчерашний день бывает неокончательным (уход ночной смены лежит
+        # сегодня) — он идёт через rows_for, а из кэша «последних» берётся
+        # только то, что старше, иначе строка задвоилась бы.
+        yesterday = self.TODAY - timedelta(days=1)
+        db = FakeDb(built=[yesterday], cached=[_cached_record(yesterday)])
+        result, collect = self._latest(db)
+        self.assertEqual(db.latest_before, yesterday)
+        self.assertEqual(collect.call_args.args[1:3], (self.TODAY, self.TODAY))
+        self.assertEqual([r["date"] for r in result["rows"]], [yesterday.isoformat()])
+
+    def test_department_filter_reaches_the_older_days(self):
+        old = self.TODAY - timedelta(days=3)
+        db = FakeDb(built=[self.TODAY - timedelta(days=1)], cached=[
+            _cached_record(old),
+            _cached_record(old, employee_id="wp:2", employee_name="Петров", department_name="КЦ 3"),
+        ])
+        result, _ = self._latest(db, department="кц 3")
+        self.assertEqual([r["employee"] for r in result["rows"]], ["Петров"])
+
+    def test_mark_time_comes_back_in_company_timezone(self):
+        # По дате этого времени экран делит список на дни, а в кэше отметка
+        # лежит как пришла из источника — бывает и без пояса.
+        old = self.TODAY - timedelta(days=3)
+        record = _cached_record(old, marks=[{"at": f"{old.isoformat()}T19:00:12", "kind": "out"}])
+        db = FakeDb(built=[self.TODAY - timedelta(days=1)], cached=[record])
+        result, _ = self._latest(db)
+        self.assertEqual(result["rows"][0]["last_mark_at"], f"{old.isoformat()}T19:00:12+05:00")
+
+    def test_recent_sort_puts_the_freshest_mark_first(self):
+        old = self.TODAY - timedelta(days=3)
+        db = FakeDb(built=[self.TODAY - timedelta(days=1)], cached=[_cached_record(old)])
+        today_row = {**_live_row(self.TODAY, name="Петров"),
+                     "last_mark_at": f"{self.TODAY.isoformat()}T08:18:00+05:00"}
+        result, _ = self._latest(db, [today_row])
+        ordered = attendance.sort_rows(result["rows"], "recent")
+        self.assertEqual([r["employee"] for r in ordered], ["Петров", "Иванов Иван"])
 
 
 if __name__ == "__main__":

@@ -157,6 +157,24 @@ const ATTENDANCE_SORTS = [
     { value: 'system', label: 'По системе отметки' },
 ];
 
+/* Что показывает список отметок. «Последние» — без привязки к дате: каждый
+ * сотрудник один раз, днём своей последней отметки, от самых свежих (просьба
+ * владельца 30.09.2026). Выбор запоминается в браузере: это настройка человека,
+ * а не разовый фильтр. */
+const ATTENDANCE_MODES = [
+    { value: 'period', label: 'За период' },
+    { value: 'latest', label: 'Последние' },
+];
+const ATTENDANCE_MODE_KEY = 'glb:attendance-mode';
+
+const readAttendanceMode = () => {
+    try {
+        return window.localStorage.getItem(ATTENDANCE_MODE_KEY) === 'latest' ? 'latest' : 'period';
+    } catch (error) {
+        return 'period';
+    }
+};
+
 const MUTE_KIND_LABELS = { all: 'Все уведомления', user: 'Сотрудник', dept: 'Отдел' };
 
 /* Почему карточка Workpace осталась без нашего сотрудника. `excluded` — не промах
@@ -495,17 +513,22 @@ const SegButton = ({ active, onClick, icon: Icon, children }) => (
 
 /* Поле фильтра с подписью: подписи держат строку фильтров ровной, а без них
  * непонятно, что означает выбранное значение. */
-const FilterField = ({ label, children, className = '', compact = false }) => (
-    <label className={`flex flex-col gap-1 ${className}`}>
-        {/* compact — на телефоне без подписи: там поля и так говорят сами за себя
-            (дата, «Все подразделения», «Сначала свежие»), а четыре подписи
-            съедали пол-экрана до первой строки списка. */}
-        <span className={`px-1 text-[10.5px] font-semibold uppercase tracking-wider text-slate-400 ${compact ? 'hidden sm:block' : ''}`}>
-            {label}
-        </span>
-        {children}
-    </label>
-);
+/* `group` — для нескольких кнопок (переключатель режима): щелчок по подписи-label
+ * нажал бы первую из них. */
+const FilterField = ({ label, children, className = '', compact = false, group = false }) => {
+    const Tag = group ? 'div' : 'label';
+    return (
+        <Tag className={`flex flex-col gap-1 ${className}`} {...(group ? { role: 'group', 'aria-label': label } : {})}>
+            {/* compact — на телефоне без подписи: там поля и так говорят сами за себя
+                (дата, «Все подразделения», «Сначала свежие»), а четыре подписи
+                съедали пол-экрана до первой строки списка. */}
+            <span className={`px-1 text-[10.5px] font-semibold uppercase tracking-wider text-slate-400 ${compact ? 'hidden sm:block' : ''}`}>
+                {label}
+            </span>
+            {children}
+        </Tag>
+    );
+};
 
 /* Плитка показателя. Число — главный элемент, подпись под ним; цвет берём
  * только под статус (норма / внимание / проблема), а не под «серию». */
@@ -881,10 +904,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [attendanceTotal, setAttendanceTotal] = useState(0);
     const [attendanceError, setAttendanceError] = useState(null);
     const [attendanceNotice, setAttendanceNotice] = useState(null);
-    const [attendanceFilters, setAttendanceFilters] = useState({
+    const [attendanceFilters, setAttendanceFilters] = useState(() => ({
         from: isoDate(new Date()), to: isoDate(new Date()),
         departments: [], q: '', kind: '', sort: 'recent', status: '',
-    });
+        mode: readAttendanceMode(),
+    }));
     const [attendanceSearch, setAttendanceSearch] = useState('');
     const [attendanceCounts, setAttendanceCounts] = useState(null);
     const [attendanceDetail, setAttendanceDetail] = useState(null);
@@ -1125,14 +1149,16 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         const requestId = attendanceRequest.current.id + 1;
         attendanceRequest.current = { id: requestId, controller };
         const limit = pageSize || ATTENDANCE_PAGE_SIZES[0];
+        const latest = filters.mode === 'latest';
         setAttendance(null);
         setAttendanceError(null);
         setAttendanceNotice(null);
         axios.get(`${base}/attendance`, {
             headers: headers(), signal: controller.signal,
             params: {
-                date_start: filters.from || undefined,
-                date_end: filters.to || undefined,
+                mode: latest ? 'latest' : undefined,
+                date_start: latest ? undefined : (filters.from || undefined),
+                date_end: latest ? undefined : (filters.to || undefined),
                 // Несколько подразделений уходят одной строкой через «;» — так их
                 // разбирает и сервер, и команда бота.
                 department: (filters.departments || []).join(';') || undefined,
@@ -1350,6 +1376,17 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         // прежней выборки после смены периода — это пустой экран без причины.
         setAttendancePage(1);
         loadAttendance(next, { page: 1, pageSize: attendancePageSize });
+    };
+
+    const changeAttendanceMode = (mode) => {
+        if (mode === attendanceFilters.mode) return;
+        try {
+            window.localStorage.setItem(ATTENDANCE_MODE_KEY, mode);
+        } catch (error) {
+            // Приватное окно: режим просто не запомнится.
+        }
+        // «Последние» — это про свежесть: порядок возвращается к «сначала свежие».
+        applyAttendanceFilters(mode === 'latest' ? { mode, sort: 'recent' } : { mode });
     };
 
     const goAttendancePage = (page) => {
@@ -1789,17 +1826,23 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const renderAttendance = () => {
         const rows = asArray(attendance);
-        const multiDay = attendanceFilters.from !== attendanceFilters.to;
+        const latestMode = attendanceFilters.mode === 'latest';
+        const multiDay = latestMode || attendanceFilters.from !== attendanceFilters.to;
         // По дням группируем только при сортировке «сначала свежие»: там дни идут
         // подряд. При сортировке по ФИО один день разорвался бы на куски, поэтому
         // дата тогда стоит в самой строке.
         const grouped = multiDay && attendanceFilters.sort === 'recent';
+        // В «Последних» список идёт по времени последней отметки, и день группы —
+        // её день: ночная смена со вчерашним приходом, ушедшая утром, стоит среди
+        // сегодняшних, а дату своей смены показывает в строке.
+        const groupDay = (row) => (latestMode ? String(row.last_mark_at || row.date).slice(0, 10) : row.date);
         const groups = [];
         if (grouped) {
             for (const [index, row] of rows.entries()) {
+                const day = groupDay(row);
                 const last = groups[groups.length - 1];
-                if (last && last.date === row.date) last.items.push([row, index]);
-                else groups.push({ date: row.date, items: [[row, index]] });
+                if (last && last.date === day) last.items.push([row, index]);
+                else groups.push({ date: day, items: [[row, index]] });
             }
         }
         const firstShown = (attendancePage - 1) * attendancePageSize + 1;
@@ -1808,35 +1851,52 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         return (
             <div className="space-y-3">
                 <div className={`${iosCard} p-3`}>
-                    {/* Порядок в разметке — телефонный: период с «Обновить», поиск,
-                        подразделения с сортировкой. На компьютере ряд собирается
-                        привычно слева направо через order. */}
+                    {/* Порядок в разметке — телефонный: режим с «Обновить», период,
+                        поиск, подразделения с сортировкой. На компьютере ряд
+                        собирается привычно слева направо через order. */}
+                    {/* На компьютере все поля ряда одной высоты (36 px): при разной
+                        подписи над ними шли лесенкой. */}
                     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 sm:flex sm:flex-wrap sm:gap-2.5">
-                        <FilterField compact label="Период" className="min-w-0 sm:order-1">
-                            <IosDateRangePicker from={attendanceFilters.from} to={attendanceFilters.to}
-                                                max={isoDate(new Date())}
-                                                onChange={({ from, to }) => applyAttendanceFilters({ from, to })} />
+                        <FilterField compact group label="Показать" className="min-w-0 sm:w-[196px]">
+                            <IosSegmented stretch value={attendanceFilters.mode} onChange={changeAttendanceMode}
+                                          options={ATTENDANCE_MODES} ariaLabel="Какие отметки показать"
+                                          className="h-[38px] sm:h-9" />
                         </FilterField>
-                        {/* Прошедшие дни читаются из кэша — «Обновить» перечитывает
-                            их из Воркпейса и Клокстера. Нужна редко, поэтому тихая. */}
-                        <button type="button" onClick={refreshAttendance}
-                                className="grid h-[38px] w-[38px] shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95 disabled:opacity-50 sm:order-4 sm:h-[42px] sm:w-[42px]"
-                                disabled={attendance === null}
-                                aria-label="Перечитать период из систем"
-                                title="Перечитать период из Воркпейса и Клокстера">
-                            <RefreshCw className={`h-4 w-4 ${attendance === null ? 'animate-spin' : ''}`} />
-                        </button>
-                        <FilterField compact label="Поиск" className="col-span-2 min-w-0 sm:order-3 sm:min-w-[200px] sm:flex-1">
-                            <div className="relative">
-                                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                                <input
-                                    className={`${iosInput} pl-9`}
-                                    value={attendanceSearch}
-                                    onChange={(e) => onAttendanceSearch(e.target.value)}
-                                    placeholder="ФИО или должность"
-                                />
-                            </div>
-                        </FilterField>
+                        {!latestMode && (
+                            <FilterField compact label="Период" className="col-span-2 min-w-0 sm:order-1">
+                                <IosDateRangePicker from={attendanceFilters.from} to={attendanceFilters.to}
+                                                    max={isoDate(new Date())}
+                                                    onChange={({ from, to }) => applyAttendanceFilters({ from, to })} />
+                            </FilterField>
+                        )}
+                        {/* Поиск и «Обновить» на компьютере — связка: на новую строку они
+                            переносятся только вместе, иначе кнопка оставалась там одна.
+                            На телефоне связки нет (`contents`), и кнопка стоит в первой
+                            строке, рядом с режимом. */}
+                        <div className="contents sm:order-3 sm:flex sm:min-w-[240px] sm:flex-1 sm:items-end sm:gap-2.5">
+                            <FilterField compact label="Поиск" className="col-span-2 min-w-0 sm:flex-1">
+                                <div className="relative">
+                                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                                    <input
+                                        className={`${iosInput} pl-9 sm:py-2`}
+                                        value={attendanceSearch}
+                                        onChange={(e) => onAttendanceSearch(e.target.value)}
+                                        placeholder="ФИО или должность"
+                                    />
+                                </div>
+                            </FilterField>
+                            {/* Прошедшие дни читаются из кэша — «Обновить» перечитывает
+                                их из Воркпейса и Клокстера. Нужна редко, поэтому тихая. */}
+                            <button type="button" onClick={refreshAttendance}
+                                    className="col-start-2 row-start-1 grid h-[38px] w-[38px] shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95 disabled:opacity-50 sm:h-9 sm:w-9"
+                                    disabled={attendance === null}
+                                    aria-label={latestMode ? 'Перечитать вчера и сегодня из систем' : 'Перечитать период из систем'}
+                                    title={latestMode
+                                        ? 'Перечитать вчера и сегодня из Воркпейса и Клокстера'
+                                        : 'Перечитать период из Воркпейса и Клокстера'}>
+                                <RefreshCw className={`h-4 w-4 ${attendance === null ? 'animate-spin' : ''}`} />
+                            </button>
+                        </div>
                         <div className="col-span-2 grid grid-cols-2 gap-2 sm:order-2 sm:flex sm:gap-2.5">
                             {!scoped && (
                                 <FilterField compact label="Подразделения" className="min-w-0 sm:w-[220px]">
@@ -1939,7 +1999,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                 <EmptyBlock icon={Clock}>
                                     {attendanceFilters.status || attendanceFilters.q || attendanceFilters.departments.length
                                         ? 'Под выбранные условия никто не подходит'
-                                        : 'За выбранный период отметок нет'}
+                                        : latestMode ? 'Отметок пока нет' : 'За выбранный период отметок нет'}
                                 </EmptyBlock>
                             ) : grouped ? (
                                 groups.map((group) => (
@@ -1948,7 +2008,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                             {fmtDayLong(group.date)}
                                         </div>
                                         <div className="divide-y divide-slate-200/60">
-                                            {group.items.map(([row, index]) => renderAttendanceRow(row, index, false))}
+                                            {group.items.map(([row, index]) => renderAttendanceRow(row, index, row.date !== group.date))}
                                         </div>
                                     </div>
                                 ))
@@ -1978,7 +2038,9 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                 </div>
                                 {attendanceTotal <= attendancePageSize && (
                                     <span className="tabular-nums">
-                                        {fmtInt(attendanceTotal)} {pluralRu(attendanceTotal, 'строка', 'строки', 'строк')}
+                                        {fmtInt(attendanceTotal)} {latestMode
+                                            ? pluralRu(attendanceTotal, 'сотрудник', 'сотрудника', 'сотрудников')
+                                            : pluralRu(attendanceTotal, 'строка', 'строки', 'строк')}
                                     </span>
                                 )}
                             </div>
@@ -1991,7 +2053,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                         from={firstShown}
                                         to={lastShown}
                                         onPage={goAttendancePage}
-                                        unit="отметки"
+                                        unit={latestMode ? 'сотрудники' : 'отметки'}
                                     />
                                 </div>
                             )}

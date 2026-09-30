@@ -210,5 +210,40 @@ class ApiTests(unittest.TestCase):
         self.assertIn("GROUP_LATE_CLOCKSTER_ROSTER_MAX_AGE", helper)
 
 
+class LatestMarksModeTests(unittest.TestCase):
+    """«Последние отметки» (просьба владельца 30.09.2026): в фильтрах выбирается
+    режим без привязки к дате — по 50 человек на страницу, от самых свежих."""
+
+    def test_mode_is_a_segmented_switch_in_the_filters(self):
+        self.assertIn("{ value: 'latest', label: 'Последние' }", VIEW)
+        block = VIEW[VIEW.index('label="Показать"'):]
+        block = block[:block.index("</FilterField>")]
+        self.assertIn("<IosSegmented", block)
+        self.assertIn("onChange={changeAttendanceMode}", block)
+        # Кнопки внутри <label>: щелчок по подписи нажал бы первую из них.
+        self.assertIn("group", VIEW[VIEW.index('label="Показать"') - 60:VIEW.index('label="Показать"')])
+
+    def test_latest_mode_sends_no_dates(self):
+        self.assertIn("mode: latest ? 'latest' : undefined", VIEW)
+        self.assertIn("date_start: latest ? undefined : (filters.from || undefined)", VIEW)
+        # Выбор периода в этом режиме не показываем вовсе, а не гасим.
+        self.assertIn("{!latestMode && (", VIEW)
+
+    def test_choice_is_remembered_and_survives_private_mode(self):
+        self.assertIn("window.localStorage.getItem(ATTENDANCE_MODE_KEY)", VIEW)
+        self.assertIn("window.localStorage.setItem(ATTENDANCE_MODE_KEY, mode)", VIEW)
+        read = VIEW[VIEW.index("const readAttendanceMode"):]
+        self.assertIn("try {", read[:read.index("};")])
+
+    def test_latest_mode_starts_from_the_freshest(self):
+        self.assertIn("mode === 'latest' ? { mode, sort: 'recent' } : { mode }", VIEW)
+
+    def test_route_serves_latest_without_a_period(self):
+        route = BOT[BOT.index("def api_group_late_bot_attendance"):]
+        route = route[:route.index("\n@app.route")]
+        self.assertIn("== 'latest'", route)
+        self.assertIn("_attendance_cache.latest_rows(db, department=department, refresh=refresh)", route)
+
+
 if __name__ == "__main__":
     unittest.main()

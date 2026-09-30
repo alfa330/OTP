@@ -63222,6 +63222,35 @@ class Database:
             """, params)
             return [dict(zip(self.GLB_ATTENDANCE_COLUMNS, row)) for row in cursor.fetchall()]
 
+    def glb_latest_attendance_rows(self, day_before):
+        """По каждому сотруднику — строки его последнего дня с отметкой до `day_before`.
+
+        Режим «Последние отметки» раздела: список без привязки к дате, где каждый
+        человек стоит днём, когда отметился в последний раз. Свежие дни (от
+        `day_before`) сюда не входят — их отдаёт `rows_for` по тем же правилам,
+        что экран за период. День без прихода и ухода (неявка, «ждём прихода»)
+        отметкой не считается. Подразделение и поиск, как и у
+        `glb_read_attendance_rows`, режутся в Python."""
+        edge = self._glb_day(day_before)
+        if not edge:
+            return []
+        columns = ', '.join(f'r.{column}' for column in self.GLB_ATTENDANCE_COLUMNS)
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                WITH latest AS (
+                    SELECT employee_id, MAX(day) AS day
+                    FROM glb_attendance_rows
+                    WHERE day < %s AND (fact_in IS NOT NULL OR fact_out IS NOT NULL)
+                    GROUP BY employee_id
+                )
+                SELECT {columns}
+                FROM glb_attendance_rows r
+                JOIN latest l ON l.employee_id = r.employee_id AND l.day = r.day
+                WHERE r.fact_in IS NOT NULL OR r.fact_out IS NOT NULL
+                ORDER BY r.day DESC, r.employee_name, r.seq
+            """, (edge,))
+            return [dict(zip(self.GLB_ATTENDANCE_COLUMNS, row)) for row in cursor.fetchall()]
+
     def glb_forget_attendance_days(self, day_from=None, day_to=None):
         """Сбрасывает кэш дней: правила плана поменялись — прошлое надо пересчитать."""
         start, end = self._glb_day(day_from), self._glb_day(day_to)

@@ -23,6 +23,7 @@ from datetime import date as date_cls, datetime, timedelta
 from group_late import attendance
 from group_late.config import TZ
 from group_late.departments import clean_department_filters, department_matches
+from group_late.helpers import parse_dt
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,37 @@ def rows_for(db, date_start, date_end, department=None, refresh=False):
         "built_days": len(rebuilt),
         "cached_days": len(cached_days),
     }
+
+
+def latest_rows(db, department=None, refresh=False):
+    """Последняя отметка каждого сотрудника — без привязки к дате.
+
+    Одна строка на человека: день, в который он отметился последним. Вчера и
+    сегодня идут через `rows_for`: вчерашний день бывает ещё неокончательным
+    (уход ночной смены лежит сегодня), и без пересборки ушедший в 08:18 стоял бы
+    в списке с приходом 21:55. Глубже — последний день с отметкой из кэша."""
+    today = _now().date()
+    fresh_from = today - timedelta(days=1)
+    payload = rows_for(db, fresh_from, today, department=department, refresh=refresh)
+    rows = list(payload["rows"])
+    if db is not None:
+        older = [row_from_cache(record) for record in db.glb_latest_attendance_rows(fresh_from)]
+        filters = clean_department_filters(department)
+        if filters:
+            older = [row for row in older if department_matches(row.get("department"), filters)]
+        rows.extend(older)
+
+    latest = {}
+    for row in rows:
+        when = parse_dt(row.get("last_mark_at"))
+        if when is None:
+            continue
+        key = row.get("employee_id") or row.get("employee")
+        if key not in latest or when > latest[key][0]:
+            # Время отметки — в поясе компании: по нему экран делит список на
+            # дни, а в кэше оно лежит как пришло из источника, бывает и без пояса.
+            latest[key] = (when, {**row, "last_mark_at": when.isoformat()})
+    return {**payload, "rows": [row for _, row in latest.values()]}
 
 
 def backfill(db, days=7, until=None):
