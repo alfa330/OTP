@@ -7,14 +7,17 @@ import {
     plural, queueSummary, STALE_MARK,
 } from './queueDayRules';
 
-/* Очередь ревью по дням разговора — два экрана, как «Календарь» на iOS.
+/* Очередь ревью по дням разговора — два экрана, как «Почта» или «Календарь» iOS.
  *
- * Сначала — плитки дней, сгруппированные по месяцам. Плитка — сводка дня: сколько
- * ждёт проверки (главное число), есть ли критические, средние баллы ИИ и человека,
- * сколько уже проверено. Разговоров на плитке нет: по нажатию открывается экран дня
- * — полная аналитика дня и список его разговоров. Со стрелками можно перейти к
- * соседнему дню, не возвращаясь к плиткам, а проверив весь день — сразу к
- * следующему, где ещё есть работа.
+ * Сначала — дни, сгруппированные по месяцам. У месяца один список: строки дней
+ * разделены волосяной линией, а не разнесены отдельными карточками — так лента
+ * читается сверху вниз одним взглядом. Строка — сводка дня: листок календаря,
+ * сколько ждёт проверки и сколько из них критических, кто работал; справа
+ * колонками средние баллы ИИ и человека и сколько уже проверено. Подписи колонок —
+ * один раз в шапке списка, а не в каждой строке. Разговоров в строке нет: по
+ * нажатию открывается экран дня — полная аналитика дня и список его разговоров.
+ * Со стрелками можно перейти к соседнему дню, не возвращаясь к списку, а проверив
+ * весь день — сразу к следующему, где ещё есть работа.
  *
  * Данные и состояние (какой день открыт, загруженные строки, только что
  * проверенные) живут в CallQaView: из карточки разговора человек возвращается на
@@ -25,6 +28,11 @@ const criticalText = (n) => `${n} ${plural(n, 'критическое', 'кри�
 const waitingText = (n) => plural(n, 'ждёт проверки', 'ждут проверки', 'ждут проверки');
 const round = (value) => (value == null ? null : Math.round(value));
 
+// Колонки списка дней на компьютере — одни на шапку и строки, иначе разъедутся.
+const DAY_COLUMNS = 'sm:grid sm:grid-cols-[minmax(0,1fr)_4rem_4.5rem_5.5rem_1rem] sm:items-center sm:gap-4';
+
+const WEEKDAY_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
 /* Листок календаря: день недели и число, как значок «Календаря» — месяц уже в
  * заголовке раздела. По числам глаз идёт по ленте дней; сегодняшний — синий. */
 function DateLeaf({ day, info }) {
@@ -33,44 +41,40 @@ function DateLeaf({ day, info }) {
     const today = info.relative === 'Сегодня';
     return (
         <div aria-hidden="true"
-             className={`flex h-[52px] w-12 shrink-0 flex-col items-center justify-center rounded-xl ${
-                 today ? 'bg-blue-500 text-white shadow-[0_4px_12px_-4px_rgba(59,130,246,0.6)]' : 'bg-slate-100 text-slate-900'}`}>
+             className={`flex h-11 w-11 shrink-0 flex-col items-center justify-center rounded-[10px] ${
+                 today ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-900'}`}>
             {date == null ? (
-                <span className="text-[18px] font-semibold text-slate-400">—</span>
+                <span className="text-[17px] font-semibold text-slate-400">—</span>
             ) : (
                 <>
-                    <span className={`text-[10.5px] font-semibold uppercase leading-none tracking-wide ${
+                    <span className={`text-[10px] font-semibold uppercase leading-none tracking-wide ${
                         today ? 'text-white/85' : 'text-slate-500'}`}>{WEEKDAY_SHORT[new Date(`${day.day}T12:00:00`).getDay()]}</span>
-                    <span className="mt-1 text-[21px] font-semibold leading-none tabular-nums">{date}</span>
+                    <span className="mt-[3px] text-[18px] font-semibold leading-none tabular-nums">{date}</span>
                 </>
             )}
         </div>
     );
 }
 
-const WEEKDAY_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
-
-/* Балл одной строкой: подпись серым, число в цвет балла. */
-function InlineScore({ label, value }) {
+/* Балл числом в цвет балла; нет балла — прочерк. */
+function Score({ value, className = '' }) {
     return (
-        <span className="inline-flex items-baseline gap-1">
-            <span className="text-slate-400">{label}</span>
-            <span className={`font-semibold tabular-nums ${value == null ? 'text-slate-300' : SCORE_TEXT[scoreTone(value)]}`}>
-                {value ?? '—'}
-            </span>
+        <span className={`font-semibold tabular-nums ${value == null ? 'text-slate-300' : SCORE_TEXT[scoreTone(value)]} ${className}`}>
+            {value ?? '—'}
         </span>
     );
 }
 
-/* Плитка дня — кнопка на весь день. Слева листок календаря, рядом главное: сколько
- * ждёт проверки и сколько из них критических (единственный красный на плитке).
- * Внизу за волосяной линией одной строкой — как прошёл день: средние баллы ИИ и
- * человека и сколько уже проверено. Разговоров на плитке нет — они на экране дня. */
-function DayTile({ day, onOpen }) {
+/* Строка дня — кнопка на весь день. Главное — сколько ждёт проверки; критические —
+ * красным (единственный красный в строке), рядом — кто работал. На компьютере
+ * баллы и «проверено» — в колонках справа; на телефоне — третьей строкой. */
+function DayRow({ day, onOpen }) {
     const info = dayTitle(day.day);
     const done = day.open === 0;
     const evaluated = Math.max(day.evaluated || 0, day.open || 0);
-    // Кто работал в этот день — то, чего на плитке больше нигде нет.
+    const ai = round(day.ai_avg);
+    const human = round(day.human_avg);
+    // Кто работал в этот день — то, чего в строке больше нигде нет.
     const directions = (day.directions || []).map((d) => d.name);
     const who = [
         day.operators ? `${day.operators} ${plural(day.operators, 'сотрудник', 'сотрудника', 'сотрудников')}` : null,
@@ -80,39 +84,40 @@ function DayTile({ day, onOpen }) {
         day.critical ? criticalText(day.critical) : null].filter(Boolean).join(', ');
     return (
         <button type="button" onClick={() => onOpen(day.day)} data-qa-day-tile={day.day} aria-label={label}
-                className="group flex flex-col rounded-2xl bg-white p-4 text-left ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_14px_30px_-18px_rgba(15,23,42,0.35)] hover:ring-slate-300/80 active:translate-y-0 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
-            <div className="flex w-full items-center gap-3.5">
+                className={`group flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 focus-visible:bg-blue-50/60 focus-visible:outline-none active:bg-slate-100 sm:px-5 ${DAY_COLUMNS}`}>
+            <div className="flex min-w-0 flex-1 items-center gap-3.5">
                 <DateLeaf day={day} info={info} />
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0">
                     {done ? (
-                        <div className="flex items-center gap-1.5 text-[15px] font-semibold text-emerald-600">
-                            <CheckCircle2 size={17} aria-hidden="true" />Всё проверено
+                        <div className="flex items-center gap-1.5 text-[14px] font-semibold text-emerald-600">
+                            <CheckCircle2 size={15} aria-hidden="true" />Всё проверено
                         </div>
                     ) : (
                         <div className="flex items-baseline gap-1.5">
-                            <span className="text-[26px] font-semibold leading-none tabular-nums text-slate-900">{day.open}</span>
-                            <span className="truncate text-[13px] text-slate-500">{waitingText(day.open)}</span>
+                            <span className="text-[16px] font-semibold tabular-nums text-slate-900">{day.open}</span>
+                            <span className="text-[13.5px] text-slate-700">{waitingText(day.open)}</span>
                         </div>
                     )}
-                    <div className="mt-1.5 truncate text-[12.5px] text-slate-500">
+                    <div className="mt-0.5 truncate text-[12.5px] text-slate-500">
                         {!done && day.critical > 0 && (
                             <span className="font-medium text-rose-600">{criticalText(day.critical)}{who ? ' · ' : ''}</span>
                         )}
                         {who}
                     </div>
+                    <div className="mt-1 flex items-baseline gap-3 text-[12px] text-slate-400 sm:hidden">
+                        <span>ИИ <Score value={ai} /></span>
+                        <span>Человек <Score value={human} /></span>
+                        <span>проверено <span className="font-medium tabular-nums text-slate-600">{day.reviewed || 0} из {evaluated}</span></span>
+                    </div>
                 </div>
-                <ChevronRight size={17} aria-hidden="true"
-                              className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-400" />
             </div>
-            <div className="mt-3.5 flex w-full items-center justify-between gap-3 border-t border-slate-100 pt-3 text-[12.5px]">
-                <span className="flex items-baseline gap-3">
-                    <InlineScore label="ИИ" value={round(day.ai_avg)} />
-                    <InlineScore label="Человек" value={round(day.human_avg)} />
-                </span>
-                <span className="text-slate-500 tabular-nums">
-                    Проверено <span className="font-medium text-slate-700">{day.reviewed || 0}</span> из {evaluated}
-                </span>
-            </div>
+            <Score value={ai} className="hidden text-right text-[15px] sm:block" />
+            <Score value={human} className="hidden text-right text-[15px] sm:block" />
+            <span className="hidden text-right text-[13px] tabular-nums text-slate-600 sm:block">
+                {day.reviewed || 0} из {evaluated}
+            </span>
+            <ChevronRight size={16} aria-hidden="true"
+                          className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-400" />
         </button>
     );
 }
@@ -147,10 +152,11 @@ function Overview({ days, total, truncated, onOpenDay, onRefresh }) {
     );
 }
 
+/* Месяц — заголовок и один список его дней. */
 function MonthSection({ group, onOpenDay }) {
     const headingId = useId();
     return (
-        <section aria-labelledby={headingId} className="space-y-2.5">
+        <section aria-labelledby={headingId} className="space-y-2">
             <div className="flex items-baseline justify-between gap-3 px-1">
                 <h2 id={headingId} className="text-[18px] font-semibold text-slate-900">{group.title}</h2>
                 {group.open > 0 && (
@@ -160,8 +166,22 @@ function MonthSection({ group, onOpenDay }) {
                     </span>
                 )}
             </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-                {group.days.map((day) => <DayTile key={day.day} day={day} onOpen={onOpenDay} />)}
+            <div className={`${iosCard} overflow-hidden`}>
+                <div aria-hidden="true"
+                     className={`hidden border-b border-slate-100 px-5 py-2 text-[11px] font-medium uppercase tracking-wide text-slate-400 ${DAY_COLUMNS}`}>
+                    <span>День</span>
+                    <span className="text-right" title="Средний балл ИИ за день">ИИ</span>
+                    <span className="text-right" title="Средний балл человека за день">Человек</span>
+                    <span className="text-right" title="Проверено человеком из оценённых ИИ">Проверено</span>
+                    <span />
+                </div>
+                <div role="list">
+                    {group.days.map((day) => (
+                        <div role="listitem" key={day.day} className="border-b border-slate-100 last:border-b-0">
+                            <DayRow day={day} onOpen={onOpenDay} />
+                        </div>
+                    ))}
+                </div>
             </div>
         </section>
     );
@@ -276,7 +296,7 @@ function DayScreen({ days, day, state, reviewedKeys, onOpen, onOpenDay, onClose,
                 <div className={`text-[13px] font-medium ${info.relative ? 'text-blue-600' : 'text-slate-500'}`}>
                     {info.relative ? `${info.relative}, ${info.weekday.toLowerCase()}` : info.weekday || ' '}
                 </div>
-                {/* Фокус сюда ставит CallQaView: день открыли с плитки, или в нём
+                {/* Фокус сюда ставит CallQaView: день открыли из списка, или в нём
                     не осталось разговоров после проверки. */}
                 <h2 id="qa-queue-day-title" tabIndex={-1}
                     className="rounded-md text-[24px] font-semibold leading-tight text-slate-900 outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">

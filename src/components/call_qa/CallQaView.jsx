@@ -149,7 +149,7 @@ export default function CallQaView(props) {
     const [queue, setQueue] = useState(null);      // сводка дней { days, total, truncated }; null = загрузка
     const [queueErr, setQueueErr] = useState(false);
     const [queueDayItems, setQueueDayItems] = useState({});   // день → { items, total, end, loading, error }
-    const [queueDay, setQueueDay] = useState(null);   // открытый день очереди; null — плитки дней
+    const [queueDay, setQueueDay] = useState(null);   // открытый день очереди; null — список дней
     // Проверенные с последней загрузки: из дня пропадают сразу, сводка дня меняется на месте.
     const [queueReviewed, setQueueReviewed] = useState([]);
     const queueGeneration = useRef(0);
@@ -278,11 +278,11 @@ export default function CallQaView(props) {
     const canSwitchDepartment = departmentOptions.length > 1;
     const departmentName = (departments || []).find((item) => item.code === department)?.name || '';
 
-    /* Очередь — по дням разговора: плитки дней из сводки (/review-queue/days), а по
-     * нажатию на плитку — экран дня со списком его разговоров (/review-queue?day=…).
+    /* Очередь — по дням разговора: список дней по месяцам из сводки (/review-queue/days),
+     * а по нажатию на строку дня — экран дня со списком его разговоров (/review-queue?day=…).
      * Состояние (открытый день, строки, только что проверенные) живёт здесь, а не в
      * QueueDays: пока открыта карточка разговора, очередь не смонтирована, и человек
-     * вернулся бы к плиткам, а не на экран дня, где остановился. */
+     * вернулся бы к списку дней, а не на экран дня, где остановился. */
     /* Сброс очереди: запрос сводки в полёте отменяется, а поздние ответы по строкам
      * дней отсекает новое поколение. Нужен и там, где очередь не на экране (смена
      * отдела или отбора на другой вкладке): иначе запоздавший ответ прежнего отдела
@@ -318,7 +318,7 @@ export default function CallQaView(props) {
     };
 
     /* Строки дня. `fresh` — день открыли (с плиток или стрелкой): список читается
-     * заново — пока человек смотрел плитки, его могли проверить другие. Дальше
+     * заново — пока человек смотрел список дней, его могли проверить другие. Дальше
      * «Показать ещё» и повтор после сбоя — с перекрытием и отсевом повторов
      * (dayPageRequest / mergeDayPage): список дня мог сдвинуться. Сколько ещё не
      * показано, считает ответ самого дня (`total` и докуда дочитали — `end`), а не
@@ -352,7 +352,7 @@ export default function CallQaView(props) {
                                                              loading: false, error: true } }));
             });
     };
-    // С плиток — на экран дня; стрелками — к соседнему дню, не возвращаясь к плиткам.
+    // Из списка дней — на экран дня; стрелками — к соседнему дню, не возвращаясь к списку.
     const openQueueDay = (day, { fromTile = true } = {}) => {
         if (!day) return;
         queueReturn.current = { dayOpened: true, focusTitle: fromTile };
@@ -466,9 +466,9 @@ export default function CallQaView(props) {
          а если в дне никого не осталось — к заголовку дня. Прежний фокус (кнопка
          строки) к этому времени отцеплен от документа: без этого он уходил на вкладку,
          и страница прыгала в начало;
-       — открыли день — начало экрана дня в поле зрения (плитка могла быть внизу
-         длинной ленты), фокус на заголовок дня, если открыли с плитки;
-       — «Все дни» — обратно к плитке этого дня. */
+       — открыли день — начало экрана дня в поле зрения (строка могла быть внизу
+         длинной ленты), фокус на заголовок дня, если открыли из списка;
+       — «Все дни» — обратно к строке этого дня. */
     const queueReturn = useRef(null);
     useEffect(() => {
         const back = queueReturn.current;
