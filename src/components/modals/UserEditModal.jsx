@@ -225,6 +225,14 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
 
 // onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
 // Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
+/* Поля вкладки на странице сотрудника (embedded) — одной сгруппированной
+   карточкой, как у самой страницы; оформляет её employee-card-page.css. В
+   отдельном окне обёртки нет вовсе: дети ложатся прямо в .space-y-6, и
+   разметка окна остаётся прежней до элемента. */
+const UemFieldsFrame = ({ embedded, children }) => (
+    embedded ? <div className="uem-fields">{children}</div> : children
+);
+
 const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, embedded = false }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
@@ -1152,7 +1160,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             className={embedded ? 'uem-embedded-card' : 'otp-modal-card pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in'}
             onClick={(e) => e.stopPropagation()}
             >
-            <div className={embedded ? 'px-6 pb-6' : 'px-6 py-5 max-h-[88vh] overflow-y-auto'}>
+            <div className={embedded ? 'uem-embedded-body' : 'px-6 py-5 max-h-[88vh] overflow-y-auto'}>
                 {/* Header */}
                 {embedded ? null : isMobileShell ? (
                 /* Телефон: шапка экрана — стрелка слева и заголовок по центру,
@@ -1227,6 +1235,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     ))}
                     </div>
                 )}
+                <UemFieldsFrame embedded={embedded}>
                 {isCreateMode &&(
                 <>
                 {activeTab === "data" && (
@@ -2731,6 +2740,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     )}
                     </>
                 )}
+                </UemFieldsFrame>
 
                 {/* Если создали — показываем креды */}
                 {createdCredentials && (
@@ -2794,7 +2804,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                 )}
                 {!createdCredentials && !isMobileShell && (
-                    <div className="flex justify-end items-center gap-3 pt-2">
+                    <div className="uem-actions flex justify-end items-center gap-3 pt-2">
                     <button
                         onClick={() => {
                         setModalError("");

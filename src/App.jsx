@@ -50975,7 +50975,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const employeeCardPages = {
                 edit: {
                     title: 'Изменить данные',
-                    tone: 'plain',
                     guard: true,
                     // Справочники — свежими, как при открытии отдельного окна
                     // правки: там их перечитывает эффект по showUserEditModal.

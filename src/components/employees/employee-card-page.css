@@ -27,6 +27,7 @@
     /* Фон шапки — цвет самого раздела (bg-gray-50) с прозрачностью: сквозь неё
        видно уезжающие под неё строки, как под шапкой в iOS и macOS. */
     --ecp-bar-bg: rgba(249, 250, 251, 0.82);
+    --ecp-input: rgba(118, 118, 128, 0.1);
     --ecp-shadow: 0 0 0 0.5px rgba(15, 23, 42, 0.1), 0 1px 2px rgba(15, 23, 42, 0.04);
     --ecp-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
@@ -62,6 +63,7 @@ html[data-otp-theme="dark"] .ecp {
     --ecp-danger-soft: rgba(252, 165, 165, 0.1);
     --ecp-warn: #fbbf24;
     --ecp-bar-bg: rgba(23, 25, 30, 0.82);
+    --ecp-input: #2b3039;
     --ecp-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.08);
 }
 
@@ -620,13 +622,211 @@ html[data-otp-theme="dark"] .ecp-btn.is-tinted:hover {
     outline: none;
 }
 
-/* Форма правки несёт свои поля и отступы (UserEditModal, режим embedded) —
-   ей нужна только белая подложка. */
-.ecp-narrow.is-plain .ecp-subpage-body {
-    padding: 4px 0 4px;
-    border-radius: 18px;
+/* ── Форма правки на странице (UserEditModal, режим embedded) ──────────
+
+   Владелец 30.09.2026 по снимку: после «Изменить» страница «меняется на
+   старую версию» — форма оставалась прежней: серая полоса вкладок и поля в
+   рамках. Здесь она того же вида, что сама страница: вкладки —
+   переключателем, поля вкладки — одной сгруппированной карточкой (обёртка
+   .uem-fields есть только в embedded), каждое поле — строкой с разделителем,
+   подпись над полем, поле — с заливкой, без рамки. «Отмена» и «Сохранить» —
+   плавающей панелью у нижнего края: к ним не надо листать форму.
+
+   !important — против утилит Tailwind в разметке формы и тёмного слоя
+   (theme-dark.css пишет цвета полей с !important и грузится позже —
+   поэтому и вес правил здесь не ниже (0,3,1): при равном побеждал бы он). */
+
+.ecp .uem-embedded-body > .space-y-6 {
+    margin-top: 0;
+}
+
+.ecp .uem-embedded-body > .space-y-6 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 16px;
+}
+
+/* Вкладки — переключатель, как сегменты iOS: выбранная — белой плашкой. */
+.ecp .uem-embedded-body .grid.grid-cols-5 {
+    display: flex;
+    gap: 0;
+    padding: 2px;
+    border-radius: 10px;
+    background: var(--ecp-fill) !important;
+}
+
+.ecp .uem-embedded-body .grid.grid-cols-5 > button {
+    flex: 1 1 0;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    padding: 0 8px !important;
+    border-radius: 8px !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    color: var(--ecp-text) !important;
+    font-size: 13.5px !important;
+    font-weight: 500 !important;
+    white-space: nowrap;
+    transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.ecp .uem-embedded-body .grid.grid-cols-5 > button[aria-pressed="true"] {
+    background: var(--ecp-card) !important;
+    font-weight: 600 !important;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04) !important;
+}
+
+html[data-otp-theme="dark"] .ecp .uem-embedded-body .grid.grid-cols-5 > button[aria-pressed="true"] {
+    background: #3a3f48 !important;
+}
+
+/* Поля вкладки — одна карточка, поле — строка. */
+.ecp .uem-embedded-body .uem-fields {
+    border-radius: 14px;
     background: var(--ecp-card);
     box-shadow: var(--ecp-shadow);
+}
+
+.ecp .uem-embedded-body .uem-fields > * {
+    padding: 14px 18px !important;
+}
+
+.ecp .uem-embedded-body .uem-fields > * + * {
+    border-top: 0.5px solid var(--ecp-sep) !important;
+}
+
+/* Блоки-плашки верхнего уровня (фото, подсказка «оставьте пустым», период
+   статуса) — такие же строки, а не карточки в карточке. */
+.ecp .uem-embedded-body .uem-fields > .rounded-lg,
+.ecp .uem-embedded-body .uem-fields > .rounded-xl {
+    border-right-width: 0 !important;
+    border-bottom-width: 0 !important;
+    border-left-width: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+}
+
+.ecp .uem-embedded-body .uem-fields > :first-child {
+    border-top-width: 0 !important;
+}
+
+/* Плашки внутри строки — мягкой заливкой, без рамки. Именно div: у самих
+   полей (select, input) те же классы rounded-lg border, и без этого они
+   получали цвет плашки вместо цвета поля. */
+.ecp .uem-embedded-body .uem-fields > * div.rounded-lg.border,
+.ecp .uem-embedded-body .uem-fields > * div.rounded-xl.border {
+    border-width: 0 !important;
+    border-radius: 12px !important;
+    background: var(--ecp-fill) !important;
+}
+
+.ecp .uem-embedded-body .uem-fields label.block {
+    margin-bottom: 6px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    color: var(--ecp-muted) !important;
+}
+
+/* Поле в фокусе подсвечивает свою подпись — видно, что сейчас правится. */
+.ecp .uem-embedded-body .uem-fields div:focus-within > label.block {
+    color: var(--ecp-accent) !important;
+}
+
+.ecp .uem-embedded-body .uem-fields label.inline-flex {
+    gap: 10px !important;
+    font-size: 15px !important;
+    color: var(--ecp-text) !important;
+}
+
+.ecp .uem-embedded-body .uem-fields input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--ecp-accent-fill);
+}
+
+.ecp .uem-embedded-body .uem-fields input[type="text"],
+.ecp .uem-embedded-body .uem-fields input[type="number"],
+.ecp .uem-embedded-body .uem-fields input[type="date"],
+.ecp .uem-embedded-body .uem-fields input[type="email"],
+.ecp .uem-embedded-body .uem-fields input[type="tel"],
+.ecp .uem-embedded-body .uem-fields input[type="password"],
+.ecp .uem-embedded-body .uem-fields select,
+.ecp .uem-embedded-body .uem-fields textarea,
+.ecp .uem-embedded-body .uem-fields button[aria-haspopup="listbox"] {
+    min-height: 40px;
+    padding: 8px 12px !important;
+    border: 0 !important;
+    border-radius: 10px !important;
+    outline: none;
+    background: var(--ecp-input) !important;
+    box-shadow: none !important;
+    color: var(--ecp-text) !important;
+    font-size: 15px !important;
+    transition: background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.ecp .uem-embedded-body .uem-fields input:focus,
+.ecp .uem-embedded-body .uem-fields select:focus,
+.ecp .uem-embedded-body .uem-fields textarea:focus,
+.ecp .uem-embedded-body .uem-fields button[aria-haspopup="listbox"]:focus-visible,
+.ecp .uem-embedded-body .uem-fields button[aria-haspopup="listbox"][aria-expanded="true"] {
+    background: var(--ecp-card) !important;
+    box-shadow: 0 0 0 3px var(--ecp-accent-ring) !important;
+}
+
+.ecp .uem-embedded-body .uem-fields input:disabled,
+.ecp .uem-embedded-body .uem-fields select:disabled,
+.ecp .uem-embedded-body .uem-fields textarea:disabled {
+    opacity: 0.55;
+}
+
+.ecp .uem-embedded-body .uem-fields p.text-xs,
+.ecp .uem-embedded-body .uem-fields div.text-xs {
+    font-size: 12.5px !important;
+    color: var(--ecp-muted) !important;
+}
+
+/* «Отмена» и «Сохранить» — плавающей панелью у нижнего края поля
+   раздела (липкость — от края содержимого, как у шапки). */
+.ecp .uem-embedded-body .uem-actions {
+    position: sticky;
+    bottom: calc(16px - var(--ecp-pad-bottom, 32px));
+    z-index: 5;
+    gap: 10px !important;
+    padding: 10px !important;
+    border-radius: 16px;
+    background: var(--ecp-bar-bg);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    box-shadow: var(--ecp-shadow), 0 12px 32px -12px rgba(15, 23, 42, 0.3);
+}
+
+.ecp .uem-embedded-body .uem-actions > button {
+    height: 38px;
+    padding: 0 20px !important;
+    border-radius: 11px !important;
+    font-size: 14.5px !important;
+    font-weight: 600 !important;
+    transition: filter 150ms ease, transform 140ms var(--ecp-ease);
+}
+
+.ecp .uem-embedded-body .uem-actions > button:first-child {
+    background: var(--ecp-fill-strong) !important;
+    color: var(--ecp-text) !important;
+}
+
+.ecp .uem-embedded-body .uem-actions > button:last-child {
+    background: var(--ecp-accent-fill) !important;
+    color: #fff !important;
+}
+
+.ecp .uem-embedded-body .uem-actions > button:hover {
+    filter: brightness(0.96);
+}
+
+.ecp .uem-embedded-body .uem-actions > button:active {
+    transform: scale(0.97);
 }
 
 /* ── История ──────────────────────────────────────────────────────────── */

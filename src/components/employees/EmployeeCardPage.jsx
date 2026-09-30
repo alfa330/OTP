@@ -626,7 +626,7 @@ export default function EmployeeCardPage({
 
     const activeDef = pageKey ? pageDef(pageKey) : null;
     const renderSubpage = () => (
-        <div className={`ecp-narrow${activeDef?.tone === 'plain' ? ' is-plain' : ''}`}>
+        <div className="ecp-narrow">
             <h1 ref={(node) => { titleRef.current = node; headingRef.current = node; }} className="ecp-large-title" tabIndex={-1}>
                 {activeDef?.title}
             </h1>

@@ -235,6 +235,27 @@ class EmbeddedEditFormTests(unittest.TestCase):
         self.assertIn('data-uem-crop=""', EDIT)
         self.assertIn('[data-uem-crop]', PAGE)
 
+    def test_embedded_form_looks_like_the_page(self):
+        """Владелец 30.09.2026: после «Изменить» страница «менялась на старую
+        версию» — форма оставалась прежней. Поля вкладки — сгруппированной
+        карточкой (обёртка только в embedded), «Отмена/Сохранить» — плавающей
+        панелью; в отдельном окне разметка не меняется."""
+        self.assertIn("embedded ? <div className=\"uem-fields\">{children}</div> : children", EDIT)
+        self.assertIn('<UemFieldsFrame embedded={embedded}>', EDIT)
+        self.assertIn('</UemFieldsFrame>', EDIT)
+        self.assertIn('className="uem-actions flex justify-end items-center gap-3 pt-2"', EDIT)
+        self.assertIn("embedded ? 'uem-embedded-body' :", EDIT)
+        css = without_comments(PAGE_CSS)
+        self.assertIn('.ecp .uem-embedded-body .uem-fields {', css)
+        self.assertIn('.ecp .uem-embedded-body .grid.grid-cols-5 > button[aria-pressed="true"] {', css)
+        actions = css[css.index('.ecp .uem-embedded-body .uem-actions {'):]
+        self.assertIn('position: sticky;', actions[:actions.index('}')])
+        # Плашки внутри строки — только div: у select и input те же классы.
+        self.assertIn('.uem-fields > * div.rounded-lg.border', css)
+        self.assertNotRegex(css, r'\.uem-fields > \* \.rounded-lg\.border')
+        self.assertNotIn("tone: 'plain'", APP)
+        self.assertNotIn('is-plain', PAGE + PAGE_CSS)
+
     def test_embedded_focus_does_not_scroll_the_sliding_page(self):
         self.assertIn('nameRef.current?.focus(embedded ? { preventScroll: true } : undefined);', EDIT)
 
