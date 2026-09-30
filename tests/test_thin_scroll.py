@@ -75,10 +75,36 @@ class ThinScrollTests(unittest.TestCase):
 
     def test_every_ios_window_scrolls_thin(self):
         """Тело IosModal — прокрутка каждого окна в стиле iOS («Результаты»
-        новости и ещё сотня): системная полоса вдоль скруглённого окна чужая."""
+        новости и ещё сотня): системная полоса вдоль скруглённого окна чужая.
+
+        С 29.09.2026 класс тела — значение по умолчанию параметра bodyClassName
+        (константа MODAL_BODY_CLASS): окно с колонками, прокручиваемыми по
+        отдельности, передаёт своё тело. Поэтому проверяется цепочка целиком —
+        константа тонкая, она же умолчание, она же на теле — и каждое своё тело:
+        иначе параметр стал бы обходом правила."""
         ios = _read('src', 'components', 'ui', 'ios.jsx')
+        default = re.search(r"const MODAL_BODY_CLASS = '([^']*)';", ios)
+        self.assertIsNotNone(default, 'класс тела IosModal не найден')
+        self.assertTrue(default.group(1).startswith('thin-scroll flex-1 overflow-y-auto'),
+                        default.group(1))
         modal = ios[ios.index('export const IosModal'):]
-        self.assertIn('className="thin-scroll flex-1 overflow-y-auto', modal)
+        modal = modal[:modal.index('\n};\n')]
+        self.assertTrue("bodyClassName = MODAL_BODY_CLASS }" in modal,
+                        'IosModal: умолчание bodyClassName — не MODAL_BODY_CLASS')
+        self.assertTrue('<div className={bodyClassName}>' in modal,
+                        'IosModal: тело окна не берёт класс из bodyClassName')
+
+        overrides = []
+        for folder, _dirs, files in os.walk(os.path.join(ROOT, 'src')):
+            for name in files:
+                if not name.endswith(('.jsx', '.js')):
+                    continue
+                with open(os.path.join(folder, name), encoding='utf-8') as handle:
+                    source = handle.read()
+                for match in re.finditer(r'bodyClassName=(\{[^}]*\}|"[^"]*"|\'[^\']*\')', source):
+                    overrides.append((name, match.group(1)))
+        for name, value in overrides:
+            self.assertIn('thin-scroll', value, '%s: своё тело окна без thin-scroll' % name)
 
     def test_the_phone_still_draws_no_bars(self):
         """На телефоне полос нет вовсе, и тонкий класс этого не отменяет."""
