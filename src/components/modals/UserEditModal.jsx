@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
@@ -225,15 +226,27 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
 
 // onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
 // Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
-/* Поля вкладки на странице сотрудника (embedded) — одной сгруппированной
-   карточкой, как у самой страницы; оформляет её employee-card-page.css. В
-   отдельном окне обёртки нет вовсе: дети ложатся прямо в .space-y-6, и
+/* На странице сотрудника (embedded) форма — не вкладки, а те же карточки,
+   что у самой страницы: все разделы разом, каждый своей карточкой с
+   заголовком (владелец 30.09.2026: «Изменить» — в том же стиле, а не
+   отдельным экраном). Раскладку по колонкам даёт employee-card-page.css. В
+   отдельном окне обёрток нет вовсе: дети ложатся прямо в .space-y-6, и
    разметка окна остаётся прежней до элемента. */
 const UemFieldsFrame = ({ embedded, children }) => (
     embedded ? <div className="uem-fields">{children}</div> : children
 );
 
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, embedded = false }) => {
+/* Раздел формы карточкой с заголовком — только на странице сотрудника. */
+const UemSection = ({ embedded, id, title, children }) => (
+    embedded ? (
+        <section className={`uem-section uem-section--${id}`} aria-label={title}>
+            <h3 className="uem-section-title">{title}</h3>
+            <div className="uem-section-body">{children}</div>
+        </section>
+    ) : children
+);
+
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, embedded = false, actionsPortalNode = null }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -1121,6 +1134,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         </div>
     );
 
+    /* «Отмена» и «Сохранить» на странице сотрудника — в её липкой шапке, на
+       месте «Изменить», как в «Контактах» iOS: к ним не нужно листать форму. */
+    const placeDesktopActions = (node) => (
+        embedded && actionsPortalNode ? createPortal(node, actionsPortalNode) : node
+    );
+
     /* embedded — форма страницей внутри страницы сотрудника (EmployeeCardPage):
        без своего фона, рамки окна и шапки — шапку «‹ Имя» держит страница, а
        «Отмена» и сохранение возвращают на неё же. Никакого окна поверх. */
@@ -1214,7 +1233,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 )}
 
                 <div className="mt-4 space-y-6">
-                {!createdCredentials && (
+                {!createdCredentials && !embedded && (
                     <div className="grid grid-cols-5 gap-2 rounded-xl bg-gray-100 p-1">
                     {tabs.map((tab) => (
                         <button
@@ -1933,8 +1952,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {/* --- Режим редактирования: показываем остальные поля как раньше --- */}
                 {!isCreateMode && (
                     <>
-                    {activeTab === "data" && (
-                        <>
+                    {(embedded || activeTab === "data") && (
+                        <UemSection embedded={embedded} id="data" title="Личные данные">
                         {renderAvatarEditor()}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
@@ -2061,11 +2080,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={fieldsLocked}
                             />
                         </div>
-                        </>
+                        </UemSection>
                     )}
 
-                    {activeTab === "contacts" && (
-                        <>
+                    {(embedded || activeTab === "contacts") && (
+                        <UemSection embedded={embedded} id="contacts" title="Контакты">
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Номер телефона</label>
                             <input
@@ -2202,11 +2221,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </div>
                             </div>
                         </details>
-                        </>
+                        </UemSection>
                     )}
 
-                    {activeTab === "corporate" && (
-                        <>
+                    {(embedded || activeTab === "corporate") && (
+                        <UemSection embedded={embedded} id="corporate" title="Оформление">
                         <div>
                             <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 mb-1">
                             Дата найма
@@ -2345,11 +2364,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             />
                         </div>
                         )}
-                        </>
+                        </UemSection>
                     )}
 
-                    {activeTab === "general" && (
-                        <>
+                    {(embedded || activeTab === "general") && (
+                        <UemSection embedded={embedded} id="general" title="Работа">
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Статус</label>
                             <select
@@ -2706,11 +2725,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             )}
                     </>
                     )}
-                    </>
+                    </UemSection>
                 )}
 
-                    {activeTab === "account" && (
-                        <>
+                    {(embedded || activeTab === "account") && (
+                        <UemSection embedded={embedded} id="account" title="Вход в портал">
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
                             Оставьте поле пустым, если менять логин или пароль не нужно.
                         </div>
@@ -2736,7 +2755,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={fieldsLocked}
                             />
                         </div>
-                    </>
+                    </UemSection>
                     )}
                     </>
                 )}
@@ -2784,7 +2803,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 )}
 
                 {/* Error message */}
-                <div aria-live="polite" className="min-h-[1.25rem]">
+                <div aria-live="polite" className="uem-error min-h-[1.25rem]">
                     {modalError && <p className="text-sm text-red-600">{modalError}</p>}
                 </div>
 
@@ -2803,7 +2822,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </button>
                     </div>
                 )}
-                {!createdCredentials && !isMobileShell && (
+                {!createdCredentials && !isMobileShell && (placeDesktopActions(
                     <div className="uem-actions flex justify-end items-center gap-3 pt-2">
                     <button
                         onClick={() => {
@@ -2836,7 +2855,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         )}
                     </button>
                     </div>
-                )}
+                ))}
 
                 {createdCredentials && (
                     <p className="mt-2 text-xs text-gray-400">

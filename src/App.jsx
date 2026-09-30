@@ -50974,8 +50974,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                форма терялась бы от промаха мышью. */
             const employeeCardPages = {
                 edit: {
-                    title: 'Изменить данные',
-                    guard: true,
+                    // Правка — режим самой страницы; Escape из неё не уводит и без guard.
+                    title: 'Изменение данных',
                     // Справочники — свежими, как при открытии отдельного окна
                     // правки: там их перечитывает эффект по showUserEditModal.
                     onOpen: (employee) => {
@@ -50983,12 +50983,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         fetchUserModalGroups();
                         fetchDepartments();
                     },
-                    render: ({ back }) => (
+                    // «Отмена» и «Сохранить» форма кладёт в шапку страницы (actionsNode).
+                    render: ({ back, actionsNode }) => (
                         <UserEditModal
                             embedded
                             isOpen
                             onClose={back}
                             userToEdit={userToEdit}
+                            actionsPortalNode={actionsNode}
                             {...userEditModalProps}
                         />
                     ),
@@ -51035,6 +51037,90 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return value;
             };
 
+            /* Строка итогов страницы сотрудника (владелец выбрал макет «дашборд»
+               30.09.2026): статус, сколько работает, ставка и кто ведёт. Только
+               то, что уже есть в записи человека, — без новых запросов. */
+            const parseEmployeeDateValue = (value) => {
+                const text = String(value || '').trim();
+                let match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+                if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+                match = text.match(/^(\d{2})[-./](\d{2})[-./](\d{4})/);
+                if (match) return new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+                return null;
+            };
+            const employeeTenureLabel = (from) => {
+                const now = new Date();
+                let months = (now.getFullYear() - from.getFullYear()) * 12 + (now.getMonth() - from.getMonth());
+                if (now.getDate() < from.getDate()) months -= 1;
+                const ru = (n, one, few, many) => {
+                    const mod100 = n % 100;
+                    const mod10 = n % 10;
+                    if (mod100 > 10 && mod100 < 20) return many;
+                    if (mod10 === 1) return one;
+                    return mod10 >= 2 && mod10 <= 4 ? few : many;
+                };
+                if (months < 1) {
+                    const days = Math.max(0, Math.floor((now - from) / 86400000));
+                    return `${days} ${ru(days, 'день', 'дня', 'дней')}`;
+                }
+                const years = Math.floor(months / 12);
+                const rest = months % 12;
+                return [
+                    years ? `${years} ${ru(years, 'год', 'года', 'лет')}` : '',
+                    rest ? `${rest} ${ru(rest, 'месяц', 'месяца', 'месяцев')}` : '',
+                ].filter(Boolean).join(' ');
+            };
+            const employeeCardSummary = (employee) => {
+                const code = normalizeEmployeeStatusCode(employee?.status);
+                const fired = code === 'fired' || code === 'dismissal';
+                const items = [{
+                    key: 'status',
+                    label: 'Статус',
+                    value: `${getEmployeeStatusBadgeMeta(employee?.status).label}${isEmployeeBlacklistDismissal(employee) ? ' · ЧС' : ''}`,
+                    tone: code === 'working' ? 'ok' : (fired ? 'danger' : 'warn'),
+                }];
+                const hired = parseEmployeeDateValue(employee?.hire_date);
+                if (hired && !fired && hired <= new Date()) {
+                    items.push({ key: 'tenure', label: 'В компании', value: employeeTenureLabel(hired), note: `с ${formatEmployeeTableDate(employee?.hire_date)}` });
+                } else if (hired) {
+                    items.push({ key: 'tenure', label: 'Дата найма', value: formatEmployeeTableDate(employee?.hire_date) });
+                }
+                const rate = Number(employee?.rate || 1);
+                const rateNote = { 1: 'полная ставка', 0.75: 'три четверти ставки', 0.5: 'половина ставки' }[rate] || '';
+                items.push({ key: 'rate', label: 'Ставка', value: rate.toFixed(2), note: rateNote });
+                if (String(employee?.supervisor_name || '').trim()) {
+                    items.push({
+                        key: 'lead',
+                        label: 'Супервайзер',
+                        value: employee.supervisor_name,
+                        note: employee?.direction ? `направление «${employee.direction}»` : '',
+                    });
+                } else if (String(employee?.job_title || '').trim()) {
+                    items.push({ key: 'lead', label: 'Должность', value: employee.job_title, note: departmentNameOfEmployee(employee) });
+                } else if (departmentNameOfEmployee(employee)) {
+                    // «СЗоВ — Служба заботы о водителях» в плитку не влезает:
+                    // короткое имя — значением, расшифровка — подписью.
+                    const [short, ...rest] = departmentNameOfEmployee(employee).split(' — ');
+                    items.push({ key: 'lead', label: 'Отдел', value: short, note: rest.join(' — ') });
+                }
+                return items;
+            };
+
+            // Кнопки «Связаться» — только для того, что у человека заполнено.
+            const employeeContactActions = (employee) => {
+                const list = [];
+                const digits = normalizeKzPhoneDigits(employee?.phone);
+                if (digits) {
+                    list.push({ key: 'call', label: 'Позвонить', icon: 'phone', href: `tel:+${digits}` });
+                    list.push({ key: 'whatsapp', label: 'WhatsApp', icon: 'whatsapp', href: `https://wa.me/${digits}` });
+                }
+                const telegram = parseTelegramNick(employee?.telegram_nick);
+                if (telegram) list.push({ key: 'telegram', label: 'Telegram', icon: 'telegram', href: `https://t.me/${telegram.username}` });
+                const email = String(employee?.email || employee?.personal_email || '').trim();
+                if (email) list.push({ key: 'mail', label: 'Почта', icon: 'mail', href: `mailto:${email}` });
+                return list;
+            };
+
             // Страница сотрудника на компьютере — одна на все списки раздела;
             // открыта — стоит на месте списка (backLabel — его заголовок).
             const renderEmployeeCardPage = ({ rows, backLabel, columnsFor, subtitleOf, actionsFor }) => (
@@ -51057,6 +51143,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         pages={employeeCardPages}
                         loadHistory={loadUserHistory}
                         historyValueOf={formatEmployeeHistoryValue}
+                        summaryOf={employeeCardSummary}
+                        contactActionsOf={employeeContactActions}
                         Avatar={AvatarImage}
                     />
                 </Suspense>

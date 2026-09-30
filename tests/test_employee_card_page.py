@@ -1,11 +1,12 @@
 """Страница сотрудника на компьютере — «Учет сотрудников».
 
-Решения владельца 30.09.2026, в два захода: (1) «три точки» в конце строки
+Решения владельца 30.09.2026, в три захода: (1) «три точки» в конце строки
 убрать, нажатие на строку — карточка для чтения, «Править», «В супервайзеры»,
 «История» — её кнопки, стиль iOS/macOS, без второй модалки; (2) «модалка
 слишком маленькая — без модалки, переход как на страницу и кнопка назад, чтобы
-там была вся информация». Подробности — в шапке
-src/components/employees/EmployeeCardPage.jsx.
+там была вся информация»; (3) из пяти макетов — «дашборд», «Связаться» слева,
+«Изменить» и история — в том же стиле, а не отдельными экранами. Подробности —
+в шапке src/components/employees/EmployeeCardPage.jsx.
 
 Всё это держится на тексте, который легко вернуть одной правкой: меню «⋮» в
 строке, окно поверх списка, window.confirm перед повышением. Сборка при этом
@@ -133,14 +134,21 @@ class NoWindowTests(unittest.TestCase):
         self.assertEqual(APP.count('dismissAdminUser(employee, { skipConfirm: true })'), 1)
         self.assertEqual(APP.count('actionsFor: manageUsersActionsFor,'), 2)
 
-    def test_edit_history_and_demote_are_pages_of_the_next_level(self):
+    def test_edit_and_history_stay_on_the_page_demote_goes_deeper(self):
+        """Владелец: «Изменить» и история — в том же стиле, а не отдельным.
+        Правка — режим самой страницы, история — вкладка большой карточки;
+        страницей следующего уровня остаётся только «В операторы»."""
         for key in ("page: 'edit'", "page: 'history'", "page: 'demote'"):
             self.assertEqual(APP.count(key), 1, key)
         pages = APP[APP.index('const employeeCardPages = {'):APP.index('const employeeCardDeptFields')]
         self.assertIn('<UserEditModal\n                            embedded', pages)
         self.assertIn('onClose={back}', pages)
+        self.assertIn('actionsPortalNode={actionsNode}', pages)
         self.assertIn('renderDemotionForm()', pages)
-        self.assertEqual(pages.count('guard: true'), 2)
+        self.assertEqual(pages.count('guard: true'), 1)
+        self.assertIn("if (action.page === 'edit') {\n            enterEdit();", PAGE)
+        self.assertIn("if (action.page === 'history') {\n            showTab('history');", PAGE)
+        self.assertIn("{editing ? renderEdit() : renderDashboard()}", PAGE)
         self.assertIn("<span className=\"ecp-back-label\">{pageKey ? person?.name : backLabel}</span>", PAGE)
 
     def test_demotion_window_does_not_open_over_the_page(self):
@@ -153,6 +161,7 @@ class NoWindowTests(unittest.TestCase):
         self.assertIn('setConfirmKey((current) => (current === action.key ? null : action.key));', PAGE)
 
     def test_escape_never_drops_a_form(self):
+        self.assertIn("if (mode === 'edit') return;", PAGE)
         self.assertIn('if (pageKey && pageDef(pageKey)?.guard) return;', PAGE)
         self.assertIn('if (isTypingTarget(document.activeElement)) return;', PAGE)
 
@@ -168,13 +177,16 @@ class ReviewFindingsTests(unittest.TestCase):
 
     def test_each_visit_to_a_page_is_a_fresh_instance(self):
         """«Отмена» в правке и сразу «Изменить» возвращали отменённый черновик."""
-        self.assertIn("key={`${pageKey || 'card'}:${pageSeq}`}", PAGE)
+        self.assertIn("key={pageKey ? `page:${pageKey}:${pageSeq}` : `${mode}:${editSeq}`}", PAGE)
         self.assertIn('setPageSeq((seq) => seq + 1);', PAGE)
+        self.assertEqual(PAGE.count('setEditSeq((seq) => seq + 1);'), 2)
 
     def test_late_back_does_not_pop_someone_elses_page(self):
-        self.assertIn('back: backFrom(pageSeq)', PAGE)
+        self.assertIn('back: popPageFrom(pageSeq)', PAGE)
         self.assertIn('if (pageSeqRef.current === seq && pageKeyRef.current) popPage();', PAGE)
         self.assertIn('const leftKey = pageKeyRef.current;', PAGE)
+        self.assertIn('back: exitEditFrom(editSeq)', PAGE)
+        self.assertIn("if (editSeqRef.current === seq && modeRef.current === 'edit') exitEdit();", PAGE)
 
     def test_edit_page_refreshes_groups_and_departments(self):
         pages = APP[APP.index('const employeeCardPages = {'):APP.index('const employeeCardDeptFields')]
@@ -204,7 +216,8 @@ class ReviewFindingsTests(unittest.TestCase):
 
     def test_leaving_by_sidebar_cleans_up_the_level_page(self):
         """Иначе окно «Перевести в операторы» всплывало в другом разделе."""
-        self.assertIn("if (key && key !== 'history') pagesRef.current?.[key]?.onLeave?.();", PAGE)
+        self.assertIn('if (key) pagesRef.current?.[key]?.onLeave?.();', PAGE)
+        self.assertIn("if (modeRef.current === 'edit') pagesRef.current?.edit?.onLeave?.();", PAGE)
 
     def test_rows_do_not_promise_a_dialog(self):
         self.assertNotIn('aria-haspopup="dialog"', directory_source())
@@ -219,7 +232,7 @@ class ReviewFindingsTests(unittest.TestCase):
 
 class EmbeddedEditFormTests(unittest.TestCase):
     def test_embedded_form_has_no_backdrop_frame_or_header(self):
-        self.assertIn('onOpenSipSettings = null, embedded = false }) => {', EDIT)
+        self.assertIn('onOpenSipSettings = null, embedded = false, actionsPortalNode = null }) => {', EDIT)
         self.assertIn('{!embedded && (\n        <div\n            className="otp-modal-dim', EDIT)
         self.assertIn("className={embedded ? 'uem-embedded' : 'otp-modal-root fixed inset-0", EDIT)
         self.assertIn("role={embedded ? undefined : 'dialog'}", EDIT)
@@ -236,25 +249,27 @@ class EmbeddedEditFormTests(unittest.TestCase):
         self.assertIn('[data-uem-crop]', PAGE)
 
     def test_embedded_form_looks_like_the_page(self):
-        """Владелец 30.09.2026: после «Изменить» страница «менялась на старую
-        версию» — форма оставалась прежней. Поля вкладки — сгруппированной
-        карточкой (обёртка только в embedded), «Отмена/Сохранить» — плавающей
-        панелью; в отдельном окне разметка не меняется."""
+        """Владелец 30.09.2026: «Изменить» — в таком же стиле, а не отдельным.
+        Встроенная форма — без вкладок, все разделы разом карточками той же
+        раскладки (контакты слева), «Отмена/Сохранить» — в шапке страницы; в
+        отдельном окне разметка не меняется."""
         self.assertIn("embedded ? <div className=\"uem-fields\">{children}</div> : children", EDIT)
-        self.assertIn('<UemFieldsFrame embedded={embedded}>', EDIT)
-        self.assertIn('</UemFieldsFrame>', EDIT)
-        self.assertIn('className="uem-actions flex justify-end items-center gap-3 pt-2"', EDIT)
+        self.assertIn('{!createdCredentials && !embedded && (', EDIT)
+        for block, title in (('data', 'Личные данные'), ('contacts', 'Контакты'), ('corporate', 'Оформление'),
+                             ('general', 'Работа'), ('account', 'Вход в портал')):
+            self.assertIn(f'{{(embedded || activeTab === "{block}") && (', EDIT, block)
+            self.assertIn(f'<UemSection embedded={{embedded}} id="{block}" title="{title}">', EDIT, block)
+        self.assertIn('embedded && actionsPortalNode ? createPortal(node, actionsPortalNode) : node', EDIT)
+        self.assertIn('{!createdCredentials && !isMobileShell && (placeDesktopActions(\n                    <div className="uem-actions flex justify-end items-center gap-3 pt-2">', EDIT)
         self.assertIn("embedded ? 'uem-embedded-body' :", EDIT)
+        self.assertIn('<div ref={setActionsNode} className="ecp-bar-actions" />', PAGE)
         css = without_comments(PAGE_CSS)
-        self.assertIn('.ecp .uem-embedded-body .uem-fields {', css)
-        self.assertIn('.ecp .uem-embedded-body .grid.grid-cols-5 > button[aria-pressed="true"] {', css)
-        actions = css[css.index('.ecp .uem-embedded-body .uem-actions {'):]
-        self.assertIn('position: sticky;', actions[:actions.index('}')])
+        self.assertIn('grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);', css_block('.ecp .uem-embedded-body .uem-fields'))
+        self.assertIn('grid-column: 1;', css_block('.ecp .uem-embedded-body .uem-section--contacts'))
         # Плашки внутри строки — только div: у select и input те же классы.
-        self.assertIn('.uem-fields > * div.rounded-lg.border', css)
-        self.assertNotRegex(css, r'\.uem-fields > \* \.rounded-lg\.border')
+        self.assertIn('.uem-section-body > * div.rounded-lg.border', css)
+        self.assertNotRegex(css, r'\.uem-section-body > \* \.rounded-lg\.border')
         self.assertNotIn("tone: 'plain'", APP)
-        self.assertNotIn('is-plain', PAGE + PAGE_CSS)
 
     def test_embedded_focus_does_not_scroll_the_sliding_page(self):
         self.assertIn('nameRef.current?.focus(embedded ? { preventScroll: true } : undefined);', EDIT)
@@ -315,19 +330,37 @@ class LayoutAndThemeTests(unittest.TestCase):
 
     def test_data_is_readable(self):
         """Владелец 30.09.2026: «серый на фоне белого не очень». Значения —
-        тёмные, подписи — колонкой рядом с ними, вторичный серый не светлее
-        #6e6e73 (4,9:1 на белом)."""
-        value = css_block('.ecp-value')
-        self.assertIn('color: var(--ecp-text);', value)
-        self.assertIn('font-weight: 500;', value)
-        self.assertIn('text-align: right;', css_block('.ecp-label'))
-        self.assertIn('grid-template-columns: minmax(110px, 38%) minmax(0, 1fr);', css_block('.ecp-field'))
+        тёмные, вторичный серый не светлее #6e6e73 (4,9:1 на белом)."""
+        for selector in ('.ecp-info-row dd', '.ecp-contact-row dd'):
+            value = css_block(selector)
+            self.assertIn('color: var(--ecp-text);', value, selector)
+            self.assertIn('font-weight: 500;', value, selector)
+        self.assertIn('text-align: right;', css_block('.ecp-info-row dd'))
         self.assertIn('--ecp-muted: #6e6e73;', PAGE_CSS)
         self.assertNotIn('#8a8a8e', without_comments(PAGE_CSS))
 
-    def test_two_columns_of_fields_that_never_split_a_group(self):
-        self.assertIn('columns: 2 400px;', css_block('.ecp-sections'))
-        self.assertIn('break-inside: avoid;', css_block('.ecp-sections .ecp-group'))
+    def test_dashboard_contact_block_is_on_the_left(self):
+        """Владелец: «блок связаться сделать слева, а не справа»."""
+        self.assertIn('grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);', css_block('.ecp-dash'))
+        dash = PAGE_CODE[PAGE_CODE.index('<div className="ecp-dash">'):]
+        self.assertLess(dash.index('<aside className="ecp-side">'), dash.index('ecp-panel ecp-main'))
+        self.assertLess(dash.index('<h2 className="ecp-panel-title">Связаться</h2>'), dash.index('ecp-panel ecp-main'))
+        # Контакты — в «Связаться», в «Сведениях» их второй раз нет.
+        self.assertIn("sections.filter((section) => section.key !== 'contacts')", PAGE)
+
+    def test_history_is_a_tab_and_a_preview(self):
+        self.assertIn('role="tablist"', PAGE)
+        self.assertIn("onShowAll={() => showTab('history')}", PAGE)
+        self.assertIn("if (!pageKey && mainTab === 'history') {\n                showTab('info');", PAGE)
+        # Два читателя — один запрос.
+        self.assertIn('if (cache.has(pendingKey)) return cache.get(pendingKey);', PAGE)
+
+    def test_two_balanced_columns_of_fields(self):
+        """Каждая группа — в ту колонку, что короче: CSS-колонки шли по
+        порядку и оставляли левую полупустой."""
+        self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', css_block('.ecp-info'))
+        self.assertIn('const target = columns[0].size <= columns[1].size ? columns[0] : columns[1];', PAGE)
+        self.assertIn('className="ecp-info-col"', PAGE)
 
     def test_reduced_motion_is_honoured(self):
         self.assertIn('@media (prefers-reduced-motion: reduce)', PAGE_CSS)
