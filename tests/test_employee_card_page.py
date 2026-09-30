@@ -313,6 +313,18 @@ class LayoutAndThemeTests(unittest.TestCase):
         self.assertIn('flushSync(update);', transition)
         self.assertIn("window.matchMedia('(prefers-reduced-motion: reduce)')", transition)
 
+    def test_data_is_readable(self):
+        """Владелец 30.09.2026: «серый на фоне белого не очень». Значения —
+        тёмные, подписи — колонкой рядом с ними, вторичный серый не светлее
+        #6e6e73 (4,9:1 на белом)."""
+        value = css_block('.ecp-value')
+        self.assertIn('color: var(--ecp-text);', value)
+        self.assertIn('font-weight: 500;', value)
+        self.assertIn('text-align: right;', css_block('.ecp-label'))
+        self.assertIn('grid-template-columns: minmax(110px, 38%) minmax(0, 1fr);', css_block('.ecp-field'))
+        self.assertIn('--ecp-muted: #6e6e73;', PAGE_CSS)
+        self.assertNotIn('#8a8a8e', without_comments(PAGE_CSS))
+
     def test_two_columns_of_fields_that_never_split_a_group(self):
         self.assertIn('columns: 2 400px;', css_block('.ecp-sections'))
         self.assertIn('break-inside: avoid;', css_block('.ecp-sections .ecp-group'))
