@@ -5,6 +5,9 @@ import axios from 'axios';
 import _ from 'lodash';
 import Papa from 'papaparse';
 import ToastContainer from './components/common/ToastContainer';
+// Смена «список ↔ страница сотрудника» — переходом браузера (View Transitions):
+// модуль крошечный и нужен до того, как ленивая страница загрузится.
+import { runPageTransition, usesViewTransitions } from './components/employees/pageTransition';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
@@ -50200,13 +50203,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const openEmployeeCard = useCallback((userId) => {
                 employeeListScrollRef.current = mainContentRef.current?.scrollTop || 0;
                 employeeListFocusIdRef.current = Number(userId);
-                setEmployeeCardId(Number(userId));
+                runPageTransition('forward', () => setEmployeeCardId(Number(userId)));
             }, []);
 
             const closeEmployeeCard = useCallback(() => {
                 employeeListRestoreRef.current = true;
-                setEmployeeListReturn(true);
-                setEmployeeCardId(null);
+                runPageTransition('back', () => {
+                    // Своё проявление списку — только без перехода браузера,
+                    // иначе список двигался бы дважды.
+                    setEmployeeListReturn(!usesViewTransitions());
+                    setEmployeeCardId(null);
+                });
             }, []);
 
             useLayoutEffect(() => {
@@ -51289,7 +51296,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onClick={(event) => openEmployeeCardFromRow(event, employee.id)}
                                                     onKeyDown={(event) => handleEmployeeRowKeyDown(event, employee.id)}
                                                     tabIndex={0}
-                                                    aria-haspopup="dialog"
                                                     className="transition-colors duration-200 cursor-pointer hover:bg-gray-50 focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500"
                                                 >
                                                     {columns.map((column) => (
@@ -56100,7 +56106,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             onClick={(event) => handleManageUserRowClick(event, u.id)}
                                                             onKeyDown={(event) => handleEmployeeRowKeyDown(event, u.id)}
                                                             tabIndex={0}
-                                                            aria-haspopup="dialog"
                                                             className={`transition-colors duration-200 cursor-pointer focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${
                                                                 isSelectedForBulk ? 'bg-blue-100/70 hover:bg-blue-100' : 'hover:bg-gray-50'
                                                             }`}

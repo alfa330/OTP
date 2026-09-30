@@ -1,6 +1,7 @@
 import React from 'react';
 import { buildCardSections } from './employeesPhoneList';
 import { historyFieldLabel } from '../modals/historyFieldLabels';
+import { runPageTransition, usesViewTransitions } from './pageTransition';
 import './employee-card-page.css';
 
 /**
@@ -316,6 +317,7 @@ export default function EmployeeCardPage({
     const pageSeqRef = React.useRef(0);
     pageKeyRef.current = pageKey;
     pageSeqRef.current = pageSeq;
+    const rootRef = React.useRef(null);
     const barRef = React.useRef(null);
     const titleRef = React.useRef(null);
     const headingRef = React.useRef(null);
@@ -329,10 +331,48 @@ export default function EmployeeCardPage({
         (key) => (key === 'history' ? HISTORY_PAGE : (pages && pages[key]) || null),
         [pages],
     );
+    /* Поле прокрутки и описания страниц App.jsx передаёт новыми на КАЖДЫЙ свой
+       рендер. В зависимостях эффекта прокрутки такая функция сбрасывала бы
+       страницу к началу и уводила фокус с поля формы при любом тосте или
+       ответе справочника — поэтому через ref. */
+    const getScrollRootRef = React.useRef(getScrollRoot);
+    getScrollRootRef.current = getScrollRoot;
+    const pagesRef = React.useRef(pages);
+    pagesRef.current = pages;
     const scrollRoot = React.useCallback(
-        () => (getScrollRoot && getScrollRoot()) || document.scrollingElement || document.documentElement,
-        [getScrollRoot],
+        () => (getScrollRootRef.current && getScrollRootRef.current()) || document.scrollingElement || document.documentElement,
+        [],
     );
+
+    /* Страница — от края до края поля раздела, шапка липнет к самому верху.
+       Сколько «до края», решает отступ поля, а он разный: p-8 в браузере, ноль
+       или безопасная зона в установленном приложении (styles.css, standalone).
+       Зашитые 32 px в приложении уводили шапку за верх окна — «‹ Назад» было
+       не видно, а слева страница наезжала на сайдбар. */
+    React.useLayoutEffect(() => {
+        const node = rootRef.current;
+        if (!node) return undefined;
+        const apply = () => {
+            const field = scrollRoot();
+            if (!field || field === document.documentElement || field === document.scrollingElement) return;
+            const style = window.getComputedStyle(field);
+            node.style.setProperty('--ecp-pad-top', style.paddingTop);
+            node.style.setProperty('--ecp-pad-right', style.paddingRight);
+            node.style.setProperty('--ecp-pad-bottom', style.paddingBottom);
+            node.style.setProperty('--ecp-pad-left', style.paddingLeft);
+        };
+        apply();
+        window.addEventListener('resize', apply);
+        return () => window.removeEventListener('resize', apply);
+    }, [scrollRoot]);
+
+    /* Ушли со страницы мимо «‹» — сайдбаром, из колокола: страница уровня всё
+       равно прибирает за собой (перевод в операторы снимает цель — иначе его
+       окно всплыло бы уже в другом разделе). */
+    React.useEffect(() => () => {
+        const key = pageKeyRef.current;
+        if (key && key !== 'history') pagesRef.current?.[key]?.onLeave?.();
+    }, []);
 
     /* Человек ушёл из списка — повышен, переведён, удалён: страница уходит
        сама. Пока список перечитывается, ждём — строк на это время бывает ноль. */
@@ -374,12 +414,14 @@ export default function EmployeeCardPage({
     const pushPage = (key) => {
         const def = pageDef(key);
         if (!def || !person) return;
-        def.onOpen?.(person);
         cardScrollRef.current = scrollRoot()?.scrollTop || 0;
-        setConfirmKey(null);
-        setDirection('forward');
-        setPageKey(key);
-        setPageSeq((seq) => seq + 1);
+        runPageTransition('forward', () => {
+            def.onOpen?.(person);
+            setConfirmKey(null);
+            setDirection('forward');
+            setPageKey(key);
+            setPageSeq((seq) => seq + 1);
+        });
     };
 
     /* По ref, а не по замыканию: «назад» зовут и из долгих операций страницы
@@ -387,10 +429,12 @@ export default function EmployeeCardPage({
     const popPage = React.useCallback(() => {
         const leftKey = pageKeyRef.current;
         if (!leftKey) return;
-        pageDef(leftKey)?.onLeave?.();
-        setDirection('back');
-        setPageKey(null);
-        setPageSeq((seq) => seq + 1);
+        runPageTransition('back', () => {
+            pageDef(leftKey)?.onLeave?.();
+            setDirection('back');
+            setPageKey(null);
+            setPageSeq((seq) => seq + 1);
+        });
     }, [pageDef]);
 
     /* «Назад» для страницы — только пока на экране ИМЕННО этот её вход: форма,
@@ -412,8 +456,13 @@ export default function EmployeeCardPage({
         const onKey = (event) => {
             if (event.key !== 'Escape' || event.defaultPrevented) return;
             if (isTypingTarget(document.activeElement)) return;
-            // Раскрытый выбор, календарь или кадр фото закрываются своим Escape.
-            if (document.querySelector('[aria-expanded="true"]:not([data-ecp]), [data-uem-crop]')) return;
+            /* Окно поверх страницы («Новость дня» и другие) закрывается своим
+               Escape — страница под ним с места не двигается. */
+            if (document.querySelector('[aria-modal="true"]')) return;
+            /* Раскрытый выбор, календарь или кадр фото — тоже. Именно
+               всплывающие (aria-haspopup): открытый поиск сайдбара тоже
+               aria-expanded, но Escape он не забирает. */
+            if (document.querySelector('[aria-expanded="true"][aria-haspopup]:not([data-ecp]), [data-uem-crop]')) return;
             if (confirmKey) {
                 event.preventDefault();
                 setConfirmKey(null);
@@ -599,8 +648,12 @@ export default function EmployeeCardPage({
         </div>
     );
 
+    /* Сдвиг экранов делает переход браузера (pageTransition.js); где его нет —
+       экран проявляется своей CSS-анимацией. Обе сразу — было бы два движения. */
+    const screenMotion = usesViewTransitions() ? '' : ` is-animated is-${direction}`;
+
     return (
-        <div className="ecp">
+        <div ref={rootRef} className="ecp">
             <div ref={barRef} className="ecp-bar">
                 <button type="button" className="ecp-back" onClick={goBack}>
                     <svg width="12" height="20" viewBox="0 0 12 20" fill="none" aria-hidden="true">
@@ -613,7 +666,7 @@ export default function EmployeeCardPage({
             </div>
             <div
                 key={`${pageKey || 'card'}:${pageSeq}`}
-                className={`ecp-screen is-${direction}`}
+                className={`ecp-screen${screenMotion}`}
             >
                 <div className="ecp-content">
                     {pageKey ? renderSubpage() : renderCard()}

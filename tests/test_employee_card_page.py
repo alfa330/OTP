@@ -118,9 +118,11 @@ class RowsOpenThePageTests(unittest.TestCase):
 
 class NoWindowTests(unittest.TestCase):
     def test_page_opens_no_window(self):
-        for banned in ('role="dialog"', 'aria-modal', 'createPortal', 'window.confirm', 'IosModal',
+        for banned in ('role="dialog"', 'createPortal', 'window.confirm', 'IosModal',
                        'MobileActionSheet', 'HistoryModal', 'otp-modal-root'):
             self.assertNotIn(banned, PAGE_CODE, banned)
+        # aria-modal — только в селекторе «поверх открыто чужое окно», не атрибутом.
+        self.assertIsNone(re.search(r'\saria-modal=', PAGE_CODE))
         self.assertNotIn('position: fixed', without_comments(PAGE_CSS))
 
     def test_actions_are_one_list_for_both_layouts(self):
@@ -189,6 +191,25 @@ class ReviewFindingsTests(unittest.TestCase):
         self.assertNotIn('canDismissAdmin: true,', APP)
         self.assertIn("!(role === 'admin' && isEmployeeAccountingManager && !isAdminLikeRoleFn(currentUserRole))", directory_source())
 
+    def test_scroll_root_prop_does_not_retrigger_the_scroll_effect(self):
+        """getScrollRoot приходит новой стрелкой на каждый рендер App: в
+        зависимостях эффекта она сбрасывала прокрутку и уводила фокус с поля
+        формы при каждом тосте (разбор fe43e0e2)."""
+        self.assertIn('getScrollRootRef.current = getScrollRoot;', PAGE)
+        self.assertIn('document.scrollingElement || document.documentElement,\n        [],\n    );', PAGE)
+
+    def test_escape_leaves_windows_and_sidebar_search_alone(self):
+        self.assertIn("if (document.querySelector('[aria-modal=\"true\"]')) return;", PAGE)
+        self.assertIn('[aria-expanded="true"][aria-haspopup]:not([data-ecp])', PAGE)
+
+    def test_leaving_by_sidebar_cleans_up_the_level_page(self):
+        """Иначе окно «Перевести в операторы» всплывало в другом разделе."""
+        self.assertIn("if (key && key !== 'history') pagesRef.current?.[key]?.onLeave?.();", PAGE)
+
+    def test_rows_do_not_promise_a_dialog(self):
+        self.assertNotIn('aria-haspopup="dialog"', directory_source())
+        self.assertNotIn('aria-haspopup="dialog"', employees_desktop_source())
+
     def test_history_error_toast_exists_in_app_scope(self):
         start = APP.index('const fetchUserHistory = async (userId) => {')
         body = APP[start:APP.index('};', start)]
@@ -220,14 +241,25 @@ class EmbeddedEditFormTests(unittest.TestCase):
 
 class LayoutAndThemeTests(unittest.TestCase):
     def test_bar_sticks_to_the_very_top_of_the_section(self):
-        """Липкость считается от края содержимого main-content (за его p-8):
-        с top: 0 шапка висела на 32 px ниже и резала верх страницы."""
+        """Липкость считается от края содержимого main-content (за его
+        отступом). Отступ разный: p-8 в браузере, ноль в установленном
+        приложении — зашитые 32 px там уводили «‹ Назад» за верх окна
+        (снимок владельца 30.09.2026). Страница читает отступ сама."""
         bar = css_block('.ecp-bar')
         self.assertIn('position: sticky;', bar)
-        self.assertIn('top: -32px;', bar)
+        self.assertIn('top: calc(-1 * var(--ecp-pad-top, 32px));', bar)
         root = css_block('.ecp')
-        self.assertIn('margin: -32px -32px 0;', root)
-        self.assertIn('min-height: calc(100vh - 32px);', root)
+        self.assertIn('margin: calc(-1 * var(--ecp-pad-top, 32px)) calc(-1 * var(--ecp-pad-right, 32px)) 0 calc(-1 * var(--ecp-pad-left, 32px));', root)
+        self.assertIn('min-height: calc(100vh - var(--ecp-pad-bottom, 32px));', root)
+        self.assertIn('overflow-x: clip;', root)
+        for side in ('Top', 'Right', 'Bottom', 'Left'):
+            self.assertIn(f"node.style.setProperty('--ecp-pad-{side.lower()}', style.padding{side});", PAGE)
+        self.assertNotRegex(without_comments(PAGE_CSS), r'-32px')
+
+    def test_back_is_a_visible_button(self):
+        back = css_block('.ecp-back')
+        self.assertIn('background: var(--ecp-card);', back)
+        self.assertIn('border-radius: 999px;', back)
 
     def test_dark_layer_repaints_the_tokens(self):
         light = PAGE_CSS[PAGE_CSS.index('.ecp {'):PAGE_CSS.index('html[data-otp-theme="dark"] .ecp {')]
@@ -240,9 +272,25 @@ class LayoutAndThemeTests(unittest.TestCase):
 
     def test_screens_keep_no_transform_after_entering(self):
         """Иначе экран стал бы контейнером для fixed-потомков: кадр фото в
-        форме правки съёжился бы до его размеров."""
-        self.assertRegex(PAGE_CSS, r'animation: ecp-in-forward 380ms var\(--ecp-ease\) backwards;')
-        self.assertIn('animation: ecp-in-back 380ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;', PAGE_CSS)
+        форме правки съёжился бы до его размеров, а плавающий переключатель
+        «Общее/Данные…» списка уезжал бы из угла окна."""
+        self.assertIn('animation: ecp-in-forward 380ms var(--ecp-ease) backwards;', css_block('.ecp-screen.is-animated'))
+        self.assertIn('animation: ecp-fade-in 300ms ease backwards;', css_block('.ecp-in-left'))
+        self.assertNotIn('transform', css_block('.ecp-in-left'))
+
+    def test_pages_change_with_a_view_transition(self):
+        """Уходящая и входящая страницы видны разом и только в поле раздела."""
+        self.assertIn("runPageTransition('forward', () => setEmployeeCardId(Number(userId)));", APP)
+        self.assertIn("runPageTransition('back', () => {", APP)
+        self.assertIn("setEmployeeListReturn(!usesViewTransitions());", APP)
+        self.assertEqual(PAGE.count("runPageTransition('forward', () => {"), 1)
+        self.assertEqual(PAGE.count("runPageTransition('back', () => {"), 1)
+        self.assertIn("const screenMotion = usesViewTransitions() ? '' : ` is-animated is-${direction}`;", PAGE)
+        self.assertIn('html[data-ecp-nav] .main-content {\n    view-transition-name: ecp-field;', PAGE_CSS)
+        self.assertIn('::view-transition-group(ecp-field) {\n    overflow: clip;', PAGE_CSS)
+        transition = (EMPLOYEES / 'pageTransition.js').read_text(encoding='utf-8')
+        self.assertIn('flushSync(update);', transition)
+        self.assertIn("window.matchMedia('(prefers-reduced-motion: reduce)')", transition)
 
     def test_two_columns_of_fields_that_never_split_a_group(self):
         self.assertIn('columns: 2 400px;', css_block('.ecp-sections'))

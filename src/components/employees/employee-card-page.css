@@ -30,12 +30,16 @@
     --ecp-shadow: 0 0 0 0.5px rgba(15, 23, 42, 0.1), 0 1px 2px rgba(15, 23, 42, 0.04);
     --ecp-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
-    /* Во всю ширину поля раздела: у main-content p-8, шапка ложится от края
-       до края и липнет к его верху. */
-    margin: -32px -32px 0;
-    /* Ровно экран: с нижним отступом main-content короткая страница иначе
-       прокручивалась бы на 32 px впустую. */
-    min-height: calc(100vh - 32px);
+    /* Во всю ширину поля раздела: шапка ложится от края до края и липнет к
+       его верху. Отступ поля (--ecp-pad-*) страница читает сама: в браузере это
+       p-8, в установленном приложении — ноль или безопасная зона. */
+    margin: calc(-1 * var(--ecp-pad-top, 32px)) calc(-1 * var(--ecp-pad-right, 32px)) 0 calc(-1 * var(--ecp-pad-left, 32px));
+    /* Ровно экран: с нижним отступом поля короткая страница иначе
+       прокручивалась бы впустую. */
+    min-height: calc(100vh - var(--ecp-pad-bottom, 32px));
+    /* Страница въезжает сдвигом вправо: без обрезки край давал бы на миг
+       прокрутку вбок. clip, а не hidden — hidden сломал бы липкую шапку. */
+    overflow-x: clip;
     color: var(--ecp-text);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -66,15 +70,15 @@ html[data-otp-theme="dark"] .ecp {
 .ecp-bar {
     position: sticky;
     /* Липкость отсчитывается от края СОДЕРЖИМОГО прокручиваемого поля, то есть
-       за его p-8: с top: 0 шапка висела бы на 32 px ниже края и резала
-       верх страницы. */
-    top: -32px;
+       за его отступом: с top: 0 шапка висела бы ниже края и резала верх
+       страницы. */
+    top: calc(-1 * var(--ecp-pad-top, 32px));
     z-index: 20;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
     gap: 12px;
-    height: 56px;
+    height: 60px;
     padding: 0 24px;
     background: var(--ecp-bar-bg);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -86,26 +90,29 @@ html[data-otp-theme="dark"] .ecp {
     box-shadow: 0 0.5px 0 var(--ecp-sep);
 }
 
+/* «Назад» — кнопкой, которую видно сразу: белая пилюля с тенью, как кнопки
+   панели macOS, а не голый текст у края. */
 .ecp-back {
     justify-self: start;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     max-width: 100%;
     height: 36px;
-    margin-left: -8px;
-    padding: 0 12px 0 8px;
+    padding: 0 16px 0 12px;
     border: 0;
-    border-radius: 10px;
-    background: transparent;
+    border-radius: 999px;
+    background: var(--ecp-card);
+    box-shadow: var(--ecp-shadow), 0 1px 3px rgba(15, 23, 42, 0.06);
     color: var(--ecp-accent);
     font-size: 15px;
+    font-weight: 600;
     cursor: pointer;
-    transition: background-color 150ms ease, transform 140ms var(--ecp-ease);
+    transition: background-color 150ms ease, box-shadow 150ms ease, transform 140ms var(--ecp-ease);
 }
 
 .ecp-back:hover {
-    background: var(--ecp-accent-soft);
+    background: var(--ecp-card-hover);
 }
 
 .ecp-back:active {
@@ -145,21 +152,92 @@ html[data-otp-theme="dark"] .ecp {
 
 /* ── Переход ──────────────────────────────────────────────────────────── */
 
-/* backwards, а не both: после входа на экране не остаётся transform — иначе он
-   стал бы контейнером для fixed-потомков (кадр фото в форме правки). */
 .ecp-screen {
     padding: 12px 32px 56px;
+}
+
+/* Запасной переход — там, где нет View Transitions (pageTransition.js).
+   backwards, а не both: после входа на экране не остаётся transform — иначе он
+   стал бы контейнером для fixed-потомков (кадр фото в форме правки). */
+.ecp-screen.is-animated {
     animation: ecp-in-forward 380ms var(--ecp-ease) backwards;
 }
 
-.ecp-screen.is-back {
+.ecp-screen.is-animated.is-back {
     animation-name: ecp-in-back;
 }
 
-/* Список, в который вернулись со страницы, въезжает слева — как предыдущий
-   экран в навигации iOS. Класс ставит App.jsx на контейнер списка. */
+/* Основной переход — View Transitions: имя получает только поле раздела и
+   только на время перехода. Прежняя страница уезжает, новая въезжает, обе
+   видны разом; за край поля они не выходят — сайдбар стоит. */
+html[data-ecp-nav] .main-content {
+    view-transition-name: ecp-field;
+}
+
+::view-transition-group(ecp-field) {
+    overflow: clip;
+    animation-duration: 420ms;
+}
+
+::view-transition-old(ecp-field),
+::view-transition-new(ecp-field) {
+    height: 100%;
+    animation-duration: 420ms;
+    animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+    animation-fill-mode: both;
+    mix-blend-mode: normal;
+}
+
+html[data-ecp-nav="forward"]::view-transition-old(ecp-field) {
+    animation-name: ecp-vt-out-left;
+}
+
+html[data-ecp-nav="forward"]::view-transition-new(ecp-field) {
+    animation-name: ecp-vt-in-right;
+}
+
+html[data-ecp-nav="back"]::view-transition-old(ecp-field) {
+    animation-name: ecp-vt-out-right;
+}
+
+html[data-ecp-nav="back"]::view-transition-new(ecp-field) {
+    animation-name: ecp-vt-in-left;
+}
+
+/* Остальное окно (сайдбар, колокол, тосты) при переходе не меняется — ему
+   не нужен и перекрёстный наплыв по умолчанию. */
+html[data-ecp-nav]::view-transition-old(root),
+html[data-ecp-nav]::view-transition-new(root) {
+    animation: none;
+}
+
+@keyframes ecp-vt-out-left {
+    to { opacity: 0; transform: translateX(-12%); }
+}
+
+@keyframes ecp-vt-in-right {
+    from { opacity: 0; transform: translateX(16%); }
+}
+
+@keyframes ecp-vt-out-right {
+    to { opacity: 0; transform: translateX(16%); }
+}
+
+@keyframes ecp-vt-in-left {
+    from { opacity: 0; transform: translateX(-12%); }
+}
+
+/* Список, в который вернулись со страницы, проявляется. Класс ставит App.jsx
+   на контейнер списка. Без сдвига: внутри списка живёт плавающий переключатель
+   «Общее/Данные…» (fixed), и transform на предке утащил бы его на время
+   анимации из угла окна в угол списка. */
 .ecp-in-left {
-    animation: ecp-in-back 380ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+    animation: ecp-fade-in 300ms ease backwards;
+}
+
+@keyframes ecp-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 @keyframes ecp-in-forward {
@@ -259,6 +337,12 @@ html[data-otp-theme="dark"] .ecp {
 @container (max-width: 820px) {
     .ecp-hero {
         flex-wrap: wrap;
+    }
+
+    /* Имя остаётся рядом с фото и переносится внутри своей колонки — иначе
+       длинное ФИО уезжало под фото, а кнопки стояли с отступом под пустотой. */
+    .ecp-hero-main {
+        flex: 1 1 0;
     }
 
     .ecp-actions {
@@ -705,7 +789,7 @@ html[data-otp-theme="dark"] .ecp-btn.is-tinted:hover {
 
 /* Без движения — только смена: экраны не въезжают, раскрытия мгновенны. */
 @media (prefers-reduced-motion: reduce) {
-    .ecp-screen,
+    .ecp-screen.is-animated,
     .ecp-in-left {
         animation: none;
     }
