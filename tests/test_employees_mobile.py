@@ -202,7 +202,9 @@ class WindowTests(unittest.TestCase):
         footer = footer[:footer.index('{!createdCredentials && !isMobileShell && (')]
         self.assertIn('className="uem-save"', footer)
         self.assertNotIn('Отмена', footer)
-        self.assertIn('{!createdCredentials && !isMobileShell && <p className="mt-2 text-xs text-gray-400">Нажмите Esc', EDIT)
+        # Внутри карточки сотрудника (embedded) подсказка неправда: окна вокруг
+        # формы там нет, Escape и крестик — у карточки.
+        self.assertIn('{!createdCredentials && !isMobileShell && !embedded && <p className="mt-2 text-xs text-gray-400">Нажмите Esc', EDIT)
 
     def test_edit_form_tabs_are_one_strip(self):
         """Общий слой делает из grid-cols-5 две колонки — вкладки вставали 2×3."""

@@ -225,7 +225,7 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
 
 // onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
 // Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null, embedded = false }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -582,10 +582,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     useEffect(() => {
         if (isOpen) {
         setTimeout(() => {
-            nameRef.current?.focus();
+            // Внутри карточки форма въезжает сдвигом: фокус с прокруткой
+            // дёрнул бы окно вбок посреди этого движения.
+            nameRef.current?.focus(embedded ? { preventScroll: true } : undefined);
         }, 50);
         }
-    }, [isOpen]);
+    }, [isOpen, embedded]);
 
     useEffect(() => (() => {
         revokeAvatarPreviewUrl();
@@ -1098,9 +1100,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         </div>
     );
 
+    /* embedded — форма экраном внутри карточки сотрудника (EmployeeCardSheet):
+       без своего фона, рамки окна и шапки — шапку со стрелкой назад и Escape
+       держит карточка, а «Отмена» и сохранение возвращают на неё же. Так
+       правка не ложится вторым окном поверх первого. */
     return (
         <>
         {/* Backdrop */}
+        {!embedded && (
         <div
             className="otp-modal-dim fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
             onClick={() => {
@@ -1111,13 +1118,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             }}
             aria-hidden="true"
         />
+        )}
 
         {/* Modal container (catch Escape) */}
         <div
-            className="otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4"
-            tabIndex={-1}
+            className={embedded ? 'uem-embedded' : 'otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4'}
+            tabIndex={embedded ? undefined : -1}
             onKeyDown={(e) => {
-            if (e.key === "Escape") {
+            if (!embedded && e.key === "Escape") {
                     setModalError("");
                     setCreatedCredentials(null);
                     closeAvatarCropEditor();
@@ -1126,15 +1134,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             }}
         >
             <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="edit-user-title"
-            className="otp-modal-card pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
+            role={embedded ? undefined : 'dialog'}
+            aria-modal={embedded ? undefined : 'true'}
+            aria-labelledby={embedded ? undefined : 'edit-user-title'}
+            className={embedded ? 'uem-embedded-card' : 'otp-modal-card pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in'}
             onClick={(e) => e.stopPropagation()}
             >
-            <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
+            <div className={embedded ? 'px-6 pb-6' : 'px-6 py-5 max-h-[88vh] overflow-y-auto'}>
                 {/* Header */}
-                {isMobileShell ? (
+                {embedded ? null : isMobileShell ? (
                 /* Телефон: шапка экрана — стрелка слева и заголовок по центру,
                    как у остальных экранов портала. Карандаш и крестик справа —
                    приметы окна посреди стола; уход с экрана делают стрелкой. */
@@ -2814,13 +2822,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </p>
                 )}
 
-                {!createdCredentials && !isMobileShell && <p className="mt-2 text-xs text-gray-400">Нажмите Esc, кликните вне модалки или крестик вверху, чтобы закрыть.</p>}
+                {!createdCredentials && !isMobileShell && !embedded && <p className="mt-2 text-xs text-gray-400">Нажмите Esc, кликните вне модалки или крестик вверху, чтобы закрыть.</p>}
                 </div>
             </div>
             </div>
         </div>
         {avatarCropState && (
-            <div className="otp-modal-root fixed inset-0 z-[70] flex items-center justify-center p-4">
+            <div className="otp-modal-root fixed inset-0 z-[70] flex items-center justify-center p-4" data-uem-crop="">
                 <div
                     className="otp-modal-dim absolute inset-0 bg-slate-900/65 backdrop-blur-[1px]"
                     onClick={handleAvatarCropCancel}

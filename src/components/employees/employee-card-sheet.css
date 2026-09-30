@@ -1,0 +1,833 @@
+/* Карточка сотрудника на компьютере — EmployeeCardSheet.jsx.
+ *
+ * Одно окно со стеком экранов внутри, как лист в iOS: карточка — корень,
+ * правка, история и перевод въезжают справа в ТО ЖЕ окно, а высота окна
+ * следует за активным экраном. Цвета — токены --ecs-*: светлые — палитра
+ * системного списка настроек (серое полотно, белые группы строк, тонкий
+ * разделитель), тёмные — палитра тёмного слоя портала (theme-dark.css), чтобы
+ * форма правки внутри окна была с ним одного тона.
+ *
+ * Длительности ухода окна и сдвига экрана продублированы в компоненте
+ * (SHEET_LEAVE_MS, PAGE_MS): по ним он снимает разметку после анимации.
+ */
+
+.ecs {
+    --ecs-bg: #f2f2f7;
+    --ecs-card: #ffffff;
+    --ecs-card-hover: #f5f5f8;
+    --ecs-text: #1c1c1e;
+    --ecs-muted: #8a8a8e;
+    --ecs-sep: rgba(60, 60, 67, 0.2);
+    --ecs-fill: rgba(118, 118, 128, 0.12);
+    --ecs-fill-strong: rgba(118, 118, 128, 0.22);
+    --ecs-accent: #007aff;
+    --ecs-accent-fill: #007aff;
+    --ecs-accent-soft: rgba(0, 122, 255, 0.1);
+    --ecs-accent-ring: rgba(0, 122, 255, 0.38);
+    --ecs-danger: #ff3b30;
+    --ecs-danger-fill: #ff3b30;
+    --ecs-danger-soft: rgba(255, 59, 48, 0.08);
+    --ecs-warn: #c77700;
+    --ecs-dim: rgba(15, 23, 42, 0.32);
+    --ecs-thumb: rgba(60, 60, 67, 0.28);
+    --ecs-shadow: 0 32px 80px -24px rgba(15, 23, 42, 0.45), 0 0 0 0.5px rgba(15, 23, 42, 0.14);
+    /* Кривая листа iOS: быстрый старт, долгое мягкое торможение. */
+    --ecs-ease: cubic-bezier(0.32, 0.72, 0, 1);
+    --ecs-push: 420ms;
+
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+    color: var(--ecs-text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+html[data-otp-theme="dark"] .ecs {
+    --ecs-bg: #17191e;
+    --ecs-card: #1e2127;
+    --ecs-card-hover: #242832;
+    --ecs-text: #e8ecf2;
+    --ecs-muted: #939cab;
+    --ecs-sep: #2e333c;
+    --ecs-fill: #22262d;
+    --ecs-fill-strong: #2b3039;
+    --ecs-accent: #93c5fd;
+    --ecs-accent-fill: #2563eb;
+    --ecs-accent-soft: rgba(147, 197, 253, 0.12);
+    --ecs-accent-ring: rgba(147, 197, 253, 0.4);
+    --ecs-danger: #fca5a5;
+    --ecs-danger-fill: #dc2626;
+    --ecs-danger-soft: rgba(252, 165, 165, 0.1);
+    --ecs-warn: #fbbf24;
+    --ecs-dim: rgba(0, 0, 0, 0.55);
+    --ecs-thumb: rgba(235, 235, 245, 0.22);
+    --ecs-shadow: 0 32px 80px -24px rgba(0, 0, 0, 0.75), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+}
+
+.ecs.is-leaving {
+    pointer-events: none;
+}
+
+/* ── Окно ─────────────────────────────────────────────────────────────── */
+
+.ecs-dim {
+    position: absolute;
+    inset: 0;
+    background: var(--ecs-dim);
+    -webkit-backdrop-filter: blur(6px) saturate(1.1);
+    backdrop-filter: blur(6px) saturate(1.1);
+    animation: ecs-fade-in 260ms ease both;
+}
+
+.ecs.is-leaving .ecs-dim {
+    animation: ecs-fade-out 200ms ease both;
+}
+
+/* backwards, а не both: после входа на окне не остаётся transform — иначе
+   оно стало бы контейнером для fixed-потомков (кадр фото в форме правки). */
+.ecs-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: min(540px, 100%);
+    border-radius: 20px;
+    overflow: hidden;
+    background: var(--ecs-bg);
+    box-shadow: var(--ecs-shadow);
+    outline: none;
+    animation: ecs-panel-in 440ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+    transition: background-color 300ms ease;
+}
+
+.ecs.is-leaving .ecs-panel {
+    animation: ecs-panel-out 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+.ecs-panel[data-tone="plain"] {
+    background: var(--ecs-card);
+}
+
+@keyframes ecs-panel-in {
+    from { opacity: 0; transform: translateY(14px) scale(0.965); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes ecs-panel-out {
+    from { opacity: 1; transform: none; }
+    to { opacity: 0; transform: translateY(6px) scale(0.98); }
+}
+
+@keyframes ecs-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes ecs-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+/* ── Шапка ────────────────────────────────────────────────────────────── */
+
+.ecs-bar {
+    position: relative;
+    z-index: 2;
+    flex: none;
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr) 48px;
+    align-items: center;
+    height: 52px;
+    padding: 0 10px;
+    background: var(--ecs-bg);
+    transition: background-color 300ms ease, box-shadow 200ms ease;
+}
+
+.ecs-panel[data-tone="plain"] .ecs-bar {
+    background: var(--ecs-card);
+}
+
+.ecs-bar[data-lined] {
+    box-shadow: 0 0.5px 0 var(--ecs-sep);
+}
+
+.ecs-bar-side {
+    display: flex;
+    align-items: center;
+}
+
+.ecs-bar-side.is-end {
+    justify-content: flex-end;
+}
+
+.ecs-round {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--ecs-fill);
+    color: var(--ecs-muted);
+    cursor: pointer;
+    transition: background-color 150ms ease, color 150ms ease, opacity 220ms ease, transform 280ms var(--ecs-ease);
+}
+
+.ecs-round:hover {
+    background: var(--ecs-fill-strong);
+    color: var(--ecs-text);
+}
+
+.ecs-round:active {
+    transform: scale(0.92);
+}
+
+/* Стрелка назад — только на экранах поверх карточки; въезжает вместе с ними. */
+.ecs-back {
+    background: transparent;
+    color: var(--ecs-accent);
+    opacity: 0;
+    transform: translateX(8px);
+    pointer-events: none;
+}
+
+.ecs-bar.is-page .ecs-back {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+}
+
+.ecs-back:hover {
+    background: var(--ecs-fill);
+    color: var(--ecs-accent);
+}
+
+.ecs-bar-center {
+    position: relative;
+    height: 100%;
+    min-width: 0;
+}
+
+.ecs-bar-title {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    text-align: center;
+    opacity: 0;
+    transform: translateY(5px);
+    transition: opacity 220ms ease, transform 300ms var(--ecs-ease);
+    pointer-events: none;
+}
+
+.ecs-bar-title.is-root {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 52px;
+}
+
+/* Имя уехало под шапку при прокрутке — оно появляется в шапке. */
+.ecs-bar:not(.is-page)[data-title] .ecs-bar-title.is-root,
+.ecs-bar.is-page .ecs-bar-title.is-page {
+    opacity: 1;
+    transform: none;
+}
+
+.ecs-bar-main,
+.ecs-bar-sub {
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.ecs-bar-main {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 19px;
+}
+
+.ecs-bar-sub {
+    font-size: 12px;
+    line-height: 15px;
+    color: var(--ecs-muted);
+}
+
+/* ── Экраны ───────────────────────────────────────────────────────────── */
+
+.ecs-stage {
+    position: relative;
+    flex: none;
+    overflow: hidden;
+    overflow: clip;
+}
+
+.ecs-stage.is-ready {
+    transition: height var(--ecs-push) var(--ecs-ease);
+}
+
+.ecs-page {
+    position: absolute;
+    inset: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--ecs-bg);
+    outline: none;
+    transition: transform var(--ecs-push) var(--ecs-ease), opacity 320ms ease;
+}
+
+/* Полоса прокрутки — как у macOS: видна, пока курсор над экраном. Иначе она
+   мелькала бы у края при каждом плавном изменении высоты окна. */
+.ecs-page.thin-scroll::-webkit-scrollbar-thumb {
+    background-color: transparent;
+}
+
+.ecs-page.thin-scroll:hover::-webkit-scrollbar-thumb {
+    background-color: var(--ecs-thumb);
+}
+
+.ecs-page.is-root.is-under {
+    transform: translateX(-26%);
+    opacity: 0;
+}
+
+.ecs-page.is-sub {
+    transform: translateX(100%);
+    box-shadow: -16px 0 32px -12px rgba(15, 23, 42, 0.2);
+}
+
+.ecs-page.is-sub.is-in {
+    transform: none;
+}
+
+.ecs-page.is-sub.is-plain {
+    background: var(--ecs-card);
+}
+
+.ecs-body {
+    padding: 2px 20px 24px;
+}
+
+.ecs-page.is-sub .ecs-body {
+    padding-top: 10px;
+}
+
+/* Форма правки несёт свои поля и отступы (UserEditModal, режим embedded). */
+.ecs-page.is-plain .ecs-body {
+    padding: 0;
+}
+
+/* ── Карточка ─────────────────────────────────────────────────────────── */
+
+.ecs-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 0 12px 18px;
+    text-align: center;
+}
+
+.ecs-photo {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 84px;
+    height: 84px;
+    margin-bottom: 10px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: linear-gradient(180deg, #a8adb9, #868b97);
+    color: #fff;
+    font-size: 34px;
+    font-weight: 500;
+}
+
+.ecs-photo-img {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    object-fit: cover;
+}
+
+.ecs-name {
+    max-width: 100%;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 27px;
+    letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
+}
+
+.ecs-sub {
+    font-size: 14px;
+    line-height: 19px;
+    color: var(--ecs-muted);
+}
+
+.ecs-sub > span + span::before {
+    content: ' · ';
+    color: var(--ecs-muted);
+}
+
+.ecs-sub .is-warn {
+    color: var(--ecs-warn);
+}
+
+.ecs-sub .is-danger {
+    color: var(--ecs-danger);
+}
+
+/* Действия — плитками под именем, как быстрые действия контакта в iOS. */
+.ecs-tiles {
+    display: grid;
+    gap: 8px;
+}
+
+.ecs-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    min-width: 0;
+    min-height: 62px;
+    padding: 10px 6px 9px;
+    border: 0;
+    border-radius: 13px;
+    background: var(--ecs-card);
+    box-shadow: 0 0 0 0.5px var(--ecs-sep);
+    color: var(--ecs-accent);
+    cursor: pointer;
+    transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms var(--ecs-ease), opacity 160ms ease;
+}
+
+.ecs-tile:hover {
+    background: var(--ecs-card-hover);
+}
+
+.ecs-tile:active {
+    transform: scale(0.965);
+}
+
+.ecs-tile.is-armed {
+    background: var(--ecs-accent-soft);
+    box-shadow: 0 0 0 1px var(--ecs-accent-ring);
+}
+
+.ecs-tile:disabled {
+    opacity: 0.45;
+    cursor: default;
+    transform: none;
+}
+
+.ecs-glyph {
+    width: 21px;
+    height: 21px;
+}
+
+.ecs-tile-label {
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 15px;
+}
+
+/* Раскрытие по высоте: сетка из одной строки 0fr → 1fr. */
+.ecs-reveal {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition: grid-template-rows 320ms var(--ecs-ease), opacity 220ms ease;
+}
+
+.ecs-reveal.is-open {
+    grid-template-rows: 1fr;
+    opacity: 1;
+}
+
+.ecs-reveal-inner {
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Рамка, а не тень-кольцо: раскрытие режет всё, что за краем блока, и
+   кольцо теряло нижнюю кромку. */
+.ecs-confirm {
+    margin-top: 10px;
+    padding: 14px 16px;
+    border: 0.5px solid var(--ecs-sep);
+    border-radius: 13px;
+    background: var(--ecs-card);
+}
+
+.ecs-confirm-note {
+    margin: 0 0 12px;
+    font-size: 14px;
+    line-height: 19px;
+    color: var(--ecs-text);
+}
+
+.ecs-confirm-btns {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.ecs-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 9px;
+    background: var(--ecs-fill);
+    color: var(--ecs-text);
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 150ms ease, filter 150ms ease, transform 140ms var(--ecs-ease);
+}
+
+.ecs-btn:hover {
+    background: var(--ecs-fill-strong);
+}
+
+.ecs-btn.is-primary {
+    background: var(--ecs-accent-fill);
+    color: #fff;
+}
+
+.ecs-btn.is-danger {
+    background: var(--ecs-danger-fill);
+    color: #fff;
+}
+
+.ecs-btn.is-primary:hover,
+.ecs-btn.is-danger:hover {
+    filter: brightness(1.07);
+}
+
+.ecs-btn:active {
+    transform: scale(0.97);
+}
+
+.ecs-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+    transform: none;
+}
+
+/* ── Группы строк ─────────────────────────────────────────────────────── */
+
+.ecs-group {
+    margin-top: 22px;
+}
+
+.ecs-caption {
+    padding: 0 16px 6px;
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--ecs-muted);
+}
+
+.ecs-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-radius: 13px;
+    overflow: hidden;
+    background: var(--ecs-card);
+    box-shadow: 0 0 0 0.5px var(--ecs-sep);
+}
+
+.ecs-item {
+    position: relative;
+}
+
+.ecs-item + .ecs-item::before {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 0.5px;
+    background: var(--ecs-sep);
+    pointer-events: none;
+}
+
+/* Поле — строкой «подпись — значение», как в «Об этом устройстве». Длинное
+   значение переносится у правого края, а не выталкивает подпись. */
+.ecs-field {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 42px;
+    padding: 11px 16px;
+    font-size: 14.5px;
+    line-height: 20px;
+}
+
+.ecs-label {
+    flex: none;
+    max-width: 46%;
+    margin: 0;
+    color: var(--ecs-text);
+}
+
+.ecs-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    text-align: right;
+    color: var(--ecs-muted);
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+.ecs-value a {
+    color: var(--ecs-accent);
+    text-decoration: none;
+}
+
+.ecs-value a:hover {
+    text-decoration: underline;
+}
+
+.ecs-row-btn {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    background: transparent;
+    font-size: 14.5px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 140ms ease;
+}
+
+.ecs-row-btn.is-danger {
+    color: var(--ecs-danger);
+}
+
+.ecs-row-btn.is-danger:hover,
+.ecs-row-btn.is-danger.is-armed {
+    background: var(--ecs-danger-soft);
+}
+
+.ecs-row-btn:disabled {
+    color: var(--ecs-muted);
+    background: transparent;
+    cursor: default;
+}
+
+.ecs-tile:focus-visible,
+.ecs-row-btn:focus-visible,
+.ecs-btn:focus-visible,
+.ecs-round:focus-visible,
+.ecs-link:focus-visible {
+    outline: 2px solid var(--ecs-accent-ring);
+    outline-offset: 2px;
+}
+
+/* ── История ──────────────────────────────────────────────────────────── */
+
+.ecs-search {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 36px;
+    padding: 0 10px;
+    border-radius: 10px;
+    background: var(--ecs-fill);
+    color: var(--ecs-muted);
+    transition: box-shadow 150ms ease;
+}
+
+.ecs-search:focus-within {
+    box-shadow: 0 0 0 2px var(--ecs-accent-ring);
+}
+
+.ecs-search svg {
+    flex: none;
+    width: 15px;
+    height: 15px;
+}
+
+.ecs-search input,
+.ecs-search input:focus {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+    background: transparent;
+    color: var(--ecs-text);
+    font-size: 14px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ecs-search input::placeholder {
+    color: var(--ecs-muted);
+}
+
+.ecs-hist-item {
+    padding: 10px 16px 11px;
+}
+
+.ecs-hist-line {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.ecs-hist-field {
+    min-width: 0;
+    font-size: 14.5px;
+    font-weight: 600;
+    line-height: 20px;
+}
+
+.ecs-hist-time {
+    flex: none;
+    font-size: 12.5px;
+    color: var(--ecs-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ecs-hist-change {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 8px;
+    margin-top: 3px;
+    font-size: 14px;
+    line-height: 19px;
+}
+
+.ecs-hist-old,
+.ecs-hist-new {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-line;
+}
+
+.ecs-hist-old {
+    color: var(--ecs-muted);
+}
+
+.ecs-hist-arrow {
+    flex: none;
+    width: 14px;
+    height: 14px;
+    color: var(--ecs-muted);
+}
+
+.ecs-hist-who {
+    margin-top: 3px;
+    font-size: 12.5px;
+    line-height: 16px;
+    color: var(--ecs-muted);
+}
+
+.ecs-loading {
+    display: grid;
+    place-items: center;
+    min-height: 150px;
+}
+
+.ecs-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 40px 16px;
+    text-align: center;
+    font-size: 14px;
+    color: var(--ecs-muted);
+}
+
+.ecs-link {
+    padding: 4px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ecs-accent);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.ecs-link:hover {
+    background: var(--ecs-accent-soft);
+}
+
+.ecs-spinner {
+    display: inline-block;
+    width: 22px;
+    height: 22px;
+    border: 2.5px solid var(--ecs-fill-strong);
+    border-top-color: var(--ecs-muted);
+    border-radius: 50%;
+    animation: ecs-spin 800ms linear infinite;
+}
+
+.ecs-spinner.is-small {
+    width: 13px;
+    height: 13px;
+    border-width: 2px;
+    border-color: rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+}
+
+@keyframes ecs-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Без движения — только проявление: сдвиги экранов и рост окна мгновенны. */
+@media (prefers-reduced-motion: reduce) {
+    .ecs-panel {
+        animation: ecs-fade-in 160ms ease backwards;
+    }
+
+    .ecs.is-leaving .ecs-panel {
+        animation: ecs-fade-out 140ms ease forwards;
+    }
+
+    .ecs-page,
+    .ecs-stage.is-ready,
+    .ecs-reveal,
+    .ecs-bar-title,
+    .ecs-round,
+    .ecs-tile {
+        transition-duration: 1ms;
+    }
+}

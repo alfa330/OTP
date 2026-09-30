@@ -198,6 +198,7 @@ const SessionUserModal = lazyWithRetry(() => import('./components/sessions/Sessi
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
 const RegContestCeremony = lazyWithRetry(() => import('./components/contests/RegContestCeremony'));
 const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
+const EmployeeCardSheet = lazyWithRetry(() => import('./components/employees/EmployeeCardSheet'));
 const HoursAccountingMobileView = lazyWithRetry(() => import('./components/hours/HoursAccountingMobile'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
@@ -42707,6 +42708,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // сразу в раздел его отдела.
             const [sipSettingsProvider, setSipSettingsProvider] = useState('');
             const [userToEdit, setUserToEdit] = useState(null);
+            // Карточка сотрудника на компьютере (EmployeeCardSheet): id того,
+            // чья карточка открыта в списке «Учета сотрудников».
+            const [employeeCardId, setEmployeeCardId] = useState(null);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
             const [userModalGroups, setUserModalGroups] = useState([]);
@@ -43007,7 +43011,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, [showToast, canAccessDevLetterSection]);
             const [openMenuId, setOpenMenuId] = useState(null);
-            const [rowActionMenuPos, setRowActionMenuPos] = useState({ top: 0, left: 0, width: 208 });
             const [selectedManageUsersIds, setSelectedManageUsersIds] = useState(new Set());
             const [bulkManageUsersChanges, setBulkManageUsersChanges] = useState({
                 group_id: '',
@@ -43104,40 +43107,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [activeTrainerTab, setActiveTrainerTab] = useState("active");
             const [dismissingAdminId, setDismissingAdminId] = useState(null);
             const [employeeTableSection, setEmployeeTableSection] = useState('general');
-            const openRowActionMenu = useCallback((event, menuId, options = {}) => {
-                event?.stopPropagation?.();
-
-                const width = Number(options.width) || 208;
-                const estimatedHeight = Number(options.height) || 128;
-                const gap = 8;
-                const viewportMargin = 8;
-                const rect = event?.currentTarget?.getBoundingClientRect?.();
-
-                if (openMenuId === menuId) {
-                    setOpenMenuId(null);
-                    return;
-                }
-
-                if (!rect || typeof window === 'undefined') {
-                    setOpenMenuId(menuId);
-                    return;
-                }
-
-                const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-                const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-                const left = Math.max(
-                    viewportMargin,
-                    Math.min(rect.right - width, viewportWidth - width - viewportMargin)
-                );
-                const shouldOpenUp = rect.bottom + gap + estimatedHeight > viewportHeight - viewportMargin;
-                const top = shouldOpenUp
-                    ? Math.max(viewportMargin, rect.top - estimatedHeight - gap)
-                    : Math.min(rect.bottom + gap, viewportHeight - viewportMargin);
-
-                setRowActionMenuPos({ top, left, width });
-                setOpenMenuId(menuId);
-            }, [openMenuId]);
-
             useEffect(() => {
                 if (openMenuId == null) return undefined;
 
@@ -49723,22 +49692,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return data;
             };
 
+            // История изменений сотрудника: окно истории открывает
+            // fetchUserHistory, карточка на компьютере читает её сама.
+            const loadUserHistory = useCallback(async (userId) => {
+                const response = await axios.get(`${API_BASE_URL}/api/user/history?user_id=${userId}`, {
+                    headers: {
+                        'X-User-Id': user.id
+                    }
+                });
+                if (response.data.status !== 'success') throw new Error(response.data.error || 'history');
+                return Array.isArray(response.data.history) ? response.data.history : [];
+            }, [API_BASE_URL, user?.id]);
+
             const fetchUserHistory = async (userId) => {
                 try {
                     setLoadingHistoryId(userId);
-                    const response = await axios.get(`${API_BASE_URL}/api/user/history?user_id=${userId}`, {
-                        headers: {
-                            'X-User-Id': user.id
-                        }
-                    });
-                    if (response.data.status === 'success') {
-                        setUserHistory(response.data.history);
-                        setShowHistoryModal(true);
-                    } else {
-                        addToast('Failed to fetch history', 'error');
-                    }
+                    setUserHistory(await loadUserHistory(userId));
+                    setShowHistoryModal(true);
                 } catch (error) {
-                    addToast('Error fetching history', 'error');
+                    addToast('Не удалось загрузить историю', 'error');
                 } finally {
                     setLoadingHistoryId(null);
                 }
@@ -49751,7 +49723,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                if (!user || !isAdminLikeRole) {
+                if (!user || !(isAdminLikeRole || isEmployeeAccountingManager)) {
                     showToast('Только администратор может повышать сотрудников', 'error');
                     return;
                 }
@@ -49797,7 +49769,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 } finally {
                     if (isMounted.current) setPromotingUserId(null);
                 }
-            }, [API_BASE_URL, fetchUsers, isAdminLikeRole, showToast, user]);
+            }, [API_BASE_URL, fetchUsers, isAdminLikeRole, isEmployeeAccountingManager, showToast, user]);
 
             // Группы, которыми СВ руководит сейчас, и что с ними станет после
             // понижения: у группы может быть второй СВ — тогда она не осиротеет.
@@ -50215,11 +50187,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setSelectedManageUsersIds(new Set());
             }, []);
 
-            const handleManageUserRowClick = useCallback((event, userId) => {
-                if (!(event?.ctrlKey || event?.metaKey)) return;
+            const closeEmployeeCard = useCallback(() => setEmployeeCardId(null), []);
+
+            // Раздел сменился или окно стало телефонным — карточка закрывается:
+            // строк, из которых её открыли, на экране больше нет.
+            useEffect(() => {
+                setEmployeeCardId(null);
+            }, [view, isMobileShell]);
+
+            // Строка открывает карточку сотрудника (решение владельца 30.09.2026:
+            // вместо «трёх точек» в конце строки). Ссылка в ячейке — телефон,
+            // Telegram — ведёт по своему адресу, а текст, выделенный мышью, —
+            // это копирование, а не открытие.
+            const openEmployeeCardFromRow = useCallback((event, userId) => {
+                if (event?.target?.closest?.('a, button, input, select, textarea, label')) return;
+                if (String(window.getSelection?.() || '').trim()) return;
+                setEmployeeCardId(Number(userId));
+            }, []);
+
+            // С клавиатуры — так же: Tab до строки, Enter или пробел.
+            const handleEmployeeRowKeyDown = useCallback((event, userId) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key !== 'Enter' && event.key !== ' ') return;
                 event.preventDefault();
-                toggleManageUsersSelection(userId);
-            }, [toggleManageUsersSelection]);
+                setEmployeeCardId(Number(userId));
+            }, []);
+
+            const handleManageUserRowClick = useCallback((event, userId) => {
+                if (event?.ctrlKey || event?.metaKey) {
+                    event.preventDefault();
+                    toggleManageUsersSelection(userId);
+                    return;
+                }
+                openEmployeeCardFromRow(event, userId);
+            }, [openEmployeeCardFromRow, toggleManageUsersSelection]);
 
             const applyBulkManageUsersChanges = useCallback(async () => {
                 const selectedIds = Array.from(selectedManageUsersIds)
@@ -50778,15 +50779,229 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </Suspense>
             );
 
-            const employeeHistoryPhoneAction = (employee) => ({
+            /* Действия над сотрудником — ОДИН список на обе раскладки. Телефон
+               (EmployeesMobileView) читает label, confirm и onClick; карточка на
+               компьютере (EmployeeCardSheet) — ещё short и icon для плитки и
+               page: экран внутри того же окна вместо второго окна поверх. */
+            const employeeEditAction = (employee) => ({
+                key: 'edit',
+                label: 'Изменить',
+                icon: 'edit',
+                page: 'edit',
+                onClick: () => {
+                    setUserToEdit(employee);
+                    setShowUserEditModal(true);
+                },
+            });
+
+            const employeeHistoryAction = (employee) => ({
                 key: 'history',
                 label: loadingHistoryId === employee?.id ? 'Загрузка…' : 'История изменений',
+                short: 'История',
+                icon: 'history',
+                page: 'history',
                 disabled: loadingHistoryId === employee?.id,
                 onClick: () => {
                     setSelectedUserForHistory(employee);
                     fetchUserHistory(employee.id);
                 },
             });
+
+            const manageUsersActionsFor = (employee) => [
+                employeeEditAction(employee),
+                employeeHistoryAction(employee),
+                // Повышать может только админ: у остальных пункт
+                // заканчивался бы отказом уже после нажатия.
+                (isAdminLikeRole || isEmployeeAccountingManager) && {
+                    key: 'promote',
+                    label: promotingUserId === Number(employee?.id) ? 'Повышение…' : 'Перевести в супервайзеры',
+                    short: 'В супервайзеры',
+                    icon: 'promote',
+                    disabled: promotingUserId === Number(employee?.id),
+                    confirm: { note: `Повысить «${employee?.name || ''}» до супервайзера?`, label: 'Повысить' },
+                    onClick: () => promoteUserToSupervisor(employee, { skipConfirm: true }),
+                },
+            ].filter(Boolean);
+
+            // Пропсы формы правки — общие у отдельного окна и у экрана в карточке.
+            const userEditModalProps = {
+                svList,
+                directions,
+                departments,
+                groups: userModalGroups,
+                user,
+                onSave: saveUserChanges,
+                onOpenSipSettings: (canAccessSipSettingsFleet || canAccessSipSettingsTez) ? ((departmentId) => {
+                    // Куда вести, решает провайдер отдела сотрудника: у ТЭЗ
+                    // поля Binotel, у остальных — локальная АТС. Если раздел
+                    // человеку не открыт, просто никуда не идём: обход
+                    // allowlist его всё равно выкинет на первый доступный.
+                    const code = normalizeDepartmentCode(
+                        (departments || []).find((d) => Number(d?.id) === Number(departmentId))?.code
+                    );
+                    const isTez = SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES.has(code);
+                    if (isTez ? !canAccessSipSettingsTez : !canAccessSipSettingsFleet) return;
+                    setShowUserEditModal(false);
+                    setSipSettingsProvider(isTez ? 'binotel' : 'asterisk');
+                    navigateToView('sip_settings');
+                }) : null,
+            };
+
+            // Перевод СВ в операторы: форма общая у окна (телефон) и у экрана
+            // карточки (компьютер). Группа обязательна: без неё у человека не
+            // будет ни супервайзера, ни учёта часов.
+            const renderDemotionForm = () => (
+                <div className="space-y-4">
+                    {demotionGroupImpact.length > 0 && (
+                        <IosSection
+                            title="Его группы после перевода"
+                            hint={demotionGroupImpact.some((group) => !group.successor)
+                                ? 'Группе без супервайзера назначьте нового в разделе «Группы».'
+                                : null}
+                        >
+                            {demotionGroupImpact.map((group) => (
+                                <div key={group.id} className="flex items-center justify-between gap-3">
+                                    <span className="min-w-0 flex-1 truncate text-[14px] text-slate-900">
+                                        {group.name}
+                                    </span>
+                                    <IosBadge tone={group.successor ? 'slate' : 'amber'}>
+                                        {group.successor ? group.successor.name : 'без супервайзера'}
+                                    </IosBadge>
+                                </div>
+                            ))}
+                        </IosSection>
+                    )}
+
+                    <IosSection
+                        title="Группа, в которой он станет оператором"
+                        hint={demotionGroupImpact.some((group) => !group.successor
+                            && String(group.id) === String(demotionGroupId))
+                            ? 'Это его собственная группа: пока в ней не появится супервайзер, его не будет и у него самого.'
+                            : null}
+                    >
+                        <CustomSelect
+                            value={demotionGroupId}
+                            onChange={(value) => setDemotionGroupId(value)}
+                            options={demotionGroupOptions.map((group) => ({
+                                value: String(group.id),
+                                label: group.name,
+                            }))}
+                            placeholder={demotionGroupOptions.length
+                                ? 'Выберите группу'
+                                : 'Активных групп в отделе нет'}
+                            disabled={isDemoting || !demotionGroupOptions.length}
+                            searchable={demotionGroupOptions.length > 6}
+                        />
+                    </IosSection>
+                </div>
+            );
+
+            const renderDemotionButtons = (onCancel) => (
+                <>
+                    <button
+                        type="button"
+                        onClick={onCancel}
+                        disabled={isDemoting}
+                        className={iosBtnSecondary}
+                    >
+                        Отмена
+                    </button>
+                    <button
+                        type="button"
+                        onClick={demoteSupervisorToOperator}
+                        disabled={isDemoting || !demotionGroupId}
+                        className={iosBtnPrimary}
+                    >
+                        {isDemoting && <FaIcon className="fas fa-spinner fa-spin"></FaIcon>}
+                        {isDemoting ? 'Перевожу…' : 'Перевести'}
+                    </button>
+                </>
+            );
+
+            /* Экраны карточки поверх её корня — в том же окне, со стрелкой
+               назад. guard: щелчок мимо окна их не закрывает — несохранённая
+               форма терялась бы от промаха мышью. */
+            const employeeCardPages = {
+                edit: {
+                    title: 'Изменить данные',
+                    tone: 'plain',
+                    guard: true,
+                    onOpen: (employee) => setUserToEdit(employee),
+                    render: ({ back }) => (
+                        <UserEditModal
+                            embedded
+                            isOpen
+                            onClose={back}
+                            userToEdit={userToEdit}
+                            {...userEditModalProps}
+                        />
+                    ),
+                },
+                demote: {
+                    title: 'Перевести в операторы',
+                    guard: true,
+                    onOpen: (employee) => {
+                        setDemotionTarget(employee);
+                        setDemotionGroupId('');
+                    },
+                    onLeave: closeDemotionModal,
+                    // После перевода цель сброшена, а список ещё перечитывается:
+                    // пустая форма мигнула бы до того, как карточка закроется сама.
+                    render: ({ back }) => (demotionTarget ? (
+                        <div className="space-y-4">
+                            {renderDemotionForm()}
+                            <div className="flex justify-end gap-2">{renderDemotionButtons(back)}</div>
+                        </div>
+                    ) : (
+                        <div className="ecs-loading"><span className="ecs-spinner" aria-hidden="true" /></div>
+                    )),
+                },
+            };
+
+            // Поля карточки — по отделу САМОГО человека: при «Все отделы» таблица
+            // показывает только общие колонки, а у одного человека отдел известен.
+            // Отдел не нашёлся (справочник не ответил) — набор списка.
+            const employeeCardDeptFields = (employee, fallback) => {
+                const code = (departments || []).find(
+                    (dep) => Number(dep?.id) === Number(employee?.department_id ?? employee?.departmentId),
+                )?.code;
+                return code ? employeeDeptFieldsForCode(code) : fallback;
+            };
+
+            // Значения в истории изменений словами, а не кодами журнала.
+            const formatEmployeeHistoryValue = (field, value) => {
+                if (field === 'status') return getEmployeeStatusBadgeMeta(value).label;
+                if (field === 'gender') {
+                    const gender = String(value || '').trim().toLowerCase();
+                    if (gender === 'male') return 'Мужской';
+                    if (gender === 'female') return 'Женский';
+                }
+                return value;
+            };
+
+            // Карточка сотрудника на компьютере — одна на все списки раздела.
+            const renderEmployeeCardSheet = ({ rows, columnsFor, subtitleOf, actionsFor }) => (
+                <Suspense fallback={null}>
+                    <EmployeeCardSheet
+                        employeeId={employeeCardId}
+                        rows={rows}
+                        loading={isAdminDataLoading}
+                        onClose={closeEmployeeCard}
+                        cardSectionList={EMPLOYEE_TABLE_SECTIONS}
+                        columnsFor={columnsFor}
+                        renderValue={renderEmployeePhoneValue}
+                        subtitleOf={subtitleOf}
+                        statusCodeOf={normalizeEmployeeStatusCode}
+                        statusLabelOf={(status) => getEmployeeStatusBadgeMeta(status).label}
+                        isBlacklist={isEmployeeBlacklistDismissal}
+                        actionsFor={actionsFor}
+                        pages={employeeCardPages}
+                        loadHistory={loadUserHistory}
+                        historyValueOf={formatEmployeeHistoryValue}
+                        Avatar={AvatarImage}
+                    />
+                </Suspense>
+            );
 
             const usersSortPhone = {
                 sortField: usersSortField,
@@ -50828,6 +51043,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const rows = departmentFilter
                     ? allRows.filter((r) => Number(r?.department_id ?? r?.departmentId) === Number(departmentFilter))
                     : allRows;
+                const columnsVariant = role === 'operator' ? 'operator' : 'staff';
+                // Действия над человеком — одни на телефоне и в карточке компьютера.
+                const actionsFor = (employee) => {
+                    const statusCode = normalizeEmployeeStatusCode(employee?.status);
+                    const isDismissed = statusCode === 'fired' || statusCode === 'dismissal';
+                    const isDismissing = dismissingAdminId === Number(employee?.id);
+                    const name = employee?.name || '';
+                    return [
+                        employeeEditAction(employee),
+                        employeeHistoryAction(employee),
+                        canDemoteSupervisor && !isDismissed && {
+                            key: 'demote',
+                            label: 'Перевести в операторы',
+                            short: 'В операторы',
+                            icon: 'demote',
+                            page: 'demote',
+                            onClick: () => {
+                                setDemotionTarget(employee);
+                                setDemotionGroupId('');
+                            },
+                        },
+                        canRemoveSupervisor && {
+                            key: 'remove',
+                            label: 'Удалить',
+                            danger: true,
+                            confirm: { note: `Удалить супервайзера «${name}»?`, label: 'Удалить' },
+                            onClick: () => removeSv(employee.id, { skipConfirm: true }),
+                        },
+                        canDismissAdmin && {
+                            key: 'dismiss',
+                            label: isDismissed ? 'Уволен' : (isDismissing ? 'Увольняю…' : 'Уволить'),
+                            danger: true,
+                            disabled: isDismissed || isDismissing,
+                            confirm: { note: `Уволить админа «${name}»?`, label: 'Уволить' },
+                            onClick: () => dismissAdminUser(employee, { skipConfirm: true }),
+                        },
+                    ].filter(Boolean);
+                };
                 if (isMobileShell) {
                     const countWordsByRole = {
                         sv: ['супервайзер', 'супервайзера', 'супервайзеров'],
@@ -50845,7 +51098,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         search: searchQuery,
                         onSearch: setSearchQuery,
                         matchesSearch: (employee, query) => matchesEmployeeSearchQuery(employee, query),
-                        columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, role === 'operator' ? 'operator' : 'staff'),
+                        columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, columnsVariant),
                         ...usersSortPhone,
                         // Отдел в строке — только когда в списке люди разных отделов.
                         subtitleOf: setDepartmentFilter && !departmentFilter ? departmentNameOfEmployee : null,
@@ -50854,168 +51107,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             : null,
                         onAdd: canAdd ? () => openCreateEmployeeModalForRole(role) : null,
                         addLabel,
-                        actionsFor: (employee) => {
-                            const statusCode = normalizeEmployeeStatusCode(employee?.status);
-                            const isDismissed = statusCode === 'fired' || statusCode === 'dismissal';
-                            const isDismissing = dismissingAdminId === Number(employee?.id);
-                            const name = employee?.name || '';
-                            return [
-                                {
-                                    key: 'edit',
-                                    label: 'Изменить',
-                                    onClick: () => {
-                                        setUserToEdit(employee);
-                                        setShowUserEditModal(true);
-                                    },
-                                },
-                                employeeHistoryPhoneAction(employee),
-                                canDemoteSupervisor && !isDismissed && {
-                                    key: 'demote',
-                                    label: 'Перевести в операторы',
-                                    onClick: () => {
-                                        setDemotionTarget(employee);
-                                        setDemotionGroupId('');
-                                    },
-                                },
-                                canRemoveSupervisor && {
-                                    key: 'remove',
-                                    label: 'Удалить',
-                                    danger: true,
-                                    confirm: { note: `Удалить супервайзера «${name}»?`, label: 'Удалить' },
-                                    onClick: () => removeSv(employee.id, { skipConfirm: true }),
-                                },
-                                canDismissAdmin && {
-                                    key: 'dismiss',
-                                    label: isDismissed ? 'Уволен' : (isDismissing ? 'Увольняю…' : 'Уволить'),
-                                    danger: true,
-                                    disabled: isDismissed || isDismissing,
-                                    confirm: { note: `Уволить админа «${name}»?`, label: 'Уволить' },
-                                    onClick: () => dismissAdminUser(employee, { skipConfirm: true }),
-                                },
-                            ].filter(Boolean);
-                        },
+                        actionsFor,
                     });
                 }
                 const columns = buildEmployeeSectionColumns(role === 'operator' ? 'operator' : 'staff');
-
-                const renderRowActionMenu = (employee) => {
-                    const menuId = `${role}-${employee?.id}`;
-                    const normalizedStatus = String(employee?.status || '').trim().toLowerCase();
-                    const isDismissed = normalizedStatus === 'fired' || normalizedStatus === 'dismissal';
-                    return (
-                        <td
-                            onClick={(e) => e.stopPropagation()}
-                            className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === menuId ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                        >
-                            <div className="relative inline-block text-left">
-                                <button
-                                    type="button"
-                                    onClick={(event) => openRowActionMenu(event, menuId, { width: 208, height: canDemoteSupervisor ? 220 : (canDismissAdmin || canRemoveSupervisor ? 176 : 132) })}
-                                    className="p-2 rounded-full hover:bg-gray-100"
-                                >
-                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                </button>
-
-                                {openMenuId === menuId && (
-                                    <div
-                                        className="fixed bg-white border rounded-lg shadow-lg"
-                                        style={{
-                                            top: `${rowActionMenuPos.top}px`,
-                                            left: `${rowActionMenuPos.left}px`,
-                                            width: `${rowActionMenuPos.width}px`,
-                                            zIndex: 10000
-                                        }}
-                                    >
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setUserToEdit(employee);
-                                                setShowUserEditModal(true);
-                                                setOpenMenuId(null);
-                                            }}
-                                            className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                        >
-                                            <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setSelectedUserForHistory(employee);
-                                                fetchUserHistory(employee.id);
-                                                setOpenMenuId(null);
-                                            }}
-                                            disabled={loadingHistoryId === employee.id}
-                                            className="block w-full text-left px-4 py-2 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                                        >
-                                            {loadingHistoryId === employee.id ? (
-                                                <>
-                                                    <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
-                                                    Загрузка...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <FaIcon className="fas fa-history mr-2"></FaIcon>
-                                                    История
-                                                </>
-                                            )}
-                                        </button>
-
-                                        {canDemoteSupervisor && !isDismissed && (
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setOpenMenuId(null);
-                                                    setDemotionTarget(employee);
-                                                    setDemotionGroupId('');
-                                                }}
-                                                className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                            >
-                                                <FaIcon className="fas fa-user-minus mr-2"></FaIcon>В операторы
-                                            </button>
-                                        )}
-
-                                        {(canRemoveSupervisor || canDismissAdmin) && <div className="border-t border-gray-200" />}
-
-                                        {canRemoveSupervisor && (
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setOpenMenuId(null);
-                                                    removeSv(employee.id);
-                                                }}
-                                                className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
-                                            >
-                                                <FaIcon className="fas fa-trash mr-2"></FaIcon>Удалить
-                                            </button>
-                                        )}
-
-                                        {canDismissAdmin && (
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setOpenMenuId(null);
-                                                    dismissAdminUser(employee);
-                                                }}
-                                                disabled={isDismissed || dismissingAdminId === Number(employee.id)}
-                                                className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:text-gray-400 disabled:hover:bg-white"
-                                            >
-                                                {dismissingAdminId === Number(employee.id) ? (
-                                                    <>
-                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Увольняю...
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <FaIcon className="fas fa-user-slash mr-2"></FaIcon>{isDismissed ? 'Уволен' : 'Уволить'}
-                                                    </>
-                                                )}
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        </td>
-                    );
-                };
 
                 const filteredByStatus = rows.filter((employee) => isEmployeeVisibleByStatusTab(employee?.status, activeStatusTab));
                 const searchedRows = filteredByStatus.filter((employee) => matchesEmployeeSearchQuery(employee, searchQuery));
@@ -51112,13 +51207,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </th>
                                                     );
                                                 })}
-                                                <th className="px-6 py-3"></th>
                                             </tr>
                                         </thead>
 
                                         <tbody className="bg-white divide-y divide-gray-200">
                                             {sortedRows.map((employee) => (
-                                                <tr key={employee.id} className="transition-colors duration-200 group hover:bg-gray-50">
+                                                <tr
+                                                    key={employee.id}
+                                                    onClick={(event) => openEmployeeCardFromRow(event, employee.id)}
+                                                    onKeyDown={(event) => handleEmployeeRowKeyDown(event, employee.id)}
+                                                    tabIndex={0}
+                                                    aria-haspopup="dialog"
+                                                    className="transition-colors duration-200 cursor-pointer hover:bg-gray-50 focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500"
+                                                >
                                                     {columns.map((column) => (
                                                         <td
                                                             key={column.key}
@@ -51127,7 +51228,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {column.render(employee)}
                                                         </td>
                                                     ))}
-                                                    {renderRowActionMenu(employee)}
                                                 </tr>
                                             ))}
                                         </tbody>
@@ -51137,7 +51237,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <td className="px-6 py-3 font-medium text-gray-700">
                                                     {sortedRows.length} {countLabel}
                                                 </td>
-                                                <td colSpan={columns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                <td colSpan={Math.max(1, columns.length - 1)} className="px-6 py-3 text-sm text-gray-600">
                                                     Показан раздел: {activeEmployeeTableSection.label}
                                                 </td>
                                             </tr>
@@ -51148,6 +51248,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
 
                         {renderEmployeeTableSectionSwitcher()}
+                        {renderEmployeeCardSheet({
+                            rows: allRows,
+                            columnsFor: (tableSection, employee) => buildEmployeeColumnsOfSection(
+                                tableSection,
+                                columnsVariant,
+                                employeeCardDeptFields(employee, employeeDeptFieldsOfViewer()),
+                            ),
+                            subtitleOf: (employee) => [employee?.job_title, departmentNameOfEmployee(employee)]
+                                .filter(Boolean).join(' · '),
+                            actionsFor,
+                        })}
                     </div>
                 );
             };
@@ -55666,26 +55777,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             saving: isBulkManageUsersSaving,
                                         },
                                     },
-                                    actionsFor: (employee) => [
-                                        {
-                                            key: 'edit',
-                                            label: 'Изменить',
-                                            onClick: () => {
-                                                setUserToEdit(employee);
-                                                setShowUserEditModal(true);
-                                            },
-                                        },
-                                        employeeHistoryPhoneAction(employee),
-                                        // Повышать может только админ: у остальных пункт
-                                        // заканчивался бы отказом уже после нажатия.
-                                        (isAdminLikeRole || isEmployeeAccountingManager) && {
-                                            key: 'promote',
-                                            label: promotingUserId === Number(employee?.id) ? 'Повышение…' : 'Перевести в супервайзеры',
-                                            disabled: promotingUserId === Number(employee?.id),
-                                            confirm: { note: `Повысить «${employee?.name || ''}» до супервайзера?`, label: 'Повысить' },
-                                            onClick: () => promoteUserToSupervisor(employee, { skipConfirm: true }),
-                                        },
-                                    ].filter(Boolean),
+                                    actionsFor: manageUsersActionsFor,
                                 })}
                                 {(view === 'manage_users' || view === 'employees') && (
                                 !isMobileShell && (
@@ -55921,7 +56013,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </th>
                                                             );
                                                         })}
-                                                        <th className="px-6 py-3"></th>
                                                     </tr>
                                                     </thead>
 
@@ -55932,7 +56023,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <tr
                                                             key={u.id}
                                                             onClick={(event) => handleManageUserRowClick(event, u.id)}
-                                                            className={`transition-colors duration-200 group cursor-pointer ${
+                                                            onKeyDown={(event) => handleEmployeeRowKeyDown(event, u.id)}
+                                                            tabIndex={0}
+                                                            aria-haspopup="dialog"
+                                                            className={`transition-colors duration-200 cursor-pointer focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-500 ${
                                                                 isSelectedForBulk ? 'bg-blue-100/70 hover:bg-blue-100' : 'hover:bg-gray-50'
                                                             }`}
                                                             title="Для мультивыбора: Ctrl + клик"
@@ -55945,85 +56039,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     {column.render(u)}
                                                                 </td>
                                                             ))}
-                                                            <td
-                                                                onClick={(e) => e.stopPropagation()}
-                                                                className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                                                            >
-                                                                <div className="relative inline-block text-left">
-                                                                <button
-                                                                    onClick={(e) => {
-                                                                        openRowActionMenu(e, u.id, { width: 208, height: 132 });
-                                                                    }}
-                                                                    className="p-2 rounded-full hover:bg-gray-100"
-                                                                >
-                                                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                                                </button>
-
-                                                                {openMenuId === u.id && (
-                                                                    <div
-                                                                        className="fixed bg-white border rounded-lg shadow-lg"
-                                                                        style={{
-                                                                            top: `${rowActionMenuPos.top}px`,
-                                                                            left: `${rowActionMenuPos.left}px`,
-                                                                            width: `${rowActionMenuPos.width}px`,
-                                                                            zIndex: 10000
-                                                                        }}
-                                                                    >
-                                                                    <button
-                                                                        onClick={() => {
-                                                                        setUserToEdit(u);
-                                                                        setShowUserEditModal(true);
-                                                                        setOpenMenuId(null);
-                                                                        }}
-                                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                                    >
-                                                                        <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
-                                                                    </button>
-                                                                    <button
-                                                                        onClick={() => {
-                                                                        setOpenMenuId(null);
-                                                                        promoteUserToSupervisor(u);
-                                                                        }}
-                                                                        disabled={promotingUserId === Number(u.id)}
-                                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                                                                    >
-                                                                        {promotingUserId === Number(u.id) ? (
-                                                                        <>
-                                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
-                                                                            Повышение...
-                                                                        </>
-                                                                        ) : (
-                                                                        <>
-                                                                            <FaIcon className="fas fa-user-shield mr-2"></FaIcon>
-                                                                            В супервайзеры
-                                                                        </>
-                                                                        )}
-                                                                    </button>
-                                                                    <button
-                                                                        onClick={() => {
-                                                                        setSelectedUserForHistory(u);
-                                                                        fetchUserHistory(u.id);
-                                                                        setOpenMenuId(null);
-                                                                        }}
-                                                                        disabled={loadingHistoryId === u.id}
-                                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                                    >
-                                                                        {loadingHistoryId === u.id ? (
-                                                                        <>
-                                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
-                                                                            Загрузка...
-                                                                        </>
-                                                                        ) : (
-                                                                        <>
-                                                                            <FaIcon className="fas fa-history mr-2"></FaIcon>
-                                                                            История
-                                                                        </>
-                                                                        )}
-                                                                    </button>
-                                                                    </div>
-                                                                )}
-                                                                </div>
-                                                            </td>
                                                         </tr>
                                                         );
                                                     })}
@@ -56034,7 +56049,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <td className="px-6 py-3 font-medium text-gray-700">
                                                             {svUsers.length} сотрудников
                                                         </td>
-                                                        <td colSpan={manageUsersSectionColumns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                        <td colSpan={Math.max(1, manageUsersSectionColumns.length - 1)} className="px-6 py-3 text-sm text-gray-600">
                                                             Показан раздел: {activeEmployeeTableSection.label}
                                                         </td>
                                                     </tr>
@@ -56048,6 +56063,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     })()
                                     )}
                                     {renderEmployeeTableSectionSwitcher()}
+                                    {renderEmployeeCardSheet({
+                                        rows: operatorUsers,
+                                        columnsFor: (tableSection, employee) => buildEmployeeColumnsOfSection(
+                                            tableSection,
+                                            'operator',
+                                            employeeCardDeptFields(employee, manageUsersDeptFields),
+                                        ),
+                                        subtitleOf: (employee) => [
+                                            employee?.job_title || employee?.direction,
+                                            departmentNameOfEmployee(employee),
+                                        ].filter(Boolean).join(' · '),
+                                        actionsFor: manageUsersActionsFor,
+                                    })}
                                 </div>
                                 ))}
                                 {view === 'manage_admins' && (isSuperAdmin || isEmployeeAccountingManager) && renderEmployeeDirectorySection({
@@ -56782,7 +56810,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     reportBusy: isLoading,
                                     actionsFor: isManageOperatorsReadOnly ? null : (op) => [
                                         { key: 'edit', label: 'Изменить', onClick: () => openManagedOperatorEditor(op) },
-                                        employeeHistoryPhoneAction(op),
+                                        employeeHistoryAction(op),
                                     ],
                                 })}
                                 {view === 'manage_operators' && !isMobileShell && (
@@ -60745,77 +60773,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                         {/* Перевод СВ в операторы. Группа обязательна: без неё у
                             человека не будет ни супервайзера, ни учёта часов. */}
+                        {/* На компьютере перевод идёт экраном в карточке сотрудника
+                            (employeeCardPages.demote) — окно поверх неё не нужно. */}
                         <IosModal
-                            open={!!demotionTarget}
+                            open={!!demotionTarget && employeeCardId == null}
                             onClose={isDemoting ? undefined : closeDemotionModal}
                             title="Перевести в операторы"
                             subtitle={demotionTarget?.name || ''}
                             maxWidth="max-w-md"
-                            footer={(
-                                <>
-                                    <button
-                                        type="button"
-                                        onClick={closeDemotionModal}
-                                        disabled={isDemoting}
-                                        className={iosBtnSecondary}
-                                    >
-                                        Отмена
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={demoteSupervisorToOperator}
-                                        disabled={isDemoting || !demotionGroupId}
-                                        className={iosBtnPrimary}
-                                    >
-                                        {isDemoting && <FaIcon className="fas fa-spinner fa-spin"></FaIcon>}
-                                        {isDemoting ? 'Перевожу…' : 'Перевести'}
-                                    </button>
-                                </>
-                            )}
+                            footer={renderDemotionButtons(closeDemotionModal)}
                         >
-                            <div className="space-y-4">
-                                {demotionGroupImpact.length > 0 && (
-                                    <IosSection
-                                        title="Его группы после перевода"
-                                        hint={demotionGroupImpact.some((group) => !group.successor)
-                                            ? 'Группе без супервайзера назначьте нового в разделе «Группы».'
-                                            : null}
-                                    >
-                                        {demotionGroupImpact.map((group) => (
-                                            <div key={group.id} className="flex items-center justify-between gap-3">
-                                                <span className="min-w-0 flex-1 truncate text-[14px] text-slate-900">
-                                                    {group.name}
-                                                </span>
-                                                <IosBadge tone={group.successor ? 'slate' : 'amber'}>
-                                                    {group.successor ? group.successor.name : 'без супервайзера'}
-                                                </IosBadge>
-                                            </div>
-                                        ))}
-                                    </IosSection>
-                                )}
-
-                                <IosSection
-                                    title="Группа, в которой он станет оператором"
-                                    hint={demotionGroupImpact.some((group) => !group.successor
-                                        && String(group.id) === String(demotionGroupId))
-                                        ? 'Это его собственная группа: пока в ней не появится супервайзер, его не будет и у него самого.'
-                                        : null}
-                                >
-                                    <CustomSelect
-                                        value={demotionGroupId}
-                                        onChange={(value) => setDemotionGroupId(value)}
-                                        options={demotionGroupOptions.map((group) => ({
-                                            value: String(group.id),
-                                            label: group.name,
-                                        }))}
-                                        placeholder={demotionGroupOptions.length
-                                            ? 'Выберите группу'
-                                            : 'Активных групп в отделе нет'}
-                                        disabled={isDemoting || !demotionGroupOptions.length}
-                                        searchable={demotionGroupOptions.length > 6}
-                                    />
-                                </IosSection>
-                            </div>
+                            {renderDemotionForm()}
                         </IosModal>
                         {showUserEditModal && (
                             <Suspense fallback={null}>
@@ -60823,26 +60791,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     isOpen={showUserEditModal}
                                     onClose={() => setShowUserEditModal(false)}
                                     userToEdit={userToEdit}
-                                    svList={svList}
-                                    directions={directions}
-                                    departments={departments}
-                                    groups={userModalGroups}
-                                    user={user}
-                                    onSave={saveUserChanges}
-                                    onOpenSipSettings={(canAccessSipSettingsFleet || canAccessSipSettingsTez) ? ((departmentId) => {
-                                        // Куда вести, решает провайдер отдела сотрудника: у ТЭЗ
-                                        // поля Binotel, у остальных — локальная АТС. Если раздел
-                                        // человеку не открыт, просто никуда не идём: обход
-                                        // allowlist его всё равно выкинет на первый доступный.
-                                        const code = normalizeDepartmentCode(
-                                            (departments || []).find((d) => Number(d?.id) === Number(departmentId))?.code
-                                        );
-                                        const isTez = SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES.has(code);
-                                        if (isTez ? !canAccessSipSettingsTez : !canAccessSipSettingsFleet) return;
-                                        setShowUserEditModal(false);
-                                        setSipSettingsProvider(isTez ? 'binotel' : 'asterisk');
-                                        navigateToView('sip_settings');
-                                    }) : null}
+                                    {...userEditModalProps}
                                 />
                             </Suspense>
                         )}

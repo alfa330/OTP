@@ -590,7 +590,9 @@ class AddUserGroupTests(unittest.TestCase):
 
     def test_create_payload_sends_group_id(self):
         self.assertIn("group_id: isCreatedTrainer ? null : (editedUser.group_id ? Number(editedUser.group_id) : null)", APP)
-        self.assertIn("groups={userModalGroups}", APP)
+        # Пропсы формы общие у окна и у экрана в карточке сотрудника.
+        self.assertIn("groups: userModalGroups,", APP)
+        self.assertEqual(APP.count("{...userEditModalProps}"), 2)
 
     def test_modal_uses_group_select_instead_of_supervisor(self):
         self.assertIn("groupsForSelectedDept", USER_MODAL)
