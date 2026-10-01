@@ -125,6 +125,28 @@ class PanelTests(unittest.TestCase):
             self.assertNotIn('type="date"', source, path.name)
 
 
+class JournalCancelTests(unittest.TestCase):
+    """Отмену видит и делает только руководитель; ФИО во Флит не открывает
+    заодно карточку выдачи."""
+
+    def setUp(self):
+        self.journal = _read(ROOT / 'src' / 'components' / 'water' / 'WaterJournal.jsx')
+        self.panel = _read(PANEL)
+
+    def test_only_the_manager_opens_the_issue_sheet(self):
+        self.assertIn('onClick={canManage ? () => setOpened(item) : undefined}', self.journal)
+        self.assertIn('{canManage && (\n                <IssueSheet', self.journal)
+        self.assertIn('canManage={Boolean(capabilities.can_manage)}', self.panel)
+
+    def test_cancel_needs_a_reason_before_the_button_wakes_up(self):
+        self.assertIn('disabled={!reason.trim() || saving}', self.journal)
+        self.assertIn('/api/water/issues/${item.id}/cancel', self.journal)
+
+    def test_links_inside_a_clickable_row_stop_propagation(self):
+        driver_name = self.journal.split('const DriverName = ')[1].split('};')[0]
+        self.assertIn('event.stopPropagation()', driver_name)
+
+
 class WiringTests(unittest.TestCase):
     def test_schema_is_initialised_on_start(self):
         database = _read(ROOT / 'database.py')
@@ -151,10 +173,23 @@ class SchemaTests(unittest.TestCase):
     def test_stock_never_goes_negative(self):
         self.assertIn('stock           INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0)', self.ddl)
 
-    def test_welcome_is_unique_per_account_and_per_person(self):
-        self.assertIn("ON water_issues(driver_account_id) WHERE kind = 'welcome'", self.ddl)
-        self.assertIn("ON water_issues(driver_iin) WHERE kind = 'welcome' AND driver_iin IS NOT NULL",
+    def test_welcome_is_unique_per_account_and_per_person_among_live_issues(self):
+        self.assertIn("uq_water_welcome_account_live "
+                      "ON water_issues(driver_account_id) WHERE kind = 'welcome' AND canceled_at IS NULL",
                       self.ddl)
+        self.assertIn("uq_water_welcome_iin_live "
+                      "ON water_issues(driver_iin) WHERE kind = 'welcome' AND driver_iin IS NOT NULL "
+                      "AND canceled_at IS NULL", self.ddl)
+
+    def test_old_welcome_indexes_are_dropped_on_live_bases(self):
+        """Старое условие считало и отменённые — повторная выдача после отмены
+        упиралась бы в него; CREATE IF NOT EXISTS по старому имени его не сменил бы."""
+        migrations = '\n'.join(schema._MIGRATIONS)
+        self.assertIn('DROP INDEX IF EXISTS uq_water_welcome_account', migrations)
+        self.assertIn('DROP INDEX IF EXISTS uq_water_welcome_iin', migrations)
+        self.assertNotIn('uq_water_welcome_account "', self.ddl)
+        for column in ('canceled_at', 'canceled_by', 'canceled_by_name', 'cancel_reason'):
+            self.assertIn('ADD COLUMN IF NOT EXISTS %s' % column, migrations)
 
     def test_tables_before_indexes(self):
         executed = []

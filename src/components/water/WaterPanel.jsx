@@ -61,9 +61,10 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
 
     useEffect(() => { if (capabilities) loadOffices(); }, [capabilities, loadOffices]);
 
-    /* Офис поменялся (выдача, поступление, пороги) — кладём свежую строку на
-       место, новый офис — в список, и убираем его из справочника «добавить». */
-    const officeUpdated = useCallback((office) => {
+    /* Свежая строка офиса — на место, новый офис — в список, и прочь из
+       справочника «добавить». Журнал при этом не трогаем: это нужно отмене,
+       которая сама поправила свою строку в журнале. */
+    const putOffice = useCallback((office) => {
         if (!office) return;
         setOffices((prev) => {
             const list = Array.isArray(prev) ? prev : [];
@@ -72,8 +73,15 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                 : [...list, office];
         });
         setDirectory((prev) => prev.filter((item) => item.id !== office.office_id));
-        setJournalKey((value) => value + 1);
     }, []);
+
+    /* Офис поменялся из другой вкладки (выдача, поступление, пороги) — журнал
+       перечитается при следующем открытии. */
+    const officeUpdated = useCallback((office) => {
+        if (!office) return;
+        putOffice(office);
+        setJournalKey((value) => value + 1);
+    }, [putOffice]);
 
     const tabs = useMemo(() => [
         { value: 'issue', label: 'Выдача' },
@@ -128,7 +136,14 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                 />
             )}
             {tab === 'journal' && (
-                <WaterJournal apiBaseUrl={apiBaseUrl} headers={headers} reloadKey={journalKey} showToast={showToast} />
+                <WaterJournal
+                    apiBaseUrl={apiBaseUrl}
+                    headers={headers}
+                    reloadKey={journalKey}
+                    canManage={Boolean(capabilities.can_manage)}
+                    onStockChanged={putOffice}
+                    showToast={showToast}
+                />
             )}
             {tab === 'settings' && capabilities.can_manage && (
                 <WaterSettings

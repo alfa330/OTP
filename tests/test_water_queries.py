@@ -66,6 +66,39 @@ class PersonHistoryTests(unittest.TestCase):
         self.assertEqual(len(history), 1)
 
 
+class CanceledIssuesTests(unittest.TestCase):
+    """Отменённая выдача не считается ни в праве водителя, ни в расходе."""
+
+    def test_history_skips_canceled_in_both_queries(self):
+        cursor = ScriptedCursor([row('activity', 3)], [])
+        queries.person_history(cursor, ACCOUNT, '900101300123')
+        for sql, _params in cursor.sql:
+            self.assertIn('canceled_at IS NULL', sql)
+        # Условие по аккаунту ИЛИ ИИН — в скобках: без них «AND canceled_at»
+        # прилип бы только к ИИН, и отменённые по аккаунту вернулись бы.
+        self.assertIn('WHERE (driver_account_id', cursor.sql[0][0])
+
+    def test_dashboard_counts_only_live_issues(self):
+        from datetime import date
+        cursor = ScriptedCursor([])
+        settings = {'low_threshold': 20, 'buy_threshold': 10}
+        queries.dashboard(cursor, settings, date_from=date(2026, 9, 1), date_to=date(2026, 9, 30),
+                          today=date(2026, 9, 30))
+        issues_block = cursor.sql[0][0].split('FROM water_issues')[1].split('GROUP BY')[0]
+        self.assertIn('canceled_at IS NULL', issues_block)
+
+    def test_cancel_locks_the_row_and_never_cancels_twice(self):
+        cursor = ScriptedCursor([(7, 3, ACCOUNT, None, 2, None)])
+        issue = queries.issue_for_cancel(cursor, 7, for_update=True)
+        self.assertIn('FOR UPDATE', cursor.sql[0][0])
+        self.assertEqual(issue['blocks'], 2)
+        cursor = ScriptedCursor([], [], [])
+        queries.cancel_issue(cursor, issue, reason='ошиблись', actor={'user_id': 1, 'name': 'Р'})
+        self.assertIn('AND canceled_at IS NULL', cursor.sql[0][0])
+        self.assertIn('stock = stock + %s', cursor.sql[1][0])
+        self.assertEqual(cursor.sql[1][1], (2, 3))
+
+
 class RecipientsTests(unittest.TestCase):
     def test_gone_recipients_fall_back_to_the_head(self):
         """Выбранных уволили или у них нет Telegram — о закупке всё равно

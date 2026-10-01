@@ -150,8 +150,23 @@ class Store:
 
     def person_history(self, cursor, account_id, iin=None, limit=20):
         rows = [item for item in self.issues
-                if item['driver_account_id'] == account_id or (iin and item.get('driver_iin') == iin)]
+                if not item.get('canceled_at')
+                and (item['driver_account_id'] == account_id or (iin and item.get('driver_iin') == iin))]
         return sorted(rows, key=lambda item: item['created_at'], reverse=True)
+
+    def issue_for_cancel(self, cursor, issue_id, for_update=False):
+        item = next((row for row in self.issues if row['id'] == int(issue_id)), None)
+        if not item:
+            return None
+        return {'id': item['id'], 'water_office_id': item['water_office_id'],
+                'driver_account_id': item['driver_account_id'], 'driver_iin': item.get('driver_iin'),
+                'blocks': item['blocks'], 'canceled_at': item.get('canceled_at')}
+
+    def cancel_issue(self, cursor, issue, reason, actor):
+        item = next(row for row in self.issues if row['id'] == issue['id'])
+        item.update(canceled_at=NOW, canceled_by_name=actor.get('name'), cancel_reason=reason)
+        self.offices[item['water_office_id']]['stock'] += item['blocks']
+        return dict(item, created_at=item['created_at'].isoformat(), canceled_at=NOW.isoformat())
 
     def create_issue(self, cursor, office, driver, verdict, blocks, actor):
         if self.fail_welcome_unique and verdict['kind'] == 'welcome':
@@ -231,6 +246,7 @@ class _Base(unittest.TestCase):
                      'taken_office_ids', 'directory_office', 'add_office', 'update_office',
                      'apply_movement', 'list_movements', 'lock_driver', 'person_history',
                      'create_issue', 'list_issues', 'issues_for_export', 'filter_values',
+                     'issue_for_cancel', 'cancel_issue',
                      'dashboard', 'notify_candidates', 'front_office_head_ids',
                      'notify_recipients'):
             patches[name] = getattr(store, name)
@@ -497,6 +513,63 @@ class FkTests(_Base):
         self.assertEqual(self.issue(water_office_id=office_id, fk_confirmed='yes').status_code, 409)
 
 
+class CancelTests(_Base):
+    """Отмена ошибочной выдачи (01.10.2026): руководитель, с причиной, блоки
+    возвращаются, водителю выдача больше не засчитывается."""
+
+    def setUp(self):
+        super().setUp()
+        self.office_id = self.store.add(stock=10)
+        self.assertEqual(self.issue(water_office_id=self.office_id).status_code, 201)
+        self.issue_id = self.store.issues[0]['id']
+        self.viewer = person(role='admin', headed_codes=('front_office',))
+
+    def cancel(self, **body):
+        return self.client.post('/api/water/issues/%d/cancel' % self.issue_id, json=body)
+
+    def test_front_office_cannot_cancel(self):
+        self.viewer = person()
+        response = self.cancel(reason='ошиблись')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'WATER_MANAGE_FORBIDDEN')
+        self.assertIsNone(self.store.issues[0].get('canceled_at'))
+
+    def test_reason_is_required_and_nothing_changes_without_it(self):
+        for body in ({}, {'reason': '   '}):
+            response = self.cancel(**body)
+            self.assertEqual(response.get_json()['code'], 'WATER_CANCEL_REASON_REQUIRED')
+        self.assertIsNone(self.store.issues[0].get('canceled_at'))
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 9)
+
+    def test_cancel_returns_the_blocks_and_marks_the_row(self):
+        response = self.cancel(reason='ошиблись водителем')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body['office']['stock'], 10)
+        self.assertEqual(body['issue']['cancel_reason'], 'ошиблись водителем')
+        self.assertTrue(body['issue']['canceled_at'])
+        self.assertEqual(self.store.locks[-1], (ACCOUNT, '900101300123'))
+
+    def test_second_cancel_is_refused(self):
+        self.assertEqual(self.cancel(reason='ошиблись').status_code, 200)
+        response = self.cancel(reason='ещё раз')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.store.offices[self.office_id]['stock'], 10)
+
+    def test_unknown_issue_is_404(self):
+        self.issue_id = 999
+        self.assertEqual(self.cancel(reason='x').status_code, 404)
+
+    def test_canceled_welcome_can_be_issued_again(self):
+        """Ради этого отмена и нужна: ошибочная выдача не должна закрывать
+        водителю приветственный блок."""
+        self.cancel(reason='не тот водитель')
+        self.viewer = person()
+        response = self.issue(water_office_id=self.office_id)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()['issue']['kind'], 'welcome')
+
+
 class PilotGateTests(_Base):
     def test_pilot_lets_in_only_the_super_admin(self):
         with mock.patch.object(water_routes.access, 'PILOT_SUPER_ADMIN_ONLY', True):
@@ -712,6 +785,20 @@ class ExportTests(_Base):
             self.assertEqual(cell.value, expected)
         context = {row[0].value: row[1] for row in book['Контекст'].iter_rows(min_row=2) if row[0].value}
         self.assertEqual(context['Отбор'].data_type, 's')
+
+    def test_canceled_issue_stays_in_the_file_but_not_in_the_total(self):
+        office_id = self.store.add(stock=10)
+        self.issue(water_office_id=office_id)
+        self.store.issues[0].update(canceled_at=NOW, canceled_by_name='Руководитель', cancel_reason='ошиблись')
+        response = self.client.get('/api/water/issues/export?date_from=2026-09-01&date_to=2026-09-30')
+        book = load_workbook(BytesIO(response.data))
+        sheet = book['Выдачи']
+        header = [cell.value for cell in sheet[1]]
+        self.assertEqual(sheet.cell(row=2, column=header.index('Отменена') + 1).value,
+                         '30.09.2026 12:00 · Руководитель · ошиблись')
+        context = {row[0].value: row[1].value for row in book['Контекст'].iter_rows(min_row=2) if row[0].value}
+        self.assertEqual(context['Блоков выдано'], 0)
+        self.assertEqual(context['Отменено выдач (в «Блоков выдано» не входят)'], 1)
 
     def test_kind_filter_is_validated(self):
         response = self.client.get('/api/water/issues?kind=free')

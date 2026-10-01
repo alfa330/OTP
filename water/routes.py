@@ -458,6 +458,41 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                      count, issue['kind'], found['account_id'], office['name'], ctx.get('name'))
         return jsonify({"issue": issue, "office": office, "verdict": verdict_after}), 201
 
+    @water_route('/issues/<int:issue_id>/cancel', methods=('POST',), need='manage')
+    def water_issue_cancel(issue_id, ctx):
+        """Отменить ошибочную выдачу (01.10.2026): не тот водитель, не тот офис,
+        лишний клик. Только руководитель и с причиной — отмена меняет и остаток,
+        и право водителя на следующую выдачу.
+
+        Порядок замков тот же, что у выдачи: офис → водитель → строка выдачи.
+        Иначе отмена и выдача тому же водителю могли бы запереть друг друга
+        крест-накрест.
+        """
+        reason = _clean(_payload().get('reason'), _MAX_COMMENT)
+        if not reason:
+            return _bad('Напишите причину отмены', 'WATER_CANCEL_REASON_REQUIRED')
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return _not_ready()
+            issue = queries.issue_for_cancel(cursor, issue_id)
+            if not issue:
+                return _bad('Выдача не найдена', 'WATER_ISSUE_NOT_FOUND', 404)
+            if issue['canceled_at']:
+                return _bad('Эта выдача уже отменена', 'WATER_ISSUE_ALREADY_CANCELED', 409)
+            settings = queries.get_settings(cursor)
+            queries.read_office(cursor, issue['water_office_id'], settings, for_update=True)
+            queries.lock_driver(cursor, issue['driver_account_id'], issue.get('driver_iin'))
+            issue = queries.issue_for_cancel(cursor, issue_id, for_update=True)
+            # Под замком — ещё раз: вторая вкладка могла отменить её же, пока
+            # мы ждали очереди, и вернуть блоки дважды было бы нельзя.
+            if issue['canceled_at']:
+                return _bad('Эта выдача уже отменена', 'WATER_ISSUE_ALREADY_CANCELED', 409)
+            item = queries.cancel_issue(cursor, issue, reason=reason, actor=_actor(ctx))
+            office = queries.read_office(cursor, issue['water_office_id'], settings)
+        logging.info('Вода: выдача %s отменена (%s бл. вернулись в «%s»), отменил %s',
+                     issue_id, issue['blocks'], office['name'], ctx.get('name'))
+        return jsonify({"issue": item, "office": office})
+
     # ── Журнал выдач ─────────────────────────────────────────────────────
     @water_route('/issues')
     def water_issues(ctx):

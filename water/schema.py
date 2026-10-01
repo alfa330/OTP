@@ -136,7 +136,15 @@ _STATEMENTS = [
 
         issued_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
         issued_by_name     VARCHAR(200),
-        created_at         TIMESTAMP NOT NULL DEFAULT %s
+        created_at         TIMESTAMP NOT NULL DEFAULT %s,
+
+        -- Отмена ошибочной выдачи (руководитель, с причиной). Строка остаётся
+        -- в журнале — это история операций, — но в праве водителя, остатках и
+        -- расходе отменённая выдача больше не считается.
+        canceled_at        TIMESTAMP,
+        canceled_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        canceled_by_name   VARCHAR(200),
+        cancel_reason      TEXT
     )
     """ % _NOW,
 
@@ -153,11 +161,15 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_water_issues_iin "
     "ON water_issues(driver_iin, created_at DESC) WHERE driver_iin IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_water_issues_issued_by ON water_issues(issued_by)",
-    # Приветственный блок — один на аккаунт и один на человека (ИИН).
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_water_welcome_account "
-    "ON water_issues(driver_account_id) WHERE kind = 'welcome'",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_water_welcome_iin "
-    "ON water_issues(driver_iin) WHERE kind = 'welcome' AND driver_iin IS NOT NULL",
+    # Приветственный блок — один на аккаунт и один на человека (ИИН), среди
+    # НЕ отменённых: отменили ошибочный — водителю можно выдать заново.
+    # Имена новые (`_live`), а не прежние: CREATE … IF NOT EXISTS по старому
+    # имени молча оставил бы на живой базе индекс со старым условием.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_water_welcome_account_live "
+    "ON water_issues(driver_account_id) WHERE kind = 'welcome' AND canceled_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_water_welcome_iin_live "
+    "ON water_issues(driver_iin) WHERE kind = 'welcome' AND driver_iin IS NOT NULL "
+    "AND canceled_at IS NULL",
 ]
 
 # Миграции по живой базе. Идут ПОСЛЕ таблиц и ПЕРЕД индексами (порядок держит
@@ -166,6 +178,19 @@ _STATEMENTS = [
 _MIGRATIONS = [
     # ФК нового водителя (30.09.2026, до первой выкладки — для уже развёрнутых стендов).
     "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS fk_source VARCHAR(16)",
+
+    # Отмена ошибочной выдачи (01.10.2026).
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS canceled_at TIMESTAMP",
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS canceled_by INTEGER "
+    "REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS canceled_by_name VARCHAR(200)",
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS cancel_reason TEXT",
+    # Прежние уникальные индексы приветственного считали и отменённые выдачи —
+    # повторная выдача после отмены упиралась бы в них. Новые (`_live`)
+    # создаются в фазе индексов той же транзакции разворота, так что момента
+    # «без уникальности» снаружи не видно.
+    "DROP INDEX IF EXISTS uq_water_welcome_account",
+    "DROP INDEX IF EXISTS uq_water_welcome_iin",
 ]
 
 

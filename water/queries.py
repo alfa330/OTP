@@ -253,12 +253,17 @@ def person_history(cursor, account_id, iin=None, limit=20):
 
     ИИН нужен потому, что у водителя в каждом парке свой аккаунт: без него
     «приветственный один раз» обходился бы переходом в соседний парк.
+
+    Отменённые выдачи сюда не попадают: отмена для того и существует, чтобы
+    ошибочная выдача не включала водителю неделю ожидания и не закрывала ему
+    приветственный блок.
     """
     cursor.execute(
         """
         SELECT %s FROM water_issues
-         WHERE driver_account_id = %%(account)s
-            OR (%%(iin)s <> '' AND driver_iin = %%(iin)s)
+         WHERE (driver_account_id = %%(account)s
+                OR (%%(iin)s <> '' AND driver_iin = %%(iin)s))
+           AND canceled_at IS NULL
          ORDER BY created_at DESC, id DESC
          LIMIT %%(limit)s
         """ % ', '.join(_HISTORY_COLUMNS),
@@ -273,6 +278,7 @@ def person_history(cursor, account_id, iin=None, limit=20):
             """
             SELECT %s FROM water_issues
              WHERE kind = 'welcome'
+               AND canceled_at IS NULL
                AND (driver_account_id = %%(account)s
                     OR (%%(iin)s <> '' AND driver_iin = %%(iin)s))
              ORDER BY created_at, id
@@ -318,13 +324,15 @@ def create_issue(cursor, office, driver, verdict, *, blocks, actor):
 _ISSUE_COLUMNS = ('id', 'water_office_id', 'city', 'office_name', 'kind', 'blocks',
                   'stock_after', 'driver_account_id', 'driver_name', 'driver_phone',
                   'driver_park', 'driver_park_id', 'driver_tariffs', 'orders_counted',
-                  'orders_basis', 'issued_by', 'issued_by_name', 'created_at')
+                  'orders_basis', 'issued_by', 'issued_by_name', 'created_at',
+                  'canceled_at', 'canceled_by_name', 'cancel_reason')
 
 
 def _issue_row(row):
     item = dict(zip(_ISSUE_COLUMNS, row))
     item['driver_tariffs'] = [str(code) for code in _json_list(item['driver_tariffs'])]
     item['created_at'] = _iso(item['created_at'])
+    item['canceled_at'] = _iso(item['canceled_at'])
     return item
 
 
@@ -333,6 +341,42 @@ def read_issue(cursor, issue_id):
                    (int(issue_id),))
     row = cursor.fetchone()
     return _issue_row(row) if row else None
+
+
+def issue_for_cancel(cursor, issue_id, *, for_update=False):
+    """Где, кому и сколько выдано и не отменена ли уже — всё, что нужно отмене.
+
+    ИИН здесь только для замка водителя (lock_driver), наружу он не отдаётся.
+    for_update запирает строку: две отмены одной выдачи не вернут блоки дважды.
+    """
+    cursor.execute(
+        'SELECT id, water_office_id, driver_account_id, driver_iin, blocks, canceled_at '
+        'FROM water_issues WHERE id = %s' + (' FOR UPDATE' if for_update else ''),
+        (int(issue_id),))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'id': row[0], 'water_office_id': row[1], 'driver_account_id': row[2],
+            'driver_iin': row[3], 'blocks': int(row[4]), 'canceled_at': row[5]}
+
+
+def cancel_issue(cursor, issue, *, reason, actor):
+    """Отмена по ЗАПЕРТЫМ офису, водителю и строке выдачи.
+
+    Строка остаётся в журнале с пометкой «кто, когда, почему», блоки
+    возвращаются на остаток тем же курсором: вода не ушла, либо её выдадут
+    заново — уже нужному водителю, и это будет новая выдача со своим списанием.
+    """
+    cursor.execute(
+        "UPDATE water_issues SET canceled_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), "
+        "canceled_by = %s, canceled_by_name = %s, cancel_reason = %s "
+        "WHERE id = %s AND canceled_at IS NULL",
+        (actor['user_id'], actor.get('name'), reason, issue['id']))
+    cursor.execute(
+        "UPDATE water_offices SET stock = stock + %s, "
+        "updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') WHERE id = %s",
+        (int(issue['blocks']), int(issue['water_office_id'])))
+    return read_issue(cursor, issue['id'])
 
 
 def _issue_filter(filters, params):
@@ -450,6 +494,7 @@ def dashboard(cursor, settings, *, date_from, date_to, today):
                        COUNT(*) FILTER (WHERE kind = 'activity') AS activity
                   FROM water_issues
                  WHERE created_at >= %(from)s AND created_at < %(to_next)s
+                   AND canceled_at IS NULL
                  GROUP BY water_office_id
           ) i ON i.water_office_id = o.id
           LEFT JOIN (

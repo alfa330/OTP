@@ -71,6 +71,9 @@ COLUMNS = (
     ('orders_basis', 'Заказы считаны', 18),
     ('kind', 'Вид выдачи', 16),
     ('blocks', 'Блоков', 9),
+    # Отменённая выдача остаётся в файле (это журнал операций), но с пометкой
+    # «когда, кто, почему» — и в итог «Блоков выдано» не входит.
+    ('cancel_note', 'Отменена', 40),
 )
 
 TEXT_COLUMNS = ('driver_phone', 'driver_account_id')
@@ -146,11 +149,23 @@ def _header_row(sheet, titles):
     return row
 
 
+def cancel_note(item):
+    """«01.10.2026 10:15 · Кто · причина» — у отменённой выдачи, иначе пусто."""
+    if not item.get('canceled_at'):
+        return None
+    moment = _as_datetime(item.get('canceled_at'))
+    parts = [moment.strftime('%d.%m.%Y %H:%M') if moment else '',
+             item.get('canceled_by_name') or '', item.get('cancel_reason') or '']
+    return ' · '.join(part for part in parts if part)
+
+
 def _issue_row(sheet, item):
     row = []
     for key, _title, _width in COLUMNS:
         value = item.get(key)
-        if key == 'created_at':
+        if key == 'cancel_note':
+            cell = _text(sheet, cancel_note(item))
+        elif key == 'created_at':
             cell = WriteOnlyCell(sheet, value=_as_datetime(value))
             cell.number_format = DATETIME_FORMAT
         elif key == 'driver_tariffs':
@@ -180,10 +195,14 @@ def build_workbook(items, *, period_from, period_to, generated_by='', filters_no
     issues.append(_header_row(issues, [title for _key, title, _width in COLUMNS]))
     written = 0
     blocks = 0
+    canceled = 0
     for item in items:
         issues.append(_issue_row(issues, item))
         written += 1
-        blocks += int(item.get('blocks') or 0)
+        if item.get('canceled_at'):
+            canceled += 1
+        else:
+            blocks += int(item.get('blocks') or 0)
 
     context = workbook.create_sheet(SHEET_CONTEXT)
     context.column_dimensions['A'].width = 26
@@ -200,6 +219,10 @@ def build_workbook(items, *, period_from, period_to, generated_by='', filters_no
         ('Выдач в файле', written),
         ('Блоков выдано', blocks),
     ]
+    if canceled:
+        # Числом, а не фразой: «1 — не входят» не согласуется, а подпись
+        # объясняет, почему блоки в файле не сходятся с «Блоков выдано».
+        lines.append(('Отменено выдач (в «Блоков выдано» не входят)', canceled))
     if total is not None and total > written:
         lines.append(('Внимание', 'В файл вошли первые %d выдач из %d — сузьте период или отбор'
                       % (written, total)))
