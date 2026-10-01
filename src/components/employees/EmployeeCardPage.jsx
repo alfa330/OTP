@@ -10,16 +10,17 @@ import './employee-card-page.css';
  * 30.09.2026 владелец за день прошёл путь от «три точки убрать, по строке —
  * карточка» через «без модалки, переход как на страницу» к выбору из пяти
  * макетов: вариант 5, «дашборд», с правками — «Связаться» слева, «Изменить»
- * и история — в том же стиле, а не отдельными экранами.
+ * и история — в том же стиле, а не отдельными экранами. 01.10.2026: история —
+ * одна (вкладка, с пагинацией, без второй ленты слева), правка — без прокрутки.
  *
  * Поэтому это страница раздела (список уступает ей место) такого вида:
  *   • шапка — фото, имя, «Изменить» и перевод;
  *   • строка итогов — статус, сколько работает, ставка, руководитель;
- *   • слева «Связаться» (кнопки и все контакты) и последние изменения,
- *     справа «Сведения» с переключателем «Сведения / История»;
- *   • «Изменить» — та же страница в режиме правки, как в «Контактах» iOS:
- *     те же карточки становятся полями, «Отмена» и «Сохранить» — в липкой
- *     шапке на месте «‹ Назад»;
+ *   • слева «Связаться» (кнопки и все контакты) и опасное, справа карточка с
+ *     переключателем «Сведения / История», история — постранично;
+ *   • «Изменить» — та же страница в режиме правки: одна карточка с
+ *     переключателем разделов формы, поля раздела сеткой — раздел целиком на
+ *     экране; «Отмена» и «Сохранить» — в липкой шапке на месте «‹ Назад»;
  *   • вопрос перед действием («Повысить?», «Удалить?») — прямо на странице.
  *
  * Действия — тот же список, что у телефона (actionsFor в App.jsx): `page` —
@@ -153,8 +154,8 @@ const shownValue = (value, field, valueOf) => {
     return valueOf ? String(valueOf(field, text) ?? text) : text;
 };
 
-/* Историю читают двое — последние изменения слева и вкладка «История», — а
-   запрос один: пока он в пути, второй читатель ждёт тот же ответ. */
+/* Ответ держим в кэше страницы — вкладку «История» открывают и закрывают; пока
+   запрос в пути, повторное открытие ждёт тот же ответ, а не шлёт второй. */
 const readHistory = (cache, id, load) => {
     const pendingKey = `pending:${id}`;
     if (cache.has(pendingKey)) return cache.get(pendingKey);
@@ -225,63 +226,55 @@ const HistoryState = ({ state, retry, children }) => {
     return children;
 };
 
-/* Последние изменения — в левой колонке, строкой «что → стало» и кто когда. */
-function HistoryPreview({ employeeId, load, cache, valueOf, refreshKey, onShowAll }) {
-    const [state, retry] = useHistory(employeeId, load, cache, refreshKey);
-    const entries = historyEntries(state.items.slice(0, 4), valueOf);
-    return (
-        <HistoryState state={state} retry={retry}>
-            {entries.length === 0 ? (
-                <div className="ecp-panel-empty">Изменений пока не было</div>
-            ) : (
-                <ul className="ecp-feed">
-                    {entries.map((item) => (
-                        <li key={item.id} className="ecp-feed-item">
-                            <span className="ecp-feed-dot" aria-hidden="true" />
-                            <div className="ecp-feed-main">
-                                <div className="ecp-feed-what">{item.label}: {item.oldValue} → {item.newValue}</div>
-                                <div className="ecp-feed-when">{[`${item.day}${item.time ? `, ${item.time}` : ''}`, item.who].filter(Boolean).join(' · ')}</div>
-                            </div>
-                        </li>
-                    ))}
-                </ul>
-            )}
-            {state.items.length > 0 && (
-                <button type="button" className="ecp-link ecp-panel-more" onClick={onShowAll}>
-                    Вся история · {state.items.length}
-                </button>
-            )}
-        </HistoryState>
-    );
-}
+const HISTORY_PAGE_SIZE = 10;
 
-/* Вся история — вкладка «История» большой карточки: поиск и дни. */
+const PagerArrow = ({ back = false }) => (
+    <svg viewBox="0 0 12 20" width="8" height="14" fill="none" aria-hidden="true">
+        <path d={back ? 'M10 2L2 10l8 8' : 'M2 2l8 8-8 8'} stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+);
+
+/* История — вкладка большой карточки: поиск, дни и страницы по десять. */
 function HistoryList({ employeeId, load, cache, valueOf, refreshKey }) {
     const [state, retry] = useHistory(employeeId, load, cache, refreshKey);
     const [query, setQuery] = React.useState('');
+    const [page, setPage] = React.useState(0);
+    const rootRef = React.useRef(null);
+    const turnedRef = React.useRef(false);
     const q = query.trim().toLowerCase();
-    const groups = React.useMemo(() => {
-        const list = [];
-        const byKey = new Map();
-        historyEntries(state.items, valueOf).forEach((item) => {
-            if (q) {
-                const haystack = [item.label, item.field, item.oldValue, item.newValue, item.rawOld, item.rawNew, item.who, item.at]
-                    .map((value) => (value == null ? '' : String(value).toLowerCase()));
-                if (!haystack.some((value) => value.includes(q))) return;
-            }
-            if (!byKey.has(item.dayKey)) {
-                const group = { key: item.dayKey, label: item.day, items: [] };
-                byKey.set(item.dayKey, group);
-                list.push(group);
-            }
-            byKey.get(item.dayKey).items.push(item);
-        });
-        return list;
-    }, [state.items, q, valueOf]);
+    const found = React.useMemo(() => historyEntries(state.items, valueOf).filter((item) => {
+        if (!q) return true;
+        return [item.label, item.field, item.oldValue, item.newValue, item.rawOld, item.rawNew, item.who, item.at]
+            .some((value) => value != null && String(value).toLowerCase().includes(q));
+    }), [state.items, q, valueOf]);
+    const pageCount = Math.max(1, Math.ceil(found.length / HISTORY_PAGE_SIZE));
+    // После сохранения записей может стать меньше — страница не уходит за край.
+    const current = Math.min(page, pageCount - 1);
+    const from = current * HISTORY_PAGE_SIZE;
+    const shown = found.slice(from, from + HISTORY_PAGE_SIZE);
+    const groups = [];
+    shown.forEach((item) => {
+        const last = groups[groups.length - 1];
+        if (last && last.key === item.dayKey) last.items.push(item);
+        else groups.push({ key: item.dayKey, label: item.day, items: [item] });
+    });
+
+    /* Листнули, а начало списка уехало под шапку — список встаёт к началу,
+       иначе новая страница открывалась бы с середины. */
+    React.useEffect(() => {
+        if (!turnedRef.current) return;
+        turnedRef.current = false;
+        const node = rootRef.current;
+        if (node && node.getBoundingClientRect().top < 80) node.scrollIntoView({ block: 'start' });
+    }, [current]);
+    const turn = (next) => {
+        turnedRef.current = true;
+        setPage(next);
+    };
 
     return (
         <HistoryState state={state} retry={retry}>
-            <div className="ecp-hist">
+            <div ref={rootRef} className="ecp-hist">
                 {state.items.length > 0 && (
                     <label className="ecp-search">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
@@ -290,7 +283,7 @@ function HistoryList({ employeeId, load, cache, valueOf, refreshKey }) {
                         <input
                             type="search"
                             value={query}
-                            onChange={(event) => setQuery(event.target.value)}
+                            onChange={(event) => { setQuery(event.target.value); setPage(0); }}
                             placeholder="Поиск по полю, значению или автору"
                             autoComplete="off"
                             spellCheck={false}
@@ -298,7 +291,7 @@ function HistoryList({ employeeId, load, cache, valueOf, refreshKey }) {
                         />
                     </label>
                 )}
-                {groups.length === 0 ? (
+                {shown.length === 0 ? (
                     <div className="ecp-empty">
                         {q ? `Ничего не найдено по запросу «${query.trim()}»` : 'Изменений пока не было'}
                     </div>
@@ -307,11 +300,11 @@ function HistoryList({ employeeId, load, cache, valueOf, refreshKey }) {
                         <div className="ecp-caption">{group.label}</div>
                         <ul className="ecp-hist-list">
                             {group.items.map((item) => (
+                                /* Запись — одной строкой, как в таблице: поле,
+                                   «было → стало», кто, время. Так страница из
+                                   десяти помещается на экран без прокрутки. */
                                 <li key={item.id} className="ecp-hist-item">
-                                    <div className="ecp-hist-line">
-                                        <span className="ecp-hist-field">{item.label}</span>
-                                        {item.time && <span className="ecp-hist-time">{item.time}</span>}
-                                    </div>
+                                    <span className="ecp-hist-field">{item.label}</span>
                                     <div className="ecp-hist-change">
                                         <span className="ecp-hist-old">{item.oldValue}</span>
                                         <svg className="ecp-hist-arrow" viewBox="0 0 16 16" fill="none" aria-label="стало">
@@ -319,12 +312,29 @@ function HistoryList({ employeeId, load, cache, valueOf, refreshKey }) {
                                         </svg>
                                         <span className="ecp-hist-new">{item.newValue}</span>
                                     </div>
-                                    {item.who && <div className="ecp-hist-who">{item.who}</div>}
+                                    <span className="ecp-hist-who">{item.who}</span>
+                                    <span className="ecp-hist-time">{item.time}</span>
                                 </li>
                             ))}
                         </ul>
                     </section>
                 ))}
+                {pageCount > 1 && (
+                    <nav className="ecp-pager" aria-label="Страницы истории">
+                        <span className="ecp-pager-count">
+                            {shown.length > 1 ? `${from + 1}–${from + shown.length}` : from + 1} из {found.length}
+                        </span>
+                        <div className="ecp-pager-btns">
+                            <button type="button" className="ecp-pager-btn" onClick={() => turn(current - 1)} disabled={current === 0} aria-label="Предыдущая страница">
+                                <PagerArrow back />
+                            </button>
+                            <span className="ecp-pager-page" aria-live="polite">{current + 1} из {pageCount}</span>
+                            <button type="button" className="ecp-pager-btn" onClick={() => turn(current + 1)} disabled={current >= pageCount - 1} aria-label="Следующая страница">
+                                <PagerArrow />
+                            </button>
+                        </div>
+                    </nav>
+                )}
             </div>
         </HistoryState>
     );
@@ -591,7 +601,7 @@ export default function EmployeeCardPage({
     if (!person) return null;
 
     const actions = actionsFor ? actionsFor(person) : [];
-    // Историю открывает сама страница (слева и вкладкой) — кнопкой в шапке она не нужна.
+    // Историю открывает вкладка «История» — кнопкой в шапке она не нужна.
     const headActions = actions.filter((action) => !action.danger && action.page !== 'history');
     const dangers = actions.filter((action) => action.danger);
     const confirmAction = actions.find((action) => action.key === confirmKey && action.confirm) || null;
@@ -755,21 +765,6 @@ export default function EmployeeCardPage({
                             <div className="ecp-panel-empty">Контакты не заполнены</div>
                         )}
                     </section>
-
-                    {mainTab === 'info' && (
-                        <section className="ecp-panel" aria-label="Последние изменения">
-                            <h2 className="ecp-panel-title">Последние изменения</h2>
-                            <HistoryPreview
-                                key={person?.id}
-                                employeeId={person?.id}
-                                load={loadHistory}
-                                cache={historyCacheRef.current}
-                                valueOf={historyValueOf}
-                                refreshKey={editSeq}
-                                onShowAll={() => showTab('history')}
-                            />
-                        </section>
-                    )}
 
                     {/* Опасное — отдельной карточкой в самом низу, чтобы его не
                         задеть вместо «Изменить». */}

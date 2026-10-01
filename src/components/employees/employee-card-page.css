@@ -3,8 +3,9 @@
  * Не окно, а страница раздела: список уступает ей место в том же
  * прокручиваемом поле (main-content), сверху липкая полупрозрачная шапка с
  * «‹ Назад». Вид — «дашборд», выбранный владельцем 30.09.2026 из пяти
- * макетов: шапка человека, строка итогов, слева «Связаться» и последние
- * изменения, справа «Сведения / История»; правка — те же карточки полями.
+ * макетов: шапка человека, строка итогов, слева «Связаться», справа
+ * «Сведения / История» (история постранично); правка — одна карточка с
+ * переключателем разделов, без прокрутки.
  *
  * Цвета — токены --ecp-*: светлые — палитра системного списка настроек
  * (белые группы строк, тонкий разделитель), тёмные — палитра тёмного слоя
@@ -720,52 +721,6 @@ html[data-otp-theme="dark"] .ecp-btn.is-plain:hover {
     text-decoration: underline;
 }
 
-/* Последние изменения — лента с точками. */
-.ecp-feed {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.ecp-feed-item {
-    display: grid;
-    grid-template-columns: 10px minmax(0, 1fr);
-    gap: 10px;
-}
-
-.ecp-feed-dot {
-    width: 8px;
-    height: 8px;
-    margin-top: 6px;
-    border-radius: 50%;
-    background: var(--ecp-accent-fill);
-}
-
-.ecp-feed-item:first-child .ecp-feed-dot {
-    background: #34c759;
-}
-
-.ecp-feed-what {
-    font-size: 14.5px;
-    font-weight: 600;
-    line-height: 20px;
-    color: var(--ecp-text);
-    overflow-wrap: anywhere;
-}
-
-.ecp-feed-when {
-    margin-top: 2px;
-    font-size: 13px;
-    color: var(--ecp-label-strong);
-}
-
-.ecp-panel-more {
-    margin: 12px 0 0 -10px;
-}
-
 /* Опасное — внизу слева, красной строкой. */
 .ecp-danger {
     padding: 6px;
@@ -939,13 +894,14 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
     outline: none;
 }
 
-/* ── Правка — те же карточки полями (UserEditModal, режим embedded) ─────
+/* ── Правка — одна карточка с переключателем разделов (UserEditModal, embedded) ─
 
-   Владелец 30.09.2026: «Изменить» — в том же стиле, а не отдельным
-   экраном. Поэтому форма лежит той же раскладкой, что сведения: слева
-   карточка «Контакты» (на месте «Связаться»), справа «Работа», «Личные
-   данные», «Оформление», «Вход в портал». Каждое поле — строкой с подписью
-   сверху и заливкой без рамки; «Отмена» и «Сохранить» — в липкой шапке.
+   Владелец: «Изменить» — в том же стиле, что страница (30.09.2026), и без
+   прокрутки — «на одной странице, но с селекторами» (01.10.2026). Поэтому
+   форма — одна карточка: сверху переключатель «Общее / Данные / Контакты /
+   Корпоративное / Аккаунт», как «Сведения / История», под ним поля ОДНОГО
+   раздела сеткой в несколько колонок. Подпись над полем, заливка без рамки;
+   «Отмена» и «Сохранить» — в липкой шапке.
 
    !important — против утилит Tailwind в разметке формы и тёмного слоя
    (theme-dark.css пишет цвета полей с !important и грузится позже —
@@ -982,93 +938,104 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
 }
 
 .ecp .uem-embedded-body .uem-fields {
-    display: grid;
-    grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);
-    gap: 20px;
-    align-items: start;
-}
-
-.ecp .uem-embedded-body .uem-section {
-    min-width: 0;
+    padding: 18px 20px 22px;
     border-radius: 18px;
     background: var(--ecp-card);
     box-shadow: var(--ecp-shadow), 0 2px 8px rgba(15, 23, 42, 0.03);
 }
 
-.ecp .uem-embedded-body .uem-section--contacts {
-    grid-column: 1;
-    grid-row: 1 / span 4;
+.ecp .uem-embedded-body .uem-seg {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    margin-bottom: 20px;
+    padding: 2px;
+    border-radius: 10px;
+    background: var(--ecp-fill);
 }
 
-.ecp .uem-embedded-body .uem-section--general { grid-column: 2; grid-row: 1; }
-.ecp .uem-embedded-body .uem-section--data { grid-column: 2; grid-row: 2; }
-.ecp .uem-embedded-body .uem-section--corporate { grid-column: 2; grid-row: 3; }
-.ecp .uem-embedded-body .uem-section--account { grid-column: 2; grid-row: 4; }
-
-@container (max-width: 860px) {
-    .ecp .uem-embedded-body .uem-fields {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
-    .ecp .uem-embedded-body .uem-section {
-        grid-column: 1 !important;
-        grid-row: auto !important;
-        order: 2;
-    }
-
-    .ecp .uem-embedded-body .uem-section--contacts {
-        order: 0;
-    }
-
-    .ecp .uem-embedded-body .uem-section--general {
-        order: 1;
-    }
-}
-
-.ecp .uem-embedded-body .uem-section-title {
-    margin: 0;
-    padding: 18px 20px 6px;
-    font-size: 17px;
-    font-weight: 700;
-    line-height: 22px;
+.ecp .uem-embedded-body .uem-seg-btn {
+    height: 32px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
     color: var(--ecp-text);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 180ms ease, box-shadow 180ms ease;
 }
 
-.ecp .uem-embedded-body .uem-section-body > * {
-    padding: 12px 20px !important;
+.ecp .uem-embedded-body .uem-seg-btn.is-on {
+    background: var(--ecp-card);
+    font-weight: 600;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04);
 }
 
-.ecp .uem-embedded-body .uem-section-body > * + * {
-    border-top: 1px solid var(--ecp-sep) !important;
+html[data-otp-theme="dark"] .ecp .uem-embedded-body .uem-seg-btn.is-on {
+    background: #3a3f48;
 }
 
-.ecp .uem-embedded-body .uem-section-body > :last-child {
-    padding-bottom: 18px !important;
+.ecp .uem-embedded-body .uem-seg-btn:focus-visible {
+    outline: 2px solid var(--ecp-accent-ring);
+    outline-offset: 2px;
 }
 
-/* Блоки-плашки верхнего уровня (фото, подсказка «оставьте пустым», период
-   статуса) — такие же строки, а не карточки в карточке. */
+.ecp .uem-embedded-body .uem-section {
+    animation: ecp-fade-in 200ms ease backwards;
+}
+
+/* Поля раздела — сеткой: сколько колонок влезет по 280 px. */
+.ecp .uem-embedded-body .uem-section-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 18px 20px;
+    align-items: start;
+}
+
+/* «Группа» и «Ставка» лежат в общей обёртке — её поля встают в сетку сами. */
+.ecp .uem-embedded-body .uem-section-body > .grid.grid-cols-1 {
+    display: contents;
+}
+
+/* Флажок — на уровне полей соседних клеток, а не под их подписями. */
+.ecp .uem-embedded-body .uem-section-body div:has(> label.inline-flex > input[type="checkbox"]) {
+    align-self: end;
+    display: flex;
+    align-items: center;
+    min-height: 40px;
+}
+
+/* Плашки (фото, подсказка «оставьте пустым», период статуса, близкие
+   контакты) — во всю ширину, мягкой заливкой без рамки. Поля внутри видны:
+   их заливка полупрозрачная и ложится на заливку плашки. */
 .ecp .uem-embedded-body .uem-section-body > .rounded-lg,
-.ecp .uem-embedded-body .uem-section-body > .rounded-xl {
-    border-right-width: 0 !important;
-    border-bottom-width: 0 !important;
-    border-left-width: 0 !important;
-    border-radius: 0 !important;
-    background: transparent !important;
-}
-
-.ecp .uem-embedded-body .uem-section-body > :first-child {
-    border-top-width: 0 !important;
-}
-
-/* Плашки внутри строки — мягкой заливкой, без рамки. Именно div: у самих
-   полей (select, input) те же классы rounded-lg border, и без этого они
-   получали цвет плашки вместо цвета поля. */
-.ecp .uem-embedded-body .uem-section-body > * div.rounded-lg.border,
-.ecp .uem-embedded-body .uem-section-body > * div.rounded-xl.border {
-    border-width: 0 !important;
+.ecp .uem-embedded-body .uem-section-body > .rounded-xl,
+.ecp .uem-embedded-body .uem-section-body > details {
+    grid-column: 1 / -1;
+    padding: 12px 14px !important;
+    border: 0 !important;
     border-radius: 12px !important;
     background: var(--ecp-fill) !important;
+}
+
+/* Близкие контакты — такой же плашкой, их поля в ряд. */
+.ecp .uem-embedded-body .uem-section-body > details > summary {
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    color: var(--ecp-text) !important;
+}
+
+.ecp .uem-embedded-body .uem-section-body > details > div {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 18px 20px;
+    margin-top: 12px !important;
+}
+
+.ecp .uem-embedded-body .uem-section-body > details > div > * {
+    margin-top: 0 !important;
 }
 
 .ecp .uem-embedded-body .uem-fields label.block {
@@ -1213,39 +1180,42 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
 }
 
 .ecp-hist-item {
-    padding: 11px 0 12px;
+    display: grid;
+    grid-template-columns: minmax(110px, 0.9fr) minmax(0, 2fr) minmax(0, 1.1fr) 44px;
+    grid-template-areas: "field change who time";
+    align-items: baseline;
+    gap: 2px 16px;
+    padding: 10px 0;
     border-top: 1px solid var(--ecp-sep);
+    font-size: 14.5px;
+    line-height: 20px;
 }
 
-.ecp-hist-line {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
+/* Узкая карточка: поле и время сверху, изменение и автор под ними. */
+@container (max-width: 600px) {
+    .ecp-hist-item {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+            "field time"
+            "change change"
+            "who who";
+    }
 }
 
 .ecp-hist-field {
+    grid-area: field;
     min-width: 0;
-    font-size: 15px;
     font-weight: 600;
-    line-height: 20px;
-}
-
-.ecp-hist-time {
-    flex: none;
-    font-size: 13px;
-    color: var(--ecp-muted);
-    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
 }
 
 .ecp-hist-change {
+    grid-area: change;
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 3px 8px;
-    margin-top: 3px;
-    font-size: 15px;
-    line-height: 20px;
+    align-items: baseline;
+    gap: 2px 8px;
+    min-width: 0;
 }
 
 .ecp-hist-old,
@@ -1266,16 +1236,95 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
 
 .ecp-hist-arrow {
     flex: none;
+    align-self: center;
     width: 14px;
     height: 14px;
     color: var(--ecp-muted);
 }
 
 .ecp-hist-who {
-    margin-top: 3px;
+    grid-area: who;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     font-size: 13px;
-    line-height: 17px;
     color: var(--ecp-label-strong);
+}
+
+.ecp-hist-time {
+    grid-area: time;
+    text-align: right;
+    font-size: 13px;
+    color: var(--ecp-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ecp-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 14px;
+    border-top: 1px solid var(--ecp-sep);
+}
+
+.ecp-pager-count {
+    font-size: 13px;
+    color: var(--ecp-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ecp-pager-btns {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ecp-pager-page {
+    min-width: 56px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+}
+
+.ecp-pager-btn {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--ecp-fill);
+    color: var(--ecp-accent);
+    cursor: pointer;
+    transition: background-color 140ms ease, transform 140ms var(--ecp-ease);
+}
+
+.ecp-pager-btn:hover {
+    background: var(--ecp-fill-strong);
+}
+
+.ecp-pager-btn:active {
+    transform: scale(0.94);
+}
+
+.ecp-pager-btn:disabled {
+    color: var(--ecp-muted);
+    opacity: 0.5;
+    cursor: default;
+    transform: none;
+}
+
+.ecp-pager-btn:focus-visible {
+    outline: 2px solid var(--ecp-accent-ring);
+    outline-offset: 2px;
+}
+
+/* Начало списка при перелистывании встаёт под липкую шапку, а не за неё. */
+.ecp-hist {
+    scroll-margin-top: 76px;
 }
 
 .ecp-loading {
@@ -1336,7 +1385,8 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
 @media (prefers-reduced-motion: reduce) {
     .ecp-screen.is-animated,
     .ecp-in-left,
-    .ecp-main-body {
+    .ecp-main-body,
+    .ecp .uem-embedded-body .uem-section {
         animation: none;
     }
 
@@ -1344,7 +1394,9 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
     .ecp-bar-title,
     .ecp-btn,
     .ecp-back,
-    .ecp-seg-btn {
+    .ecp-seg-btn,
+    .ecp-pager-btn,
+    .ecp .uem-embedded-body .uem-seg-btn {
         transition-duration: 1ms;
     }
 }

@@ -226,21 +226,20 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
 
 // onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
 // Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
-/* На странице сотрудника (embedded) форма — не вкладки, а те же карточки,
-   что у самой страницы: все разделы разом, каждый своей карточкой с
-   заголовком (владелец 30.09.2026: «Изменить» — в том же стиле, а не
-   отдельным экраном). Раскладку по колонкам даёт employee-card-page.css. В
-   отдельном окне обёрток нет вовсе: дети ложатся прямо в .space-y-6, и
-   разметка окна остаётся прежней до элемента. */
-const UemFieldsFrame = ({ embedded, children }) => (
-    embedded ? <div className="uem-fields">{children}</div> : children
+/* На странице сотрудника (embedded) форма — одна карточка: сверху
+   переключатель разделов (head), под ним поля одного раздела сеткой, чтобы
+   раздел помещался на экран без прокрутки (владелец 01.10.2026: «всё слишком
+   длинное — пусть будет на одной странице, но с селекторами»). Сетку даёт
+   employee-card-page.css. В отдельном окне обёрток нет вовсе: дети ложатся
+   прямо в .space-y-6, и разметка окна остаётся прежней до элемента. */
+const UemFieldsFrame = ({ embedded, head = null, children }) => (
+    embedded ? <div className="uem-fields">{head}{children}</div> : children
 );
 
-/* Раздел формы карточкой с заголовком — только на странице сотрудника. */
+/* Раздел формы — панель переключателя, только на странице сотрудника. */
 const UemSection = ({ embedded, id, title, children }) => (
     embedded ? (
-        <section className={`uem-section uem-section--${id}`} aria-label={title}>
-            <h3 className="uem-section-title">{title}</h3>
+        <section className={`uem-section uem-section--${id}`} role="tabpanel" aria-label={title}>
             <div className="uem-section-body">{children}</div>
         </section>
     ) : children
@@ -1254,7 +1253,25 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     ))}
                     </div>
                 )}
-                <UemFieldsFrame embedded={embedded}>
+                <UemFieldsFrame
+                    embedded={embedded}
+                    head={!createdCredentials && embedded && (
+                        <div className="uem-seg" role="tablist" aria-label="Раздел формы">
+                            {tabs.map((tab) => (
+                                <button
+                                    key={tab.id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={activeTab === tab.id}
+                                    className={`uem-seg-btn${activeTab === tab.id ? ' is-on' : ''}`}
+                                    onClick={() => setActiveTab(tab.id)}
+                                >
+                                    {tab.title || tab.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                >
                 {isCreateMode &&(
                 <>
                 {activeTab === "data" && (
@@ -1952,8 +1969,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {/* --- Режим редактирования: показываем остальные поля как раньше --- */}
                 {!isCreateMode && (
                     <>
-                    {(embedded || activeTab === "data") && (
-                        <UemSection embedded={embedded} id="data" title="Личные данные">
+                    {activeTab === "data" && (
+                        <UemSection embedded={embedded} id="data" title="Данные">
                         {renderAvatarEditor()}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
@@ -2083,7 +2100,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </UemSection>
                     )}
 
-                    {(embedded || activeTab === "contacts") && (
+                    {activeTab === "contacts" && (
                         <UemSection embedded={embedded} id="contacts" title="Контакты">
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Номер телефона</label>
@@ -2224,8 +2241,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </UemSection>
                     )}
 
-                    {(embedded || activeTab === "corporate") && (
-                        <UemSection embedded={embedded} id="corporate" title="Оформление">
+                    {activeTab === "corporate" && (
+                        <UemSection embedded={embedded} id="corporate" title="Корпоративное">
                         <div>
                             <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 mb-1">
                             Дата найма
@@ -2367,8 +2384,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </UemSection>
                     )}
 
-                    {(embedded || activeTab === "general") && (
-                        <UemSection embedded={embedded} id="general" title="Работа">
+                    {activeTab === "general" && (
+                        <UemSection embedded={embedded} id="general" title="Общее">
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Статус</label>
                             <select
@@ -2728,8 +2745,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </UemSection>
                 )}
 
-                    {(embedded || activeTab === "account") && (
-                        <UemSection embedded={embedded} id="account" title="Вход в портал">
+                    {activeTab === "account" && (
+                        <UemSection embedded={embedded} id="account" title="Аккаунт">
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
                             Оставьте поле пустым, если менять логин или пароль не нужно.
                         </div>

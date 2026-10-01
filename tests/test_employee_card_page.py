@@ -5,8 +5,9 @@
 «История» — её кнопки, стиль iOS/macOS, без второй модалки; (2) «модалка
 слишком маленькая — без модалки, переход как на страницу и кнопка назад, чтобы
 там была вся информация»; (3) из пяти макетов — «дашборд», «Связаться» слева,
-«Изменить» и история — в том же стиле, а не отдельными экранами. Подробности —
-в шапке src/components/employees/EmployeeCardPage.jsx.
+«Изменить» и история — в том же стиле, а не отдельными экранами; (4) 01.10:
+история одна — вкладкой с пагинацией, правка — без прокрутки, разделы
+переключателем. Подробности — в шапке src/components/employees/EmployeeCardPage.jsx.
 
 Всё это держится на тексте, который легко вернуть одной правкой: меню «⋮» в
 строке, окно поверх списка, window.confirm перед повышением. Сборка при этом
@@ -249,26 +250,31 @@ class EmbeddedEditFormTests(unittest.TestCase):
         self.assertIn('[data-uem-crop]', PAGE)
 
     def test_embedded_form_looks_like_the_page(self):
-        """Владелец 30.09.2026: «Изменить» — в таком же стиле, а не отдельным.
-        Встроенная форма — без вкладок, все разделы разом карточками той же
-        раскладки (контакты слева), «Отмена/Сохранить» — в шапке страницы; в
-        отдельном окне разметка не меняется."""
-        self.assertIn("embedded ? <div className=\"uem-fields\">{children}</div> : children", EDIT)
+        """Владелец: «Изменить» — в таком же стиле, а не отдельным (30.09.2026),
+        и без прокрутки — «на одной странице, но с селекторами» (01.10.2026).
+        Встроенная форма — одна карточка: переключатель разделов как «Сведения /
+        История» и поля одного раздела сеткой; «Отмена/Сохранить» — в шапке
+        страницы; в отдельном окне разметка не меняется."""
+        self.assertIn("embedded ? <div className=\"uem-fields\">{head}{children}</div> : children", EDIT)
         self.assertIn('{!createdCredentials && !embedded && (', EDIT)
-        for block, title in (('data', 'Личные данные'), ('contacts', 'Контакты'), ('corporate', 'Оформление'),
-                             ('general', 'Работа'), ('account', 'Вход в портал')):
-            self.assertIn(f'{{(embedded || activeTab === "{block}") && (', EDIT, block)
+        self.assertIn('head={!createdCredentials && embedded && (', EDIT)
+        self.assertIn('<div className="uem-seg" role="tablist" aria-label="Раздел формы">', EDIT)
+        for block, title in (('data', 'Данные'), ('contacts', 'Контакты'), ('corporate', 'Корпоративное'),
+                             ('general', 'Общее'), ('account', 'Аккаунт')):
+            self.assertIn(f'{{activeTab === "{block}" && (', EDIT, block)
             self.assertIn(f'<UemSection embedded={{embedded}} id="{block}" title="{title}">', EDIT, block)
+        self.assertNotIn('embedded || activeTab', EDIT)
         self.assertIn('embedded && actionsPortalNode ? createPortal(node, actionsPortalNode) : node', EDIT)
         self.assertIn('{!createdCredentials && !isMobileShell && (placeDesktopActions(\n                    <div className="uem-actions flex justify-end items-center gap-3 pt-2">', EDIT)
         self.assertIn("embedded ? 'uem-embedded-body' :", EDIT)
         self.assertIn('<div ref={setActionsNode} className="ecp-bar-actions" />', PAGE)
         css = without_comments(PAGE_CSS)
-        self.assertIn('grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);', css_block('.ecp .uem-embedded-body .uem-fields'))
-        self.assertIn('grid-column: 1;', css_block('.ecp .uem-embedded-body .uem-section--contacts'))
-        # Плашки внутри строки — только div: у select и input те же классы.
-        self.assertIn('.uem-section-body > * div.rounded-lg.border', css)
-        self.assertNotRegex(css, r'\.uem-section-body > \* \.rounded-lg\.border')
+        self.assertIn('grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));',
+                      css_block('.ecp .uem-embedded-body .uem-section-body'))
+        self.assertIn('display: contents;', css_block('.ecp .uem-embedded-body .uem-section-body > .grid.grid-cols-1'))
+        # Плашки — только прямые дети раздела: у select и input те же классы.
+        self.assertIn('.uem-section-body > .rounded-lg,', css)
+        self.assertNotRegex(css, r'\.uem-section-body \.rounded-lg')
         self.assertNotIn("tone: 'plain'", APP)
 
     def test_embedded_focus_does_not_scroll_the_sliding_page(self):
@@ -348,12 +354,22 @@ class LayoutAndThemeTests(unittest.TestCase):
         # Контакты — в «Связаться», в «Сведениях» их второй раз нет.
         self.assertIn("sections.filter((section) => section.key !== 'contacts')", PAGE)
 
-    def test_history_is_a_tab_and_a_preview(self):
+    def test_history_is_one_paged_tab(self):
+        """Владелец 01.10.2026: «почему два раза история — оставь
+        переключатель и сделай пагинацию». Ленты слева нет, вкладка — по
+        десять записей."""
         self.assertIn('role="tablist"', PAGE)
-        self.assertIn("onShowAll={() => showTab('history')}", PAGE)
+        self.assertNotIn('HistoryPreview', PAGE)
+        self.assertNotIn('ecp-feed', PAGE + PAGE_CSS)
+        self.assertEqual(PAGE.count('<HistoryList'), 1)
+        self.assertIn('const HISTORY_PAGE_SIZE = 10;', PAGE)
+        self.assertIn('const current = Math.min(page, pageCount - 1);', PAGE)
+        self.assertIn('<nav className="ecp-pager" aria-label="Страницы истории">', PAGE)
+        self.assertIn('setQuery(event.target.value); setPage(0);', PAGE)
+        # Запись — одной строкой (поле, изменение, кто, время): страница из
+        # десяти помещается на экран.
+        self.assertIn('grid-template-areas: "field change who time";', css_block('.ecp-hist-item'))
         self.assertIn("if (!pageKey && mainTab === 'history') {\n                showTab('info');", PAGE)
-        # Два читателя — один запрос.
-        self.assertIn('if (cache.has(pendingKey)) return cache.get(pendingKey);', PAGE)
 
     def test_two_balanced_columns_of_fields(self):
         """Каждая группа — в ту колонку, что короче: CSS-колонки шли по
