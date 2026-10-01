@@ -103,7 +103,7 @@ from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: 
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.5.0'
+VERSION = '1.5.1'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -128,6 +128,14 @@ ERROR_SLEEP_SECONDS = 30
 ERROR_SLEEP_MAX = 300
 
 PORTAL_TIMEOUT = (10, 120)
+
+# Ночной полный проход по вчерашним суткам — в 01:05, когда их часовой хвост уже в базе.
+# Звонок, начатый до полуночи, станция пишет в CDR после отбоя, то есть уже за полночью, а
+# принадлежит он прошлым суткам: живой хвост новых суток его не берёт, хвост прошлых к тому
+# времени закрыт. Портал ставит сутки в очередь, только когда раздел открывают, — ночью этого
+# не делает никто, и без своего прохода такой звонок доезжал бы к утру, а непринятый не
+# успевал бы к роботу пропущенных (он разбирает только последние три часа).
+NIGHTLY_AT = timedelta(hours=1, minutes=5)
 
 
 def _env_file_values(path):
@@ -234,6 +242,8 @@ class Bridge:
         # процесс: строки базы (плечи) и надстройки (строка на звонок) в одних сутках не
         # смешиваются, иначе у звонка менялось бы число плеч и он уезжал бы на портал зря.
         self.cdr = self.pbxdb if self.pbxdb.enabled else self.station
+        # Какие вчерашние сутки этот процесс уже закрыл ночным проходом (NIGHTLY_AT).
+        self._finalized_day = None
         self.records_session = self._build_records_session()
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         try:
@@ -431,6 +441,31 @@ class Bridge:
         return queue_facts_mod.attach(touches, facts,
                                       journal_until=getattr(self.pbxdb, 'covered_until', None))
 
+    def maybe_finalize_yesterday(self, now=None):
+        """Ночной полный проход по вчерашним суткам (см. NIGHTLY_AT). True, если он был.
+
+        Только при CDR из базы станции: надстройка отдавала строку на звонок, и звонок через
+        полночь у неё датировался строкой за полночью — живой хвост новых суток его брал.
+        Один раз за сутки на процесс; после перезапуска проход повторится — это одно
+        чтение суток, и закрытые сутки от него не меняются."""
+        if self.cdr is not self.pbxdb:
+            return False
+        now = now or datetime.now()   # время станции и контейнера — Алматы
+        if now - datetime.combine(now.date(), datetime.min.time()) < NIGHTLY_AT:
+            return False
+        yesterday = now.date() - timedelta(days=1)
+        if self._finalized_day == yesterday:
+            return False
+        # Отметка ДО прохода: отказ базы не должен превращаться в чтение суток каждую минуту —
+        # он уже записан порталу ошибкой суток, и сутки перечитает первый, кто откроет раздел.
+        self._finalized_day = yesterday
+        start = datetime.combine(yesterday, datetime.min.time())
+        log.info('Сутки %s: ночной полный проход', yesterday.isoformat())
+        self.do_day({'day': yesterday.isoformat(),
+                     'from_dt': start.strftime('%Y-%m-%dT%H:%M:%S'),
+                     'to_dt': (start + timedelta(days=1, hours=1)).strftime('%Y-%m-%dT%H:%M:%S')})
+        return True
+
     def _report_failure(self, day, error):
         """Сказать порталу, что сутки не вышли. Если и это не дошло — записать в
         лог и жить дальше: сутки протухнут по времени взятия и вернутся сами."""
@@ -564,6 +599,7 @@ class Bridge:
                 if now >= next_poll:
                     had_work = self.tick()
                     self.beat()
+                    had_work = self.maybe_finalize_yesterday() or had_work
                     error_sleep = ERROR_SLEEP_SECONDS
                     # Была работа — сразу за следующей: очередь может быть длинной,
                     # и ждать минуту между сутками значило бы растянуть месяц на час.

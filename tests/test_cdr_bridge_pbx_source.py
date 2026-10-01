@@ -136,6 +136,56 @@ class SourceTests(unittest.TestCase):
         self.assertEqual([t['linkedid'] for t in self.sent[0][1]['touches']], ['1.1'])
 
 
+class NightlyPassTests(unittest.TestCase):
+    """Звонок 23:59:45 с отбоем за полночью пишется в CDR уже в новых сутках, а принадлежит
+    прошлым: живой хвост новых суток его не берёт. Его довозит ночной проход моста по
+    вчерашним суткам — без него непринятый не успел бы к роботу пропущенных (три часа)."""
+
+    def setUp(self):
+        self.db = _Db(cdr=[
+            leg('9.9', '2026-09-14T23:59:45', disposition='BUSY', billsec=0, duration=20),
+            agent_leg('9.9', '2026-09-15T00:00:10', billsec=60),
+        ])
+        self.bridge = agent_mod.Bridge(dict(CONFIG), station=_Station(), pbxdb_source=self.db)
+        self.sent = []
+        self.bridge._post = (lambda path, payload:
+                             self.sent.append((path, payload)) or {'complete': True})
+
+    def test_not_before_the_hour_tail_is_in(self):
+        from datetime import datetime
+        self.assertFalse(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 0, 40)))
+        self.assertEqual(self.sent, [])
+
+    def test_yesterday_is_read_whole_once_the_tail_is_in(self):
+        from datetime import datetime
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 10)))
+        self.assertEqual(self.db.cdr_calls, [('2026-09-14T00:00:00', '2026-09-15T01:00:00')])
+        path, payload = self.sent[0]
+        self.assertEqual((path, payload['day']), ('day', '2026-09-14'))
+        self.assertEqual([t['linkedid'] for t in payload['touches']], ['9.9'],
+                         'звонок через полночь доехал в свои сутки')
+
+    def test_once_per_day(self):
+        from datetime import datetime
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 10)))
+        self.assertFalse(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 13, 0)))
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 16, 1, 10)))
+        self.assertEqual([p['day'] for _path, p in self.sent], ['2026-09-14', '2026-09-15'])
+
+    def test_a_failed_pass_is_not_retried_every_minute(self):
+        from datetime import datetime
+        self.db.fail = pbxdb.PbxDbError('база станции: нет соединения')
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 10)))
+        self.assertFalse(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 11)))
+        self.assertEqual(len(self.db.cdr_calls), 1)
+
+    def test_not_with_the_addon(self):
+        from datetime import datetime
+        bridge = agent_mod.Bridge(dict(CONFIG), station=_Station(), pbxdb_source=pbxdb.PbxDb())
+        bridge._post = lambda path, payload: self.fail('проход с надстройкой не нужен')
+        self.assertFalse(bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 10)))
+
+
 class WithoutDatabaseTests(unittest.TestCase):
     def test_without_a_database_the_addon_is_used_as_before(self):
         station = _Station([leg('1.1', '2026-09-15T09:00:00')])
