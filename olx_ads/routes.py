@@ -33,13 +33,20 @@ Blueprint собирается фабрикой и получает зависи
     POST /api/olx_ads/history/<id>/rollback      — вернуть прежний текст
     GET  /api/olx_ads/runs                       — прогоны
 
-Две границы прав, и обе проверяются ЗДЕСЬ, а не в обработчиках
+    GET  /api/olx_ads/publishers                 — кому из маркетологов разрешено публиковать
+    POST /api/olx_ads/publishers/<id>            — разрешить или запретить: {"can_publish": bool}
+
+Три границы прав, и все проверяются ЗДЕСЬ, а не в обработчиках
 --------------------------------------------------------------
 `content=True` — готовить тексты (бриф, генерация, правка черновика). Это работа
 маркетолога, и она не выходит за пределы портала.
 
 `apply=True` — писать в OLX. Единственное действие раздела наружу, от лица
-компании, и сразу по сотням боевых объявлений. Открыто админу и главам отделов.
+компании, и сразу по сотням боевых объявлений. Открыто админу, главам отделов и
+маркетологам, которым это разрешили поимённо (задача #371).
+
+`manage=True` — решать, кому из маркетологов публиковать. Админ и глава
+«Маркетинга»: это его люди.
 """
 
 import logging
@@ -99,7 +106,8 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
     """
     bp = Blueprint('olx_ads', __name__, url_prefix='/api/olx_ads')
 
-    def section_route(rule, methods=('GET',), content=False, apply=False):
+    def section_route(rule, methods=('GET',), content=False, apply=False,
+                      manage=False):
         all_methods = tuple(methods) + ('OPTIONS',)
 
         def decorator(handler):
@@ -117,6 +125,13 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
                     with db._get_cursor() as cursor:
                         ctx = leads_queries.load_access_context(cursor, requester_id)
+                        # Поимённое разрешение публиковать (#371) что-то меняет
+                        # только у рядового маркетолога. Остальным таблицу не
+                        # читаем: админ и главы публикуют по должности, а чужим
+                        # раздел закрыт целиком.
+                        if ctx and access.works_in_section_department(ctx):
+                            ctx['publish_granted'] = queries.is_publisher(
+                                cursor, requester_id)
                     if not ctx:
                         return jsonify({"error": "Пользователь не найден"}), 404
 
@@ -131,7 +146,13 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     if apply and not access.can_apply(ctx):
                         return jsonify({
                             "error": "Публиковать изменения в OLX может "
-                                     "администратор или глава отдела"
+                                     "администратор, глава отдела или "
+                                     "маркетолог с разрешением на публикацию"
+                        }), 403
+                    if manage and not access.can_manage_publishers(ctx):
+                        return jsonify({
+                            "error": "Решать, кто из маркетологов публикует, "
+                                     "может администратор или глава «Маркетинга»"
                         }), 403
 
                     return handler(ctx, *args, **kwargs)
@@ -529,5 +550,55 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
     def olx_ads_runs(ctx):
         with db._get_cursor() as cursor:
             return jsonify({'items': queries.list_runs(cursor, limit=50)})
+
+    # ── кто публикует ────────────────────────────────────────────────────
+
+    def _publisher_candidates(cursor):
+        return queries.list_publisher_candidates(
+            cursor, access.SECTION_MEMBER_DEPARTMENT_CODE,
+            access.SECTION_MEMBER_ROLE)
+
+    @section_route('/publishers', manage=True)
+    def olx_ads_publishers(ctx):
+        """Рядовые маркетологи с отметкой, разрешено ли им публиковать (#371)."""
+        with db._get_cursor() as cursor:
+            items = _publisher_candidates(cursor)
+        return jsonify({'items': items})
+
+    @section_route('/publishers/<int:user_id>', methods=('POST',), manage=True)
+    def olx_ads_publisher_set(ctx, user_id):
+        """Разрешить или запретить маркетологу публиковать: {"can_publish": bool}.
+
+        Разрешить можно только рядовому маркетологу раздела: админ и главы
+        публикуют по должности, а человеку вне раздела разрешение ничего бы не
+        дало сейчас — и молча ожило бы, переведи его потом в «Маркетинг». Снять
+        разрешение можно всегда: лишняя строка опаснее недостающей.
+
+        Отвечает свежим списком целиком: он короткий, а экрану не приходится
+        гадать, что ещё поменялось.
+        """
+        allow = _body().get('can_publish')
+        if not isinstance(allow, bool):
+            return jsonify({'error': 'Укажите, разрешить или запретить: '
+                                     'can_publish — true или false'}), 400
+        with db._get_cursor() as cursor:
+            if allow:
+                target = leads_queries.load_access_context(cursor, user_id)
+                if not target:
+                    return jsonify({'error': 'Сотрудник не найден'}), 404
+                if not access.works_in_section_department(target):
+                    return jsonify({
+                        'error': 'Разрешить публиковать можно только маркетологу '
+                                 'раздела — админ и главы отделов публикуют и так'
+                    }), 400
+                queries.grant_publisher(cursor, user_id,
+                                        actor_id=ctx.get('user_id'),
+                                        actor_name=ctx.get('name'))
+            else:
+                queries.revoke_publisher(cursor, user_id)
+            items = _publisher_candidates(cursor)
+        log.info('Объявления OLX: разрешение публиковать %s пользователю %s, решил %s',
+                 'выдано' if allow else 'снято', user_id, ctx.get('user_id'))
+        return jsonify({'items': items})
 
     return bp

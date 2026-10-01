@@ -679,3 +679,69 @@ def discard_drafts(cursor, pairs):
             .format(now=_NOW), (cabinet_code, str(advert_id)))
         dropped += cursor.rowcount or 0
     return dropped
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Кто из маркетологов публикует
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Задача #371. Админ и главы отделов пишут в OLX по должности, рядовой
+# маркетолог — только с поимённым разрешением, строкой в olx_ads_publishers.
+# Когда строка действует, решает access.py; здесь только хранение.
+
+def is_publisher(cursor, user_id):
+    """Есть ли у человека поимённое разрешение публиковать."""
+    cursor.execute("SELECT 1 FROM olx_ads_publishers WHERE user_id = %s",
+                   (int(user_id),))
+    return cursor.fetchone() is not None
+
+
+def list_publisher_candidates(cursor, department_code, role):
+    """Рядовые сотрудники отдела раздела — с отметкой, разрешено ли им публиковать.
+
+    Отбор повторяет `access.works_in_section_department`: тот же отдел, та же
+    должность, и не глава отдела. Уволенных нет — разрешать им нечего. Админа и
+    глав здесь нет намеренно: они публикуют по должности, и переключатель
+    напротив них ничего бы не менял.
+    """
+    cursor.execute(
+        """
+        SELECT u.id                    AS user_id,
+               u.name,
+               u.job_title,
+               (p.user_id IS NOT NULL) AS can_publish,
+               p.granted_by_name,
+               p.granted_at
+          FROM users u
+          JOIN departments d ON d.id = u.department_id
+          LEFT JOIN olx_ads_publishers p ON p.user_id = u.id
+         WHERE lower(trim(d.code)) = %(department)s
+           AND lower(trim(u.role)) = %(role)s
+           AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+           AND NOT EXISTS (
+                SELECT 1 FROM departments h
+                 WHERE h.head_user_id = u.id AND h.is_active
+           )
+         ORDER BY u.name, u.id
+        """,
+        {'department': department_code, 'role': role})
+    return _all(cursor)
+
+
+def grant_publisher(cursor, user_id, actor_id=None, actor_name=None):
+    """Разрешить публиковать. Повторное разрешение не переписывает, кто дал первое."""
+    cursor.execute(
+        """
+        INSERT INTO olx_ads_publishers (user_id, granted_by, granted_by_name)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        (int(user_id), actor_id, actor_name))
+    return cursor.rowcount or 0
+
+
+def revoke_publisher(cursor, user_id):
+    """Снять разрешение. Строки нет — снимать нечего, это не ошибка."""
+    cursor.execute("DELETE FROM olx_ads_publishers WHERE user_id = %s",
+                   (int(user_id),))
+    return cursor.rowcount or 0

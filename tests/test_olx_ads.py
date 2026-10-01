@@ -25,18 +25,22 @@ def _read(*parts):
 
 class AccessTests(unittest.TestCase):
 
-    def _ctx(self, role='operator', department_code=None, headed_codes=()):
-        return {
+    def _ctx(self, role='operator', department_code=None, headed_codes=(),
+             publish_granted=None):
+        ctx = {
             'role': role,
             'department_code': department_code,
             'headed_department_ids': [1] if headed_codes else [],
             'headed_department_codes': list(headed_codes),
         }
+        if publish_granted is not None:
+            ctx['publish_granted'] = publish_granted
+        return ctx
 
     def test_global_admin_does_everything(self):
         caps = access.capabilities(self._ctx(role='admin'))
         self.assertEqual(caps, {'can_view': True, 'can_write_content': True,
-                                'can_apply': True})
+                                'can_apply': True, 'can_manage_publishers': True})
 
     def test_heads_of_marketing_and_op_publish(self):
         for code in ('marketing', 'op'):
@@ -69,6 +73,67 @@ class AccessTests(unittest.TestCase):
         source = _read('olx_ads', 'access.py')
         self.assertIn('from olx_amo import access as leads_access', source)
         self.assertNotIn("('op', 'marketing')", source)
+
+    # ── поимённое разрешение публиковать (#371) ──────────────────────────
+
+    def test_marketer_with_permission_publishes(self):
+        # Задача #371: глава «Маркетинга» просит дать право публиковать одному
+        # из своих маркетологов — и только ему.
+        caps = access.capabilities(self._ctx(role='marketing_manager',
+                                             department_code='marketing',
+                                             publish_granted=True))
+        self.assertTrue(caps['can_view'])
+        self.assertTrue(caps['can_write_content'])
+        self.assertTrue(caps['can_apply'])
+        self.assertFalse(caps['can_manage_publishers'],
+                         'разрешение публиковать не даёт раздавать его другим')
+
+    def test_permission_is_personal_not_the_whole_role(self):
+        # Тот же отдел и та же должность, но без своей строки — не публикует.
+        for granted in (None, False):
+            ctx = self._ctx(role='marketing_manager', department_code='marketing',
+                            publish_granted=granted)
+            self.assertFalse(access.can_apply(ctx), granted)
+
+    def test_permission_does_not_open_the_section_to_anyone_else(self):
+        # Строка разрешения — не пропуск в раздел: у человека вне «Маркетинга»
+        # или не на должности маркетолога она не значит ничего.
+        for ctx in (self._ctx(role='operator', department_code='szov',
+                              publish_granted=True),
+                    self._ctx(role='operator', department_code='marketing',
+                              publish_granted=True),
+                    self._ctx(role='marketing_manager', department_code='op',
+                              publish_granted=True),
+                    self._ctx(role='sv', headed_codes=['szov'],
+                              publish_granted=True)):
+            self.assertFalse(access.can_view(ctx), ctx)
+            self.assertFalse(access.can_apply(ctx), ctx)
+
+    def test_permission_does_not_reach_replies_to_candidates(self):
+        # Ответ кандидату в «Лидах OLX» — другое действие с прежней границей.
+        from olx_amo import access as leads_access
+
+        ctx = self._ctx(role='marketing_manager', department_code='marketing',
+                        publish_granted=True)
+        self.assertTrue(access.can_apply(ctx))
+        self.assertFalse(leads_access.can_reply(ctx))
+
+    def test_admin_and_marketing_head_decide_who_publishes(self):
+        self.assertTrue(access.can_manage_publishers(self._ctx(role='admin')))
+        self.assertTrue(access.can_manage_publishers(
+            self._ctx(role='admin', headed_codes=['marketing'])))
+        self.assertTrue(access.can_manage_publishers(
+            self._ctx(role='head', headed_codes=['marketing', 'op'])))
+
+    def test_others_do_not_decide_who_publishes(self):
+        # Глава «ОП» публикует сам, но чужим отделом не распоряжается.
+        for ctx in (self._ctx(role='admin', headed_codes=['op']),
+                    self._ctx(role='admin', headed_codes=['szov']),
+                    self._ctx(role='marketing_manager', department_code='marketing',
+                              publish_granted=True),
+                    self._ctx(role='operator', department_code='marketing'),
+                    {}):
+            self.assertFalse(access.can_manage_publishers(ctx), ctx)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -471,6 +536,15 @@ class SchemaTests(unittest.TestCase):
         self.assertIn('def _init_olx_ads_schema_tx', database)
         self.assertIn('SAVEPOINT olx_ads_schema', database)
 
+    def test_publish_permission_is_one_row_per_person(self):
+        # #371: разрешение либо есть, либо нет — второй строки на человека не
+        # бывает; кто и когда разрешил, лежит рядом.
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertIn('CREATE TABLE IF NOT EXISTS olx_ads_publishers', ddl)
+        self.assertRegex(ddl, r'user_id\s+INTEGER PRIMARY KEY')
+        for column in ('granted_by', 'granted_by_name', 'granted_at'):
+            self.assertIn(column, ddl)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP и подключение
@@ -506,11 +580,214 @@ class RoutesTests(unittest.TestCase):
                         'olx_ads_generate_active', 'olx_ads_generate_job'):
             decorator = self._decorator_of(handler)
             self.assertNotIn('apply=True', decorator, handler)
+            self.assertNotIn('manage=True', decorator, handler)
+
+    def test_who_publishes_is_decided_behind_the_manage_right(self):
+        # Даже СПИСОК маркетологов с разрешениями — только тем, кто решает.
+        for handler in ('olx_ads_publishers', 'olx_ads_publisher_set'):
+            self.assertIn('manage=True', self._decorator_of(handler), handler)
 
     def test_blueprint_is_registered(self):
         app = _read('bot_schedule2.py')
         self.assertIn('from olx_ads.routes import build_olx_ads_blueprint', app)
         self.assertIn('build_olx_ads_blueprint(', app)
+
+
+class PublishPermissionRoutesTests(unittest.TestCase):
+    """Поимённое разрешение публиковать (#371) — живыми запросами через блюпринт.
+
+    Подменены только база и SQL-слой: гейт, разбор тела и ответы — настоящие.
+    Люди выдуманные, номера условные.
+    """
+
+    PEOPLE = {
+        1: {'role': 'admin'},                                              # админ
+        2: {'role': 'admin', 'headed': ['marketing']},                     # глава «Маркетинга»
+        3: {'role': 'admin', 'headed': ['op']},                            # глава «ОП»
+        4: {'role': 'marketing_manager', 'department_code': 'marketing'},  # маркетолог
+        5: {'role': 'marketing_manager', 'department_code': 'marketing'},  # маркетолог
+        6: {'role': 'operator', 'department_code': 'szov'},                # чужой
+    }
+
+    def setUp(self):
+        from contextlib import contextmanager
+
+        from flask import Flask
+
+        from olx_ads import queries as real_queries
+        from olx_ads import routes
+
+        people = self.PEOPLE
+        self.granted = {}
+        self.is_publisher_calls = []
+        self.candidate_args = []
+        self.requester = 1
+        test = self
+
+        def context_of(user_id):
+            spec = people.get(int(user_id))
+            if spec is None:
+                return None
+            headed = list(spec.get('headed', ()))
+            return {'user_id': int(user_id), 'name': 'Сотрудник %s' % user_id,
+                    'role': spec['role'], 'department_id': 1,
+                    'department_code': spec.get('department_code'),
+                    'headed_department_ids': [10] if headed else [],
+                    'headed_department_codes': headed}
+
+        class _Db(object):
+            @contextmanager
+            def _get_cursor(self):
+                yield None
+
+        class _Leads(object):
+            @staticmethod
+            def load_access_context(cursor, user_id):
+                return context_of(user_id)
+
+        class _Q(object):
+            def __getattr__(self, name):
+                return getattr(real_queries, name)
+
+            @staticmethod
+            def is_publisher(cursor, user_id):
+                test.is_publisher_calls.append(user_id)
+                return user_id in test.granted
+
+            @staticmethod
+            def list_publisher_candidates(cursor, department_code, role):
+                test.candidate_args.append((department_code, role))
+                out = []
+                for user_id, spec in sorted(people.items()):
+                    if (spec.get('department_code') == department_code
+                            and spec['role'] == role and not spec.get('headed')):
+                        grant = test.granted.get(user_id)
+                        out.append({'user_id': user_id, 'name': 'Сотрудник %s' % user_id,
+                                    'job_title': None, 'can_publish': grant is not None,
+                                    'granted_by_name': grant, 'granted_at': None})
+                return out
+
+            @staticmethod
+            def grant_publisher(cursor, user_id, actor_id=None, actor_name=None):
+                test.granted.setdefault(user_id, actor_name)
+                return 1
+
+            @staticmethod
+            def revoke_publisher(cursor, user_id):
+                return 1 if test.granted.pop(user_id, None) else 0
+
+        real_leads = routes.leads_queries
+        real_q = routes.queries
+        routes.leads_queries = _Leads()
+        routes.queries = _Q()
+        self.addCleanup(lambda: setattr(routes, 'leads_queries', real_leads))
+        self.addCleanup(lambda: setattr(routes, 'queries', real_q))
+
+        app = Flask(__name__)
+        app.register_blueprint(routes.build_olx_ads_blueprint(
+            db=_Db(),
+            require_api_key=lambda fn: fn,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (test.requester, None, None),
+        ))
+        self.client = app.test_client()
+
+    def _as(self, user_id):
+        self.requester = user_id
+        return self.client
+
+    def _apply_empty(self, user_id):
+        # Пустая пачка: прошедший гейт получает 400 от самой ручки и ничего не
+        # пишет в OLX, не прошедший — 403. Так проверяется именно гейт.
+        return self._as(user_id).post('/api/olx_ads/apply', json={'targets': []})
+
+    # ── публикация ───────────────────────────────────────────────────────
+
+    def test_marketer_without_permission_is_stopped_at_the_gate(self):
+        response = self._apply_empty(4)
+        self.assertEqual(403, response.status_code)
+        self.assertIn('разрешением на публикацию', response.get_json()['error'])
+
+    def test_marketer_with_permission_passes_the_gate(self):
+        self.granted[4] = 'Сотрудник 2'
+        response = self._apply_empty(4)
+        self.assertEqual(400, response.status_code)
+        self.assertIn('Не выбрано ни одного объявления', response.get_json()['error'])
+
+    def test_permission_of_one_marketer_is_not_shared_with_another(self):
+        self.granted[4] = 'Сотрудник 2'
+        self.assertEqual(403, self._apply_empty(5).status_code)
+
+    def test_permission_row_does_not_let_a_stranger_in(self):
+        self.granted[6] = 'Сотрудник 2'
+        response = self._apply_empty(6)
+        self.assertEqual(403, response.status_code)
+        self.assertEqual('Раздел недоступен', response.get_json()['error'])
+        self.assertNotIn(6, self.is_publisher_calls,
+                         'вне раздела таблицу разрешений не читаем вовсе')
+
+    def test_admin_and_heads_publish_without_reading_the_table(self):
+        for user_id in (1, 2, 3):
+            self.assertEqual(400, self._apply_empty(user_id).status_code, user_id)
+        self.assertEqual([], self.is_publisher_calls)
+
+    # ── кто решает ───────────────────────────────────────────────────────
+
+    def test_list_is_for_admin_and_marketing_head_only(self):
+        # Маркетолог со своим разрешением чужие не видит и не раздаёт.
+        self.granted[4] = 'Сотрудник 2'
+        for user_id, expected in ((1, 200), (2, 200), (3, 403), (4, 403), (6, 403)):
+            response = self._as(user_id).get('/api/olx_ads/publishers')
+            self.assertEqual(expected, response.status_code, user_id)
+
+    def test_list_shows_rank_and_file_marketers_of_the_section(self):
+        self.granted[5] = 'Сотрудник 2'
+        body = self._as(2).get('/api/olx_ads/publishers').get_json()
+        self.assertEqual([4, 5], [item['user_id'] for item in body['items']])
+        self.assertEqual([False, True], [item['can_publish'] for item in body['items']])
+        # Отдел и должность берутся из access.py, а не пишутся в ручке заново.
+        self.assertEqual([(access.SECTION_MEMBER_DEPARTMENT_CODE,
+                           access.SECTION_MEMBER_ROLE)], self.candidate_args)
+
+    def test_head_grants_and_the_marketer_can_publish_right_away(self):
+        response = self._as(2).post('/api/olx_ads/publishers/4', json={'can_publish': True})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({4: 'Сотрудник 2'}, self.granted, 'кто разрешил — записано')
+        mine = [item for item in response.get_json()['items'] if item['user_id'] == 4]
+        self.assertTrue(mine[0]['can_publish'])
+        self.assertEqual(400, self._apply_empty(4).status_code)
+
+    def test_head_revokes_and_publishing_closes(self):
+        self.granted[4] = 'Сотрудник 1'
+        response = self._as(2).post('/api/olx_ads/publishers/4', json={'can_publish': False})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({}, self.granted)
+        self.assertEqual(403, self._apply_empty(4).status_code)
+
+    def test_cannot_grant_outside_the_section(self):
+        for user_id, expected in ((6, 400), (3, 400), (2, 400), (999, 404)):
+            response = self._as(1).post('/api/olx_ads/publishers/%d' % user_id,
+                                        json={'can_publish': True})
+            self.assertEqual(expected, response.status_code, user_id)
+        self.assertEqual({}, self.granted)
+
+    def test_revoke_works_even_for_someone_who_left_the_section(self):
+        # Лишняя строка опаснее недостающей: снять можно всегда.
+        self.granted[6] = 'Сотрудник 1'
+        response = self._as(2).post('/api/olx_ads/publishers/6', json={'can_publish': False})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({}, self.granted)
+
+    def test_body_must_say_yes_or_no(self):
+        for body in ({}, {'can_publish': 'да'}, {'can_publish': 1}, {'can_publish': None}):
+            response = self._as(2).post('/api/olx_ads/publishers/4', json=body)
+            self.assertEqual(400, response.status_code, body)
+        self.assertEqual({}, self.granted)
+
+    def test_head_of_op_cannot_grant_to_marketing(self):
+        response = self._as(3).post('/api/olx_ads/publishers/4', json={'can_publish': True})
+        self.assertEqual(403, response.status_code)
+        self.assertEqual({}, self.granted)
 
 
 class JsonShapeTests(unittest.TestCase):
@@ -939,6 +1216,16 @@ class FrontendWiringTests(unittest.TestCase):
 
     def test_hidden_instruction_is_not_sent_silently(self):
         self.assertIn("if (showInstruction) setInstruction('')", self.view)
+
+    def test_who_publishes_is_set_in_the_section_by_those_who_decide(self):
+        # #371: кнопку и окно видит только тот, кто решает; остальным — ни
+        # серой кнопки, ни пустого окна.
+        self.assertIn('caps.can_manage_publishers &&', self.view)
+        self.assertIn('/api/olx_ads/publishers', self.view)
+        self.assertIn('Кто публикует', self.view)
+        self.assertIn('data-publishers', self.view)
+        # Отказ сервера возвращает переключатель назад, а не оставляет ложь.
+        self.assertIn('mark(person.user_id, !next)', self.view)
 
 
 class BriefFrontendTests(unittest.TestCase):

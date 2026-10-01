@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, Check, ChevronDown, ChevronRight, ExternalLink, History, Loader2,
+    AlertTriangle, Check, ChevronDown, ChevronRight, ExternalLink, History, KeyRound, Loader2,
     RefreshCw, RotateCcw, Search, Send, Sparkles, Trash2, X,
 } from 'lucide-react';
 import {
@@ -33,7 +33,8 @@ import {
  * делается откат.
  *
  * Про права. Сочинять и править черновики может весь раздел, а публиковать в
- * OLX — только админ и главы отделов. Кнопки, которых человеку нельзя, не
+ * OLX — админ, главы отделов и маркетологи, которым это разрешили поимённо
+ * (задача #371, окно «Кто публикует»). Кнопки, которых человеку нельзя, не
  * рисуются вовсе, а не показываются серыми: серая кнопка без объяснения — шум.
  *
  * Про цвет. Красится только отклонение: отказ площадки, истёкшее объявление,
@@ -121,6 +122,7 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [tab, setTab] = useState('adverts');
     const [syncing, setSyncing] = useState(false);
     const [listVersion, setListVersion] = useState(0);
+    const [publishersOpen, setPublishersOpen] = useState(false);
 
     const loadPing = useCallback(() => (
         axios.get(`${apiBaseUrl}/api/olx_ads/ping`, { headers: headers() })
@@ -205,6 +207,13 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
+                    {/* Настройка редкая — тихой кнопкой, а не вкладкой: заходят
+                        в неё раз, когда в отделе появляется новый человек. */}
+                    {caps.can_manage_publishers && (
+                        <button type="button" className={iosBtnGhost} onClick={() => setPublishersOpen(true)}>
+                            <KeyRound className="h-4 w-4" /> Кто публикует
+                        </button>
+                    )}
                     <button
                         type="button"
                         className={iosBtnSecondary}
@@ -256,7 +265,108 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     onChanged={refreshAll}
                 />
             )}
+
+            {caps.can_manage_publishers && (
+                <PublishersModal
+                    open={publishersOpen}
+                    onClose={() => setPublishersOpen(false)}
+                    apiBaseUrl={apiBaseUrl}
+                    headers={headers}
+                    toast={toast}
+                />
+            )}
         </div>
+    );
+};
+
+/* ── Кто публикует в OLX ────────────────────────────────────────────────────
+   Задача #371: глава «Маркетинга» попросил дать право публиковать одному из
+   своих маркетологов. Право выдаётся поимённо, а не всей должности: в отделе
+   есть и таргетолог, и видеограф, и переписывать сотни живых объявлений им
+   незачем. Админ и главы отделов публикуют по должности — в списке их нет,
+   переключатель напротив них ничего бы не менял. */
+const PublishersModal = ({ open, onClose, apiBaseUrl, headers, toast }) => {
+    const [items, setItems] = useState(null);
+    const [busyId, setBusyId] = useState(null);
+
+    /* Список читаем при каждом открытии: окно открывают редко, а разрешение
+       мог поменять второй человек с тем же правом. */
+    useEffect(() => {
+        if (!open) return;
+        setItems(null);
+        axios.get(`${apiBaseUrl}/api/olx_ads/publishers`, { headers: headers() })
+            .then((response) => setItems(response.data?.items || []))
+            .catch((error) => {
+                toast(error.response?.data?.error || 'Не удалось загрузить список', 'error');
+                setItems([]);
+            });
+    }, [open, apiBaseUrl, headers, toast]);
+
+    const mark = (userId, value) => setItems((prev) => (prev || []).map((person) => (
+        person.user_id === userId ? { ...person, can_publish: value } : person
+    )));
+
+    /* Флаг — ответ сервера совпадёт с локальным значением, поэтому
+       переключатель двигается сразу, а при отказе возвращается назад. */
+    const setAllowed = (person, next) => {
+        setBusyId(person.user_id);
+        mark(person.user_id, next);
+        axios.post(`${apiBaseUrl}/api/olx_ads/publishers/${person.user_id}`, {
+            can_publish: next,
+        }, { headers: headers() })
+            .then((response) => {
+                setItems(response.data?.items || []);
+                toast(next ? `${person.name} может публиковать в OLX` : `${person.name} больше не публикует в OLX`, 'success');
+            })
+            .catch((error) => {
+                mark(person.user_id, !next);
+                toast(error.response?.data?.error || 'Не удалось сохранить', 'error');
+            })
+            .finally(() => setBusyId(null));
+    };
+
+    return (
+        <IosModal
+            open={open}
+            onClose={onClose}
+            title="Кто публикует в OLX"
+            subtitle="Админ и главы отделов публикуют всегда"
+        >
+            {items === null && (
+                <div className="flex justify-center py-10 text-slate-400">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                </div>
+            )}
+            {items && items.length === 0 && (
+                <div className="py-10 text-center text-[13.5px] text-slate-500">
+                    В «Маркетинге» пока нет маркетологов
+                </div>
+            )}
+            {items && items.length > 0 && (
+                <ul data-publishers className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                    {items.map((person) => (
+                        <li key={person.user_id} className="flex items-center justify-between gap-3 px-4 py-3">
+                            <div
+                                className="min-w-0"
+                                title={person.can_publish && person.granted_at
+                                    ? `Разрешено ${fmtDateTime(person.granted_at)}${person.granted_by_name ? ` · ${person.granted_by_name}` : ''}`
+                                    : undefined}
+                            >
+                                <div className="truncate text-[14px] font-medium text-slate-900">{person.name}</div>
+                                {person.job_title && (
+                                    <div className="truncate text-[12px] text-slate-500">{person.job_title}</div>
+                                )}
+                            </div>
+                            <IosToggle
+                                checked={Boolean(person.can_publish)}
+                                onChange={(next) => setAllowed(person, next)}
+                                disabled={busyId === person.user_id}
+                            />
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </IosModal>
     );
 };
 
