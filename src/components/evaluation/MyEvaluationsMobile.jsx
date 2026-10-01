@@ -450,7 +450,8 @@ const MonitoringScaleScreen = ({ scale }) => {
                     </p>
                     {deficiency ? (
                       <p className="mt-2 text-[13px] leading-snug text-amber-700">
-                        Недочёт: {Math.max(0, Number(deficiency.weight) || 0)}%
+                        {/* У критичного критерия недочёт — вычет из итога, а не сниженный вес. */}
+                        Недочёт: {criterion?.isCritical ? '−' : ''}{Math.max(0, Number(deficiency.weight) || 0)}{criterion?.isCritical ? ' б.' : '%'}
                         {String(deficiency.description || '').trim() ? ` — ${String(deficiency.description).trim()}` : ''}
                       </p>
                     ) : null}

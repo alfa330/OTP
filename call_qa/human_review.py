@@ -12,11 +12,14 @@
   комментарий.
 
 Формула балла и набор вердиктов повторяют журнал (src/call_evaluation/main.jsx,
-``CriterionCard`` + ``totalScore``): критический критерий знает только
-«Корректно / N/A / Критич. ошибка», остальные — «Корректно / Ошибка / N/A» и
-«Недочёт», если шкала его предусматривает. Зеркало на фронте —
-src/components/call_qa/humanReview.js; расхождение между ними означало бы, что
-балл в карточке и балл в журнале считаются по-разному.
+``CriterionCard``; формула — src/call_evaluation/journalScore.js): критический
+критерий знает «Корректно / N/A / Критич. ошибка», остальные — «Корректно /
+Ошибка / N/A»; «Недочёт» — у тех и других, если шкала его предусматривает.
+Недочёт взвешенного критерия — частичный зачёт (вес недочёта вместо веса
+критерия), недочёт критического — вычет установленного числа баллов из итога
+вместо обнуления. Зеркало на фронте — src/components/call_qa/humanReview.js;
+расхождение между ними означало бы, что балл в карточке и балл в журнале
+считаются по-разному.
 """
 from __future__ import annotations
 
@@ -68,9 +71,25 @@ def has_deficiency(criterion: dict) -> bool:
     return isinstance(deficiency, dict) and deficiency.get("weight") is not None
 
 
+def critical_deficiency_penalty(criterion: dict) -> float:
+    """Сколько баллов снимает с итога «Недочёт» по КРИТИЧЕСКОМУ критерию.
+
+    Поле в шкале одно — deficiency.weight, а смысл задаёт критичность: у
+    взвешенного критерия это частичный зачёт, у критического — вычет из итога
+    (критическая ошибка обнуляет оценку, недочёт снимает только эти баллы)."""
+    if not criterion.get("is_critical") or not has_deficiency(criterion):
+        return 0.0
+    try:
+        return max(0.0, float(criterion["deficiency"].get("weight") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def allowed_verdicts(criterion: dict) -> tuple[str, ...]:
     """Что можно поставить по критерию — ровно кнопки журнала."""
     if criterion.get("is_critical"):
+        if has_deficiency(criterion):
+            return (CORRECT, NOT_APPLICABLE, DEFICIENCY, ERROR)
         return (CORRECT, NOT_APPLICABLE, ERROR)
     if has_deficiency(criterion):
         return (CORRECT, INCORRECT, DEFICIENCY, NOT_APPLICABLE)
@@ -169,7 +188,7 @@ def validation_message(problems: dict) -> str | None:
 
 
 def score_of(criteria: list[dict], scores: list):
-    """Балл журнала (main.jsx totalScore). None, пока хоть один критерий пуст:
+    """Балл журнала (journalScore.js). None, пока хоть один критерий пуст:
     частичная сумма читалась бы как низкая оценка."""
     if not is_complete(scores):
         return None
@@ -178,15 +197,18 @@ def score_of(criteria: list[dict], scores: list):
         if criterion.get("is_critical") and verdict_by_idx.get(criterion.get("idx")) == ERROR:
             return 0
     total = 0.0
+    penalty = 0.0
     for criterion in criteria:
-        if criterion.get("is_critical"):
-            continue
         verdict = verdict_by_idx.get(criterion.get("idx"))
+        if criterion.get("is_critical"):
+            if verdict == DEFICIENCY:
+                penalty += critical_deficiency_penalty(criterion)
+            continue
         if verdict in (CORRECT, NOT_APPLICABLE):
             total += float(criterion.get("weight") or 0)
         elif verdict == DEFICIENCY and has_deficiency(criterion):
             total += float(criterion["deficiency"].get("weight") or 0)
-    return round(total)
+    return round(max(0.0, total - penalty))
 
 
 # ── хранение ─────────────────────────────────────────────────────────────────
@@ -330,7 +352,8 @@ def now_local_iso() -> str:  # pragma: no cover — обёртка времен�
 
 
 __all__ = [
-    "HUMAN_VERDICTS", "COMMENT_REQUIRED", "NEGATIVE", "allowed_verdicts", "verdict_from_ai",
+    "HUMAN_VERDICTS", "COMMENT_REQUIRED", "NEGATIVE", "critical_deficiency_penalty",
+    "allowed_verdicts", "verdict_from_ai",
     "normalise_verdict", "normalise_scores", "normalise_comments", "is_complete", "is_empty",
     "validate", "validation_message", "score_of", "serialise", "get_review", "upsert_review",
     "mark_counted", "latest_scored",

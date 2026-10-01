@@ -248,6 +248,9 @@ node-тест `tests/ai_qa_filters.test.mjs` сверяет, что обе ст�
 Вердикты ИИ: `Correct | Incorrect | N/A | Deficiency | Pending` («Недочёт» — только у критериев
 с `deficiency`). `human`/`human_comment` — пер-критерийная оценка супервайзера
 (`Correct | Incorrect | N/A | Deficiency | Error`), прикрепляется свежей при каждом открытии.
+Недочёт бывает и у критического критерия: там `deficiency.weight` — не сниженный вес, а
+сколько баллов недочёт снимает с итога вместо обнуления (итог не ниже нуля); формула одна
+с журналом — `src/call_evaluation/journalScore.js`.
 
 `score_breakdown` — из чего сложился балл: `unchecked_weight` это вес критериев,
 которые ИИ проверить не может (`system_api`/`manual`) и которые формула зачитывает

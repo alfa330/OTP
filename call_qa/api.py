@@ -1661,7 +1661,7 @@ def journal_review_for_subject(subject_kind: str, call_id: int) -> dict | None:
 
 
 def _attach_scale(payload: dict) -> None:
-    """Вес и описание критериев из ЖИВОЙ шкалы — для панели «Моя оценка».
+    """Вес, описание и число недочёта критериев из ЖИВОЙ шкалы — для панели «Моя оценка».
 
     В immutable-карточке их нет (там только вердикты ИИ), а человеку, который
     оценивает сам, нужны и вес («12 pts», как в журнале), и текст критерия под
@@ -1697,6 +1697,16 @@ def _attach_scale(payload: dict) -> None:
         or any("is_critical" in c and c.get("idx") in by_idx
                and verdict_shape(by_idx[c["idx"]]) != verdict_shape(c)
                for c in criteria))
+    # Число недочёта (сниженный вес, у критического — вычет из итога) — тоже из
+    # живой шкалы, как вес: по ней сервер считает балл «Моей оценки», и с числом из
+    # снимка прогона карточка показала бы один итог, а в журнал ушёл бы другой.
+    # Только при той же форме критериев — иначе карточка и так ждёт «Переоценить».
+    if not payload["scale_changed"]:
+        for c in criteria:
+            meta = by_idx.get(c.get("idx"))
+            if meta and "deficiency" in c:
+                c["deficiency"] = (meta.get("deficiency")
+                                   if isinstance(meta.get("deficiency"), dict) else None)
 
 
 def _my_review(subject_kind: str, call_id: int, reviewer_id: int, journal: dict | None):
@@ -1857,12 +1867,14 @@ def _normalise_legacy_ai_verdicts(card: dict) -> bool:
 
 
 def _ai_score(direction: dict, result: dict):
-    """Балл ИИ по той же формуле, что и человеческий (main.jsx): критический Incorrect → 0;
-    иначе сумма весов НЕкритических критериев со статусом Correct/N/A; Deficiency даёт
-    частичный зачёт — вес недочёта из шкалы (criterion.deficiency.weight). Критерии, которые
-    ИИ не может проверить (system_api/manual → Pending), считаем зачётом (benefit of the doubt).
-    Но Pending по TRANSCRIPT-критерию = модель не вернула вердикт даже после повтора —
-    оценка неполная, балла нет (None): сбой не должен превращаться в незаслуженный зачёт."""
+    """Балл ИИ по той же формуле, что и человеческий (journalScore.js): критический
+    Incorrect → 0; иначе сумма весов НЕкритических критериев со статусом Correct/N/A;
+    Deficiency даёт частичный зачёт — вес недочёта из шкалы (criterion.deficiency.weight),
+    а Deficiency по КРИТИЧЕСКОМУ критерию снимает с итога установленное в шкале число баллов
+    (не ниже нуля). Критерии, которые ИИ не может проверить (system_api/manual → Pending),
+    считаем зачётом (benefit of the doubt). Но Pending по TRANSCRIPT-критерию = модель не
+    вернула вердикт даже после повтора — оценка неполная, балла нет (None): сбой не должен
+    превращаться в незаслуженный зачёт."""
     rows = result.get("per_criterion", [])
     if any(r.get("source") == "transcript" and r.get("verdict") == "Pending" for r in rows):
         return None
@@ -1873,16 +1885,19 @@ def _ai_score(direction: dict, result: dict):
         if c.get("is_critical") and verdict.get(c["idx"]) in ("Incorrect", "Error"):
             return 0
     total = 0.0
+    penalty = 0.0
     for c in crits:
-        if c.get("is_critical"):
-            continue
         v = verdict.get(c["idx"])
+        if c.get("is_critical"):
+            if v == "Deficiency":
+                penalty += human_review_mod.critical_deficiency_penalty(c)
+            continue
         if v in ("Correct", "N/A", "Pending"):
             total += (c.get("weight") or 0)
         elif v == "Deficiency":
             deficiency = c.get("deficiency") if isinstance(c.get("deficiency"), dict) else {}
             total += float(deficiency.get("weight") or 0)
-    return round(total)
+    return round(max(0.0, total - penalty))
 
 
 def _score_breakdown(direction: dict, result: dict) -> dict:

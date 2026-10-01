@@ -43,8 +43,13 @@ class VerdictRulesTests(unittest.TestCase):
     def test_allowed_verdicts_mirror_journal_buttons(self):
         self.assertEqual(hr.allowed_verdicts(SCALE[0]), ("Correct", "Incorrect", "N/A"))
         self.assertEqual(hr.allowed_verdicts(SCALE[1]), ("Correct", "Incorrect", "Deficiency", "N/A"))
-        # У критического критерия нет «Ошибки» и «Недочёта» — только критическая ошибка.
+        # У критического критерия нет «Ошибки» — только критическая ошибка, а
+        # «Недочёт» — лишь когда шкала его задаёт (там он снимает баллы с итога).
         self.assertEqual(hr.allowed_verdicts(SCALE[3]), ("Correct", "N/A", "Error"))
+        critical_with_deficiency = _crit(4, None, critical=True,
+                                         deficiency={"weight": 10, "description": "тон"})
+        self.assertEqual(hr.allowed_verdicts(critical_with_deficiency),
+                         ("Correct", "N/A", "Deficiency", "Error"))
 
     def test_verdict_from_ai_maps_critical_incorrect_to_error(self):
         self.assertEqual(hr.verdict_from_ai(SCALE[3], "Incorrect"), "Error")
@@ -135,9 +140,12 @@ class FrontendMirrorTests(unittest.TestCase):
     def test_js_module_mirrors_the_rules(self):
         js = (ROOT / "src" / "components" / "call_qa" / "humanReview.js").read_text(encoding="utf-8-sig")
         self.assertIn("COMMENT_REQUIRED = new Set([INCORRECT, ERROR])", js)
-        self.assertIn("if (criterion?.is_critical) return [CORRECT, NOT_APPLICABLE, ERROR];", js)
+        self.assertIn("[CORRECT, NOT_APPLICABLE, DEFICIENCY, ERROR]", js)
+        self.assertIn(": [CORRECT, NOT_APPLICABLE, ERROR];", js)
         self.assertIn("if (verdict === INCORRECT && criterion?.is_critical) verdict = ERROR;", js)
         self.assertIn("if (criteria.some((c, i) => c.is_critical && scores[i] === ERROR)) return 0;", js)
+        self.assertIn("if (v === DEFICIENCY) penalty += criticalDeficiencyPenalty(c);", js)
+        self.assertIn("return Math.round(Math.max(0, total - penalty));", js)
 
 
 class SchemaTests(unittest.TestCase):

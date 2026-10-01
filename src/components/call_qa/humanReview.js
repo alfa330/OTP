@@ -3,7 +3,7 @@
  * Зеркало call_qa/human_review.py: набор кнопок у критерия, перевод вердикта
  * ИИ в вердикт человека (им карточка и заполнена с самого начала), что считать
  * исправлением ИИ, обязательность комментария и балл журнала
- * (src/call_evaluation/main.jsx, totalScore). Сервер считает то же самое и
+ * (src/call_evaluation/journalScore.js). Сервер считает то же самое и
  * является истиной; здесь — чтобы человек видел балл и подсказки до отправки, а
  * не после отказа.
  *
@@ -26,9 +26,22 @@ export const hasDeficiency = (criterion) => (
     && criterion.deficiency.weight != null
 );
 
+/* Сколько баллов снимает с итога «Недочёт» по критическому критерию. Поле в
+ * шкале одно — deficiency.weight, смысл задаёт критичность: у взвешенного
+ * критерия это частичный зачёт, у критического — вычет вместо обнуления. */
+export const criticalDeficiencyPenalty = (criterion) => (
+    criterion?.is_critical && hasDeficiency(criterion)
+        ? Math.max(0, Number(criterion.deficiency.weight) || 0)
+        : 0
+);
+
 /** Кнопки у критерия — ровно те, что в журнале. */
 export const allowedVerdicts = (criterion) => {
-    if (criterion?.is_critical) return [CORRECT, NOT_APPLICABLE, ERROR];
+    if (criterion?.is_critical) {
+        return hasDeficiency(criterion)
+            ? [CORRECT, NOT_APPLICABLE, DEFICIENCY, ERROR]
+            : [CORRECT, NOT_APPLICABLE, ERROR];
+    }
     return hasDeficiency(criterion)
         ? [CORRECT, INCORRECT, DEFICIENCY, NOT_APPLICABLE]
         : [CORRECT, INCORRECT, NOT_APPLICABLE];
@@ -144,14 +157,18 @@ export const filledCount = (criteria, scores) => (
 export const scoreOf = (criteria, scores) => {
     if (!isComplete(criteria, scores)) return null;
     if (criteria.some((c, i) => c.is_critical && scores[i] === ERROR)) return 0;
+    let penalty = 0;
     const total = criteria.reduce((sum, c, i) => {
-        if (c.is_critical) return sum;
         const v = scores[i];
+        if (c.is_critical) {
+            if (v === DEFICIENCY) penalty += criticalDeficiencyPenalty(c);
+            return sum;
+        }
         if (v === CORRECT || v === NOT_APPLICABLE) return sum + (Number(c.weight) || 0);
         if (v === DEFICIENCY && hasDeficiency(c)) return sum + (Number(c.deficiency.weight) || 0);
         return sum;
     }, 0);
-    return Math.round(total);
+    return Math.round(Math.max(0, total - penalty));
 };
 
 /**

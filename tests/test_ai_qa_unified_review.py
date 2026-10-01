@@ -129,6 +129,26 @@ class ScaleShapeTests(unittest.TestCase):
         live = {"idx": 0, "name": "Выявление", "is_critical": False, "deficiency": None, "weight": 10}
         self.assertTrue(self._attach([dict(card)], [live])["scale_changed"])
 
+    def test_same_shape_takes_live_deficiency_number(self):
+        """Вычет поменяли (10 → 20) — форма та же, карточка не закрыта, и её итог
+        обязан считаться тем же числом, что сервер, иначе в журнал ушёл бы другой балл."""
+        card = {"idx": 0, "name": "Грубость", "is_critical": True,
+                "deficiency": {"weight": 10, "description": "тон"}}
+        live = {"idx": 0, "name": "Грубость", "is_critical": True, "weight": 0,
+                "deficiency": {"weight": 20, "description": "повышенный тон"}}
+        payload = self._attach([dict(card)], [live])
+        self.assertFalse(payload["scale_changed"])
+        self.assertEqual(payload["criteria"][0]["deficiency"],
+                         {"weight": 20, "description": "повышенный тон"})
+
+    def test_changed_shape_keeps_run_deficiency(self):
+        # Недочёт сняли — карточка ждёт «Переоценить», её кнопки остаются от прогона.
+        card = {"idx": 0, "name": "Грубость", "is_critical": True, "deficiency": {"weight": 10}}
+        live = {"idx": 0, "name": "Грубость", "is_critical": True, "deficiency": None, "weight": 0}
+        payload = self._attach([dict(card)], [live])
+        self.assertTrue(payload["scale_changed"])
+        self.assertEqual(payload["criteria"][0]["deficiency"], {"weight": 10})
+
     def test_state_payload_without_flags_is_not_compared(self):
         # human_review_state собирает карточку из одних idx — сравнивать там нечего.
         live = {"idx": 0, "name": "Лояльность", "is_critical": True, "deficiency": None, "weight": None}

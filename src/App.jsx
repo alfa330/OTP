@@ -59438,7 +59438,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                             </div>
                                                                                             {crit?.deficiency && (
                                                                                                 <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs sm:text-sm text-amber-900">
-                                                                                                    Недочет: {Math.max(0, Number(crit?.deficiency?.weight || 0))}%
+                                                                                                    {/* У критичного критерия недочёт — вычет из итога, а не сниженный вес. */}
+                                                                                                    Недочет: {isCritical ? '−' : ''}{Math.max(0, Number(crit?.deficiency?.weight || 0))}{isCritical ? ' б.' : '%'}
                                                                                                     {deficiencyDescription ? ` - ${deficiencyDescription}` : ''}
                                                                                                 </div>
                                                                                             )}

@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import './styles.css';
 import FaIcon from '../components/common/FaIcon';
 import { CALL_KIND_ANY, CALL_KIND_OPTIONS, callKindFlags } from './randomCallKind';
+import { criticalDeficiencyPenalty, journalTotalScore } from './journalScore';
 import {
     EMPLOYMENT_STATUS_META, buildEmploymentStatusBuckets, buildEmploymentStatusTabs,
     describeDismissalChip, describeTransferChip, isFiredStatus, normalizeEmploymentStatus,
@@ -1030,7 +1031,14 @@ const CriterionCard = ({ criterion, index, score, comment, commentVisible, onSco
                         </>
                     )}
                     {criterion.isCritical && (
-                        <ScoreToggle label="Критич. ошибка" value="Error" active={score === 'Error'} onClick={() => onScoreChange('Error')} />
+                        <>
+                            {/* Недочёт критического критерия не обнуляет итог, а снимает
+                                установленное в шкале число баллов — оно на кнопке. */}
+                            {criterion.deficiency && (
+                                <ScoreToggle label={`Недочёт −${criticalDeficiencyPenalty(criterion)}`} value="Deficiency" active={score === 'Deficiency'} onClick={() => onScoreChange('Deficiency')} />
+                            )}
+                            <ScoreToggle label="Критич. ошибка" value="Error" active={score === 'Error'} onClick={() => onScoreChange('Error')} />
+                        </>
                     )}
                 </div>
 
@@ -3322,12 +3330,7 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
 
     const wazzupUrl = wazzupChatUrlFromSnapshot(snapshot);
     const hasCriticalError = criteria.some((c, i) => c.isCritical && scores[i] === 'Error');
-    const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, c, i) => {
-        if (c.isCritical) return sum;
-        if (scores[i] === 'Correct' || scores[i] === 'N/A') return sum + c.weight;
-        if (scores[i] === 'Deficiency' && c.deficiency) return sum + c.deficiency.weight;
-        return sum;
-    }, 0);
+    const totalScore = journalTotalScore(criteria, scores);
 
     const addQuote = ({ messageId, text }) => {
         const msg = (snapshot.messages || []).find((m) => String(m.id) === String(messageId));
@@ -3975,12 +3978,7 @@ const EvaluationModal = ({
     };
 
     const hasCriticalError = criteria.some((c,i) => c.isCritical && scores[i]==='Error');
-    const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, c, i) => {
-        if (c.isCritical) return sum;
-        if (scores[i]==='Correct'||scores[i]==='N/A') return sum + c.weight;
-        if (scores[i]==='Deficiency'&&c.deficiency) return sum + c.deficiency.weight;
-        return sum;
-    }, 0);
+    const totalScore = journalTotalScore(criteria, scores);
 
     const isSubmitDisabled = !activeOperator || !currentDir || !criteria.length ||
         (isCalibrationAddCallMode && !calibrationRoomId) ||
@@ -4384,12 +4382,7 @@ const CalibrationReviewModal = ({ isOpen, onClose, callEntry, userId, onSubmitte
     }, [isOpen, callEntry, criteria.length]);
 
     const hasCriticalError = criteria.some((c, i) => c?.isCritical && scores[i] === 'Error');
-    const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, c, i) => {
-        if (c?.isCritical) return sum;
-        if (scores[i] === 'Correct' || scores[i] === 'N/A') return sum + (Number(c?.weight) || 0);
-        if (scores[i] === 'Deficiency' && c?.deficiency?.weight != null) return sum + (Number(c?.deficiency?.weight) || 0);
-        return sum;
-    }, 0);
+    const totalScore = journalTotalScore(criteria, scores);
     const isSubmitDisabled = !callEntry?.id || !callEntry?.room_id || !criteria.length || scores.some((s, i) => (s === 'Error' || s === 'Incorrect') && !comments[i]?.trim());
 
     const submit = async () => {
@@ -7175,6 +7168,7 @@ const App = ({ user, initialSelection }) => {
                                                                             <td>
                                                                                 <span className={call.scores[ci]==='Correct'||call.scores[ci]==='N/A' ? 'score-correct' : 'score-error'}>
                                                                                     {call.scores[ci] || 'Correct'}
+                                                                                    {c.isCritical && call.scores[ci] === 'Deficiency' && c.deficiency ? ` −${criticalDeficiencyPenalty(c)}` : ''}
                                                                                 </span>
                                                                             </td>
                                                                             <td style={{color:'var(--text-2)',fontSize:12}}>{call.criterionComments?.[ci] || '—'}</td>
@@ -7891,16 +7885,30 @@ const App = ({ user, initialSelection }) => {
                                                                                             </>
                                                                                         )}
                                                                                         {row.is_critical && (
-                                                                                            <ScoreToggle
-                                                                                                label="Критич. ошибка"
-                                                                                                value="Error"
-                                                                                                active={etalonScore === 'Error'}
-                                                                                                onClick={() => {
-                                                                                                    const next = [...etalonScoresDraft];
-                                                                                                    next[row.criterion_index] = 'Error';
-                                                                                                    setEtalonScoresDraft(next);
-                                                                                                }}
-                                                                                            />
+                                                                                            <>
+                                                                                                {!!criterionMeta?.deficiency && (
+                                                                                                    <ScoreToggle
+                                                                                                        label={`Недочёт −${criticalDeficiencyPenalty({ ...criterionMeta, isCritical: true })}`}
+                                                                                                        value="Deficiency"
+                                                                                                        active={etalonScore === 'Deficiency'}
+                                                                                                        onClick={() => {
+                                                                                                            const next = [...etalonScoresDraft];
+                                                                                                            next[row.criterion_index] = 'Deficiency';
+                                                                                                            setEtalonScoresDraft(next);
+                                                                                                        }}
+                                                                                                    />
+                                                                                                )}
+                                                                                                <ScoreToggle
+                                                                                                    label="Критич. ошибка"
+                                                                                                    value="Error"
+                                                                                                    active={etalonScore === 'Error'}
+                                                                                                    onClick={() => {
+                                                                                                        const next = [...etalonScoresDraft];
+                                                                                                        next[row.criterion_index] = 'Error';
+                                                                                                        setEtalonScoresDraft(next);
+                                                                                                    }}
+                                                                                                />
+                                                                                            </>
                                                                                         )}
                                                                                     </div>
                                                                                     {(isNeg || String(etalonComment || '').trim().length > 0) && (

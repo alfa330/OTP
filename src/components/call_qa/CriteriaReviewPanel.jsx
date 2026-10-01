@@ -9,7 +9,8 @@ import { iosCard, iosBtnPrimary, iosBtnGhost, IosBadge, IosHint, IosToggle, scor
 import {
     allowedVerdicts, verdictFromAi, aiVerdictOf, toAiVerdict, isCorrection, aiCommentFor,
     initialVerdicts, quoteInTranscript, scoreOf, validateReview, validateCorrections,
-    isEmptyReview, validationLabel, filledCount, COMMENT_REQUIRED, NEGATIVE, VERDICT_LABEL, ERROR,
+    isEmptyReview, validationLabel, filledCount, criticalDeficiencyPenalty,
+    COMMENT_REQUIRED, NEGATIVE, VERDICT_LABEL, ERROR, DEFICIENCY,
 } from './humanReview';
 import { CHAT_SUBJECTS } from './subjects';
 
@@ -265,6 +266,13 @@ const CriterionReview = memo(function CriterionReview({
     const hasReasoning = aiVerdict != null && Boolean(reasonText || evidence);
     const conf = c.conf != null ? Math.round(Number(c.conf) * 100) : null;
     const critError = value === ERROR;
+    // Недочёт критического критерия снимает баллы с итога, а не обнуляет его.
+    // На кнопке число не помещается (у такого критерия их четыре), поэтому оно в
+    // подсказке кнопки и строкой под кнопками, когда недочёт выбран.
+    const penalty = criticalDeficiencyPenalty(c);
+    // Четыре кнопки с «Критич. ошибкой» в равных долях на телефоне резали подписи
+    // («Недоч…», «Критич. о…»): такой ряд делится по ширине подписей.
+    const fitContent = options.length > 3 && options.includes(ERROR);
 
     // Рамка — ровно одна: серая рамка iosCard стоит в CSS позже цветных и молча
     // перебивала бы их (крит. ошибка, «исправлено», подсветка незаполненного).
@@ -349,7 +357,8 @@ const CriterionReview = memo(function CriterionReview({
                     return (
                         <button key={v} type="button" disabled={locked} aria-pressed={active}
                                 onClick={() => onPick(index, v)}
-                                className={`flex min-h-9 min-w-0 ${v === ERROR ? 'flex-[1.4]' : 'flex-1'} items-center justify-center gap-1 rounded-lg px-1.5 py-1.5 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed ${
+                                title={v === DEFICIENCY && penalty ? `Снимает ${penalty} б. с итога, а не обнуляет его` : undefined}
+                                className={`flex min-h-9 min-w-0 ${fitContent ? 'flex-auto' : v === ERROR ? 'flex-[1.4]' : 'flex-1'} items-center justify-center gap-1 rounded-lg px-1.5 py-1.5 text-[12px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:cursor-not-allowed ${
                                     active ? ui.active : `text-slate-500 ${locked ? 'opacity-60' : 'hover:text-slate-700'}`}`}>
                             <ui.Icon size={12} strokeWidth={2.5} className="shrink-0" />
                             <span className="truncate">{VERDICT_LABEL[v]}</span>
@@ -357,6 +366,12 @@ const CriterionReview = memo(function CriterionReview({
                     );
                 })}
             </div>
+
+            {value === DEFICIENCY && penalty > 0 && (
+                <div className="mt-1.5 px-0.5 text-[11.5px] font-medium text-amber-700">
+                    Снимает {penalty} б. с итога
+                </div>
+            )}
 
             {/* Пустой критерий, по которому у ИИ есть вердикт (своя оценка сохранена
                 частичной или ИИ дооценил после «Переоценить»), — вердикт ИИ виден и

@@ -85,6 +85,13 @@ const normalizeCriterion = (criterion = {}) => ({
     : null,
 });
 
+// Недочет взвешенного критерия — сниженный вес (частичный зачёт), критичного —
+// сколько баллов он снимает с итога вместо обнуления.
+const deficiencyValueLabel = (criterion) =>
+  criterion.isCritical
+    ? `−${criterion.deficiency.weight} б.`
+    : `${criterion.deficiency.weight}%`;
+
 const normalizeCalculationModelCode = (value) => {
   const code = String(value || '').trim().toLowerCase();
   if (CALCULATION_MODELS.some((model) => model.code === code)) return code;
@@ -380,7 +387,7 @@ export default function MonitoringScaleView({
     setCritCritical(Boolean(criterion.isCritical));
     setCritWeight(criterion.isCritical ? '' : String(criterion.weight ?? ''));
     setCritValue(criterion.value === EMPTY_DESCRIPTION ? '' : criterion.value || '');
-    if (criterion.deficiency && !criterion.isCritical) {
+    if (criterion.deficiency) {
       setCritHasDef(true);
       setDefWeight(String(criterion.deficiency.weight ?? ''));
       setDefDesc(
@@ -450,6 +457,19 @@ export default function MonitoringScaleView({
       }
     }
 
+    // Поле недочёта одно (deficiency.weight), смысл задаёт критичность: у
+    // взвешенного критерия это частичный зачёт (не больше веса критерия), у
+    // критичного — сколько баллов недочёт снимает с итога вместо обнуления.
+    // Только целое: дробный вычет давал бы итоги на .5, а их журнал, карточка
+    // ИИ и сервер округляют по-разному.
+    if (critHasDef && critCritical) {
+      const penalty = Number(defWeight);
+      if (!Number.isInteger(penalty) || penalty < 1 || penalty > 100) {
+        notify('Недочёт критичного критерия должен снимать целое число баллов от 1 до 100.', 'error');
+        return;
+      }
+    }
+
     if (critHasDef && !critCritical) {
       const deficiencyWeight = Number(defWeight);
       const criterionWeight = Number(critWeight);
@@ -469,7 +489,7 @@ export default function MonitoringScaleView({
       isCritical: critCritical,
       value: critValue.trim() || EMPTY_DESCRIPTION,
       deficiency:
-        critHasDef && !critCritical
+        critHasDef
           ? {
               weight: Number(defWeight),
               description: defDesc.trim() || EMPTY_DESCRIPTION,
@@ -1981,12 +2001,13 @@ export default function MonitoringScaleView({
                             onChange={(event) => {
                               const isChecked = event.target.checked;
                               setCritCritical(isChecked);
-                              if (isChecked) {
-                                setCritWeight('');
-                                setCritHasDef(false);
-                                setDefWeight('');
-                                setDefDesc('');
-                              }
+                              if (isChecked) setCritWeight('');
+                              // Число недочёта у взвешенного и критичного критерия значит
+                              // разное (зачёт против вычета) — при смене типа недочёт
+                              // задаётся заново.
+                              setCritHasDef(false);
+                              setDefWeight('');
+                              setDefDesc('');
                             }}
                           />
                           <div>
@@ -2013,38 +2034,42 @@ export default function MonitoringScaleView({
                           </div>
                         ) : null}
 
-                        {!critCritical ? (
-                          <label className="toggle-row">
-                            <input
-                              type="checkbox"
-                              checked={critHasDef}
-                              onChange={(event) => {
-                                const isChecked = event.target.checked;
-                                setCritHasDef(isChecked);
-                                if (!isChecked) {
-                                  setDefWeight('');
-                                  setDefDesc('');
-                                }
-                              }}
-                            />
-                            <div>
-                              <span className="toggle-row-title">Есть недочет</span>
-                              <span className="toggle-row-hint">
-                                Для частичной ошибки можно указать отдельный сниженный вес.
-                              </span>
-                            </div>
-                          </label>
-                        ) : null}
+                        <label className="toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={critHasDef}
+                            onChange={(event) => {
+                              const isChecked = event.target.checked;
+                              setCritHasDef(isChecked);
+                              if (!isChecked) {
+                                setDefWeight('');
+                                setDefDesc('');
+                              }
+                            }}
+                          />
+                          <div>
+                            <span className="toggle-row-title">Есть недочет</span>
+                            <span className="toggle-row-hint">
+                              {critCritical
+                                ? 'Недочет снимает с итога указанное число баллов, а не обнуляет оценку.'
+                                : 'Для частичной ошибки можно указать отдельный сниженный вес.'}
+                            </span>
+                          </div>
+                        </label>
 
-                        {critHasDef && !critCritical ? (
+                        {critHasDef ? (
                           <div className="msv-indent">
-                            <label className="field-label">Вес недочета</label>
+                            <label className="field-label">
+                              {critCritical ? 'Сколько баллов снимает недочет' : 'Вес недочета'}
+                            </label>
                             <input
                               type="number"
                               value={defWeight}
                               onChange={(event) => setDefWeight(event.target.value)}
-                              placeholder={`1 – ${critWeight || '...'}`}
+                              placeholder={critCritical ? '1 – 100' : `1 – ${critWeight || '...'}`}
                               min="1"
+                              max={critCritical ? '100' : undefined}
+                              step={critCritical ? '1' : undefined}
                             />
                           </div>
                         ) : null}
@@ -2059,13 +2084,15 @@ export default function MonitoringScaleView({
                           />
                         </div>
 
-                        {critHasDef && !critCritical ? (
+                        {critHasDef ? (
                           <div className="msv-indent">
                             <label className="field-label">Описание недочета</label>
                             <textarea
                               value={defDesc}
                               onChange={(event) => setDefDesc(event.target.value)}
-                              placeholder="Опишите, как выглядит частичная ошибка..."
+                              placeholder={critCritical
+                                ? 'Опишите, какое нарушение считается недочетом, а не критической ошибкой...'
+                                : 'Опишите, как выглядит частичная ошибка...'}
                               style={{ minHeight: 96 }}
                             />
                           </div>
@@ -2135,7 +2162,7 @@ export default function MonitoringScaleView({
                             {activeCriterion.deficiency ? (
                               <span className="chip orange">
                                 <Icon icon="fa-circle-info" size={10} />
-                                Недочет {activeCriterion.deficiency.weight}%
+                                Недочет {deficiencyValueLabel(activeCriterion)}
                               </span>
                             ) : null}
                           </div>
@@ -2181,7 +2208,7 @@ export default function MonitoringScaleView({
                         <span className="msv-criterion-label">Недочет</span>
                         <span className="msv-criterion-value">
                           {activeCriterion.deficiency
-                            ? `${activeCriterion.deficiency.weight}%`
+                            ? deficiencyValueLabel(activeCriterion)
                             : 'Не задан'}
                         </span>
                       </div>

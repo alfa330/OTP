@@ -2981,10 +2981,12 @@ def _calibration_label_score(value):
 
 
 def _compute_total_score_from_criteria(criteria, scores):
+    """Балл калибровки — формула журнала (src/call_evaluation/journalScore.js)."""
     criteria = criteria if isinstance(criteria, list) else []
     scores = scores if isinstance(scores, list) else []
     has_critical_error = False
     total = 0.0
+    penalty = 0.0
 
     for idx, criterion in enumerate(criteria):
         criterion = criterion if isinstance(criterion, dict) else {}
@@ -2993,6 +2995,14 @@ def _compute_total_score_from_criteria(criteria, scores):
         if is_critical:
             if score_value == 'Error':
                 has_critical_error = True
+            elif score_value == 'Deficiency':
+                # Недочёт критического критерия не обнуляет итог, а снимает
+                # установленное в шкале число баллов (deficiency.weight).
+                deficiency = criterion.get('deficiency') if isinstance(criterion.get('deficiency'), dict) else {}
+                try:
+                    penalty += max(0.0, float(deficiency.get('weight') or 0))
+                except Exception:
+                    pass
             continue
         try:
             weight = float(criterion.get('weight') or 0)
@@ -3009,7 +3019,7 @@ def _compute_total_score_from_criteria(criteria, scores):
 
     if has_critical_error:
         return 0.0, True
-    return round(float(total), 2), False
+    return round(max(0.0, float(total) - penalty), 2), False
 
 
 def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluations, admin_scores=None, admin_comments=None):

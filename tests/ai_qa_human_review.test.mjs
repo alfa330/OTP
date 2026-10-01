@@ -5,7 +5,7 @@ import {
     allowedVerdicts, verdictFromAi, scoreOf, validateReview, isEmptyReview, validationLabel,
     alignScores, alignComments, filledCount, isComplete,
     toAiVerdict, aiVerdictOf, isCorrection, aiCommentFor, initialVerdicts, validateCorrections,
-    quoteInTranscript,
+    quoteInTranscript, criticalDeficiencyPenalty,
 } from '../src/components/call_qa/humanReview.js';
 
 /**
@@ -44,6 +44,27 @@ test('балл — формула журнала', () => {
     assert.equal(scoreOf(SCALE, ['Correct', 'Deficiency', 'Correct', 'Correct']), 85);
     assert.equal(scoreOf(SCALE, ['Correct', 'Correct', 'N/A', 'N/A']), 100);
     assert.equal(scoreOf(SCALE, ['Correct', 'Correct', 'Correct', 'Error']), 0);
+});
+
+/* Недочёт критического критерия — вычет установленного числа баллов из итога
+ * вместо обнуления (как в журнале и на сервере: call_qa/human_review.score_of). */
+test('недочёт критического критерия снимает баллы, а не обнуляет', () => {
+    const scale = [
+        crit(0, 60),
+        crit(1, 40, { deficiency: { weight: 15, description: 'частично' } }),
+        crit(2, null, { is_critical: true, deficiency: { weight: 10, description: 'тон' } }),
+        crit(3, null, { is_critical: true }),
+    ];
+    assert.deepEqual(allowedVerdicts(scale[2]), ['Correct', 'N/A', 'Deficiency', 'Error']);
+    assert.deepEqual(allowedVerdicts(scale[3]), ['Correct', 'N/A', 'Error']);
+    assert.equal(criticalDeficiencyPenalty(scale[2]), 10);
+    assert.equal(criticalDeficiencyPenalty(scale[1]), 0);
+    assert.equal(verdictFromAi(scale[2], 'Deficiency'), 'Deficiency');
+    assert.equal(verdictFromAi(scale[2], 'Incorrect'), 'Error');
+    assert.equal(scoreOf(scale, ['Correct', 'Correct', 'Deficiency', 'Correct']), 90);
+    assert.equal(scoreOf(scale, ['Correct', 'Deficiency', 'Deficiency', 'Correct']), 65);
+    assert.equal(scoreOf(scale, ['Incorrect', 'Incorrect', 'Deficiency', 'Correct']), 0);
+    assert.equal(scoreOf(scale, ['Correct', 'Correct', 'Deficiency', 'Error']), 0);
 });
 
 test('частичная оценка балла не имеет', () => {
