@@ -1,19 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Чтение журнала очередей из базы станции. Работает ИЗНУТРИ корпоративной сети.
+"""Чтение базы самой станции: CDR, журнал очередей и справочник номеров. Работает ИЗНУТРИ
+корпоративной сети.
 
-Зачем ещё один источник, если есть HTTP-ручка CDR
--------------------------------------------------
-Надстройка станции склеивает звонок в одну строку и теряет момент ответа, а ожидание
-приходится выводить из длины автоинформатора (см. `cdr/queue_facts.py`). Сам Asterisk
-пишет те же величины точно — в таблицу `queuelog` своей базы. С 21.09.2026 у нас есть
-на неё учётка ТОЛЬКО НА ЧТЕНИЕ (`SELECT` на `asteriskcdrdb`).
+Почему не HTTP-ручка надстройки
+-------------------------------
+Надстройка «FreePBX Stats» на отдельной машине склеивает звонок в одну строку и теряет
+момент ответа, разговор оператора и его запись; ожидание приходилось выводить из длины
+автоинформатора (см. `cdr/queue_facts.py`). А 30.09.2026 в 22:31 она просто перестала
+отвечать (порты закрыты при живом хосте), и мост остался без данных на ночь и утро: сама
+станция всё это время писала звонки. Сам Asterisk пишет всё точно — в свою базу: сырые
+плечи в `cdr`, события очередей в `queuelog`, номера сотрудников в `asterisk.users`. С
+21.09.2026 у нас есть на неё учётка ТОЛЬКО НА ЧТЕНИЕ (`SELECT` на `asteriskcdrdb` и
+`asterisk`), и с 1.5.0 мост берёт оттуда всё: надстройка ему больше не нужна.
 
 Чем это безопасно для станции
 -----------------------------
-  * один запрос за цикл, одно соединение, никакого пула;
-  * окно по индексированной колонке `time` и потолок строк — полных сканов нет.
-    Проверено 21.09.2026: `COUNT(*)` по неиндексированному полю `cel.eventtime`
-    рвёт соединение по таймауту, а выборка окном по `time` отвечает мгновенно;
+  * по запросу на источник за цикл, одно соединение, никакого пула;
+  * окна по индексированным колонкам (`cdr.calldate`, `queuelog.time`) и потолок строк —
+    полных сканов нет. Проверено 21.09.2026: `COUNT(*)` по неиндексированному полю
+    `cel.eventtime` рвёт соединение по таймауту, а выборка окном по `time` отвечает
+    мгновенно; сутки `cdr` (3–9 тыс. строк) — так же;
   * читаются только девять типов событий (`queue_facts.WANTED_EVENTS`). Паузы операторов
     и попытки дозвона (`RINGNOANSWER` — тысячи строк в сутки) остаются на станции;
   * никаких `INSERT`/`UPDATE`: их и грант не позволит.
@@ -53,6 +59,67 @@ _QUEUE_SQL = (
     " ORDER BY id "
     " LIMIT %s"
 )
+
+# ── CDR ──────────────────────────────────────────────────────────────────────
+# Сутки станции — 3–9 тыс. плеч (22–29.09.2026). Потолок впятеро выше и не обрезает молча:
+# упёрлись — это ошибка чтения, а не неполные сутки на портале.
+CDR_MAX_ROWS = 50000
+# Окно суточного задания — сутки с часовым хвостом, плюс час запаса назад (CDR_LEAD).
+CDR_MAX_WINDOW = timedelta(hours=26)
+# Запас назад от начала окна. Строка CDR — плечо, а не звонок: звонок, пришедший в 23:59:45,
+# кончается после полуночи, и его плечи за полночью без начала склеились бы в отдельное
+# касание новых суток (23.09.2026 так задвоился бы звонок 22.09). С запасом звонок
+# собирается целиком, получает настоящее начало, и фильтр суток по началу касания отдаёт
+# его прошлым суткам. Надстройка, отдававшая строку на звонок, этой ловушки не знала.
+CDR_LEAD = timedelta(hours=1)
+
+# Те же поля, что отдавала надстройка (`/freepbx/cdr`): склейке (`cdr.touches`) нужны они.
+_CDR_COLUMNS = ('calldate', 'clid', 'src', 'dst', 'dcontext', 'channel', 'dstchannel',
+                'duration', 'billsec', 'disposition', 'uniqueid', 'did', 'recordingfile',
+                'linkedid')
+
+# `sequence` — порядок записи строк станцией: у плеч одной секунды он и есть их порядок.
+_CDR_SQL = (
+    "SELECT " + ', '.join(_CDR_COLUMNS) + " "
+    "  FROM cdr "
+    " WHERE calldate >= %s AND calldate < %s "
+    " ORDER BY calldate, sequence "
+    " LIMIT %s"
+)
+
+# Справочник номеров самой станции — то, что надстройка отдавала ручкой `/agents/map`:
+# имя в транслите («Ivanov_Ivan»), портал сверяет его с ФИО по словам (cdr/directory.py).
+_AGENTS_SQL = "SELECT extension, name FROM asterisk.users"
+
+
+def _text(value):
+    return '' if value is None else str(value)
+
+
+def _cdr_row(values):
+    row = dict(zip(_CDR_COLUMNS, values))
+    calldate = row['calldate']
+    row['calldate'] = (calldate.strftime('%Y-%m-%dT%H:%M:%S') if isinstance(calldate, datetime)
+                       else _text(calldate).replace(' ', 'T')[:19])
+    for name in ('duration', 'billsec'):
+        try:
+            row[name] = int(row[name] or 0)
+        except (TypeError, ValueError):
+            row[name] = 0
+    for name in _CDR_COLUMNS:
+        if name not in ('calldate', 'duration', 'billsec'):
+            row[name] = _text(row[name])
+    # Готовой ссылки на запись станция в базе не хранит: склейка соберёт её из имени файла
+    # и даты (`cdr.touches._recording_url`) — тем же адресом, каким её давала надстройка.
+    row['recording_url'] = None
+    return row
+
+
+def _moment(text):
+    try:
+        return datetime.strptime(str(text or '')[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        raise PbxDbError('граница окна %r не разбирается' % (text,))
 
 
 class PbxDbError(Exception):
@@ -153,6 +220,47 @@ class PbxDb:
     def facts(self, start, end):
         """Готовые факты звонков за окно: {callid: {вход, ответ, ожидание, разговор, отбой}}."""
         return queue_facts.build_facts(self.queue_rows(start, end))
+
+    def cdr_rows(self, start, end):
+        """Плечи CDR станции за окно [start, end) — словари с полями, которые ждёт склейка."""
+        if not self.enabled:
+            raise PbxDbError('база станции не настроена')
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            raise PbxDbError('окно CDR задаётся временем')
+        if not timedelta(0) < end - start <= CDR_MAX_WINDOW:
+            raise PbxDbError('окно CDR %s — %s шире суток с хвостом' % (start, end))
+        rows = self._cursor_rows(_CDR_SQL, [start, end, CDR_MAX_ROWS])
+        if len(rows) >= CDR_MAX_ROWS:
+            # Обрезанные сутки на портале выглядели бы как тихий день, а не как ошибка.
+            raise PbxDbError('CDR: упёрлись в потолок %d строк за %s — %s'
+                             % (CDR_MAX_ROWS, start, end))
+        return [_cdr_row(row) for row in rows]
+
+    def iter_cdr(self, from_dt, to_dt, on_page=None):
+        """Тот же вход, что у `Station.iter_cdr`: границы строками, на выходе строки CDR.
+
+        Читается с запасом назад (`CDR_LEAD`): звонок, начатый до начала окна, должен
+        собраться целиком, иначе его хвост станет лишним касанием. Касания из запаса
+        отсекает тот, кто знает свои сутки, — по дате начала касания."""
+        rows = self.cdr_rows(_moment(from_dt) - CDR_LEAD, _moment(to_dt))
+        if on_page:
+            on_page(len(rows))
+        return iter(rows)
+
+    def agents_map(self):
+        """ext → имя по справочнику самой станции (`asterisk.users`)."""
+        if not self.enabled:
+            raise PbxDbError('база станции не настроена')
+        out = {}
+        for extension, name in self._cursor_rows(_AGENTS_SQL, []):
+            ext = _text(extension).strip()
+            if ext:
+                out[ext] = _text(name).strip()
+        return out
+
+    def describe(self):
+        """Где лежит источник — для строки состояния моста на портале (без учётки)."""
+        return 'mysql://%s:%d/%s' % (self.host, self.port, self.database)
 
 
 def from_config(config):

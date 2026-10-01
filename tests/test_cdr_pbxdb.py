@@ -175,6 +175,85 @@ class SnapshotTrapTests(unittest.TestCase):
                         'без autocommit мост читает один и тот же снимок весь день')
 
 
+def cdr_row(at='2026-09-21 09:00:26', linkedid='1.1', billsec=30, recordingfile=None):
+    """Строка `cdr`, как её отдаёт pymysql: время — datetime, NULL — None."""
+    return (datetime.strptime(at, '%Y-%m-%d %H:%M:%S'), '"Client" <+77015550001>',
+            '+77015550001', '3001', 'ext-queues', 'PJSIP/+77475555578-0006ce4f',
+            'Local/6699@from-queue-0005e9cf;1', 40, billsec, 'ANSWERED', linkedid,
+            '7475555578', recordingfile, linkedid)
+
+
+class CdrTests(unittest.TestCase):
+    """С 1.5.0 мост берёт CDR из базы станции, а не у надстройки: строки обязаны выглядеть
+    так, как их ждёт склейка, а чтение — оставаться таким же бережным, как журнал очередей."""
+
+    def setUp(self):
+        self.conn = _Conn(rows=[cdr_row(), cdr_row(at='2026-09-21 09:00:31', billsec=0)])
+        self.source = pbxdb.PbxDb(host='10.0.0.1', user='ro', password='x',
+                                  connect=lambda: self.conn)
+
+    def test_rows_have_the_fields_the_touch_builder_reads(self):
+        rows = self.source.cdr_rows(START, END)
+        self.assertEqual(rows[0]['calldate'], '2026-09-21T09:00:26')
+        self.assertEqual((rows[0]['duration'], rows[0]['billsec']), (40, 30))
+        self.assertEqual(rows[0]['dstchannel'], 'Local/6699@from-queue-0005e9cf;1')
+        self.assertEqual(rows[0]['recordingfile'], '', 'NULL — пустая строка, а не None')
+        self.assertIsNone(rows[0]['recording_url'],
+                          'ссылку склейка соберёт из имени файла и даты сама')
+
+    def test_one_indexed_query_with_a_row_ceiling(self):
+        self.source.cdr_rows(START, END)
+        self.assertEqual(len(self.conn.queries), 1)
+        sql, params = self.conn.queries[0]
+        self.assertIn('FROM cdr WHERE calldate >= %s AND calldate < %s', sql)
+        self.assertIn('ORDER BY calldate, sequence', sql)
+        self.assertEqual(params, [START, END, pbxdb.CDR_MAX_ROWS])
+
+    def test_reading_starts_an_hour_early_to_catch_calls_from_before_midnight(self):
+        """Звонок 23:59:45 кончается после полуночи: без запаса его хвост стал бы лишним
+        касанием новых суток (23.09.2026 так задвоился бы звонок 22.09)."""
+        list(self.source.iter_cdr('2026-09-21T00:00:00', '2026-09-22T01:00:00'))
+        _sql, params = self.conn.queries[0]
+        self.assertEqual(params[0], START - pbxdb.CDR_LEAD)
+        self.assertEqual(params[1], END)
+
+    def test_hitting_the_ceiling_is_an_error_not_a_quiet_day(self):
+        with mock.patch.object(pbxdb, 'CDR_MAX_ROWS', 2):
+            with self.assertRaises(pbxdb.PbxDbError):
+                self.source.cdr_rows(START, END)
+
+    def test_a_window_wider_than_a_day_never_reaches_the_station(self):
+        with self.assertRaises(pbxdb.PbxDbError):
+            self.source.cdr_rows(START, START + timedelta(days=2))
+        self.assertEqual(self.conn.queries, [])
+
+    def test_unreadable_window_bounds_are_refused(self):
+        with self.assertRaises(pbxdb.PbxDbError):
+            list(self.source.iter_cdr('вчера', '2026-09-22T01:00:00'))
+        self.assertEqual(self.conn.queries, [])
+
+    def test_a_disabled_source_refuses_instead_of_returning_an_empty_day(self):
+        """Пустой список выглядел бы как сутки без звонков — и портал закрыл бы их."""
+        with self.assertRaises(pbxdb.PbxDbError):
+            pbxdb.PbxDb(connect=lambda: _Conn()).cdr_rows(START, END)
+
+    def test_cdr_does_not_touch_the_journal_coverage_mark(self):
+        self.source.cdr_rows(START, END)
+        self.assertIsNone(self.source.covered_until,
+                          'отметку полноты журнала ставит только чтение журнала')
+
+
+class DirectoryTests(unittest.TestCase):
+    def test_extensions_and_names_come_from_the_stations_users(self):
+        conn = _Conn(rows=[('6699', 'Ivanov_Ivan'), (6452, 'Petrova Anna'),
+                           ('', 'без номера'), ('305', None)])
+        source = pbxdb.PbxDb(host='10.0.0.1', user='ro', connect=lambda: conn)
+        self.assertEqual(source.agents_map(), {'6699': 'Ivanov_Ivan',
+                                               '6452': 'Petrova Anna', '305': ''})
+        sql, _params = conn.queries[0]
+        self.assertIn('FROM asterisk.users', sql)
+
+
 class ConfigTests(unittest.TestCase):
     def test_empty_config_gives_a_disabled_source(self):
         self.assertFalse(pbxdb.from_config({}).enabled)

@@ -33,6 +33,7 @@ BUSY), у исходящего автодозвона — одна-две. Ск�
 
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 # Внутренний номер в имени канала: PJSIP/6650-0002ca2e, Local/6687@from-queue.
 EXT_RE = re.compile(r"(?:PJSIP|SIP|Local)/(\d{3,4})[-@]")
@@ -53,6 +54,8 @@ IN_REC = re.compile(r"^in-(\d{9,15})-\+?(\d{9,15})-")
 # На строках BUSY тот же Local/<ext> — всего лишь попытка дозвона, не ответ.
 QUEUE_ANSWER_RE = re.compile(r"Local/(\d{3,4})@from-queue")
 QUEUE_OUT_RE = re.compile(r"Local/(3\d{3})@ext-to-queue")
+# Сторона оператора у попытки очереди: `Local/6728@from-queue-0005dc4a;2` → его телефон.
+QUEUE_AGENT_SIDE_RE = re.compile(r"^Local/\d{3,4}@from-queue-[0-9a-f]+;2$")
 
 # Наш номер — линия таксопарка: его набрал клиент или с него позвонили клиенту.
 # Живёт в трёх местах, по доле касаний суток 23.09.2026:
@@ -228,6 +231,7 @@ def _leg(row, kind, agent, client=""):
         "recordingfile": str(row.get("recordingfile") or ""),
         "recording_url": row.get("recording_url"),
         "queue_leg": queue_leg,
+        "agent_side": bool(QUEUE_AGENT_SIDE_RE.match(str(row.get("channel") or ""))),
         "line": _leg_line(row, kind, client),
         "dial_prefix": prefix.group(1) if prefix else "",
     }
@@ -294,6 +298,109 @@ def _line_number(legs, prefix_lines):
     return ""
 
 
+def _moment(value):
+    text = str(value or "")[:19].replace("T", " ")
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _call_seconds(legs):
+    """Сколько длился звонок целиком: от начала первого плеча до конца последнего.
+
+    Строка CDR — одно плечо, и у входящего через очередь каждая попытка дозвониться до
+    оператора — своё плечо в пару секунд: самое длинное из них короче звонка. 29.09.2026
+    клиент 07:19:07 ждал в очереди 3035 две с половиной минуты (70 плеч), а самое длинное
+    плечо — 14 с. По этой величине портал судит, когда звонок кончился (минута ожидания
+    перезвона, полнота журнала очередей), так что занижать её нельзя. У одной строки на
+    звонок (так отдавала надстройка станции) это просто её `duration`."""
+    longest = max((leg["duration"] for leg in legs), default=0)
+    spans = [(moment, moment + timedelta(seconds=leg["duration"]))
+             for leg in legs for moment in (_moment(leg["at"]),) if moment is not None]
+    if not spans:
+        return longest
+    whole = int((max(end for _, end in spans) - min(start for start, _ in spans)).total_seconds())
+    return max(longest, whole)
+
+
+def _outcome_legs(legs, kind):
+    """Плечи, по которым судят, чем кончился звонок.
+
+    У исходящего — плечи К КЛИЕНТУ. Автообзвон сначала соединяет оператора: очередь звонит
+    ему, телефон снимает трубку сам, и в сыром CDR это плечо ANSWERED с billsec в секунду —
+    даже когда клиент так и не ответил. По нему склейка записала бы «Разговор» в одну секунду
+    (51 звонок за 29.09.2026), а робот пропущенных принял бы такой перезвон за дозвон и не
+    завёл бы сделку. Ответил ли клиент, знает только плечо транка.
+
+    У входящего — все плечи: разговор там и так берётся с плеча оператора (`_touch`)."""
+    if kind == "out":
+        client_legs = [leg for leg in legs if leg["kind"] == "out"]
+        if client_legs:
+            return client_legs
+    return legs
+
+
+def _answer_moment(leg):
+    """Когда на плече сняли трубку: начало плеча плюс звон (`duration − billsec`).
+
+    `calldate` плеча — начало вызова, а не ответ: плечо оператора начинается, когда у него
+    зазвонил телефон."""
+    moment = _moment(leg["at"])
+    if moment is None:
+        return str(leg["at"] or "").replace("T", " ")
+    ring = max(0, leg["duration"] - leg["billsec"])
+    return (moment + timedelta(seconds=ring)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _last_rung(legs):
+    """Кому очередь звонила последним — номер непринятого входящего.
+
+    Непринятый звонок в сыром CDR — десятки попыток очереди по разным операторам, и ни
+    одна не называет «того самого». Касание держит номер того, кому очередь звонила,
+    когда клиент положил трубку (так по нему и считаются «потерянные» оператора и его
+    группы на «Табло ОП»): последнее плечо, где назван ровно один внутренний номер.
+    Плечи уже отсортированы по времени."""
+    for leg in reversed(legs):
+        if len(leg["exts"]) == 1:
+            return leg["exts"][0]
+    return None
+
+
+def _own_recording(pick, legs, ext):
+    """Запись звонка: файл выбранного плеча, а без него — файл того же оператора с другого
+    плеча этого же звонка или запись самой очереди (`q-…`, она одна на звонок).
+
+    Запись чужого оператора не берётся никогда: при параллельном дозвоне файл пишется у
+    каждого, кому звонили, и супервайзер слушал бы не тот разговор."""
+    url = _recording_url(pick)
+    if url:
+        return url
+    for leg in reversed(legs):
+        if leg["recordingfile"] and ext and leg["agent"] == ext:
+            return _recording_url(leg)
+    for leg in reversed(legs):
+        if Q_REC.match(leg["recordingfile"]):
+            return _recording_url(leg)
+    return ""
+
+
+def _queue_attempts_only(legs):
+    """В группе одни попытки очереди дозвониться до операторов, а самого звонка в CDR нет.
+
+    Так в сыром CDR выглядит заявка автообзвона, которой никто не ответил: она висит в
+    очереди до четверти часа, очередь звонит операторам каждые пять секунд, и каждая
+    попытка — строка `Local/<ext>@from-queue…;2` с номером клиента в `src`. Строки самой
+    заявки нет никогда. Без этого правила склейка назвала бы её «Входящий (не приняли)»
+    (28.09.2026 — четыре таких, 48–860 строк у каждой), и робот пропущенных завёл бы на
+    неё сделку в amoCRM. Надстройка станции, отдававшая одну строку на звонок, их не
+    показывала вовсе — показывать их и сейчас не за что: клиент нам не звонил.
+
+    Разговор в такой группе — уже не призрак: оператор взял заявку, и касание остаётся."""
+    return all(leg["agent_side"] and not (leg["disposition"] == "ANSWERED" and leg["billsec"] > 0)
+               for leg in legs)
+
+
 def _reached_nobody(legs):
     """Входящий, у которого ни одно плечо не дошло ни до очереди, ни до человека.
 
@@ -334,7 +441,7 @@ def _before_queue_touch(linkedid, client, legs, prefix_lines=None):
         "call_type": TYPE_IN_BEFORE_QUEUE,
         "result": RESULT_BEFORE_QUEUE,
         "talk_seconds": 0,
-        "dial_seconds": max((leg["duration"] for leg in legs), default=0),
+        "dial_seconds": _call_seconds(legs),
         "queue": "",
         "line_number": _line_number(legs, prefix_lines),
         "recording_url": url,
@@ -347,10 +454,11 @@ def _before_queue_touch(linkedid, client, legs, prefix_lines=None):
 def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     legs.sort(key=lambda leg: (leg["at"] or "", leg["disposition"] or ""))
     kind = "out" if any(leg["kind"] == "out" for leg in legs) else "in"
+    decisive = _outcome_legs(legs, kind)
 
     # Разговор считаем по плечу САМОГО АГЕНТА; плечо очереди — только на крайний
     # случай, его billsec раздут ожиданием в очереди.
-    agent_legs = [leg for leg in legs if leg["agent"]]
+    agent_legs = [leg for leg in decisive if leg["agent"]]
     real_legs = [leg for leg in agent_legs if not leg["queue_leg"]]
     talked_real = [leg for leg in real_legs
                    if leg["disposition"] == "ANSWERED" and leg["billsec"] > 0]
@@ -366,9 +474,9 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     elif agent_legs:
         pick = agent_legs[-1]
     else:
-        pick = legs[-1]
+        pick = decisive[-1]
 
-    dispositions = [leg["disposition"] for leg in legs]
+    dispositions = [leg["disposition"] for leg in decisive]
     if billsec > 0:
         result = RESULT_TALK
     elif "ANSWERED" in dispositions:
@@ -387,6 +495,9 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
         # ровно один внутренний номер — это он; если несколько, гадать нельзя.
         candidates = sorted({e for leg in legs for e in leg["exts"]})
         ext = candidates[0] if len(candidates) == 1 else None
+    if ext is None and kind == "in" and not talked:
+        # Кроме непринятого: у него «тот самый» — кому очередь звонила последним.
+        ext = _last_rung(legs)
 
     if kind == "out":
         call_type = TYPE_OUT
@@ -394,13 +505,18 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
         call_type = TYPE_IN if billsec > 0 else TYPE_IN_MISSED
 
     started = min((leg["at"] for leg in legs if leg["at"]), default=pick["at"])
-    answered = pick["at"] if pick["at"] and pick["at"] != started else None
+    started_text = str(started).replace("T", " ") if started else ""
+    # Момент ответа — только у звонка, где поговорили: у брошенного в очереди его не было,
+    # и на пустом поле держится склейка «принят / потерян» на портале.
+    answered = _answer_moment(pick) if talked and pick["at"] else ""
+    if answered == started_text:
+        answered = ""
     name, direction = resolve_operator(ext, started) if ext else ("", "")
-    url = _recording_url(pick)
+    url = _own_recording(pick, legs, ext)
 
     return {
-        "started_at": str(started).replace("T", " ") if started else "",
-        "answered_at": str(answered).replace("T", " ") if answered else "",
+        "started_at": started_text,
+        "answered_at": answered,
         "phone": client,
         "operator": name,
         "ext": ext or "",
@@ -408,7 +524,7 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
         "call_type": call_type,
         "result": result,
         "talk_seconds": billsec,
-        "dial_seconds": max((leg["duration"] for leg in legs), default=0),
+        "dial_seconds": _call_seconds(legs),
         "queue": ",".join(sorted({q for leg in legs for q in leg["queues"]})),
         "line_number": _line_number(legs, prefix_lines),
         "recording_url": url,
@@ -456,7 +572,8 @@ def build_touches(rows, resolve_operator=None, phones=None):
     prefix_lines = learn_prefix_lines(seen_prefixes)
     touches = [_before_queue_touch(linkedid, client, legs, prefix_lines) if _reached_nobody(legs)
                else _touch(linkedid, client, legs, resolve_operator, prefix_lines)
-               for (linkedid, client), legs in groups.items()]
+               for (linkedid, client), legs in groups.items()
+               if not _queue_attempts_only(legs)]
     # Звонок, у которого есть хоть одна строка очереди или агента, — обычное касание, и
     # строки приветствия к нему не подмешиваются: иначе у него сдвинулись бы начало и
     # число плеч, а на них стоит расчёт ожидания на «Табло ОП».

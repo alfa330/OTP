@@ -188,19 +188,29 @@ class LiveTailTests(unittest.TestCase):
 
 
 class _Journal:
-    """Журнал очередей станции: отдаёт события, попавшие в окно запроса."""
+    """База станции: журнал очередей (события, попавшие в окно запроса) и, с моста 1.5.0,
+    сам CDR — его мост тоже берёт оттуда, а не у надстройки."""
 
-    def __init__(self, rows=None, fail=None):
+    def __init__(self, rows=None, fail=None, cdr=None):
         self.rows = rows or []
         self.fail = fail
         self.windows = []
         self.enabled = True
+        self.cdr = list(cdr or [])
+        self.cdr_calls = []
 
     def facts(self, start, end):
         self.windows.append((start, end))
         if self.fail:
             raise self.fail
         return queue_facts.build_facts([r for r in self.rows if start <= r['time'] < end])
+
+    def iter_cdr(self, from_dt, to_dt, on_page=None):
+        self.cdr_calls.append((from_dt, to_dt))
+        return iter(self.cdr)
+
+    def describe(self):
+        return 'mysql://pbx.invalid:3306/asteriskcdrdb'
 
 
 def queue_event(callid, time_text, event, **data):
@@ -338,6 +348,8 @@ class LiveTailBeforeQueueTests(unittest.TestCase):
     def test_the_bridge_day_job_decides_the_same_way(self):
         """Суточная присылка (перечитка старых суток) идёт тем же правилом, что и хвост."""
         from cdr_bridge import agent as agent_mod
+        # С 1.5.0 строки CDR — из базы станции, той же, где журнал очередей.
+        self.journal.cdr = list(self.station.rows)
         bridge = agent_mod.Bridge({'portal': 'http://portal.invalid', 'token': 'x',
                                    'station': 'http://127.0.0.1:9', 'login': '', 'password': ''},
                                   station=self.station, pbxdb_source=self.journal)
@@ -345,6 +357,7 @@ class LiveTailBeforeQueueTests(unittest.TestCase):
         bridge._post = lambda path, payload: sent.append((path, payload)) or {'complete': True}
         self.assertTrue(bridge.do_day({'day': '2026-09-15', 'from_dt': '2026-09-15T00:00:00',
                                        'to_dt': '2026-09-16T01:00:00'}))
+        self.assertEqual(self.station.calls, [], 'к надстройке мост с базой не ходит')
         touches = {t['linkedid']: t for t in sent[0][1]['touches']}
         self.assertEqual(touches['2.2']['call_type'], 'Входящий (не дошёл до очереди)')
         self.assertEqual(touches['2.2']['result'], 'Сброс до очереди')

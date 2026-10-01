@@ -229,6 +229,160 @@ class MidnightTests(unittest.TestCase):
         self.assertEqual(touches[0]['talk_seconds'], 200)
 
 
+class RawLegsTests(unittest.TestCase):
+    """С 1.5.0 мост читает сырые плечи из базы станции, а не строку на звонок от
+    надстройки. Сверка 22–29.09.2026 (15 834 касания) против боевых касаний из надстройки
+    совпала по составу и типам звонков один в один — после правил, закреплённых здесь.
+    Каждое ломается без ошибки: просто цифра на табло или сделка в amoCRM становится другой.
+    """
+
+    def _autodial(self, client_disposition='NO ANSWER', client_billsec=0, agent_billsec=1):
+        """Заявка автообзвона: очередь соединяет оператора (его телефон снимает трубку сам),
+        потом станция набирает клиента через транк."""
+        return [
+            row(calldate='2026-09-29T00:01:36', src='77475555578', dst='7778*77015550090',
+                dcontext='outbound-allroutes', channel='Local/3016@ext-to-queue-0005e9af;1',
+                dstchannel='PJSIP/+77475555578-0006ce0d', duration=3,
+                billsec=client_billsec, disposition=client_disposition,
+                uniqueid='9.1', linkedid='9.1',
+                recordingfile='out-7778*77015550090-6699-20260929-000138-9.1.wav'),
+            row(calldate='2026-09-29T00:01:36', src='7778*77015550090', dst='6699',
+                dcontext='from-internal', channel='Local/6699@from-queue-0005e9b0;2',
+                dstchannel='PJSIP/6699-0006ce0c', duration=3, billsec=agent_billsec,
+                disposition='ANSWERED', uniqueid='9.3', linkedid='9.1'),
+        ]
+
+    def test_autodial_answered_only_by_the_agent_is_not_a_conversation(self):
+        """Клиент не ответил, а плечо оператора ANSWERED с секундой: это не «Разговор».
+        Иначе робот пропущенных принял бы такой перезвон за дозвон и не завёл бы сделку."""
+        touch = T.build_touches(self._autodial())[0]
+        self.assertEqual(touch['call_type'], T.TYPE_OUT)
+        self.assertEqual(touch['result'], T.RESULT_NO_ANSWER)
+        self.assertEqual(touch['talk_seconds'], 0)
+        self.assertEqual(touch['ext'], '6699')
+        self.assertTrue(touch['recording_url'].endswith(
+            'out-7778*77015550090-6699-20260929-000138-9.1.wav'),
+            'запись — с плеча клиента, у плеча оператора файла нет')
+
+    def test_autodial_talk_is_the_clients_leg(self):
+        touch = T.build_touches(self._autodial('ANSWERED', 40, 42))[0]
+        self.assertEqual(touch['result'], T.RESULT_TALK)
+        self.assertEqual(touch['talk_seconds'], 40, 'разговор — по плечу клиента')
+
+    def _missed_ring_all(self):
+        """Очередь звонит двоим по очереди, оба заняты, клиент кладёт трубку."""
+        legs = []
+        for index, (at, ext) in enumerate((('10:00:00', '6651'), ('10:00:05', '6652'),
+                                           ('10:00:10', '6651'), ('10:00:15', '6652'))):
+            legs.append(row(calldate='2026-09-29T' + at, src='+77015550091', dst='3010',
+                            dcontext='ext-queues', channel='PJSIP/+77475555578-0006d35f',
+                            dstchannel='Local/%s@from-queue-0005ee%02x;1' % (ext, index),
+                            duration=5 if index == 0 else 0, disposition='BUSY',
+                            uniqueid='8.1', linkedid='8.1', did='7475555578'))
+        return legs
+
+    def test_missed_call_has_no_answer_moment(self):
+        """На пустом `answered_at` у непринятого держится «принят / потерян» на портале."""
+        touch = T.build_touches(self._missed_ring_all())[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN_MISSED)
+        self.assertEqual(touch['answered_at'], '')
+
+    def test_missed_call_belongs_to_whom_the_queue_rang_last(self):
+        """Иначе потерянный ушёл бы хозяину очереди, а не человеку, и пропал бы сигнал
+        «человек без группы сидит в очередях» (разница «Все» и групп на табло)."""
+        touch = T.build_touches(self._missed_ring_all())[0]
+        self.assertEqual(touch['ext'], '6652')
+
+    def test_call_length_spans_all_legs(self):
+        """Каждая попытка очереди — своё плечо в секунды; звонок длиннее любого из них."""
+        touch = T.build_touches(self._missed_ring_all())[0]
+        self.assertEqual(touch['dial_seconds'], 15)
+
+    def test_dialer_request_nobody_took_is_not_a_call(self):
+        """Заявка автообзвона висит в очереди до четверти часа, и в CDR от неё остаются
+        только попытки очереди `Local/<ext>@from-queue…;2` — строки самой заявки нет."""
+        attempts = [
+            row(calldate='2026-09-28T09:49:36', src='+77015550092', dst='6728',
+                dcontext='from-internal', channel='Local/6728@from-queue-0005dc4a;2',
+                dstchannel='PJSIP/6728-0006ba15', disposition='BUSY',
+                uniqueid='7.2', linkedid='7.1'),
+            row(calldate='2026-09-28T09:49:37', src='+77015550092', dst='6726',
+                dcontext='from-internal', channel='Local/6726@from-queue-0005dc4b;2',
+                dstchannel='PJSIP/6726-0006ba16', disposition='BUSY',
+                uniqueid='7.3', linkedid='7.1'),
+        ]
+        self.assertEqual(T.build_touches(attempts), [])
+        # Есть строка самого звонка в очереди — это настоящий входящий.
+        attempts.append(row(calldate='2026-09-28T09:49:30', src='+77015550092', dst='3034',
+                            dcontext='ext-queues', channel='PJSIP/+77475555578-0006ba10',
+                            dstchannel='Local/6728@from-queue-0005dc4a;1', disposition='BUSY',
+                            uniqueid='7.1', linkedid='7.1', did='7475555578'))
+        touches = T.build_touches(attempts)
+        self.assertEqual(len(touches), 1)
+        self.assertEqual(touches[0]['call_type'], T.TYPE_IN_MISSED)
+
+    def test_dialer_request_somebody_took_stays(self):
+        attempts = [row(calldate='2026-09-28T09:49:36', src='+77015550093', dst='6728',
+                        dcontext='from-internal', channel='Local/6728@from-queue-0005dc4a;2',
+                        dstchannel='PJSIP/6728-0006ba15', disposition='ANSWERED',
+                        duration=35, billsec=30, uniqueid='7.2', linkedid='7.1')]
+        self.assertEqual(len(T.build_touches(attempts)), 1)
+
+    def test_answer_moment_is_the_start_of_the_leg_plus_its_ringing(self):
+        touch = T.build_touches([
+            row(calldate='2026-09-29T10:00:00', src='+77015550094', dst='3001',
+                disposition='ANSWERED', duration=50, billsec=50,
+                dstchannel='Local/6653@from-queue-0001;1', uniqueid='6.1', linkedid='6.1'),
+            row(calldate='2026-09-29T10:00:06', src='+77015550094', dst='6653',
+                disposition='ANSWERED', duration=44, billsec=40, dstchannel='PJSIP/6653-0002',
+                uniqueid='6.2', linkedid='6.1',
+                recordingfile='external-6653-+77015550094-20260929-100006-6.2.wav'),
+        ])[0]
+        self.assertEqual(touch['answered_at'], '2026-09-29 10:00:10')
+        self.assertEqual(touch['talk_seconds'], 40)
+
+    def test_recording_comes_from_the_same_operator_on_another_leg(self):
+        """Оператор снял трубку и сразу положил (у его плеча billsec 0), разговор взят с
+        плеча очереди — а файл лежит на плече оператора."""
+        touch = T.build_touches([
+            row(calldate='2026-09-29T01:11:23', src='+77015550095', dst='3010',
+                disposition='ANSWERED', duration=9, billsec=9,
+                dstchannel='Local/6699@from-queue-0005e9cf;1', uniqueid='5.1', linkedid='5.1'),
+            row(calldate='2026-09-29T01:11:30', src='+77015550095', dst='6699',
+                disposition='ANSWERED', duration=2, billsec=0, dstchannel='PJSIP/6699-0006ce50',
+                uniqueid='5.2', linkedid='5.1',
+                recordingfile='external-6699-+77015550095-20260929-011130-5.2.wav'),
+        ])[0]
+        self.assertEqual(touch['ext'], '6699')
+        self.assertTrue(touch['recording_url'].endswith(
+            'external-6699-+77015550095-20260929-011130-5.2.wav'))
+
+    def test_another_operators_recording_is_never_taken(self):
+        touch = T.build_touches([
+            row(calldate='2026-09-29T01:11:23', src='+77015550096', dst='3010',
+                disposition='ANSWERED', duration=9, billsec=9,
+                dstchannel='Local/6699@from-queue-0005e9cf;1', uniqueid='4.1', linkedid='4.1'),
+            row(calldate='2026-09-29T01:11:23', src='+77015550096', dst='6700',
+                disposition='BUSY', dstchannel='PJSIP/6700-0006ce51',
+                uniqueid='4.2', linkedid='4.1',
+                recordingfile='external-6700-+77015550096-20260929-011123-4.2.wav'),
+        ])[0]
+        self.assertEqual(touch['ext'], '6699')
+        self.assertEqual(touch['recording_url'], '',
+                         'файл 6700 — запись другого оператора, слушать её как этот звонок нельзя')
+
+    def test_one_row_per_call_is_read_as_before(self):
+        """Строка на звонок от надстройки (локальная отладка без базы) склеивается как раньше:
+        новые правила касаются только многоплечевых звонков."""
+        touch = T.build_touches([row(
+            calldate='2026-09-29T11:00:00', src='+77015550097', dst='3001',
+            disposition='ANSWERED', duration=30, billsec=30,
+            dstchannel='Local/6653@from-queue-0001;1')])[0]
+        self.assertEqual(touch['answered_at'], '')
+        self.assertEqual(touch['dial_seconds'], 30)
+        self.assertEqual(touch['ext'], '6653')
+
+
 class RecordingTests(unittest.TestCase):
     def test_ready_url_is_preferred(self):
         touch = T.build_touches([row(

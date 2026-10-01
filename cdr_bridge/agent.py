@@ -19,6 +19,14 @@ Render и до сети не дотягивается — значит, ходи
 склеивает строки в касания ПРЯМО ЗДЕСЬ и отправляет результат. Через интернет
 едут 3,4 тысячи касаний вместо 23 тысяч сырых строк — в десять раз меньше.
 
+Откуда CDR (с 1.5.0)
+--------------------
+Из базы самой станции (`cdr_bridge/pbxdb.py`): сырые плечи `cdr`, журнал очередей
+`queuelog`, справочник номеров `asterisk.users` — одной учёткой на чтение. HTTP-ручки
+надстройки «FreePBX Stats» (`station.py`) мост берёт, только если база не настроена
+(локальная отладка): надстройка теряет момент ответа и запись оператора, а 30.09.2026
+легла на всю ночь, пока станция исправно писала звонки.
+
 Склейка берётся из `cdr.touches` — того же модуля, что живёт на портале. Второй
 копии этой логики быть не должно: она сверена с эталонной выгрузкой построчно, и
 разошедшиеся копии обнаружились бы не сразу, а на цифрах в отчёте.
@@ -95,7 +103,7 @@ from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: 
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.4.2'
+VERSION = '1.5.0'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -219,17 +227,28 @@ class Bridge:
         self.signer = self._build_signer(config)
         self.station = station or Station(config['station'], config['login'],
                                           config['password'])
-        # Журнал очередей станции. Выключен настройками или без драйвера — мост
-        # ведёт себя ровно как до появления точных фактов.
+        # База станции: CDR, журнал очередей и справочник номеров. Выключена настройками или
+        # без драйвера — мост читает CDR у надстройки, как до 1.5.0, и без точных фактов.
         self.pbxdb = pbxdb_source if pbxdb_source is not None else pbxdb.from_config(config)
+        # Откуда берутся строки CDR — и для суток, и для живого хвоста. Источник один на
+        # процесс: строки базы (плечи) и надстройки (строка на звонок) в одних сутках не
+        # смешиваются, иначе у звонка менялось бы число плеч и он уезжал бы на портал зря.
+        self.cdr = self.pbxdb if self.pbxdb.enabled else self.station
         self.records_session = self._build_records_session()
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         try:
             live_interval = int(str(config.get('live_interval') or '0').strip() or 0)
         except ValueError:
             live_interval = 0
-        self.live = (live.LiveTail(self._post, self.station, live_interval, pbxdb=self.pbxdb)
+        self.live = (live.LiveTail(self._post, self.cdr, live_interval, pbxdb=self.pbxdb)
                      if live_interval > 0 else None)
+
+    @property
+    def cdr_label(self):
+        """Где мост берёт CDR — в строку состояния на портале и в журнал запуска."""
+        if self.cdr is self.pbxdb:
+            return self.pbxdb.describe()
+        return self.config['station']
 
     @staticmethod
     def _build_session(config):
@@ -299,7 +318,7 @@ class Bridge:
             'agent_id': self.agent_id,
             'hostname': socket.gethostname(),
             'version': '%s/%s' % (VERSION, platform.python_version()),
-            'station_url': self.config['station'],
+            'station_url': self.cdr_label,
             'error': error,
         })
 
@@ -308,7 +327,8 @@ class Bridge:
     def send_directory(self):
         """Справочник агентов станции. Портал сам к станции не ходит, а знать,
         кто владеет номером сейчас, может только она."""
-        agents = self.station.agents_map()
+        source = self.pbxdb if self.cdr is self.pbxdb else self.station
+        agents = source.agents_map()
         result = self._post('directory', {'agents': agents})
         log.info('Справочник станции отправлен: %d номеров', result.get('agents', 0))
 
@@ -331,11 +351,15 @@ class Bridge:
             return False
         rows = []
         try:
-            for row in self.station.iter_cdr(job['from_dt'], job['to_dt']):
+            for row in self.cdr.iter_cdr(job['from_dt'], job['to_dt']):
                 rows.append(row)
         except StationError as exc:
             log.warning('Сутки %s: станция отказала (%s) — %s', day, exc.code, exc)
             self._report_failure(day, '%s: %s' % (exc.code, exc))
+            return False
+        except pbxdb.PbxDbError as exc:
+            log.warning('Сутки %s: база станции не прочиталась — %s', day, exc)
+            self._report_failure(day, 'база станции: %s' % exc)
             return False
         except Exception as exc:  # noqa: BLE001
             # Всё, что не StationError — битый JSON, кончившаяся память, ошибка
@@ -421,7 +445,7 @@ class Bridge:
         if answer.get('want_directory'):
             try:
                 self.send_directory()
-            except StationError as exc:
+            except (StationError, pbxdb.PbxDbError) as exc:
                 # Без справочника касания всё равно поедут — только без ФИО.
                 log.warning('Справочник станции не забрался: %s', exc)
         jobs = answer.get('jobs') or []
@@ -530,9 +554,8 @@ class Bridge:
             log.warning('Пульс не записался в %s: %s', path, exc)
 
     def run(self):
-        log.info('Мост «Касания» %s запущен. Портал: %s (%s), станция: %s, id: %s',
-                 VERSION, self.portal, self.auth_label, self.config['station'],
-                 self.agent_id)
+        log.info('Мост «Касания» %s запущен. Портал: %s (%s), CDR: %s, id: %s',
+                 VERSION, self.portal, self.auth_label, self.cdr_label, self.agent_id)
         error_sleep = ERROR_SLEEP_SECONDS
         next_poll = 0.0
         while True:
@@ -642,12 +665,24 @@ def main(argv=None):
     if args.check:
         ok = True
         print('вход     %s' % bridge.auth_label)
-        try:
-            bridge.station.health()
-            print('станция  %s — отвечает' % config['station'])
-        except StationError as exc:
-            ok = False
-            print('станция  %s — НЕ отвечает: %s' % (config['station'], exc))
+        if bridge.cdr is bridge.pbxdb:
+            # Время станции местное, как и в контейнере (TZ=Asia/Almaty в образе).
+            now = datetime.now()
+            try:
+                rows = bridge.pbxdb.cdr_rows(now - timedelta(hours=1), now)
+                agents = bridge.pbxdb.agents_map()
+                print('станция  %s — CDR за час: %d строк, номеров в справочнике: %d'
+                      % (bridge.cdr_label, len(rows), len(agents)))
+            except pbxdb.PbxDbError as exc:
+                ok = False
+                print('станция  %s — НЕ читается: %s' % (bridge.cdr_label, exc))
+        else:
+            try:
+                bridge.station.health()
+                print('станция  %s — отвечает' % config['station'])
+            except StationError as exc:
+                ok = False
+                print('станция  %s — НЕ отвечает: %s' % (config['station'], exc))
         try:
             answer = bridge.poll()
             print('портал   %s — принял, заданий в очереди: %d'
