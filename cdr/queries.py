@@ -851,7 +851,8 @@ def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0,
     params = {'ext': str(ext), 'day_from': day_from, 'day_to': day_to,
               'types': list(call_types), 'min_talk': int(min_talk or 0), 'limit': int(limit)}
     sql = """
-        SELECT linkedid, phone, started_at, call_type, talk_seconds, recording_url
+        SELECT linkedid, phone, started_at, call_type, talk_seconds, recording_url,
+               hangup_side
           FROM cdr_touches
          WHERE ext = %(ext)s
            AND call_day BETWEEN %(day_from)s AND %(day_to)s
@@ -870,7 +871,8 @@ def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0,
     sql += " ORDER BY random() LIMIT %(limit)s"
     cursor.execute(sql, params)
     return [{'linkedid': row[0], 'phone': row[1], 'started_at': row[2], 'call_type': row[3],
-             'talk_seconds': int(row[4] or 0), 'recording_url': row[5] or ''}
+             'talk_seconds': int(row[4] or 0), 'recording_url': row[5] or '',
+             'hangup_side': row[6] or ''}
             for row in cursor.fetchall()]
 
 
@@ -881,14 +883,18 @@ def sample_day_calls(cursor, exts, day, call_types, min_talk=0, max_talk=0, limi
     как у sample_operator_calls: выборке нужен день всего направления.
 
     Принадлежность записи, как и там, проверяет вызывающий
-    (cdr.touches.recording_belongs_to): это правило склейки, а не отбора."""
+    (cdr.touches.recording_belongs_to): это правило склейки, а не отбора.
+
+    hangup_side — кто положил трубку (журнал очереди, только у входящих): его
+    видит модель оценки (call_qa.call_end)."""
     exts = sorted({str(ext).strip() for ext in (exts or []) if str(ext or '').strip()})
     if not exts or not call_types:
         return []
     params = {'exts': exts, 'day': day, 'types': list(call_types),
               'min_talk': int(min_talk or 0), 'limit': int(limit)}
     sql = """
-        SELECT linkedid, ext, phone, started_at, call_type, talk_seconds, recording_url
+        SELECT linkedid, ext, phone, started_at, call_type, talk_seconds, recording_url,
+               hangup_side
           FROM cdr_touches
          WHERE ext = ANY(%(exts)s)
            AND call_day = %(day)s
@@ -903,7 +909,8 @@ def sample_day_calls(cursor, exts, day, call_types, min_talk=0, max_talk=0, limi
     sql += " ORDER BY random() LIMIT %(limit)s"
     cursor.execute(sql, params)
     return [{'linkedid': row[0], 'ext': row[1], 'phone': row[2], 'started_at': row[3],
-             'call_type': row[4], 'talk_seconds': int(row[5] or 0), 'recording_url': row[6] or ''}
+             'call_type': row[4], 'talk_seconds': int(row[5] or 0), 'recording_url': row[6] or '',
+             'hangup_side': row[7] or ''}
             for row in cursor.fetchall()]
 
 
@@ -912,7 +919,8 @@ def touch_by_linkedid(cursor, linkedid):
     выбранного звонка в «ИИ-оценке». У одного linkedid бывает несколько строк
     (по телефонам участников); берём ту, где есть разговор и запись."""
     cursor.execute("""
-        SELECT linkedid, phone, ext, started_at, call_type, talk_seconds, recording_url
+        SELECT linkedid, phone, ext, started_at, call_type, talk_seconds, recording_url,
+               hangup_side
           FROM cdr_touches
          WHERE linkedid = %s
          ORDER BY (coalesce(recording_url, '') <> '') DESC, talk_seconds DESC, phone
@@ -922,7 +930,8 @@ def touch_by_linkedid(cursor, linkedid):
     if not row:
         return None
     return {'linkedid': row[0], 'phone': row[1], 'ext': row[2], 'started_at': row[3],
-            'call_type': row[4], 'talk_seconds': int(row[5] or 0), 'recording_url': row[6] or ''}
+            'call_type': row[4], 'talk_seconds': int(row[5] or 0), 'recording_url': row[6] or '',
+            'hangup_side': row[7] or ''}
 
 
 def operator_sip_and_model(cursor, operator_ids):

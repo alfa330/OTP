@@ -530,6 +530,10 @@ op_funnel_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='op-funnel
 # что проходы всё равно идут строго по одному — второй упрётся в advisory-лок.
 # Оценки внутри прохода параллелит сама выборка (AI_QA_DAILY_SAMPLE_WORKERS).
 ai_qa_sample_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ai-qa-sample')
+# Кабинет Binotel (сторона завершения разговора) ждут с потолком, а сам экспорт
+# идёт здесь: зависший кабинет держит этот поток, а не запрос «Из АТС» или проход
+# выборки (_binotel_panel_day_end_parties).
+binotel_panel_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='binotel-panel')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -6719,10 +6723,10 @@ def api_ai_qa_pull_call():
                                               settings.get('min_duration_sec')),
                     max_duration_sec=body.get('max_duration_sec',
                                               settings.get('max_duration_sec')),
-                    # Сторона завершения разговора разделу не нужна, а стоит
-                    # логина в кабинет Binotel и двух CSV-экспортов — на КАЖДОГО
-                    # проверяемого кандидата. Именно это делало «Из АТС» у Тез КЦ
-                    # висящей кнопкой.
+                    # Сторону завершения разговора — только за день выбранного
+                    # звонка (см. _binotel_random_call), а не за весь период: логин
+                    # в кабинет и экспорт недели на каждого проверяемого кандидата
+                    # и делали «Из АТС» у Тез КЦ висящей кнопкой.
                     fetch_end_parties=False, **kwargs)
             elif department == CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE:
                 # Отдел продаж: кандидаты из своих касаний CDR, длительности — как у
@@ -6923,7 +6927,8 @@ def _cdr_import_touch(linkedid, requester_id, requester):
         operator_id=operator_id, operator_name=operator_name,
         external_id=str(touch['linkedid']), month=month, datetime_raw=dt_raw,
         phone=phone, duration_sec=touch['talk_seconds'],
-        notes=f"{AI_QA_PULL_CALL_SOURCE}:{requester_id}:cdr", call_end_party='unknown')
+        notes=f"{AI_QA_PULL_CALL_SOURCE}:{requester_id}:cdr",
+        call_end_party=touch.get('hangup_side') or 'unknown')
     if new_id:
         with db._get_cursor() as cursor:
             cdr_queries.enqueue_audio_job(cursor, str(touch['linkedid']), touch['recording_url'],
@@ -6943,7 +6948,7 @@ def _cdr_import_touch(linkedid, requester_id, requester):
         "month": month, "datetime": dt_raw, "phone": phone,
         "duration_sec": touch['talk_seconds'],
         "direction": "in" if touch['call_type'] == cdr_touches.TYPE_IN else "out",
-        "call_end_party": 'unknown', "audio_pending": audio_pending,
+        "call_end_party": touch.get('hangup_side') or 'unknown', "audio_pending": audio_pending,
     }
     return jsonify({"status": "success", "calls": [created], "created": 1 if new_id else 0,
                     "call": created, "month": month}), 200
@@ -7052,7 +7057,7 @@ def _ai_qa_sample_cdr_import(candidate):
         external_id=candidate['key'], month=started.strftime('%Y-%m'),
         datetime_raw=started.strftime('%d.%m.%Y %H:%M:%S'), phone=phone,
         duration_sec=row['talk_seconds'], notes=f"{AI_QA_PULL_CALL_SOURCE}:auto:cdr",
-        call_end_party='unknown', status=qa_sample.IMPORT_STATUS)
+        call_end_party=row.get('hangup_side') or 'unknown', status=qa_sample.IMPORT_STATUS)
     if new_id:
         with db._get_cursor() as cursor:
             cdr_queries.enqueue_audio_job(cursor, candidate['key'], row['recording_url'],
@@ -7171,9 +7176,16 @@ def _ai_qa_sample_binotel_candidates(day):
             continue
         picked.append((int(matches[0]['id']), matches[0].get('name') or '', call))
     directions = qa_sample.operator_directions({op_id for op_id, _, _ in picked})
+    # Кто положил трубку: публичный API не отдаёт, кабинет — да, одним экспортом за
+    # день. Сбой кабинета выборку не держит: звонок оценится без стороны, а её
+    # доберёт ночной backfill_binotel_call_end_parties.
+    end_parties = ((_binotel_panel_day_end_parties(day, BINOTEL_PANEL_WAIT_SAMPLE_S) or {})
+                   if picked else {})
     return [{'direction_id': directions.get(op_id), 'operator_id': op_id,
              'operator_name': name, 'key': str(call['general_call_id']), 'call': call,
-             'dt_raw': client.format_dt(call['start_time'])}
+             'dt_raw': client.format_dt(call['start_time']),
+             'call_end_party': (end_parties.get(str(call['general_call_id']))
+                                or call.get('call_end_party') or 'unknown')}
             for op_id, name, call in picked]
 
 
@@ -7193,7 +7205,7 @@ def _ai_qa_sample_binotel_import(candidate):
         external_id=candidate['key'], month=month, datetime_raw=candidate['dt_raw'],
         phone=call['external_number'], duration_sec=call['billsec'],
         notes=f"{AI_QA_PULL_CALL_SOURCE}:auto:binotel", audio_path=audio_path,
-        call_end_party=call.get('call_end_party') or 'unknown',
+        call_end_party=candidate.get('call_end_party') or call.get('call_end_party') or 'unknown',
         status=qa_sample.IMPORT_STATUS)
 
 
@@ -28506,10 +28518,13 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         candidates = candidates[:TEZ_BINOTEL_SAMPLE_CAP]
 
     # Сторона завершения разговора: публичный API её не отдаёт, берём из кабинета.
-    # Раздел «ИИ-оценка» её не спрашивает вовсе (fetch_end_parties=False): для
-    # оценки она не нужна, а стоит логина в кабинет и двух CSV-экспортов. Пустое
-    # значение не теряется — его добирает ночной backfill_binotel_call_end_parties.
+    # Журнал берёт её сразу на весь период. Раздел «ИИ-оценка» (fetch_end_parties=
+    # False) — только за ДЕНЬ выбранного звонка: оценке она нужна (модель учитывает,
+    # кто положил трубку), а экспорт дня в разы легче экспорта недели, и тот же день
+    # делят кэшем соседние клики и ночная выборка. Сбой кабинета оставляет сторону
+    # неизвестной — её добирает ночной backfill_binotel_call_end_parties.
     end_parties = _binotel_panel_call_end_parties(date_from, date_to) if fetch_end_parties else {}
+    day_parties = {}      # день звонка → стороны из кабинета; None — кабинет молчит
 
     created_list = []
     for c in candidates:
@@ -28519,16 +28534,23 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         if gid in existing:
             continue
         dt_raw = client.format_dt(c['start_time'])
-        month = None
+        started = None
         for _fmt in ('%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M'):
             try:
-                month = datetime.strptime(dt_raw, _fmt).strftime('%Y-%m')
+                started = datetime.strptime(dt_raw, _fmt)
                 break
             except (ValueError, TypeError):
                 continue
-        if not month:
+        if not started:
             continue
+        month = started.strftime('%Y-%m')
         party = end_parties.get(gid) or c.get('call_end_party') or 'unknown'
+        if party == 'unknown' and not fetch_end_parties:
+            day_iso = started.date().isoformat()
+            if day_iso not in day_parties and None not in day_parties.values():
+                day_parties[day_iso] = _binotel_panel_day_end_parties(
+                    day_iso, BINOTEL_PANEL_WAIT_PULL_S)
+            party = (day_parties.get(day_iso) or {}).get(gid) or 'unknown'
         new_id = db.import_single_random_call(
             operator_id=operator_id, operator_name=operator_name,
             external_id=gid, month=month, datetime_raw=dt_raw,
@@ -28652,7 +28674,8 @@ def _cdr_random_call(*, operator_id, operator_name, requester_id, incoming, outg
             operator_id=operator_id, operator_name=operator_name,
             external_id=linkedid, month=month, datetime_raw=dt_raw,
             phone=phone, duration_sec=row['talk_seconds'],
-            notes=f"{source}:{requester_id}:cdr", call_end_party='unknown')
+            notes=f"{source}:{requester_id}:cdr",
+            call_end_party=row.get('hangup_side') or 'unknown')
         existing.add(linkedid)                # чтобы не выбрать тот же дважды (и на гонке — пропустить)
         if not new_id:
             continue
@@ -28663,7 +28686,7 @@ def _cdr_random_call(*, operator_id, operator_name, requester_id, incoming, outg
             "month": month, "datetime": dt_raw, "phone": phone,
             "duration_sec": row['talk_seconds'],
             "direction": "in" if row['call_type'] == cdr_touches.TYPE_IN else "out",
-            "call_end_party": 'unknown', "audio_pending": True,
+            "call_end_party": row.get('hangup_side') or 'unknown', "audio_pending": True,
         })
     if not created_list:
         return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках",
@@ -48075,6 +48098,13 @@ _BINOTEL_PANEL_PARTIES_CACHE = {}
 _BINOTEL_PANEL_PARTIES_LOCK = threading.Lock()
 _BINOTEL_PANEL_PARTIES_TTL = 600   # секунд
 
+# Сколько ждать кабинет, когда сторона завершения нужна оценке. Экспорт дня обычно
+# занимает секунды, но таймаут экспорта у кабинета — пять минут на направление, и
+# кнопка с ним висела бы минутами. Не дождались — звонок идёт без стороны (её
+# доберёт ночной backfill_binotel_call_end_parties), а экспорт доедет в кэш.
+BINOTEL_PANEL_WAIT_PULL_S = 15
+BINOTEL_PANEL_WAIT_SAMPLE_S = 180
+
 
 def _binotel_panel_call_end_parties(date_from, date_to):
     """{generalCallID: 'operator'|'client'|'system'} из КАБИНЕТА Binotel за период.
@@ -48129,6 +48159,21 @@ def _binotel_panel_call_end_parties(date_from, date_to):
                          key=lambda k: _BINOTEL_PANEL_PARTIES_CACHE[k][0])
             _BINOTEL_PANEL_PARTIES_CACHE.pop(oldest, None)
     return parties
+
+
+def _binotel_panel_day_end_parties(day, wait_s):
+    """Сторона завершения звонков ОДНОГО дня из кабинета, но не дольше wait_s.
+
+    {generalCallID: 'operator'|'client'}; None — кабинет не ответил за wait_s (тогда
+    вызывающему больше не стоит его ждать). Экспорт идёт в binotel_panel_pool и,
+    даже брошенный, доезжает в кэш _binotel_panel_call_end_parties."""
+    future = binotel_panel_pool.submit(_binotel_panel_call_end_parties, day, day)
+    try:
+        return future.result(timeout=wait_s)
+    except Exception:
+        logging.warning("binotel: кабинет не отдал сторону завершения за %s с (день %s)",
+                        wait_s, day)
+        return None
 
 
 def _binotel_eval_month_days(month_str):
@@ -48513,7 +48558,7 @@ def sync_cdr_evaluation_calls(month=None, triggered_by='scheduler', force=False,
                         datetime_raw=started_at.strftime('%d.%m.%Y %H:%M:%S'),
                         phone=phone, duration_sec=row['talk_seconds'],
                         notes=f"distribution:{importer_id or 'auto'}:cdr",
-                        call_end_party='unknown')
+                        call_end_party=row.get('hangup_side') or 'unknown')
                     already.add(linkedid)
                     if not new_id:
                         continue

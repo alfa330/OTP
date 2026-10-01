@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useMemo, useRef } from 'react';
 import DealBadge from './DealBadge';
-import { Languages, AlertTriangle, MessageSquare, Paperclip } from 'lucide-react';
+import { Languages, AlertTriangle, MessageSquare, Paperclip, PhoneOff } from 'lucide-react';
 import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
 import CriteriaReviewPanel from './CriteriaReviewPanel';
@@ -184,13 +184,29 @@ function MetaRow({ evaluation, children }) {
 
 const LANGUAGE = { ru: 'русский', kk: 'казахский', en: 'английский', uz: 'узбекский', ky: 'киргизский', tr: 'турецкий' };
 
-/* Звонок: на каком языке говорили и насколько уверенно распознано. */
+const CALL_END_LABEL = {
+    operator: 'Завершил оператор',
+    client: 'Завершил водитель',
+    system: 'Завершено системой',
+    transfer: 'Перевод звонка',
+};
+
+/* Звонок: кто положил трубку, на каком языке говорили и насколько уверенно
+   распознано. Сторону завершения видит и ИИ при оценке; неизвестную не
+   показываем — у исходящих ОП её нет никогда, и строка была бы на каждой карточке. */
 function CallMeta({ call }) {
+    const endLabel = CALL_END_LABEL[call.call_end_party];
     const langs = Object.entries(call.languages || {}).sort((a, b) => b[1] - a[1]);
     const text = langs.length === 1 ? LANGUAGE[langs[0][0]] || langs[0][0].toUpperCase()
         : langs.map(([code, pct]) => `${LANGUAGE[code] || code.toUpperCase()} ${pct}%`).join(', ');
     return (
         <MetaRow evaluation={call.evaluation}>
+            {endLabel && (
+                <span className="inline-flex items-center gap-1.5" title="По данным телефонии">
+                    <PhoneOff size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
+                    {endLabel}
+                </span>
+            )}
             {text && (
                 <span className="inline-flex min-w-0 items-center gap-1.5">
                     <Languages size={13} className="shrink-0 text-slate-400" aria-hidden="true" />

@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from . import config
 from . import media as media_mod
+from .call_end import normalise_call_end_party
 from .evaluation.fingerprint import content_hash
 
 ALMATY = ZoneInfo("Asia/Almaty")
@@ -216,8 +217,9 @@ def _load_call(call_id: int) -> dict:
         cur.execute(
             """SELECT c.id, c.direction_id, d.name, u.name,
                       TO_CHAR(c.created_at,'DD.MM.YYYY, HH24:MI'), c.score, c.audio_path,
-                      dep.code
+                      dep.code, c.call_end_party, ic.call_end_party
                  FROM calls c
+                 LEFT JOIN imported_calls ic ON ic.id = c.imported_call_id
                  LEFT JOIN directions d ON c.direction_id = d.id
                  LEFT JOIN departments dep ON dep.id = d.department_id
                  LEFT JOIN users u ON u.id = c.operator_id
@@ -238,7 +240,8 @@ def _load_call(call_id: int) -> dict:
             # Отдел у звонка журнала берём у НАПРАВЛЕНИЯ (это его связь с
             # отделом), а не у оператора: оператора могли перевести, а оценка
             # осталась по шкале прежнего направления.
-            "department_code": config.normalise_department_code(row[7])}
+            "department_code": config.normalise_department_code(row[7]),
+            "call_end_party": normalise_call_end_party(row[8], row[9])}
 
 
 def _load_wz_episode(episode_id: int) -> dict:
@@ -302,7 +305,7 @@ def _load_imported_call(imported_call_id: int) -> dict:
             """SELECT ic.id, u.direction_id, d.name, COALESCE(u.name, ic.operator_name),
                       TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC', 'DD.MM.YYYY, HH24:MI'),
                       ic.audio_path, ic.operator_id, ic.phone_number, ic.duration_sec,
-                      ic.status, dep.code, hc.score
+                      ic.status, dep.code, hc.score, ic.call_end_party
                  FROM imported_calls ic
                  LEFT JOIN users u ON u.id = ic.operator_id
                  LEFT JOIN directions d ON d.id = u.direction_id
@@ -338,7 +341,8 @@ def _load_imported_call(imported_call_id: int) -> dict:
             "operator_user_id": row[6], "phone_number": row[7],
             "duration_sec": row[8], "import_status": row[9],
             "department_code": config.normalise_department_code(row[10]),
-            "human_score": row[11]}
+            "human_score": row[11],
+            "call_end_party": normalise_call_end_party(row[12])}
 
 
 def _load_c2d_snapshot(snapshot_id: int) -> dict:

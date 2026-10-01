@@ -186,13 +186,17 @@ class QueueItemsColumnsTests(unittest.TestCase):
         stamp = dt.datetime(2026, 9, 23, 7, 4, tzinfo=dt.timezone.utc)
         base = (5, "Основа ОП", "Оператор", "23.09 12:04", None, [], 0.9, stamp, 71, "fp", {},
                 "imported_call", {}, 90, {"unchecked_weight": 10})
-        dated = base + (dt.date(2026, 9, 23), 7) + (None,) * api._DEAL_COLUMN_COUNT
-        undated = (6,) + base[1:] + (None, None) + ("D-1",) + (None,) * (api._DEAL_COLUMN_COUNT - 1)
+        dated = base + (dt.date(2026, 9, 23), 7, "client") + (None,) * api._DEAL_COLUMN_COUNT
+        undated = ((6,) + base[1:] + (None, None, None) + ("D-1",)
+                   + (None,) * (api._DEAL_COLUMN_COUNT - 1))
         cursor = _Cursor([dated, undated])
         items = api._queue_items(cursor, with_deals=False)
         by_id = {item["id"]: item for item in items}
         self.assertEqual(by_id[5]["day"], "2026-09-23")
         self.assertEqual(by_id[5]["_operator_id"], 7)
+        # Кто завершил звонок «на сейчас» — для пометки «устарела» (как у карточки).
+        self.assertEqual(by_id[5]["_call_end_party"], "client")
+        self.assertIn(api._SUBJECT_CALL_END_PARTY, cursor.sql[-1][0])
         self.assertEqual(by_id[5]["unchecked_weight"], 10)
         self.assertEqual(by_id[5]["ai_score"], 90)
         self.assertIsNone(by_id[5]["deal"])
@@ -219,7 +223,7 @@ class QueueItemsColumnsTests(unittest.TestCase):
         stamp = dt.datetime(2026, 9, 23, 7, 4, tzinfo=dt.timezone.utc)
         slim_criteria = [{"ai": "Incorrect", "source": "transcript", "conf": 0.9, "is_critical": True}]
         row = ((5, "Основа ОП", "Оператор", "23.09 12:04", None, slim_criteria, 0.9, stamp, 73,
-                None, None, "imported_call", {}, 40, None, dt.date(2026, 9, 23), 7)
+                None, None, "imported_call", {}, 40, None, dt.date(2026, 9, 23), 7, None)
                + (None,) * api._DEAL_COLUMN_COUNT)
         cursor = _Cursor([row, row[:15] + (dt.date(2026, 9, 22),) + row[16:]])
         items = api._queue_items(cursor, with_deals=False, slim=True)
@@ -227,6 +231,7 @@ class QueueItemsColumnsTests(unittest.TestCase):
         sql, params = cursor.sql[-1]
         self.assertNotIn("LEFT JOIN LATERAL", sql)            # отпечаток прогона не нужен
         self.assertNotIn(api._SUBJECT_HUMAN_SCORE, sql)       # балл человека не нужен
+        self.assertNotIn(api._SUBJECT_CALL_END_PARTY, sql)    # и сторона завершения тоже
         self.assertIn(api._CRITERIA_FOR_REASONS, sql)
         self.assertEqual(params[-1], api._QUEUE_SUMMARY_CAP)
         # Причины считаются тем же правилом, что у строк дня.

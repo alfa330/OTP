@@ -579,6 +579,24 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([c["key"] for c in candidates], ["1.1"])
         self.assertEqual(candidates[0]["direction_id"], 73)
 
+    def test_cdr_import_carries_the_hangup_side(self):
+        """У ОП кто положил трубку — из журнала очереди станции (только входящие)."""
+        from cdr import queries as cdr_queries
+        imported = []
+        namespace = {
+            "db": SimpleNamespace(import_single_random_call=lambda **kw: imported.append(kw) or 3,
+                                  _get_cursor=lambda: _Cursor()),
+            "AI_QA_PULL_CALL_SOURCE": "aiqa",
+        }
+        fn = _load_function(self.source, "_ai_qa_sample_cdr_import", namespace)
+        row = {"started_at": datetime(2026, 9, 29, 9, 32), "phone": "7773714269",
+               "talk_seconds": 90, "recording_url": "x.wav", "hangup_side": "client"}
+        with mock.patch.object(cdr_queries, "enqueue_audio_job"):
+            fn({"operator_id": 1, "operator_name": "А", "key": "1.1", "row": row})
+            fn({"operator_id": 1, "operator_name": "А", "key": "1.2",
+                "row": {**row, "hangup_side": ""}})          # исходящий: стороны нет
+        self.assertEqual([kw["call_end_party"] for kw in imported], ["client", "unknown"])
+
     def test_cdr_audio_state(self):
         from cdr import queries as cdr_queries
         records = {1: {"audio_path": "b/x.wav"}, 2: {"audio_path": None}, 3: {"audio_path": None},
@@ -603,23 +621,63 @@ class AdapterTests(unittest.TestCase):
         calls = [call("1", "Айгерим"), call("2", "Айгерим", billsec=0), call("3", "Айгерим", rec="none"),
                  call("4", "Айгерим", billsec=5000), call("5", "Незнакомец"), call("6", "Из СЗоВ"),
                  call("7", "Айгерим", call_type=tez_binotel_calls.CALL_TYPE_INCOMING)]
-        client = SimpleNamespace(list_calls_for_day=lambda day: calls, format_dt=lambda ts: "29.09.2026 10:00:00")
         people = {"Айгерим": [{"id": 1, "name": "Айгерим"}], "Из СЗоВ": [{"id": 50, "name": "Из СЗоВ"}]}
+        panel = mock.Mock(return_value={"1": "operator"})
+        candidates = self._binotel_candidates(calls, people, panel)
+        self.assertEqual([c["key"] for c in candidates], ["1", "7"])
+        self.assertEqual({c["direction_id"] for c in candidates}, {83})
+        # Кто положил трубку — из кабинета, ОДНИМ экспортом за день выборки: публичный
+        # API его не отдаёт. Звонка нет в кабинете — сторона неизвестна, не выдумана.
+        panel.assert_called_once_with(DAY, 180)
+        self.assertEqual([c["call_end_party"] for c in candidates], ["operator", "unknown"])
+        # Кабинет не ответил вовремя — выборка идёт дальше без стороны.
+        panel = mock.Mock(return_value=None)
+        candidates = self._binotel_candidates(calls, people, panel)
+        self.assertEqual([c["call_end_party"] for c in candidates], ["unknown", "unknown"])
+
+    def test_binotel_empty_day_does_not_log_into_the_panel(self):
+        panel = mock.Mock(return_value={})
+        self.assertEqual(self._binotel_candidates([], {}, panel), [])
+        panel.assert_not_called()
+
+    def _binotel_candidates(self, calls, people, panel):
+        from tez import binotel_calls as tez_binotel_calls
+        client = SimpleNamespace(list_calls_for_day=lambda day: calls,
+                                 format_dt=lambda ts: "29.09.2026 10:00:00")
         namespace = {
             "db": SimpleNamespace(), "TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE": "tez",
             "_ai_qa_sample_durations": lambda: (60, 300),
             "_ai_qa_sample_department_members": lambda code: {1},
             "_status_import_build_operator_lookup": lambda **kw: people,
             "_status_import_resolve_operator_matches": lambda name, lookup: lookup.get(name, []),
+            "_binotel_panel_day_end_parties": panel, "BINOTEL_PANEL_WAIT_SAMPLE_S": 180,
         }
         fn = _load_function(self.source, "_ai_qa_sample_binotel_candidates", namespace)
         with mock.patch.object(tez_binotel_calls, "get_config", return_value={}), \
                 mock.patch.object(tez_binotel_calls, "api_ready", return_value=True), \
                 mock.patch.object(tez_binotel_calls.BinotelApiClient, "from_config", return_value=client), \
                 mock.patch.object(ds, "operator_directions", return_value={1: 83}):
-            candidates = fn(DAY)
-        self.assertEqual([c["key"] for c in candidates], ["1", "7"])
-        self.assertEqual({c["direction_id"] for c in candidates}, {83})
+            return fn(DAY)
+
+    def test_panel_wait_has_a_ceiling(self):
+        """Зависший кабинет (таймаут экспорта — пять минут) не держит ни кнопку, ни
+        проход: ждём не дольше потолка, а экспорт доезжает в своём потоке."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        release = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(pool.shutdown, wait=True)
+        self.addCleanup(release.set)
+        namespace = {"binotel_panel_pool": pool, "logging": mock.Mock(),
+                     "_binotel_panel_call_end_parties":
+                         lambda a, b: release.wait(5) and {"9": "client"}}
+        fn = _load_function(self.source, "_binotel_panel_day_end_parties", namespace)
+        started = time.monotonic()
+        self.assertIsNone(fn("2026-09-29", 0.05))
+        self.assertLess(time.monotonic() - started, 2)
+        release.set()
+        self.assertEqual(fn("2026-09-29", 5), {"9": "client"})
 
     def test_sample_window_is_its_own_not_the_listening_plan(self):
         fn = _load_function(self.source, "_ai_qa_sample_durations", {})
@@ -700,6 +758,10 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(fn(candidate), 7)
         self.assertEqual((imported[0]["audio_path"], imported[0]["status"], imported[0]["notes"]),
                          ("bucket/tez-1.mp3", ds.IMPORT_STATUS, "aiqa:auto:binotel"))
+        self.assertEqual(imported[0]["call_end_party"], "client")
+        # Сторона из кабинета, приложенная к кандидату, главнее пустого поля API.
+        self.assertEqual(fn({**candidate, "call_end_party": "operator"}), 7)
+        self.assertEqual(imported[1]["call_end_party"], "operator")
 
     def test_every_import_marks_the_row_as_sample_and_auto(self):
         for name in ("_ai_qa_sample_cdr_import", "_ai_qa_sample_oktell_import",

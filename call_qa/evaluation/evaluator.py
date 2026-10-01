@@ -11,6 +11,7 @@ import json
 
 from .. import config
 from .. import llm
+from .. import call_end
 from . import criterion_config as cc
 from .data_checks import get_data_checker
 from ..rag import store
@@ -239,12 +240,16 @@ def _subset_rag_text(prepared_rag: dict | None, criteria: list[dict], fallback: 
 def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_rag=True, model,
                     rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
                     subject_kind=config.SUBJECT_CALL, cache_ttl=None,
-                    department=None) -> dict:
+                    department=None, call_end_party=None) -> dict:
     """Тело запроса оценки (для синхронного вызова и для Batch API).
 
     cache_ttl прокидывается в prompt-cache системного блока. Интерактивная оценка
     (открытие карточки) оставляет дефолт: одиночный вызов не окупает удвоенную
-    запись. Пакетный прогон передаёт config.CLAUDE_CACHE_TTL_BATCH."""
+    запись. Пакетный прогон передаёт config.CLAUDE_CACHE_TTL_BATCH.
+
+    call_end_party — кто завершил звонок по данным телефонии (call_end.py). Идёт в
+    ПОЛЬЗОВАТЕЛЬСКОЕ сообщение рядом с транскриптом, а не в системный блок: это
+    данные звонка, а системный промпт закреплён эталонным хэшем и кэшируется."""
     if use_rag and rag_text is None:
         rag, trace, _ = _prepare_rag(direction["id"], criteria, transcript,
                                      knowledge_snapshot_id=knowledge_snapshot_id)
@@ -254,8 +259,11 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
         rag = rag_text if use_rag else "(RAG отключён для этого варианта оценки)"
     low = ("\nНЕУВЕРЕННЫЕ ФРАГМЕНТЫ РАСПОЗНАВАНИЯ (не штрафовать):\n"
            + json.dumps(asr_low_spans, ensure_ascii=False)) if asr_low_spans else ""
+    # У переписки трубку не кладут; неизвестная сторона даёт '' — вход прежний.
+    end = (call_end.prompt_block(call_end_party)
+           if subject_kind in config.AUDIO_SUBJECT_KINDS else "")
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
-            f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
+            f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}{end}\n\nОцени по всем перечисленным критериям.")
     return llm.build_body(model=model,
                           system=build_system(criteria, subject_kind, department), user=user,
                           schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True,
@@ -264,11 +272,12 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
 
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model,
                  rag_text=None, stage="primary", subject_kind=config.SUBJECT_CALL,
-                 department=None) -> dict:
+                 department=None, call_end_party=None) -> dict:
     """Оценка подмножества (transcript) критериев моделью `model`."""
     body = build_eval_body(transcript, direction, criteria, asr_low_spans=asr_low_spans,
                            use_rag=use_rag, model=model, rag_text=rag_text,
-                           subject_kind=subject_kind, department=department)
+                           subject_kind=subject_kind, department=department,
+                           call_end_party=call_end_party)
     result = llm.post_body(body, timeout=120.0, include_meta=True)
     if result.get("_llm_meta") is not None:
         result["_llm_meta"]["stage"] = stage
@@ -334,7 +343,8 @@ def _collect_verdicts(items) -> dict:
 def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=True,
              call_context=None, knowledge_snapshot_id=None, prepared_rag=None,
              primary_result=None, primary_llm_meta=None,
-             subject_kind=config.SUBJECT_CALL, department=None) -> dict:
+             subject_kind=config.SUBJECT_CALL, department=None,
+             call_end_party=None) -> dict:
     """Полная оценка. Двухуровнево: массовая модель (BULK) первым проходом, затем спорные/
     критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику."""
     cc.apply_to_direction(direction)
@@ -370,7 +380,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
     ai = (primary_result if primary_result is not None else
           (_claude_eval(transcript, direction, t_crits, asr_low_spans=asr_low_spans,
                         use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
-                        rag_text=rag_text, stage="bulk", subject_kind=subject_kind, department=department)
+                        rag_text=rag_text, stage="bulk", subject_kind=subject_kind, department=department,
+                        call_end_party=call_end_party)
            if t_crits else {"per_criterion": [], "overall_comment": ""}))
     if primary_llm_meta and not ai.get("_llm_meta"):
         llm_calls.append(primary_llm_meta)
@@ -386,7 +397,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
         retry_rag_text = _subset_rag_text(prepared_rag, missing, rag_text)
         retry = _claude_eval(transcript, direction, missing, asr_low_spans=asr_low_spans,
                              use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
-                             rag_text=retry_rag_text, stage="bulk_retry", subject_kind=subject_kind, department=department)
+                             rag_text=retry_rag_text, stage="bulk_retry", subject_kind=subject_kind, department=department,
+                             call_end_party=call_end_party)
         if retry.get("_llm_meta"):
             llm_calls.append(retry["_llm_meta"])
         for idx, v in _collect_verdicts(retry.get("per_criterion")).items():
@@ -408,7 +420,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
             hard_rag_text = _subset_rag_text(prepared_rag, escalate, rag_text)
             ai2 = _claude_eval(transcript, direction, escalate, asr_low_spans=asr_low_spans,
                                use_rag=use_rag, model=config.CLAUDE_MODEL_HARD,
-                               rag_text=hard_rag_text, stage="hard", subject_kind=subject_kind, department=department)
+                               rag_text=hard_rag_text, stage="hard", subject_kind=subject_kind, department=department,
+                               call_end_party=call_end_party)
             if ai2.get("_llm_meta"):
                 llm_calls.append(ai2["_llm_meta"])
             for idx, v in _collect_verdicts(ai2.get("per_criterion")).items():

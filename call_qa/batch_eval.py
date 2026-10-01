@@ -38,6 +38,7 @@ from . import config
 from . import llm
 from . import providers
 from . import media as media_mod
+from .call_end import normalise_call_end_party
 from . import subjects as subjects_mod
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
@@ -154,8 +155,10 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
         conn = config.connect_ro(); cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         cur.execute(
             """SELECT c.id, c.direction_id, d.name, u.name,
-                      TO_CHAR(c.created_at,'DD.MM.YYYY, HH24:MI'), c.score, c.audio_path
+                      TO_CHAR(c.created_at,'DD.MM.YYYY, HH24:MI'), c.score, c.audio_path,
+                      c.call_end_party, ic.call_end_party
                  FROM calls c
+                 LEFT JOIN imported_calls ic ON ic.id = c.imported_call_id
                  LEFT JOIN directions d ON c.direction_id = d.id
                  LEFT JOIN users u ON c.operator_id = u.id
                 WHERE c.direction_id = ANY(%s) AND c.score IS NOT NULL
@@ -167,7 +170,9 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "subject_kind": config.SUBJECT_CALL,
                  "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
-                 "datetime": r[4], "human_score": r[5], "audio_path": r[6]} for r in rows]
+                 "datetime": r[4], "human_score": r[5], "audio_path": r[6],
+                 # та же вводная, что берёт карточка (subjects._load_call)
+                 "call_end_party": normalise_call_end_party(r[7], r[8])} for r in rows]
 
     calls = q(month)
     log(f"выборка {month}: {len(calls)} звонков; точный immutable cache проверяется по fingerprint")
@@ -737,6 +742,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 # открытие карточки не нашло бы прогон и оценило заново за деньги.
                 subject_kind=subject_kind,
                 department=department_code,
+                call_end_party=call.get("call_end_party"),
             )
             cached = runtime_store.get_cached_evaluation(
                 call_id=call["id"], evaluation_fingerprint=fingerprint,
@@ -755,6 +761,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 model=config.CLAUDE_MODEL_BULK, rag_text=prepared["rag_text"],
                 subject_kind=subject_kind, department=department_code,
                 cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
+                call_end_party=components["call_end_party"],
             )
             custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {
@@ -951,6 +958,10 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                         # ещё нет; тогда считаем отдел по направлению прогона.
                         department=entry.get("department") or _direction_department_code(
                             int(direction["id"])),
+                        # Добивка HARD-моделью видит ту же сторону завершения, что
+                        # и первый проход: она подписана в отпечатке манифеста.
+                        call_end_party=(entry.get("fingerprint_components") or {}).get(
+                            "call_end_party"),
                     ),
                     tries=3, delay=20, what=f"завершение оценки call {cid}",
                 )

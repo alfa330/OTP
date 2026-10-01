@@ -944,12 +944,32 @@ class PullCallTests(unittest.TestCase):
         self.assertIn("_ai_qa_pull_response_code(response)", self.body)
         self.assertIn('"code": "no_sip"', self.api_source)
 
-    def test_pull_does_not_pay_for_the_hangup_side(self):
+    def test_pull_takes_the_hangup_side_only_for_the_chosen_day(self):
         """Сторона завершения разговора берётся логином в кабинет Binotel и двумя
-        CSV-экспортами — на КАЖДОГО проверяемого кандидата. Разделу она не нужна
-        вовсе, а её сбор и делал «Из АТС» у Тез КЦ висящей кнопкой."""
+        CSV-экспортами. Экспорт всего периода на каждого проверяемого кандидата и
+        делал «Из АТС» у Тез КЦ висящей кнопкой, а без стороны ИИ не знает, кто
+        положил трубку. Поэтому раздел берёт её за ДЕНЬ выбранного звонка."""
         self.assertIn("fetch_end_parties=False", self.body)
         self.assertIn("fetch_end_parties=True", self.api_source)
+        node = next(item for item in source_cache.parse(self.api_source).body
+                    if isinstance(item, ast.FunctionDef) and item.name == "_binotel_random_call")
+        random_call = ast.get_source_segment(self.api_source, node)
+        self.assertIn("if party == 'unknown' and not fetch_end_parties:", random_call)
+        # с потолком ожидания, и один промолчавший кабинет больше не ждём
+        self.assertIn("_binotel_panel_day_end_parties(\n                    day_iso, BINOTEL_PANEL_WAIT_PULL_S)",
+                      random_call)
+        self.assertIn("None not in day_parties.values()", random_call)
+
+    def test_cdr_pulls_carry_the_queue_hangup_side(self):
+        """У ОП сторона лежит в касании (журнал очереди станции, у входящих) —
+        каждая подтяжка CDR кладёт её в пул, а не 'unknown' наглухо."""
+        for name in ("_cdr_import_touch", "_cdr_random_call", "_ai_qa_sample_cdr_import"):
+            node = next(item for item in source_cache.parse(self.api_source).body
+                        if isinstance(item, ast.FunctionDef) and item.name == name)
+            body = ast.get_source_segment(self.api_source, node)
+            with self.subTest(name=name):
+                self.assertIn(".get('hangup_side') or 'unknown'", body)
+                self.assertNotIn("call_end_party='unknown'", body)
 
     def test_empty_window_and_exhausted_pool_are_told_apart(self):
         """«Звонков нет» лечится периодом пошире, «все уже подтянуты» — нет."""

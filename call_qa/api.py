@@ -12,6 +12,7 @@ from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
 
+from . import call_end
 from . import config
 from . import human_review as human_review_mod
 from . import subjects as subjects_mod
@@ -443,6 +444,14 @@ _SUBJECT_DAY = (f"COALESCE({_local_from_utc('c.created_at')}::date,"
                 " cs.day,"
                 " (ce.ended_at AT TIME ZONE 'Asia/Almaty')::date)")
 
+# Кто завершил звонок «на сейчас» — та же вводная, что берёт оценка
+# (subjects._load_call/_load_imported_call). Звонок журнала, у которого своей
+# стороны нет, берёт её у связанного импорта, как и загрузчик карточки: иначе
+# очередь и карточка расходились бы в пометке «устарела».
+_SUBJECT_CALL_END_PARTY = (
+    "COALESCE(NULLIF(c.call_end_party, 'unknown'), ic.call_end_party,"
+    " (SELECT x.call_end_party FROM imported_calls x WHERE x.id = c.imported_call_id))")
+
 # Балл ИИ лежит в JSON строкой. Проверка регуляркой — не украшение: у части
 # карточек ai_score отсутствует или записан как 'null', и голый ::numeric ронял
 # бы ВЕСЬ запрос ошибкой приведения, а не отсеивал одну строку.
@@ -686,11 +695,13 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
     # (`with_deals`, решает маршрут): остальным ни колонок, ни семи JOIN'ов.
     deal_join = _marketing_join(cur, filters, need_columns=with_deals)
     if slim:
-        human_col, criteria_col, run_cols, breakdown_col, run_join = (
-            "NULL", _CRITERIA_FOR_REASONS, "NULL::text, NULL::jsonb", "NULL::jsonb", "")
+        human_col, criteria_col, run_cols, breakdown_col, run_join, end_col = (
+            "NULL", _CRITERIA_FOR_REASONS, "NULL::text, NULL::jsonb", "NULL::jsonb", "",
+            "NULL::text")
     else:
-        human_col, criteria_col, breakdown_col = (
-            _SUBJECT_HUMAN_SCORE, "rc.payload->'criteria'", "rc.payload->'score_breakdown'")
+        human_col, criteria_col, breakdown_col, end_col = (
+            _SUBJECT_HUMAN_SCORE, "rc.payload->'criteria'", "rc.payload->'score_breakdown'",
+            _SUBJECT_CALL_END_PARTY)
         run_cols = "run.evaluation_fingerprint::text, run.fingerprint_components"
         run_join = """
              LEFT JOIN LATERAL (
@@ -707,7 +718,7 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
                   {criteria_col}, rc.payload->'asr_mean_conf', rc.created_at,
                   {_SUBJECT_DIRECTION}, {run_cols}, rc.subject_kind, rc.payload->'media',
                   rc.payload->'ai_score', {breakdown_col}, {_SUBJECT_DAY},
-                  {_SUBJECT_OPERATOR_ID}"""
+                  {_SUBJECT_OPERATOR_ID}, {end_col}"""
         + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
              FROM ai_review_cache rc""" + _SUBJECT_JOIN + deal_join + """
              LEFT JOIN ai_evaluation_meta m
@@ -741,8 +752,9 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
                       # Без даты — тот же ключ, что у карточки «Без даты»: по нему
                       # фронт находит день проверенного разговора.
                       "day": r[15].isoformat() if r[15] else QUEUE_NO_DAY,
-                      "deal": _deal_row(r, 17),
+                      "deal": _deal_row(r, 18),
                       "_operator_id": r[16],
+                      "_call_end_party": r[17],
                       "_sev": min((prio.index(x) for x in reasons), default=len(prio)),
                       "_ts": r[7], "_direction_id": r[8],
                       "_run_fp": r[9], "_run_components": r[10]})
@@ -758,7 +770,8 @@ def _fetch_in_batches(cur, size: int = 2000):
         yield from batch
 
 
-_QUEUE_PRIVATE_KEYS = ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components", "_operator_id")
+_QUEUE_PRIVATE_KEYS = ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components", "_operator_id",
+                       "_call_end_party")
 
 
 def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
@@ -1148,7 +1161,8 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
     показывается прежняя оценка с пометкой «устарела» (переоценка — только кнопкой
     «Переоценить»). Здесь ожидаемый fingerprint восстанавливается без записи в БД:
     транскрипт-компонент берётся из последнего прогона (аудио и ASR-конфиг звонка
-    неизменны в норме), остальные — из текущего состояния направления.
+    неизменны в норме), сторона завершения звонка — «на сейчас» (её могут
+    доуточнить после оценки), остальные — из текущего состояния направления.
     stale: True — карточка откроется с пометкой «оценка устарела»; False — кэш
     совпадёт; None — определить не удалось."""
     contexts: dict[int, dict | None] = {}
@@ -1157,7 +1171,10 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
         # открытие гарантированно запустит новую оценку.
         item["stale"] = True
         components = item.get("_run_components") or {}
-        transcript_identity = components.get("transcript_hash")
+        # У прогонов до учёта стороны завершения транскрипт-компонент и есть
+        # отпечаток транскрипта; у новых он лежит отдельно (_evaluation_identity).
+        transcript_identity = (components.get("source_transcript_hash")
+                               or components.get("transcript_hash"))
         direction_id, run_fp = item.get("_direction_id"), item.get("_run_fp")
         if not (run_fp and transcript_identity and direction_id):
             continue
@@ -1190,7 +1207,8 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
                 transcript_hash=transcript_identity, direction=ctx["direction"],
                 knowledge_snapshot={"content_hash": ctx["snapshot_hash"]}, use_rag=use_rag,
                 subject_kind=item.get("subject") or config.SUBJECT_CALL,
-                department=ctx.get("department_code"))
+                department=ctx.get("department_code"),
+                call_end_party=item.get("_call_end_party"))
             item["stale"] = expected != run_fp
         except Exception:
             logging.exception(
@@ -1412,7 +1430,7 @@ def _retrieval_config(*, enabled: bool) -> dict:
 def _evaluation_identity(*, transcript_hash: str, direction: dict,
                          knowledge_snapshot: dict, use_rag: bool,
                          subject_kind: str = config.SUBJECT_CALL,
-                         department=None) -> tuple[str, dict, dict]:
+                         department=None, call_end_party=None) -> tuple[str, dict, dict]:
     """Отпечаток оценки. prompt_hash считается от ТОГО ЖЕ промпта, который уйдёт
     в модель, — с видом субъекта и отделом.
 
@@ -1422,7 +1440,15 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
     (вид субъекта по умолчанию — звонок, отдел ОП даёт тот же текст), поэтому
     сохранённые оценки ОП остаются свежими; у 21 оценки переписок Верификаторов
     отпечаток сменится — карточка покажет бейдж «оценка устарела», переоценка
-    по кнопке."""
+    по кнопке.
+
+    transcript_hash — отпечаток самого транскрипта; сторону завершения звонка
+    (call_end.py) он складывает с ним здесь, в одном месте для карточки, теневого
+    прогона, пакета и очереди. Сам транскрипт-отпечаток остаётся в компонентах
+    (source_transcript_hash) — по нему очередь пересчитывает ожидаемый отпечаток,
+    когда сторона стала известна уже после оценки."""
+    party = (call_end.normalise_call_end_party(call_end_party)
+             if subject_kind in config.AUDIO_SUBJECT_KINDS else "unknown")
     transcript_criteria = [c for c in direction["criteria"] if c.get("eval_source") == cc.TRANSCRIPT]
     model_config = {
         "bulk": config.CLAUDE_MODEL_BULK, "hard": config.CLAUDE_MODEL_HARD,
@@ -1433,7 +1459,7 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
                      for c in direction["criteria"]]
     retrieval_cfg = _retrieval_config(enabled=use_rag)
     fingerprint, components = build_evaluation_fingerprint(
-        transcript_hash=transcript_hash, model=config.CLAUDE_MODEL,
+        transcript_hash=call_end.identity(transcript_hash, party), model=config.CLAUDE_MODEL,
         model_config=model_config,
         prompt_hash=content_hash(evaluator.build_system(
             transcript_criteria, subject_kind, department)),
@@ -1445,6 +1471,8 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
         evaluator_code_version=config.EVALUATOR_CODE_VERSION,
     )
     components["criterion_config"] = criterion_cfg
+    components["source_transcript_hash"] = transcript_hash
+    components["call_end_party"] = party
     return fingerprint, components, retrieval_cfg
 
 
@@ -2202,7 +2230,7 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
     return {"asm": asm, "lines": lines, "transcript_cache_id": transcript_cache_id,
             "transcript_hash": transcript_hash, "source_identity": audio_fp,
             "source_model": config.SONIOX_MODEL, "source_config": asr_cfg,
-            "extra": {}}
+            "extra": {"call_end_party": subject.get("call_end_party") or "unknown"}}
 
 
 def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
@@ -2384,10 +2412,13 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
     transcript_identity = transcript_fingerprint(
         audio_fingerprint=source["source_identity"], asr_model=source["source_model"],
         asr_config=source["source_config"], transcript=asm["text"])
+    # Кто завершил звонок — данные телефонии, вводная наравне с транскриптом.
+    call_end_party = subject.get("call_end_party")
     fingerprint, fingerprint_components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
         knowledge_snapshot=snapshot, use_rag=primary_use_rag,
-        subject_kind=subject_kind, department=department_code)
+        subject_kind=subject_kind, department=department_code,
+        call_end_party=call_end_party)
     audio_path = subject.get("audio_path")
 
     if not refresh:
@@ -2466,7 +2497,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
                     transcript_identity=transcript_identity,
                     scale_revision_id=scale_revision_id, snapshot=snapshot,
                     primary_run_id=cached_run["id"], pair_id=cached_run.get("pair_id"),
-                    refresh=False, department=department_code)
+                    refresh=False, department=department_code,
+                    call_end_party=call_end_party)
             legacy_fixed = _normalise_legacy_ai_verdicts(cached)
             # Keep the legacy queue projection available, but adjudication itself
             # is bound only to the immutable run metadata hydrated above. Прогон с
@@ -2497,7 +2529,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         result = evaluator.evaluate(
             asm["text"], direction, asr_low_spans=asm["low_conf_spans"],
             use_rag=primary_use_rag, knowledge_snapshot_id=snapshot["id"],
-            subject_kind=subject_kind, department=department_code)
+            subject_kind=subject_kind, department=department_code,
+            call_end_party=fingerprint_components["call_end_party"])
         completed_at = runtime_store.now_utc()
     except Exception as exc:
         completed_at = runtime_store.now_utc()
@@ -2598,7 +2631,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             transcript_identity=transcript_identity,
             scale_revision_id=scale_revision_id, snapshot=snapshot,
             primary_run_id=run_id, pair_id=pair_id, refresh=refresh,
-            department=department_code)
+            department=department_code, call_end_party=call_end_party)
 
     _cache_put(call_id, model, payload, subject_kind=subject_kind)
     _meta_upsert(call_id, model, payload, subject_kind=subject_kind)
@@ -2613,12 +2646,13 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
                         scale_revision_id: int,
                         snapshot: dict, primary_run_id: str, pair_id: str | None,
                         refresh: bool, subject_kind: str = config.SUBJECT_CALL,
-                        department=None):
+                        department=None, call_end_party=None):
     """Best-effort paired RAG-on run; it never changes the user-facing verdict."""
     fingerprint, components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
         knowledge_snapshot=snapshot, use_rag=True,
-        subject_kind=subject_kind, department=department)
+        subject_kind=subject_kind, department=department,
+        call_end_party=call_end_party)
     if not refresh:
         try:
             if runtime_store.get_cached_evaluation(
@@ -2633,7 +2667,8 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
         result = evaluator.evaluate(
             asm["text"], direction, asr_low_spans=asm.get("low_conf_spans") or [],
             use_rag=True, knowledge_snapshot_id=snapshot["id"],
-            subject_kind=subject_kind, department=department)
+            subject_kind=subject_kind, department=department,
+            call_end_party=components["call_end_party"])
         completed = runtime_store.now_utc()
         shadow_payload = {
             "id": call_id, "subject_kind": subject_kind, "direction_id": direction_id,
