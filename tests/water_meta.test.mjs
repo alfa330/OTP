@@ -103,4 +103,6 @@ test('default office: remembered, then the only one in own city, then the only o
   assert.equal(defaultOfficeId(offices, 'Шымкент', 4), 3);
   assert.equal(defaultOfficeId(offices, 'Алматы', null), null);
   assert.equal(defaultOfficeId([offices[2]], null, null), 3);
+  // Своего города в учёте нет — чужой офис сам не подставляется.
+  assert.equal(defaultOfficeId([offices[0]], 'Астана', null), null);
 });

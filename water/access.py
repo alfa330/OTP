@@ -24,11 +24,16 @@
 
 from parcels.access import is_department_head, is_global_admin, normalize_role
 
-# ПИЛОТ (30.09.2026): владелец проверяет раздел сам — «задеплой для меня, чтобы
-# я мог проверить». Пока флаг стоит, раздел открыт только супер-админу; всё, что
-# ниже, — периметр ПОСЛЕ пилота. Снимать флаг вместе с зеркалом во фронте
-# (WATER_PILOT_SUPER_ADMIN_ONLY в App.jsx) — тест сверяет их.
-PILOT_SUPER_ADMIN_ONLY = True
+# ПИЛОТ. 30.09.2026 владелец проверял раздел сам («задеплой для меня, чтобы я мог
+# проверить»), 01.10.2026 выдал доступ поимённо сотрудникам фронт-офисов («на
+# данный момент выдай доступы по офисникам»): шесть в Алматы, два в Астане. Пока
+# флаг стоит, раздел открыт супер-админу и этому списку; всё, что ниже, — периметр
+# ПОСЛЕ пилота. Внутри раздела права обычные: офисники выдают воду (их отдел —
+# фронт-офисы), но учёт не ведут. Список — только id: ФИО сотрудников в публичный
+# репозиторий не кладём. Зеркало во фронте — WATER_PILOT и WATER_PILOT_USER_IDS в
+# App.jsx; тест сверяет их, снимать и дополнять — в обоих местах.
+PILOT = True
+PILOT_USER_IDS = (419, 421, 422, 423, 424, 509, 425, 426)
 
 ISSUE_DEPARTMENT_CODE = 'front_office'   # выдают воду
 CHECK_DEPARTMENT_CODE = 'szov'           # колл-центр: проверяют и смотрят
@@ -47,6 +52,13 @@ def _belongs_to(ctx, code):
     return str(ctx.get('department_code') or '').strip().lower() == code
 
 
+def _user_id(ctx):
+    try:
+        return int(ctx.get('user_id'))
+    except (TypeError, ValueError):
+        return None
+
+
 def can_open_section(ctx):
     """Пускать ли в раздел. Проверяется на КАЖДОМ роуте: спрятанный пункт меню
     доступом не является, а ручки /api/water зовут и напрямую.
@@ -55,8 +67,9 @@ def can_open_section(ctx):
     владельца — реализовывать буквально (тренеру «Посылки» открыли только по
     его отдельной задаче #360). Зеркало — canAccessWaterSectionForUser.
     """
-    if PILOT_SUPER_ADMIN_ONLY:
-        return normalize_role(ctx.get('role')) == 'super_admin'
+    if PILOT:
+        return (normalize_role(ctx.get('role')) == 'super_admin'
+                or _user_id(ctx) in PILOT_USER_IDS)
     if is_global_admin(ctx):
         return True
     if normalize_role(ctx.get('role')) == 'trainer':

@@ -19,21 +19,39 @@ class _AfterPilot(unittest.TestCase):
     """Периметр ПОСЛЕ пилота: флаг «только супер-админ» снят."""
 
     def setUp(self):
-        patcher = mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
+        patcher = mock.patch.object(access, 'PILOT', False)
         patcher.start()
         self.addCleanup(patcher.stop)
 
 
 class PilotTests(unittest.TestCase):
-    """Пилот (30.09.2026): раздел видит только супер-админ — владелец проверяет сам."""
+    """Пилот: супер-админ и поимённый список офисников (01.10.2026), больше никто."""
 
-    def test_only_super_admin_gets_in_during_the_pilot(self):
-        self.assertTrue(access.PILOT_SUPER_ADMIN_ONLY)
+    def test_only_super_admin_and_listed_people_get_in_during_the_pilot(self):
+        self.assertTrue(access.PILOT)
         self.assertTrue(access.can_open_section(ctx(role='super_admin', department_code='szov')))
         for role, code, heads in (('operator', 'front_office', ()), ('admin', None, ()),
                                   ('admin', 'front_office', ('front_office',)), ('sv', 'szov', ())):
             self.assertFalse(access.can_open_section(ctx(role=role, department_code=code, headed_codes=heads)),
                              (role, code))
+
+    def test_owner_list_of_office_staff(self):
+        """Шесть офисников Алматы и двое Астаны — список владельца 01.10.2026."""
+        self.assertEqual(sorted(access.PILOT_USER_IDS), [419, 421, 422, 423, 424, 425, 426, 509])
+
+    def test_listed_office_operator_gets_in_and_issues_but_does_not_manage(self):
+        listed = dict(ctx(role='operator', department_code='front_office'), user_id=424)
+        self.assertTrue(access.can_open_section(listed))
+        self.assertTrue(access.can_issue(listed))
+        self.assertFalse(access.can_manage(listed))
+        # Оператор — значит, QR-подтверждение сессии, как в «Посылках».
+        self.assertTrue(access.requires_sensitive_qr(listed))
+
+    def test_listed_id_in_another_department_still_only_checks(self):
+        """Список открывает вход, права внутри — по отделу: СЗоВ воду не выдаёт."""
+        listed = dict(ctx(role='operator', department_code='szov'), user_id=424)
+        self.assertTrue(access.can_open_section(listed))
+        self.assertFalse(access.can_issue(listed))
 
 
 def ctx(role='operator', department_code='front_office', headed_codes=(), city=None):

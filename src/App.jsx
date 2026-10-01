@@ -2415,15 +2415,18 @@ const canAccessParcelsSectionForUser = (userLike) => {
    учёт, считает water/access.py. */
 const WATER_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
 
-/* ПИЛОТ (30.09.2026): владелец проверяет раздел сам — пока флаг стоит, пункт
-   меню и экран есть только у супер-админа. Сервер закрыт тем же флагом
-   (water/access.py: PILOT_SUPER_ADMIN_ONLY); снимать — в обоих местах. */
-const WATER_PILOT_SUPER_ADMIN_ONLY = true;
+/* ПИЛОТ: пока флаг стоит, пункт меню и экран есть у супер-админа и у
+   поимённо названных офисников (список владельца 01.10.2026: шесть в Алматы,
+   двое в Астане; только id — ФИО в публичный репозиторий не кладём). Сервер
+   закрыт тем же правилом (water/access.py: PILOT, PILOT_USER_IDS); тест сверяет
+   списки, снимать и дополнять — в обоих местах. */
+const WATER_PILOT = true;
+const WATER_PILOT_USER_IDS = new Set([419, 421, 422, 423, 424, 509, 425, 426]);
 
 const canAccessWaterSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
-    if (WATER_PILOT_SUPER_ADMIN_ONLY) return false;
+    if (WATER_PILOT) return WATER_PILOT_USER_IDS.has(Number(userLike?.id));
     // Тренер раздел не просил — правило владельца «буквально и не расширять»,
     // как у «Касаний» и «Воронки ОП» (#360 открывал тренеру только названное).
     if (role === 'trainer') return false;

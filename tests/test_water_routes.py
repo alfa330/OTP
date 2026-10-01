@@ -257,7 +257,7 @@ class _Base(unittest.TestCase):
         ready.start()
         self.addCleanup(ready.stop)
         # Роуты проверяются с периметром ПОСЛЕ пилота; сам пилот — PilotGateTests.
-        pilot = mock.patch.object(water_routes.access, 'PILOT_SUPER_ADMIN_ONLY', False)
+        pilot = mock.patch.object(water_routes.access, 'PILOT', False)
         pilot.start()
         self.addCleanup(pilot.stop)
 
@@ -572,12 +572,19 @@ class CancelTests(_Base):
 
 class PilotGateTests(_Base):
     def test_pilot_lets_in_only_the_super_admin(self):
-        with mock.patch.object(water_routes.access, 'PILOT_SUPER_ADMIN_ONLY', True):
+        with mock.patch.object(water_routes.access, 'PILOT', True):
             response = self.client.get('/api/water/ping')
             self.assertEqual(response.status_code, 403)
             self.assertEqual(response.get_json()['code'], 'WATER_SECTION_CLOSED')
             self.viewer = person(role='super_admin', department_code='szov')
             self.assertEqual(self.client.get('/api/water/ping').status_code, 200)
+
+    def test_listed_office_operator_issues_during_the_pilot(self):
+        with mock.patch.object(water_routes.access, 'PILOT', True):
+            self.viewer = person(user_id=424)
+            office_id = self.store.add(stock=5)
+            self.assertEqual(self.issue(water_office_id=office_id).status_code, 201)
+            self.assertEqual(self.store.issues[0]['issued_by'], 424)
 
 
 class BuyAlertTests(_Base):

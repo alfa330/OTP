@@ -149,12 +149,16 @@ export const rememberOffice = (id) => {
 };
 
 /* Офис по умолчанию: запомненный (если он ещё в учёте) → единственный офис
-   своего города → единственный офис вообще. Иначе человек выбирает сам. */
+   своего города. Офис ЧУЖОГО города сам не подставляется никогда: пока в учёте
+   один алматинский офис, астанинский сотрудник иначе получил бы его выбранным и
+   списывал бы воду с чужой полки. Единственный офис вообще подставляется только
+   тому, у кого город не указан. Иначе человек выбирает сам. */
 export const defaultOfficeId = (offices, city, remembered) => {
     const active = (offices || []).filter((office) => office.is_active !== false);
     if (remembered && active.some((office) => office.id === remembered)) return remembered;
-    const own = city ? active.filter((office) => office.city === city) : [];
-    if (own.length === 1) return own[0].id;
-    if (active.length === 1) return active[0].id;
-    return null;
+    if (city) {
+        const own = active.filter((office) => office.city === city);
+        return own.length === 1 ? own[0].id : null;
+    }
+    return active.length === 1 ? active[0].id : null;
 };

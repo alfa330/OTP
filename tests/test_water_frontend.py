@@ -76,14 +76,20 @@ class SectionWiringTests(unittest.TestCase):
         predicate = self.app.split('const canAccessWaterSectionForUser = (userLike) => {')[1].split('\n};')[0]
         self.assertIn("if (role === 'trainer') return false;", predicate)
 
-    def test_pilot_flag_is_the_same_on_both_sides(self):
-        """Пилот «только супер-админ»: пункт меню и сервер снимаются вместе."""
-        flag = re.search(r'const WATER_PILOT_SUPER_ADMIN_ONLY = (true|false);', self.app)
+    def test_pilot_flag_and_list_are_the_same_on_both_sides(self):
+        """Пилот «супер-админ + поимённый список»: пункт меню и сервер обязаны
+        совпадать — иначе человек видит пункт, а раздел отвечает отказом (или
+        наоборот: доступ выдан, а пункта нет)."""
+        flag = re.search(r'const WATER_PILOT = (true|false);', self.app)
         self.assertIsNotNone(flag)
-        self.assertEqual(flag.group(1) == 'true', access.PILOT_SUPER_ADMIN_ONLY)
+        self.assertEqual(flag.group(1) == 'true', access.PILOT)
+        ids = re.search(r'const WATER_PILOT_USER_IDS = new Set\(\[([0-9,\s]*)\]\);', self.app)
+        self.assertIsNotNone(ids)
+        front = {int(x) for x in ids.group(1).split(',') if x.strip()}
+        self.assertEqual(front, set(access.PILOT_USER_IDS))
         predicate = self.app.split('const canAccessWaterSectionForUser = (userLike) => {')[1].split('\n};')[0]
         self.assertLess(predicate.index("if (role === 'super_admin') return true;"),
-                        predicate.index('if (WATER_PILOT_SUPER_ADMIN_ONLY) return false;'))
+                        predicate.index('if (WATER_PILOT) return WATER_PILOT_USER_IDS.has(Number(userLike?.id));'))
 
     def test_droplet_icon_is_mapped(self):
         fa = _read(ROOT / 'src' / 'components' / 'common' / 'FaIcon.jsx')
