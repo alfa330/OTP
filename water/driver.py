@@ -10,6 +10,9 @@
     `last_order_at`. `week` и `month` — СКОЛЬЗЯЩИЕ окна, а не календарные: у
     снимка, снятого в понедельник, `week` = 27 при `today` = 2, у снятого
     1 сентября `month` = 121 при `today` = 0. Поездок «с даты» CRM не отдаёт;
+  * `orders.last_7_days` (с 01.10.2026) — сами заказы того же окна, что
+    `week` (`count` = `week`), у каждого `category` — тариф заказа в тех же
+    кодах Флита. Список обрезается на 500 заказах (`truncated`);
   * `car.tariffs` — коды тарифов машины в наименованиях Флита (`econom`,
     `comfort`, `comfort_plus`, `business`, …);
   * `employment` — `created_date` (регистрация в парке), `work_status`,
@@ -55,6 +58,25 @@ def _tariffs(car):
     return seen
 
 
+def _week_by_tariff(orders):
+    """Заказы за последние 7 дней по тарифам: ({код: заказов}, обрезан ли список).
+
+    Нет списка (ответ CRM старого вида, база заказов недоступна) — (None,
+    False): «нет данных», а не «ноль заказов на каждом тарифе». Заказ без
+    тарифа не считается ни к одному.
+    """
+    block = orders.get('last_7_days') if isinstance(orders, dict) else None
+    items = block.get('items') if isinstance(block, dict) else None
+    if not isinstance(items, list):
+        return None, False
+    counts = {}
+    for item in items:
+        code = str((item.get('category') if isinstance(item, dict) else None) or '').strip().lower()
+        if code:
+            counts[code] = counts.get(code, 0) + 1
+    return counts, block.get('truncated') is True
+
+
 def normalize(data):
     """Ответ CRM → поля, которые нужны разделу. Полный ответ — в `info`."""
     data = data if isinstance(data, dict) else {}
@@ -68,6 +90,7 @@ def normalize(data):
     photo = dispatcher.get('photo_control') if isinstance(dispatcher.get('photo_control'), dict) else {}
 
     iin = ''.join(ch for ch in str(driver.get('iin') or '') if ch.isdigit())
+    week_by_tariff, week_truncated = _week_by_tariff(orders)
     return {
         'account_id': summary.get('account_id'),
         'iin': iin[:20] or None,
@@ -94,6 +117,11 @@ def normalize(data):
             'month': _int_or_none(orders.get('month')),
             'total': _int_or_none(orders.get('total')),
             'last_order_at': _text(orders.get('last_order_at'), 32),
+            # Разбивка недели по тарифам — для экрана: сотрудник видит, сколько
+            # заказов на тарифах программы. Само право по-прежнему считается
+            # по `week`/`total`, то есть по всем тарифам.
+            'week_by_tariff': week_by_tariff,
+            'week_truncated': week_truncated,
         },
         'info': data,
     }

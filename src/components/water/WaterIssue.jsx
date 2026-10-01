@@ -28,12 +28,31 @@ const WORK_STATUS = {
     fired: 'Уволен',
 };
 
+/* Заказы недели на тарифах программы из настроек — «из них Business 12,
+   Premier (Ultima) 3». Тариф программы, которого нет у машины и по которому не
+   было заказов, не показываем: «Premier 0» у машины без Premier — шум. Нет
+   разбивки от CRM — нет и строки: «нет данных» не равно «ноль». */
+const programWeekOrders = (orders, carTariffs, programTariffs) => {
+    const byTariff = orders.week_by_tariff;
+    if (!byTariff || typeof byTariff !== 'object' || orders.week == null) return [];
+    return programTariffs
+        .map((code) => [code, Number(byTariff[code]) || 0])
+        .filter(([code, count]) => count > 0 || carTariffs.includes(code));
+};
+
 const DriverCard = ({ driver, programTariffs }) => {
     const account = driverAccountUrl({ driver_account_id: driver.account_id, driver_park_id: driver.park_id });
     const statusNote = driver.fired ? 'Уволен из парка'
         : driver.is_blocked ? 'Заблокирован в парке'
             : WORK_STATUS[driver.work_status] ?? null;
     const orders = driver.orders || {};
+    // Список CRM обрезан на 500 заказах — числа «не меньше», отсюда «+».
+    // Пробелы внутри пары неразрывные: на телефоне «Business» не уезжает от
+    // своего числа на другую строку, перенос — только после запятой.
+    const more = orders.week_truncated ? '+' : '';
+    const programWeek = programWeekOrders(orders, driver.tariffs || [], programTariffs)
+        .map(([code, count]) => `${tariffLabel(code)} ${count}${more}`.replace(/ /g, ' '))
+        .join(', ');
     return (
         <div className="space-y-2">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -56,6 +75,7 @@ const DriverCard = ({ driver, programTariffs }) => {
                 {driver.registered_at && <span>Регистрация {fmtDate(driver.registered_at)}</span>}
                 <span className="tabular-nums">
                     Заказов: {orders.total ?? '—'} всего · {orders.week ?? '—'} за 7 дней
+                    {programWeek && `, из них ${programWeek}`}
                 </span>
                 {statusNote && <span className="font-medium text-rose-600">{statusNote}</span>}
             </div>
