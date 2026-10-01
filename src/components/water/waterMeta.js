@@ -124,8 +124,18 @@ export const fmtAvg = (value) => {
 export const parseCount = (value) => {
     const text = String(value ?? '').trim();
     if (!text) return null;
-    if (!/^\d{1,6}$/.test(text)) return NaN;
+    if (!isCountDraft(text)) return NaN;
     return Number(text);
+};
+
+/* Черновик поля количества (CountInput): пусто или только цифры, не длиннее
+   COUNT_MAX_DIGITS. Буква, пробел, минус, запятая — не черновик: такой ввод
+   поле отбрасывает. Тот же потолок, что у parseCount. */
+export const COUNT_MAX_DIGITS = 6;
+
+export const isCountDraft = (value) => {
+    const text = String(value ?? '');
+    return text.length <= COUNT_MAX_DIGITS && /^\d*$/.test(text);
 };
 
 /* Условия получения воды словами — вкладка «Условия» у тех, кто программу
@@ -159,6 +169,15 @@ export const conditionGroups = (settings) => {
         },
     ];
 };
+
+/* Где офис: «Алматы · ул. Байзакова 78А». Название офиса в справочнике вики
+   («Офис для подключения тарифа «Бизнес»») есть и в Алматы, и в Астане, а
+   за стойкой офис узнают по адресу (01.10.2026: «отображать адрес самого
+   офиса, не только название»). */
+export const officePlace = (office) => [office?.city, office?.address]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' · ');
 
 /* Ключ «последний офис» в localStorage — удобство одного сотрудника. */
 export const LAST_OFFICE_KEY = 'otp_water_last_office';

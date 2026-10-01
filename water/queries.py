@@ -484,7 +484,7 @@ def dashboard(cursor, settings, *, date_from, date_to, today):
     }
     cursor.execute(
         """
-        SELECT o.id, o.city, o.name, o.stock, o.low_threshold, o.buy_threshold, o.created_at,
+        SELECT o.id, o.city, o.name, o.address, o.stock, o.low_threshold, o.buy_threshold, o.created_at,
                COALESCE(i.blocks, 0), COALESCE(i.issues, 0), COALESCE(i.welcome, 0),
                COALESCE(i.activity, 0), COALESCE(m.intake, 0)
           FROM water_offices o
@@ -509,7 +509,7 @@ def dashboard(cursor, settings, *, date_from, date_to, today):
         params)
     rows = []
     for row in cursor.fetchall():
-        (office_id, city, name, stock, own_low, own_buy, created_at, issued, issues,
+        (office_id, city, name, address, stock, own_low, own_buy, created_at, issued, issues,
          welcome, activity, intake) = row
         low = own_low if own_low is not None else settings['low_threshold']
         buy = own_buy if own_buy is not None else settings['buy_threshold']
@@ -518,7 +518,7 @@ def dashboard(cursor, settings, *, date_from, date_to, today):
         days = max(1, (end - start).days + 1)
         avg = float(issued) / days
         rows.append({
-            'id': office_id, 'city': city, 'name': name, 'stock': int(stock),
+            'id': office_id, 'city': city, 'name': name, 'address': address, 'stock': int(stock),
             'low_threshold': low, 'buy_threshold': buy,
             'status': rules.stock_status(stock, low, buy),
             'issued_blocks': int(issued), 'issues': int(issues),

@@ -200,6 +200,32 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(rules.PROGRAM_CITIES, ('Алматы', 'Астана'))
         self.assertIn("'Все офисы Алматы и Астаны уже в учёте'", stock)
 
+    def test_quantity_fields_take_digits_only(self):
+        """«Поля, где нужно вводить количество, — только числа, а не буквы»
+        (01.10.2026): все поля количества идут через CountInput, а он ввод с
+        нецифрой отбрасывает (не вычищает: из «12,5» вышло бы 125)."""
+        water = ROOT / 'src' / 'components' / 'water'
+        for path in water.glob('*.jsx'):
+            if path.name != 'CountInput.jsx':
+                self.assertNotIn('inputMode="numeric"', _read(path), path.name)
+        stock = _read(water / 'WaterStock.jsx')
+        self.assertEqual(stock.count('<CountInput '), 4)  # поступление/пересчёт, два порога, офис в учёт
+        settings = _read(water / 'WaterSettings.jsx')
+        self.assertIn('const { rejected, inputProps } = useCountInput(onChange);', settings)
+        self.assertIn('<input className={NUMBER_INPUT} {...inputProps} value={value} />', settings)
+        count = _read(water / 'CountInput.jsx')
+        handler = count.split('const handleChange = (event) => {')[1].split('\n    };')[0]
+        self.assertLess(handler.index('if (!isCountDraft(next)) {'), handler.index('onChange(next);'))
+        self.assertIn('setRejected(true);\n            return;', handler)
+        self.assertNotIn('replace(', handler)
+
+    def test_stock_shows_the_office_address(self):
+        """«Отображать адрес самого офиса, не только название» (01.10.2026):
+        одно название «Бизнес» есть и в Алматы, и в Астане."""
+        stock = _read(ROOT / 'src' / 'components' / 'water' / 'WaterStock.jsx')
+        self.assertEqual(stock.count('{officePlace(row)}'), 2)  # таблица и карточки на телефоне
+        self.assertIn('subtitle={officePlace(office)}', stock)
+
     def test_no_native_selects_or_date_inputs(self):
         """Эталон портала — свои пикеры: системный select/date — чужая деталь."""
         for path in (ROOT / 'src' / 'components' / 'water').glob('*.jsx'):

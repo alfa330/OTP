@@ -7,7 +7,8 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import { fmtDateTime, shiftDaysBack, todayISO } from '../parcels/parcelMeta';
-import { blocksWord, fmtAvg, forecastLabel, parseCount, plural, stockStatus } from './waterMeta';
+import CountInput from './CountInput';
+import { blocksWord, fmtAvg, forecastLabel, officePlace, parseCount, plural, stockStatus } from './waterMeta';
 
 /*
  * «Остатки» — дашборд по офисам (ТЗ, разделы 6–7) и карточка офиса.
@@ -127,7 +128,7 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
     const ownThresholds = office.own_low_threshold !== null || office.own_buy_threshold !== null;
 
     return (
-        <IosModal open={open} onClose={onClose} title={office.name} subtitle={office.city} maxWidth="max-w-lg">
+        <IosModal open={open} onClose={onClose} title={office.name} subtitle={officePlace(office)} maxWidth="max-w-lg">
             <div className="space-y-4">
                 <div className="flex items-end justify-between gap-3">
                     <div>
@@ -161,9 +162,8 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
                                     <span className={iosGroupLabel}>
                                         {mode === 'intake' ? 'Поступило блоков' : 'Сколько блоков на самом деле'}
                                     </span>
-                                    <input className={iosInput} inputMode="numeric" value={amount}
-                                           onChange={(event) => setAmount(event.target.value)}
-                                           placeholder={mode === 'intake' ? 'Блок — 16 бутылок по 0,5 л' : `Сейчас в учёте ${office.stock}`} />
+                                    <CountInput key={mode} className={iosInput} value={amount} onChange={setAmount}
+                                                placeholder={mode === 'intake' ? 'Блок — 16 бутылок по 0,5 л' : `Сейчас в учёте ${office.stock}`} />
                                 </label>
                                 <label className="block space-y-1.5">
                                     <span className={iosGroupLabel}>
@@ -185,15 +185,13 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
                                 <div className="grid grid-cols-2 gap-3">
                                     <label className="block space-y-1.5">
                                         <span className={iosGroupLabel}>Низкий остаток</span>
-                                        <input className={iosInput} inputMode="numeric" value={low}
-                                               onChange={(event) => setLow(event.target.value)}
-                                               placeholder={`Общий: ${settings?.low_threshold ?? '—'}`} />
+                                        <CountInput className={iosInput} value={low} onChange={setLow}
+                                                    placeholder={`Общий: ${settings?.low_threshold ?? '—'}`} />
                                     </label>
                                     <label className="block space-y-1.5">
                                         <span className={iosGroupLabel}>Требуется закупка</span>
-                                        <input className={iosInput} inputMode="numeric" value={buy}
-                                               onChange={(event) => setBuy(event.target.value)}
-                                               placeholder={`Общий: ${settings?.buy_threshold ?? '—'}`} />
+                                        <CountInput className={iosInput} value={buy} onChange={setBuy}
+                                                    placeholder={`Общий: ${settings?.buy_threshold ?? '—'}`} />
                                     </label>
                                 </div>
                                 <p className="text-[11.5px] text-slate-500">
@@ -320,8 +318,8 @@ const AddOffice = ({ open, onClose, directory, apiBaseUrl, headers, onAdded, sho
                 </label>
                 <label className="block space-y-1.5">
                     <span className={iosGroupLabel}>Сколько блоков сейчас в офисе</span>
-                    <input className={iosInput} inputMode="numeric" value={stock}
-                           onChange={(event) => setStock(event.target.value)} placeholder="Блок — 16 бутылок по 0,5 л" />
+                    <CountInput className={iosInput} value={stock} onChange={setStock}
+                                placeholder="Блок — 16 бутылок по 0,5 л" />
                 </label>
             </div>
         </IosModal>
@@ -414,7 +412,7 @@ const WaterStock = ({ apiBaseUrl, headers, capabilities, settings, offices, dire
                                 className={`cursor-pointer transition hover:bg-slate-50 ${index ? 'border-t border-slate-100' : ''}`}>
                                 <td className="px-3.5 py-2.5">
                                     <div className="text-slate-900">{row.name}</div>
-                                    <div className="text-[12px] text-slate-500">{row.city}</div>
+                                    <div className="text-[12px] text-slate-500">{officePlace(row)}</div>
                                 </td>
                                 <td className="px-3.5 py-2.5">
                                     <div className="flex items-center gap-2">
@@ -449,7 +447,7 @@ const WaterStock = ({ apiBaseUrl, headers, capabilities, settings, offices, dire
                             </span>
                         </div>
                         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[12px] text-slate-500">
-                            <span>{row.city}</span>
+                            <span>{officePlace(row)}</span>
                             <span>выдано {row.issued_blocks} · поступило {row.intake_blocks}</span>
                             <span>в день {fmtAvg(row.avg_daily)}</span>
                         </div>

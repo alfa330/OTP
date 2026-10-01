@@ -4,6 +4,7 @@ import { Loader2 } from 'lucide-react';
 import { IosSection, iosBtnPrimary } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { fmtDateTime } from '../parcels/parcelMeta';
+import { COUNT_HINT, useCountInput } from './CountInput';
 import { KNOWN_TARIFFS, parseCount, tariffLabel } from './waterMeta';
 
 /*
@@ -32,18 +33,24 @@ const THRESHOLD_FIELDS = [
 const NUMBER_INPUT = 'w-20 shrink-0 rounded-xl border-0 bg-slate-100 px-3 py-2 text-center text-[14px] '
     + 'tabular-nums text-slate-900 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
 
-const Field = ({ label, hint, value, onChange }) => (
-    <label className="flex items-center justify-between gap-3">
-        <span className="min-w-0">
-            <span className="block text-[13.5px] text-slate-800">{label}</span>
-            {hint && <span className="block text-[11.5px] text-slate-500">{hint}</span>}
-        </span>
-        {/* Не iosInput: в нём w-full, и узкое поле растягивалось на всю
-            строку, сжимая подпись в столбик по слову. */}
-        <input className={NUMBER_INPUT} inputMode="numeric"
-               value={value} onChange={(event) => onChange(event.target.value)} />
-    </label>
-);
+const Field = ({ label, hint, value, onChange }) => {
+    // Только цифры (CountInput). Подсказка «Только цифры» встаёт на место
+    // пояснения слева: под узким полем справа ей не уместиться.
+    const { rejected, inputProps } = useCountInput(onChange);
+    return (
+        <label className="flex items-center justify-between gap-3">
+            <span className="min-w-0">
+                <span className="block text-[13.5px] text-slate-800">{label}</span>
+                {rejected
+                    ? <span className="block text-[11.5px] text-rose-600">{COUNT_HINT}</span>
+                    : hint && <span className="block text-[11.5px] text-slate-500">{hint}</span>}
+            </span>
+            {/* Не iosInput: в нём w-full, и узкое поле растягивалось на всю
+                строку, сжимая подпись в столбик по слову. */}
+            <input className={NUMBER_INPUT} {...inputProps} value={value} />
+        </label>
+    );
+};
 
 const WaterSettings = ({ apiBaseUrl, headers, onSaved, showToast }) => {
     const [loaded, setLoaded] = useState(null);

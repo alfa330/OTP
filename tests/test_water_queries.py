@@ -87,6 +87,19 @@ class CanceledIssuesTests(unittest.TestCase):
         issues_block = cursor.sql[0][0].split('FROM water_issues')[1].split('GROUP BY')[0]
         self.assertIn('canceled_at IS NULL', issues_block)
 
+    def test_dashboard_carries_the_office_address(self):
+        """«Остатки» показывают адрес офиса: по нему офис узнают за стойкой."""
+        from datetime import date
+        row = (1, 'Алматы', 'Офис для подключения тарифа «Бизнес»', 'ул. Байзакова 78А', 0,
+               None, None, datetime(2026, 9, 30, 11, 8), 0, 0, 0, 0, 15)
+        cursor = ScriptedCursor([row])
+        rows = queries.dashboard(cursor, {'low_threshold': 20, 'buy_threshold': 10},
+                                 date_from=date(2026, 9, 2), date_to=date(2026, 10, 1),
+                                 today=date(2026, 10, 1))
+        self.assertIn('o.address', cursor.sql[0][0])
+        self.assertEqual((rows[0]['address'], rows[0]['stock'], rows[0]['status'], rows[0]['intake_blocks']),
+                         ('ул. Байзакова 78А', 0, 'buy', 15))
+
     def test_cancel_locks_the_row_and_never_cancels_twice(self):
         cursor = ScriptedCursor([(7, 3, ACCOUNT, None, 2, None)])
         issue = queries.issue_for_cancel(cursor, 7, for_update=True)

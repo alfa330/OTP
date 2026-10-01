@@ -12,7 +12,9 @@ import {
   exportFileName,
   fmtAvg,
   forecastLabel,
+  isCountDraft,
   nextIssueLine,
+  officePlace,
   parseCount,
   plural,
   stockStatus,
@@ -130,4 +132,24 @@ test('conditions without limits say so instead of showing zeros', () => {
   assert.equal(activity['Как часто'], 'Без ограничения по дням');
   assert.equal(activity['Тариф машины'], 'не заданы');
   assert.equal(activity['Сколько'], '1 блок за выдачу');
+});
+
+test('count fields take digits only, up to six', () => {
+  for (const good of ['', '0', '120', '000123', '999999']) {
+    assert.equal(isCountDraft(good), true, good);
+  }
+  // «Только числа, а не буквы» (01.10.2026): буквы, пробелы, минус, дробь и
+  // нелатинские цифры поле отбрасывает целиком, а не вычищает.
+  for (const bad of ['12a', 'а', '-3', '1,5', '1.5', ' 12', '12 ', '1 000', '1234567', '١٢', '１２']) {
+    assert.equal(isCountDraft(bad), false, bad);
+  }
+  assert.equal(parseCount('120'), 120);
+  assert.ok(Number.isNaN(parseCount('12a')));
+});
+
+test('office place reads city and address', () => {
+  assert.equal(officePlace({ city: 'Алматы', address: 'ул. Байзакова 78А' }), 'Алматы · ул. Байзакова 78А');
+  assert.equal(officePlace({ city: 'Астана', address: '  ' }), 'Астана');
+  assert.equal(officePlace({ city: '', address: 'Сарыарка 31' }), 'Сарыарка 31');
+  assert.equal(officePlace(null), '');
 });
