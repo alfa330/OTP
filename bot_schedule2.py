@@ -4977,6 +4977,25 @@ def _can_access_tasks(role, requester_id):
     return _back_office_task_employee_role(requester_id, role) is not None
 
 
+# Поимённый доступ ко ВСЕМ задачам раздела — сверх границы главы отдела.
+# Админ, возглавляющий отдел, идёт в «Задачи» под 'sv' (_effective_scoped_manager_role)
+# и видит только задачи, где он участник, плюс задачи СВ своего отдела. Человек
+# из списка идёт под своей ролью и без отдела охвата — так же, как админ, который
+# отдел не возглавляет: все задачи всех отделов и те же права на них.
+# Роль список НЕ повышает: проверка пропускает только админов, и СВ или оператор,
+# вписанный сюда, остался бы при своём охвате.
+#   1 — админ, глава СЗоВ: все задачи открыты по решению владельца 01.10.2026.
+TASKS_FULL_ACCESS_USER_IDS = {1}
+
+
+def _has_full_task_access(role, requester_id):
+    """Админ из TASKS_FULL_ACCESS_USER_IDS: в «Задачах» без границы главы отдела."""
+    try:
+        return _is_admin_role(role) and int(requester_id) in TASKS_FULL_ACCESS_USER_IDS
+    except (TypeError, ValueError):
+        return False
+
+
 def _task_route_guard():
     requester_id, requester, error = _resolve_requester()
     if error:
@@ -4987,6 +5006,12 @@ def _task_route_guard():
         return None, None, jsonify({
             "error": "Only admin, sv, trainer, department heads and back office employees can access tasks"
         }), 403
+    if _has_full_task_access(requester_role, requester_id):
+        # Ровно то, что гард ниже даёт админу, не возглавляющему отдел.
+        g.effective_task_role = requester_role
+        g.task_scope_is_personal = False
+        g.task_scope_department_id = None
+        return requester_id, requester, None, None
     g.effective_task_role = _effective_scoped_manager_role(requester_role, requester_id)
     # Рядовой бэк-офиса идёт в слой данных под ролью СВОЕГО ОТДЕЛА: отдела там
     # не видно, а охват у него личный — задачи, где он постановщик, поручитель
