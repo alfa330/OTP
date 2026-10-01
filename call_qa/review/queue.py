@@ -10,15 +10,21 @@ from ..rag import store
 REASON_PRIORITY = ("critical", "lowconf", "pending", "asr", "media")
 
 
-def review_reasons(criteria, asr_mean_conf=None, media_stats=None) -> list[str]:
+def review_reasons(criteria, asr_mean_conf=None, media_stats=None, subject_kind=None) -> list[str]:
     """Почему субъект требует человека — по критериям В ФОРМЕ КАРТОЧКИ (payload['criteria']:
     {idx, is_critical, source, ai, conf}). Пустой список = флагов нет, ревью не обязательно.
     Те же правила, что needs_review(), но на сохранённой карточке — для очереди ревью.
 
     media_stats — сводка вложений эпизода чата: у чата нет ASR-уверенности, зато
-    есть свой аналог «плохо слышно» — нерасшифрованное фото или голосовое."""
+    есть свой аналог «плохо слышно» — нерасшифрованное фото или голосовое.
+
+    «Слабый звук» — только у звонков. Карточка переписки хранит asr_mean_conf = 0
+    (распознавания у неё нет, а оценка пишет `mean_conf or 0`), и без проверки вида
+    субъекта КАЖДЫЙ чат помечался «слабым звуком» — на проде 01.10.2026 так стояли
+    все 131 оценка переписки и ни один из 433 звонков."""
     reasons = set()
-    if asr_mean_conf is not None and asr_mean_conf < config.ASR_CONF_HARD:
+    if (subject_kind not in config.CHAT_SUBJECT_KINDS
+            and asr_mean_conf is not None and asr_mean_conf < config.ASR_CONF_HARD):
         reasons.add("asr")
     if int((media_stats or {}).get("failed") or 0) > 0:
         reasons.add("media")

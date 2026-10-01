@@ -30,6 +30,18 @@ class ReviewReasonsTests(unittest.TestCase):
 
     def test_bad_asr_flagged(self):
         self.assertEqual(queue.review_reasons([_crit()], 0.4), ["asr"])
+        self.assertEqual(queue.review_reasons([_crit()], 0.4, subject_kind="imported_call"), ["asr"])
+
+    def test_chat_is_never_weak_sound(self):
+        # У переписки распознавания нет, а карточка хранит asr_mean_conf = 0 — это не «слабый звук».
+        for kind in ("wz_episode", "ca_episode", "c2d_snapshot"):
+            self.assertEqual(queue.review_reasons([_crit()], 0, subject_kind=kind), [], kind)
+
+    def test_payload_reasons_know_the_subject(self):
+        chat = {"criteria": [_crit()], "asr_mean_conf": 0, "media": {}, "subject_kind": "wz_episode"}
+        call = dict(chat, subject_kind="call")
+        self.assertEqual(call_qa_api._payload_reasons(chat), [])
+        self.assertEqual(call_qa_api._payload_reasons(call), ["asr"])
 
     def test_non_critical_incorrect_is_not_a_flag(self):
         # Уверенный Incorrect по НЕкритическому критерию — нормальный вердикт, не повод для ревью.

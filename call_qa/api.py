@@ -726,7 +726,7 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
     prio = review_queue.REASON_PRIORITY
     items = []
     for r in rows:
-        reasons = review_queue.review_reasons(r[5] or [], r[6], r[12] or {})
+        reasons = review_queue.review_reasons(r[5] or [], r[6], r[12] or {}, subject_kind=r[11])
         breakdown = r[14] if isinstance(r[14], dict) else {}
         items.append({"id": r[0], "direction": r[1], "operator": r[2] or "—",
                       "datetime": r[3], "human_score": r[4], "reasons": reasons or ["ok"],
@@ -1934,7 +1934,8 @@ def _lines_from_tokens(toks: list[dict]) -> list[dict]:
 
 def _payload_reasons(payload: dict) -> list[str]:
     return review_queue.review_reasons(
-        payload.get("criteria"), payload.get("asr_mean_conf"), payload.get("media") or {})
+        payload.get("criteria"), payload.get("asr_mean_conf"), payload.get("media") or {},
+        subject_kind=payload.get("subject_kind"))
 
 
 def _cache_get(call_id, model, subject_kind=config.SUBJECT_CALL):
