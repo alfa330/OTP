@@ -860,9 +860,9 @@ export default function CallQaView(props) {
                                         department={department}
                                         onInteractionChange={setSectionInteraction} />
             ) : (
-                <AdjudicationsRag apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                <AdjudicationsRag key={department} apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                                    showToast={showToast} canManage={canManageRag}
-                                   department={department}
+                                   department={department} departmentName={departmentName}
                                    filters={marketingAccess ? filters : undefined}
                                    onInteractionChange={setSectionInteraction} />
             )}

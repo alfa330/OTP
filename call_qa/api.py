@@ -2942,9 +2942,15 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
             {"value": value, "label": value, "count": int(count)}
             for value, count in cur.fetchall()]
         cur.execute(
-            """SELECT (SELECT COALESCE(MAX(current_revision),0) FROM qa_knowledge_state),
-                      (SELECT COUNT(*) FROM qa_policy_rules WHERE rule_status='active'),
-                      (SELECT COUNT(*) FROM qa_policy_rules r
+            """WITH scoped_rules AS (
+                        SELECT * FROM qa_policy_rules
+                         WHERE (%s::int[] IS NULL OR direction_id = ANY(%s))),
+                    scoped_knowledge AS (
+                        SELECT * FROM qa_knowledge_state
+                         WHERE (%s::int[] IS NULL OR direction_id = ANY(%s)))
+               SELECT (SELECT COALESCE(MAX(current_revision),0) FROM scoped_knowledge),
+                      (SELECT COUNT(*) FROM scoped_rules WHERE rule_status='active'),
+                      (SELECT COUNT(DISTINCT r.id) FROM scoped_rules r
                         JOIN qa_policy_rule_versions v ON v.id=r.current_version_id
                         JOIN qa_policy_rule_embeddings e
                           ON e.rule_version_id=v.id AND e.index_status='ready'
@@ -2952,9 +2958,10 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
                        WHERE r.rule_status='active' AND m.embedding_provider=%s
                          AND m.embedding_model=%s AND m.embedding_dim=%s
                          AND m.config_hash=%s),
-                      (SELECT MAX(updated_at) FROM qa_knowledge_state),
+                      (SELECT MAX(updated_at) FROM scoped_knowledge),
                       %s""",
-            (embedding_contract["provider"], embedding_contract["model"],
+            (scope_family, scope_family, scope_family, scope_family,
+             embedding_contract["provider"], embedding_contract["model"],
              embedding_contract["dim"], embedding_contract["config_hash"],
              embedding_contract["model"]))
         state = cur.fetchone()
@@ -2976,8 +2983,14 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
         logging.exception("ai-qa: policy catalog load failed")
         if runtime_store.is_schema_compat_error(exc):
             try:
-                return _legacy_adjudications_page(direction=direction, q=q, page=page,
-                                                   page_size=page_size)
+                # Legacy does not support modern lifecycle/index/deal filters.
+                # Do not return a broader catalog under an apparently applied filter.
+                if (status not in (None, "all") or index_status not in (None, "all")
+                        or (filters or {}).get('marketing')):
+                    raise RuntimeError("Для выбранных фильтров требуется актуальная схема каталога")
+                return _legacy_adjudications_page(
+                    direction=direction, q=q, page=page, page_size=page_size,
+                    allowed_direction_ids=allowed_direction_ids, department=department)
             except Exception:
                 logging.exception("ai-qa: legacy policy catalog fallback failed")
         return {"items": [], "total": 0, "page": page, "page_size": page_size,
@@ -2994,7 +3007,8 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
                 pass
 
 
-def _legacy_adjudications_page(*, direction=None, q=None, page=1, page_size=20) -> dict:
+def _legacy_adjudications_page(*, direction=None, q=None, page=1, page_size=20,
+                              allowed_direction_ids=None, department=None) -> dict:
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
@@ -3006,8 +3020,15 @@ def _legacy_adjudications_page(*, direction=None, q=None, page=1, page_size=20) 
                        LEFT JOIN users u ON u.id=a.created_by
                       WHERE a.is_active"""
             params = []
+            if allowed_direction_ids is not None or department:
+                family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
+                sql += " AND a.direction_id = ANY(%s)"
+                params.append(family or [-1])
             if direction and direction != "all":
-                sql += " AND d.name=%s"; params.append(direction)
+                if str(direction).isdigit():
+                    sql += " AND a.direction_id=%s"; params.append(int(direction))
+                else:
+                    sql += " AND d.name=%s"; params.append(direction)
             if q:
                 pattern = f"%{q}%"
                 sql += " AND (a.criterion_name ILIKE %s OR a.excerpt ILIKE %s OR " \
@@ -3022,7 +3043,7 @@ def _legacy_adjudications_page(*, direction=None, q=None, page=1, page_size=20) 
                   "use_count": int(row[7] or 0), "by": row[8] or "—",
                   "date": row[9].strftime("%d.%m.%Y") if row[9] else "—",
                   "not_covered": row[10], "situation": row[11],
-                  "rule_status": "active", "index_status": "indexed"}
+                  "source_type": "legacy", "rule_status": "quarantined", "index_status": "unindexed"}
                  for row in rows]
         return {"items": items, "total": int(rows[0][12]) if rows else 0,
                 "page": page, "page_size": page_size,

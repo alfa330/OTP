@@ -218,7 +218,7 @@ class AdminAccessContractTests(unittest.TestCase):
     def test_frontend_gates_manage_by_super_admin(self):
         self.assertIn("normalizeRole(user?.role) === 'super_admin'", self.view_src)
         self.assertIn("canManage={canManageRag}", self.view_src)
-        self.assertIn("canManage && (", self.rag_src)
+        self.assertIn("canManage && !editing &&", self.rag_src)
         self.assertIn("window.confirm", self.rag_src)
         self.assertIn("expected_rule_version_id", self.rag_src)
         self.assertIn("expected_content_hash", self.rag_src)
@@ -233,7 +233,7 @@ class AdminAccessContractTests(unittest.TestCase):
         # status='deprecated', там же скрыта кнопка повторного удаления.
         call_qa_src = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig")
         self.assertIn("c.rule_status IS DISTINCT FROM 'deprecated'", call_qa_src)
-        self.assertIn("{ key: 'deleted', label: 'Удалённые', Icon: Trash2 }", self.rag_src)
+        self.assertIn("{ key: 'deleted', label: 'Удалённые', count:", self.rag_src)
         self.assertIn("view === 'deleted' ? 'deprecated' : status", self.rag_src)
         self.assertIn("itemRuleStatus !== 'deprecated' && (", self.rag_src)
         self.assertIn("option.value !== 'deprecated'", self.rag_src)
