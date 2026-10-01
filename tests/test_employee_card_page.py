@@ -336,13 +336,14 @@ class LayoutAndThemeTests(unittest.TestCase):
 
     def test_data_is_readable(self):
         """Владелец 30.09.2026: «серый на фоне белого не очень». Значения —
-        тёмные, вторичный серый не светлее #6e6e73 (4,9:1 на белом)."""
-        for selector in ('.ecp-info-row dd', '.ecp-contact-row dd'):
+        тёмные, вторичный серый не светлее #6e6e73 (4,9:1 на белом, 4,7:1 на
+        плашке группы #f5f5f7)."""
+        for selector in ('.ecp-cell dd', '.ecp-contact-row dd'):
             value = css_block(selector)
             self.assertIn('color: var(--ecp-text);', value, selector)
             self.assertIn('font-weight: 500;', value, selector)
-        self.assertIn('text-align: right;', css_block('.ecp-info-row dd'))
         self.assertIn('--ecp-muted: #6e6e73;', PAGE_CSS)
+        self.assertIn('--ecp-group: #f5f5f7;', PAGE_CSS)
         self.assertNotIn('#8a8a8e', without_comments(PAGE_CSS))
 
     def test_dashboard_contact_block_is_on_the_left(self):
@@ -371,12 +372,20 @@ class LayoutAndThemeTests(unittest.TestCase):
         self.assertIn('grid-template-areas: "field change who time";', css_block('.ecp-hist-item'))
         self.assertIn("if (!pageKey && mainTab === 'history') {\n                showTab('info');", PAGE)
 
-    def test_two_balanced_columns_of_fields(self):
-        """Каждая группа — в ту колонку, что короче: CSS-колонки шли по
-        порядку и оставляли левую полупустой."""
-        self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', css_block('.ecp-info'))
-        self.assertIn('const target = columns[0].size <= columns[1].size ? columns[0] : columns[1];', PAGE)
-        self.assertIn('className="ecp-info-col"', PAGE)
+    def test_groups_are_separate_boxes_in_reading_order(self):
+        """Владелец 01.10.2026: «разделение общее, данные, корпоративное —
+        понятнее, в стиле iOS/macOS». Группа — своя плашка с иконкой и
+        заголовком, группы идут по порядку сверху вниз (раскладка по колонкам
+        ставила «Корпоративное» перед «Данными»)."""
+        self.assertNotIn('infoColumns', PAGE)
+        self.assertIn('{infoSections.map((section) => (\n                                    <section key={section.key} className="ecp-group"', PAGE)
+        self.assertIn('<FaIcon className={section.icon', PAGE)
+        self.assertIn('background: var(--ecp-group);', css_block('.ecp-group'))
+        self.assertIn('flex-direction: column;', css_block('.ecp-info'))
+        self.assertIn('grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));', css_block('.ecp-group-list'))
+        # Иконка группы — та же, что у переключателя разделов списка.
+        phone = (EMPLOYEES / 'employeesPhoneList.js').read_text(encoding='utf-8')
+        self.assertIn('return { key: section.key, title: section.label, icon: section.icon, fields };', phone)
 
     def test_reduced_motion_is_honoured(self):
         self.assertIn('@media (prefers-reduced-motion: reduce)', PAGE_CSS)

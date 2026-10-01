@@ -1,4 +1,5 @@
 import React from 'react';
+import FaIcon from '../common/FaIcon';
 import { buildCardSections } from './employeesPhoneList';
 import { historyFieldLabel } from '../modals/historyFieldLabels';
 import { runPageTransition, usesViewTransitions } from './pageTransition';
@@ -17,7 +18,8 @@ import './employee-card-page.css';
  *   • шапка — фото, имя, «Изменить» и перевод;
  *   • строка итогов — статус, сколько работает, ставка, руководитель;
  *   • слева «Связаться» (кнопки и все контакты) и опасное, справа карточка с
- *     переключателем «Сведения / История», история — постранично;
+ *     переключателем «Сведения / История», история — постранично; группы
+ *     сведений — плашками с иконкой, как разделы настроек macOS;
  *   • «Изменить» — та же страница в режиме правки: одна карточка с
  *     переключателем разделов формы, поля раздела сеткой — раздел целиком на
  *     экране; «Отмена» и «Сохранить» — в липкой шапке на месте «‹ Назад»;
@@ -651,15 +653,6 @@ export default function EmployeeCardPage({
     // Контакты живут в «Связаться» — в «Сведениях» второй раз они не нужны.
     const contactFields = sections.find((section) => section.key === 'contacts')?.fields || [];
     const infoSections = sections.filter((section) => section.key !== 'contacts');
-    /* Группы — в две колонки, каждая следующая в ту, что короче: CSS-колонки
-       шли строго по порядку, и левая оставалась полупустой («Общее» — четыре
-       строки, «Данные» — шесть, «Корпоративное» уходило под них). */
-    const infoColumns = infoSections.reduce((columns, section) => {
-        const target = columns[0].size <= columns[1].size ? columns[0] : columns[1];
-        target.sections.push(section);
-        target.size += section.fields.length + 1; // +1 — подпись группы
-        return columns;
-    }, [{ sections: [], size: 0 }, { sections: [], size: 0 }]).filter((column) => column.sections.length > 0);
     /* В шапке — то, чего нет в полях ниже: направление оператора уже стоит
        строкой в «Общем», и повтор был бы тем же словом дважды. */
     const fieldTexts = new Set(sections.flatMap((section) => section.fields).map((field) => field.value));
@@ -802,23 +795,30 @@ export default function EmployeeCardPage({
                     </div>
                     <div key={mainTab} className="ecp-main-body">
                         {mainTab === 'info' ? (
+                            /* Владелец 01.10.2026: «разделение общее, данные,
+                               корпоративное сделать понятнее». Группа — своя
+                               плашка с иконкой (те же, что у переключателя
+                               списка) и заголовком, группы — сверху вниз по
+                               порядку, поля внутри сеткой: подпись над значением,
+                               как в форме правки. */
                             <div className="ecp-info">
-                                {infoColumns.map((column) => (
-                                    <div key={column.sections[0].key} className="ecp-info-col">
-                                        {column.sections.map((section) => (
-                                            <section key={section.key} className="ecp-info-group" aria-label={section.title}>
-                                                <div className="ecp-caption">{section.title}</div>
-                                                <dl className="ecp-info-list">
-                                                    {section.fields.map((field) => (
-                                                        <div key={field.key} className="ecp-info-row">
-                                                            <dt>{field.label}</dt>
-                                                            <dd>{field.value}</dd>
-                                                        </div>
-                                                    ))}
-                                                </dl>
-                                            </section>
-                                        ))}
-                                    </div>
+                                {infoSections.map((section) => (
+                                    <section key={section.key} className="ecp-group" aria-label={section.title}>
+                                        <h3 className="ecp-group-head">
+                                            <span className={`ecp-group-icon is-${section.key}`} aria-hidden="true">
+                                                <FaIcon className={section.icon || 'fa-solid fa-layer-group'} />
+                                            </span>
+                                            {section.title}
+                                        </h3>
+                                        <dl className="ecp-group-list">
+                                            {section.fields.map((field) => (
+                                                <div key={field.key} className="ecp-cell">
+                                                    <dt>{field.label}</dt>
+                                                    <dd>{field.value}</dd>
+                                                </div>
+                                            ))}
+                                        </dl>
+                                    </section>
                                 ))}
                             </div>
                         ) : (

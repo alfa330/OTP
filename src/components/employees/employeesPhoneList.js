@@ -104,7 +104,7 @@ export const buildCardSections = (sectionList, columnsFor, valueOf, skipKeys = [
                 if (isEmptyValue(value)) return;
                 fields.push({ key: column.key, label: column.label, value });
             });
-            return { key: section.key, title: section.label, fields };
+            return { key: section.key, title: section.label, icon: section.icon, fields };
         })
         .filter((section) => section.fields.length > 0);
 };

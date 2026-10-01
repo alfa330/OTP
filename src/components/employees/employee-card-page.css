@@ -37,6 +37,7 @@
        видно уезжающие под неё строки, как под шапкой в iOS и macOS. */
     --ecp-bar-bg: rgba(249, 250, 251, 0.82);
     --ecp-input: rgba(118, 118, 128, 0.1);
+    --ecp-group: #f5f5f7;
     --ecp-ok: #1d7a3a;
     --ecp-shadow: 0 0 0 0.5px rgba(15, 23, 42, 0.1), 0 1px 2px rgba(15, 23, 42, 0.04);
     --ecp-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -75,6 +76,7 @@ html[data-otp-theme="dark"] .ecp {
     --ecp-warn: #fbbf24;
     --ecp-bar-bg: rgba(23, 25, 30, 0.82);
     --ecp-input: #2b3039;
+    --ecp-group: #252930;
     --ecp-ok: #6ee7a0;
     --ecp-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.08);
 }
@@ -711,13 +713,13 @@ html[data-otp-theme="dark"] .ecp-btn.is-plain:hover {
 }
 
 .ecp-contact-row dd a,
-.ecp-info-row dd a {
+.ecp-cell dd a {
     color: var(--ecp-accent);
     text-decoration: none;
 }
 
 .ecp-contact-row dd a:hover,
-.ecp-info-row dd a:hover {
+.ecp-cell dd a:hover {
     text-decoration: underline;
 }
 
@@ -804,27 +806,82 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
     animation: ecp-fade-in 220ms ease backwards;
 }
 
-/* Сведения — группами в две колонки (раскладывает EmployeeCardPage.jsx);
-   в узкой карточке — одной. */
+/* Сведения — группа своей плашкой, как раздел настроек macOS: плитка-иконка,
+   заголовок, под ним поля сеткой (подпись над значением). Группы — сверху вниз
+   по порядку: так их видно раздельно, а не одним списком с подписями. */
 .ecp-main {
     container-type: inline-size;
 }
 
 .ecp-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ecp-group {
+    padding: 14px 16px 16px;
+    border-radius: 14px;
+    background: var(--ecp-group);
+}
+
+.ecp-group-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 14px;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 20px;
+    color: var(--ecp-text);
+}
+
+.ecp-group-icon {
+    flex: none;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    column-gap: 32px;
-    align-items: start;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: #8e8e93;
+    color: #fff;
+    font-size: 15px;
 }
 
-@container (max-width: 600px) {
-    .ecp-info {
-        grid-template-columns: minmax(0, 1fr);
-    }
+/* Цвета — системные iOS; в тёмной теме — их тёмные варианты. */
+.ecp-group-icon.is-general { background: #007aff; }
+.ecp-group-icon.is-data { background: #34c759; }
+.ecp-group-icon.is-corporate { background: #ff9500; }
+
+html[data-otp-theme="dark"] .ecp-group-icon.is-general { background: #0a84ff; }
+html[data-otp-theme="dark"] .ecp-group-icon.is-data { background: #30d158; }
+html[data-otp-theme="dark"] .ecp-group-icon.is-corporate { background: #ff9f0a; }
+
+.ecp-group-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 14px 24px;
+    margin: 0;
 }
 
-.ecp-info-group {
-    margin-bottom: 20px;
+.ecp-cell {
+    min-width: 0;
+}
+
+.ecp-cell dt {
+    font-size: 13px;
+    line-height: 17px;
+    color: var(--ecp-muted);
+}
+
+.ecp-cell dd {
+    margin: 3px 0 0;
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 20px;
+    color: var(--ecp-text);
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
 }
 
 .ecp-caption {
@@ -835,37 +892,6 @@ html[data-otp-theme="dark"] .ecp-seg-btn.is-on {
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--ecp-muted);
-}
-
-.ecp-info-list {
-    margin: 0;
-}
-
-.ecp-info-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 16px;
-    padding: 10px 0;
-    border-top: 1px solid var(--ecp-sep);
-}
-
-.ecp-info-row dt {
-    flex: none;
-    max-width: 50%;
-    font-size: 15px;
-    color: var(--ecp-muted);
-}
-
-.ecp-info-row dd {
-    min-width: 0;
-    margin: 0;
-    text-align: right;
-    font-size: 15px;
-    font-weight: 500;
-    color: var(--ecp-text);
-    overflow-wrap: anywhere;
-    font-variant-numeric: tabular-nums;
 }
 
 .ecp-back:focus-visible,
