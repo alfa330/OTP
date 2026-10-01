@@ -12,6 +12,7 @@ import { isDepartmentHead, normalizeRole } from '../../utils/roles';
 import { fitHeight, measureShell } from '../crm/layout';
 import { canPullCalls, SUBJECT_FAMILY_CALLS, SUBJECT_FAMILY_CHATS } from './subjects';
 import CallReviewCard from './CallReviewCard';
+import { adjudicationSummary } from './SimilarRules';
 import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
 import CriteriaClassification from './CriteriaClassification';
@@ -565,6 +566,24 @@ export default function CallQaView(props) {
         }
     };
 
+    /* «Такой разбор уже был?» и «что ИИ получил по критерию в этой оценке» —
+       под исправленным критерием (SimilarRules). Сбой молчит: подсказка не
+       должна мешать сохранить разбор. */
+    const similarAdjud = async (c, { text, verdict }) => {
+        const call = callData;
+        if (!apiBaseUrl || !call?._evaluation_run_id || !c?.criterion_id) return null;
+        try {
+            const r = await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate/similar`, {
+                call_id: call.id, subject_kind: call.subject_kind || 'call',
+                evaluation_run_id: call._evaluation_run_id,
+                criterion_id: c.criterion_id, text: text || '', correct_verdict: verdict,
+            }, { headers: headers() });
+            return r.data || null;
+        } catch {
+            return null;
+        }
+    };
+
     /* Сохранение карточки — одно на оценку человека и ревью ИИ.
      *
      * `human` — оценка проверяющего по шкале сотрудника (ai_human_reviews, а с
@@ -577,7 +596,8 @@ export default function CallQaView(props) {
      *
      * `ai` — итог ревью прогона, пока он не разобран: без исправлений это
      * подтверждение (тоже результат ревью: звонок уходит из очереди и остаётся
-     * сигналом качества модели), с исправлениями — черновики базы знаний.
+     * сигналом качества модели), с исправлениями — правила базы знаний, которые
+     * ИИ применит уже в следующих оценках (дубль действующего — к нему).
      *
      * Порядок — сначала своя оценка: она важнее и её не отвергают из-за того, что
      * прогон успели переоценить. Карточка закрывается только после ответа на ревью
@@ -630,13 +650,15 @@ export default function CallQaView(props) {
             return { ok: true, state };
         }
         const items = ai.items || [];
+        let adjudicated = null;
         try {
-            await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
+            const r = await axios.post(`${apiBaseUrl}/api/ai-qa/adjudicate`,
                 { call_id: call.id, direction_id: call.direction_id, subject_kind: kind,
                   evaluation_run_id: call._evaluation_run_id,
                   scale_revision_id: call._scale_revision_id,
                   evaluation_fingerprint: call._evaluation_fingerprint,
                   items }, { headers: headers() });
+            adjudicated = r.data || null;
         } catch (error) {
             const message = error?.response?.data?.error || 'не удалось сохранить разбор';
             // Прогон успел разобрать кто-то другой: дальше карточка сохраняет только
@@ -649,7 +671,7 @@ export default function CallQaView(props) {
             return { ok: false, state };
         }
         showToast?.(items.length
-            ? `Исправлений: ${items.length} — в черновики базы знаний${inJournal}`
+            ? `${adjudicationSummary(items.length, adjudicated)}${inJournal}`
             : `Оценка ИИ подтверждена${inJournal}`, 'success');
         // Разговор уходит из своего дня очереди сразу, а сводка дня меняется на месте.
         // День и причины берём у строки очереди (открыт из неё) или у загруженного дня.
@@ -792,6 +814,7 @@ export default function CallQaView(props) {
                     ) : (
                         <CallReviewCard key={callData?._evaluation_run_id || callData?.id} call={callData || undefined} onSkip={requestCloseCall}
                                         onSave={saveReview} onRefine={refineAdjud}
+                                        onSimilar={similarAdjud}
                                         canCorrectJournal={canCorrectJournal}
                                         onInteractionChange={setReviewInteraction} />
                     )}

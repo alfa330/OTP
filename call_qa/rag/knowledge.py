@@ -11,6 +11,7 @@ this keeps case + rule + embedding and lifecycle + snapshot changes atomic.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -283,6 +284,53 @@ def create_knowledge_snapshot(conn, *, direction_id: int, scale_revision_id: int
             "created_at": created_at, "reused": False}
 
 
+def publish_direction_snapshots(conn, *, direction_id: int, created_by=None,
+                                reason: str | None = None,
+                                scale_revision_id=None) -> dict | None:
+    """Опубликовать снимок для КАЖДОЙ ревизии шкалы направления, у которой уже
+    есть состояние базы знаний (qa_knowledge_state).
+
+    Раньше снимок уходил в ревизию с наибольшим номером, а оценка берёт ту
+    ревизию, чей хэш совпал с ЖИВОЙ шкалой (sync_scale_revision). Это разные
+    вещи, когда шкалу поменяли и вернули: у направления 72 оценки идут по
+    ревизии №2 (id 5), а «Одобрено» в «Базе разборов» публиковало в №3 (id 6) —
+    одобренное правило оценки не видели вовсе. Состав снимка от ревизии не
+    зависит (это активные правила направления), поэтому обновить все известные
+    ревизии и честнее, и проще, чем угадывать живую.
+
+    Ревизия без состояния ещё ни разу не оценивалась: первая же оценка по ней
+    сама соберёт снимок со всеми активными правилами (ensure_knowledge_context).
+    Возвращает снимок запрошенной ревизии (scale_revision_id) или самой новой.
+    """
+    direction_id = int(direction_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT s.scale_revision_id FROM qa_knowledge_state s
+                 JOIN qa_scale_revisions r ON r.id = s.scale_revision_id
+                WHERE s.direction_id=%s
+                ORDER BY r.scale_revision DESC""", (direction_id,))
+        revisions = [int(row[0]) for row in cur.fetchall()]
+        if not revisions and scale_revision_id is None:
+            cur.execute(
+                """SELECT id FROM qa_scale_revisions WHERE direction_id=%s
+                    ORDER BY scale_revision DESC LIMIT 1""", (direction_id,))
+            row = cur.fetchone()
+            if not row:
+                raise KnowledgeValidationError("direction has no registered scale revision")
+            revisions = [int(row[0])]
+    if scale_revision_id is not None:
+        requested = int(scale_revision_id)
+        revisions = [requested] + [rev for rev in revisions if rev != requested]
+    primary = None
+    for revision in revisions:
+        snapshot = create_knowledge_snapshot(
+            conn, direction_id=direction_id, scale_revision_id=revision,
+            created_by=created_by, reason=reason)
+        if primary is None:
+            primary = snapshot
+    return primary
+
+
 def ensure_knowledge_context(conn, *, direction: dict, created_by=None) -> dict:
     """Synchronise scale metadata and return a usable current snapshot."""
     scale_revision_id = sync_scale_revision(
@@ -535,17 +583,11 @@ def revise_policy_rule(conn, *, rule_id: str, changes: dict, actor_id=None,
         )
         cur.execute("SELECT direction_id FROM qa_policy_rules WHERE id=%s", (str(rule_id),))
         direction_id = int(cur.fetchone()[0])
-    snapshot = None
     if publish_snapshot and row[1] == "active":
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id FROM qa_scale_revisions WHERE direction_id=%s
-                    ORDER BY scale_revision DESC LIMIT 1""", (direction_id,))
-            scale_row = cur.fetchone()
-        if scale_row:
-            snapshot = create_knowledge_snapshot(
-                conn, direction_id=direction_id, scale_revision_id=int(scale_row[0]),
-                created_by=actor_id, reason=str(reason).strip())
+        # Действовавшая версия ушла в черновик — снимок обязан её потерять во
+        # всех ревизиях шкалы, а не только в последней по номеру.
+        publish_direction_snapshots(conn, direction_id=direction_id, created_by=actor_id,
+                                    reason=str(reason).strip())
     return {"rule_id": str(rule_id), "rule_version_id": version_id,
             "rule_version": next_version, "content_hash": digest, "rule_status": "draft"}
 
@@ -662,7 +704,8 @@ def mark_rule_index_pending(conn, *, rule_version_id: int, provider: str, model:
 
 def transition_policy_rule(conn, *, rule_id: str, to_status: str, actor_id=None,
                            reason: str, expected_status=None, version_id=None,
-                           scale_revision_id=None, expected_version_id=None) -> dict:
+                           scale_revision_id=None, expected_version_id=None,
+                           publish_snapshot: bool = True) -> dict:
     if to_status not in RULE_STATUSES:
         raise KnowledgeValidationError(f"invalid rule status: {to_status}")
     if not str(reason or "").strip():
@@ -728,22 +771,102 @@ def transition_policy_rule(conn, *, rule_id: str, to_status: str, actor_id=None,
             (to_status, selected_version, actor_id, str(reason).strip(), str(rule_id)),
         )
     snapshot = None
-    if to_status == "active" or current_status == "active":
-        if scale_revision_id is None:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT id FROM qa_scale_revisions WHERE direction_id=%s
-                        ORDER BY scale_revision DESC LIMIT 1""", (direction_id,))
-                scale_row = cur.fetchone()
-            if not scale_row:
-                raise KnowledgeValidationError("direction has no registered scale revision")
-            scale_revision_id = int(scale_row[0])
-        snapshot = create_knowledge_snapshot(
-            conn, direction_id=direction_id, scale_revision_id=int(scale_revision_id),
-            created_by=actor_id, reason=str(reason).strip(),
-        )
+    # publish_snapshot=False — снимок опубликует вызывающий, один на пачку правил
+    # (activate_rules): иначе три исправления в одной карточке давали бы три
+    # ревизии базы знаний подряд.
+    if publish_snapshot and (to_status == "active" or current_status == "active"):
+        snapshot = publish_direction_snapshots(
+            conn, direction_id=direction_id, created_by=actor_id,
+            reason=str(reason).strip(), scale_revision_id=scale_revision_id)
     return {"rule_id": str(rule_id), "rule_version_id": selected_version,
             "rule_status": to_status, "knowledge_snapshot": snapshot}
+
+
+def activate_rules(conn, *, direction: dict, rule_ids, actor_id=None,
+                   reason: str, auto: bool = False) -> dict | None:
+    """Включить черновики правил в оценку сразу и опубликовать ОДИН снимок.
+
+    Разбор из карточки должен влиять на следующую же оценку направления
+    (решение владельца 01.10.2026): до этого правило ждало ручного «Одобрено», и
+    за полтора месяца ни одно из 108 исправлений до ИИ не дошло.
+
+    Снимок публикуется для ЖИВОЙ шкалы направления — той, что посчитает
+    ensure_knowledge_context при следующей оценке. Шкала прогона, на котором
+    исправляли, для этого не годится: если шкалу с тех пор поменяли, снимок лёг
+    бы в старую ревизию, и новые оценки правила бы не увидели. Сам разбор
+    (qa_adjudication_cases) по-прежнему привязан к шкале прогона — это делает
+    вызывающий, здесь только жизненный цикл правила.
+
+    direction — как у оценки: criteria.load_direction + apply_to_direction.
+    Правило без готового вектора не активируется (transition_policy_rule
+    откажет), поэтому сюда передают только проиндексированные.
+
+    auto — самовключение разбора из карточки. Включается только правило, которое
+    ПОД БЛОКИРОВКОЙ строки всё ещё несёт отметку metadata.auto_activate: отметку
+    снимает администратор, взявший правило в руки, и прочитанный раньше список
+    «ждущих» не должен включить правило поверх его решения. Правило, которое
+    включить нельзя (уже включили или выключили параллельно, нет вектора),
+    пропускается под точкой сохранения, а не роняет всю пачку: иначе один
+    застрявший черновик навсегда блокировал бы самовключение по направлению.
+    Отметка снимается с включённых — выключит администратор, само не включится.
+    Возвращает {"snapshot", "activated"} или None, если включать было нечего.
+    """
+    ids = [str(rule_id) for rule_id in dict.fromkeys(rule_ids or ()) if rule_id]
+    if not ids:
+        return None
+    # Живая ревизия обязана иметь состояние ДО публикации: тогда снимок ляжет и в
+    # неё, даже если по этой шкале ещё не было ни одной оценки.
+    ctx = ensure_knowledge_context(conn, direction=direction, created_by=actor_id)
+    activated = []
+    for rule_id in ids:
+        if auto:
+            with conn.cursor() as cur:
+                cur.execute("SAVEPOINT activate_rule")
+                cur.execute("""SELECT metadata ? 'auto_activate' FROM qa_policy_rules
+                                WHERE id=%s FOR UPDATE""", (rule_id,))
+                marked = cur.fetchone()
+            if not marked or not marked[0]:
+                with conn.cursor() as cur:
+                    cur.execute("RELEASE SAVEPOINT activate_rule")
+                continue
+        try:
+            transition_policy_rule(
+                conn, rule_id=rule_id, to_status="active", actor_id=actor_id,
+                reason=reason, expected_status="draft",
+                scale_revision_id=ctx["scale_revision_id"], publish_snapshot=False)
+        except (KnowledgeValidationError, KnowledgeConflict, KeyError):
+            if not auto:
+                raise
+            with conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT activate_rule")
+            logging.warning("ai-qa: правило %s не включено в оценку", rule_id, exc_info=True)
+            continue
+        if auto:
+            with conn.cursor() as cur:
+                cur.execute("RELEASE SAVEPOINT activate_rule")
+        activated.append(rule_id)
+    if not activated:
+        return None
+    release_auto_activation(conn, rule_ids=activated)
+    snapshot = publish_direction_snapshots(
+        conn, direction_id=int(direction["id"]), created_by=actor_id, reason=reason,
+        scale_revision_id=ctx["scale_revision_id"])
+    return {"snapshot": snapshot, "activated": activated}
+
+
+def release_auto_activation(conn, *, rule_ids) -> None:
+    """Снять отметку самовключения (metadata.auto_activate) с правил.
+
+    Отметку ставит разбор из карточки: «включить, как только будет вектор».
+    Она снимается, когда правило включено или его взял в руки администратор —
+    иначе выключенный им черновик включился бы снова при следующем разборе."""
+    ids = [str(rule_id) for rule_id in rule_ids or () if rule_id]
+    if not ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE qa_policy_rules SET metadata = metadata - 'auto_activate'
+                WHERE id = ANY(%s::uuid[]) AND metadata ? 'auto_activate'""", (ids,))
 
 
 def rule_document_text(*, situation: str | None, excerpt: str | None,

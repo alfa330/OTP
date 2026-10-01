@@ -207,8 +207,11 @@ class AdjudicationValidationTests(unittest.TestCase):
             def close(self): pass
 
         provider = MagicMock(metadata={"provider": "test", "model": "m", "dim": 2})
-        provider.embed_document.return_value = [[0.1, 0.2]]
+        # Вектор поиска и вектор текста правила считаются одним вызовом.
+        provider.embed_document.return_value = [[0.1, 0.2], [0.3, 0.4]]
         create_case = MagicMock(return_value="case-id")
+        activate = MagicMock(return_value={"rule-1"})
+        rollout = {"mode": "active", "approval": {"valid": True, "manual": True}}
         with patch.object(api, "_validated_adjudication_items",
                           return_value=(payload, validated)), \
              patch.object(api.config, "connect_rw", return_value=Connection()), \
@@ -216,20 +219,30 @@ class AdjudicationValidationTests(unittest.TestCase):
              patch.object(knowledge, "rule_document_text", return_value="document"), \
              patch.object(knowledge, "create_adjudication_case", create_case), \
              patch.object(knowledge, "create_draft_policy_rule",
-                          return_value={"rule_version_id": 9}), \
+                          return_value={"rule_id": "rule-1", "rule_version_id": 9}), \
              patch.object(knowledge, "record_rule_embedding"), \
+             patch.object(knowledge, "ensure_embedding_model", return_value=4), \
+             patch("call_qa.rag.similar.find_similar",
+                   return_value={"items": [], "degraded": False}), \
+             patch("call_qa.rag.similar.save_vector"), \
              patch.object(knowledge, "ensure_knowledge_context",
                           side_effect=AssertionError("current scale used")), \
              patch.object(api.criteria_mod, "load_direction",
                           side_effect=AssertionError("current scale used")), \
+             patch.object(api, "_activate_review_rules", activate), \
+             patch.object(api, "_rag_rollout", return_value=rollout), \
              patch.object(api, "_claim_review_outcome"), \
              patch.object(api, "_record_review_outcome"), \
              patch.object(api, "_record_rule_review_feedback"):
             saved = api._save_adjudications_locked(
                 10, 72, [{}], evaluation_run_id=RUN_ID, scale_revision_id=7)
-        self.assertEqual(saved, 1)
+        self.assertEqual(saved["saved"], 1)
+        self.assertEqual(saved["activated"], 1)
+        self.assertEqual(saved["rag_mode"], "active")
         self.assertEqual(create_case.call_args.kwargs["scale_revision_id"], 7)
         self.assertEqual(create_case.call_args.kwargs["evaluation_run_id"], RUN_ID)
+        # Включение в оценку — по живой шкале направления, отдельным шагом.
+        self.assertEqual(activate.call_args.args[:2], (72, ["rule-1"]))
 
     def test_review_claim_rejects_repeat_submit_atomically(self):
         cursor = MagicMock()

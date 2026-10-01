@@ -259,7 +259,7 @@ function ChatMeta({ call }) {
     );
 }
 
-export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInteractionChange,
+export default function CallReviewCard({ call, onSave, onSkip, onRefine, onSimilar, onInteractionChange,
                                          canCorrectJournal = false }) {
     const audioRef = useRef(null);
 
@@ -411,6 +411,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
                 <CriteriaReviewPanel call={call} transcriptText={transcriptText}
                                      canCorrectJournal={canCorrectJournal}
                                      onSave={onSave} onSkip={onSkip} onRefine={onRefine}
+                                     onSimilar={onSimilar}
                                      onInteractionChange={onInteractionChange} />
             </div>
         </div>

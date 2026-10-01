@@ -460,6 +460,11 @@ export function AdjudicationCard({ item, canManage, locked, editing, busy, onEdi
     const ready = !legacy && itemRuleStatus === 'active' && INDEX_STATUS[indexState]?.participates;
     const criterion = item.criterion || item.criterion_name || 'Разбор без названия';
     const usage = item.exposure_count ?? item.use_count ?? 0;
+    // Ответ на «использует ли ИИ разбор»: сколько раз по критерию правила ИИ всё
+    // равно исправляли ПОСЛЕ того, как получил правило, и сколько раз люди
+    // повторяли тот же разбор при действующем правиле.
+    const correctedAfter = Number(item.corrected_after_count || 0);
+    const repeats = Number(item.repeat_count || 0);
     const needsIndex = ['pending', 'failed', 'error', 'stale', 'unindexed'].includes(indexState);
     const explanation = legacy ? 'Исторический разбор · нужна проверка'
         : ready ? 'Готово к применению в похожих ситуациях'
@@ -524,7 +529,19 @@ export function AdjudicationCard({ item, canManage, locked, editing, busy, onEdi
                     <p className={`flex items-start gap-1.5 text-[11.5px] leading-relaxed ${ready ? 'text-emerald-700' : 'text-slate-500'}`}>
                         {ready ? <ShieldCheck size={14} className="mt-0.5 shrink-0" /> : <Clock3 size={14} className="mt-0.5 shrink-0" />}{explanation}
                     </p>
-                    <p className="mt-0.5 pl-5 text-[11px] text-slate-400">Передавалось ИИ: {Number(usage).toLocaleString('ru-RU')}</p>
+                    <p className="mt-0.5 pl-5 text-[11px] text-slate-400">
+                        Передавалось ИИ: {Number(usage).toLocaleString('ru-RU')}
+                        {correctedAfter > 0 && (
+                            <span className="text-amber-700" title="Сколько раз по этому критерию ИИ исправляли после того, как правило ушло ему в промпт">
+                                {' · '}ИИ исправляли после этого: {correctedAfter.toLocaleString('ru-RU')}
+                            </span>
+                        )}
+                        {repeats > 0 && (
+                            <span className="text-amber-700" title="Разборы, повторившие это правило, пока оно уже действовало: ИИ ошибся снова">
+                                {' · '}повторов разбора: {repeats.toLocaleString('ru-RU')}
+                            </span>
+                        )}
+                    </p>
                 </div>
                 {canManage && !editing && <div className="flex shrink-0 items-center justify-end gap-1">
                     <button type="button" onClick={onEdit} disabled={locked} className={`${iosBtnSecondary} !min-h-10 !px-3 !text-[12px]`}>
@@ -755,7 +772,7 @@ export default function AdjudicationsRag(props) {
                         </button>
                     </div>
                 </div>
-                <p className="px-4 pb-5 pt-3 text-[13px] leading-relaxed text-slate-500 sm:px-6">Проверенные правила помогают ИИ оценивать похожие разговоры.</p>
+                <p className="px-4 pb-5 pt-3 text-[13px] leading-relaxed text-slate-500 sm:px-6">Исправления из карточек сразу становятся правилами: ИИ применяет их в следующих оценках похожих разговоров.</p>
                 <div className="grid grid-cols-3 divide-x divide-slate-100 border-t border-slate-100 bg-slate-50/50">
                     {[{ value: catalogCount, label: 'Разборов в отделе', key: 'all' },
                       { value: draftCount, label: 'Ждут проверки', key: 'draft' },
@@ -839,7 +856,7 @@ export default function AdjudicationsRag(props) {
             </div> : result && !error && health.status !== 'error' && items.length === 0 ? <div className={`${iosCard} flex flex-col items-center px-6 py-14 text-center`}>
                 <div className="mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-slate-100 text-slate-400"><BookOpen size={26} strokeWidth={1.5} /></div>
                 <h3 className="text-[16px] font-semibold text-slate-800">{hasFilters || hasDealFilters ? 'Подходящих разборов нет' : view === 'deleted' ? 'Удалённых разборов нет' : 'В этом отделе пока нет разборов'}</h3>
-                <p className="mt-2 max-w-md text-[13px] leading-relaxed text-slate-500">{hasFilters ? 'Попробуйте другое направление, статус или поисковый запрос.' : hasDealFilters ? 'Измените отбор по сделке в панели раздела.' : view === 'deleted' ? 'Здесь сохраняется история удалённых правил.' : 'Исправьте оценку ИИ при проверке разговора — разбор появится здесь как черновик.'}</p>
+                <p className="mt-2 max-w-md text-[13px] leading-relaxed text-slate-500">{hasFilters ? 'Попробуйте другое направление, статус или поисковый запрос.' : hasDealFilters ? 'Измените отбор по сделке в панели раздела.' : view === 'deleted' ? 'Здесь сохраняется история удалённых правил.' : 'Исправьте оценку ИИ при проверке разговора — разбор появится здесь и сразу начнёт применяться в оценках.'}</p>
                 {hasFilters && <button type="button" onClick={resetFilters} className={`${iosBtnSecondary} mt-5`}>Сбросить фильтры</button>}
             </div> : result && !error && health.status !== 'error' ? <>
                 <div className="grid items-start gap-4 xl:grid-cols-2">

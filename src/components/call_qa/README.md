@@ -202,6 +202,30 @@ node-тест `tests/ai_qa_filters.test.mjs` сверяет, что обе ст�
      items:[{ criterion_id, criterion_idx, criterion_name, ai_verdict, correct_verdict,
               reason, not_covered, situation, excerpt, excerpt_verified, evidence_status }] }`
   `items: []` — это «Подтвердить» (тоже результат ревью: субъект уходит из очереди).
+  → `{ saved, activated, pending_index, linked, rag_mode, auto_activation, rules:[{ rule_id,
+  criterion_id, status:'active'|'draft'|'linked', ready }] }`. Правило разбора включается в
+  оценку СРАЗУ (без «Одобрено»); без готового вектора — `draft`, его включит фоновая
+  переиндексация; не включённый по сбою черновик подберёт следующий разбор направления.
+  Дубль (тот же смысл И та же формулировка: слова, «не/должен/обязан…» и числа; тот же
+  вердикт) правила, которое ИИ в ЭТОЙ оценке получил, нового правила не создаёт (`linked`) —
+  кейс несёт `metadata.duplicate_of_rule_id`; не дошедшее до промпта правило — повод для
+  нового. `rag_mode` — режим направления сейчас: при `shadow`/`off` фронт не обещает «ИИ
+  учтёт». `auto_activation:false` — направление включено по контрольной проверке (не
+  вручную): правила ждут администратора, новый снимок снял бы одобрение. Тот же режим
+  карточка получает заранее в `rag_now: { mode, auto_activation }` (режим в самом прогоне
+  застыл на момент оценки, у пакетной — `batch`).
+- `POST /api/ai-qa/adjudicate/similar` ← `{ call_id, subject_kind, evaluation_run_id,
+  criterion_id, text, correct_verdict }` → `{ items:[{ rule_id, rule_status, rule_text,
+  correct_verdict, score|null, verdict:'duplicate'|'similar'|'in_prompt', same_verdict,
+  run:{ code, similarity, threshold } }], duplicate_of, degraded, run:{ rag_enabled, status,
+  included } }` — «такой разбор уже был?» (пороги в `call_qa/rag/similar.py`) и что ИИ
+  получил по критерию в ЭТОЙ оценке (текст — из трассы прогона); `run.code`: `included`,
+  `below_threshold` (порог — этого прогона, сходство округлено вниз), `top_k`,
+  `not_retrieved` (в базе оценки было, но в окно поиска не вошло — другие правила ближе),
+  `missing_from_snapshot` (действовало, но ни в один снимок ревизии шкалы этой оценки не
+  попало — сбой публикации), `inactive_at_run` (тогда не действовало или опубликовано
+  после того, как оценка взяла снимок), `rag_off`, `retrieval_failed`. Доступ сверяется
+  по направлению прогона.
 - `POST /api/ai-qa/adjudicate/refine` ← `{ direction_id, criterion_idx, criterion_name,
   ai_verdict, ai_comment, correct_verdict, reason, excerpt, excerpt_verified, evidence_status }`
   → `{ proposal: { rule, situation, not_covered, note_to_reviewer } }` (подсказка; сохраняет человек).
@@ -209,6 +233,9 @@ node-тест `tests/ai_qa_filters.test.mjs` сверяет, что обе ст�
 - `GET/POST /api/ai-qa/criteria-config?direction_id=` ↔ `criterion_config`.
 - `GET /api/ai-qa/adjudications`, `PUT/DELETE /api/ai-qa/adjudications/:id`,
   `POST /api/ai-qa/adjudications/:id/reindex`, `GET/PUT /api/ai-qa/rag-rollout`.
+  Строка каталога несёт `corrected_after_count` (сколько раз ИИ исправляли по критерию
+  ПОСЛЕ того, как правило ушло ему в промпт) и `repeat_count` (разборы-дубли, привязанные
+  к правилу, пока оно действовало).
 
 ### Объект `call` (карточка)
 

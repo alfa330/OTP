@@ -6250,14 +6250,16 @@ def api_ai_qa_adjudicate():
         # отдельно: у главы отдела ось направлений не ограничена.
         if not _ai_qa_direction_department_allowed(requester_id, body.get('direction_id')):
             return jsonify({"error": "направление вне вашего доступа"}), 403
-        saved = save_adjudications(
+        # saved/activated/pending_index: разбор сразу идёт в следующие оценки
+        # направления; без готового вектора его включит фоновая переиндексация.
+        result = save_adjudications(
             body.get('call_id'), body.get('direction_id'), body.get('items', []),
             reviewer_id=requester_id,
             evaluation_run_id=body.get('evaluation_run_id'),
             scale_revision_id=body.get('scale_revision_id'),
             evaluation_fingerprint=body.get('evaluation_fingerprint'),
             subject_kind=subject)
-        return jsonify({"status": "success", "saved": saved}), 200
+        return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
     except Exception:
@@ -6289,6 +6291,55 @@ def api_ai_qa_adjudicate_refine():
     except Exception as error:
         logging.exception("ai-qa adjudicate refine failed")
         return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/adjudicate/similar', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_adjudicate_similar():
+    """«Такой разбор уже был?» и «что ИИ знал, когда ошибся?» — при исправлении
+    критерия в карточке. Только чтение; вектор текста считает Vertex."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa import config as _qa_config
+        from call_qa.api import (adjudication_similar, call_in_scope, direction_in_scope,
+                                 subject_direction_id)
+        body = request.get_json(force=True) or {}
+        if not isinstance(body, dict):
+            raise ValueError("тело запроса должно быть JSON-объектом")
+        subject = _ai_qa_subject_kind(body.get('subject_kind') or body.get('subject'),
+                                      default=_qa_config.SUBJECT_CALL)
+        call_id = int(body.get('call_id'))
+        scope = _ai_qa_direction_scope(requester_id)
+        if not call_in_scope(call_id, scope, subject):
+            return jsonify({"error": "субъект вне ваших направлений"}), 403
+        # Правила — политика направления; отдел сверяем по самому разговору, как
+        # у карточки: у главы отдела ось направлений не ограничена.
+        if not _ai_qa_direction_department_allowed(
+                requester_id, subject_direction_id(call_id, subject)):
+            return jsonify({"error": "субъект вне вашего отдела"}), 403
+        # Правила показываются направления ПРОГОНА — его и сверяем (разговор
+        # могли с тех пор перенести в другое направление).
+        result = adjudication_similar(
+            call_id=call_id, subject_kind=subject,
+            evaluation_run_id=body.get('evaluation_run_id'),
+            criterion_id=body.get('criterion_id'),
+            text=str(body.get('text') or '')[:4000],
+            correct_verdict=body.get('correct_verdict'),
+            authorize=lambda direction_id: (
+                direction_in_scope(direction_id, scope)
+                and _ai_qa_direction_department_allowed(requester_id, direction_id)))
+        return jsonify({"status": "success", **result}), 200
+    except PermissionError as error:
+        return jsonify({"error": str(error)}), 403
+    except (TypeError, ValueError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa adjudicate similar failed")
+        return jsonify({"error": "не удалось проверить похожие разборы"}), 500
 
 
 @app.route('/api/ai-qa/criteria-config', methods=['GET', 'POST', 'OPTIONS'])

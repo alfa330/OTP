@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
+import SimilarRules from './SimilarRules';
 import {
     Check, X, Minus, AlertTriangle, ShieldAlert, Sparkles, Save, Loader2, Plus, Lock,
     BookMarked, RotateCcw, ChevronDown, Quote, Undo2, ShieldCheck, Server, User2, Clock,
@@ -26,7 +27,8 @@ import { CHAT_SUBJECTS } from './subjects';
  *   • оценку человека (ai_human_reviews), а с переключателем «Учитывать в
  *     качестве» — и строку «Журнала оценок» (полную, как в журнале);
  *   • пока прогон ИИ не разобран — итог ревью: подтверждение, если исправлений
- *     нет, или исправления в черновики базы знаний ИИ. Объяснение исправления —
+ *     нет, или исправления, которые сразу идут в базу знаний ИИ (дубль
+ *     действующего правила привязывается к нему). Объяснение исправления —
  *     комментарий человека; правило и цитату для ИИ можно уточнить отдельно.
  *
  * Правила и формула — в humanReview.js (зеркало call_qa/human_review.py).
@@ -82,6 +84,7 @@ const kbSignature = (kb) => JSON.stringify(Object.keys(kb || {}).sort().map((key
  * цитаты»; с ним — правило для похожих случаев и дословный фрагмент разговора. */
 function KnowledgeDetails({
     c, value, comment, extra: saved, onChange, disabled, transcriptText, onRefine, forceOpen = false, ruleRequired = false,
+    ragLive = true,
 }) {
     // Открытым блок бывает и без своих данных (forceOpen у закрытой на чтение оценки).
     const extra = saved || {};
@@ -94,8 +97,11 @@ function KnowledgeDetails({
     valueRef.current = value;
     useEffect(() => () => { request.current += 1; }, []);
 
-    const hint = 'Исправление уходит в черновики базы знаний: одобренные правила ИИ применяет к похожим '
-        + 'разговорам. Без правила в черновик пойдёт ваш комментарий, без цитаты — отметка «без подтверждения».';
+    const hint = (ragLive
+        ? 'Исправление сразу уходит в базу знаний: ИИ применит его в следующих оценках похожих разговоров. '
+        : 'Исправление сохранится правилом в «Базе разборов», но в оценки само сейчас не попадёт. ')
+        + 'Без правила возьмём ваш комментарий, без цитаты — отметка «без подтверждения». '
+        + 'Если ИИ уже получил такое правило и всё равно ошибся, новое не создастся — разбор добавится к нему.';
     if (!extra.open && !forceOpen) {
         return (
             <div className="mt-2 flex items-center gap-1.5">
@@ -231,6 +237,7 @@ function KnowledgeDetails({
 const CriterionReview = memo(function CriterionReview({
     c, index, value, comment, extra, onPick, onComment, onExtra, onRevert,
     locked, kbEnabled, kbLocked, highlight, journalVerdict, journalComment, transcriptText, onRefine,
+    onSimilar, ragLive,
 }) {
     const [reasonOpen, setReasonOpen] = useState(false);
     const [commentOpen, setCommentOpen] = useState(false);
@@ -426,8 +433,15 @@ const CriterionReview = memo(function CriterionReview({
                 <KnowledgeDetails c={c} value={value} comment={text} extra={extra}
                                   onChange={(patch) => onExtra(c.idx, patch)} disabled={kbLocked}
                                   transcriptText={transcriptText} onRefine={onRefine}
-                                  forceOpen={reasonViaRule}
+                                  forceOpen={reasonViaRule} ragLive={ragLive}
                                   ruleRequired={reasonViaRule && !String(extra?.rule || '').trim()} />
+            )}
+            {/* «Такой разбор уже был?» — по тому, что уйдёт правилом: само правило,
+                а без него — комментарий (так же собирает разбор сохранение). */}
+            {corrected && transcript && kbEnabled && onSimilar && (
+                <SimilarRules criterion={c} verdict={toAiVerdict(value)}
+                              text={String(extra?.rule || '').trim() || text}
+                              onSimilar={onSimilar} />
             )}
         </div>
     );
@@ -448,6 +462,7 @@ function SettingRow({ label, hint, checked, onChange, disabled }) {
 
 export default function CriteriaReviewPanel({
     call, transcriptText = '', canCorrectJournal = false, onSave, onSkip, onRefine, onInteractionChange,
+    onSimilar,
 }) {
     const criteria = useMemo(() => call?.criteria || [], [call]);
     const journal = call?.human_review || null;
@@ -472,6 +487,13 @@ export default function CriteriaReviewPanel({
     // (и убирает карточку из очереди). Разобранный второй раз не принимается.
     const aiReview = call?.ai_review || null;
     const aiPending = !aiReview?.outcome && hasTranscript;
+    // «ИИ учтёт исправление» — по тому, как направление оценивается СЕЙЧАС
+    // (rag_now с сервера): режим в прогоне застыл на момент оценки, у пакетной —
+    // «batch». В shadow/off или пока правила включает администратор — не обещаем.
+    const ragNow = call?.rag_now;
+    const ragLive = ragNow
+        ? ['active', 'canary'].includes(ragNow.mode) && ragNow.auto_activation !== false
+        : ['active', 'canary'].includes(call?.evaluation?.rollout_mode);
     const scaleChanged = Boolean(call?.scale_changed);
     const inJournal = Boolean(lastSaved?.counted_in_quality);
     // Ушедшая в журнал оценка правится только переоценкой, а её из карточки делает
@@ -666,7 +688,8 @@ export default function CriteriaReviewPanel({
     } else if (doAi && correctionIdx.length) {
         status = (
             <p className="text-[12px] text-slate-500">
-                Исправлений: <b className="text-blue-600">{correctionIdx.length}</b> — уйдут в черновики базы знаний ИИ
+                Исправлений: <b className="text-blue-600">{correctionIdx.length}</b>
+                {ragLive ? ' — ИИ учтёт их в следующих оценках' : ' — сохранятся в «Базу разборов»'}
             </p>
         );
     } else if (lastSaved && !dirty && !humanLocked) {
@@ -751,7 +774,8 @@ export default function CriteriaReviewPanel({
                                      highlight={problemIdx.has(i)}
                                      journalVerdict={journalByOther ? c.human : null}
                                      journalComment={journalByOther ? c.human_comment : null}
-                                     transcriptText={transcriptText} onRefine={onRefine} />
+                                     transcriptText={transcriptText} onRefine={onRefine}
+                                     onSimilar={onSimilar} ragLive={ragLive} />
                 ))}
             </div>
 

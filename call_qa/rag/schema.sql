@@ -448,6 +448,25 @@ CREATE INDEX IF NOT EXISTS idx_rule_embedding_hnsw_384
     WITH (m=16, ef_construction=128)
     WHERE embedding_dim=384 AND index_status='ready' AND embedding IS NOT NULL;
 
+-- Векторы ТЕКСТА правила — для «такой разбор уже был?» (call_qa/rag/similar.py).
+-- Отдельно от векторов поиска выше: те построены по «ситуации и цитате» под
+-- сравнение с разговором и дубли правил не различают (замер 01.10.2026 на 852
+-- размеченных парах). Ключ — хэш текста: версии правил неизменяемы, и вектор,
+-- посчитанный раз, переживает и выкладки, и пересборку правил.
+CREATE TABLE IF NOT EXISTS qa_rule_text_embeddings (
+    text_hash            character(64) NOT NULL,
+    embedding_model_id   bigint NOT NULL REFERENCES qa_embedding_models(id),
+    embedding            vector NOT NULL,
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (text_hash, embedding_model_id),
+    CHECK (text_hash ~ '^[0-9a-f]{64}$')
+);
+-- Разбор-дубль действующего правила привязывается к нему (metadata), а не
+-- становится новым правилом; «Повторы» в каталоге считаются по этому ключу.
+CREATE INDEX IF NOT EXISTS idx_adjudication_case_duplicate_of
+    ON qa_adjudication_cases ((metadata->>'duplicate_of_rule_id'))
+    WHERE metadata ? 'duplicate_of_rule_id';
+
 CREATE TABLE IF NOT EXISTS qa_reindex_jobs (
     id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     rule_id              uuid NOT NULL REFERENCES qa_policy_rules(id),

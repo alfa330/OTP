@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const React = require('react');
@@ -29,7 +30,9 @@ async function load(relative) {
   mkdirSync(dir, { recursive: true });
   const outfile = join(dir, `${relative.replace(/[\\/]/g, '_')}.mjs`);
   buildSync({
-    entryPoints: [new URL(`../src/components/${relative}`, import.meta.url).pathname],
+    // fileURLToPath, а не .pathname: на Windows .pathname даёт «/C:/…», и
+    // esbuild такой путь не находит — тест падал до первой проверки.
+    entryPoints: [fileURLToPath(new URL(`../src/components/${relative}`, import.meta.url))],
     bundle: true, format: 'esm', platform: 'node', target: 'node18', outfile,
     packages: 'external', loader: { '.js': 'jsx', '.jsx': 'jsx', '.css': 'empty' },
     logLevel: 'silent',
