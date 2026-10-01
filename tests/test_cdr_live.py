@@ -187,6 +187,25 @@ class LiveTailTests(unittest.TestCase):
         self.assertEqual(len(self.station.calls), 1)
 
 
+class LiveTailFullPassFailureTests(unittest.TestCase):
+    def test_a_failed_full_pass_does_not_repeat_on_every_step(self):
+        """Полный проход упал (потолок строк, сбой базы) — следующий шаг идёт обычным окном
+        последних часов, а не тем же полным запросом до полуночи."""
+        posts = []
+        station = _Station([cdr_row('1.1', '2026-09-15 09:00:00')])
+        tail = live.LiveTail(lambda path, payload: posts.append((path, payload)),
+                             station, 20, today=lambda: TODAY)
+        tail.step(now=1000.0)                         # первый проход — полный, удачный
+        tail.cycles = live.FULL_REFRESH_EVERY        # пришла очередь полного прохода
+        station.fail = StationError('потолок строк', 'bad_payload')
+        self.assertTrue(tail.maybe_step(now=2000.0))
+        self.assertEqual(tail.failures, 1)
+        station.fail = None
+        tail.step(now=2100.0)
+        self.assertNotEqual(station.calls[-1][0], '2026-09-15T00:00:00',
+                            'после отказа полного прохода — обычное окно, а не снова весь день')
+
+
 class _Journal:
     """База станции: журнал очередей (события, попавшие в окно запроса) и, с моста 1.5.0,
     сам CDR — его мост тоже берёт оттуда, а не у надстройки."""

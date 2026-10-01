@@ -172,12 +172,39 @@ class NightlyPassTests(unittest.TestCase):
         self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 16, 1, 10)))
         self.assertEqual([p['day'] for _path, p in self.sent], ['2026-09-14', '2026-09-15'])
 
-    def test_a_failed_pass_is_not_retried_every_minute(self):
+    def test_a_failed_pass_is_retried_every_ten_minutes_not_every_minute(self):
         from datetime import datetime
         self.db.fail = pbxdb.PbxDbError('база станции: нет соединения')
         self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 10)))
         self.assertFalse(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 11)))
         self.assertEqual(len(self.db.cdr_calls), 1)
+        self.db.fail = None
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 20)))
+        self.assertEqual([p.get('day') for _path, p in self.sent if 'touches' in p], ['2026-09-14'])
+        self.assertFalse(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 40)),
+                         'вышло — до следующих суток больше не читаем')
+
+    def test_after_four_a_failed_pass_waits_for_the_section(self):
+        from datetime import datetime
+        self.db.fail = pbxdb.PbxDbError('база станции: нет соединения')
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 4, 5)))
+        self.assertFalse(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 4, 30)))
+        self.assertEqual(len(self.db.cdr_calls), 1)
+
+    def test_journal_failure_fails_the_day_instead_of_wiping_its_facts(self):
+        """CDR и журнал — одна база. Сутки без точных полей портал положил бы ВМЕСТО
+        сохранённых, и табло до конца дня считало бы ожидание с приветствием."""
+        from datetime import datetime
+
+        def broken_facts(start, end):
+            raise pbxdb.PbxDbError('база станции: нет соединения')
+
+        self.db.facts = broken_facts
+        self.assertTrue(self.bridge.maybe_finalize_yesterday(datetime(2026, 9, 15, 1, 10)))
+        path, payload = self.sent[0]
+        self.assertEqual((path, payload['day']), ('day', '2026-09-14'))
+        self.assertNotIn('touches', payload, 'отказ, а не сутки без журнала')
+        self.assertIn('журнал очередей', payload['error'])
 
     def test_not_with_the_addon(self):
         from datetime import datetime

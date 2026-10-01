@@ -56,6 +56,8 @@ QUEUE_ANSWER_RE = re.compile(r"Local/(\d{3,4})@from-queue")
 QUEUE_OUT_RE = re.compile(r"Local/(3\d{3})@ext-to-queue")
 # Сторона оператора у попытки очереди: `Local/6728@from-queue-0005dc4a;2` → его телефон.
 QUEUE_AGENT_SIDE_RE = re.compile(r"^Local/\d{3,4}@from-queue-[0-9a-f]+;2$")
+# Собственный канал дозвонщика (автообзвон, заказ перезвона): `Local/3016@ext-to-queue-…;1`.
+DIALER_CHANNEL_RE = re.compile(r"^Local/3\d{3}@ext-to-queue-")
 
 # Наш номер — линия таксопарка: его набрал клиент или с него позвонили клиенту.
 # Живёт в трёх местах, по доле касаний суток 23.09.2026:
@@ -218,6 +220,7 @@ def _leg(row, kind, agent, client=""):
         queues.add(matched.group(1))
 
     prefix = DIAL_PREFIX_RE.match(dst) if kind == "out" else None
+    dialer = bool(DIALER_CHANNEL_RE.match(str(row.get("channel") or "")))
 
     return {
         "at": row.get("calldate"),
@@ -232,6 +235,10 @@ def _leg(row, kind, agent, client=""):
         "recording_url": row.get("recording_url"),
         "queue_leg": queue_leg,
         "agent_side": bool(QUEUE_AGENT_SIDE_RE.match(str(row.get("channel") or ""))),
+        "dialer": dialer,
+        # Служебная строка дозвонщика — Playback, Congestion, AGI на его же канале без канала
+        # назначения: клиента она не набирала, и её ANSWERED с секундой — не ответ клиента.
+        "service": kind == "out" and dialer and not str(row.get("dstchannel") or ""),
         "line": _leg_line(row, kind, client),
         "dial_prefix": prefix.group(1) if prefix else "",
     }
@@ -327,17 +334,17 @@ def _call_seconds(legs):
 def _outcome_legs(legs, kind):
     """Плечи, по которым судят, чем кончился звонок.
 
-    У исходящего — плечи К КЛИЕНТУ. Автообзвон сначала соединяет оператора: очередь звонит
-    ему, телефон снимает трубку сам, и в сыром CDR это плечо ANSWERED с billsec в секунду —
-    даже когда клиент так и не ответил. По нему склейка записала бы «Разговор» в одну секунду
-    (51 звонок за 29.09.2026), а робот пропущенных принял бы такой перезвон за дозвон и не
-    завёл бы сделку. Ответил ли клиент, знает только плечо транка.
+    У исходящего — плечи К КЛИЕНТУ, и только они; список может быть и пустым. Автообзвон
+    сначала соединяет оператора: очередь звонит ему, телефон снимает трубку сам, и в сыром CDR
+    это плечо ANSWERED с billsec в секунду — даже когда клиент так и не ответил (51 звонок за
+    29.09.2026 вышел бы «Разговором» в секунду). То же со служебными строками дозвонщика
+    (Playback, Congestion, AGI без канала назначения): 28 исходящих за 22–29.09 получали от них
+    «разговор» в 1–3 с без единого ответа транка. Робот пропущенных принял бы такой перезвон за
+    дозвон и не завёл бы сделку. Ответил ли клиент, знает только строка, набиравшая клиента.
 
-    У входящего — все плечи: разговор там и так берётся с плеча оператора (`_touch`)."""
+    У входящего — все плечи: разговор там берётся с плеча оператора (`_touch`)."""
     if kind == "out":
-        client_legs = [leg for leg in legs if leg["kind"] == "out"]
-        if client_legs:
-            return client_legs
+        return [leg for leg in legs if leg["kind"] == "out" and not leg["service"]]
     return legs
 
 
@@ -456,27 +463,43 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     kind = "out" if any(leg["kind"] == "out" for leg in legs) else "in"
     decisive = _outcome_legs(legs, kind)
 
-    # Разговор считаем по плечу САМОГО АГЕНТА; плечо очереди — только на крайний
-    # случай, его billsec раздут ожиданием в очереди.
-    agent_legs = [leg for leg in decisive if leg["agent"]]
-    real_legs = [leg for leg in agent_legs if not leg["queue_leg"]]
-    talked_real = [leg for leg in real_legs
-                   if leg["disposition"] == "ANSWERED" and leg["billsec"] > 0]
-    talked_any = [leg for leg in agent_legs
+    if kind == "out":
+        # Разговор исходящего — по плечу клиента, кто бы на нём ни значился: у строки транка
+        # оператора называет только имя файла записи, а запись пишется не всегда. Плеча к
+        # клиенту нет вовсе — клиента не набирали, и разговора с ним не было.
+        talked = [leg for leg in decisive
                   if leg["disposition"] == "ANSWERED" and leg["billsec"] > 0]
-    talked = talked_real or talked_any
-    billsec = max((leg["billsec"] for leg in talked), default=0)
-
-    if talked:
-        pick = max(talked, key=lambda leg: leg["billsec"])
-    elif real_legs:
-        pick = real_legs[-1]
-    elif agent_legs:
-        pick = agent_legs[-1]
+        if talked:
+            pick = max(talked, key=lambda leg: leg["billsec"])
+        elif decisive:
+            pick = decisive[-1]
+        else:
+            # Клиента не набирали (заказ перезвона, AGI): звонок называет собственная строка
+            # заказа — в её src тот, кто заказал. Последнее по времени плечо здесь — попытка
+            # очереди, а при равных секундах это чужое «Занято» (24.09.2026: 57 звонков).
+            pick = next((leg for leg in reversed(legs) if leg["kind"] == "out"), legs[-1])
+        dispositions = [leg["disposition"] for leg in (decisive or legs)]
     else:
-        pick = decisive[-1]
+        # Разговор считаем по плечу САМОГО АГЕНТА; плечо очереди — только на крайний
+        # случай, его billsec раздут ожиданием в очереди.
+        agent_legs = [leg for leg in decisive if leg["agent"]]
+        real_legs = [leg for leg in agent_legs if not leg["queue_leg"]]
+        talked_real = [leg for leg in real_legs
+                       if leg["disposition"] == "ANSWERED" and leg["billsec"] > 0]
+        talked_any = [leg for leg in agent_legs
+                      if leg["disposition"] == "ANSWERED" and leg["billsec"] > 0]
+        talked = talked_real or talked_any
 
-    dispositions = [leg["disposition"] for leg in decisive]
+        if talked:
+            pick = max(talked, key=lambda leg: leg["billsec"])
+        elif real_legs:
+            pick = real_legs[-1]
+        elif agent_legs:
+            pick = agent_legs[-1]
+        else:
+            pick = decisive[-1]
+        dispositions = [leg["disposition"] for leg in decisive]
+    billsec = max((leg["billsec"] for leg in talked), default=0)
     if billsec > 0:
         result = RESULT_TALK
     elif "ANSWERED" in dispositions:
@@ -490,6 +513,12 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
         result = _DISPOSITION_RESULT.get(last, last or "неизвестно")
 
     ext = pick["agent"]
+    if ext is None and kind == "out":
+        # Строка транка без записи оператора не называет — его называет плечо оператора,
+        # снявшего трубку: у автообзвона это тот, кто взял заявку.
+        took = [leg for leg in legs if leg["agent"] and leg["disposition"] == "ANSWERED"]
+        if took:
+            ext = max(took, key=lambda leg: leg["billsec"])["agent"]
     if ext is None:
         # Оператора не назвало ни одно плечо. Если во всей группе засветился
         # ровно один внутренний номер — это он; если несколько, гадать нельзя.
@@ -507,8 +536,12 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     started = min((leg["at"] for leg in legs if leg["at"]), default=pick["at"])
     started_text = str(started).replace("T", " ") if started else ""
     # Момент ответа — только у звонка, где поговорили: у брошенного в очереди его не было,
-    # и на пустом поле держится склейка «принят / потерян» на портале.
-    answered = _answer_moment(pick) if talked and pick["at"] else ""
+    # и на пустом поле держится склейка «принят / потерян» на портале. У строки дозвонщика
+    # CDR отмечает ответ, когда трубку снял ОПЕРАТОР (с этой секунды набирают клиента), а не
+    # клиент: в 82 из 93 таких строк за 22–29.09 он совпал с началом набора. Ответа клиента
+    # там нет — поле честно пустое.
+    answered = (_answer_moment(pick)
+                if talked and pick["at"] and not (kind == "out" and pick["dialer"]) else "")
     if answered == started_text:
         answered = ""
     name, direction = resolve_operator(ext, started) if ext else ("", "")

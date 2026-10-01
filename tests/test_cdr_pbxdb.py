@@ -147,6 +147,17 @@ class ReconnectTests(unittest.TestCase):
         with self.assertRaises(pbxdb.PbxDbError):
             source.queue_rows(START, END)
 
+    def test_a_query_that_timed_out_is_not_sent_again(self):
+        """Таймаут чтения — запрос станция ещё выполняет, у MariaDB 5.5 его не прервать.
+        Повтор дал бы ей второй такой же: только ошибка, без нового соединения."""
+        conns = [_Conn(broken=True), _Conn(rows=[row()])]
+        source = pbxdb.PbxDb(host='10.0.0.1', user='ro', connect=lambda: conns.pop(0))
+        clock = iter([100.0, 100.0 + pbxdb.READ_TIMEOUT])
+        with mock.patch.object(pbxdb.time, 'monotonic', side_effect=lambda: next(clock)):
+            with self.assertRaises(pbxdb.PbxDbError):
+                source.queue_rows(START, END)
+        self.assertEqual(len(conns), 1, 'второе соединение не открывалось')
+
     def test_the_connection_is_reused_between_calls(self):
         conn = _Conn(rows=[row()])
         source = pbxdb.PbxDb(host='10.0.0.1', user='ro', connect=lambda: conn)

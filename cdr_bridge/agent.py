@@ -103,7 +103,7 @@ from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: 
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.5.1'
+VERSION = '1.5.2'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -136,6 +136,10 @@ PORTAL_TIMEOUT = (10, 120)
 # не делает никто, и без своего прохода такой звонок доезжал бы к утру, а непринятый не
 # успевал бы к роботу пропущенных (он разбирает только последние три часа).
 NIGHTLY_AT = timedelta(hours=1, minutes=5)
+# Не вышел — повтор раз в десять минут, но не позже четырёх утра: дальше сутки ждут, пока
+# раздел откроют, как и без ночного прохода. Каждую минуту повторять отказ базы незачем.
+NIGHTLY_RETRY = timedelta(minutes=10)
+NIGHTLY_UNTIL = timedelta(hours=4)
 
 
 def _env_file_values(path):
@@ -242,8 +246,10 @@ class Bridge:
         # процесс: строки базы (плечи) и надстройки (строка на звонок) в одних сутках не
         # смешиваются, иначе у звонка менялось бы число плеч и он уезжал бы на портал зря.
         self.cdr = self.pbxdb if self.pbxdb.enabled else self.station
-        # Какие вчерашние сутки этот процесс уже закрыл ночным проходом (NIGHTLY_AT).
+        # Какие вчерашние сутки этот процесс уже закрыл ночным проходом (NIGHTLY_AT) и когда
+        # повторить проход, который не вышел.
         self._finalized_day = None
+        self._nightly_retry_at = None
         self.records_session = self._build_records_session()
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         try:
@@ -387,6 +393,13 @@ class Bridge:
             return False
         own = self._attach_queue_facts([t for t in built if t['started_at'][:10] == day],
                                        window_start, window_end, day)
+        if own is None:
+            # CDR и журнал — одна база: прочитался один, а другой нет, значит, она сейчас
+            # сбоит. Сутки без точных полей портал положил бы ВМЕСТО сохранённых (замена суток
+            # целиком), и табло потеряло бы ожидания до конца дня. Лучше отказ: сутки
+            # перечитаются, а сохранённое останется.
+            self._report_failure(day, 'журнал очередей станции не прочитался')
+            return False
         payload = {
             'day': day,
             'rows_fetched': len(rows),
@@ -425,16 +438,17 @@ class Bridge:
     def _attach_queue_facts(self, touches, start, end, day):
         """Дописать касаниям точные вход в очередь, ожидание, разговор и сторону отбоя.
 
-        Журнал очередей — источник вспомогательный: его отказ не должен стоить нам суток.
-        Не прочитался — сутки уезжают как раньше, а табло считает ожидание по длине
-        автоинформатора."""
+        При CDR от надстройки журнал — источник вспомогательный: не прочитался — сутки
+        уезжают как раньше, а табло считает ожидание по длине автоинформатора. При CDR из
+        той же базы станции отказ журнала — None: сбоит сама база, и сутки лучше перечитать,
+        чем заменить сохранённые точные поля пустыми (см. do_day)."""
         if self.pbxdb is None or not self.pbxdb.enabled:
             return touches
         try:
             facts = self.pbxdb.facts(start, end)
         except Exception as exc:  # noqa: BLE001
             log.warning('Сутки %s: журнал очередей не прочитался: %s', day, exc)
-            return touches
+            return None if self.cdr is self.pbxdb else touches
         # Журнал читается ПОСЛЕ CDR: у каждого звонка из выдачи вход в очередь, если он
         # был, уже записан. Поэтому по прочитанному без обрыва окну можно сказать и
         # «входа не было» — такой непринятый становится «не дошёл до очереди».
@@ -446,24 +460,30 @@ class Bridge:
 
         Только при CDR из базы станции: надстройка отдавала строку на звонок, и звонок через
         полночь у неё датировался строкой за полночью — живой хвост новых суток его брал.
-        Один раз за сутки на процесс; после перезапуска проход повторится — это одно
-        чтение суток, и закрытые сутки от него не меняются."""
+        Удачный проход — раз в сутки на процесс; после перезапуска он повторится — это одно
+        чтение суток, и закрытые сутки от него не меняются. Неудачный повторяется раз в
+        NIGHTLY_RETRY до NIGHTLY_UNTIL, а дальше сутки ждут открытия раздела."""
         if self.cdr is not self.pbxdb:
             return False
         now = now or datetime.now()   # время станции и контейнера — Алматы
-        if now - datetime.combine(now.date(), datetime.min.time()) < NIGHTLY_AT:
+        since_midnight = now - datetime.combine(now.date(), datetime.min.time())
+        if since_midnight < NIGHTLY_AT:
             return False
         yesterday = now.date() - timedelta(days=1)
         if self._finalized_day == yesterday:
             return False
-        # Отметка ДО прохода: отказ базы не должен превращаться в чтение суток каждую минуту —
-        # он уже записан порталу ошибкой суток, и сутки перечитает первый, кто откроет раздел.
-        self._finalized_day = yesterday
+        if self._nightly_retry_at is not None and now < self._nightly_retry_at:
+            return False
         start = datetime.combine(yesterday, datetime.min.time())
         log.info('Сутки %s: ночной полный проход', yesterday.isoformat())
-        self.do_day({'day': yesterday.isoformat(),
-                     'from_dt': start.strftime('%Y-%m-%dT%H:%M:%S'),
-                     'to_dt': (start + timedelta(days=1, hours=1)).strftime('%Y-%m-%dT%H:%M:%S')})
+        done = self.do_day({'day': yesterday.isoformat(),
+                            'from_dt': start.strftime('%Y-%m-%dT%H:%M:%S'),
+                            'to_dt': (start + timedelta(days=1, hours=1)).strftime('%Y-%m-%dT%H:%M:%S')})
+        if done or since_midnight >= NIGHTLY_UNTIL:
+            self._finalized_day = yesterday
+            self._nightly_retry_at = None
+        else:
+            self._nightly_retry_at = now + NIGHTLY_RETRY
         return True
 
     def _report_failure(self, day, error):

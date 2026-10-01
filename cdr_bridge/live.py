@@ -221,13 +221,15 @@ class LiveTail:
             self._reset(today)
         start, end, full = self.window()
         from_dt, to_dt = _fmt(start), _fmt(end)
+        # Цикл засчитан до чтения: полный проход, который упал (потолок строк, сбой базы), не
+        # повторяется на каждом шаге — следующий идёт обычным окном, а полный — в свой черёд.
+        self.cycles += 1
         fresh = list(self._station.iter_cdr(from_dt, to_dt))
         if full:
             self.rows = {}
         for row in fresh:
             if isinstance(row, dict):
                 self.rows[_row_key(row)] = row
-        self.cycles += 1
         # Журнал очередей — за то же окно, что и CDR: полный проход перечитывает день
         # целиком, приращение накапливается поверх (см. queue_facts.merge).
         facts = self._queue_facts(start, end)
