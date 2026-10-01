@@ -270,3 +270,20 @@ def stock_status(stock, low, buy):
     if stock <= int(low or 0):
         return 'low'
     return 'enough'
+
+
+# Офисы программы (решение владельца 01.10.2026): воду выдают только в Алматы и
+# Астане и не в офисах подключения Wolt. По этому правилу справочник «Офис в
+# учёт» показывает офисы, и по нему же сервер отказывает добавить другой.
+PROGRAM_CITIES = ('Алматы', 'Астана')
+EXCLUDED_OFFICE_MARKS = ('wolt',)
+
+
+def is_program_office(office):
+    """Можно ли завести офис из справочника вики в учёт воды."""
+    office = office or {}
+    city = str(office.get('city') or '').strip().lower()
+    name = str(office.get('name') or '').lower()
+    if city not in {item.lower() for item in PROGRAM_CITIES}:
+        return False
+    return not any(mark in name for mark in EXCLUDED_OFFICE_MARKS)

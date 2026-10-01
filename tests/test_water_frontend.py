@@ -193,6 +193,13 @@ class PanelTests(unittest.TestCase):
         self.assertIn('const [tab, setTab] = useState(null);', self.panel)
         self.assertIn('tabs.some((item) => item.value === tab) ? tab : tabs[0]?.value', self.panel)
 
+    def test_add_office_placeholder_names_the_program_cities(self):
+        """Пустой справочник «Офис в учёт» объясняет, почему пуст, — теми же
+        городами, что держит сервер (rules.PROGRAM_CITIES)."""
+        stock = _read(ROOT / 'src' / 'components' / 'water' / 'WaterStock.jsx')
+        self.assertEqual(rules.PROGRAM_CITIES, ('Алматы', 'Астана'))
+        self.assertIn("'Все офисы Алматы и Астаны уже в учёте'", stock)
+
     def test_no_native_selects_or_date_inputs(self):
         """Эталон портала — свои пикеры: системный select/date — чужая деталь."""
         for path in (ROOT / 'src' / 'components' / 'water').glob('*.jsx'):

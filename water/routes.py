@@ -192,7 +192,8 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
             if manage:
                 taken = queries.taken_office_ids(cursor)
                 payload['directory'] = [office for office in queries.directory(cursor)
-                                        if office['id'] not in taken]
+                                        if office['id'] not in taken
+                                        and rules.is_program_office(office)]
         return jsonify(payload)
 
     @water_route('/offices', methods=('POST',), need='manage')
@@ -218,6 +219,9 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 wiki_office = queries.directory_office(cursor, office_id)
                 if not wiki_office:
                     return _bad('Офиса нет в справочнике фронт-офисов', 'WATER_OFFICE_UNKNOWN', 404)
+                if not rules.is_program_office(wiki_office):
+                    return _bad('Учёт воды ведётся только в офисах Алматы и Астаны, '
+                                'кроме офисов Wolt', 'WATER_OFFICE_OUTSIDE_PROGRAM')
                 if office_id in queries.taken_office_ids(cursor):
                     return _bad('Этот офис уже в учёте', 'WATER_OFFICE_TAKEN', 409)
                 office = queries.add_office(

@@ -83,6 +83,8 @@ class Store:
         self.candidates = [{'id': 5, 'name': 'Руководитель', 'city': None, 'has_telegram': True}]
         self.directory = [
             {'id': 47, 'city': 'Алматы', 'name': 'Офис Алматы №1', 'address': 'Жамбыла 172В'},
+            {'id': 45, 'city': 'Алматы', 'name': 'Офис для подключения тарифа «Wolt»', 'address': 'Толе би 4'},
+            {'id': 49, 'city': 'Астана', 'name': 'Офис Астана', 'address': 'Сарыарка 31'},
             {'id': 65, 'city': 'Шымкент', 'name': 'Офис Шымкент', 'address': 'Республики 17'},
         ]
         self.fail_welcome_unique = False
@@ -659,9 +661,18 @@ class ManageTests(_Base):
         self.viewer = person(role='admin', headed_codes=('front_office',))
 
     def test_add_office_with_start_stock(self):
-        response = self.client.post('/api/water/offices', json={'office_id': 65, 'stock': 40})
+        response = self.client.post('/api/water/offices', json={'office_id': 49, 'stock': 40})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()['office']['stock'], 40)
+
+    def test_offices_outside_the_program_are_refused(self):
+        """Воду выдают только в Алматы и Астане и не в офисах Wolt (01.10.2026):
+        сервер держит это сам, а не только список на экране."""
+        for wiki_id in (65, 45):
+            response = self.client.post('/api/water/offices', json={'office_id': wiki_id, 'stock': 5})
+            self.assertEqual(response.status_code, 400, wiki_id)
+            self.assertEqual(response.get_json()['code'], 'WATER_OFFICE_OUTSIDE_PROGRAM')
+        self.assertEqual(self.store.offices, {})
 
     def test_add_office_twice_is_refused(self):
         self.store.add(wiki_id=47)
@@ -672,10 +683,14 @@ class ManageTests(_Base):
         response = self.client.post('/api/water/offices', json={'office_id': 999, 'stock': 1})
         self.assertEqual(response.status_code, 404)
 
+    def test_directory_offers_only_almaty_and_astana_without_wolt(self):
+        body = self.client.get('/api/water/offices').get_json()
+        self.assertEqual([item['id'] for item in body['directory']], [47, 49])
+
     def test_directory_hides_offices_already_in_the_program(self):
         self.store.add(wiki_id=47)
         body = self.client.get('/api/water/offices').get_json()
-        self.assertEqual([item['id'] for item in body['directory']], [65])
+        self.assertEqual([item['id'] for item in body['directory']], [49])
 
     def test_intake_adds(self):
         office_id = self.store.add(stock=5)

@@ -271,6 +271,25 @@ class StockStatusTests(unittest.TestCase):
         self.assertEqual(rules.stock_status(0, 0, 0), 'buy')
 
 
+class ProgramOfficeTests(unittest.TestCase):
+    """«Оставь города Алматы, Астана … и убрать офисы Wolt» (01.10.2026)."""
+
+    def test_almaty_and_astana_offices_are_in_the_program(self):
+        for city, name in (('Алматы', 'Офис Алматы №1'), ('Астана', 'Офис Астана'),
+                           ('Алматы', 'Офис для подключения тарифа «Бизнес»'),
+                           (' алматы ', 'Офис Алматы №2')):
+            self.assertTrue(rules.is_program_office({'city': city, 'name': name}), (city, name))
+
+    def test_wolt_offices_are_not(self):
+        for name in ('Офис для подключения тарифа «Wolt', 'WOLT', 'Офис wolt'):
+            self.assertFalse(rules.is_program_office({'city': 'Астана', 'name': name}), name)
+
+    def test_other_cities_are_not(self):
+        for city in ('Шымкент', 'Караганда', '', None):
+            self.assertFalse(rules.is_program_office({'city': city, 'name': 'Офис'}), city)
+        self.assertFalse(rules.is_program_office(None))
+
+
 class WordsTests(unittest.TestCase):
     def test_russian_plural(self):
         self.assertEqual(rules.days_word(1), '1 день')
