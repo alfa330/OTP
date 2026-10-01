@@ -251,6 +251,57 @@ class CallSamplingTests(_DbCase):
         self.assertEqual(self.attempted, [f"a{i}" for i in range(7)])   # набрали — остановились
 
 
+class DownloadedChatTests(_DbCase):
+    """Переписки, которых в базе нет (СЗоВ — Chat2Desk): добор после готового пула."""
+
+    def setUp(self):
+        self.use(FakeDB(departments={69: "szov", 70: "szov", 73: "op"}))
+        self.downloaded = []
+
+    def source(self, candidates, unusable=()):
+        counter = iter(range(5000, 6000))
+
+        def import_chat(candidate):
+            self.downloaded.append(candidate["key"])
+            return None if candidate["key"] in unusable else next(counter)
+        return ds.ChatSource(department="szov", subject_kind="c2d_snapshot",
+                             candidates=lambda day: candidates, import_chat=import_chat)
+
+    def test_tops_up_only_what_the_ready_pool_did_not_cover(self):
+        for i in range(25):     # готовый пул уже дал 25 снапшотов
+            self.db.samples.append({"id": i + 1, "sample_day": DAY, "department": "szov",
+                                    "direction_id": 69, "family": ds.FAMILY_CHATS,
+                                    "subject_kind": "c2d_snapshot", "subject_id": 100 + i,
+                                    "status": ds.STATUS_PICKED, "attempts": 0, "last_error": None})
+        chats = [{"key": f"r{i}", "direction_id": 69, "operator_id": 1} for i in range(40)]
+        added = ds._sample_downloaded_chats(DAY, self.source(chats), 30, random.Random(1))
+        self.assertEqual(added, {69: 5})
+        self.assertEqual(len(self.downloaded), 5)            # квота — только на недостающее
+        new = [s for s in self.db.samples if s["subject_id"] >= 5000]
+        self.assertEqual({(s["family"], s["subject_kind"]) for s in new},
+                         {(ds.FAMILY_CHATS, "c2d_snapshot")})
+
+    def test_unusable_chat_is_replaced_and_foreign_direction_skipped(self):
+        chats = ([{"key": f"r{i}", "direction_id": 69, "operator_id": 1} for i in range(4)]
+                 + [{"key": "x", "direction_id": 73, "operator_id": 2}])
+        keep_order = SimpleNamespace(shuffle=lambda pool: None)
+        added = ds._sample_downloaded_chats(DAY, self.source(chats, unusable={"r0"}), 2, keep_order)
+        self.assertEqual(added, {69: 2})
+        self.assertEqual(self.downloaded, ["r0", "r1", "r2"])   # «x» чужого отдела не качаем
+
+    def test_pass_downloads_after_the_ready_pool(self):
+        order = []
+        with mock.patch.object(config, "DEPARTMENT_CODES", ("szov",)), \
+                mock.patch.object(ds, "_sample_chats", side_effect=lambda *a: order.append("pool") or {69: 3}), \
+                mock.patch.object(ds, "_sample_downloaded_chats",
+                                  side_effect=lambda *a, **k: order.append("download") or {69: 27}), \
+                mock.patch.object(ds, "_evaluate_open"), \
+                mock.patch.object(ds, "status", return_value={"totals": {}}):
+            result = ds.run(DAY, chat_sources=[self.source([])])
+        self.assertEqual(order, ["pool", "download"])
+        self.assertEqual(result["added"]["szov"][ds.FAMILY_CHATS], {69: 30})
+
+
 class ChatSamplingTests(_DbCase):
     def test_chat_pool_of_the_section_is_narrowed_to_the_direction_and_day(self):
         self.use(FakeDB(canonical=[71], chat_ids=[11, 12, 13, 14]))
@@ -570,6 +621,68 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([c["key"] for c in candidates], ["1", "7"])
         self.assertEqual({c["direction_id"] for c in candidates}, {83})
 
+    def test_sample_window_is_its_own_not_the_listening_plan(self):
+        fn = _load_function(self.source, "_ai_qa_sample_durations", {})
+        with mock.patch.object(config, "AI_QA_DAILY_SAMPLE_MIN_DURATION_S", 5), \
+                mock.patch.object(config, "AI_QA_DAILY_SAMPLE_MAX_DURATION_S", 0):
+            self.assertEqual(fn(), (5, 0))      # от 5 с, без верхней границы
+        body = self.source[self.source.index("def _ai_qa_sample_durations("):]
+        body = body[:body.index("\ndef ")]
+        self.assertNotIn("get_call_distribution_settings", body)
+
+    def test_c2d_candidates_respect_the_quota_reserve(self):
+        namespace = {"db": SimpleNamespace(), "OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE": "szov",
+                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": lambda: 1000}
+        fn = _load_function(self.source, "_ai_qa_sample_c2d_candidates", namespace)
+        with mock.patch.object(config, "AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE", 15000):
+            self.assertEqual(fn(DAY), [])        # квоту делит синк статистики
+
+    def test_c2d_candidates_come_from_the_stats_table_without_snapshots(self):
+        from contextlib import contextmanager
+        executed = []
+        row = tuple(range(21)) + (69,)
+
+        class Cur:
+            def execute(self, sql, params=None):
+                executed.append((sql, params))
+
+            def fetchall(self):
+                return [row]
+
+        @contextmanager
+        def cursor():
+            yield Cur()
+        fake_db = SimpleNamespace(_get_cursor=cursor, _C2D_REQUEST_COLUMNS="r.request_id",
+                                  _c2d_request_row_dict=lambda r: {"request_id": r[0], "operator_id": r[15]})
+        namespace = {"db": fake_db, "OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE": "szov",
+                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": lambda: 90000}
+        fn = _load_function(self.source, "_ai_qa_sample_c2d_candidates", namespace)
+        with mock.patch.object(subjects_mod, "chat_direction_family", return_value=[69, 3]):
+            got = fn(DAY)
+        self.assertEqual(got, [{"direction_id": 69, "operator_id": 15, "key": "0",
+                                "row": {"request_id": 0, "operator_id": 15}}])
+        sql, params = executed[-1]
+        self.assertIn("NOT EXISTS (SELECT 1 FROM c2d_chat_snapshots s", sql)
+        self.assertEqual(params[:2], (DAY, [69, 3]))
+
+    def test_c2d_import_keeps_only_fairly_attributable_chats(self):
+        saved = []
+        fake_db = SimpleNamespace(save_c2d_snapshot=lambda *a, **k: saved.append((a, k)) or 77)
+        namespace = {"db": fake_db, "_c2d_fetch_request_messages": lambda rid, **k: (9, [])}
+        fn = _load_function(self.source, "_ai_qa_sample_c2d_import", namespace)
+        candidate = {"row": {"request_id": 5, "request_start": None, "request_end": None}}
+        self.assertIsNone(fn(candidate))
+        self.assertEqual(saved, [])                       # переписки нет — снапшота нет
+        namespace["_c2d_fetch_request_messages"] = lambda rid, **k: (9, [{"id": 1}])
+        with mock.patch.object(subjects_mod, "load", return_value={"kind": "c2d_snapshot"}), \
+                mock.patch.object(subjects_mod, "eligibility", return_value={"ok": False}):
+            self.assertIsNone(fn(candidate))              # ручная передача / один «ок»
+        self.assertEqual(len(saved), 1)                   # снапшот остаётся журналу
+        with mock.patch.object(subjects_mod, "load", return_value={"kind": "c2d_snapshot"}), \
+                mock.patch.object(subjects_mod, "eligibility", return_value={"ok": True}):
+            self.assertEqual(fn(candidate), 77)
+        self.assertIsNone(saved[0][1]["created_by"])
+
     def test_binotel_import_without_recording_takes_no_row(self):
         imported = []
         namespace = {
@@ -724,6 +837,8 @@ class MonolithWiringTests(unittest.TestCase):
         job = self.source[self.source.index("def ai_qa_daily_sample_job"):]
         job = job[:job.index("\ndef ")]
         self.assertIn("triggered_by == 'scheduler' and not qa_config.AI_QA_DAILY_SAMPLE_ENABLED", job)
+        # Чаты СЗоВ доскачиваются: без источника переписок у отдела было бы 5–17 в день.
+        self.assertIn("chat_sources=_ai_qa_sample_chat_sources()", job)
 
 
 if __name__ == "__main__":

@@ -21,8 +21,12 @@
   супервайзеров и закрыли бы им норму.
 * Переписки — из тех же пулов, что «Случайный чат» раздела
   (api._CHAT_CANDIDATE_SQL): тот же гейт атрибуции и тот же день разговора, что
-  у очереди. У СЗоВ пул — уже скачанные снапшоты Chat2Desk: месячная квота их API
-  почти выедена, и за её пределы выборка не ходит.
+  у очереди. У СЗоВ готовых снапшотов Chat2Desk за день 5–30, поэтому недостающее
+  выборка скачивает сама (ChatSource из bot_schedule2) — пока остаток месячной
+  квоты их API выше запаса AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE: на той же квоте
+  живёт суточный синк статистики.
+* Длительность звонков — своё окно выборки (от 5 с, без верхней границы), а не
+  окно «Деления звонков».
 * Оценка — ровно путь открытия карточки (api.review_payload): тот же отпечаток,
   поэтому разговор из выборки не откроется «устаревшим» и не оценится дважды.
 * Проход держит advisory-лок: при выкладке два инстанса живут одновременно, и
@@ -94,6 +98,20 @@ class CallSource:
     candidates: Callable
     import_call: Callable
     audio_state: Callable
+
+
+@dataclass(frozen=True)
+class ChatSource:
+    """Переписки, которых в базе ещё нет: их скачивает адаптер (СЗоВ — Chat2Desk).
+
+    candidates(day) → как у CallSource; import_chat(candidate) → id субъекта (снапшота),
+    уже прошедшего гейт честной оценки, или None — переписки нет или её нельзя
+    честно приписать одному оператору. Выборка зовёт его, только когда готового
+    пула (_sample_chats) на направление не хватило."""
+    department: str
+    subject_kind: str
+    candidates: Callable
+    import_chat: Callable
 
 
 def sample_day(now: datetime | None = None) -> date:
@@ -288,14 +306,12 @@ def _sample_calls(day, source: CallSource, size, rng, *, deadline=None,
     Подтяжка — это скачивание записей с АТС по одной, поэтому и она уважает
     предел прохода: недобранное доберёт следующий проход того же дня."""
     candidates = [c for c in (source.candidates(day) or []) if c.get("key")]
-    conn = config.connect_rw()
-    try:
-        with conn, conn.cursor() as cur:
-            departments = _direction_departments(cur, [c.get("direction_id") for c in candidates])
-            have = _cell_counts(cur, day)
-            keys = sorted({str(c["key"]) for c in candidates})
-            taken_keys = set()
-            if keys:
+    keys = sorted({str(c["key"]) for c in candidates})
+    taken_keys = set()
+    if keys:
+        conn = config.connect_rw()
+        try:
+            with conn, conn.cursor() as cur:
                 # Звонок, который уже лежит в пуле (план прослушки, «Из АТС», прошлая
                 # выборка), второй строкой не берём: у imported_calls ключ (external_id,
                 # month), и повторная подтяжка всё равно вернула бы None — но уже после
@@ -303,6 +319,36 @@ def _sample_calls(day, source: CallSource, size, rng, *, deadline=None,
                 cur.execute("SELECT external_id FROM imported_calls WHERE external_id = ANY(%s)",
                             (keys,))
                 taken_keys = {str(row[0]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+    return _take(day, source.department, candidates, source.import_call, size, rng,
+                 family=FAMILY_CALLS, subject_kind=config.SUBJECT_IMPORTED_CALL,
+                 taken_keys=taken_keys, deadline=deadline, monotonic=monotonic)
+
+
+def _sample_downloaded_chats(day, source: ChatSource, size, rng, *, deadline=None,
+                             monotonic=time.monotonic) -> dict:
+    """Переписки, которых в базе ещё нет: адаптер их скачивает (СЗоВ — Chat2Desk) и
+    сам проверяет гейтом честной оценки. Идёт ПОСЛЕ готового пула (_sample_chats) и
+    добирает только то, чего пулу не хватило: каждое скачивание — квота чужого API."""
+    candidates = [c for c in (source.candidates(day) or []) if c.get("key")]
+    return _take(day, source.department, candidates, source.import_chat, size, rng,
+                 family=FAMILY_CHATS, subject_kind=source.subject_kind, taken_keys=set(),
+                 deadline=deadline, monotonic=monotonic)
+
+
+def _take(day, department, candidates, importer, size, rng, *, family, subject_kind,
+          taken_keys, deadline=None, monotonic=time.monotonic) -> dict:
+    """Добор из источника: по каждому направлению отдела до size, в случайном порядке.
+
+    importer(candidate) кладёт субъект в базу (звонок в пул, переписку в снапшот) и
+    отдаёт его id или None — «этот не годится, берите следующего». Отказы источника
+    подряд обрывают отдел на этот проход: лежащую АТС или API перебор не лечит."""
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            departments = _direction_departments(cur, [c.get("direction_id") for c in candidates])
+            have = _cell_counts(cur, day)
     finally:
         conn.close()
 
@@ -310,20 +356,20 @@ def _sample_calls(day, source: CallSource, size, rng, *, deadline=None,
     foreign = 0
     for candidate in candidates:
         direction_id = candidate.get("direction_id")
-        # Направление чужого отдела (оператор перешёл, у линии общий номер) — звонок
+        # Направление чужого отдела (оператор перешёл, у линии общий номер) — разговор
         # оценился бы по чужой шкале. Такие не берём вовсе.
-        if direction_id is None or departments.get(int(direction_id)) != source.department:
+        if direction_id is None or departments.get(int(direction_id)) != department:
             foreign += 1
             continue
         by_direction.setdefault(int(direction_id), []).append(candidate)
     if foreign:
-        logging.info("ai-qa выборка %s: %s звонков %s вне направлений отдела", day,
-                     foreign, source.department)
+        logging.info("ai-qa выборка %s: %s разговоров (%s, %s) вне направлений отдела", day,
+                     foreign, family, department)
 
     added = {}
     errors = 0
     for direction_id in sorted(by_direction):
-        need = size - have.get((direction_id, FAMILY_CALLS), 0)
+        need = size - have.get((direction_id, family), 0)
         if need <= 0:
             continue
         pool = by_direction[direction_id]
@@ -339,31 +385,31 @@ def _sample_calls(day, source: CallSource, size, rng, *, deadline=None,
                 continue
             taken_keys.add(key)
             try:
-                imported_id = source.import_call(candidate)
+                subject_id = importer(candidate)
             except Exception:
                 errors += 1
-                logging.exception("ai-qa выборка %s: не удалось подтянуть звонок %s (%s)",
-                                  day, key, source.department)
+                logging.exception("ai-qa выборка %s: не удалось подтянуть %s %s (%s)",
+                                  day, family, key, department)
                 continue
             errors = 0
-            if not imported_id:
+            if not subject_id:
                 continue
             conn = config.connect_rw()
             try:
                 with conn, conn.cursor() as cur:
-                    taken += _record(cur, day, source.department, direction_id, FAMILY_CALLS,
-                                     config.SUBJECT_IMPORTED_CALL, imported_id)
+                    taken += _record(cur, day, department, direction_id, family,
+                                     subject_kind, subject_id)
             finally:
                 conn.close()
         if taken:
             added[direction_id] = taken
         if errors >= _IMPORT_ERROR_LIMIT:
-            logging.warning("ai-qa выборка %s: АТС отдела %s отказывает подряд — "
-                            "отдел в этом проходе пропущен", day, source.department)
+            logging.warning("ai-qa выборка %s: источник %s отдела %s отказывает подряд — "
+                            "в этом проходе пропущен", day, family, department)
             break
         if deadline is not None and monotonic() >= deadline:
-            logging.warning("ai-qa выборка %s: предел прохода вышел на подтяжке звонков "
-                            "отдела %s — доберёт следующий проход", day, source.department)
+            logging.warning("ai-qa выборка %s: предел прохода вышел на подтяжке (%s, %s) — "
+                            "доберёт следующий проход", day, family, department)
             break
     return added
 
@@ -496,8 +542,8 @@ def _evaluate_open(day, sources, evaluate, in_queue, deadline, *, sleep, monoton
 
 # ── проход ───────────────────────────────────────────────────────────────────
 
-def run(day=None, *, call_sources=(), evaluate=None, in_queue=None, size=None, rng=None,
-        now=None, sleep=time.sleep, monotonic=time.monotonic) -> dict:
+def run(day=None, *, call_sources=(), chat_sources=(), evaluate=None, in_queue=None, size=None,
+        rng=None, now=None, sleep=time.sleep, monotonic=time.monotonic) -> dict:
     """Один проход выборки: добрать день до N по каждому направлению и оценить.
 
     day — день разговоров (по умолчанию вчерашний по Алматы). Повторный проход
@@ -506,6 +552,8 @@ def run(day=None, *, call_sources=(), evaluate=None, in_queue=None, size=None, r
     size = int(size or config.AI_QA_DAILY_SAMPLE_SIZE)
     sources = {config.normalise_department_code(source.department): source
                for source in (call_sources or ())}
+    downloads = {config.normalise_department_code(source.department): source
+                 for source in (chat_sources or ())}
     evaluate = evaluate or _review_payload
     in_queue = in_queue or _in_queue
     rng = rng or random.Random()
@@ -529,6 +577,17 @@ def run(day=None, *, call_sources=(), evaluate=None, in_queue=None, size=None, r
                 added[code][FAMILY_CHATS] = _sample_chats(day, code, size)
             except Exception:
                 logging.exception("ai-qa выборка %s: переписки отдела %s не выбраны", day, code)
+            download = downloads.get(code)
+            if download is not None:
+                # Сначала готовый пул (бесплатно), потом скачивание недостающего.
+                try:
+                    for direction_id, n in _sample_downloaded_chats(
+                            day, download, size, rng, deadline=deadline,
+                            monotonic=monotonic).items():
+                        chats = added[code][FAMILY_CHATS]
+                        chats[direction_id] = chats.get(direction_id, 0) + n
+                except Exception:
+                    logging.exception("ai-qa выборка %s: переписки отдела %s не скачаны", day, code)
             source = sources.get(code)
             if source is not None:
                 try:

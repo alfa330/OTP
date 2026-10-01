@@ -6957,20 +6957,14 @@ def _cdr_import_touch(linkedid, requester_id, requester):
 # хелперы трёх телефоний. Отличие от «Из АТС» одно, но важное: строка пула
 # получает статус 'ai_sample' (qa_sample.IMPORT_STATUS) — журнал и «Деление
 # звонков» её не видят, план прослушки супервайзеров выборка не трогает.
-# Длительности — общие настройки «Деления звонков», как у «Из АТС»: иначе в
-# выборку уезжали бы двухсекундные «не туда попал».
+# Длительности — своё окно выборки (AI_QA_DAILY_SAMPLE_MIN/MAX_DURATION_S, от 5 с
+# без верхней границы), а не окно «Деления звонков»: то подобрано под ручную
+# прослушку и у «ОП линии» Тез КЦ отсекало две трети разговоров.
 
 def _ai_qa_sample_durations():
-    settings = db.get_call_distribution_settings() or {}
-
-    def _dur(value):
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return 0
-        return parsed if parsed >= 0 else 0
-    min_d = _dur(settings.get('min_duration_sec'))
-    max_d = _dur(settings.get('max_duration_sec'))
+    from call_qa import config as qa_config
+    min_d = qa_config.AI_QA_DAILY_SAMPLE_MIN_DURATION_S
+    max_d = qa_config.AI_QA_DAILY_SAMPLE_MAX_DURATION_S
     if max_d and min_d and max_d < min_d:
         min_d, max_d = max_d, min_d
     return min_d, max_d
@@ -7215,6 +7209,80 @@ def _ai_qa_sample_pbx_audio_state(imported_id):
     return qa_sample.AUDIO_PENDING
 
 
+def _ai_qa_sample_c2d_quota_left():
+    """Сколько бесплатных запросов API Chat2Desk осталось в этом месяце (один запрос)."""
+    payload = _c2d_api_get('/v1/companies/api_info')
+    calls = ((payload.get('data') or {}).get('api_calls') or {})
+    return int(calls.get('left_free_requests') or 0)
+
+
+def _ai_qa_sample_c2d_candidates(day):
+    """СЗоВ: заявки Chat2Desk дня у операторов чатовых направлений — из таблицы синка
+    статистики, без запросов к API. Переписки у них ещё нет (снапшоты уже скачанных
+    выборка берёт из готового пула раньше), поэтому заявки со снапшотом не берём.
+    «Ответов оператора» должно быть не меньше порога гейта — иначе скачивание
+    заведомо впустую. Ниже запаса квоты — пусто: квоту делит синк статистики."""
+    from call_qa import config as qa_config, subjects as qa_subjects
+    reserve = qa_config.AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE
+    left = _ai_qa_sample_c2d_quota_left()
+    if left < reserve:
+        logging.warning("ai-qa выборка %s: квоты Chat2Desk осталось %s (< запаса %s) — "
+                        "чаты СЗоВ только из готовых снапшотов", day, left, reserve)
+        return []
+    with db._get_cursor() as cursor:
+        family = qa_subjects.chat_direction_family(
+            cursor, OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+        if not family:
+            return []
+        cursor.execute(f"""
+            SELECT {db._C2D_REQUEST_COLUMNS}, COALESCE(d.canonical_id, d.id)
+              FROM c2d_requests r
+              JOIN users u ON u.id = r.operator_id
+              LEFT JOIN directions d ON d.id = u.direction_id
+             WHERE r.day = %s AND u.direction_id = ANY(%s)
+               AND COALESCE(r.outgoing_messages, 0) >= %s
+               AND NOT EXISTS (SELECT 1 FROM c2d_chat_snapshots s
+                                WHERE s.request_id = r.request_id)
+        """, (day, list(family), qa_config.C2D_MIN_OPERATOR_MESSAGES))
+        rows = cursor.fetchall()
+    candidates = []
+    for row in rows:
+        request = db._c2d_request_row_dict(row[:-1])
+        candidates.append({'direction_id': row[-1], 'operator_id': request.get('operator_id'),
+                           'key': str(request['request_id']), 'row': request})
+    return candidates
+
+
+def _ai_qa_sample_c2d_import(candidate):
+    """Переписка заявки — тем же путём, что «Случайный чат» журнала (снапшот в
+    c2d_chat_snapshots). В выборку идёт только снапшот, прошедший гейт честной
+    оценки: ручная передача чата посреди заявки или один «ок» оператора — и берётся
+    следующая заявка. Снапшот при этом остаётся: он пригодится журналу."""
+    from call_qa import config as qa_config, subjects as qa_subjects
+    row = candidate['row']
+    dialog_id, messages = _c2d_fetch_request_messages(
+        row['request_id'], request_start=row.get('request_start'),
+        request_end=row.get('request_end'))
+    if not messages:
+        return None
+    snapshot_id = db.save_c2d_snapshot(row['request_id'], dialog_id, messages,
+                                       request_row=row, created_by=None)
+    subject = qa_subjects.load(qa_config.SUBJECT_C2D_SNAPSHOT, snapshot_id)
+    if not qa_subjects.eligibility(subject)['ok']:
+        return None
+    return snapshot_id
+
+
+def _ai_qa_sample_chat_sources():
+    from call_qa import config as qa_config, daily_sample as qa_sample
+    return [
+        qa_sample.ChatSource(department=OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+                             subject_kind=qa_config.SUBJECT_C2D_SNAPSHOT,
+                             candidates=_ai_qa_sample_c2d_candidates,
+                             import_chat=_ai_qa_sample_c2d_import),
+    ]
+
+
 def _ai_qa_sample_sources():
     from call_qa import daily_sample as qa_sample
     return [
@@ -7261,7 +7329,8 @@ def ai_qa_daily_sample_job(day=None, triggered_by='scheduler'):
                         triggered_by=triggered_by,
                         since=datetime.now(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M'))
     try:
-        result = qa_sample.run(day, call_sources=_ai_qa_sample_sources())
+        result = qa_sample.run(day, call_sources=_ai_qa_sample_sources(),
+                               chat_sources=_ai_qa_sample_chat_sources())
     except Exception:
         logging.exception("ai-qa выборка: проход упал (%s)", triggered_by)
         return {'status': 'failed'}
