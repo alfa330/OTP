@@ -412,7 +412,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
- *   water — WATER_SECTION_DEPARTMENT_CODES;
+ *   water — фронт-офисы и СЗоВ (canAccessWaterSectionForUser);
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
@@ -709,6 +709,8 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'voice_trainer',
     // «Библиотека» (#282): тренер по ТЗ загружает книги и смотрит мониторинг.
     'library',
+    // «Учёт воды»: тренер — как операторы своего отдела (01.10.2026).
+    'water',
 ]);
 // Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
 // (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
@@ -2406,38 +2408,32 @@ const canAccessParcelsSectionForUser = (userLike) => {
 };
 
 /* «Учёт воды» — остатки питьевой воды во фронт-офисах и выдача водителям.
+   Своим разделом, а не вкладкой «Посылок» — решение владельца 30.09.2026.
 
-   Периметр тот же, что у «Посылок»: фронт-офисы выдают, колл-центр СЗоВ
-   проверяет право водителя и смотрит остатки, глобальный админ — всё. Своим
-   разделом, а не вкладкой «Посылок» — решение владельца 30.09.2026.
+   Кому открыт (решение владельца 01.10.2026):
+     супер-админ и руководитель регионов / фронт-офисов (глава «Фронт офисы») —
+       всё, включая журнал и настройки;
+     офисники из списка WATER_ISSUER_USER_IDS — выдают воду (шесть в Алматы,
+       двое в Астане; только id — ФИО в публичный репозиторий не кладём);
+     колл-центр СЗоВ, любая роль, и тренер СЗоВ — остатки и условия получения;
+     ТЭЗ КЦ — закрыт целиком, и главе, и админу; админы прочих отделов — тоже.
+   Тренер проходит своим отделом, как операторы («тренеру можно выдать доступ
+   как и операторам», 01.10.2026).
 
-   Здесь решается только «показывать ли пункт меню»; кто выдаёт и кто ведёт
-   учёт, считает water/access.py. */
-const WATER_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
-
-/* ПИЛОТ: пока флаг стоит, пункт меню и экран есть у супер-админа и у
-   поимённо названных офисников (список владельца 01.10.2026: шесть в Алматы,
-   двое в Астане; только id — ФИО в публичный репозиторий не кладём). Сервер
-   закрыт тем же правилом (water/access.py: PILOT, PILOT_USER_IDS); тест сверяет
-   списки, снимать и дополнять — в обоих местах. */
-const WATER_PILOT = true;
-const WATER_PILOT_USER_IDS = new Set([419, 421, 422, 423, 424, 509, 425, 426]);
+   Здесь решается только «показывать ли пункт меню»; вкладки и кнопки рисуются
+   по capabilities из /api/water/ping, обязательную границу держит сервер —
+   water/access.py (can_open_section, ISSUER_USER_IDS). Тест сверяет списки и
+   порядок проверок: дополнять — в обоих местах. */
+const WATER_ISSUER_USER_IDS = new Set([419, 421, 422, 423, 424, 509, 425, 426]);
 
 const canAccessWaterSectionForUser = (userLike) => {
-    const role = normalizeRole(userLike?.role);
-    if (role === 'super_admin') return true;
-    if (WATER_PILOT) return WATER_PILOT_USER_IDS.has(Number(userLike?.id));
-    // Тренер раздел не просил — правило владельца «буквально и не расширять»,
-    // как у «Касаний» и «Воронки ОП» (#360 открывал тренеру только названное).
-    if (role === 'trainer') return false;
-    // Глава чужого отдела с базовой admin-ролью — не глобальный админ.
-    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
-    if (isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some(
-        (code) => WATER_SECTION_DEPARTMENT_CODES.includes(code),
-    )) return true;
-    return WATER_SECTION_DEPARTMENT_CODES.includes(
-        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
-    );
+    if (normalizeRole(userLike?.role) === 'super_admin') return true;
+    const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    const headed = aiQaHeadDepartmentCodesOf(userLike);
+    if (own === 'tez' || headed.includes('tez')) return false;
+    if (isDepartmentHead(userLike) && headed.includes('front_office')) return true;
+    if (own === 'front_office') return WATER_ISSUER_USER_IDS.has(Number(userLike?.id));
+    return own === 'szov' || headed.includes('szov');
 };
 
 /* «Ссылка на подписание» — ИИН водителя → ссылка на подписание документов
@@ -54074,10 +54070,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {/* «Учёт воды» — выдача воды водителям и остатки по
-                                        фронт-офисам. Аудитория та же, что у «Посылок»,
-                                        поэтому пункт объявлен ОДИН раз здесь, в общей части
-                                        меню, рядом с ними. Кто выдаёт и кто ведёт учёт,
-                                        считает бэкенд (water/access.py). */}
+                                        фронт-офисам. Пункт объявлен ОДИН раз здесь, в общей
+                                        части меню, рядом с «Посылками»: главе отдела и
+                                        тренеру он виден без дубля в ролевых ветках. Кому
+                                        открыт — canAccessWaterSectionForUser; кто выдаёт и
+                                        кто ведёт учёт, считает бэкенд (water/access.py). */}
                                     {canAccessWaterSection && (
                                     <SidebarDeptScope section="water" activeCode={activeDeptCode}>
                                         <li>

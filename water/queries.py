@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 
 from parcels import queries as parcels_queries
 
-from . import rules
+from . import access, rules
 
 load_access_context = parcels_queries.load_access_context
 now_almaty = parcels_queries.now_almaty
@@ -545,32 +545,46 @@ def front_office_head_ids(cursor):
 
 
 def notify_candidates(cursor):
-    """Кого можно выбрать получателем: работающие сотрудники фронт-офисов, их
-    глава и глобальные админы — ровно те, кто откроет раздел по ссылке из
-    письма (access.can_open_section без СЗоВ: закупку ведёт не колл-центр).
+    """Кого можно выбрать получателем «Требуется закупка»: тех, кто воду выдаёт
+    или ведёт учёт (access.can_issue / can_manage) — супер-админов, руководителя
+    фронт-офисов и офисников из списка. Колл-центр закупку не ведёт, а админам
+    других отделов раздел закрыт — письмо со ссылкой в закрытый экран им слать
+    незачем.
 
-    Админ, назначенный главой ЧУЖОГО отдела, глобальным админом не считается
-    (семантика портала), раздел ему закрыт — и письмо со ссылкой в закрытый
-    экран ему слать незачем. Региональный специалист, которого ещё наймут,
-    появится здесь сам — он будет в отделе фронт-офисов."""
+    Отбор — теми же правилами, что и вход в раздел, а не своей копией в SQL:
+    разойдись они, человек получал бы письмо и упирался в отказ.
+    """
     cursor.execute(
         """
-        WITH heads AS (
-            SELECT head_user_id AS id, code FROM departments
-             WHERE is_active AND head_user_id IS NOT NULL
-        )
-        SELECT u.id, u.name, u.city, u.telegram_id IS NOT NULL
+        SELECT u.id, u.name, u.city, u.telegram_id IS NOT NULL, u.role, d.code,
+               COALESCE((SELECT array_agg(h.id) FROM departments h
+                          WHERE h.head_user_id = u.id AND h.is_active), '{}'),
+               COALESCE((SELECT array_agg(h.code) FROM departments h
+                          WHERE h.head_user_id = u.id AND h.is_active), '{}')
           FROM users u
           LEFT JOIN departments d ON d.id = u.department_id
          WHERE COALESCE(u.status, '') <> 'fired'
-           AND (d.code = 'front_office'
-                OR u.role = 'super_admin'
-                OR (u.role = 'admin' AND u.id NOT IN (SELECT id FROM heads))
-                OR u.id IN (SELECT id FROM heads WHERE code = 'front_office'))
+           AND (u.role = 'super_admin'
+                OR d.code = 'front_office'
+                OR u.id IN (SELECT head_user_id FROM departments
+                             WHERE code = 'front_office' AND is_active
+                               AND head_user_id IS NOT NULL))
          ORDER BY u.name
         """)
-    return [{'id': row[0], 'name': row[1], 'city': row[2], 'has_telegram': bool(row[3])}
-            for row in cursor.fetchall()]
+    people = []
+    for (user_id, name, city, has_telegram, role, department_code,
+         headed_ids, headed_codes) in cursor.fetchall():
+        # Тот же контекст, что собирает load_access_context для входа в раздел.
+        ctx = {
+            'user_id': user_id, 'role': access.normalize_role(role),
+            'department_code': department_code,
+            'headed_department_ids': list(headed_ids or []),
+            'headed_department_codes': list(headed_codes or []),
+        }
+        if access.can_issue(ctx) or access.can_manage(ctx):
+            people.append({'id': user_id, 'name': name, 'city': city,
+                           'has_telegram': bool(has_telegram)})
+    return people
 
 
 def notify_recipients(cursor, settings):

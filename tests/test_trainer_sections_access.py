@@ -25,6 +25,8 @@ SECTIONS = {
     'parcels': 'canAccessParcelsSectionForUser',
     'sign_links': 'canAccessSignLinksSectionForUser',
     'driver_chats': 'canAccessDriverChatsSectionForUser',
+    # «Учёт воды»: «тренеру можно выдать доступ как и операторам» (01.10.2026).
+    'water': 'canAccessWaterSectionForUser',
 }
 
 

@@ -128,6 +128,38 @@ export const parseCount = (value) => {
     return Number(text);
 };
 
+/* Условия получения воды словами — вкладка «Условия» у тех, кто программу
+   не настраивает (колл-центр, офисники). Числа и тарифы — из настроек, а не из
+   кода: поменял руководитель порог — тут же поменялся и текст. */
+export const conditionGroups = (settings) => {
+    const s = settings || {};
+    const tariffs = (s.tariffs || []).map(tariffLabel).join(', ') || 'не заданы';
+    const trips = Number(s.min_trips) || 0;
+    const days = Number(s.cooldown_days) || 0;
+    return [
+        {
+            title: 'Приветственный блок',
+            rows: [
+                ['Кому', 'Новому водителю — ещё ни одного выполненного заказа'],
+                ['Тариф машины', tariffs],
+                ['ФК', 'Должен быть пройден'],
+                ['Сколько', `${blocksWord(Number(s.welcome_blocks) || 1)}, один раз`],
+            ],
+        },
+        {
+            title: 'За активность',
+            rows: [
+                ['Поездки', trips
+                    ? `${tripsWord(trips)} с прошлой выдачи, первый раз — за последние 7 дней`
+                    : 'Не требуются'],
+                ['Как часто', days ? `Не чаще раза в ${daysWord(days)}` : 'Без ограничения по дням'],
+                ['Тариф машины', tariffs],
+                ['Сколько', `${blocksWord(Number(s.activity_blocks) || 1)} за выдачу`],
+            ],
+        },
+    ];
+};
+
 /* Ключ «последний офис» в localStorage — удобство одного сотрудника. */
 export const LAST_OFFICE_KEY = 'otp_water_last_office';
 

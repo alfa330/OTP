@@ -107,12 +107,24 @@ class RecipientsTests(unittest.TestCase):
         recipients = queries.notify_recipients(cursor, {'notify_user_ids': [57]})
         self.assertEqual(recipients, [{'user_id': 403, 'name': 'Глава', 'chat_id': 777}])
 
-    def test_candidates_exclude_heads_of_other_departments(self):
-        cursor = ScriptedCursor([])
-        queries.notify_candidates(cursor)
-        sql = cursor.sql[0][0]
-        self.assertIn("u.role = 'admin' AND u.id NOT IN (SELECT id FROM heads)", sql)
-        self.assertNotIn("u.role IN ('admin', 'super_admin')", sql)
+    def test_candidates_are_those_who_issue_or_manage(self):
+        """Получатель «Требуется закупка» — кто выдаёт воду или ведёт учёт:
+        отбор теми же правилами water.access, что и вход в раздел."""
+        # id, name, city, has_telegram, role, department, headed ids, headed codes
+        rows = [
+            (1, 'Супер-админ', None, True, 'super_admin', 'szov', [], []),
+            (2, 'Руководитель', 'Алматы', True, 'admin', 'front_office', [909], ['front_office']),
+            (424, 'Офисник из списка', 'Алматы', False, 'operator', 'front_office', [], []),
+            (10, 'Офисник не из списка', 'Алматы', True, 'operator', 'front_office', [], []),
+            (3, 'Админ СЗоВ', None, True, 'admin', 'szov', [], []),
+            (4, 'Глава ТЭЗ', None, True, 'admin', 'tez', [560], ['tez']),
+        ]
+        cursor = ScriptedCursor(rows)
+        people = queries.notify_candidates(cursor)
+        self.assertEqual([item['id'] for item in people], [1, 2, 424])
+        self.assertEqual(people[2], {'id': 424, 'name': 'Офисник из списка', 'city': 'Алматы',
+                                     'has_telegram': False})
+        self.assertIn("COALESCE(u.status, '') <> 'fired'", cursor.sql[0][0])
 
 
 if __name__ == '__main__':

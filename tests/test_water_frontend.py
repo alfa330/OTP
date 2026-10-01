@@ -8,7 +8,10 @@
   * DDL держит главное: остаток не уходит в минус, приветственный — один.
 """
 
+import json
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -58,11 +61,71 @@ class SectionWiringTests(unittest.TestCase):
         parcels_item = self.app.index("handleSidebarViewNavigation(e, 'parcels')")
         self.assertLess(parcels_item, self.app.index("handleSidebarViewNavigation(e, 'water')"))
 
-    def test_predicate_mirrors_the_backend_perimeter(self):
-        self.assertIn("const WATER_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];", self.app)
-        self.assertEqual(set(access.SECTION_DEPARTMENT_CODES), {'front_office', 'szov'})
-        predicate = self.app.split('const canAccessWaterSectionForUser = (userLike) => {')[1].split('\n};')[0]
-        self.assertIn("role === 'admin' && !isDepartmentHead(userLike)", predicate)
+    def _predicate(self):
+        return self.app.split('const canAccessWaterSectionForUser = (userLike) => {')[1].split('\n};')[0]
+
+    def test_issuer_list_is_the_same_on_both_sides(self):
+        """Пункт меню и сервер обязаны совпадать — иначе человек видит пункт, а
+        раздел отвечает отказом (или наоборот: доступ выдан, а пункта нет)."""
+        ids = re.search(r'const WATER_ISSUER_USER_IDS = new Set\(\[([0-9,\s]*)\]\);', self.app)
+        self.assertIsNotNone(ids)
+        front = {int(x) for x in ids.group(1).split(',') if x.strip()}
+        self.assertEqual(front, set(access.ISSUER_USER_IDS))
+        self.assertNotIn('WATER_PILOT', self.app)
+
+    def test_predicate_checks_in_the_backend_order(self):
+        """Супер-админ → ТЭЗ закрыт → руководитель → офисники по списку → СЗоВ,
+        как в water.access.can_open_section: ТЭЗ закрыт раньше любых оснований."""
+        predicate = self._predicate()
+        steps = ["=== 'super_admin') return true;",
+                 "if (own === 'tez' || headed.includes('tez')) return false;",
+                 "if (isDepartmentHead(userLike) && headed.includes('front_office')) return true;",
+                 "if (own === 'front_office') return WATER_ISSUER_USER_IDS.has(Number(userLike?.id));",
+                 "return own === 'szov' || headed.includes('szov');"]
+        positions = [predicate.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(access.CLOSED_DEPARTMENT_CODES, ('tez',))
+        self.assertEqual((access.ISSUE_DEPARTMENT_CODE, access.CHECK_DEPARTMENT_CODE),
+                         ('front_office', 'szov'))
+
+    def test_predicate_answers_like_the_server(self):
+        """Сам предикат из App.jsx, выполненный node, против can_open_section на
+        всех сочетаниях роли, отдела, главенства и списка: проверяем поведение,
+        а не текст."""
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node недоступен')
+        app = self.app
+        normalize = re.search(r'^const normalizeDepartmentCode = .*$', app, re.M).group(0)
+        start = app.index('const aiQaHeadDepartmentCodesOf = (userLike) => {')
+        head_codes = app[start:app.index('\n};\n', start) + 3]
+        start = app.index('const WATER_ISSUER_USER_IDS = ')
+        end = app.index('\n};\n', app.index('const canAccessWaterSectionForUser = ')) + 3
+        cases = []
+        for role in ('super_admin', 'admin', 'sv', 'trainer', 'operator', 'trainee'):
+            for code in ('front_office', 'szov', 'tez', 'op', 'it', None):
+                for heads in ((), ('front_office',), ('szov',), ('tez',), ('op',)):
+                    for user_id in (10, 424):
+                        cases.append((role, code, heads, user_id))
+        users = [{'id': user_id, 'role': role, 'department_code': code,
+                  'headed_department_id': 1 if heads else None,
+                  'headed_department_codes': list(heads)}
+                 for role, code, heads, user_id in cases]
+        roles_url = (ROOT / 'src' / 'utils' / 'roles.js').as_uri()
+        script = '\n'.join((
+            "import { normalizeRole, isDepartmentHead } from '%s';" % roles_url,
+            normalize, head_codes, app[start:end],
+            'const users = %s;' % json.dumps(users),
+            'process.stdout.write(JSON.stringify(users.map((u) => canAccessWaterSectionForUser(u))));',
+        ))
+        out = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, check=True)
+        front = json.loads(out.stdout.decode('utf-8'))
+        for (role, code, heads, user_id), shown in zip(cases, front):
+            ctx = {'user_id': user_id, 'role': role, 'department_code': code,
+                   'headed_department_ids': [1] if heads else [],
+                   'headed_department_codes': list(heads)}
+            self.assertEqual(shown, access.can_open_section(ctx), (role, code, heads, user_id))
+        self.assertEqual(len(front), len(cases))
 
     def test_guards_and_registries(self):
         self.assertIn("if (view === 'water' && canAccessWaterSection) return;", self.app)
@@ -70,26 +133,11 @@ class SectionWiringTests(unittest.TestCase):
         self.assertIn("    water: 'Water accounting',", self.app)
         self.assertIn("|| view === 'water' || view === 'driver_chats'", self.app)
         self.assertIn("canAccessWaterSection && deptAllowsInner('water'),", self.app)
-        # Тренер раздел не просил: ни в его списке, ни в предикате.
+        # Тренер — как операторы своего отдела (01.10.2026): раздел в его списке,
+        # а исключения по роли в предикате нет.
         trainer = self.app.split('const TRAINER_ALLOWED_VIEWS = Object.freeze([')[1].split(']);')[0]
-        self.assertNotIn("'water'", trainer)
-        predicate = self.app.split('const canAccessWaterSectionForUser = (userLike) => {')[1].split('\n};')[0]
-        self.assertIn("if (role === 'trainer') return false;", predicate)
-
-    def test_pilot_flag_and_list_are_the_same_on_both_sides(self):
-        """Пилот «супер-админ + поимённый список»: пункт меню и сервер обязаны
-        совпадать — иначе человек видит пункт, а раздел отвечает отказом (или
-        наоборот: доступ выдан, а пункта нет)."""
-        flag = re.search(r'const WATER_PILOT = (true|false);', self.app)
-        self.assertIsNotNone(flag)
-        self.assertEqual(flag.group(1) == 'true', access.PILOT)
-        ids = re.search(r'const WATER_PILOT_USER_IDS = new Set\(\[([0-9,\s]*)\]\);', self.app)
-        self.assertIsNotNone(ids)
-        front = {int(x) for x in ids.group(1).split(',') if x.strip()}
-        self.assertEqual(front, set(access.PILOT_USER_IDS))
-        predicate = self.app.split('const canAccessWaterSectionForUser = (userLike) => {')[1].split('\n};')[0]
-        self.assertLess(predicate.index("if (role === 'super_admin') return true;"),
-                        predicate.index('if (WATER_PILOT) return WATER_PILOT_USER_IDS.has(Number(userLike?.id));'))
+        self.assertIn("'water'", trainer)
+        self.assertNotIn("'trainer'", self._predicate())
 
     def test_droplet_icon_is_mapped(self):
         fa = _read(ROOT / 'src' / 'components' / 'common' / 'FaIcon.jsx')
@@ -118,10 +166,32 @@ class LabelMirrorTests(unittest.TestCase):
 
 
 class PanelTests(unittest.TestCase):
-    def test_settings_tab_only_for_the_manager(self):
-        panel = _read(PANEL)
-        self.assertIn("capabilities?.can_manage ? { value: 'settings'", panel)
-        self.assertIn("tab === 'settings' && capabilities.can_manage", panel)
+    """Вкладки по правам (01.10.2026): журнал и настройки — руководителю,
+    остальным вместо настроек — «Условия» для чтения, колл-центру — без выдачи."""
+
+    def setUp(self):
+        self.panel = _read(PANEL)
+
+    def test_journal_tab_and_screen_only_with_the_journal_right(self):
+        self.assertIn("capabilities.can_view_journal ? { value: 'journal', label: 'Журнал' } : null",
+                      self.panel)
+        self.assertIn("activeTab === 'journal' && capabilities.can_view_journal && (", self.panel)
+
+    def test_settings_for_the_manager_conditions_for_everyone_else(self):
+        self.assertIn("{ value: 'settings', label: manage ? 'Настройки' : 'Условия' }", self.panel)
+        self.assertIn("activeTab === 'settings' && capabilities.can_manage && (\n                <WaterSettings",
+                      self.panel)
+        self.assertIn("activeTab === 'settings' && !capabilities.can_manage && (\n"
+                      "                <WaterConditions settings={settings} />", self.panel)
+
+    def test_call_centre_tabs_lead_with_stock_and_conditions(self):
+        tabs = self.panel.split('const tabs = useMemo(() => {')[1].split('}, [capabilities]);')[0]
+        viewer = tabs.split('return [')[-1].split('];')[0]
+        self.assertEqual(re.findall(r"label: '([^']+)'", viewer), ['Остатки', 'Условия', 'Проверка'])
+        self.assertNotIn('journal', viewer)
+        # Первая вкладка — первая в наборе роли, а не «Выдача» для всех.
+        self.assertIn('const [tab, setTab] = useState(null);', self.panel)
+        self.assertIn('tabs.some((item) => item.value === tab) ? tab : tabs[0]?.value', self.panel)
 
     def test_no_native_selects_or_date_inputs(self):
         """Эталон портала — свои пикеры: системный select/date — чужая деталь."""

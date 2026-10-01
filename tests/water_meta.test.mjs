@@ -6,6 +6,7 @@ import {
   KIND_LABELS,
   TARIFF_LABELS,
   blocksWord,
+  conditionGroups,
   daysWord,
   defaultOfficeId,
   exportFileName,
@@ -105,4 +106,28 @@ test('default office: remembered, then the only one in own city, then the only o
   assert.equal(defaultOfficeId([offices[2]], null, null), 3);
   // Своего города в учёте нет — чужой офис сам не подставляется.
   assert.equal(defaultOfficeId([offices[0]], 'Астана', null), null);
+});
+
+test('conditions spell out the program from the settings', () => {
+  const groups = conditionGroups({
+    tariffs: ['business', 'ultimate'], min_trips: 20, cooldown_days: 7,
+    welcome_blocks: 1, activity_blocks: 2,
+  });
+  assert.deepEqual(groups.map((group) => group.title), ['Приветственный блок', 'За активность']);
+  const welcome = Object.fromEntries(groups[0].rows);
+  assert.equal(welcome['Тариф машины'], 'Business, Premier (Ultima)');
+  assert.equal(welcome['ФК'], 'Должен быть пройден');
+  assert.equal(welcome['Сколько'], '1 блок, один раз');
+  const activity = Object.fromEntries(groups[1].rows);
+  assert.equal(activity['Поездки'], '20 поездок с прошлой выдачи, первый раз — за последние 7 дней');
+  assert.equal(activity['Как часто'], 'Не чаще раза в 7 дней');
+  assert.equal(activity['Сколько'], '2 блока за выдачу');
+});
+
+test('conditions without limits say so instead of showing zeros', () => {
+  const activity = Object.fromEntries(conditionGroups({ tariffs: [], min_trips: 0, cooldown_days: 0 })[1].rows);
+  assert.equal(activity['Поездки'], 'Не требуются');
+  assert.equal(activity['Как часто'], 'Без ограничения по дням');
+  assert.equal(activity['Тариф машины'], 'не заданы');
+  assert.equal(activity['Сколько'], '1 блок за выдачу');
 });

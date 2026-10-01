@@ -62,8 +62,10 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
     def water_route(rule, methods=('GET',), need=None):
         """Каркас роута: preflight, авторизация, контекст, гейты, ошибки.
 
-        need='issue'  — выдача воды (фронт-офисы, глобальный админ);
-        need='manage' — учёт целиком (глава фронт-офисов, глобальный админ).
+        need='issue'   — выдача воды (офисники из списка, руководитель, супер-админ);
+        need='manage'  — учёт целиком (руководитель регионов / фронт-офисов,
+                         супер-админ);
+        need='journal' — журнал выдач и его выгрузка (те же, что manage).
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -110,6 +112,11 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         return jsonify({
                             "error": "Учёт ведёт региональный руководитель",
                             "code": "WATER_MANAGE_FORBIDDEN",
+                        }), 403
+                    if need == 'journal' and not access.can_view_journal(ctx):
+                        return jsonify({
+                            "error": "Журнал выдач видят руководитель и супер-админы",
+                            "code": "WATER_JOURNAL_FORBIDDEN",
                         }), 403
                     return handler(*args, ctx=ctx, **kwargs)
                 except Exception as exc:  # noqa: BLE001
@@ -494,7 +501,7 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return jsonify({"issue": item, "office": office})
 
     # ── Журнал выдач ─────────────────────────────────────────────────────
-    @water_route('/issues')
+    @water_route('/issues', need='journal')
     def water_issues(ctx):
         filters, error = _filters_from_args(request.args)
         if error:
@@ -508,7 +515,7 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 offset=_int(request.args.get('offset')) or 0)
         return jsonify({"items": items, "total": total})
 
-    @water_route('/issues/export')
+    @water_route('/issues/export', need='journal')
     def water_issues_export(ctx):
         """Выгрузка журнала. Читающий роут: «сохранить то, что вижу» — то же,
         что «посмотреть». Отбор — тот же разбор, что у списка; период
@@ -539,7 +546,7 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return send_file(stream, mimetype=XLSX_MIME, as_attachment=True,
                          download_name=report.report_filename(date_from, date_to))
 
-    @water_route('/filters')
+    @water_route('/filters', need='journal')
     def water_filters(ctx):
         with db._get_cursor() as cursor:
             if not schema.schema_is_ready(cursor):

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Loader2 } from 'lucide-react';
 import { IosSegmented, iosCard } from '../ui/ios';
+import WaterConditions from './WaterConditions';
 import WaterIssue from './WaterIssue';
 import WaterJournal from './WaterJournal';
 import WaterSettings from './WaterSettings';
@@ -16,11 +17,13 @@ import WaterStock from './WaterStock';
  * «Посылок», — фронт-офисы и колл-центр СЗоВ, — и тот же QR-замок. Панель
  * самодостаточна: всё берёт из /api/water.
  *
- * Вкладки:
+ * Вкладки (набор — по правам, см. tabs ниже):
  *   Выдача     — вставить ID водителя, увидеть право и выдать
- *   Остатки    — дашборд по офисам, поступления, пересчёт, пороги
- *   Журнал     — история выдач с фильтрами и выгрузкой
- *   Настройки  — условия программы (только руководителю)
+ *   Проверка   — то же без кнопки «Выдать» (колл-центр СЗоВ)
+ *   Остатки    — дашборд по офисам; поступления, пересчёт, пороги — руководителю
+ *   Журнал     — история выдач с фильтрами и выгрузкой (руководителю)
+ *   Настройки  — условия программы (руководителю); остальным — «Условия»,
+ *                то же только для чтения
  */
 
 const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
@@ -32,7 +35,8 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
     const [offices, setOffices] = useState(null);
     const [directory, setDirectory] = useState([]);
     const [error, setError] = useState('');
-    const [tab, setTab] = useState('issue');
+    // null — человек ещё ничего не выбирал: открыта первая вкладка его роли.
+    const [tab, setTab] = useState(null);
     const [journalKey, setJournalKey] = useState(0);
 
     useEffect(() => {
@@ -83,12 +87,31 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
         setJournalKey((value) => value + 1);
     }, [putOffice]);
 
-    const tabs = useMemo(() => [
-        { value: 'issue', label: 'Выдача' },
-        { value: 'stock', label: 'Остатки' },
-        { value: 'journal', label: 'Журнал' },
-        capabilities?.can_manage ? { value: 'settings', label: 'Настройки' } : null,
-    ].filter(Boolean), [capabilities?.can_manage]);
+    /* Вкладки — по правам из /ping (решение владельца 01.10.2026):
+         руководитель и супер-админ  Выдача · Остатки · Журнал · Настройки
+         офисники из списка          Выдача · Остатки · Условия
+         колл-центр СЗоВ             Остатки · Условия · Проверка
+       «Условия» — та же программа, что «Настройки», только для чтения. У
+       колл-центра первыми остатки и условия — их и просили; проверка водителя
+       по ID третьей. */
+    const tabs = useMemo(() => {
+        if (!capabilities) return [];
+        const manage = Boolean(capabilities.can_manage);
+        if (capabilities.can_issue || manage) {
+            return [
+                { value: 'issue', label: 'Выдача' },
+                { value: 'stock', label: 'Остатки' },
+                capabilities.can_view_journal ? { value: 'journal', label: 'Журнал' } : null,
+                { value: 'settings', label: manage ? 'Настройки' : 'Условия' },
+            ].filter(Boolean);
+        }
+        return [
+            { value: 'stock', label: 'Остатки' },
+            { value: 'settings', label: 'Условия' },
+            { value: 'issue', label: 'Проверка' },
+        ];
+    }, [capabilities]);
+    const activeTab = tabs.some((item) => item.value === tab) ? tab : tabs[0]?.value;
 
     if (error) {
         return <div className={`${iosCard} p-6 text-center text-[13.5px] text-slate-600`}>{error}</div>;
@@ -110,9 +133,9 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
 
     return (
         <div className="space-y-4">
-            <IosSegmented value={tab} onChange={setTab} options={tabs} ariaLabel="Учёт воды" />
+            <IosSegmented value={activeTab} onChange={setTab} options={tabs} ariaLabel="Учёт воды" />
 
-            {tab === 'issue' && (
+            {activeTab === 'issue' && (
                 <WaterIssue
                     apiBaseUrl={apiBaseUrl}
                     headers={headers}
@@ -123,7 +146,7 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                     showToast={showToast}
                 />
             )}
-            {tab === 'stock' && (
+            {activeTab === 'stock' && (
                 <WaterStock
                     apiBaseUrl={apiBaseUrl}
                     headers={headers}
@@ -135,7 +158,7 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                     showToast={showToast}
                 />
             )}
-            {tab === 'journal' && (
+            {activeTab === 'journal' && capabilities.can_view_journal && (
                 <WaterJournal
                     apiBaseUrl={apiBaseUrl}
                     headers={headers}
@@ -145,7 +168,10 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                     showToast={showToast}
                 />
             )}
-            {tab === 'settings' && capabilities.can_manage && (
+            {activeTab === 'settings' && !capabilities.can_manage && (
+                <WaterConditions settings={settings} />
+            )}
+            {activeTab === 'settings' && capabilities.can_manage && (
                 <WaterSettings
                     apiBaseUrl={apiBaseUrl}
                     headers={headers}

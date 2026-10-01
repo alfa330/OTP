@@ -43,9 +43,10 @@ from water import schema as water_schema  # noqa: E402
 TODAY = date(2026, 9, 30)
 NOW = datetime(2026, 9, 30, 12, 0)
 ACCOUNT = 'c' * 32
+ISSUER = 424  # офисник из списка владельца (water.access.ISSUER_USER_IDS)
 
 
-def person(role='operator', department_code='front_office', headed_codes=(), user_id=10):
+def person(role='operator', department_code='front_office', headed_codes=(), user_id=ISSUER):
     return {
         'user_id': user_id, 'name': 'Сотрудник %d' % user_id, 'role': role,
         'department_id': 909, 'department_code': department_code, 'city': 'Алматы',
@@ -256,10 +257,6 @@ class _Base(unittest.TestCase):
         ready = mock.patch.object(water_schema, 'schema_is_ready', lambda cursor: True)
         ready.start()
         self.addCleanup(ready.stop)
-        # Роуты проверяются с периметром ПОСЛЕ пилота; сам пилот — PilotGateTests.
-        pilot = mock.patch.object(water_routes.access, 'PILOT', False)
-        pilot.start()
-        self.addCleanup(pilot.stop)
 
         self.lookup_override = None
 
@@ -340,6 +337,7 @@ class GateTests(_Base):
     def test_ping_carries_capabilities_and_public_settings(self):
         body = self.client.get('/api/water/ping').get_json()
         self.assertTrue(body['capabilities']['can_issue'])
+        self.assertFalse(body['capabilities']['can_view_journal'])
         self.assertNotIn('notify_user_ids', body['settings'])
 
 
@@ -570,21 +568,57 @@ class CancelTests(_Base):
         self.assertEqual(response.get_json()['issue']['kind'], 'welcome')
 
 
-class PilotGateTests(_Base):
-    def test_pilot_lets_in_only_the_super_admin(self):
-        with mock.patch.object(water_routes.access, 'PILOT', True):
-            response = self.client.get('/api/water/ping')
-            self.assertEqual(response.status_code, 403)
-            self.assertEqual(response.get_json()['code'], 'WATER_SECTION_CLOSED')
-            self.viewer = person(role='super_admin', department_code='szov')
-            self.assertEqual(self.client.get('/api/water/ping').status_code, 200)
+def manager():
+    """Руководитель регионов / фронт-офисов — глава отдела «Фронт офисы»."""
+    return person(role='admin', headed_codes=('front_office',))
 
-    def test_listed_office_operator_issues_during_the_pilot(self):
-        with mock.patch.object(water_routes.access, 'PILOT', True):
-            self.viewer = person(user_id=424)
-            office_id = self.store.add(stock=5)
-            self.assertEqual(self.issue(water_office_id=office_id).status_code, 201)
-            self.assertEqual(self.store.issues[0]['issued_by'], 424)
+
+class PerimeterTests(_Base):
+    """Кому открыт раздел и журнал (решение владельца 01.10.2026)."""
+
+    JOURNAL = ('/api/water/issues', '/api/water/filters',
+               '/api/water/issues/export?date_from=2026-09-01&date_to=2026-09-30')
+
+    def test_office_staff_outside_the_list_are_closed(self):
+        self.viewer = person(user_id=10)
+        response = self.client.get('/api/water/ping')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'WATER_SECTION_CLOSED')
+
+    def test_listed_office_staff_issue_under_their_own_name(self):
+        office_id = self.store.add(stock=5)
+        self.assertEqual(self.issue(water_office_id=office_id).status_code, 201)
+        self.assertEqual(self.store.issues[0]['issued_by'], ISSUER)
+
+    def test_tez_is_closed_even_for_its_head(self):
+        for viewer in (person(department_code='tez'),
+                       person(role='admin', department_code='tez', headed_codes=('tez',))):
+            self.viewer = viewer
+            response = self.client.get('/api/water/ping')
+            self.assertEqual(response.status_code, 403, viewer)
+            self.assertEqual(response.get_json()['code'], 'WATER_SECTION_CLOSED')
+
+    def test_trainer_of_call_centre_gets_in_like_operators(self):
+        self.viewer = person(role='trainer', department_code='szov')
+        body = self.client.get('/api/water/ping').get_json()
+        self.assertTrue(body['capabilities']['can_open'])
+        self.assertFalse(body['capabilities']['can_issue'])
+        self.assertEqual(self.client.post('/api/water/check', json={'link': ACCOUNT}).status_code, 200)
+
+    def test_journal_is_closed_to_issuers_and_the_call_centre(self):
+        for viewer in (person(), person(role='sv', department_code='szov'),
+                       person(role='admin', department_code='szov', headed_codes=('szov',))):
+            self.viewer = viewer
+            for url in self.JOURNAL:
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 403, (viewer['role'], url))
+                self.assertEqual(response.get_json()['code'], 'WATER_JOURNAL_FORBIDDEN')
+
+    def test_journal_is_open_to_the_manager_and_super_admin(self):
+        for viewer in (manager(), person(role='super_admin', department_code='szov')):
+            self.viewer = viewer
+            for url in self.JOURNAL[:2]:
+                self.assertEqual(self.client.get(url).status_code, 200, (viewer['role'], url))
 
 
 class BuyAlertTests(_Base):
@@ -747,6 +781,10 @@ class ManageTests(_Base):
 
 @unittest.skipIf(load_workbook is None, 'openpyxl не установлен')
 class ExportTests(_Base):
+    def setUp(self):
+        super().setUp()
+        self.viewer = manager()  # журнал и выгрузка — руководителю
+
     def test_period_is_required(self):
         response = self.client.get('/api/water/issues/export')
         self.assertEqual(response.get_json()['code'], 'WATER_PERIOD_REQUIRED')
