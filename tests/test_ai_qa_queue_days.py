@@ -32,6 +32,12 @@ class _Cursor:
     def fetchall(self):
         return self.rows
 
+    def fetchmany(self, size):
+        # Сводка читает пачками: отдаём по одной строке, чтобы цикл пачек
+        # действительно отработал больше одного раза.
+        batch, self.rows = self.rows[:1], self.rows[1:]
+        return batch
+
     def close(self):
         pass
 
@@ -87,8 +93,10 @@ class DaysSummaryTests(unittest.TestCase):
         self.assertEqual(first["open_ai_min"], 0)
         self.assertEqual((first["evaluated"], first["reviewed"], first["corrected"]), (5, 3, 1))
         self.assertEqual((first["ai_avg"], first["human_avg"], first["human_n"]), (70.5, 80.0, 2))
-        # Сводка берёт выборку очереди без колонок сделки: они ей не нужны.
+        # Сводка берёт выборку очереди без колонок сделки и облегчённую (без
+        # обоснований критериев и балла человека): они ей не нужны.
         self.assertFalse(queue.call_args.kwargs["with_deals"])
+        self.assertTrue(queue.call_args.kwargs["slim"])
         # Итоги — одним запросом и только по дням, где кто-то ждёт.
         sql, params = cursor.sql[-1]
         self.assertIn("GROUP BY day", sql)
@@ -110,9 +118,14 @@ class DaysSummaryTests(unittest.TestCase):
                     mock.patch.object(api, "_queue_items", return_value=items):
                 self.assertEqual(api.review_queue_days(), {"days": [], "total": 0, "truncated": False})
 
-    def test_truncated_when_the_fetch_cap_is_hit(self):
+    def test_truncated_only_at_the_summary_safety_cap(self):
         many = [_item(i, "2026-09-23", ["ok"], 90) for i in range(3)]
+        # Рабочий потолок списка сводку больше не режет: с ежедневной выборкой он
+        # выбрасывал бы старые дни вместе с критическими разговорами.
         with mock.patch.object(api, "_QUEUE_FETCH_CAP", 3):
+            out, _, _ = self._run([], items=many)
+        self.assertFalse(out["truncated"])
+        with mock.patch.object(api, "_QUEUE_SUMMARY_CAP", 3):
             out, _, _ = self._run([], items=many)
         self.assertTrue(out["truncated"])
 
@@ -134,6 +147,22 @@ class DayPageTests(unittest.TestCase):
         self.assertNotIn("_operator_id", page["items"][0])
         self.assertNotIn("_sev", page["items"][0])
         self.assertEqual([i["id"] for i in none_page["items"]], [4])
+
+    def test_impossible_day_is_an_empty_day_not_a_database_error(self):
+        with mock.patch.object(api.config, "connect_ro") as connect, \
+                mock.patch.object(api, "_queue_items") as queue:
+            self.assertEqual(api.review_queue_day("2026-02-30"), {"items": [], "total": 0})
+        connect.assert_not_called()
+        queue.assert_not_called()
+
+    def test_day_page_asks_the_queue_for_its_day_only(self):
+        with mock.patch.object(api.config, "connect_ro", return_value=_Conn(_Cursor([]))), \
+                mock.patch.object(api, "_flag_stale_evaluations", side_effect=lambda rows: None), \
+                mock.patch.object(api, "_queue_items", return_value=[]) as queue:
+            api.review_queue_day("2026-09-23")
+            api.review_queue_day(api.QUEUE_NO_DAY)
+        self.assertEqual([c.kwargs["day"] for c in queue.call_args_list],
+                         ["2026-09-23", api.QUEUE_NO_DAY])
 
     def test_pages_of_a_day_add_up_without_gaps(self):
         """Страницы дня складываются в весь день без пропусков и повторов, а равные
@@ -172,6 +201,37 @@ class QueueItemsColumnsTests(unittest.TestCase):
         self.assertEqual(by_id[6]["deal"]["id"], "D-1")
         sql = cursor.sql[-1][0]
         self.assertLess(sql.index(api._SUBJECT_DAY), sql.index("FROM ai_review_cache rc"))
+
+    def test_day_is_filtered_in_sql_before_the_cap(self):
+        cursor = _Cursor([])
+        api._queue_items(cursor, with_deals=False, day="2026-09-23")
+        sql, params = cursor.sql[-1]
+        where = sql[sql.index("WHERE rc.model"):]
+        self.assertIn(f"AND {api._SUBJECT_DAY} = %s", where)
+        self.assertLess(where.index(f"AND {api._SUBJECT_DAY} = %s"), where.index("LIMIT %s"))
+        self.assertEqual(params[-2:], ("2026-09-23", api._QUEUE_FETCH_CAP))
+        api._queue_items(cursor, with_deals=False, day=api.QUEUE_NO_DAY)
+        sql, params = cursor.sql[-1]
+        self.assertIn(f"AND {api._SUBJECT_DAY} IS NULL", sql)
+        self.assertNotIn(api.QUEUE_NO_DAY, params)
+
+    def test_slim_summary_reads_only_what_the_reasons_need(self):
+        stamp = dt.datetime(2026, 9, 23, 7, 4, tzinfo=dt.timezone.utc)
+        slim_criteria = [{"ai": "Incorrect", "source": "transcript", "conf": 0.9, "is_critical": True}]
+        row = ((5, "Основа ОП", "Оператор", "23.09 12:04", None, slim_criteria, 0.9, stamp, 73,
+                None, None, "imported_call", {}, 40, None, dt.date(2026, 9, 23), 7)
+               + (None,) * api._DEAL_COLUMN_COUNT)
+        cursor = _Cursor([row, row[:15] + (dt.date(2026, 9, 22),) + row[16:]])
+        items = api._queue_items(cursor, with_deals=False, slim=True)
+        self.assertEqual(len(items), 2)                      # обе пачки дочитаны
+        sql, params = cursor.sql[-1]
+        self.assertNotIn("LEFT JOIN LATERAL", sql)            # отпечаток прогона не нужен
+        self.assertNotIn(api._SUBJECT_HUMAN_SCORE, sql)       # балл человека не нужен
+        self.assertIn(api._CRITERIA_FOR_REASONS, sql)
+        self.assertEqual(params[-1], api._QUEUE_SUMMARY_CAP)
+        # Причины считаются тем же правилом, что у строк дня.
+        self.assertEqual(items[0]["reasons"], ["critical"])
+        self.assertEqual(items[0]["day"], "2026-09-23")
 
 
 class CompatModeTests(unittest.TestCase):

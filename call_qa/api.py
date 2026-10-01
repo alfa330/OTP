@@ -184,6 +184,27 @@ def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
 
 _QUEUE_FETCH_CAP = 3000  # верх глобальной сортировки по критичности до постраничной нарезки
 QUEUE_NO_DAY = "none"    # день очереди у разговора без даты (карточка «Без даты»)
+# Сводке дней потолок 3000 не годится: он режет по свежести ОЦЕНКИ, и с ежедневной
+# выборкой (до 270 оценок в сутки, call_qa.daily_sample) старые дни — вместе с
+# критическими разговорами — через несколько недель молча выпадали бы из очереди.
+# Сводка идёт облегчённой выборкой (_CRITERIA_FOR_REASONS), и этот верх —
+# страховка памяти инстанса (2 ГБ на всё приложение), а не рабочий предел: в отдел
+# приходит 90–150 оценок в сутки, двадцать тысяч непроверенных — это месяцы. Дойдёт
+# — в шапке очереди появится «показаны первые N».
+_QUEUE_SUMMARY_CAP = 20000
+
+# Сводке дней из критериев нужны только поля, по которым считаются причины очереди
+# (review_queue.review_reasons): вердикт, источник, уверенность, критичность.
+# Целиком критерии с обоснованиями и цитатами весят ~14 КБ на разговор (замер
+# 01.10.2026 на проде: 8,4 МБ на 583 оценки), облегчённые — в семь раз меньше.
+# Причины при этом считаются тем же Python, что у строк дня: сохранённые
+# ai_evaluation_meta.review_reasons для этого не годятся — у 40 из 198 текущих
+# оценок строки меты нет вовсе, и счётчик дня разошёлся бы с метками строк.
+_CRITERIA_FOR_REASONS = """(CASE WHEN jsonb_typeof(rc.payload->'criteria') = 'array'
+        THEN (SELECT jsonb_agg(jsonb_build_object('ai', c->'ai', 'source', c->'source',
+                                                  'conf', c->'conf',
+                                                  'is_critical', c->'is_critical'))
+                FROM jsonb_array_elements(rc.payload->'criteria') c) END)"""
 
 # Один субъект оценки на строку кэша: звонок из журнала, звонок из АТС,
 # эпизод Wazzup/ChatApp или заявка Chat2Desk. Соединения намеренно LEFT +
@@ -628,12 +649,21 @@ def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department
 
 
 def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, department=None,
-                 filters=None, with_deals=True):
+                 filters=None, with_deals=True, day=None, slim=False):
     """Все открытые субъекты очереди (не больше _QUEUE_FETCH_CAP) в её порядке:
     сначала критичное, внутри — свежее. None — скоуп или фильтр невыполним.
 
     Один источник на список и на сводку по дням (review_queue_days): иначе карточка
-    дня обещала бы «ждут 5», а раскрытый день показывал бы четыре строки."""
+    дня обещала бы «ждут 5», а раскрытый день показывал бы четыре строки. Отбор
+    (WHERE) у всех режимов один и тот же; режимы меняют только то, ЧТО читается:
+
+    * day — строки одного дня (QUEUE_NO_DAY — без даты), отобранные в SQL ДО
+      потолка: экран дня не тянет всю очередь ради своих строк и не теряет их,
+      когда очередь длиннее потолка;
+    * slim — для сводки дней: без балла человека, отпечатка прогона и обоснований
+      критериев (им сводка не пользуется), с потолком-страховкой _QUEUE_SUMMARY_CAP
+      вместо рабочего _QUEUE_FETCH_CAP. Пометку «устарела» по таким строкам не
+      считают — её считает только страница (_queue_page)."""
     scope_sql, scope_params = _direction_predicate(
         cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
     if scope_sql is None:
@@ -643,24 +673,26 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
         cur, filters, allowed_direction_ids, department)
     if filter_sql is None:
         return None
+    day_sql, day_params = "", ()
+    if day is not None:
+        if day == QUEUE_NO_DAY:
+            day_sql = f" AND {_SUBJECT_DAY} IS NULL"
+        else:
+            day_sql, day_params = f" AND {_SUBJECT_DAY} = %s", (day,)
     # Сделка показывается в строке очереди, а не только фильтрует: маркетолог
     # выбирает, что смотреть, именно по каналу и парку, и открывать карточку
     # ради этих двух слов — лишний шаг на каждой строке.
     # Сделка в строке — только тем, кому открыт модуль маркетинга
     # (`with_deals`, решает маршрут): остальным ни колонок, ни семи JOIN'ов.
     deal_join = _marketing_join(cur, filters, need_columns=with_deals)
-    cur.execute(
-        f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
-                  rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
-                  {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
-                  run.fingerprint_components, rc.subject_kind, rc.payload->'media',
-                  rc.payload->'ai_score', rc.payload->'score_breakdown', {_SUBJECT_DAY},
-                  {_SUBJECT_OPERATOR_ID}"""
-        + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
-             FROM ai_review_cache rc""" + _SUBJECT_JOIN + deal_join + """
-             LEFT JOIN ai_evaluation_meta m
-                    ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
-                       AND m.model = rc.model
+    if slim:
+        human_col, criteria_col, run_cols, breakdown_col, run_join = (
+            "NULL", _CRITERIA_FOR_REASONS, "NULL::text, NULL::jsonb", "NULL::jsonb", "")
+    else:
+        human_col, criteria_col, breakdown_col = (
+            _SUBJECT_HUMAN_SCORE, "rc.payload->'criteria'", "rc.payload->'score_breakdown'")
+        run_cols = "run.evaluation_fingerprint::text, run.fingerprint_components"
+        run_join = """
              LEFT JOIN LATERAL (
                  SELECT r.evaluation_fingerprint, r.fingerprint_components
                    FROM ai_evaluation_runs r
@@ -669,14 +701,28 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
                     AND r.run_kind IN ('standard','force','batch')
                   ORDER BY r.created_at DESC, r.id::text DESC
                   LIMIT 1
-             ) run ON true
+             ) run ON true"""
+    cur.execute(
+        f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {human_col},
+                  {criteria_col}, rc.payload->'asr_mean_conf', rc.created_at,
+                  {_SUBJECT_DIRECTION}, {run_cols}, rc.subject_kind, rc.payload->'media',
+                  rc.payload->'ai_score', {breakdown_col}, {_SUBJECT_DAY},
+                  {_SUBJECT_OPERATOR_ID}"""
+        + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY) + """
+             FROM ai_review_cache rc""" + _SUBJECT_JOIN + deal_join + """
+             LEFT JOIN ai_evaluation_meta m
+                    ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                       AND m.model = rc.model""" + run_join + """
             WHERE rc.model = %s AND m.review_outcome IS NULL"""
-        + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + """
+        + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + day_sql + """
             ORDER BY rc.created_at DESC LIMIT %s""",
-        (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params,
-         _QUEUE_FETCH_CAP),
+        (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params, *day_params,
+         _QUEUE_SUMMARY_CAP if slim else _QUEUE_FETCH_CAP),
     )
-    rows = cur.fetchall()
+    # Сводка разбирает строки пачками: критерии строки нужны только на время
+    # review_reasons, и держать разобранными все сразу — это сотни мегабайт на
+    # длинной очереди в процессе, где живут ещё бот и планировщик.
+    rows = _fetch_in_batches(cur) if slim else cur.fetchall()
     prio = review_queue.REASON_PRIORITY
     items = []
     for r in rows:
@@ -702,6 +748,14 @@ def _queue_items(cur, *, allowed_direction_ids=None, subject_kind=None, departme
                       "_run_fp": r[9], "_run_components": r[10]})
     items.sort(key=lambda i: (i["_sev"], -(i["_ts"].timestamp() if i["_ts"] else 0)))
     return items
+
+
+def _fetch_in_batches(cur, size: int = 2000):
+    while True:
+        batch = cur.fetchmany(size)
+        if not batch:
+            return
+        yield from batch
 
 
 _QUEUE_PRIVATE_KEYS = ("_sev", "_ts", "_direction_id", "_run_fp", "_run_components", "_operator_id")
@@ -827,10 +881,19 @@ def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_directi
                      with_deals=True) -> dict:
     """Строки одного дня очереди — карточка дня раскрывается ими.
 
-    Отбор — из той же выборки, что и сводка (_queue_items), а не периодом в SQL:
-    день без даты (QUEUE_NO_DAY) периодом не выразить, а «ждут 5» на карточке дня
-    обязано совпасть с числом строк под ней."""
+    Отбор — тот же, что у сводки (_queue_items), плюс день разговора — тем же
+    выражением _SUBJECT_DAY, по которому сводка раскладывает дни (у дня без даты —
+    IS NULL), поэтому «ждут 5» на карточке дня совпадает с числом строк под ней.
+    День отбирается в SQL ДО потолка выборки: иначе экран дня тянул бы всю очередь
+    ради своих строк, а при очереди длиннее потолка показывал бы пустой день."""
     empty = {"items": [], "total": 0}
+    if day != QUEUE_NO_DAY:
+        try:
+            date.fromisoformat(str(day))
+        except ValueError:
+            # Дня не бывает (2026-02-30): пустой день, а не 500 с куском SQL —
+            # теперь день уходит в запрос, и Postgres отверг бы такую дату.
+            return empty
     conn = None
     limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
     try:
@@ -838,7 +901,7 @@ def review_queue_day(day: str, limit: int = 50, offset: int = 0, allowed_directi
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         items = _queue_items(cur, allowed_direction_ids=allowed_direction_ids,
                              subject_kind=subject_kind, department=department,
-                             filters=filters, with_deals=with_deals)
+                             filters=filters, with_deals=with_deals, day=day)
         cur.close(); conn.close()
         if not items:
             return empty
@@ -888,7 +951,7 @@ def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         items = _queue_items(cur, allowed_direction_ids=allowed_direction_ids,
                              subject_kind=subject_kind, department=department,
-                             filters=filters, with_deals=False)
+                             filters=filters, with_deals=False, slim=True)
         if not items:
             cur.close(); conn.close()
             return empty
@@ -968,7 +1031,7 @@ def review_queue_days(allowed_direction_ids=None, subject_kind=None, department=
                 "human_n": total.get("human_n", 0),
             })
         out.sort(key=lambda d: (d["day"] != QUEUE_NO_DAY, d["day"]), reverse=True)
-        return {"days": out, "total": len(items), "truncated": len(items) >= _QUEUE_FETCH_CAP}
+        return {"days": out, "total": len(items), "truncated": len(items) >= _QUEUE_SUMMARY_CAP}
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
             # Без меты очередь не знает, что проверено. Пустая сводка читалась бы как

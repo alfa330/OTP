@@ -874,6 +874,39 @@ def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0,
             for row in cursor.fetchall()]
 
 
+def sample_day_calls(cursor, exts, day, call_types, min_talk=0, max_talk=0, limit=5000):
+    """Звонки дня у набора внутренних номеров, с разговором и ссылкой на запись, в
+    случайном порядке — кандидаты ежедневной выборки «ИИ-оценки»
+    (call_qa.daily_sample). Одним запросом на отдел, а не по запросу на оператора,
+    как у sample_operator_calls: выборке нужен день всего направления.
+
+    Принадлежность записи, как и там, проверяет вызывающий
+    (cdr.touches.recording_belongs_to): это правило склейки, а не отбора."""
+    exts = sorted({str(ext).strip() for ext in (exts or []) if str(ext or '').strip()})
+    if not exts or not call_types:
+        return []
+    params = {'exts': exts, 'day': day, 'types': list(call_types),
+              'min_talk': int(min_talk or 0), 'limit': int(limit)}
+    sql = """
+        SELECT linkedid, ext, phone, started_at, call_type, talk_seconds, recording_url
+          FROM cdr_touches
+         WHERE ext = ANY(%(exts)s)
+           AND call_day = %(day)s
+           AND call_type = ANY(%(types)s)
+           AND talk_seconds > 0
+           AND talk_seconds >= %(min_talk)s
+           AND coalesce(recording_url, '') <> ''
+    """
+    if max_talk:
+        params['max_talk'] = int(max_talk)
+        sql += " AND talk_seconds <= %(max_talk)s"
+    sql += " ORDER BY random() LIMIT %(limit)s"
+    cursor.execute(sql, params)
+    return [{'linkedid': row[0], 'ext': row[1], 'phone': row[2], 'started_at': row[3],
+             'call_type': row[4], 'talk_seconds': int(row[5] or 0), 'recording_url': row[6] or ''}
+            for row in cursor.fetchall()]
+
+
 def touch_by_linkedid(cursor, linkedid):
     """Одно касание по идентификатору звонка станции — для точечной подтяжки
     выбранного звонка в «ИИ-оценке». У одного linkedid бывает несколько строк

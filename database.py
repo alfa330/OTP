@@ -29346,13 +29346,16 @@ class Database:
 
     def import_single_random_call(self, *, operator_id, operator_name, external_id, month,
                                   datetime_raw, phone, duration_sec, notes=None, audio_path=None,
-                                  call_end_party=None):
+                                  call_end_party=None, status=None):
         """Кладёт ОДИН звонок в imported_calls как НЕ оценённый (status='not_evaluated') —
         для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
         такой звонок уже импортирован (ON CONFLICT (external_id, month)).
 
         audio_path — путь к записи в GCS (для Binotel/Oktell); может дозаписываться
-        через set_imported_call_audio_path после создания строки."""
+        через set_imported_call_audio_path после создания строки.
+
+        status — только для ежедневной выборки «ИИ-оценки» ('ai_sample'): такая строка
+        субъект оценки ИИ, а не звонок плана прослушки, и журнал её не показывает."""
         parsed_dt = _parse_datetime_raw(datetime_raw)
         phone_norm = _normalize_phone(phone)
         with self._get_cursor() as cur:
@@ -29361,12 +29364,12 @@ class Database:
                 (external_id, operator_name, operator_id, month, datetime_raw,
                  phone_number, phone_normalized, duration_sec, status, imported_at, notes,
                  audio_path, call_end_party)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated',
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,
                         CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s, %s)
                 ON CONFLICT (external_id, month) DO NOTHING
                 RETURNING id
             """, (external_id, operator_name, operator_id, month, parsed_dt,
-                  phone, phone_norm, duration_sec, notes, audio_path,
+                  phone, phone_norm, duration_sec, status or 'not_evaluated', notes, audio_path,
                   _normalize_call_end_party(call_end_party) or 'unknown'))
             row = cur.fetchone()
         return int(row[0]) if row else None
@@ -31714,12 +31717,16 @@ class Database:
         return out
 
     def get_imported_calls_status_counts_by_operator(self, month: str) -> dict:
-        """{operator_id: {total, evaluated, not_evaluated, skipped}} за месяц (для статус-таблицы)."""
+        """{operator_id: {total, evaluated, not_evaluated, skipped}} за месяц (для статус-таблицы).
+
+        Строки ежедневной выборки «ИИ-оценки» (status='ai_sample') в пул плана
+        прослушки не входят: это субъекты оценки ИИ, и «всего в пуле» с ними
+        выводило бы в таблицу операторов, у которых нормы нет вовсе."""
         out = {}
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT operator_id,
-                       COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE status <> 'ai_sample') AS total,
                        COUNT(*) FILTER (WHERE status = 'evaluated') AS evaluated,
                        COUNT(*) FILTER (WHERE status = 'not_evaluated') AS not_evaluated,
                        COUNT(*) FILTER (WHERE status = 'skipped') AS skipped

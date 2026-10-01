@@ -1298,3 +1298,34 @@ CREATE INDEX IF NOT EXISTS idx_ai_human_reviews_subject
     ON ai_human_reviews (subject_kind, call_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_human_reviews_reviewer
     ON ai_human_reviews (reviewer_id, updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Ежедневная выборка на ИИ-оценку (call_qa.daily_sample)
+-- ---------------------------------------------------------------------------
+-- Каждую ночь по каждому направлению каждого отдела берётся до N случайных
+-- разговоров вчерашнего дня: звонков и переписок отдельно. Строка — один
+-- субъект выборки. Таблица одновременно и замок от повторов (второй проход того
+-- же дня ДОБИРАЕТ направление до N, а не берёт ещё N), и память о звонках, чья
+-- запись ещё едет от моста, и журнал того, что не оценилось и почему.
+-- direction_id — каноническое направление (живая строка шкалы).
+CREATE TABLE IF NOT EXISTS ai_qa_daily_samples (
+    id              bigserial PRIMARY KEY,
+    sample_day      date NOT NULL,
+    department_code text NOT NULL,
+    direction_id    integer NOT NULL,
+    family          text NOT NULL CHECK (family IN ('calls', 'chats')),
+    subject_kind    text NOT NULL
+        CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode')),
+    subject_id      bigint NOT NULL,
+    status          text NOT NULL DEFAULT 'picked'
+        CHECK (status IN ('picked', 'evaluated', 'failed')),
+    attempts        integer NOT NULL DEFAULT 0,
+    last_error      text,
+    picked_at       timestamptz NOT NULL DEFAULT now(),
+    evaluated_at    timestamptz,
+    UNIQUE (subject_kind, subject_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_qa_daily_samples_day
+    ON ai_qa_daily_samples (sample_day, direction_id, family);
+CREATE INDEX IF NOT EXISTS idx_ai_qa_daily_samples_open
+    ON ai_qa_daily_samples (sample_day) WHERE status = 'picked';

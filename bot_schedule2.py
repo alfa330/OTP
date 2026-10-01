@@ -524,6 +524,12 @@ yandex_pro_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='yandex-p
 # утру. Одно место, а не четыре, ещё и потому, что направления обязаны идти по
 # очереди: параллельный обход упёрся бы в лимиты одного и того же токена СРМ.
 op_funnel_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='op-funnel')
+# Ежедневная выборка «ИИ-оценки» держит своё ОДНО место: проход идёт часами
+# (двести с лишним оценок по минуте и ожидание записей, которые везёт мост), и в
+# общем пуле из четырёх мест он держал бы четверть приложения. Одно место, потому
+# что проходы всё равно идут строго по одному — второй упрётся в advisory-лок.
+# Оценки внутри прохода параллелит сама выборка (AI_QA_DAILY_SAMPLE_WORKERS).
+ai_qa_sample_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ai-qa-sample')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -6776,6 +6782,52 @@ def api_ai_qa_pull_call():
         return jsonify({"error": "не удалось подтянуть звонок из АТС (детали в логах)"}), 500
 
 
+@app.route('/api/ai-qa/daily-sample', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_daily_sample():
+    """Ежедневная выборка «ИИ-оценки» (call_qa.daily_sample): GET — сводка дня по
+    направлениям, POST — проход вне расписания (первый запуск, повтор после сбоя).
+
+    Только супер-админ: проход тратит деньги на распознавание и модель, а сводка
+    служебная — в разделе её не показывают, сами оценки видны в «Очереди ревью».
+    День — ?day=YYYY-MM-DD или {"day": …}, по умолчанию вчерашний по Алматы;
+    сегодняшний не принимается: выборка берёт только завершённый день."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_admin_guard()
+    if err:
+        return err
+    from call_qa import daily_sample as qa_sample
+    body = request.get_json(silent=True) if request.method == 'POST' else None
+    raw_day = (body or {}).get('day') or request.args.get('day')
+    try:
+        day = qa_sample.parse_day(raw_day) if raw_day else qa_sample.sample_day()
+    except ValueError:
+        return jsonify({"error": "day — дата в формате YYYY-MM-DD"}), 400
+    if day > qa_sample.sample_day():
+        return jsonify({"error": "Выборка берёт только завершённые дни — не позже вчерашнего"}), 400
+    # Проверка и пометка «в очереди» — под одним локом: два одновременных клика
+    # иначе оба увидели бы пустое состояние и поставили по проходу.
+    with AI_QA_SAMPLE_STATE_LOCK:
+        current = dict(AI_QA_SAMPLE_STATE)
+        if request.method == 'POST' and not current:
+            AI_QA_SAMPLE_STATE.update(
+                state='queued', day=day.isoformat(), triggered_by=f"manual:{requester_id}",
+                since=datetime.now(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M'))
+    if request.method == 'GET':
+        try:
+            return jsonify({"status": "success", "pass": current or None,
+                            **qa_sample.status(day)}), 200
+        except Exception:
+            logging.exception("ai-qa daily sample status failed")
+            return jsonify({"error": "не удалось загрузить сводку выборки"}), 500
+    if current:
+        return jsonify({"error": "Проход выборки уже идёт или стоит в очереди — "
+                                 "дождитесь его конца", "pass": current}), 409
+    ai_qa_sample_pool.submit(ai_qa_daily_sample_job, day, f"manual:{requester_id}")
+    return jsonify({"status": "queued", "day": day.isoformat()}), 202
+
+
 def _ai_qa_cdr_operators_by_phone(requester_id, phone_suffix, date_from=None, date_to=None,
                                   limit=None):
     """Операторы отдела продаж, у которых в касаниях CDR есть записанный разговор с
@@ -6895,6 +6947,329 @@ def _cdr_import_touch(linkedid, requester_id, requester):
     }
     return jsonify({"status": "success", "calls": [created], "created": 1 if new_id else 0,
                     "call": created, "month": month}), 200
+
+
+# ── Ежедневная выборка «ИИ-оценки»: адаптеры АТС (call_qa.daily_sample) ──────
+#
+# Выборка сама решает, сколько звонков и каких направлений взять; от АТС отдела
+# ей нужны три вещи: звонки дня, подтяжка одного звонка в пул и состояние его
+# записи. Живут адаптеры здесь, рядом с «Из АТС», потому что опираются на те же
+# хелперы трёх телефоний. Отличие от «Из АТС» одно, но важное: строка пула
+# получает статус 'ai_sample' (qa_sample.IMPORT_STATUS) — журнал и «Деление
+# звонков» её не видят, план прослушки супервайзеров выборка не трогает.
+# Длительности — общие настройки «Деления звонков», как у «Из АТС»: иначе в
+# выборку уезжали бы двухсекундные «не туда попал».
+
+def _ai_qa_sample_durations():
+    settings = db.get_call_distribution_settings() or {}
+
+    def _dur(value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed >= 0 else 0
+    min_d = _dur(settings.get('min_duration_sec'))
+    max_d = _dur(settings.get('max_duration_sec'))
+    if max_d and min_d and max_d < min_d:
+        min_d, max_d = max_d, min_d
+    return min_d, max_d
+
+
+def _ai_qa_sample_month(dt_raw):
+    """'dd.mm.yyyy HH:MM[:SS]' → 'YYYY-MM' (тег imported_calls.month) или None."""
+    for fmt in ('%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M'):
+        try:
+            return datetime.strptime(str(dt_raw or '').strip(), fmt).strftime('%Y-%m')
+        except ValueError:
+            continue
+    return None
+
+
+def _ai_qa_sample_department_members(code):
+    department_id = _call_distribution_department_id_by_code(code)
+    return db.get_department_member_ids(department_id) if department_id else set()
+
+
+def _ai_qa_sample_cdr_candidates(day):
+    """Отдел продаж: звонки дня из своих касаний CDR — к станции ни одного запроса.
+    Круг операторов тот же, что у ночного «Деления звонков» (звонковые модели,
+    внутренний номер), без уволенных: их номер мог перейти к новичку."""
+    from cdr import queries as cdr_queries, touches as cdr_touches
+    from call_qa import daily_sample as qa_sample
+    min_d, max_d = _ai_qa_sample_durations()
+    department_id = _call_distribution_department_id_by_code(CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+    # Номер ведёт к тому, за кем он закреплён СЕЙЧАС. Уволенного из круга убираем
+    # (его номер мог перейти к новичку), а новичка, принятого ПОСЛЕ дня выборки,
+    # тоже: звонки того дня он сделать не мог — на его номере работал предшественник.
+    excluded = set()
+    for row in (db.get_all_operators() or []):
+        hired = row[3] if len(row) > 3 else None
+        if isinstance(hired, datetime):
+            hired = hired.date()
+        elif isinstance(hired, str):
+            try:
+                hired = datetime.strptime(hired[:10], '%Y-%m-%d').date()
+            except ValueError:
+                hired = None
+        if ((len(row) > 9 and str(row[9] or '').strip() in ('fired', 'dismissal'))
+                or (hired is not None and hired > day)):
+            excluded.add(int(row[0]))
+    by_sip = {}
+    for op_id, name, sip in _cdr_distribution_operators(department_id):
+        if op_id not in excluded:
+            by_sip.setdefault(str(sip).strip(), []).append((op_id, name))
+    # Номер, закреплённый сразу за двумя действующими, не говорит, чей это звонок.
+    owner = {sip: ops[0] for sip, ops in by_sip.items() if sip and len(ops) == 1}
+    if not owner:
+        return []
+    directions = qa_sample.operator_directions([op_id for op_id, _ in owner.values()])
+    with db._get_cursor() as cursor:
+        rows = cdr_queries.sample_day_calls(
+            cursor, list(owner), day, [cdr_touches.TYPE_IN, cdr_touches.TYPE_OUT], min_d, max_d)
+    candidates, seen = [], set()
+    for row in rows:
+        linkedid = str(row['linkedid'])
+        ext = str(row['ext'] or '').strip()
+        operator = owner.get(ext)
+        # Запись — только ДОСТОВЕРНО этого звонка и этого оператора: у трети
+        # принятых входящих станция подставляет файл чужого агента группы вызова.
+        if (not operator or linkedid in seen
+                or not cdr_touches.recording_belongs_to(row['recording_url'], ext,
+                                                        row['phone'], linkedid)):
+            continue
+        seen.add(linkedid)
+        candidates.append({'direction_id': directions.get(operator[0]),
+                           'operator_id': operator[0], 'operator_name': operator[1],
+                           'key': linkedid, 'row': row})
+    return candidates
+
+
+def _ai_qa_sample_cdr_import(candidate):
+    """Строка пула сразу, запись — заказом мосту (cdr_audio_jobs), как у «Из АТС»."""
+    from cdr import queries as cdr_queries
+    from call_qa import daily_sample as qa_sample
+    row = candidate['row']
+    started = row['started_at']
+    phone = str(row['phone'] or '')
+    phone = '7%s' % phone if len(phone) == 10 else phone
+    new_id = db.import_single_random_call(
+        operator_id=candidate['operator_id'], operator_name=candidate['operator_name'],
+        external_id=candidate['key'], month=started.strftime('%Y-%m'),
+        datetime_raw=started.strftime('%d.%m.%Y %H:%M:%S'), phone=phone,
+        duration_sec=row['talk_seconds'], notes=f"{AI_QA_PULL_CALL_SOURCE}:auto:cdr",
+        call_end_party='unknown', status=qa_sample.IMPORT_STATUS)
+    if new_id:
+        with db._get_cursor() as cursor:
+            cdr_queries.enqueue_audio_job(cursor, candidate['key'], row['recording_url'],
+                                          new_id, None)
+    return new_id
+
+
+def _ai_qa_sample_cdr_audio_state(imported_id):
+    """Запись звонка ОП: в облаке — готово; заказ мосту ещё в работе — ждём;
+    файла нет на сервере записей или заказ сгорел на отказах — звонок из выборки
+    заменяется другим (у моста уже было три попытки)."""
+    from cdr import queries as cdr_queries
+    from call_qa import daily_sample as qa_sample
+    rec = db.get_imported_call_audio(imported_id)
+    if not rec:
+        return qa_sample.AUDIO_MISSING
+    if rec.get('audio_path'):
+        return qa_sample.AUDIO_READY
+    with db._get_cursor() as cursor:
+        job = cdr_queries.audio_job_status_for_imported(cursor, imported_id)
+    if not job or job.get('status') in ('missing', 'error'):
+        return qa_sample.AUDIO_MISSING
+    return qa_sample.AUDIO_PENDING
+
+
+def _ai_qa_sample_oktell_candidates(day):
+    """СЗоВ: звонки дня из Oktell двумя запросами — операторы с записями и выборка
+    по ним (ORDER BY NEWID(), не больше OKTELL_EVAL_CAP_PER_OPERATOR на человека).
+    Звонок сопоставляется с нашим оператором по имени, как в «Делении звонков»."""
+    from call_qa import daily_sample as qa_sample
+    if not _oktell_api_ready():
+        raise RuntimeError("интеграция с Oktell недоступна")
+    min_d, max_d = _ai_qa_sample_durations()
+    mstart, mnext = _oktell_eval_range_bounds(day.isoformat(), day.isoformat())
+    members = _ai_qa_sample_department_members(OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+    lookup = _status_import_build_operator_lookup(exclude_chat_managers=True, exclude_fired=True)
+    by_auserid = {}
+    for row in _oktell_query(_oktell_eval_operators_sql(mstart, mnext, min_d, max_d)):
+        matches = _status_import_resolve_operator_matches(
+            str(row.get('operator_name') or '').strip(), lookup)
+        if len(matches) != 1 or int(matches[0]['id']) not in members:
+            continue
+        by_auserid[str(row.get('auserid'))] = (int(matches[0]['id']), matches[0].get('name') or '')
+    if not by_auserid:
+        return []
+    directions = qa_sample.operator_directions([op_id for op_id, _ in by_auserid.values()])
+    auserids = list(by_auserid)
+    candidates = []
+    for i in range(0, len(auserids), OKTELL_EVAL_OPERATOR_BATCH):
+        batch = auserids[i:i + OKTELL_EVAL_OPERATOR_BATCH]
+        for row in _oktell_query(_oktell_eval_sample_sql(
+                mstart, mnext, batch, OKTELL_EVAL_CAP_PER_OPERATOR, min_d, max_d)):
+            operator = by_auserid.get(str(row.get('auserid')))
+            conn_id = str(row.get('conn_id') or '')
+            if operator and conn_id:
+                candidates.append({'direction_id': directions.get(operator[0]),
+                                   'operator_id': operator[0], 'operator_name': operator[1],
+                                   'key': conn_id, 'row': row})
+    return candidates
+
+
+def _ai_qa_sample_oktell_import(candidate):
+    """Запись качается ДО строки пула: звонок без записи выборке не нужен вовсе."""
+    from call_qa import daily_sample as qa_sample
+    row = candidate['row']
+    conn_id = str(candidate['key'])
+    month = _ai_qa_sample_month(row.get('dt_raw'))
+    if not month:
+        return None
+    rel_paths = _oktell_record_paths_by_conn([conn_id]).get(_oktell_normalize_conn_id(conn_id))
+    audio_path = _oktell_fetch_record_to_gcs(conn_id, rel_paths)
+    if not audio_path:
+        return None
+    return db.import_single_random_call(
+        operator_id=candidate['operator_id'], operator_name=candidate['operator_name'],
+        external_id=conn_id, month=month, datetime_raw=row.get('dt_raw'),
+        phone=row.get('phone'), duration_sec=row.get('talk_sec'),
+        notes=f"{AI_QA_PULL_CALL_SOURCE}:auto:oktell", audio_path=audio_path,
+        call_end_party=_oktell_call_end_party(row.get('ct'), row.get('stop_side'),
+                                              row.get('reason_stop')),
+        status=qa_sample.IMPORT_STATUS)
+
+
+def _ai_qa_sample_binotel_candidates(day):
+    """Тез КЦ: весь день компании ОДНИМ запросом к Binotel (list_calls_for_day), а
+    не по запросу на оператора: у Binotel лимит частоты. Звонок сопоставляется с
+    оператором по имени сотрудника — sip у Binotel переходит от человека к человеку."""
+    from tez import binotel_calls as tez_binotel_calls
+    from call_qa import daily_sample as qa_sample
+    cfg = tez_binotel_calls.get_config()
+    if not tez_binotel_calls.api_ready(cfg):
+        raise RuntimeError("интеграция с Binotel недоступна")
+    min_d, max_d = _ai_qa_sample_durations()
+    members = _ai_qa_sample_department_members(TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+    client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
+    lookup = _status_import_build_operator_lookup(exclude_chat_managers=True, exclude_fired=True)
+    call_types = {tez_binotel_calls.CALL_TYPE_INCOMING, tez_binotel_calls.CALL_TYPE_OUTGOING}
+    picked = []
+    for call in client.list_calls_for_day(day):
+        billsec = call['billsec']
+        if call['call_type'] not in call_types or billsec <= 0 or not call['general_call_id']:
+            continue
+        # Наличие записи — как у «Случайного звонка»: recordingStatus, а если его нет
+        # в ответе — по disposition.
+        rec_status = call.get('recording_status') or ''
+        if rec_status:
+            if rec_status not in tez_binotel_calls.RECORDED_STATUSES:
+                continue
+        elif call['disposition'] and call['disposition'] not in tez_binotel_calls.RECORDED_DISPOSITIONS:
+            continue
+        if (min_d and billsec < min_d) or (max_d and billsec > max_d):
+            continue
+        matches = _status_import_resolve_operator_matches(
+            str(call.get('employee_name') or '').strip(), lookup)
+        if len(matches) != 1 or int(matches[0]['id']) not in members:
+            continue
+        picked.append((int(matches[0]['id']), matches[0].get('name') or '', call))
+    directions = qa_sample.operator_directions({op_id for op_id, _, _ in picked})
+    return [{'direction_id': directions.get(op_id), 'operator_id': op_id,
+             'operator_name': name, 'key': str(call['general_call_id']), 'call': call,
+             'dt_raw': client.format_dt(call['start_time'])}
+            for op_id, name, call in picked]
+
+
+def _ai_qa_sample_binotel_import(candidate):
+    """Как у Oktell: запись качается ДО строки пула. Звонок, у которого Binotel не
+    отдал запись, выборке не нужен — берётся следующий, а не держит её место."""
+    from call_qa import daily_sample as qa_sample
+    call = candidate['call']
+    month = _ai_qa_sample_month(candidate['dt_raw'])
+    if not month:
+        return None
+    audio_path = _binotel_fetch_record_to_gcs(candidate['key'])
+    if not audio_path:
+        return None
+    return db.import_single_random_call(
+        operator_id=candidate['operator_id'], operator_name=candidate['operator_name'],
+        external_id=candidate['key'], month=month, datetime_raw=candidate['dt_raw'],
+        phone=call['external_number'], duration_sec=call['billsec'],
+        notes=f"{AI_QA_PULL_CALL_SOURCE}:auto:binotel", audio_path=audio_path,
+        call_end_party=call.get('call_end_party') or 'unknown',
+        status=qa_sample.IMPORT_STATUS)
+
+
+def _ai_qa_sample_pbx_audio_state(imported_id):
+    """Oktell и Binotel: запись в облаке — готово, иначе докачка тем же путём, что у
+    аудио-ручки журнала (_ensure_imported_call_audio)."""
+    from call_qa import daily_sample as qa_sample
+    rec = db.get_imported_call_audio(imported_id)
+    if not rec:
+        return qa_sample.AUDIO_MISSING
+    if rec.get('audio_path') or _ensure_imported_call_audio(imported_id, rec):
+        return qa_sample.AUDIO_READY
+    return qa_sample.AUDIO_PENDING
+
+
+def _ai_qa_sample_sources():
+    from call_qa import daily_sample as qa_sample
+    return [
+        qa_sample.CallSource(department=CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+                             candidates=_ai_qa_sample_cdr_candidates,
+                             import_call=_ai_qa_sample_cdr_import,
+                             audio_state=_ai_qa_sample_cdr_audio_state),
+        qa_sample.CallSource(department=OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+                             candidates=_ai_qa_sample_oktell_candidates,
+                             import_call=_ai_qa_sample_oktell_import,
+                             audio_state=_ai_qa_sample_pbx_audio_state),
+        qa_sample.CallSource(department=TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+                             candidates=_ai_qa_sample_binotel_candidates,
+                             import_call=_ai_qa_sample_binotel_import,
+                             audio_state=_ai_qa_sample_pbx_audio_state),
+    ]
+
+
+# Что выборка делает в этом процессе прямо сейчас. Нужно ручке: повторный ручной
+# запуск не должен ставить проход за проходом (каждый ждёт записи моста до получаса
+# и тратит разговорам попытку), а ответ «запущен» не должен приходить, когда проход
+# на самом деле стоит в очереди за ночным.
+AI_QA_SAMPLE_STATE_LOCK = threading.Lock()
+AI_QA_SAMPLE_STATE = {}
+
+
+def _ai_qa_sample_state(**fields):
+    with AI_QA_SAMPLE_STATE_LOCK:
+        AI_QA_SAMPLE_STATE.clear()
+        AI_QA_SAMPLE_STATE.update(fields)
+
+
+def ai_qa_daily_sample_job(day=None, triggered_by='scheduler'):
+    """Проход ежедневной выборки «ИИ-оценки»: по каждому направлению отделов раздела
+    до N случайных звонков и переписок дня — и оценка боевой моделью. По расписанию
+    берётся вчерашний день; вручную (ручка /api/ai-qa/daily-sample) — любой
+    завершённый. Выключатель AI_QA_DAILY_SAMPLE_ENABLED гасит только расписание:
+    ручной запуск супер-админа — явное решение."""
+    from call_qa import config as qa_config, daily_sample as qa_sample
+    if triggered_by == 'scheduler' and not qa_config.AI_QA_DAILY_SAMPLE_ENABLED:
+        logging.info("ai-qa выборка: выключена (AI_QA_DAILY_SAMPLE_ENABLED)")
+        return {'status': 'skipped', 'reason': 'disabled'}
+    _ai_qa_sample_state(state='running', day=str(day or qa_sample.sample_day()),
+                        triggered_by=triggered_by,
+                        since=datetime.now(ZoneInfo('Asia/Almaty')).strftime('%d.%m %H:%M'))
+    try:
+        result = qa_sample.run(day, call_sources=_ai_qa_sample_sources())
+    except Exception:
+        logging.exception("ai-qa выборка: проход упал (%s)", triggered_by)
+        return {'status': 'failed'}
+    finally:
+        _ai_qa_sample_state()
+    logging.info("ai-qa выборка %s (%s): %s, итог %s, %s с", result.get('day'), triggered_by,
+                 result.get('status'), result.get('totals'), result.get('elapsed_s'))
+    return result
 
 
 def _ai_qa_pull_response_code(response):
@@ -27868,11 +28243,10 @@ def _oktell_prepare_distribution_audio(payload):
     }
 
 
-def _binotel_store_record(imported_id, general_call_id):
-    """Тянет ссылку на запись Binotel (живёт ~15 мин), скачивает mp3, кладёт в GCS и
-    проставляет imported_calls.audio_path. Возвращает audio_path или None (записи нет /
-    не удалось скачать). Синхронное ядро — используется и фоном, и докачкой по требованию
-    из аудио-эндпоинта, чтобы запись появлялась даже если фоновый поток не отработал."""
+def _binotel_fetch_record_to_gcs(general_call_id):
+    """Ссылка на запись Binotel (живёт ~15 мин) → mp3 → GCS. Возвращает audio_path или
+    None (записи нет / не удалось скачать). Без строки пула — ею занимается вызывающий:
+    ежедневной выборке «ИИ-оценки» строка без записи не нужна вовсе, как и у Oktell."""
     from tez import binotel_calls as tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
@@ -27886,7 +28260,17 @@ def _binotel_store_record(imported_id, general_call_id):
     if resp.status_code != 200 or not resp.content:
         logging.warning("binotel record download %s: HTTP %s", general_call_id, resp.status_code)
         return None
-    audio_path = _binotel_upload_record_to_gcs(resp.content, resp.headers.get('Content-Type'))
+    return _binotel_upload_record_to_gcs(resp.content, resp.headers.get('Content-Type'))
+
+
+def _binotel_store_record(imported_id, general_call_id):
+    """Тянет ссылку на запись Binotel (живёт ~15 мин), скачивает mp3, кладёт в GCS и
+    проставляет imported_calls.audio_path. Возвращает audio_path или None (записи нет /
+    не удалось скачать). Синхронное ядро — используется и фоном, и докачкой по требованию
+    из аудио-эндпоинта, чтобы запись появлялась даже если фоновый поток не отработал."""
+    audio_path = _binotel_fetch_record_to_gcs(general_call_id)
+    if not audio_path:
+        return None
     db.set_imported_call_audio_path(imported_id, audio_path)
     logging.info("binotel record stored: imported_call=%s -> %s", imported_id, audio_path)
     return audio_path
@@ -66926,6 +67310,15 @@ async def run_chatapp_retention_async():
         logging.exception("chatapp retention failed")
 
 
+async def run_ai_qa_daily_sample_async():
+    # Ежедневная выборка «ИИ-оценки» — в своём пуле: проход идёт часами.
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(ai_qa_sample_pool, ai_qa_daily_sample_job)
+    except Exception:
+        logging.exception("ai-qa daily sample failed")
+
+
 def _build_task_reminder_html(reminder):
     """Напоминание о приближающемся дедлайне заметки или задачи."""
     is_note = reminder.get('kind') == 'note'
@@ -68067,6 +68460,24 @@ if __name__ == '__main__':
         id='chatapp_sync_daily',
         misfire_grace_time=3600,
         max_instances=1,
+        coalesce=True
+    )
+
+    # Ежедневная выборка «ИИ-оценки»: по каждому направлению до 30 случайных
+    # звонков и переписок вчерашнего дня. 05:10 — после сборки эпизодов Wazzup
+    # (04:00) и синка ChatApp (04:20), к утру оценки уже в «Очереди ревью». Второй
+    # проход в 08:10 добирает то, что не успел первый: записи моста, отказы модели.
+    # max_instances=2 — не запас, а условие работы второго прохода: при одном
+    # экземпляре APScheduler ВЫБРАСЫВАЕТ запуск, пока идёт первый (это не
+    # «опоздание», misfire_grace_time его не спасает), и добор пропадал бы ровно
+    # в тяжёлые ночи. Со вторым экземпляром он встаёт в очередь своего пула из
+    # одного места и начинается, как только первый закончит.
+    scheduler.add_job(
+        run_ai_qa_daily_sample_async,
+        CronTrigger(hour='5,8', minute=10, timezone=ZoneInfo('Asia/Almaty')),
+        id='ai_qa_daily_sample',
+        misfire_grace_time=3600,
+        max_instances=2,
         coalesce=True
     )
     scheduler.add_job(
