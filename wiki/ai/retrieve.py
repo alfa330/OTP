@@ -261,6 +261,125 @@ SELECT c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
 """.format(fold_word=sql_fold('lower(raw)'),
            fold_chunk=sql_fold("lower(coalesce(c.heading_path, '') || ' ' || c.text)"))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ЧЕТВЁРТАЯ ВЕТКА: НАЗВАНИЕ СТАТЬИ
+#
+# Куски режутся из ТЕЛА статьи (chunker.py), и название в индекс помощника не
+# входит: ни в chunk_tsv, ни в вектор куска. Если тема статьи названа только в
+# заголовке, помощник её по этому слову не находит. Замер на проде 01.10.2026
+# (104 статьи, 769 кусков): статья «Транзакции» — тело про пополнение и вывод,
+# слова «транзакция» в нём нет ни разу; на «как посчитать транзакции водителя»
+# её не было даже в восьмёрке (лучший кусок 0,745 против 0,80 у соседей), а
+# лексика её не видит вовсе. Строка поиска статей этим не болеет: там название
+# весит больше всего (wiki/search.py).
+#
+# Переиндексация ради этого не нужна: ветка смотрит в wiki_articles на лету.
+# Отбор узкий, и оба условия обязательны:
+#   1. ВСЕ значимые слова названия есть в вопросе. «Транзакции» ⊂ «как
+#      посчитать транзакции водителя»; «Как подключить водителя к акции» ⊄
+#      «какие акции есть» — у такой статьи вопрос лишь задел тему.
+#   2. Хотя бы одно слово названия РЕДКОЕ среди названий периметра (не больше
+#      TITLE_MAX_DOCS статей): «акция» стоит в названиях десятка статей, и
+#      «Все акции» иначе пролезала бы в каждый вопрос про акции, где вектор и
+#      так справляется.
+# Найденная статья получает гарантированное место своим самым близким к вопросу
+# куском — как триграммная ветка: иначе плотная выдача (24 куска выше 0,68)
+# вытеснила бы её целиком.
+TITLE_MAX_DOCS = 2
+TITLE_LIMIT = 2
+
+_TITLE_ARTICLES_SQL = """
+WITH q AS (
+    SELECT DISTINCT lex
+      FROM unnest(tsvector_to_array(to_tsvector('russian', {fold_query}))) AS lex
+),
+titles AS (
+    SELECT a.id, tsvector_to_array(to_tsvector('russian', {fold_title})) AS lexes
+      FROM wiki_articles a
+     WHERE a.id = ANY(%(article_ids)s)
+),
+df AS (
+    SELECT lex, count(*) AS docs
+      FROM titles, unnest(titles.lexes) AS lex
+     GROUP BY lex
+)
+SELECT t.id, (SELECT min(df.docs) FROM unnest(t.lexes) AS l JOIN df ON df.lex = l) AS rarest
+  FROM titles t
+ WHERE cardinality(t.lexes) > 0
+   AND t.lexes <@ (SELECT coalesce(array_agg(lex), '{{}}') FROM q)
+   AND EXISTS (SELECT 1 FROM unnest(t.lexes) AS l JOIN df ON df.lex = l
+                WHERE df.docs <= %(max_docs)s)
+ ORDER BY rarest, t.id
+ LIMIT %(limit)s
+""".format(fold_query=sql_fold('lower(%(query)s)'), fold_title=sql_fold('lower(a.title)'))
+
+# Лучший кусок найденной по названию статьи — ближайший к вопросу по вектору.
+_TITLE_CHUNKS_SQL = """
+SELECT DISTINCT ON (c.article_id)
+       c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path, c.text,
+       c.requires_ack, a.historical,
+       1 - (e.embedding <=> %(qvec)s::vector) AS similarity
+  FROM wiki_ai_chunks c
+  JOIN wiki_articles a ON a.id = c.article_id
+  LEFT JOIN wiki_ai_embeddings e
+         ON e.text_hash = c.text_hash AND e.embed_provider = %(provider)s
+        AND e.embed_model = %(model)s AND e.embed_dim = %(dim)s
+ WHERE c.article_id = ANY(%(title_ids)s)
+ ORDER BY c.article_id, (e.embedding IS NULL), e.embedding <=> %(qvec)s::vector, c.chunk_idx
+"""
+
+# Без вектора вопроса — первый кусок статьи. ОТДЕЛЬНЫЙ запрос, а не ветка CASE в
+# первом: Postgres разбирает таблицы и типы до выполнения, и без расширения
+# vector (wiki/schema.py создаёт таблицу векторов под савпоинтом — её может не
+# быть) упоминание wiki_ai_embeddings или ::vector роняло бы весь поиск, хотя
+# помощник обязан жить на одной лексике.
+_TITLE_FIRST_CHUNK_SQL = """
+SELECT DISTINCT ON (c.article_id)
+       c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path, c.text,
+       c.requires_ack, a.historical, NULL::float AS similarity
+  FROM wiki_ai_chunks c
+  JOIN wiki_articles a ON a.id = c.article_id
+ WHERE c.article_id = ANY(%(title_ids)s)
+ ORDER BY c.article_id, c.chunk_idx
+"""
+
+
+def search_titles(cursor, *, article_ids, query, query_vector=None,
+                  limit=TITLE_LIMIT, max_docs=TITLE_MAX_DOCS):
+    """Статьи, чьё название целиком названо в вопросе, — их лучший кусок.
+
+    Зачем и почему отбор именно такой — в шапке у TITLE_MAX_DOCS."""
+    ids = sorted({int(x) for x in (article_ids or ())})
+    text = ' '.join(str(query or '').split())
+    if not ids or not text:
+        return []
+    cursor.execute(_TITLE_ARTICLES_SQL, {'article_ids': ids, 'query': text,
+                                         'max_docs': int(max_docs), 'limit': int(limit)})
+    title_ids = [row[0] for row in cursor.fetchall()]
+    if not title_ids:
+        return []
+    if query_vector:
+        from .embed import _as_vector, provider_contract
+
+        params = dict(provider_contract())
+        params.update({'title_ids': title_ids, 'qvec': _as_vector(query_vector)})
+        cursor.execute(_TITLE_CHUNKS_SQL, params)
+    else:
+        cursor.execute(_TITLE_FIRST_CHUNK_SQL, {'title_ids': title_ids})
+    columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx', 'heading_path',
+               'text', 'requires_ack', 'historical', 'similarity')
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    order = {article_id: index for index, article_id in enumerate(title_ids)}
+    rows.sort(key=lambda row: order.get(row['article_id'], len(order)))
+    for row in rows:
+        if row['similarity'] is not None:
+            row['similarity'] = float(row['similarity'])
+        # Человек назвал статью её же названием — для гейта уточнения и для
+        # отбора в ответ это то же, что точное совпадение термина.
+        row['title_hit'] = True
+    return rows
+
+
 # Константа RRF. 60 — общепринятое значение: оно делает вклад первых позиций
 # сопоставимым, а не подавляющим, поэтому кусок, найденный ОБЕИМИ ветками
 # невысоко, обгоняет кусок, найденный одной ветвью первым. Именно это нам и
@@ -390,7 +509,7 @@ def _cap_and_limit(rows, limit, per_article):
     return out
 
 
-def fuse(lexical, dense, fuzzy=(), *, limit=8, per_article=3):
+def fuse(lexical, dense, fuzzy=(), *, limit=8, per_article=3, titles=()):
     """Слияние ветвей: порядок задаёт вектор, лексика ДОБИРАЕТ пропущенное.
 
     Не RRF — и это вывод замера, а не вкусовщина. На боевом корпусе (29 вопросов,
@@ -420,18 +539,21 @@ def fuse(lexical, dense, fuzzy=(), *, limit=8, per_article=3):
     один-три куска ОДНОЙ статьи.
     """
     fuzzy_ids = {row['chunk_id'] for row in fuzzy}
+    title_ids = {row['chunk_id'] for row in titles}
     dense_ids = {row['chunk_id'] for row in dense}
     lexical_ids = {row['chunk_id'] for row in lexical}
     seen = set(fuzzy_ids)
     merged = []
-    for branch_index, rows in ((2, fuzzy), (1, dense), (0, lexical)):
+    # Ветка названия (3) — сразу за триграммной и тоже с гарантированным местом:
+    # статья, названная в вопросе своим же названием, обязана дойти до контекста.
+    for branch_index, rows in ((2, fuzzy), (3, titles), (1, dense), (0, lexical)):
         for row in rows:
             if branch_index != 2 and row['chunk_id'] in seen:
                 continue
             seen.add(row['chunk_id'])
             merged.append({**row, 'found_by': [branch_index]})
     # Пометим куски, найденные несколькими ветвями: полезно в витрине и в журнале.
-    membership = ((0, lexical_ids), (1, dense_ids), (2, fuzzy_ids))
+    membership = ((0, lexical_ids), (1, dense_ids), (2, fuzzy_ids), (3, title_ids))
     # strict_hit приходит только из лексической ветки, а в слиянии верх занимает
     # плотная — без переноса признак терялся ровно на самых точных попаданиях:
     # кусок, найденный обеими ветками, выглядел бы как «только вектор».
@@ -456,6 +578,10 @@ def search_hybrid(cursor, *, article_ids, query, query_vector=None,
     Третья ветка (search_fuzzy) вступает только на редком слове, которого вика
     не знает: она вытаскивает имя собственное, названное с ошибкой в букве, —
     ровно то, что приносит распознавание речи. Её вклад тоже виден в branches.
+
+    Четвёртая (search_titles) — статья, чьё название целиком названо в вопросе:
+    название в куски не входит, и без неё такая статья терялась (шапка у
+    TITLE_MAX_DOCS).
     """
     lexical = search_chunks(cursor, article_ids=article_ids, query=query,
                             limit=candidates, per_article=per_article)
@@ -464,8 +590,11 @@ def search_hybrid(cursor, *, article_ids, query, query_vector=None,
         dense = search_dense(cursor, article_ids=article_ids,
                              query_vector=query_vector, limit=candidates)
     fuzzy = search_fuzzy(cursor, article_ids=article_ids, query=query)
+    titles = search_titles(cursor, article_ids=article_ids, query=query,
+                           query_vector=query_vector)
 
-    rows = fuse(lexical, dense, fuzzy, limit=limit, per_article=per_article)
+    rows = fuse(lexical, dense, fuzzy, limit=limit, per_article=per_article,
+                titles=titles)
     # degraded — про НЕДОСТУПНОСТЬ плотной ветки, а не про её пустую выдачу.
     # Сначала здесь стояло `not dense`, и на проде это дало ложную тревогу:
     # честный отказ («сколько мне отпускных» — ни один кусок не прошёл порог)
@@ -474,7 +603,7 @@ def search_hybrid(cursor, *, article_ids, query, query_vector=None,
     # нет.
     return {'rows': rows,
             'branches': {'lexical': len(lexical), 'dense': len(dense),
-                         'fuzzy': len(fuzzy)},
+                         'fuzzy': len(fuzzy), 'title': len(titles)},
             'degraded': query_vector is None}
 
 

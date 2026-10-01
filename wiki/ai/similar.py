@@ -46,30 +46,67 @@ CLOSE = 0.85
 NEARBY = 0.82
 TITLE_HIT = 0.45
 
+# Вхождение названия в название. Было 0,75 — НИЖЕ порога показа NEARBY (0,82),
+# то есть правило вхождения находило дубль и тут же его выбрасывало: панель
+# «Такая статья уже есть?» на «Страхование» молчала про «Страхование поездок»
+# (по тексту 0,98 — настоящий дубль, пропущенный при переносе 24.08.2026).
+# Теперь вхождение — «похоже» (выше CLOSE), но только когда короткое название
+# само что-то значит: от CONTAINS_MIN_CHARS знаков. «Тест» внутри «Тестирования
+# операторов» — не повод звать редактора смотреть чужую статью; такие остаются
+# с прежним баллом и до панели не доходят.
+CONTAINS = 0.86
+CONTAINS_SHORT = 0.75
+CONTAINS_MIN_CHARS = 5
+
 # Название: триграммное сходство + прямое вхождение. Вхождение нужно отдельно от
 # similarity, потому что короткое название внутри длинного даёт низкий триграммный
 # балл («Отпуск» в «Отпуск, больничный и отгулы» — 0,32), а это очевидный дубль.
+_FOLDED_TITLE = "translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')"
+_FOLDED_QUERY = "translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')"
+
+# Вхождение — ЦЕЛЫМИ СЛОВАМИ: «Аренда» внутри «Субаренды авто» или «акции» внутри
+# «Транзакций» — не дубль. Знаки препинания заменяются пробелами по явному
+# списку, а не классом символов: [[:alnum:]] в регулярках Postgres зависит от
+# локали базы и в C-локали кириллицу не видит. Сравнение — strpos, а не LIKE:
+# у него нет подстановочных «%» и «_», и «Скидка 10%» не совпадает с чем попало.
+_TITLE_PUNCT = '«»"\'“”„()[]{}<>.,;:!?/\\|—–-_№*+=#@&~`'
+
+
+def _words_sql(expression):
+    """Свёрнутый заголовок → слова через одиночный пробел (SQL-выражение)."""
+    source = _TITLE_PUNCT.replace("'", "''")
+    return ("btrim(regexp_replace(translate(%s, '%s', '%s'), '\\s+', ' ', 'g'))"
+            % (expression, source, ' ' * len(_TITLE_PUNCT)))
+
+
 _TITLE_SQL = """
-SELECT a.id, a.title, a.slug, a.status, left(coalesce(a.summary, ''), 200),
-       GREATEST(
-           similarity(translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'), translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),
-           CASE WHEN translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
-                  OR translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
-                THEN 0.75 ELSE 0 END
-       ) AS score
-  FROM wiki_articles a
- WHERE a.id = ANY(%(article_ids)s)
-   AND (%(exclude_id)s::int IS NULL OR a.id <> %(exclude_id)s::int)
-   AND length(btrim(a.title)) > 0
-   AND GREATEST(
-           similarity(translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'), translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),
-           CASE WHEN translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
-                  OR translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
-                THEN 0.75 ELSE 0 END
-       ) >= %(floor)s
+WITH scored AS (
+    SELECT a.id, a.title, a.slug, a.status, left(coalesce(a.summary, ''), 200) AS excerpt,
+           GREATEST(
+               similarity({title}, {query}),
+               CASE WHEN least(length(btrim(a.title)), length(btrim(%(title)s)))
+                             >= %(contains_min)s
+                         AND length({words_query}) > 0 AND length({words_title}) > 0
+                         AND (strpos(' ' || {words_title} || ' ', ' ' || {words_query} || ' ') > 0
+                              OR strpos(' ' || {words_query} || ' ', ' ' || {words_title} || ' ') > 0)
+                    THEN %(contains)s
+                    WHEN {title} LIKE '%%' || {query} || '%%'
+                      OR {query} LIKE '%%' || {title} || '%%'
+                    THEN %(contains_short)s
+                    ELSE 0 END
+           ) AS score
+      FROM wiki_articles a
+     WHERE a.id = ANY(%(article_ids)s)
+       AND (%(exclude_id)s::int IS NULL OR a.id <> %(exclude_id)s::int)
+       AND length(btrim(a.title)) > 0
+)
+SELECT id, title, slug, status, excerpt, score
+  FROM scored
+ WHERE score >= %(floor)s
  ORDER BY score DESC
  LIMIT %(limit)s
-"""
+""".format(title=_FOLDED_TITLE, query=_FOLDED_QUERY,
+           words_title=_words_sql(_FOLDED_TITLE), words_query=_words_sql(_FOLDED_QUERY))
 
 # Текст: ДОЛЯ веса слов документа, найденная в статье. Не нормировка «на лучшего»
 # из выдачи — та давала бы находку всегда, даже когда похожего нет вовсе, и панель
@@ -143,7 +180,9 @@ def by_title(cursor, *, article_ids, title, exclude_id=None, limit=5,
         return []
     cursor.execute(_TITLE_SQL, {'article_ids': ids, 'title': clean,
                                 'exclude_id': exclude_id, 'limit': int(limit),
-                                'floor': float(floor)})
+                                'floor': float(floor), 'contains': CONTAINS,
+                                'contains_short': CONTAINS_SHORT,
+                                'contains_min': CONTAINS_MIN_CHARS})
     return [{'article_id': row[0], 'title': row[1], 'slug': row[2],
              'status': row[3], 'excerpt': row[4], 'score': float(row[5] or 0),
              'found_by': 'название'}

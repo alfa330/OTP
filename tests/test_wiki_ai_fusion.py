@@ -182,5 +182,81 @@ class DegradedModeTest(unittest.TestCase):
         self.assertTrue(found['degraded'])
 
 
+class TitleBranchTest(unittest.TestCase):
+    """Ветка названия: статья, названная в вопросе своим названием.
+
+    Название в куски не входит, и «Транзакции» (тело — про пополнение и вывод)
+    на «как посчитать транзакции водителя» не попадала даже в восьмёрку. Замер
+    01.10.2026 на проде: эталонные 29 вопросов — в контекст ответа 26 → 27, без
+    регрессий; на 400 настоящих вопросах операторов ветка сработала 8 раз."""
+
+    def test_title_rows_get_guaranteed_place_after_fuzzy(self):
+        dense = [row(i, 10 + i) for i in range(1, 9)]
+        titles = [row(50, 99, similarity=0.74, title_hit=True)]
+        fuzzy = [row(60, 98)]
+        out = fuse([], dense, fuzzy, titles=titles, limit=8, per_article=3)
+        self.assertEqual([60, 50], [item['chunk_id'] for item in out[:2]])
+        self.assertEqual([3], out[1]['found_by'])
+        self.assertTrue(out[1]['title_hit'])
+        self.assertEqual(8, len(out))
+
+    def test_title_chunk_found_by_vector_too_keeps_both_marks(self):
+        out = fuse([], [row(1, 10)], titles=[row(1, 10, title_hit=True)])
+        self.assertEqual([1, 3], out[0]['found_by'])
+
+    def test_title_chunk_reaches_answer_without_similarity_floor(self):
+        from wiki.ai.answer import usable_chunks
+        chunk = {**row(1, 10), 'similarity': 0.6, 'found_by': [3]}
+        self.assertEqual([chunk], usable_chunks([chunk]))
+
+    def test_named_article_is_not_clarified(self):
+        from wiki.ai.answer import should_clarify
+        chunks = [{**row(1, 10), 'similarity': 0.73, 'title_hit': True, 'found_by': [3]},
+                  {**row(2, 11), 'similarity': 0.72, 'found_by': [1]}]
+        self.assertFalse(should_clarify('транзакции', chunks)[0])
+
+    def test_sql_is_bounded_by_perimeter_and_rare_title_words(self):
+        from wiki.ai import retrieve
+        sql = ' '.join(retrieve._TITLE_ARTICLES_SQL.split())
+        self.assertIn('a.id = ANY(%(article_ids)s)', sql)      # периметр — вход
+        self.assertIn('t.lexes <@', sql)                         # всё название в вопросе
+        self.assertIn('df.docs <= %(max_docs)s', sql)            # и редкое слово
+        self.assertIn("'{}'", sql)                               # format не съел литерал
+
+    def test_without_vector_title_branch_does_not_touch_vector_table(self):
+        """Без расширения vector таблицы векторов нет вовсе; Postgres разбирает
+        имена до выполнения, и упоминание её в запросе роняло бы весь поиск."""
+        from wiki.ai.retrieve import search_titles
+
+        class Cursor:
+            def __init__(self):
+                self.executed = []
+                self.results = [[(10, 1)], [(5, 10, 'Транзакции', 'transactions', 0, '',
+                                             'текст', False, False, None)]]
+
+            def execute(self, sql, params=None):
+                self.executed.append(sql)
+
+            def fetchall(self):
+                return self.results.pop(0)
+
+        cursor = Cursor()
+        rows = search_titles(cursor, article_ids=[10], query='транзакции', query_vector=None)
+        self.assertEqual([10], [row['article_id'] for row in rows])
+        self.assertIsNone(rows[0]['similarity'])
+        self.assertNotIn('wiki_ai_embeddings', cursor.executed[1])
+        self.assertNotIn('::vector', cursor.executed[1])
+
+    def test_empty_perimeter_or_query_does_not_touch_database(self):
+        from wiki.ai.retrieve import search_titles
+
+        class Exploding:
+            def execute(self, *args, **kwargs):
+                raise AssertionError('запрос не нужен')
+
+        self.assertEqual([], search_titles(Exploding(), article_ids=[], query='транзакции'))
+        self.assertEqual([], search_titles(Exploding(), article_ids=[1], query='  '))
+
+
 if __name__ == '__main__':
     unittest.main()

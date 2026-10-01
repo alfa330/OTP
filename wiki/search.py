@@ -518,8 +518,25 @@ def search(cursor, visible_ids, query, *, section_id=None, article_types=None,
         return []
 
     ids = list(visible_ids)
-    return _run(cursor, build_sql(with_trigram, scope), ids, variants, section_id, limit,
-                article_types=article_types, author_ids=author_ids)
+    sql = build_sql(with_trigram, scope)
+    items = _run(cursor, sql, ids, variants, section_id, limit,
+                 article_types=article_types, author_ids=author_ids)
+    # Три латинские буквы — почти всегда русское слово в чужой раскладке:
+    # «cvp» = «смз», «nth» = «тех». Вариантом сразу их не берём (query_variants:
+    # «byd» → «инв» тащил бы «Инвентаризацию»), а запасным путём — только когда
+    # по самим буквам не нашлось ничего. Журнал поиска за 45 дней (01.10.2026):
+    # все трёхбуквенные латинские запросы с пустой выдачей были именно такими.
+    if not items and _SHORT_LATIN.fullmatch(trimmed):
+        swapped = wiki_text.fix_keyboard_layout(trimmed)
+        fallback = [v for v in wiki_text.query_variants(swapped)
+                    if len(v) >= 2 and v != trimmed] if swapped != trimmed else []
+        if fallback:
+            items = _run(cursor, sql, ids, fallback, section_id, limit,
+                         article_types=article_types, author_ids=author_ids)
+    return items
+
+
+_SHORT_LATIN = re.compile(r'[A-Za-z]{3}')
 
 
 def suggest(cursor, visible_ids, query, *, limit=5, with_trigram=True):

@@ -779,6 +779,44 @@ class PrefixTsqueryTest(unittest.TestCase):
         self.assertEqual(wiki_search.prefix_tsquery(None), '')
 
 
+class ShortLayoutFallbackTest(unittest.TestCase):
+    """Три латинские буквы — русское слово в чужой раскладке («cvp» = «смз»).
+
+    Вариантом сразу их не берём (query_variants: «byd» → «инв»), а повторяем
+    поиск в исправленной раскладке, только когда по самим буквам пусто. По
+    журналу поиска за 45 дней все такие пустые запросы были именно раскладкой."""
+
+    def _search(self, query, first_result):
+        from unittest.mock import patch
+
+        calls = []
+
+        def fake_run(cursor, sql, ids, variants, *args, **kwargs):
+            calls.append(list(variants))
+            return first_result if len(calls) == 1 else [{'id': 99}]
+
+        with patch.object(wiki_search, '_run', side_effect=fake_run):
+            items = wiki_search.search(None, [1, 2], query)
+        return items, calls
+
+    def test_empty_three_letter_query_retries_in_fixed_layout(self):
+        items, calls = self._search('cvp', [])
+        self.assertEqual(items, [{'id': 99}])
+        self.assertIn('смз', calls[1])
+        self.assertNotIn('cvp', calls[1])
+
+    def test_found_by_letters_means_no_retry(self):
+        items, calls = self._search('byd', [{'id': 1}])
+        self.assertEqual(items, [{'id': 1}])
+        self.assertEqual(len(calls), 1)
+
+    def test_longer_or_non_latin_queries_do_not_retry(self):
+        for query in ('смз', 'cvpb', 'cv', 'c1p'):
+            with self.subTest(query=query):
+                _, calls = self._search(query, [])
+                self.assertEqual(len(calls), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
 

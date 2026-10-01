@@ -127,6 +127,30 @@ class SimilarSqlTest(unittest.TestCase):
         found = {row['article_id'] for row in rows}
         self.assertIn(2, found)
 
+    def test_contained_title_reaches_the_panel_as_similar(self):
+        """Вхождение было 0,75 — ниже порога показа 0,82: правило находило дубль
+        и тут же его выбрасывало («Страхование» молчало про «Страхование поездок»)."""
+        found = ai_similar.find_duplicates(
+            self.cursor, visible_ids=self.all_ids(), indexed_ids=[],
+            title='Отпуск', text_words=[], vector=None)
+        by_id = {item['article_id']: item for item in found['items']}
+        self.assertIn(2, by_id)
+        self.assertEqual('похоже', by_id[2]['verdict'])
+
+    def test_containment_counts_whole_words_only(self):
+        """«Пакет» внутри «Термопакета» — середина слова: как «Аренда» в
+        «Субаренде» или «акции» в «Транзакциях», это не дубль."""
+        rows = ai_similar.by_title(self.cursor, article_ids=self.all_ids(), title='Пакет')
+        self.assertTrue(all(row['score'] < ai_similar.NEARBY for row in rows))
+        words = ai_similar.by_title(self.cursor, article_ids=self.all_ids(), title='Сайты')
+        self.assertEqual(1, words[0]['article_id'])
+        self.assertGreaterEqual(words[0]['score'], ai_similar.CLOSE)
+
+    def test_short_contained_title_stays_below_the_panel(self):
+        """«Терм» внутри «Термопакет» — четыре знака, это ещё не название."""
+        rows = ai_similar.by_title(self.cursor, article_ids=self.all_ids(), title='Терм')
+        self.assertTrue(all(row['score'] < ai_similar.NEARBY for row in rows))
+
     def test_unrelated_title_is_not_found(self):
         rows = ai_similar.by_title(self.cursor, article_ids=self.all_ids(),
                                    title='Регламент выдачи корпоративных карт')

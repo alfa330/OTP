@@ -270,6 +270,9 @@ def should_clarify(question, chunks):
     # в одной статье, поэтому её попадание — это уже названное имя.
     if any(chunk.get('fuzzy_hit') for chunk in chunks):
         return False, None
+    # Назвал статью её названием («транзакции») — тоже однозначно.
+    if any(chunk.get('title_hit') for chunk in chunks):
+        return False, None
     # …но strict_hit требует, чтобы в куске нашлись ВСЕ слова вопроса разом, и
     # этого хватает не всегда. «Что за акция 7 Казына?»: слово «казына» лежит
     # ровно в одном куске на всю вику, а слова «акция» в этом куске нет — он
@@ -417,12 +420,14 @@ def usable_chunks(chunks, floor=STRICT_FLOOR):
 
     То же и для триграммной ветки (found_by = 2): близости у её кусков нет по
     построению, а нашлись они по имени, названному с ошибкой в одну букву —
-    отбросить их порогом значило бы выбросить единственную находку.
+    отбросить их порогом значило бы выбросить единственную находку. И для ветки
+    названия (found_by = 3): человек назвал статью её названием, а тело статьи
+    этого слова может не содержать вовсе (retrieve.search_titles).
     """
     out = []
     for chunk in chunks:
         similarity = chunk.get('similarity')
-        by_word = bool({0, 2} & set(chunk.get('found_by') or []))
+        by_word = bool({0, 2, 3} & set(chunk.get('found_by') or []))
         if by_word or (similarity is not None and similarity >= floor):
             out.append(chunk)
     return out
