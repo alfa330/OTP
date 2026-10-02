@@ -300,7 +300,7 @@ class _Base(unittest.TestCase):
 
 class GateTests(_Base):
     def test_other_department_is_closed(self):
-        self.viewer = person(department_code='op')
+        self.viewer = person(department_code='marketing')
         response = self.client.get('/api/water/ping')
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()['code'], 'WATER_SECTION_CLOSED')
@@ -317,6 +317,17 @@ class GateTests(_Base):
         check = self.client.post('/api/water/check', json={'link': ACCOUNT})
         self.assertEqual(check.status_code, 200)
         self.assertTrue(check.get_json()['verdict']['allowed'])
+        response = self.issue(water_office_id=office_id)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'WATER_ISSUE_FORBIDDEN')
+        self.assertEqual(self.store.issues, [])
+
+    def test_sales_check_but_do_not_issue(self):
+        """ОП — права колл-центра СЗоВ (02.10.2026): проверка есть, выдачи нет."""
+        self.viewer = person(department_code='op')
+        office_id = self.store.add()
+        check = self.client.post('/api/water/check', json={'link': ACCOUNT})
+        self.assertEqual(check.status_code, 200)
         response = self.issue(water_office_id=office_id)
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()['code'], 'WATER_ISSUE_FORBIDDEN')
@@ -609,7 +620,8 @@ class PerimeterTests(_Base):
 
     def test_journal_is_closed_to_issuers_and_the_call_centre(self):
         for viewer in (person(), person(role='sv', department_code='szov'),
-                       person(role='admin', department_code='szov', headed_codes=('szov',))):
+                       person(role='admin', department_code='szov', headed_codes=('szov',)),
+                       person(role='admin', department_code='op', headed_codes=('op',))):
             self.viewer = viewer
             for url in self.JOURNAL:
                 response = self.client.get(url)

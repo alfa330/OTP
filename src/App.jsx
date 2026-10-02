@@ -414,7 +414,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
- *   water — фронт-офисы и СЗоВ (canAccessWaterSectionForUser);
+ *   water — фронт-офисы, СЗоВ и ОП (canAccessWaterSectionForUser);
  *   thermoboxes — THERMOBOXES_SECTION_DEPARTMENT_CODES;
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
@@ -483,7 +483,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     contests: ['szov'],
     // Реестры
     parcels: ['front_office', 'szov'],
-    water: ['front_office', 'szov'],
+    water: ['front_office', 'szov', 'op'],
     thermoboxes: ['front_office', 'szov'],
     sign_links: ['front_office', 'szov', 'op'],
 };
@@ -2421,6 +2421,8 @@ const canAccessParcelsSectionForUser = (userLike) => {
      офисники из списка WATER_ISSUER_USER_IDS — выдают воду (шесть в Алматы,
        двое в Астане; только id — ФИО в публичный репозиторий не кладём);
      колл-центр СЗоВ, любая роль, и тренер СЗоВ — остатки и условия получения;
+     отдел продаж (ОП) — то же, что СЗоВ («для ОП нужно открыть доступ»,
+       02.10.2026);
      ТЭЗ КЦ — закрыт целиком, и главе, и админу; админы прочих отделов — тоже.
    Тренер проходит своим отделом, как операторы («тренеру можно выдать доступ
    как и операторам», 01.10.2026).
@@ -2430,6 +2432,7 @@ const canAccessParcelsSectionForUser = (userLike) => {
    water/access.py (can_open_section, ISSUER_USER_IDS). Тест сверяет списки и
    порядок проверок: дополнять — в обоих местах. */
 const WATER_ISSUER_USER_IDS = new Set([419, 421, 422, 423, 424, 509, 425, 426]);
+const WATER_CHECK_DEPARTMENT_CODES = ['szov', 'op'];
 
 const canAccessWaterSectionForUser = (userLike) => {
     if (normalizeRole(userLike?.role) === 'super_admin') return true;
@@ -2438,7 +2441,7 @@ const canAccessWaterSectionForUser = (userLike) => {
     if (own === 'tez' || headed.includes('tez')) return false;
     if (isDepartmentHead(userLike) && headed.includes('front_office')) return true;
     if (own === 'front_office') return WATER_ISSUER_USER_IDS.has(Number(userLike?.id));
-    return own === 'szov' || headed.includes('szov');
+    return WATER_CHECK_DEPARTMENT_CODES.some((code) => own === code || headed.includes(code));
 };
 
 /* «Термокороба» (#363) — условия выдачи термокоробов по фронт-офисам.

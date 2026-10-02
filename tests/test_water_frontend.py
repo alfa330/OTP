@@ -74,19 +74,20 @@ class SectionWiringTests(unittest.TestCase):
         self.assertNotIn('WATER_PILOT', self.app)
 
     def test_predicate_checks_in_the_backend_order(self):
-        """Супер-админ → ТЭЗ закрыт → руководитель → офисники по списку → СЗоВ,
+        """Супер-админ → ТЭЗ закрыт → руководитель → офисники по списку → СЗоВ и ОП,
         как в water.access.can_open_section: ТЭЗ закрыт раньше любых оснований."""
         predicate = self._predicate()
         steps = ["=== 'super_admin') return true;",
                  "if (own === 'tez' || headed.includes('tez')) return false;",
                  "if (isDepartmentHead(userLike) && headed.includes('front_office')) return true;",
                  "if (own === 'front_office') return WATER_ISSUER_USER_IDS.has(Number(userLike?.id));",
-                 "return own === 'szov' || headed.includes('szov');"]
+                 "return WATER_CHECK_DEPARTMENT_CODES.some((code) => own === code || headed.includes(code));"]
         positions = [predicate.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(access.CLOSED_DEPARTMENT_CODES, ('tez',))
-        self.assertEqual((access.ISSUE_DEPARTMENT_CODE, access.CHECK_DEPARTMENT_CODE),
-                         ('front_office', 'szov'))
+        self.assertEqual(access.ISSUE_DEPARTMENT_CODE, 'front_office')
+        self.assertIn("const WATER_CHECK_DEPARTMENT_CODES = ['szov', 'op'];", self.app)
+        self.assertEqual(access.CHECK_DEPARTMENT_CODES, ('szov', 'op'))
 
     def test_predicate_answers_like_the_server(self):
         """Сам предикат из App.jsx, выполненный node, против can_open_section на
@@ -129,7 +130,7 @@ class SectionWiringTests(unittest.TestCase):
 
     def test_guards_and_registries(self):
         self.assertIn("if (view === 'water' && canAccessWaterSection) return;", self.app)
-        self.assertIn("    water: ['front_office', 'szov'],", self.app)
+        self.assertIn("    water: ['front_office', 'szov', 'op'],", self.app)
         self.assertIn("    water: 'Water accounting',", self.app)
         self.assertIn("|| view === 'water' || view === 'driver_chats'", self.app)
         self.assertIn("canAccessWaterSection && deptAllowsInner('water'),", self.app)

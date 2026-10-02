@@ -7,6 +7,7 @@
   * выдают воду поимённо названные офисники, руководитель и супер-админ;
     офисник не из списка в раздел не входит;
   * колл-центр СЗоВ в любой роли — остатки, условия и проверка, без выдачи;
+  * отдел продаж (ОП) — то же, что СЗоВ (02.10.2026);
   * тренер — как операторы своего отдела;
   * ТЭЗ КЦ закрыт целиком: и оператору, и главе, и админу;
   * QR — операторам, как в «Посылках».
@@ -93,6 +94,29 @@ class CallCentreTests(unittest.TestCase):
         self.assertFalse(access.can_view_journal(head))
 
 
+class SalesTests(unittest.TestCase):
+    """«Раздел учёт воды, для ОП нужно открыть доступ» (02.10.2026) — права
+    колл-центра СЗоВ: остатки, условия, проверка; без выдачи и журнала."""
+
+    def test_sales_see_stock_and_conditions_in_any_role(self):
+        for role in ('operator', 'trainee', 'sv', 'admin', 'trainer'):
+            person = ctx(role=role, department_code='op')
+            self.assertTrue(access.can_open_section(person), role)
+            self.assertFalse(access.can_issue(person), role)
+            self.assertFalse(access.can_manage(person), role)
+            self.assertFalse(access.can_view_journal(person), role)
+
+    def test_head_of_sales_gets_sales_rights(self):
+        head = ctx(role='admin', department_code='op', headed_codes=('op',))
+        self.assertTrue(access.can_open_section(head))
+        self.assertFalse(access.can_issue(head))
+        self.assertFalse(access.can_manage(head))
+        self.assertFalse(access.can_view_journal(head))
+
+    def test_sales_operators_confirm_by_qr(self):
+        self.assertTrue(access.requires_sensitive_qr(ctx(department_code='op')))
+
+
 class TrainerTests(unittest.TestCase):
     """«Тренеру можно выдать доступ как и операторам» (01.10.2026)."""
 
@@ -103,7 +127,7 @@ class TrainerTests(unittest.TestCase):
         self.assertFalse(access.can_view_journal(trainer))
 
     def test_trainer_of_closed_department_stays_out(self):
-        for code in ('tez', 'op', None):
+        for code in ('tez', None):
             self.assertFalse(access.can_open_section(ctx(role='trainer', department_code=code)), code)
 
     def test_trainer_in_front_offices_follows_the_issuer_list(self):
@@ -128,11 +152,11 @@ class ClosedTests(unittest.TestCase):
             ctx(role='admin', department_code='szov', headed_codes=('tez',))))
 
     def test_other_departments_and_their_admins_are_closed(self):
-        for code in ('op', 'marketing', 'hr', 'it', None, ''):
+        for code in ('marketing', 'hr', 'it', None, ''):
             self.assertFalse(access.can_open_section(ctx(department_code=code)), code)
             self.assertFalse(access.can_open_section(ctx(role='admin', department_code=code)), code)
         self.assertFalse(access.can_open_section(
-            ctx(role='admin', department_code='op', headed_codes=('op',))))
+            ctx(role='admin', department_code='marketing', headed_codes=('marketing',))))
 
 
 class QrTests(unittest.TestCase):

@@ -10,9 +10,12 @@
     (ISSUER_USER_IDS)               настроек у них нет
     колл-центр СЗоВ (отдел szov,    видят остатки и условия получения воды,
     любая роль)                     проверяют право водителя; воду не выдают
+    отдел продаж (отдел op,         то же, что колл-центр СЗоВ («для ОП нужно
+    любая роль)                     открыть доступ», 02.10.2026)
     тренер                          как операторы своего отдела («тренеру можно
                                     выдать доступ как и операторам», 01.10.2026):
-                                    тренер СЗоВ — права СЗоВ, тренер ТЭЗ закрыт
+                                    тренер СЗоВ — права СЗоВ, тренер ОП — права
+                                    ОП, тренер ТЭЗ закрыт
     ТЭЗ КЦ (отдел tez)              раздел закрыт целиком — и главе, и админу
     остальные: офисники не из       раздел закрыт: им его не выдавали
     списка, другие отделы и их
@@ -36,10 +39,10 @@ canAccessWaterSectionForUser в App.jsx; тест сверяет их, допо�
 from parcels.access import is_department_head, is_global_admin, normalize_role
 
 ISSUE_DEPARTMENT_CODE = 'front_office'   # выдают воду (поимённо) и ведут учёт (глава)
-CHECK_DEPARTMENT_CODE = 'szov'           # колл-центр: остатки, условия, проверка
+CHECK_DEPARTMENT_CODES = ('szov', 'op')  # колл-центр СЗоВ и ОП: остатки, условия, проверка
 CLOSED_DEPARTMENT_CODES = ('tez',)       # ТЭЗ КЦ — закрыт целиком
 
-SECTION_DEPARTMENT_CODES = (ISSUE_DEPARTMENT_CODE, CHECK_DEPARTMENT_CODE)
+SECTION_DEPARTMENT_CODES = (ISSUE_DEPARTMENT_CODE,) + CHECK_DEPARTMENT_CODES
 
 # Офисники, которые выдают воду: шесть в Алматы, двое в Астане (01.10.2026).
 ISSUER_USER_IDS = (419, 421, 422, 423, 424, 509, 425, 426)
@@ -101,14 +104,14 @@ def can_open_section(ctx):
         return True
     if _own(ctx) == ISSUE_DEPARTMENT_CODE:
         return _user_id(ctx) in ISSUER_USER_IDS
-    return _belongs_to(ctx, CHECK_DEPARTMENT_CODE)
+    return any(_belongs_to(ctx, code) for code in CHECK_DEPARTMENT_CODES)
 
 
 def can_issue(ctx):
     """Выдать воду: супер-админ, руководитель и офисники из списка.
 
-    СЗоВ сюда не попадает ни в какой роли: колл-центр проверяет право и
-    смотрит остатки, а вода физически выдаётся в офисе.
+    СЗоВ и ОП сюда не попадают ни в какой роли: они проверяют право и
+    смотрят остатки, а вода физически выдаётся в офисе.
     """
     if not can_open_section(ctx):
         return False
