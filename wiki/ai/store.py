@@ -53,15 +53,21 @@ RETURNING id, created_at
 # истёк 30.04.2025» — свойство МОМЕНТА ОТВЕТА. Пересчитай его при открытии
 # старого чата — и ответ, данный при живой акции, задним числом получил бы
 # пометку, которой при выдаче не было. Снимок правдивее.
+#
+# Источник-справочник (запись вкладки «Офисы»/«Города», wiki/directory.py)
+# статьи не имеет: article_id NULL, вместо него — вкладка, запись и
+# пространство. chunk_id у него вымышленный (отрицательный) и не хранится.
 _INSERT_SOURCE = """
 INSERT INTO wiki_ai_message_sources
        (message_id, ord, article_id, chunk_id, chunk_text_hash, title, slug,
         heading_path, quote, quote_ok, requires_ack, attributed,
-        stale, stale_note, stale_kind)
+        stale, stale_note, stale_kind,
+        source_kind, tab, ref_id, ref_city, space_id)
 VALUES (%(message_id)s, %(ord)s, %(article_id)s, %(chunk_id)s,
         %(chunk_text_hash)s, %(title)s, %(slug)s, %(heading_path)s, %(quote)s,
         %(quote_ok)s, %(requires_ack)s, %(attributed)s,
-        %(stale)s, %(stale_note)s, %(stale_kind)s)
+        %(stale)s, %(stale_note)s, %(stale_kind)s,
+        %(source_kind)s, %(tab)s, %(ref_id)s, %(ref_city)s, %(space_id)s)
 """
 
 _TOUCH_CHAT = """
@@ -82,11 +88,14 @@ SELECT id, seq, role, kind, text, provider, model, elapsed_ms, feedback, created
 
 # Доступность источника — джойном на периметр, переданный списком id. Так пометка
 # «статья недоступна» появляется сразу после отзыва доступа, без переиндексации.
+# У источника-справочника статьи нет (NULL даёт здесь NULL) — его доступность
+# решает chat_messages по пространству и тумблеру вкладки на сейчас.
 _SOURCES = """
 SELECT s.message_id, s.ord, s.article_id, s.title, s.slug, s.heading_path,
        s.quote, s.quote_ok, s.requires_ack, s.attributed,
        (s.article_id = ANY(%(visible)s)) AS available,
-       s.stale, s.stale_note, s.stale_kind
+       s.stale, s.stale_note, s.stale_kind,
+       s.source_kind, s.tab, s.ref_id, s.ref_city, s.space_id
   FROM wiki_ai_message_sources s
   JOIN wiki_ai_messages m ON m.id = s.message_id
  WHERE m.chat_id = %(chat_id)s
@@ -183,11 +192,18 @@ def append_message(cursor, chat_id, *, role, text, kind='answer', provider=None,
     message_id, created_at = cursor.fetchone()
 
     for position, source in enumerate(sources):
+        kind = source.get('source_kind') or 'article'
+        chunk_id = source.get('chunk_id')
         cursor.execute(_INSERT_SOURCE, {
             'message_id': message_id, 'ord': position,
             'article_id': source.get('article_id'),
-            'chunk_id': source.get('chunk_id'),
+            'chunk_id': chunk_id if kind == 'article' else None,
             'chunk_text_hash': source.get('chunk_text_hash'),
+            'source_kind': kind[:16],
+            'tab': (source.get('tab') or None) and str(source['tab'])[:16],
+            'ref_id': source.get('ref_id'),
+            'ref_city': (source.get('ref_city') or None) and str(source['ref_city'])[:120],
+            'space_id': source.get('space_id'),
             'title': (source.get('title') or '')[:255],
             'slug': (source.get('slug') or '')[:255],
             'heading_path': source.get('heading_path') or '',
@@ -207,7 +223,16 @@ def touch_chat(cursor, user_id, chat_id, *, first_question=''):
                                  'title': _title_from(first_question)})
 
 
-def chat_messages(cursor, chat_id, *, visible_article_ids=()):
+def _directory_available(kind, tab, space_id, directory_access):
+    """Открыт ли источник-справочник человеку СЕЙЧАС: пространство выдано не
+    гостем и вкладка в нём включена (directory.access_map). Снимок цитаты без
+    этого — лазейка: адрес и телефон из чужой вкладки через старый ответ."""
+    feature = tab if tab in ('offices', 'cities') else None
+    access = (directory_access or {}).get(space_id) or {}
+    return bool(kind != 'article' and feature and access.get(feature))
+
+
+def chat_messages(cursor, chat_id, *, visible_article_ids=(), directory_access=None):
     cursor.execute(_MESSAGES, {'chat_id': chat_id})
     messages = [{'id': row[0], 'seq': row[1], 'role': row[2], 'kind': row[3],
                  'text': row[4], 'provider': row[5], 'model': row[6],
@@ -223,10 +248,16 @@ def chat_messages(cursor, chat_id, *, visible_article_ids=()):
         message = by_id.get(row[0])
         if message is None:
             continue
-        available = bool(row[10])
+        kind, tab, ref_id, ref_city, space_id = row[14] or 'article', row[15], row[16], row[17], row[18]
+        if kind == 'article':
+            available = bool(row[10])
+            closed_title = 'Статья недоступна'
+        else:
+            available = _directory_available(kind, tab, space_id, directory_access)
+            closed_title = 'Справочник недоступен'
         message['sources'].append({
             'ord': row[1], 'article_id': row[2],
-            'title': row[3] if available else 'Статья недоступна',
+            'title': row[3] if available else closed_title,
             'slug': row[4] if available else None,
             'heading_path': row[5] if available else '',
             # Цитата закрытой статьи не отдаётся: доступ мог быть отозван после
@@ -235,7 +266,12 @@ def chat_messages(cursor, chat_id, *, visible_article_ids=()):
             'quote_ok': bool(row[7]), 'requires_ack': bool(row[8]),
             'attributed': bool(row[9]), 'available': available,
             'stale': bool(row[11]), 'stale_note': row[12] or '',
-            'stale_kind': row[13] or ''})
+            'stale_kind': row[13] or '',
+            'source_kind': kind,
+            'tab': tab if available else None,
+            'ref_id': ref_id if available else None,
+            'ref_city': ref_city if available else None,
+            'space_id': space_id if available else None})
     return messages
 
 

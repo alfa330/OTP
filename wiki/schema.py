@@ -1595,6 +1595,32 @@ _AI_STATEMENTS = [
     # молча сломается от правки формулировки.
     "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
     "stale_kind VARCHAR(16) NOT NULL DEFAULT '';",
+    # СПРАВОЧНИК КАК ИСТОЧНИК (02.10.2026, wiki/directory.py). Ответ про адрес
+    # офиса или комиссию Яндекса опирается на запись вкладки «Офисы»/«Города»,
+    # а не на статью. Статьи у такого источника нет — article_id допускает NULL,
+    # а запись помнит вкладку, свой id, город и пространство: по ним чип под
+    # ответом открывает вкладку, а история проверяет доступ на сейчас.
+    # NOT NULL снимаем, только пока он стоит: ALTER на каждом старте брал бы
+    # эксклюзивную блокировку таблицы, пока соседний экземпляр ещё отвечает.
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'wiki_ai_message_sources'
+               AND column_name = 'article_id' AND is_nullable = 'NO'
+        ) THEN
+            ALTER TABLE wiki_ai_message_sources ALTER COLUMN article_id DROP NOT NULL;
+        END IF;
+    END $$;
+    """,
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
+    "source_kind VARCHAR(16) NOT NULL DEFAULT 'article';",
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS tab VARCHAR(16);",
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS ref_id INTEGER;",
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS ref_city VARCHAR(120);",
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS space_id INTEGER;",
     # Пространство, в котором задавали вопрос. Ответу оно не нужно — периметр
     # уже сужен на входе, — но нужно ОТЧЁТУ: «о чём спрашивают, а в вике нет»
     # адресуется владельцу конкретной базы знаний, и вопрос из «Тез» в отчёте

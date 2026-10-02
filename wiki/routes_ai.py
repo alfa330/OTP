@@ -28,6 +28,7 @@ from datetime import date
 
 from flask import jsonify, request
 
+from . import directory as wiki_directory
 from . import perimeter as wiki_perimeter
 from . import queries
 from . import questions as wiki_questions
@@ -94,6 +95,24 @@ def assistant_spaces(cursor, ctx):
         for sp in structure.list_spaces(cursor)
         if sp['id'] in allowed and schema.space_features(sp['features'])['assistant']
     ]
+
+
+def directory_rows(cursor, ctx, question, space_id, search_query=None):
+    """Записи «Офисов» и «Городов» к вопросу (wiki/directory.py) — или [].
+
+    Под савпоинтом: справочник — приставка к ответу, и его сбой не должен
+    отнимать у оператора ответ по статьям.
+    """
+    cursor.execute('SAVEPOINT wiki_ai_directory')
+    try:
+        rows = wiki_directory.ai_rows(cursor, ctx, question, space_id=space_id,
+                                      search_query=search_query)
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_directory')
+        logging.exception('Помощник: справочник не ответил')
+        return []
+    cursor.execute('RELEASE SAVEPOINT wiki_ai_directory')
+    return rows
 
 
 def effective_space(cursor, ctx, requested):
@@ -211,8 +230,8 @@ def register(bp, wiki_route, db, log_ip):
         limit = _int_arg('limit', 8, 1, 30)
         per_article = _int_arg('per_article', 3, 1, 10)
 
-        scope = wiki_perimeter.assistant_perimeter(
-            cursor, ctx, effective_space(cursor, ctx, _space_id()))
+        space_id = effective_space(cursor, ctx, _space_id())
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, space_id)
         article_ids = scope['article_ids']
 
         query_vector = None
@@ -226,11 +245,14 @@ def register(bp, wiki_route, db, log_ip):
         found = ai_retrieve.search_hybrid(
             cursor, article_ids=article_ids, query=query,
             query_vector=query_vector, limit=limit, per_article=per_article)
+        # Ровно то, что получит /ask: записи справочника впереди статей.
+        directory = directory_rows(cursor, ctx, query, space_id)
+        rows = directory + found['rows']
 
         return jsonify({
             'query': query,
             'perimeter_articles': len(article_ids),
-            'branches': found['branches'],
+            'branches': {**found['branches'], 'directory': len(directory)},
             'degraded': found['degraded'],
             'vector_error': vector_error,
             # Поля берутся только те, что реально возвращает fuse(). Раньше здесь
@@ -249,7 +271,10 @@ def register(bp, wiki_route, db, log_ip):
                 'similarity': row.get('similarity'),
                 'found_by': row['found_by'],
                 'preview': row['text'][:400],
-            } for position, row in enumerate(found['rows'], start=1)],
+                'source_kind': row.get('source_kind') or 'article',
+                'tab': row.get('tab'),
+                'ref_id': row.get('ref_id'),
+            } for position, row in enumerate(rows, start=1)],
         })
 
     # ── Чат ──────────────────────────────────────────────────────────────────
@@ -290,7 +315,9 @@ def register(bp, wiki_route, db, log_ip):
         scope = wiki_perimeter.assistant_perimeter(
             cursor, ctx, effective_space(cursor, ctx, _space_id()))
         messages = ai_store.chat_messages(
-            cursor, chat_id, visible_article_ids=scope['article_ids'])
+            cursor, chat_id, visible_article_ids=scope['article_ids'],
+            # Источник-справочник — по доступу к вкладке СЕЙЧАС, как и статья.
+            directory_access=wiki_directory.access_map(cursor, ctx))
         # Вопросы, переданные супервайзеру (wiki/questions.py): отказ получает
         # состояние передачи, ответ — имя супервайзера. Открыл разговор — значит
         # увидел ответ, и уведомление о нём гаснет.
@@ -357,12 +384,17 @@ def register(bp, wiki_route, db, log_ip):
         found = ai_retrieve.search_hybrid(
             cursor, article_ids=scope['article_ids'], query=search_query,
             query_vector=query_vector, limit=8, per_article=3)
+        # Адреса офисов и комиссии Яндекса — из вкладок «Офисы» и «Города»,
+        # живыми данными на сегодня (wiki/directory.py). Впереди статей: при
+        # равной опоре источником становится справочник, а в промпте у него своя
+        # подпись и правило «при расхождении верен справочник».
+        rows = directory_rows(cursor, ctx, question, space_id, search_query) + found['rows']
 
         asked = ai_store.append_message(cursor, chat_id, role='user', kind='question',
                                         text=question)
         try:
             result = ai_answer.compose(
-                question, found['rows'], ai_providers.generate,
+                question, rows, ai_providers.generate,
                 history=history,
                 # Переспрашивать можно только у ХОЛОДНОГО короткого вопроса.
                 # Два случая, когда нельзя:
@@ -437,6 +469,13 @@ def register(bp, wiki_route, db, log_ip):
                 'stale': bool(source.get('stale')),
                 'stale_note': source.get('stale_note') or '',
                 'stale_kind': source.get('stale_kind') or '',
+                # Справочник: чип открывает вкладку «Офисы»/«Города» на записи,
+                # а не статью (статьи у него нет).
+                'source_kind': source.get('source_kind') or 'article',
+                'tab': source.get('tab'),
+                'ref_id': source.get('ref_id'),
+                'ref_city': source.get('ref_city'),
+                'space_id': source.get('space_id'),
             } for position, source in enumerate(result.get('sources') or [])],
             'provider': meta.get('provider'),
             'model': meta.get('model'),

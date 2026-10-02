@@ -42570,6 +42570,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                сработал снова. */
             const [wikiBellFocus, setWikiBellFocus] = useState(null);
             const clearWikiBellFocus = useCallback(() => setWikiBellFocus(null), []);
+            /* Источник-справочник под ответом шарика помощника: адрес офиса или
+               комиссия Яндекса ведут во вкладку «Офисы»/«Города» на этой записи
+               (wiki/directory.py). Одноразово, как колокол: nonce — чтобы
+               повторный щелчок по тому же чипу сработал снова. */
+            const [wikiDirectoryFocus, setWikiDirectoryFocus] = useState(null);
+            const clearWikiDirectoryFocus = useCallback(() => setWikiDirectoryFocus(null), []);
             /* Чат Wazzup, который надо открыть сразу при входе в «Чаты
                Верификаторов» — приходит ссылкой из переписки. Гасится так же,
                как слаг статьи: иначе следующий обычный вход в раздел снова
@@ -55339,6 +55345,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     onInitialArticleConsumed={clearWikiInitialSlug}
                                     bellFocus={wikiBellFocus}
                                     onBellFocusConsumed={clearWikiBellFocus}
+                                    directoryFocus={wikiDirectoryFocus}
+                                    onDirectoryFocusConsumed={clearWikiDirectoryFocus}
                                 />
                             </Suspense>
                         ))}
@@ -61811,6 +61819,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             // состояние, раздел переключаем, дальше WikiView
                             // сам откроет статью и погасит просьбу.
                             setWikiInitialSlug(String(slug));
+                            navigateToView('wiki');
+                        }}
+                        onOpenWikiTarget={(target) => {
+                            setWikiDirectoryFocus({ ...target, nonce: Date.now() });
                             navigateToView('wiki');
                         }}
                         onOpenWikiAssistant={() => navigateToView('wiki')}

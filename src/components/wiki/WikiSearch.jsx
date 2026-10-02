@@ -18,6 +18,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { matchBrand, matchCar } from './carMatch';
 import { STATUS_LABELS, STATUS_TONES } from './articleTypes';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
+import { DirectorySection, directoryTab, openableDirectory } from './searchDirectory';
 import useStableCallback from './useStableCallback';
 import WikiSearchFilters, {
     SearchFilterButton, hasOpenFilterLayer, isInsideSearchFilters,
@@ -88,13 +89,19 @@ export const markedWord = (snippet, fallback) => {
     return (match && match[1].trim()) || fallback;
 };
 
-/* Плоский список того, по чему ходят стрелки: сначала статьи, следом
-   дополнительные фрагменты («Совпадения в тексте»), последним — помощник.
-   В оригинале клавиатура так же шла сквозь обе секции.
+/* Плоский список того, по чему ходят стрелки: справочник (адреса офисов и
+   комиссии Яндекса, searchDirectory.jsx), статьи, следом дополнительные
+   фрагменты («Совпадения в тексте»), последним — помощник. В оригинале
+   клавиатура так же шла сквозь обе секции.
+
+   Справочник первым: на «офис алматы» адрес и есть ответ, а статьи ниже — его
+   окружение. Третьим аргументом и по умолчанию пустой: прежние вызовы и их
+   порядок строк не меняются.
 
    Вынесено из компонента и экспортировано ради теста: порядок строк — это и
    есть поведение клавиатуры, а проверять его кликами по выпадашке нечем. */
-export const searchRows = (items, withAssistant = false) => {
+export const searchRows = (items, withAssistant = false, directory = []) => {
+    const listed = (directory || []).map((entry) => ({ kind: 'directory', entry }));
     const articles = (items || []).map((item) => ({ kind: 'article', item }));
     const fragments = [];
     (items || []).forEach((item) => {
@@ -102,7 +109,7 @@ export const searchRows = (items, withAssistant = false) => {
             fragments.push({ kind: 'fragment', item, fragment, index });
         });
     });
-    const found = articles.concat(fragments);
+    const found = listed.concat(articles, fragments);
     return withAssistant ? found.concat([{ kind: 'assistant' }]) : found;
 };
 
@@ -323,10 +330,12 @@ export function ResultsPane({
        устройство, а дефолт null оставляет старые вызовы (и тест
        tests/wiki_ask_assistant.test.mjs) рабочими без правки. */
     filtersSlot = null,
+    // Строки справочника (офисы, комиссии). Дефолт — по той же причине.
+    directoryRows = [],
 }) {
     const showEmpty = !loading && !failed && term.length >= 2
         && articleRows.length === 0 && fragmentRows.length === 0
-        && brandModels.length === 0;
+        && brandModels.length === 0 && directoryRows.length === 0;
     const rowClass = (index) => (index === selectedIndex ? 'bg-indigo-50' : 'hover:bg-slate-50');
 
     /* Помощник живёт в общем списке строк — иначе он выпал бы из клавиатуры.
@@ -388,6 +397,14 @@ export function ResultsPane({
             )}
 
             <div ref={listRef} className="overflow-y-auto" style={{ maxHeight }}>
+                <DirectorySection
+                    entries={directoryRows}
+                    rows={rows}
+                    selectedIndex={selectedIndex}
+                    onPick={onPick}
+                    onHover={onHover}
+                />
+
                 {brandModels.length > 1 && (
                     <div className="mb-2">
                         <SectionLabel icon={Car}>
@@ -531,7 +548,8 @@ export function ResultsPane({
 }
 
 export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassifier,
-                                     onAskAssistant = null, spaceId = null }) {
+                                     onAskAssistant = null, spaceId = null,
+                                     onOpenOffice = null, onOpenCity = null }) {
     const [query, setQuery] = useState('');
     /* Фильтры сбрасываются вместе с запросом при закрытии поиска — так же, как
        это делает сам запрос («начинаем следующий поиск с чистого листа»).
@@ -545,6 +563,8 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const [authors, setAuthors] = useState([]);
     const [authorsLoading, setAuthorsLoading] = useState(false);
     const [items, setItems] = useState([]);
+    // Справочник того же ответа: офисы и комиссии Яндекса (wiki/directory.py).
+    const [directory, setDirectory] = useState([]);
     const [loading, setLoading] = useState(false);
     const [failed, setFailed] = useState(false);
     const [retryTick, setRetryTick] = useState(0);
@@ -581,9 +601,14 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const openArticle = useStableCallback(onOpenArticle);
     const openClassifier = useStableCallback(onOpenClassifier);
     const askAssistant = useStableCallback(onAskAssistant);
+    const openOffice = useStableCallback(onOpenOffice);
+    const openCity = useStableCallback(onOpenCity);
     // Сам факт наличия помощника — реактивный: вкладку выключают тумблером
     // пространства, и строка обязана исчезнуть вместе с ней.
     const canAskAssistant = !!onAskAssistant;
+    // Так же и справочник: строка офиса без вкладки «Офисы» вела бы в никуда.
+    const canOpenOffices = !!onOpenOffice;
+    const canOpenCities = !!onOpenCity;
 
     const term = query.trim();
     const active = focused || sheetOpen;
@@ -620,6 +645,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         if (active) return;
         setQuery('');
         setItems([]);
+        setDirectory([]);
         setSelectedIndex(0);
         setPickedCar(null);
         setFailed(false);
@@ -634,6 +660,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
             // проходил проверку и рисовал результаты поверх подсказки.
             requestSeq.current += 1;
             setItems([]);
+            setDirectory([]);
             setLoading(false);
             setFailed(false);
             return undefined;
@@ -664,6 +691,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                 .then((r) => {
                     if (requestSeq.current !== seq) return;
                     setItems(r.data?.items || []);
+                    setDirectory(r.data?.directory || []);
                     setSelectedIndex(0);
                     setFailed(false);
                     keyboardRef.current = false;
@@ -673,6 +701,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                     // «Ничего не найдено» на сетевой сбой — худший из ответов:
                     // человек решает, что статьи нет, и идёт спрашивать в чат.
                     setItems([]);
+                    setDirectory([]);
                     setFailed(true);
                 })
                 .finally(() => { if (requestSeq.current === seq) setLoading(false); });
@@ -702,11 +731,16 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     /* Помощник — ПОСЛЕДНЯЯ строка выдачи. Отсюда и клавиатура: при пустом
        поиске он оказывается нулевой строкой, и Enter сразу уносит вопрос в чат,
        не заставляя тянуться к мыши. */
+    const shownDirectory = useMemo(
+        () => openableDirectory(directory, { offices: canOpenOffices, cities: canOpenCities }),
+        [directory, canOpenOffices, canOpenCities],
+    );
     const rows = useMemo(
-        () => searchRows(items, canAskAssistant && term.length >= 2),
-        [items, canAskAssistant, term],
+        () => searchRows(items, canAskAssistant && term.length >= 2, shownDirectory),
+        [items, canAskAssistant, term, shownDirectory],
     );
 
+    const directoryRows = useMemo(() => rows.filter((r) => r.kind === 'directory'), [rows]);
     const articleRows = useMemo(() => rows.filter((r) => r.kind === 'article'), [rows]);
     const fragmentRows = useMemo(() => rows.filter((r) => r.kind === 'fragment'), [rows]);
 
@@ -746,10 +780,18 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
             askAssistant(term);
             return;
         }
+        if (row.kind === 'directory') {
+            // Справочник открывается своей вкладкой на этой записи, а не статьёй:
+            // у офиса и города статьи нет.
+            close();
+            if (directoryTab(row.entry) === 'offices') openOffice(row.entry);
+            else openCity(row.entry);
+            return;
+        }
         const source = row.kind === 'fragment' ? row.fragment : row.item.snippet;
         close();
         openArticle(row.item.slug, markedWord(source, term));
-    }, [close, openArticle, askAssistant, term]);
+    }, [close, openArticle, askAssistant, openOffice, openCity, term]);
 
     /* Прокрутка выделенного — ТОЛЬКО под стрелками. Без этого условия любая
        новая выдача проматывала список к первой статье, унося за верхний край
@@ -765,7 +807,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     useEffect(() => {
         const box = sheetOpen ? sheetListRef.current : listRef.current;
         if (box) box.scrollTop = 0;
-    }, [items, sheetOpen]);
+    }, [items, directory, sheetOpen]);
 
     const onKeyDown = useCallback((e) => {
         if (!rows.length) return;
@@ -895,7 +937,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         term, rows, articleRows, fragmentRows, selectedIndex,
         onHover, onPick: pickRow, brandModels, matchedBrand, activeCar,
         onPickCar: setPickedCar, loading, failed, onRetry: retry, classifierFailed,
-        filtersSlot,
+        filtersSlot, directoryRows,
     };
 
     const carPane = activeCar && classifier ? (

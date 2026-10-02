@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef } from 'react';
-import { AlertCircle, FileText, Loader2, Quote, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { AlertCircle, FileText, Loader2, MapPin, Percent, Quote, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { iosBtnGhost, IosBadge } from '../ui/ios';
 import { ChatBubble, useThreadScroll } from '../ui/chat';
 import { threadScrollIntent } from './threadScroll';
@@ -86,16 +86,21 @@ export const STALE_CAVEATS = [
      'Проверьте даты, прежде чем обещать водителю.'],
 ];
 
-/** Чип источника: название статьи, раздел и цитата под ним. */
+/* Источник-справочник (wiki/directory.py) ведёт не в статью, а во вкладку
+   «Офисы» или «Города» на этой записи: статьи у него нет, есть вкладка. */
+const SOURCE_ICONS = { offices: MapPin, cities: Percent };
+
+/** Чип источника: название статьи (или вкладки справочника), раздел и цитата под ним. */
 export const SourceChip = ({ source, onOpen }) => {
     const unavailable = source.available === false;
     // attributed — фрагмент сопоставил сервер, модель его не назвала.
     const attributed = source.attributed === true;
     const stale = source.stale === true;
+    const Icon = SOURCE_ICONS[source.tab] || FileText;
     return (
         <button
             type="button"
-            disabled={unavailable || !source.slug}
+            disabled={unavailable || !(source.slug || source.tab)}
             onClick={() => onOpen(source)}
             className={`group w-full rounded-xl px-2.5 py-2 text-left transition ${
                 unavailable
@@ -104,7 +109,7 @@ export const SourceChip = ({ source, onOpen }) => {
             }`}
         >
             <div className="flex items-center gap-1.5">
-                <FileText size={13} className="shrink-0 text-slate-400" />
+                <Icon size={13} className="shrink-0 text-slate-400" />
                 <span className="truncate text-[12.5px] font-medium text-slate-700">
                     {source.title || 'Без названия'}
                 </span>
@@ -324,7 +329,9 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, onEscalat
                             <SourceChip
                                 key={index}
                                 source={source}
-                                onOpen={(item) => onOpenArticle(item.slug, item.quote)}
+                                /* Третьим — сам источник: справочник открывается
+                                   по вкладке и записи, а не по slug. */
+                                onOpen={(item) => onOpenArticle(item.slug, item.quote, item)}
                             />
                         ))}
                     </div>

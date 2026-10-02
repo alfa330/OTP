@@ -24,6 +24,7 @@ import WikiYandexImport from './WikiYandexImport';
 import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
+import { directoryTab } from './searchDirectory';
 import WikiSpaceModal from './WikiSpaceModal';
 import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
@@ -167,7 +168,8 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
 
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
                                    initialArticleSlug, onInitialArticleConsumed,
-                                   bellFocus = null, onBellFocusConsumed }) {
+                                   bellFocus = null, onBellFocusConsumed,
+                                   directoryFocus = null, onDirectoryFocusConsumed }) {
     const headers = useMemo(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -502,6 +504,36 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         setAssistantAsk({ id: `${Date.now()}-${text}`, text });
     }, []);
 
+    /* Справочник — из поиска и из источника под ответом помощника
+       (wiki/directory.py): строка офиса открывает «Офисы» на этом офисе, строка
+       комиссий — «Города» на этом городе. Дверь — только туда, где вкладка
+       есть, по той же причине, что у помощника выше. Просьба одноразовая, как
+       questionFocus: вкладка выполняет её после загрузки и гасит. */
+    const canOpenOffices = useMemo(() => tabs.some((t) => t.key === 'offices'), [tabs]);
+    const canOpenCities = useMemo(() => tabs.some((t) => t.key === 'cities'), [tabs]);
+    const [officeFocus, setOfficeFocus] = useState(null);   // {officeId, city, nonce}
+    const [cityFocus, setCityFocus] = useState(null);       // {cityId, nonce}
+    const openDirectory = useCallback((target) => {
+        const tabKey = target?.tab || directoryTab(target);
+        if (tabKey !== 'offices' && tabKey !== 'cities') return;
+        // Запись из соседнего пространства (история помощника) — сначала в него.
+        const space = Number(target.space_id) || null;
+        if (space && space !== activeSpace?.id) setSpaceId(space);
+        // У строки поиска — id и город самой записи, у источника помощника —
+        // ref_id и ref_city; у «всей вкладки» записи нет вовсе.
+        const own = target.kind === 'office' || target.kind === 'city';
+        const id = own ? target.id : (target.ref_id ?? null);
+        const nonce = Date.now();
+        setTab(tabKey);
+        if (tabKey === 'offices') {
+            setOfficeFocus({ officeId: id, city: target.city ?? target.ref_city ?? null, nonce });
+        } else {
+            setCityFocus({ cityId: id, nonce });
+        }
+    }, [activeSpace]);
+    const consumeOfficeFocus = useCallback(() => setOfficeFocus(null), []);
+    const consumeCityFocus = useCallback(() => setCityFocus(null), []);
+
     /* Половины вкладки «Статьи» гейтятся по отдельности: каталог — редактору,
        структура — тому, кто правит дерево или раздаёт доступы. Обычно человек
        имеет обе (см. матрицу в wiki/access.py), но роль вики можно собрать
@@ -602,6 +634,25 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         else setQuestionFocus({ id: bellFocus.id, nonce: bellFocus.nonce });
         onBellFocusConsumed?.();
     }, [bellFocus, tabs, onBellFocusConsumed]);
+
+    /* Источник-справочник из шарика помощника (App.onOpenWikiTarget): вкладка
+       «Офисы»/«Города» на записи. Ждём ответа /ping, а не появления вкладки в
+       наборе: до него effectiveFeatures(null) включает все вкладки, а
+       пространство ещё не выбрано — вкладка ушла бы за данными без него, и у
+       кого пространств два, сервер ответил бы «укажите пространство», а
+       просьба сгорела бы на пустом списке. Вкладку проверяем у пространства
+       ЗАПИСИ (шарик живёт и над соседним), а недоступное пространство просьбу
+       просто гасит: открыть ту же вкладку в чужом значило бы показать не то. */
+    useEffect(() => {
+        if (!directoryFocus?.tab || loading) return;
+        const wanted = Number(directoryFocus.space_id) || null;
+        const target = wanted ? spaces.find((sp) => sp.id === wanted) : null;
+        const allowed = wanted
+            ? !!target && !!effectiveFeatures(target)[directoryFocus.tab]
+            : tabs.some((t) => t.key === directoryFocus.tab);
+        if (state && allowed) openDirectory(directoryFocus);
+        onDirectoryFocusConsumed?.();
+    }, [directoryFocus, tabs, spaces, state, loading, openDirectory, onDirectoryFocusConsumed]);
 
     /* «Опубликовать как новость» из «Вопросов» живёт, пока открыта вкладка
        «Новости»: ушли с неё иначе — просьба снимается, и следующий заход в
@@ -828,6 +879,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                 setSearchTarget({ slug: CLASSIFIER_SLUG, prefill, from });
                             }}
                             onAskAssistant={canAskAssistant ? askAssistant : null}
+                            onOpenOffice={canOpenOffices ? openDirectory : null}
+                            onOpenCity={canOpenCities ? openDirectory : null}
                         />
 
                         {/* Ссылка на вкладку — рядом с «Обновить», одной кнопкой на
@@ -1094,6 +1147,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         /* Поиск на витрине — тот же поиск, что в шапке, и выход
                            к помощнику у них обязан быть один и тот же. */
                         onAskAssistant={canAskAssistant ? askAssistant : null}
+                        // И справочник — тот же: офисы и комиссии Яндекса.
+                        onOpenOffice={canOpenOffices ? openDirectory : null}
+                        onOpenCity={canOpenCities ? openDirectory : null}
                         /* Новостью — там, где вкладка «Новости» есть и человек
                            вправе публиковать; в гостевом пространстве он
                            читатель. */
@@ -1124,7 +1180,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             onAskRequestConsumed={() => setAssistantAsk(null)}
                             openChatRequest={assistantChat}
                             onOpenChatRequestConsumed={() => setAssistantChat(null)}
-                            onOpenArticle={(slug, highlight) => {
+                            onOpenArticle={(slug, highlight, source) => {
+                                // Источник-справочник ведёт во вкладку, а не в статью.
+                                if (!slug && source?.tab) { openDirectory(source); return; }
                                 setTab('library');
                                 setSearchTarget({ slug, highlight, from: returnDoor('assistant') });
                             }}
@@ -1355,7 +1413,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
 
                 {tab === 'offices' && (
                     <WikiOffices base={base} headers={headers} showToast={showToast}
-                                 spaceId={activeSpace?.id || null} />
+                                 spaceId={activeSpace?.id || null}
+                                 focusRequest={officeFocus}
+                                 onFocusConsumed={consumeOfficeFocus} />
                 )}
 
                 {tab === 'cities' && (
@@ -1370,7 +1430,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             одной вики не должно пережить переход в другую. */}
                         <WikiCities key={activeSpace?.id || 'default'}
                                     base={base} headers={headers} showToast={showToast}
-                                    spaceId={activeSpace?.id || null} />
+                                    spaceId={activeSpace?.id || null}
+                                    focusRequest={cityFocus}
+                                    onFocusConsumed={consumeCityFocus} />
                     </Suspense>
                 )}
 

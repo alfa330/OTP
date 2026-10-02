@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     ChevronLeft, ChevronRight, Columns2, Loader2, MapPin, Plus, Rows3, Search,
@@ -181,8 +181,10 @@ const readPrefs = () => {
     }
 };
 
-export default function WikiOffices({ base, headers, showToast, spaceId = null }) {
+export default function WikiOffices({ base, headers, showToast, spaceId = null,
+                                      focusRequest = null, onFocusConsumed = null }) {
     const toast = useStableCallback(showToast);
+    const consumeFocus = useStableCallback(onFocusConsumed);
     const prefs = useMemo(readPrefs, []);
     /* НА ТЕЛЕФОНЕ ТАБЛИЦЫ НЕТ, и это не упрощение вёрстки. Таблица ТЗ — шесть
        колонок и 860 px минимальной ширины; на экране 390 px из неё видно первую
@@ -219,9 +221,48 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
     const [stateFilter, setStateFilter] = useState('');
     const [draft, setDraft] = useState(null);
     const [tick, setTick] = useState(0);
+    /* Просьба открыть вкладку на записи — из поиска или из источника под
+       ответом помощника (WikiView.openDirectory): город — фильтром, офис —
+       карточкой. Карточку открываем ПОСЛЕ загрузки по новому фильтру: в
+       прежнем списке офиса другого города может не быть вовсе. loadedTick
+       считает завершённые загрузки, и просьба ждёт следующую за собой.
+
+       Загрузку просьба запускает сама (focusTick): второй офис того же города
+       не меняет ни фильтра, ни даты, и без этого загрузка не шла, просьба
+       висела, а карточка всплывала потом от постороннего обновления. Ответ
+       загрузки, ушедшей до просьбы, отбрасывается (loadSeq): он по старому
+       фильтру, и офиса другого города в нём нет. */
+    const [pendingFocus, setPendingFocus] = useState(null);
+    const [loadedTick, setLoadedTick] = useState(0);
+    const [focusTick, setFocusTick] = useState(0);
+    const loadSeq = useRef(0);
 
     const today = officeTodayISO();
     const isToday = dayISO === today;
+
+    useEffect(() => {
+        if (!focusRequest) return;
+        setQuery('');
+        setStateFilter('');
+        setDayISO(officeTodayISO());
+        setFilters((current) => ({ ...DEFAULT_FILTERS, sort: current.sort,
+                                   city: focusRequest.city || '' }));
+        loadSeq.current += 1;
+        setPendingFocus({ ...focusRequest, after: loadedTick });
+        setFocusTick((n) => n + 1);
+        consumeFocus();
+        // Просьба — по nonce: тот же офис, запрошенный дважды, открывается дважды.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [focusRequest?.nonce]);
+
+    useEffect(() => {
+        if (!pendingFocus || loading || loadedTick <= pendingFocus.after) return;
+        if (pendingFocus.officeId) {
+            const office = offices.find((item) => item.id === pendingFocus.officeId);
+            if (office) setInfoTarget(office);
+        }
+        setPendingFocus(null);
+    }, [pendingFocus, loading, loadedTick, offices]);
 
     useEffect(() => {
         try {
@@ -239,6 +280,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
     }, []);
 
     const load = useCallback(() => {
+        const seq = ++loadSeq.current;
         setLoading(true);
         const params = { date: dayISO };
         if (query.trim()) params.q = query.trim();
@@ -251,19 +293,27 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
             axios.get(`${base}/parks`, req),
         ])
             .then(([officeResponse, parkResponse]) => {
+                // Запрос обогнали — его список уже не про то, что на экране.
+                if (seq !== loadSeq.current) return;
                 setOffices(officeResponse.data?.items || []);
                 setCities(officeResponse.data?.cities || []);
                 setCanManage(!!officeResponse.data?.can_manage);
                 setParks((parkResponse.data?.items || []).filter((p) => p.status === 'active'));
             })
-            .catch((e) => toast(errText(e, 'Не удалось загрузить офисы'), 'error'))
-            .finally(() => setLoading(false));
+            .catch((e) => {
+                if (seq === loadSeq.current) toast(errText(e, 'Не удалось загрузить офисы'), 'error');
+            })
+            .finally(() => {
+                if (seq !== loadSeq.current) return;
+                setLoading(false);
+                setLoadedTick((n) => n + 1);
+            });
     }, [base, req, query, dayISO, filters.city, filters.parkId, filters.showArchived, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);
         return () => clearTimeout(timer);
-    }, [load, query]);
+    }, [load, query, focusTick]);
 
     const save = () => {
         const payload = {

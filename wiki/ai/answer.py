@@ -129,6 +129,11 @@ SYSTEM_PROMPT = """Ты — справочный помощник корпора
      по помеченному спокойно, это ровно то, о чём спросили.
    Сегодняшнюю дату ищи в строке СЕГОДНЯ ниже. Срок из фрагмента, который её
    старше, истёк, даже если пометки на фрагменте нет.
+10. СПРАВОЧНИК. Фрагменты с подписью «Справочник «Офисы»» и «Справочник
+   «Города»» — живые данные вкладок вики на сегодня: адрес, телефон, график и
+   статус офиса, комиссия Яндекса по тарифам города. Если статья говорит
+   иначе, верен справочник: статья могла устареть, справочник ведут каждый день.
+   «Сейчас ЧЧ:ММ — открыт/закрыт до …» — состояние офиса в минуту вопроса.
 
 ФОРМАТ ОТВЕТА
 Сначала сам ответ. Затем с новой строки ровно так:
@@ -272,6 +277,10 @@ def should_clarify(question, chunks):
         return False, None
     # Назвал статью её названием («транзакции») — тоже однозначно.
     if any(chunk.get('title_hit') for chunk in chunks):
+        return False, None
+    # Назвал город и спросил офис или комиссию («офис Астана») — справочник уже
+    # ответил записью этого города (wiki/directory.py), переспрашивать не о чем.
+    if any(chunk.get('directory_hit') for chunk in chunks):
         return False, None
     # …но strict_hit требует, чтобы в куске нашлись ВСЕ слова вопроса разом, и
     # этого хватает не всегда. «Что за акция 7 Казына?»: слово «казына» лежит
@@ -422,12 +431,14 @@ def usable_chunks(chunks, floor=STRICT_FLOOR):
     построению, а нашлись они по имени, названному с ошибкой в одну букву —
     отбросить их порогом значило бы выбросить единственную находку. И для ветки
     названия (found_by = 3): человек назвал статью её названием, а тело статьи
-    этого слова может не содержать вовсе (retrieve.search_titles).
+    этого слова может не содержать вовсе (retrieve.search_titles). И для
+    справочника (found_by = 4, wiki/directory.py): записи офиса и города не
+    ищутся по сходству, а берутся по названному городу и намерению.
     """
     out = []
     for chunk in chunks:
         similarity = chunk.get('similarity')
-        by_word = bool({0, 2, 3} & set(chunk.get('found_by') or []))
+        by_word = bool({0, 2, 3, 4} & set(chunk.get('found_by') or []))
         if by_word or (similarity is not None and similarity >= floor):
             out.append(chunk)
     return out
@@ -458,9 +469,16 @@ def build_user_prompt(question, chunks, on_date=None):
         heading = chunk.get('heading_path') or ''
         title = chunk.get('title') or ''
         note = chunk.get('stale_note') or ''
-        label = f'Статья «{title}»'
-        if heading:
-            label += f', раздел «{heading}»'
+        if chunk.get('directory_hit'):
+            # Своя подпись у справочника: правило 10 системного промпта
+            # опирается на неё, когда статья и вкладка расходятся.
+            label = f'Справочник «{title}»'
+            if heading:
+                label += f', запись «{heading}»'
+        else:
+            label = f'Статья «{title}»'
+            if heading:
+                label += f', раздел «{heading}»'
         if note:
             label = f'⚠ {note}. {label}'
         blocks.append(f'[{number}] {label}\nТЕКСТ:\n{chunk["text"]}')
@@ -656,6 +674,13 @@ def build_sources(cited, chunks, answer):
             'stale': bool(chunk.get('stale')),
             'stale_kind': chunk.get('stale_kind'),
             'stale_note': chunk.get('stale_note') or '',
+            # Источник-справочник ведёт во вкладку, а не в статью: у него нет
+            # статьи (article_id None), зато есть вкладка и запись в ней.
+            'source_kind': chunk.get('source_kind') or 'article',
+            'tab': chunk.get('tab'),
+            'ref_id': chunk.get('ref_id'),
+            'ref_city': chunk.get('ref_city'),
+            'space_id': chunk.get('space_id'),
         })
     return sources
 

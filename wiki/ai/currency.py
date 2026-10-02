@@ -160,9 +160,13 @@ def today():
     Не date.today(): сервер стоит в UTC, и с полуночи до пяти утра по Алматы он
     отдавал бы вчерашнее число. На сроке акции это ровно один день ошибки в
     сторону «ещё действует», то есть в сторону инцидента.
+
+    Зона, а не «UTC+6»: с марта 2024 года страна живёт в UTC+5, и прежнее
+    смещение с 23:00 до полуночи отдавало уже завтрашнее число — то же, что
+    справочник офисов (wiki/offices.office_today) считает сегодняшним.
     """
-    return (datetime.datetime.utcnow()
-            + datetime.timedelta(hours=6)).date()
+    from zoneinfo import ZoneInfo
+    return datetime.datetime.now(ZoneInfo('Asia/Almaty')).date()
 
 
 def _as_date(day, month, year):

@@ -39,8 +39,10 @@ const readSelected = (spaceId) => {
     }
 };
 
-export default function WikiCities({ base, headers, showToast, spaceId = null }) {
+export default function WikiCities({ base, headers, showToast, spaceId = null,
+                                     focusRequest = null, onFocusConsumed = null }) {
     const toast = useStableCallback(showToast);
+    const consumeFocus = useStableCallback(onFocusConsumed);
     const isPhone = useIsMobileShell();
 
     /* Одним объектом, чтобы очередной запрос вкладки не забыл пространство —
@@ -129,6 +131,23 @@ export default function WikiCities({ base, headers, showToast, spaceId = null })
         }
         if (isPhone) setPhoneOpen(true);
     };
+
+    /* Просьба открыть вкладку на городе — из поиска или из источника под
+       ответом помощника (WikiView.openDirectory). Выполняется, когда список
+       приехал: до этого выбирать не из чего. Без города (дверь «Комиссия
+       Яндекса по городам») — просто вкладка, с прежним выбором. */
+    useEffect(() => {
+        if (!focusRequest || loading) return;
+        const city = focusRequest.cityId
+            ? cities.find((item) => item.id === focusRequest.cityId) : null;
+        if (city) {
+            setQuery('');
+            select(city);
+        }
+        consumeFocus();
+        // select — обычная функция тела; просьба выполняется по своему nonce.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [focusRequest?.nonce, loading, cities]);
 
     const summary = cities.find((city) => city.id === effectiveId) || null;
     // Карточка — сводка, поверх которой лежит догруженная подробность: пока

@@ -109,6 +109,7 @@ export default function AssistantOrb({
     user, view, apiBaseUrl, withAccessTokenHeader, showToast,
     wikiEnabled = true, locked = false, lockChecking = false,
     onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
+    onOpenWikiTarget = null,
 }) {
     const userId = user?.id;
     const [position, setPosition] = useState(null);   // null — ещё не примерились к окну
@@ -445,12 +446,19 @@ export default function AssistantOrb({
         } catch (error) { /* браузер вправе не поднять фоновую вкладку */ }
     }, [pipWindow]);
 
-    const openArticle = useCallback((slug, quote) => {
-        if (!slug) return;
+    const openArticle = useCallback((slug, quote, source) => {
+        if (!slug) {
+            // Источник-справочник: статьи нет, есть вкладка «Офисы»/«Города».
+            if (!source?.tab || !onOpenWikiTarget) return;
+            setOpen(false);
+            raisePortal();
+            onOpenWikiTarget(source);
+            return;
+        }
         setOpen(false);
         raisePortal();
         onOpenWikiArticle?.(slug, quote);
-    }, [onOpenWikiArticle, raisePortal]);
+    }, [onOpenWikiArticle, onOpenWikiTarget, raisePortal]);
 
     const openFull = useCallback(() => {
         setOpen(false);

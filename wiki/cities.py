@@ -311,6 +311,55 @@ def list_cities(cursor, *, space_id):
     return [_city_row(row) for row in cursor.fetchall()]
 
 
+def directory_cities(cursor, *, space_id):
+    """Живые города пространства для поиска и помощника (wiki/directory.py).
+
+    Не сводка и не карточка: сводке нечем назвать тарифы (названия есть только
+    в слепке Яндекса), а слепок целиком — ~6 КБ на город, на каждое нажатие
+    клавиши в поиске это было бы слишком. Из слепка берём ровно то, что нужно
+    склейке «тариф → комиссия»: код, название и порядок, как на странице.
+    """
+    cursor.execute(
+        """
+        SELECT c.id, c.name, c.tariff_meta, c.extra_tariffs, c.option_commissions,
+               c.park_commission, c.serving_office_id,
+               ARRAY(SELECT co.office_id FROM wiki_city_offices co
+                       JOIN wiki_offices oo ON oo.id = co.office_id
+                        AND oo.space_id = c.space_id AND oo.status = 'active'
+                      WHERE co.city_id = c.id
+                      ORDER BY co.position, co.office_id),
+               COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                    'class', t->>'class', 'name', t->>'name')
+                                  ORDER BY x.ord)
+                           FROM jsonb_array_elements(
+                                    COALESCE(c.yandex_data->'tariffs', '[]'::jsonb))
+                                WITH ORDINALITY AS x(t, ord)), '[]'::jsonb),
+               GREATEST(c.updated_at, c.yandex_changed_at)
+          FROM wiki_cities c
+         WHERE c.space_id = %(space)s AND c.status = 'active'
+         ORDER BY c.position, c.name
+        """,
+        {'space': space_id},
+    )
+    result = []
+    for row in cursor.fetchall():
+        (city_id, name, tariff_meta, extra_tariffs, option_commissions, park_commission,
+         serving_office_id, driver_office_ids, tariffs, updated_at) = row
+        result.append({
+            'id': city_id,
+            'name': name,
+            'tariff_meta': tariff_meta or {},
+            'extra_tariffs': extra_tariffs or [],
+            'option_commissions': option_commissions or [],
+            'park_commission': float(park_commission) if park_commission is not None else None,
+            'serving_office_id': serving_office_id,
+            'driver_office_ids': list(driver_office_ids or []),
+            'tariffs': list(tariffs or []),
+            'updated_at': _iso(updated_at),
+        })
+    return result
+
+
 def get_city(cursor, city_id, *, space_id):
     """Карточка города целиком: сводка + слепок тарифов Яндекса."""
     cursor.execute(

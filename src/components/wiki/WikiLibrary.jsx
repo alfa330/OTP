@@ -11,6 +11,7 @@ import { ArticleStamp, markedWord } from './WikiSearch';
 import WikiSearchFilters, { SearchFilterButton } from './WikiSearchFilters';
 import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
+import { DirectoryRow, directoryKey, directoryTab, openableDirectory } from './searchDirectory';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
 import { openTrail, popTrail, pushTrail, trailBack, trailTop } from './articleTrail';
@@ -133,7 +134,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                       /* «Опубликовать статью и как новость»
                                          (23.09.2026): из статьи и из редактора.
                                          null — нельзя. */
-                                      onPublishAsNews = null }) {
+                                      onPublishAsNews = null,
+                                      /* Справочник поиска (офисы, комиссии
+                                         Яндекса): та же дверь, что у поиска в
+                                         шапке. null — вкладки нет. */
+                                      onOpenOffice = null, onOpenCity = null }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
        onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
        статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
@@ -146,6 +151,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const askAssistant = useStableCallback(onAskAssistant);
     const returnTo = useStableCallback(onReturnTo);
     const canAskAssistant = !!onAskAssistant;
+    const openOffice = useStableCallback(onOpenOffice);
+    const openCity = useStableCallback(onOpenCity);
 
     /* Открытая статья — ВЕРШИНА цепочки переходов, а не отдельное значение:
        из статьи уходят по ссылке в текст соседней, и возврат обязан вести туда,
@@ -191,6 +198,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const [parks, setParks] = useState([]);
     const [parksCanManage, setParksCanManage] = useState(false);
     const [found, setFound] = useState(null);   // null = поиска не было
+    // Справочник того же ответа — офисы и комиссии (wiki/directory.py).
+    const [foundDirectory, setFoundDirectory] = useState([]);
+    const canOpenOffices = !!onOpenOffice;
+    const canOpenCities = !!onOpenCity;
+    const shownDirectory = useMemo(
+        () => openableDirectory(foundDirectory, { offices: canOpenOffices, cities: canOpenCities }),
+        [foundDirectory, canOpenOffices, canOpenCities],
+    );
     const [loading, setLoading] = useState(false);
     /* Периметр витрины — ВСЕГДА личный: человек видит то, к чему имеет
      * отношение. Переключателя «Моё / Всё содержимое» здесь больше нет.
@@ -376,7 +391,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        оригинале. */
     const load = useCallback(() => {
         const term = query.trim();
-        if (term.length < 2) { setFound(null); return; }
+        if (term.length < 2) { setFound(null); setFoundDirectory([]); return; }
 
         setLoading(true);
         /* URLSearchParams, а не объект: axios разложил бы массив как
@@ -392,9 +407,13 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 space_id: spaceId, limit: SEARCH_LIMIT,
             }),
         })
-            .then((r) => setFound(r.data?.items || []))
+            .then((r) => {
+                setFound(r.data?.items || []);
+                setFoundDirectory(r.data?.directory || []);
+            })
             .catch((e) => {
                 setFound([]);
+                setFoundDirectory([]);
                 toast(errText(e, 'Поиск не сработал'), 'error');
             })
             .finally(() => setLoading(false));
@@ -747,11 +766,29 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 )}
 
                 {!busy && searching && (
-                    found.length > 0 ? (
+                    found.length > 0 || shownDirectory.length > 0 ? (
                         <div className="space-y-2.5">
-                            <div className={iosGroupLabel}>
-                                Найдено: {found.length}{found.length >= SEARCH_LIMIT ? '+' : ''}
-                            </div>
+                            {/* Справочник — над статьями, как в поиске шапки: на
+                                «офис алматы» адрес и есть ответ. */}
+                            {shownDirectory.length > 0 && (
+                                <div className={`${iosCard} p-1.5`}>
+                                    <ul className="space-y-0.5">
+                                        {shownDirectory.map((entry) => (
+                                            <DirectoryRow
+                                                key={directoryKey(entry)}
+                                                entry={entry}
+                                                onPick={() => (directoryTab(entry) === 'offices'
+                                                    ? openOffice(entry) : openCity(entry))}
+                                            />
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            {found.length > 0 && (
+                                <div className={iosGroupLabel}>
+                                    Найдено: {found.length}{found.length >= SEARCH_LIMIT ? '+' : ''}
+                                </div>
+                            )}
                             {found.map((article) => (
                                 <ArticleCard key={article.id} article={article}
                                              onOpen={() => openHit(article)} />

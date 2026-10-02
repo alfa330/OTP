@@ -6,10 +6,13 @@
 обратные ссылки.
 """
 
+import logging
+
 from flask import jsonify, redirect, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
+from . import directory as wiki_directory
 from . import file_urls as wiki_file_urls
 from . import guests as wiki_guests
 from . import migration as wiki_migration
@@ -19,6 +22,8 @@ from . import queries
 from . import schema as wiki_schema
 from . import search as wiki_search
 from . import structure
+
+logger = logging.getLogger(__name__)
 
 
 def _int_or_none(value):
@@ -252,7 +257,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         """
         query = (request.args.get('q') or '').strip()
         if len(query) < 2:
-            return jsonify({"items": [], "query": query})
+            return jsonify({"items": [], "query": query, "directory": []})
 
         _subjects, _sections, visible = _browse(cursor, ctx)
         limit = min(max(_int_or_none(request.args.get('limit')) or 20, 1), 50)
@@ -262,15 +267,36 @@ def register(bp, wiki_route, db, log_ip, gcs):
         scope = wiki_search.normalize_scope(request.args.get('match'))
         article_types = _article_types()
         author_ids = _author_ids()
+        section_id = _int_or_none(request.args.get('section_id'))
         items = wiki_search.search(
             cursor, visible, query,
-            section_id=_int_or_none(request.args.get('section_id')),
+            section_id=section_id,
             article_types=article_types,
             author_ids=author_ids,
             scope=scope,
             limit=limit,
             with_trigram=wiki_schema.trigram_available(cursor),
         )
+
+        # Адреса офисов и комиссии Яндекса живут во вкладках «Офисы» и «Города»,
+        # а не в статьях (wiki/directory.py). Отдельным полем, а не в items:
+        # items читают как статьи (карточки витрины, открытие по slug).
+        # Фильтры — про статьи (вид, создатель, «только в названии», раздел):
+        # при них справочник молчит. Его сбой поиск не роняет — под савпоинтом,
+        # как журнал ниже.
+        directory = []
+        if not (article_types or author_ids or section_id or scope != wiki_search.MATCH_ALL):
+            cursor.execute('SAVEPOINT wiki_search_directory')
+            try:
+                directory = wiki_directory.search(
+                    cursor, ctx, query,
+                    requested_space=_int_or_none(request.args.get('space_id')))
+            except Exception:
+                cursor.execute('ROLLBACK TO SAVEPOINT wiki_search_directory')
+                logger.exception('wiki: справочник в поиске не ответил')
+                directory = []
+            else:
+                cursor.execute('RELEASE SAVEPOINT wiki_search_directory')
 
         # Запрос — в журнал. Под савпоинтом: поиск и запись идут в ОДНОЙ
         # транзакции, и падение INSERT'а иначе превратило бы рабочую выдачу в
@@ -287,7 +313,10 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 cursor,
                 user_id=ctx['user_id'],
                 query=query,
-                results_count=len(items),
+                # Справочник — тоже ответ: «офис алматы» с адресом из вкладки
+                # не дыра в базе знаний, и отчёт «искали и не нашли» не должен
+                # звать писать о нём статью.
+                results_count=len(items) + len(directory),
                 perimeter_size=len(visible),
                 department_id=ctx.get('department_id'),
                 space_id=_int_or_none(request.args.get('space_id')),
@@ -303,7 +332,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         else:
             cursor.execute('RELEASE SAVEPOINT wiki_search_log')
 
-        return jsonify({"items": items, "query": query})
+        return jsonify({"items": items, "query": query, "directory": directory})
 
     @wiki_route('/search/authors')
     def wiki_search_authors(cursor, ctx):
