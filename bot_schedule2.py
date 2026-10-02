@@ -43196,8 +43196,45 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now, *, names=None, ful
     return rows
 
 
+def _szov_chat_wallboard_last_visit(row):
+    """Последний заход учётки в Chat2Desk (`last_visit` из /v1/operators) стенным временем
+    табло: «2026-10-02 18:59:52». Пустая строка — поля нет или оно не разобралось.
+
+    Вендор пишет отметку в UTC и с припиской («2026-10-02T13:59:52 UTC»). Пока человек в
+    системе, она обновляется каждые несколько секунд, а у вышедшего замирает на выходе:
+    сверено 02.10.2026 с отчётом operator_events на семи ручных выходах — отстаёт от выхода
+    на 0–13 с и после него не двигается."""
+    text = str((row or {}).get('last_visit') or '').strip()
+    if not text:
+        return ''
+    text = re.sub(r'\s*(?:UTC|Z)$', '+00:00', text, flags=re.IGNORECASE)
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return ''
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZoneInfo(CHAT_HOURLY_TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _szov_chat_wallboard_left_at(entries, rows):
+    """С какого момента чатник не в системе: «2026-10-02 18:59:52» или '' — неизвестно.
+
+    Отметок две, берём позднюю. Лента статусов знает выход точно, только если его прислал
+    сам вендор (автовыход по бездействию). Ручной выход вебхуком не приходит, и лента
+    дописывает его временем ПОСЛЕДНЕГО события человека: у «Занят», который Chat2Desk ставит
+    за секунду до выхода, это верно, а из «Закрытия чатов» выходят позже — 01.10.2026 на 34
+    минуты, 02.10.2026 на 15. `last_visit` из ростера этой ошибки не знает.
+    Событие суток на 00:00:00 — перенесённый со вчера статус, а не выход в полночь: его не
+    берём, иначе ушедший вчера вечером читался бы «не в системе с 00:00»."""
+    moments = [_szov_chat_wallboard_last_visit(row) for row in rows or ()]
+    if entries and entries[-1][0] > 0:
+        moments.append(str(entries[-1][3] or '')[:19].replace('T', ' '))
+    return max((moment for moment in moments if moment), default='')
+
+
 def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, replies=None):
-    """Счётчики и список людей «на сейчас» по чат-менеджерам СЗоВ.
+    """Счётчики и списки людей «на сейчас» по чат-менеджерам СЗоВ.
 
     Статус берём из последнего события за сутки, а из живого списка учёток — открытые чаты и
     тех, у кого сегодня событий ещё не было: ночная смена, начатая вчера, событий сегодня не
@@ -43206,9 +43243,13 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
     Он едет рядом с каждым человеком в списке смены: со стены должно быть видно не только
     «сколько у него сейчас чатов», но и как он на них отвечает — иначе занятость читается без
     качества, и один и тот же «7 в работе» одинаково выглядит у того, кто отвечает за минуту,
-    и у того, кто держит клиента десять."""
+    и у того, кто держит клиента десять.
+    Вышедшие идут отдельным списком `offline_operators` (запрос владельца 02.10.2026): раньше
+    табло знало о них только число «Не в системе», а кто это и с какого часа — нет. Список
+    сходится с числом человек в человека: оба собираются в одних и тех же ветках ниже."""
     counts = {key: 0 for key in _SZOV_CHAT_WALLBOARD_STATUS_ORDER}
     people = []
+    offline_people = []
     seen = set()
     open_chats_total = 0
     for row in operator_rows or []:
@@ -43259,16 +43300,37 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
                 'first_reply_seconds': _szov_chat_wallboard_reply_average(own_replies, 'first'),
                 'inner_reply_seconds': _szov_chat_wallboard_reply_average(own_replies, 'inner'),
             })
+        else:
+            offline_people.append({
+                'operator_id': operator.get('id'),
+                'name': operator.get('name') or oktell_name,
+                'since': _szov_chat_wallboard_left_at(entries, [row]),
+            })
     # Учётка могла быть отключена посреди дня — в живом списке её уже нет, а события за сутки
     # остались. На линии такой человек не стоит (учётки больше нет), поэтому считаем его
     # вышедшим: иначе плитка «Онлайн» показывала бы больше людей, чем стоит в списке смены.
+    # Строку отключённой учётки ростер всё равно отдаёт — из неё берём момент выхода.
+    rows_by_name = {}
+    for row in operator_rows or []:
+        if isinstance(row, dict):
+            rows_by_name.setdefault(_chat2desk_operator_display_name(row), []).append(row)
     for oktell_name, entries in timelines.items():
         if oktell_name in seen or not entries:
             continue
         counts['offline'] = counts.get('offline', 0) + 1
+        operator = _szov_chat_wallboard_resolve(oktell_name, lookup) or {}
+        offline_people.append({
+            'operator_id': operator.get('id'),
+            'name': operator.get('name') or oktell_name,
+            'since': _szov_chat_wallboard_left_at(entries, rows_by_name.get(oktell_name)),
+        })
     people.sort(key=lambda item: (
         _SZOV_CHAT_WALLBOARD_STATUS_RANK.get(item['status_key'], len(_SZOV_CHAT_WALLBOARD_STATUS_ORDER)),
         -int(item['open_chats'] or 0), item['name']))
+    # Свежие выходы сверху: со стены важнее, кто ушёл только что, чем кто не заходит неделю.
+    # Сортировка устойчивая, поэтому при одинаковом моменте (и без него) люди идут по ФИО.
+    offline_people.sort(key=lambda item: item['name'])
+    offline_people.sort(key=lambda item: item['since'], reverse=True)
     return {
         'operators_online': counts.get('online', 0),
         'operators_busy': counts.get('busy', 0),
@@ -43279,6 +43341,7 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
         'operators_offline': counts.get('offline', 0),
         'open_chats': open_chats_total,
         'operators': people,
+        'offline_operators': offline_people,
     }
 
 
@@ -45909,8 +45972,8 @@ def _szov_chat_wallboard_workbook(payload):
                     cell.font = good_font if float(inner_seconds) <= target_seconds else bad_font
         ws_shift.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
                                                 max(1, len(people) + 1))
-        # Вышедшие в список не идут (как и на табло), но их число видно — иначе смена в файле
-        # выглядит меньше, чем она есть.
+        # Вышедшие в список смены не идут (на табло они на своей вкладке «Не в системе»), но
+        # их число видно — иначе смена в файле выглядит меньше, чем она есть.
         offline = _int(now_block.get('operators_offline'))
         if offline:
             note = ws_shift.cell(row=len(people) + 3, column=1,

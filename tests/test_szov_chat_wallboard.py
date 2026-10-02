@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -65,6 +65,8 @@ NAMES = {
     '_szov_chat_wallboard_reply_average',
     '_szov_chat_wallboard_hourly',
     '_szov_chat_wallboard_display_names',
+    '_szov_chat_wallboard_last_visit',
+    '_szov_chat_wallboard_left_at',
     '_szov_chat_wallboard_now',
     '_szov_chat_wallboard_fetch_events',
     '_szov_chat_wallboard_fetch_snapshot',
@@ -115,6 +117,7 @@ class _Harness:
             'logging': logging,
             'threading': threading,
             'datetime': datetime,
+            'timezone': timezone,
             'ZoneInfo': ZoneInfo,
             'requests': fake_requests,
             're': __import__('re'),
@@ -594,6 +597,117 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
         self.assertEqual(now['operators_online'], 0)
         self.assertEqual(now['operators_offline'], 1)
         self.assertEqual(now['operators'], [])
+        # И в списке вышедших он есть: число и список — одни и те же люди.
+        self.assertEqual(now['offline_operators'],
+                         [{'operator_id': 235, 'name': 'Тестова Алия Тестовна',
+                           'since': '2026-08-18 09:00:00'}])
+
+    def test_disabled_account_takes_its_exit_from_its_own_roster_row(self):
+        """Отключённую учётку ростер всё равно отдаёт — момент выхода берём из её строки."""
+        ns = self._namespace()
+        events = [_event('Алия Тестова', 'online', '2026-10-02 09:00:00')]
+        rows = [dict(_operator_row('Алия Тестова', online=0, status='disabled'),
+                     last_visit='2026-10-02T06:30:00 UTC')]
+        now = self._now(ns, events, rows)
+        self.assertEqual(now['offline_operators'][0]['since'], '2026-10-02 11:30:00')
+
+    def test_people_out_of_the_system_are_listed_by_name(self):
+        """Запрос владельца 02.10.2026: видно не только СКОЛЬКО чатников не в системе, но и КТО.
+
+        Список сходится с числом «Не в системе» человек в человека, в список смены вышедшие
+        не попадают, а у не заходившего сегодня момента выхода нет — его не выдумываем."""
+        ns = self._namespace()
+        events = [
+            _event('Алия Тестова', 'online', '2026-08-18 09:00:00'),
+            _event('Дана Ночная', 'logout', '2026-08-18 02:00:45'),
+        ]
+        rows = [
+            _operator_row('Алия Тестова'),
+            _operator_row('Дана Ночная', online=0, offline_type='busy'),
+            _operator_row('Ерлан Учебный', online=0),
+        ]
+        now = self._now(ns, events, rows)
+        self.assertEqual(now['offline_operators'], [
+            {'operator_id': 18, 'name': 'Ночная Дана Сменовна', 'since': '2026-08-18 02:00:45'},
+            {'operator_id': 37, 'name': 'Учебный Ерлан Тренингулы', 'since': ''},
+        ])
+        self.assertEqual(now['operators_offline'], len(now['offline_operators']))
+        self.assertEqual([person['name'] for person in now['operators']], ['Тестова Алия Тестовна'])
+
+    def test_exit_from_closing_chats_is_dated_by_last_visit(self):
+        """Ручной выход вебхуком не приходит, и лента дописывает его временем ПОСЛЕДНЕГО статуса.
+
+        Из «Закрытия чатов» выходят минутами позже (02.10.2026: статус в 18:44, выход в 18:59),
+        и время статуса читалось бы как ранний уход. `last_visit` ростера — в UTC."""
+        ns = self._namespace()
+        events = [
+            _event('Алия Тестова', 'online', '2026-10-02 09:00:00'),
+            _event('Алия Тестова', 'holiday', '2026-10-02 18:44:24'),
+            # Так ростер дописывает ручной выход: временем последнего события человека.
+            _event('Алия Тестова', 'logout', '2026-10-02 18:44:24'),
+        ]
+        rows = [dict(_operator_row('Алия Тестова', online=0, offline_type='holiday'),
+                     last_visit='2026-10-02T13:59:52 UTC')]
+        now = self._now(ns, events, rows, now_seconds=21 * 3600)
+        self.assertEqual(now['offline_operators'][0]['since'], '2026-10-02 18:59:52')
+
+    def test_exit_sent_by_the_vendor_beats_an_earlier_last_visit(self):
+        """Автовыход вендор присылает с точным временем; last_visit до него — последний заход,
+        а не выход. Иначе список разошёлся бы с часами «на линии», где человек до автовыхода был."""
+        ns = self._namespace()
+        events = [
+            _event('Алия Тестова', 'online', '2026-10-02 09:00:00'),
+            _event('Алия Тестова', 'offline', '2026-10-02 20:59:00'),
+        ]
+        rows = [dict(_operator_row('Алия Тестова', online=0), last_visit='2026-10-02T15:29:10 UTC')]
+        now = self._now(ns, events, rows, now_seconds=21 * 3600 + 600)
+        self.assertEqual(now['offline_operators'][0]['since'], '2026-10-02 20:59:00')
+
+    def test_status_carried_from_yesterday_is_not_an_exit_at_midnight(self):
+        """Вчерашний выход переносится на 00:00:00 сегодняшних суток. Это не «вышел в полночь»:
+        момент берём из last_visit, иначе ушедший вчера вечером читался бы «с 00:00»."""
+        ns = self._namespace()
+        events = [_event('Алия Тестова', 'logout', '2026-10-02 00:00:00')]
+        rows = [dict(_operator_row('Алия Тестова', online=0), last_visit='2026-10-01T14:59:02 UTC')]
+        now = self._now(ns, events, rows)
+        self.assertEqual(now['offline_operators'][0]['since'], '2026-10-01 19:59:02')
+
+    def test_last_visit_spellings_and_garbage(self):
+        """Приписка зоны бывает разной; мусор не роняет табло — момент просто неизвестен."""
+        last_visit = self._namespace()['_szov_chat_wallboard_last_visit']
+        visit = lambda value: last_visit({'last_visit': value})
+        self.assertEqual(visit('2026-10-02T13:59:52 UTC'), '2026-10-02 18:59:52')
+        self.assertEqual(visit('2026-10-02T13:59:52Z'), '2026-10-02 18:59:52')
+        self.assertEqual(visit('2026-10-02T13:59:52+00:00'), '2026-10-02 18:59:52')
+        self.assertEqual(visit('2026-10-02T21:00:00 utc'), '2026-10-03 02:00:00')  # сутки сменились
+        for broken in (None, '', 'вчера', '2026-13-45T99:00:00 UTC'):
+            self.assertEqual(visit(broken), '', broken)
+
+    def test_fresh_exits_come_first(self):
+        """Сверху тот, кто вышел только что; кто не заходит давно — ниже; без момента — в конце."""
+        ns = self._namespace()
+        events = [
+            _event('Алия Тестова', 'logout', '2026-10-02 12:00:00'),
+            _event('Бекзат Примеров', 'logout', '2026-10-02 17:30:00'),
+        ]
+        rows = [
+            _operator_row('Алия Тестова', online=0),
+            _operator_row('Бекзат Примеров', online=0),
+            dict(_operator_row('Дана Ночная', online=0), last_visit='2026-09-22T20:00:01 UTC'),
+            _operator_row('Ерлан Учебный', online=0),
+        ]
+        now = self._now(ns, events, rows, now_seconds=18 * 3600)
+        self.assertEqual([person['since'] for person in now['offline_operators']],
+                         ['2026-10-02 17:30:00', '2026-10-02 12:00:00', '2026-09-23 01:00:01', ''])
+
+    def test_people_without_a_moment_go_by_name(self):
+        """При равном моменте (и без него) — по ФИО, а не в порядке строк ростера: иначе список
+        переставлялся бы от снимка к снимку вслед за вендором."""
+        ns = self._namespace()
+        rows = [_operator_row('Ерлан Учебный', online=0), _operator_row('Дана Ночная', online=0)]
+        now = self._now(ns, [], rows)
+        self.assertEqual([person['name'] for person in now['offline_operators']],
+                         ['Ночная Дана Сменовна', 'Учебный Ерлан Тренингулы'])
 
     def test_strangers_do_not_pollute_the_rename_diagnostic(self):
         """В диагностику идут только потерянные чат-менеджеры, а не операторы других отделов."""
@@ -762,6 +876,10 @@ class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
         self.assertEqual((now['operators_busy'], now['operators_offline']), (1, 1))
         self.assertEqual([(person['name'], person['status']) for person in now['operators']],
                          [('Примеров Бекзат Примерулы', 'Занят')])
+        # Вышедшая — на странице «Не в системе», с моментом выхода (вендорский «Занят»).
+        self.assertEqual(now['offline_operators'],
+                         [{'operator_id': 235, 'name': 'Тестова Алия Тестовна',
+                           'since': '2026-10-02 17:00:01'}])
         # Часы на линии до выхода остались за ней: онлайн с 09:00 до «Занят» в 17:00:01.
         hours = {row['hour']: row['operators_online'] for row in snapshot['hourly']}
         self.assertEqual((hours[9], hours[16], hours[17]), (2, 1, 0))
@@ -851,6 +969,23 @@ class ChatWallboardWiringTests(unittest.TestCase):
         column = self.board[self.board.index('const ChatPeopleColumn'):self.board.index('const formatPeople')]
         self.assertIn('{item.status}', column)
         self.assertNotIn("item.status_key !== 'online'", column)
+
+    def test_shift_column_has_a_page_for_people_out_of_the_system(self):
+        """Запрос владельца 02.10.2026: у колонки две страницы — «На смене» и «Не в системе»,
+        число людей стоит на каждой вкладке, а вышедшие видны поимённо, а не одной строкой
+        «Не в системе: N» внизу колонки."""
+        column = self.board[self.board.index('const OfflinePeopleList'):
+                            self.board.index('const formatPeople')]
+        # Вкладки — общий примитив сайта, а не свой велосипед; число — у каждой вкладки.
+        self.assertIn('<IosSegmented', column)
+        self.assertIn("{ value: 'shift', label: 'На смене', count: items.length }", column)
+        self.assertIn("{ value: 'offline', label: 'Не в системе', count: offlineItems.length }", column)
+        # По умолчанию открыта смена: на стене смотрят прежде всего её.
+        self.assertIn("useState('shift')", column)
+        self.assertIn("formatOfflineSince(item.since, day)", column)
+        # Прежняя строка с одним числом ушла: число теперь на вкладке.
+        self.assertNotIn('Не в системе: {', self.board)
+        self.assertIn('offlinePeople={now.offline_operators} day={snapshot?.day}', self.board)
 
     def test_chat_board_shows_the_three_asked_counters(self):
         for label in ('label="Онлайн"', 'label="Занят"', 'label="Тренинг"'):

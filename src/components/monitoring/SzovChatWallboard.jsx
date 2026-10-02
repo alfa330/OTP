@@ -12,8 +12,7 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import FaIcon from '../common/FaIcon';
-import { APPLE_FONT, iosCard } from '../ui/ios';
+import { APPLE_FONT, IosSegmented, iosCard } from '../ui/ios';
 import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
 import {
     CHAT_STATUS_STYLE,
@@ -22,6 +21,7 @@ import {
     formatDuration,
     formatInt,
     formatMinutes,
+    formatOfflineSince,
     pluralRu,
 } from './szovWallboardShared';
 
@@ -49,21 +49,66 @@ const CHART_COLORS = {
 };
 
 /*
+ * Страница «Не в системе»: кто из чатников вышел и с какого момента. Свежие выходы сверху —
+ * порядок задаёт сервер. Статус-чип здесь не нужен: он был бы у всех один и тот же, а страница
+ * и так называется «Не в системе».
+ */
+const OfflinePeopleList = ({ items, day, nameSize }) => (
+    items.length === 0 ? (
+        <div className="py-1.5 text-[15px] text-slate-400">Никого</div>
+    ) : (
+        <ul className="min-h-0 divide-y divide-slate-100 overflow-y-auto">
+            {items.map((item) => {
+                const since = formatOfflineSince(item.since, day);
+                return (
+                    <li key={`${item.operator_id ?? item.name}`} className="py-3">
+                        <div className="leading-snug text-slate-800" style={{ fontSize: nameSize }}>
+                            {item.name}
+                        </div>
+                        {since ? (
+                            <div className="mt-0.5 text-[14px] font-medium tabular-nums text-slate-400">{since}</div>
+                        ) : null}
+                    </li>
+                );
+            })}
+        </ul>
+    )
+);
+
+/*
  * Правая колонка: кто сейчас на смене, в каком статусе, сколько у него чатов в работе и как
  * он на них отвечает. Время ответа тут — ЗА СУТКИ, а не «сейчас» (по одному чату оно скачет
  * от минуты до получаса), и стоит рядом с занятостью намеренно: «7 в работе» у того, кто
  * отвечает за минуту, и у того, кто держит клиента десять, — это разные семь чатов.
+ *
+ * Страниц у колонки две — «На смене» и «Не в системе» (запрос владельца 02.10.2026). Раньше
+ * вышедших было видно только числом внизу колонки, а кто это — со стены не узнать. Общим
+ * списком их не показать: смена утонула бы среди тех, кто ушёл домой. Число людей стоит на
+ * каждой вкладке, по умолчанию открыта смена — на стене смотрят прежде всего её. Вкладка —
+ * состояние экрана, как и режим подсказки графика: встроенный и полноэкранный режим
+ * переключаются каждый сам за себя.
  */
-const ChatPeopleColumn = ({ people, offline, targetSeconds, scale = 1 }) => {
+const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, scale = 1 }) => {
+    const [page, setPage] = useState('shift');
     const items = Array.isArray(people) ? people : [];
+    const offlineItems = Array.isArray(offlinePeople) ? offlinePeople : [];
     const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
     return (
         <div className={`${iosCard} flex flex-col p-5`}>
-            <div className="mb-2 flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
-                <FaIcon className="fas fa-comments"></FaIcon>
-                <span>Чатники на смене</span>
-            </div>
-            {items.length === 0 ? (
+            <IosSegmented
+                stretch
+                value={page}
+                onChange={setPage}
+                ariaLabel="Чатники"
+                className="mb-2"
+                options={[
+                    { value: 'shift', label: 'На смене', count: items.length },
+                    { value: 'offline', label: 'Не в системе', count: offlineItems.length },
+                ]}
+            />
+            {page === 'offline' ? (
+                <OfflinePeopleList items={offlineItems} day={day} nameSize={nameSize} />
+            ) : items.length === 0 ? (
                 <div className="py-1.5 text-[15px] text-slate-400">Никого</div>
             ) : (
                 <ul className="min-h-0 divide-y divide-slate-100 overflow-y-auto">
@@ -133,11 +178,6 @@ const ChatPeopleColumn = ({ people, offline, targetSeconds, scale = 1 }) => {
                     })}
                 </ul>
             )}
-            {offline > 0 ? (
-                <div className="mt-auto border-t border-slate-200/70 pt-3 text-[14px] text-slate-400">
-                    Не в системе: {formatInt(offline)}
-                </div>
-            ) : null}
         </div>
     );
 };
@@ -422,7 +462,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                 </Section>
             </div>
 
-            <ChatPeopleColumn people={now.operators} offline={Number(now.operators_offline) || 0}
+            <ChatPeopleColumn people={now.operators} offlinePeople={now.offline_operators} day={snapshot?.day}
                               targetSeconds={targetSeconds} scale={scale} />
         </div>
     );
