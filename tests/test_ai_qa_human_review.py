@@ -220,8 +220,11 @@ class ApiWiringTests(unittest.TestCase):
         self.assertIn("_ai_qa_direction_department_allowed(", body)
         self.assertIn("criteria_direction_id(direction_id)", body)
         self.assertIn('"scale_changed"', body)
-        # В журнал — только с правами журнала.
-        self.assertIn("_ensure_call_access_for_requester(", body)
+        # В журнал — только с правами журнала. Обёртка раздела отдаёт проверку
+        # общей функции всем, кроме поимённого наблюдателя (его отдел — только ОП).
+        self.assertIn("_ai_qa_operator_access(int(target['operator_id']), requester, requester_id)", body)
+        self.assertIn("return _ensure_call_access_for_requester(operator_id, requester, requester_id)",
+                      self._function("_ai_qa_operator_access"))
         self.assertIn("_ai_qa_can_correct_journal(requester_id, requester)", body)
         self.assertIn("db.add_call_evaluation(", self._function("_ai_qa_write_journal"))
 

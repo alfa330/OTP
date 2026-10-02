@@ -449,7 +449,8 @@ class BackendObserverTests(unittest.TestCase):
     def test_ai_qa_guard_refuses_writes(self):
         guard = _function_source(BOT_PATH, "_ai_qa_guard")
         self.assertIn("if _is_marketing_observer(requester_id, role):", guard)
-        self.assertIn("if _request_is_read_only():", guard)
+        # Кроме чтения — только поимённые действия (AiQaObserverActionTests).
+        self.assertIn("if _request_is_read_only() or _ai_qa_observer_may_act(requester_id):", guard)
         self.assertIn("Раздел открыт вам только на просмотр", guard)
 
     def test_surveys_guard_lists_the_role(self):
@@ -546,6 +547,131 @@ class EvaluationJournalObserverTests(unittest.TestCase):
 
     def test_batch_feedback_stays_on_the_action_flag(self):
         self.assertIn("(isAdminRole || isSupervisorRole) && !!call && !call.is_imported", self.source)
+
+
+class AiQaObserverActionTests(unittest.TestCase):
+    """Поимённое право действий наблюдателя в «ИИ-оценке» (02.10.2026, id 471 и 472).
+
+    Отдел у них прежний — только ОП, — а запись открыта на перечень ручек:
+    «Из АТС», «Моя оценка», разборы ИИ. Гоняем настоящие функции гарда на
+    двойниках, а список людей и ручек — НАСТОЯЩИЙ, из исходника: опасны оба
+    промаха — лишняя открытая ручка (шкала критериев, ручная выборка) и чужой
+    отдел у оператора.
+    """
+
+    GRANTED = (471, 472)
+    # Такой же наблюдатель «Маркетинга», но без поимённого права.
+    OTHER_OBSERVER = 474
+
+    def setUp(self):
+        class _Request:
+            method = "GET"
+            endpoint = None
+
+        class _G:
+            user_id = None
+
+        self.request = _Request()
+        self.g = _G()
+        self.operator_departments = {1: "op", 2: "szov", 3: "tez"}
+        self.namespace = {
+            "AI_QA_EXTRA_ACCESS_USER_IDS": {183, 169},
+            "AI_QA_OBSERVER_SCOPE_DEPARTMENTS": ("op",),
+            "AI_QA_SUBJECT_DEPARTMENT_CODES": frozenset({"op", "szov", "tez"}),
+            "request": self.request,
+            "g": self.g,
+            "jsonify": lambda payload: payload,
+            "db": type("_Db", (), {"get_user": staticmethod(
+                lambda id=None: (id, None, "name", ROLE))})(),
+            "_normalize_user_role": lambda role: role,
+            "_is_global_admin_requester": lambda role, requester_id: False,
+            "_is_ai_qa_department_head": lambda requester_id: False,
+            "_is_marketing_observer": lambda requester_id, role=None: True,
+            "_request_is_read_only": lambda: self.request.method in ("GET", "HEAD", "OPTIONS"),
+            "_department_code_of_user": lambda user_id: self.operator_departments.get(user_id),
+            "_ensure_call_access_for_requester": lambda *args: "delegated",
+        }
+        bot_source = _read(BOT_PATH)
+        for pattern in (r"^AI_QA_OBSERVER_ACTION_USER_IDS = \{[\d, ]*\}$",
+                        r"^AI_QA_OBSERVER_ACTION_ENDPOINTS = frozenset\(\{.*?\}\)"):
+            exec(re.search(pattern, bot_source, re.S | re.M).group(0), self.namespace)
+        for name in ("_ai_qa_guard", "_ai_qa_observer_may_act", "_ai_qa_operator_access"):
+            exec(_function_source(BOT_PATH, name), self.namespace)
+
+    def _guard(self, user_id, method, endpoint):
+        self.g.user_id = user_id
+        self.request.method = method
+        self.request.endpoint = endpoint
+        return self.namespace["_ai_qa_guard"]()
+
+    def test_grant_lists_exactly_the_people_named_by_the_owner(self):
+        # Строка в этом списке — запись в журнал оценок операторов ОП. Новый
+        # человек появляется здесь только вместе с решением владельца.
+        self.assertEqual(set(self.GRANTED), self.namespace["AI_QA_OBSERVER_ACTION_USER_IDS"])
+        self.assertNotIn(self.OTHER_OBSERVER, self.namespace["AI_QA_OBSERVER_ACTION_USER_IDS"])
+
+    def test_granted_observer_acts_only_through_listed_endpoints(self):
+        for user_id in self.GRANTED:
+            for endpoint in ("api_ai_qa_pull_call", "api_ai_qa_human_review",
+                             "api_ai_qa_adjudicate", "api_ai_qa_adjudicate_refine",
+                             "api_ai_qa_adjudicate_similar"):
+                with self.subTest(user_id=user_id, endpoint=endpoint):
+                    self.assertEqual((user_id, None), self._guard(user_id, "POST", endpoint))
+            for endpoint in ("api_ai_qa_criteria_config", "api_ai_qa_daily_sample",
+                             "api_ai_qa_rag_rollout", None):
+                with self.subTest(user_id=user_id, endpoint=endpoint):
+                    requester_id, err = self._guard(user_id, "POST", endpoint)
+                    self.assertIsNone(requester_id)
+                    self.assertEqual(403, err[1])
+
+    def test_other_observers_stay_read_only(self):
+        self.assertEqual((self.OTHER_OBSERVER, None),
+                         self._guard(self.OTHER_OBSERVER, "GET", "api_ai_qa_evaluations"))
+        requester_id, err = self._guard(self.OTHER_OBSERVER, "POST", "api_ai_qa_pull_call")
+        self.assertIsNone(requester_id)
+        self.assertEqual(403, err[1])
+
+    def test_grant_needs_marketing_membership(self):
+        # Переведён из «Маркетинга» — наблюдателем больше не считается, и
+        # поимённая строка ничего сверх общих правил не даёт.
+        self.namespace["_is_marketing_observer"] = lambda requester_id, role=None: False
+        for user_id in self.GRANTED:
+            with self.subTest(user_id=user_id):
+                requester_id, err = self._guard(user_id, "POST", "api_ai_qa_pull_call")
+                self.assertIsNone(requester_id)
+                self.assertEqual(403, err[1])
+
+    def test_operator_access_is_sales_only_and_section_only(self):
+        access = self.namespace["_ai_qa_operator_access"]
+        self.request.method = "POST"
+        for user_id in self.GRANTED:
+            with self.subTest(user_id=user_id):
+                self.g.user_id = user_id
+                self.request.endpoint = "api_ai_qa_pull_call"
+                self.assertTrue(access(1, None, user_id))
+                self.assertFalse(access(2, None, user_id))
+                self.assertFalse(access(3, None, user_id))
+                # Вне ручек раздела (тот же человек в «Журнале оценок») — общая
+                # проверка, которая наблюдателю оставляет только чтение.
+                self.request.endpoint = "save_call_evaluation"
+                self.assertEqual("delegated", access(1, None, user_id))
+        self.request.endpoint = "api_ai_qa_pull_call"
+        self.assertEqual("delegated", access(1, None, self.OTHER_OBSERVER))
+
+    def test_listed_endpoints_exist_and_section_sites_use_the_wrapper(self):
+        source = _read(BOT_PATH)
+        for endpoint in self.namespace["AI_QA_OBSERVER_ACTION_ENDPOINTS"]:
+            with self.subTest(endpoint=endpoint):
+                self.assertRegex(source, rf"(?m)^def {endpoint}\(\):")
+        for name, needle in (
+                ("api_ai_qa_pull_call", "if not _ai_qa_operator_access(operator_id, requester, requester_id):"),
+                ("_cdr_import_touch", "if not _ai_qa_operator_access(operator_id, requester, requester_id):"),
+                ("api_ai_qa_human_review",
+                 "if not _ai_qa_operator_access(int(target['operator_id']), requester, requester_id):")):
+            with self.subTest(function=name):
+                body = _function_source(BOT_PATH, name)
+                self.assertIn(needle, body)
+                self.assertNotIn("_ensure_call_access_for_requester(", body)
 
 
 class SurveysRespondentTests(unittest.TestCase):

@@ -3177,6 +3177,24 @@ FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
 #         не возглавляющий отдел), но раздел ей нужен наверняка, а поимённая
 #         строка это и выражает — в отличие от роли, которую однажды поменяют.
 AI_QA_EXTRA_ACCESS_USER_IDS = {183, 169}
+# Наблюдатель «Маркетинга» с правом ДЕЙСТВИЙ в «ИИ-оценке» — поимённо, по решению
+# владельца 02.10.2026. Это НЕ строка в списке выше: тот открывает все три отдела
+# и все действия, а здесь отдел остаётся наблюдательским (только ОП,
+# AI_QA_OBSERVER_SCOPE_DEPARTMENTS), а запись открыта ровно на перечень ручек
+# ниже: «Из АТС», «Моя оценка» (в журнал — с замком СВ: чужую строку журнала не
+# переписать) и разборы ИИ. Шкала критериев и ручной прогон выборки закрыты.
+# Право держится и на членстве в «Маркетинге»: переведённый в другой отдел его
+# теряет вместе с наблюдателем.
+#   471, 472 — сотрудники «Маркетинга», оба выданы 02.10.2026 (ФИО в
+#   публичный репозиторий не пишем — их знает users.id).
+AI_QA_OBSERVER_ACTION_USER_IDS = {471, 472}
+AI_QA_OBSERVER_ACTION_ENDPOINTS = frozenset({
+    'api_ai_qa_pull_call',
+    'api_ai_qa_human_review',
+    'api_ai_qa_adjudicate',
+    'api_ai_qa_adjudicate_refine',
+    'api_ai_qa_adjudicate_similar',
+})
 # «Чаты ОП» — СВОЙ список, а не тот же самый. Раздел показывает
 # переписку Wazzup ОТДЕЛА ПРОДАЖ, и пока список был общий, любой человек,
 # добавленный ради «ИИ-оценки», молча получал вместе с ней и чужую переписку.
@@ -5605,10 +5623,37 @@ def _ai_qa_guard():
         if role == 'sv' and _department_code_of_user(requester_id) in AI_QA_SUBJECT_DEPARTMENT_CODES:
             return requester_id, None
         if _is_marketing_observer(requester_id, role):
-            if _request_is_read_only():
+            if _request_is_read_only() or _ai_qa_observer_may_act(requester_id):
                 return requester_id, None
             return None, (jsonify({"error": "Раздел открыт вам только на просмотр"}), 403)
     return None, (jsonify({"error": "forbidden"}), 403)
+
+
+def _ai_qa_observer_may_act(requester_id):
+    """Этот запрос — действие, выданное наблюдателю поимённо
+    (AI_QA_OBSERVER_ACTION_USER_IDS).
+
+    Граница здесь по ручкам, а не по методу, как у остальных наблюдателей:
+    право выдано на перечень действий, и новая ручка записи не должна открыться
+    ему сама. Вне запроса — False, как у _request_is_read_only."""
+    if requester_id is None or int(requester_id) not in AI_QA_OBSERVER_ACTION_USER_IDS:
+        return False
+    try:
+        return request.endpoint in AI_QA_OBSERVER_ACTION_ENDPOINTS
+    except Exception:
+        return False
+
+
+def _ai_qa_operator_access(operator_id, requester, requester_id):
+    """Доступ к оператору для ДЕЙСТВИЙ раздела «ИИ-оценка».
+
+    Общая _ensure_call_access_for_requester наблюдателю «Маркетинга» пропускает
+    только чтение, и обязана: через неё же ставят оценки в «Журнале оценок» по
+    всем отделам. Поэтому поимённое право действий проверяется здесь, только в
+    ручках раздела и только по отделу наблюдателя."""
+    if _ai_qa_observer_may_act(requester_id) and _is_marketing_observer(requester_id):
+        return _department_code_of_user(operator_id) in AI_QA_OBSERVER_SCOPE_DEPARTMENTS
+    return _ensure_call_access_for_requester(operator_id, requester, requester_id)
 
 
 def _verifier_chats_guard():
@@ -6810,7 +6855,7 @@ def api_ai_qa_pull_call():
                     if explicit_operator:
                         return jsonify({"error": "Этот оператор вне ваших направлений"}), 403
                     continue
-            if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+            if not _ai_qa_operator_access(operator_id, requester, requester_id):
                 if explicit_operator:
                     return jsonify({"error": "Нет доступа к этому оператору"}), 403
                 continue
@@ -7021,7 +7066,7 @@ def _cdr_import_touch(linkedid, requester_id, requester):
         from call_qa.api import direction_in_scope
         if direction_id is None or not direction_in_scope(direction_id, scope):
             return jsonify({"error": "Этот оператор вне ваших направлений"}), 403
-    if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+    if not _ai_qa_operator_access(operator_id, requester, requester_id):
         return jsonify({"error": "Нет доступа к этому оператору"}), 403
     if not cdr_touches.recording_belongs_to(touch['recording_url'], touch['ext'],
                                             touch['phone'], touch['linkedid']):
@@ -7996,7 +8041,7 @@ def api_ai_qa_human_review():
                                          "запрос на переоценку в «Журнале оценок»",
                                 "code": "journal_locked"}), 403
             target = _ai_qa_journal_target(subject, journal_row, requester_id)
-            if not _ensure_call_access_for_requester(int(target['operator_id']), requester, requester_id):
+            if not _ai_qa_operator_access(int(target['operator_id']), requester, requester_id):
                 return jsonify({"error": "Нет доступа к оценкам этого сотрудника"}), 403
 
         review = _qa_human_review.upsert_review(
