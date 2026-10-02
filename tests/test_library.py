@@ -1789,6 +1789,21 @@ class ClosedBookTests(unittest.TestCase):
         self.assertIn('play(hostRef.current, frames.pan, options)', self.reader)
         self.assertEqual(2, self.reader.count('play(hostRef.current, back(frames.pan), options)'))
 
+    def test_pages_stay_visible_while_the_book_shuts(self):
+        """Обрыв сцены (жалоба владельца 02.10.2026): без shutting в списке
+        видимых этапов вся открытая книга пропадала в первый же кадр закрытия,
+        и обложка появлялась из ребра на пустом столе."""
+        self.assertIn("['opening', 'open', 'shutting', 'closing'].includes(stage)", self.reader)
+
+    def test_closing_an_open_book_fades_the_pages_under_the_cover(self):
+        """Полёт в карточку стартует на 80 % хода, когда край обложки ещё
+        приподнят: страницы тают, а не пропадают разом, тень обложки
+        досчитывает своё движение сама."""
+        start = self.reader.index('// 2. Книга закрыта: страницы под обложкой больше не нужны')
+        step = self.reader[start:self.reader.index("setStage('leaving');", start)]
+        self.assertIn('duration: OPENING_MS.pagesFade', step)
+        self.assertIn("if (castRef.current && now !== 'open') castRef.current.style.visibility = 'hidden';", step)
+
     def test_toc_is_above_the_closed_cover(self):
         """Закрытая книга лежит слоем над ридером; оглавление, открытое на ней,
         иначе оказалось бы под обложкой."""

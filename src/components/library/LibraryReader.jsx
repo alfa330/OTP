@@ -633,12 +633,24 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                 ]);
             }
             // 2. Книга закрыта: страницы под обложкой больше не нужны, срез
-            //    страниц — снова у обложки.
-            if (hostRef.current) hostRef.current.style.opacity = '0';
+            //    страниц — снова у обложки. Закрывали открытую книгу — полёт
+            //    стартует на 80 % хода (CLOSE_OVERLAP), когда край обложки ещё
+            //    приподнят: страницы под ним тают, а не пропадают разом (иначе
+            //    под краем обложки на кадр открывался пустой стол), а тень от
+            //    обложки досчитывает своё движение до нуля сама.
+            if (hostRef.current) {
+                if (now === 'open') {
+                    play(hostRef.current, [{ opacity: 1 }, { opacity: 0 }], {
+                        duration: OPENING_MS.pagesFade, easing: 'ease-out',
+                    });
+                } else {
+                    hostRef.current.style.opacity = '0';
+                }
+            }
             if (edgeRef.current) edgeRef.current.style.visibility = 'visible';
             // Тень от обложки падала на страницу — страницы больше нет, а
             // обложка улетает: на пустом столе тени не место.
-            if (castRef.current) castRef.current.style.visibility = 'hidden';
+            if (castRef.current && now !== 'open') castRef.current.style.visibility = 'hidden';
             setStage('leaving');
             // 3. Обратно в карточку — туда, где она сейчас: каталог мог
             //    сдвинуться. Карточки не видно — книга тает на месте.
@@ -1030,7 +1042,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                             // С полётом страницы видны с начала раскрытия (до того их
                             // закрывает обложка); без него — проявляются, когда готовы.
                             opacity: flight
-                                ? (['opening', 'open', 'closing'].includes(stage) ? 1 : 0)
+                                ? (['opening', 'open', 'shutting', 'closing'].includes(stage) ? 1 : 0)
                                 : (phase === 'ready' ? 1 : 0),
                             transition: flight ? 'none' : 'opacity 260ms ease',
                         }}
