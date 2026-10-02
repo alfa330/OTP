@@ -24,8 +24,9 @@ from openpyxl import Workbook, load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fleet_edm import access, engine, report  # noqa: E402
-from fleet_edm.client import (MAX_BATCH, THROTTLE_RECOVERY_AFTER, FleetClient,  # noqa: E402
-                               FleetError, FleetSessionExpired)
+from fleet_edm.client import (MAX_BATCH, THROTTLE_RECOVERY_AFTER,  # noqa: E402
+                               FleetAccessDenied, FleetClient, FleetError,
+                               FleetSessionExpired)
 from fleet_edm.routes import _safe_name  # noqa: E402
 
 PARK_A = 'a' * 32
@@ -675,6 +676,362 @@ class SilentParkTest(unittest.TestCase):
         self.assertNotIn('не найден', table[0]['comment'].lower())
 
 
+PARK_C = 'c' * 32
+
+
+class NoAccessParkTest(unittest.TestCase):
+    """Диспетчерская без доступа — это ответ, а не повод зациклить выгрузку.
+
+    02.10.2026, выгрузка №44 (219 617 строк): четыре строки из парка, которого нет
+    в списке учётки кабинета. Кабинет отвечал 403 `access_denied`, обход считал
+    это молчанием, трижды переспрашивал и прерывался «продолжим позже» — и так 35
+    подхватов подряд, ни одного файла. Отказ в правах переспрашивать бесполезно.
+    """
+
+    def setUp(self):
+        self._pause = engine.FAILED_PARK_PAUSE
+        engine.FAILED_PARK_PAUSE = 0
+
+    def tearDown(self):
+        engine.FAILED_PARK_PAUSE = self._pause
+
+    class _ClosedParks(FakeClient):
+        """Кабинет, где у учётки нет прав на часть диспетчерских: каждый запрос к
+        ним — 403, как на живом кабинете (список парков учётки их при этом может и
+        содержать — роль без права на список водителей)."""
+
+        def __init__(self, drivers, closed=(), **kw):
+            super().__init__(drivers, **kw)
+            self.closed = set(closed)
+            self.provider_parks = []
+
+        def _refuse(self, park_id):
+            if park_id in self.closed:
+                raise FleetAccessDenied(
+                    "Кабинет отказал (403): нет прав на этот запрос или неверный "
+                    "парк. Ответ: {'code': 'access_denied'}")
+
+        def edm_providers(self, park_id):
+            self.provider_parks.append(park_id)
+            self._refuse(park_id)
+            return super().edm_providers(park_id)
+
+        def contractors_all(self, park_id, **kw):
+            if park_id in self.closed:
+                with self._lock:
+                    self.requests_count += 1
+                    self.list_calls.append({'park': park_id,
+                                            'provider': kw.get('edm_provider'),
+                                            'archive': kw.get('archive'), 'ids': []})
+            self._refuse(park_id)
+            return super().contractors_all(park_id, **kw)
+
+        def driver_card(self, park_id, driver_id):
+            if park_id in self.closed:
+                with self._lock:
+                    self.requests_count += 1
+                    self.card_calls.append((park_id, driver_id))
+            self._refuse(park_id)
+            return super().driver_card(park_id, driver_id)
+
+    @staticmethod
+    def _drivers(closed_count=4, closed_park=PARK_C):
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                   for i in range(1, 6)}
+        drivers.update({_driver_id(100 + i): {'park': closed_park, 'provider': '2KZSP'}
+                        for i in range(closed_count)})
+        return drivers
+
+    def _closed_ids(self, drivers, park=PARK_C):
+        return [cid for cid, info in drivers.items() if info['park'] == park]
+
+    def test_park_outside_account_is_answered_without_a_request(self):
+        """Ровно случай №44: парка нет в списке учётки — спрашивать его не нужно вовсе."""
+        drivers = self._drivers()
+        client = self._ClosedParks(drivers, closed={PARK_C})      # в parks() его нет
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+
+        for cid in self._closed_ids(drivers):
+            entry = result['results'][cid]
+            self.assertEqual(entry['source'], engine.SOURCE_NO_ACCESS)
+            self.assertEqual(entry['provider_name'], '')
+            self.assertEqual(entry['park_id'], PARK_C)
+        # Ни одного запроса в закрытую диспетчерскую — ни списком, ни карточкой.
+        self.assertEqual([c for c in client.list_calls if c['park'] == PARK_C], [])
+        self.assertEqual([c for c in client.card_calls if c[0] == PARK_C], [])
+        self.assertEqual(result['stats'].get('no_access'), 4)
+        self.assertEqual(result['no_access_parks'], [PARK_C])
+        # Остальной файл собран как обычно.
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
+                         'Бумажный документооборот')
+        self.assertEqual(result['stats'].get('not_found', 0), 0)
+
+    def test_first_row_from_closed_park_does_not_break_the_provider_list(self):
+        """Справочник провайдеров берётся у доступной диспетчерской, а не у парка
+        первой строки: тот может оказаться закрытым, и 403 уронил бы весь прогон."""
+        drivers = self._drivers()
+        rows = _park_rows(drivers)
+        rows.sort(key=lambda row: row['park_id'] != PARK_C)        # закрытые — сверху
+        self.assertEqual(rows[0]['park_id'], PARK_C)
+        client = self._ClosedParks(drivers, closed={PARK_C})
+        result = engine.resolve(rows, client, control_sample=0)
+        self.assertEqual(client.provider_parks, [PARK_A])
+        self.assertEqual(result['stats'].get('no_access'), 4)
+
+    def test_listed_closed_park_in_first_row_does_not_loop(self):
+        """Находка разбора: парк В СПИСКЕ учётки, но без прав, и стоит первым в
+        файле. Его 403 на справочнике провайдеров раньше вылетал из обхода целиком
+        — подхват повторял бы его до «слишком много перезапусков», как №44."""
+        drivers = self._drivers(closed_park=PARK_B)
+        rows = _park_rows(drivers)
+        rows.sort(key=lambda row: row['park_id'] != PARK_B)        # закрытые — сверху
+        client = self._ClosedParks(drivers, closed={PARK_B})
+        result = engine.resolve(rows, client, control_sample=0)
+        self.assertEqual(client.provider_parks, [PARK_B, PARK_A])
+        for cid in self._closed_ids(drivers, PARK_B):
+            self.assertEqual(result['results'][cid]['source'], engine.SOURCE_NO_ACCESS)
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
+                         'Бумажный документооборот')
+
+    def test_closed_first_park_of_account_without_park_column(self):
+        """То же без колонки «ID парка»: справочник раньше спрашивался у parks()[0]."""
+        drivers = self._drivers(closed_count=2, closed_park=PARK_B)
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = self._ClosedParks(drivers, closed={PARK_B}, parks=(PARK_B, PARK_A))
+        result = engine.resolve(rows, client, control_sample=0)
+        self.assertEqual(client.provider_parks, [PARK_B, PARK_A])
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
+                         'Бумажный документооборот')
+        self.assertEqual(result['no_access_parks'], [PARK_B])
+
+    def test_no_park_answering_the_directory_is_final(self):
+        """Справочник не отдала ни одна диспетчерская учётки — это не «продолжим
+        позже»: отказ в правах, и routes закрывает выгрузку сразу (код no_access)."""
+        drivers = self._drivers(closed_park=PARK_B)
+        client = self._ClosedParks(drivers, closed={PARK_A, PARK_B})
+        with self.assertRaises(FleetAccessDenied):
+            engine.resolve(_park_rows(drivers), client, control_sample=0)
+        self.assertEqual(sorted(client.provider_parks), [PARK_A, PARK_B])
+
+    def test_no_access_counts_rows_not_ids(self):
+        """Один ID дважды — две строки: число на экране обязано сойтись с файлом."""
+        drivers = self._drivers()
+        rows = _park_rows(drivers)
+        rows.append(dict(next(row for row in rows if row['park_id'] == PARK_C)))
+        result = engine.resolve(rows, self._ClosedParks(drivers, closed={PARK_C}),
+                                control_sample=0)
+        self.assertEqual(result['stats'].get('no_access'), 5)
+        summary = load_workbook(report.build_workbook(rows, result))['Свод по провайдерам']
+        counts = {row[0]: row[1] for row in summary.iter_rows(min_row=2, values_only=True)}
+        self.assertEqual(counts.get(report.NO_ACCESS), 5)
+
+    def test_unverified_is_counted_after_resume(self):
+        """Находка разбора (была и до правки): «не проверено» из контрольной точки не
+        считалось, и после подхвата отчёт молча терял «НЕ СМОГЛИ ПРОВЕРИТЬ»."""
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'}}
+        rows = _park_rows(drivers)
+        resume = {'results': {_driver_id(1): engine._entry_unverified(_driver_id(1), PARK_A)}}
+        result = engine.resolve(rows, FakeClient(drivers), control_sample=0, resume=resume)
+        self.assertEqual(result['stats'].get('unverified'), 1)
+
+    def test_orphan_scan_skips_park_closed_on_card_step(self):
+        """Находка разбора: парк отдаёт список, но карточки закрыты. Строка мелкого
+        парка закрывает его на шаге карточек, и «ничья» строка после этого не должна
+        спрашивать его снова и становиться «не проверено, повторите позже»."""
+        tiny = _driver_id(50)
+        ghost = _driver_id(77)                                   # такого нет нигде
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                   for i in range(1, 6)}
+        drivers[tiny] = {'park': PARK_B, 'provider': 'paperdo'}
+
+        class CardsClosed(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                if park_id == PARK_B:
+                    with self._lock:
+                        self.card_calls.append((park_id, driver_id))
+                    raise FleetAccessDenied("Кабинет отказал (403): {'code': 'no_permissions'}")
+                return super().driver_card(park_id, driver_id)
+
+        rows = _park_rows(drivers) + [{'contractor_id': ghost, 'park_id': ''}]
+        client = CardsClosed(drivers, hidden_from_list=[tiny])
+        result = engine.resolve(rows, client, control_sample=0)
+        self.assertEqual(result['results'][tiny]['source'], engine.SOURCE_NO_ACCESS)
+        self.assertNotIn(ghost, result['results'])               # «не найден», а не «не проверено»
+        self.assertEqual(result['stats'].get('unverified', 0), 0)
+        self.assertEqual([c for c in client.card_calls if c[1] == ghost and c[0] == PARK_B], [])
+
+    def test_listed_park_refusing_is_asked_once_and_not_retried(self):
+        """Парк в списке учётки, но роль без права на список водителей: один отказ,
+        без повторов и без прерывания обхода — его строки «нет доступа»."""
+        drivers = self._drivers(closed_park=PARK_B)
+        client = self._ClosedParks(drivers, closed={PARK_B})        # PARK_B в parks()
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+
+        refused = [c for c in client.list_calls if c['park'] == PARK_B]
+        self.assertEqual(len(refused), 1)
+        for cid in self._closed_ids(drivers, PARK_B):
+            self.assertEqual(result['results'][cid]['source'], engine.SOURCE_NO_ACCESS)
+        # Ни карточкой, ни разбором остатка закрытый парк больше не спрашивали.
+        self.assertEqual([c for c in client.card_calls if c[0] == PARK_B], [])
+        self.assertEqual(result['stats'].get('no_access'), 4)
+        self.assertEqual(result['no_access_parks'], [PARK_B])
+
+    def test_transient_refusal_still_interrupts(self):
+        """Граница правки: молчание (429, сеть) — по-прежнему «продолжим позже»,
+        а не «нет доступа». Путать их нельзя — см. SilentParkTest."""
+        drivers = self._drivers(closed_park=PARK_B)
+
+        class Muted(FakeClient):
+            def contractors_all(self, park_id, **kw):
+                if park_id == PARK_B:
+                    raise FleetError('429 Too Many Requests')
+                return super().contractors_all(park_id, **kw)
+
+        with self.assertRaises(FleetError) as caught:
+            engine.resolve(_park_rows(drivers), Muted(drivers), control_sample=0)
+        self.assertNotIsInstance(caught.exception, FleetAccessDenied)
+
+    def test_probe_skips_closed_park_and_report_says_where_we_looked(self):
+        """В файле нет ID парка: закрытый парк перебор пропускает (без повторов и в
+        архиве тоже), а «не найден» в отчёте честно звучит «в доступных»."""
+        drivers = self._drivers(closed_count=2, closed_park=PARK_B)
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = self._ClosedParks(drivers, closed={PARK_B})
+        result = engine.resolve(rows, client, control_sample=0)
+
+        self.assertEqual(len([c for c in client.list_calls if c['park'] == PARK_B]), 1)
+        self.assertEqual([c for c in client.card_calls if c[0] == PARK_B], [])
+        self.assertEqual(result['no_access_parks'], [PARK_B])
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
+                         'Бумажный документооборот')
+        table = report._rows_for_sheet(rows, result['results'], {},
+                                       no_access_parks=result['no_access_parks'])
+        missing = [row for row in table
+                   if row['contractor_id'] in self._closed_ids(drivers, PARK_B)]
+        self.assertTrue(missing)
+        for row in missing:
+            self.assertEqual(row['provider_name'], report.NOT_FOUND)
+            self.assertIn('доступной', row['comment'])
+
+    def test_tiny_closed_park_card_says_no_access_not_unverified(self):
+        """Один-два водителя парка идут сразу в карточки. 403 на карточке — тоже
+        «нет доступа», а не «не смогли проверить, повторите позже»."""
+        drivers = self._drivers(closed_count=1, closed_park=PARK_B)
+        client = self._ClosedParks(drivers, closed={PARK_B})
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+        cid = self._closed_ids(drivers, PARK_B)[0]
+        self.assertEqual(result['results'][cid]['source'], engine.SOURCE_NO_ACCESS)
+        self.assertEqual(result['stats'].get('unverified', 0), 0)
+        self.assertEqual(result['no_access_parks'], [PARK_B])
+
+    def test_park_list_case_does_not_close_parks(self):
+        """Сравнение без регистра: промах здесь объявил бы закрытыми ВСЕ строки."""
+        drivers = self._drivers(closed_count=0)
+
+        class UpperParks(FakeClient):
+            def parks(self, park_id=None):
+                return [dict(park, id=park['id'].upper())
+                        for park in super().parks(park_id)]
+
+        result = engine.resolve(_park_rows(drivers), UpperParks(drivers), control_sample=0)
+        self.assertEqual(result['stats'].get('no_access', 0), 0)
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
+                         'Бумажный документооборот')
+
+    def test_resumed_run_with_closed_park_finishes(self):
+        """Подхват после перезапуска: закрытый парк в новом процессе снова один раз
+        отказывает — и выгрузка доезжает до конца, а не уходит в новый круг."""
+        drivers = self._drivers(closed_park=PARK_B)
+        drivers[_driver_id(90)] = {'park': PARK_A, 'provider': '2KZVZ'}
+        rows = _park_rows(drivers)
+        sink = ResumeTest._CheckpointSink()
+
+        class Dying(self._ClosedParks):
+            def contractors_all(self, park_id, *, edm_provider=None, **kw):
+                if edm_provider == '2KZVZ':
+                    raise FleetSessionExpired('обрыв посреди обхода')
+                return super().contractors_all(park_id, edm_provider=edm_provider, **kw)
+
+        with self.assertRaises(FleetSessionExpired):
+            engine.resolve(rows, Dying(drivers, closed={PARK_B}), control_sample=0,
+                           checkpoint=sink.save)
+        client = self._ClosedParks(drivers, closed={PARK_B})
+        result = engine.resolve(rows, client, control_sample=0, resume=sink.resume())
+        self.assertEqual(result['results'][_driver_id(90)]['provider_name'], 'Vezunchik.Pro')
+        for cid in self._closed_ids(drivers, PARK_B):
+            self.assertEqual(result['results'][cid]['source'], engine.SOURCE_NO_ACCESS)
+        self.assertLessEqual(len([c for c in client.list_calls if c['park'] == PARK_B]), 1)
+
+    def test_probe_denial_survives_restart(self):
+        """Перебор после перезапуска не повторяется (probe_done) — значит и знание о
+        закрытом парке обязано пережить перезапуск: иначе новая попытка спросит его
+        карточками, а оговорка «в доступных» пропадёт из отчёта."""
+        drivers = self._drivers(closed_count=2, closed_park=PARK_B)
+        drivers[_driver_id(90)] = {'park': PARK_A, 'provider': '2KZVZ'}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        sink = ResumeTest._CheckpointSink()
+
+        class Dying(self._ClosedParks):
+            def contractors_all(self, park_id, *, edm_provider=None, **kw):
+                if edm_provider == '2KZVZ':
+                    raise FleetSessionExpired('обрыв посреди обхода')
+                return super().contractors_all(park_id, edm_provider=edm_provider, **kw)
+
+        with self.assertRaises(FleetSessionExpired):
+            engine.resolve(rows, Dying(drivers, closed={PARK_B}), control_sample=0,
+                           checkpoint=sink.save)
+        self.assertTrue(sink.stages.get('probe_done'))
+        self.assertEqual(sink.stages.get('denied_parks'), [PARK_B])
+
+        client = self._ClosedParks(drivers, closed={PARK_B})
+        result = engine.resolve(rows, client, control_sample=0, resume=sink.resume())
+        self.assertEqual([c for c in client.list_calls if c['park'] == PARK_B], [])
+        self.assertEqual([c for c in client.card_calls if c[0] == PARK_B], [])
+        self.assertEqual(result['no_access_parks'], [PARK_B])
+        self.assertEqual(result['results'][_driver_id(90)]['provider_name'], 'Vezunchik.Pro')
+
+    def test_no_access_rows_are_labelled_in_the_file(self):
+        drivers = self._drivers()
+        rows = _park_rows(drivers)
+        result = engine.resolve(rows, self._ClosedParks(drivers, closed={PARK_C}),
+                                control_sample=0)
+        workbook = load_workbook(report.build_workbook(rows, result, source_name='вход.xlsx'))
+
+        sheet = workbook['Водители']
+        headers = [cell.value for cell in sheet[1]]
+        by_id = {}
+        for values in sheet.iter_rows(min_row=2, values_only=True):
+            by_id[values[headers.index('ID водителя')]] = dict(zip(headers, values))
+        closed_row = by_id[self._closed_ids(drivers)[0]]
+        self.assertEqual(closed_row['Провайдер ЭДО'], report.NO_ACCESS)
+        self.assertFalse(closed_row['Источник'])
+        self.assertIn('Нет доступа', closed_row['Комментарий'])
+
+        summary = {row[0]: row[1] for row in
+                   workbook['Свод по провайдерам'].iter_rows(min_row=2, values_only=True)}
+        self.assertEqual(summary.get(report.NO_ACCESS), 4)
+        self.assertIn(report.NO_ACCESS,
+                      [cell.value for cell in workbook['Провайдеры по паркам'][1]])
+
+        context = {row[0]: row[1] for row in
+                   workbook['Контекст'].iter_rows(values_only=True) if row[0]}
+        self.assertTrue(context['Провайдер определён'].startswith('5 '))
+        self.assertIn('НЕТ ДОСТУПА К ДИСПЕТЧЕРСКИМ', context)
+        self.assertIn(PARK_C, context['Диспетчерские без доступа'])
+
+    def test_ordinary_file_gets_no_extra_column(self):
+        """Колонка «нет доступа» появляется только там, где такие строки есть."""
+        drivers = self._drivers(closed_count=0)
+        rows = _park_rows(drivers)
+        result = engine.resolve(rows, FakeClient(drivers), control_sample=0)
+        workbook = load_workbook(report.build_workbook(rows, result))
+        self.assertNotIn(report.NO_ACCESS,
+                         [cell.value for cell in workbook['Провайдеры по паркам'][1]])
+        context = '\n'.join(str(row[0]) for row in
+                            workbook['Контекст'].iter_rows(values_only=True) if row[0])
+        self.assertNotIn('НЕТ ДОСТУПА', context)
+
+
 class SegmentTest(unittest.TestCase):
     """Архив спрашиваем там, где архивные есть.
 
@@ -951,6 +1308,35 @@ class NonJsonAnswerTest(unittest.TestCase):
             client.parks()
         self.assertNotIsInstance(caught.exception, FleetSessionExpired)
         self.assertIn('400', str(caught.exception))
+
+
+class AccessDeniedAnswerTest(unittest.TestCase):
+    """403 с JSON — отдельный тип ошибки: обход отличает «нет прав» от «молчит»."""
+
+    class _Response:
+        status_code = 403
+        content = b'{"code": "access_denied", "message": "Access denied"}'
+        headers = {'content-type': 'application/json'}
+
+        def json(self):
+            return {'code': 'access_denied', 'message': 'Access denied'}
+
+    class _Session:
+        cookies = type('J', (), {'update': lambda self, value: None})()
+
+        def request(self, method, url, headers=None, data=None, timeout=None):
+            return AccessDeniedAnswerTest._Response()
+
+    def test_json_403_is_access_denied(self):
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=self._Session())
+        with self.assertRaises(FleetAccessDenied) as caught:
+            client.contractors(PARK_C, contractor_ids=[_driver_id(1)])
+        # Наследник FleetError с прежним текстом: «Рассылки» узнают свой 403 по
+        # '403' in str(error), и для них ничего не изменилось.
+        self.assertIsInstance(caught.exception, FleetError)
+        self.assertNotIsInstance(caught.exception, FleetSessionExpired)
+        self.assertIn('403', str(caught.exception))
+        self.assertIn('access_denied', str(caught.exception))
 
 
 # ── сборка файла ─────────────────────────────────────────────────────────────

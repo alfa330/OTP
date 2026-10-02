@@ -45,6 +45,11 @@ TEXT_COLUMNS = ('park_id', 'contractor_id', 'phone')
 
 NOT_FOUND = 'не найден'
 
+# Что пишем в колонку «Провайдер ЭДО» строке из закрытой диспетчерской. Отдельно
+# от «не найден» (водитель там может быть) и от пустоты (её читают как «провайдер
+# не указан в кабинете») — см. engine.SOURCE_NO_ACCESS.
+NO_ACCESS = 'нет доступа'
+
 
 def build_workbook(rows, resolution, *, source_name='', generated_at=None,
                    text_warning_patch=None):
@@ -55,7 +60,8 @@ def build_workbook(rows, resolution, *, source_name='', generated_at=None,
     park_names = resolution.get('park_names') or {}
     providers = resolution.get('providers') or []
 
-    table = _rows_for_sheet(rows, results, park_names)
+    table = _rows_for_sheet(rows, results, park_names,
+                            no_access_parks=resolution.get('no_access_parks') or ())
     counts = _provider_counts(table)
     by_park = _park_counts(table, providers)
 
@@ -104,15 +110,21 @@ def _column_index(key):
     return 1
 
 
-def _rows_for_sheet(rows, results, park_names):
-    from .engine import (EMPLOYMENT_LABELS, PARK_EMPLOYEE, SOURCE_NO_PROVIDER,
-                         WORK_STATUS_LABELS)
+def _rows_for_sheet(rows, results, park_names, no_access_parks=()):
+    from .engine import (EMPLOYMENT_LABELS, PARK_EMPLOYEE, SOURCE_NO_ACCESS,
+                         SOURCE_NO_PROVIDER, WORK_STATUS_LABELS)
 
+    # Есть закрытые диспетчерские — «ни в одной» превращается в неправду: туда мы
+    # не заглядывали. Говорим ровно то, что знаем.
+    not_found_comment = ('Водитель не найден ни в одной доступной диспетчерской'
+                         if no_access_parks else
+                         'Водитель не найден ни в одной диспетчерской')
     table = []
     for row in rows:
         contractor_id = row.get('contractor_id') or ''
         entry = results.get(contractor_id) or {}
         park_id = entry.get('park_id') or row.get('park_id') or ''
+        no_access = entry.get('source') == SOURCE_NO_ACCESS
         comment = ''
         if row.get('error'):
             comment = row['error']
@@ -121,7 +133,7 @@ def _rows_for_sheet(rows, results, park_names):
             # карточкой поправило отставшее значение списка.
             comment = entry['comment']
         elif not entry:
-            comment = 'Водитель не найден ни в одной диспетчерской'
+            comment = not_found_comment
         elif (entry.get('source') == SOURCE_NO_PROVIDER
               or entry.get('employment_type') == PARK_EMPLOYEE):
             # Это ОТВЕТ, а не пропуск: поле ЭДО есть только у ИП и самозанятых, а
@@ -143,8 +155,11 @@ def _rows_for_sheet(rows, results, park_names):
                                                   entry.get('work_status') or ''),
             'employment_type': EMPLOYMENT_LABELS.get(entry.get('employment_type'),
                                                      entry.get('employment_type') or ''),
-            'provider_name': entry.get('provider_name') or (NOT_FOUND if not entry else ''),
-            'source': entry.get('source') or '',
+            'provider_name': entry.get('provider_name') or (
+                NOT_FOUND if not entry else NO_ACCESS if no_access else ''),
+            # Источника у такой строки нет — мы ничего не получили; ответ стоит в
+            # колонке провайдера, как у «не найден».
+            'source': '' if no_access else (entry.get('source') or ''),
             'comment': comment,
         })
     return table
@@ -172,7 +187,8 @@ def _park_counts(table, providers):
 def _fill_context(sheet, table, resolution, source_name, generated_at):
     check = resolution.get('check') or {}
     stats = resolution.get('stats') or {}
-    resolved = sum(1 for row in table if row['provider_name'] and row['provider_name'] != NOT_FOUND)
+    resolved = sum(1 for row in table
+                   if row['provider_name'] and row['provider_name'] not in (NOT_FOUND, NO_ACCESS))
     lines = [
         ('Выгрузка «Провайдер ЭДО»', None),
         ('', None),
@@ -230,6 +246,20 @@ def _fill_context(sheet, table, resolution, source_name, generated_at):
                       '{} строк: диспетчерские не ответили на запрос карточки. Это '
                       'не «водителя нет» — это «мы не смогли спросить»; повторите '
                       'выгрузку позже'.format(stats['unverified'])))
+    no_access_parks = resolution.get('no_access_parks') or []
+    # По строкам файла, а не по уникальным ID обхода: число обязано сойтись со
+    # сводом по провайдерам, где один ID дважды — это две строки.
+    no_access_rows = sum(1 for row in table if row['provider_name'] == NO_ACCESS)
+    if no_access_rows:
+        lines.append(('НЕТ ДОСТУПА К ДИСПЕТЧЕРСКИМ',
+                      '{} строк: у учётки кабинета нет прав на их парки, провайдера '
+                      'не узнать. Повтор не поможет — нужно выдать учётке доступ к '
+                      'этим паркам или убрать строки из файла'.format(no_access_rows)))
+    if no_access_parks:
+        lines.append(('Диспетчерские без доступа',
+                      '{} шт.: {}. «Не найден» в этом файле значит «не найден в '
+                      'доступных диспетчерских»'.format(
+                          len(no_access_parks), ', '.join(no_access_parks[:20]))))
     if stats.get('no_provider_by_kind'):
         lines.append(('Сотрудников парка', '{} строк — ЭДО к ним не применяется '
                                            '(работают по трудовому договору)'
@@ -302,7 +332,12 @@ def _fill_summary(sheet, counts, total):
 
 def _fill_parks(sheet, by_park, providers):
     names = [provider['name'] for provider in providers]
-    headers = ['Парк', 'ID парка', 'Водителей'] + names + ['не указан', 'не найден']
+    tail = ['не указан', NOT_FOUND]
+    # Колонка «нет доступа» — только когда такие строки есть: в обычном файле она
+    # была бы пустой колонкой на каждом парке.
+    if any(bucket['providers'].get(NO_ACCESS) for bucket in by_park.values()):
+        tail.append(NO_ACCESS)
+    headers = ['Парк', 'ID парка', 'Водителей'] + names + tail
     for index, title in enumerate(headers, start=1):
         cell = sheet.cell(row=1, column=index, value=title)
         cell.fill = HEADER_FILL
@@ -314,7 +349,7 @@ def _fill_parks(sheet, by_park, providers):
         cell.data_type = 's'
         cell.number_format = '@'
         sheet.cell(row=row_index, column=3, value=bucket['total'])
-        for offset, name in enumerate(names + ['не указан', NOT_FOUND], start=4):
+        for offset, name in enumerate(names + tail, start=4):
             value = bucket['providers'].get(name, 0)
             sheet.cell(row=row_index, column=offset, value=value or None)
     sheet.column_dimensions['A'].width = 32

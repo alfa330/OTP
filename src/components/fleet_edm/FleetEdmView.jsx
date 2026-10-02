@@ -40,6 +40,7 @@ const ERROR_HINTS = {
     session_expired: 'Связь с диспетчерской прервалась — выгрузка не дошла до данных.',
     bad_file: 'Файл не подошёл: нужен столбец с ID водителя.',
     fleet_error: 'Диспетчерская ответила не так, как ожидалось.',
+    no_access: 'У учётки кабинета нет прав в диспетчерских — выгрузку не собрать, пока доступ не выдадут.',
     // Осталось для старых карточек: с 24.08.2026 перезапуск сервера выгрузку не
     // убивает — она продолжается сама с того места, где остановилась.
     interrupted: 'Выгрузку прервал перезапуск сервера (до того, как раздел научился продолжать сам).',
@@ -628,6 +629,11 @@ function JobRow({ job, busy, menuOpen, deleteAsked, blocked, onMenu, onDownload,
                         </span>
                     )}
                     {stats.from_card > 0 && <span>дособрано вручную: {num(stats.from_card)}</span>}
+                    {stats.no_access > 0 && (
+                        <span title="У учётки кабинета нет прав на эти диспетчерские — провайдера не узнать. Нужно выдать учётке доступ или убрать эти строки из файла.">
+                            нет доступа к диспетчерской: {num(stats.no_access)}
+                        </span>
+                    )}
                     {formatDuration(job.duration_ms) && <span>{formatDuration(job.duration_ms)}</span>}
                     {formatSize(job.file_size) && <span>{formatSize(job.file_size)}</span>}
                 </div>

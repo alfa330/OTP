@@ -42,7 +42,7 @@ from io import BytesIO
 from flask import Blueprint, jsonify, request, send_file
 
 from . import access, engine, queries, report
-from .client import FleetClient, FleetError, FleetSessionExpired
+from .client import FleetAccessDenied, FleetClient, FleetError, FleetSessionExpired
 
 # Обычная выгрузка из кабинета на 150 тысяч строк весит около 10 МБ. Двадцать
 # пять — с запасом, и при этом не даёт положить инстанс одним запросом.
@@ -356,6 +356,10 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 'not_found': resolution_stats.get('not_found', 0),
                 'no_provider_by_kind': resolution_stats.get('no_provider_by_kind', 0),
                 'unverified': resolution_stats.get('unverified', 0),
+                # Строки из диспетчерских, к которым у учётки нет доступа (см.
+                # engine.SOURCE_NO_ACCESS), и сами эти диспетчерские.
+                'no_access': resolution_stats.get('no_access', 0),
+                'no_access_parks': resolution.get('no_access_parks') or [],
                 'park_probe_requests': resolution.get('park_probe_requests') or 0,
                 'classify_requests': resolution.get('classify_requests') or 0,
                 'skipped_orphans': resolution.get('skipped_orphans') or 0,
@@ -398,6 +402,13 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 logging.exception("Провайдер ЭДО: не удалось отметить сессию протухшей")
         except engine.InputError as error:
             _fail(job_id, error, 'bad_file', requests_count)
+        except FleetAccessDenied as error:
+            # Отказ в правах, вылетевший из обхода целиком (справочник провайдеров
+            # не отдала ни одна диспетчерская, 403 на списке парков учётки), — это
+            # ответ, а не сбой. На подхват его отдавать нельзя: каждая попытка
+            # упиралась бы в тот же 403 до «слишком много перезапусков», как №44.
+            # Отказы по отдельным паркам сюда не доходят — их разбирает обход.
+            _fail(job_id, error, 'no_access', requests_count)
         except FleetError as error:
             # Сетевые и прочие ошибки кабинета карточку НЕ закрывают: контрольная
             # точка на месте, и подхват попробует ещё раз. Иначе один моргнувший

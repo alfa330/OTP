@@ -71,7 +71,8 @@ import time
 from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .client import MAX_FILTER_IDS, FleetClient, FleetError, FleetSessionExpired
+from .client import (MAX_FILTER_IDS, FleetAccessDenied, FleetClient, FleetError,
+                     FleetSessionExpired)
 
 # Ниже этого числа водителей в парке дешевле спросить карточки, чем ждать раундов
 # по провайдерам. Арифметика: карточка — ровно один запрос на человека, а парк,
@@ -108,6 +109,22 @@ CARD_SOURCES = ('карточка', SOURCE_VERIFIED, SOURCE_CORRECTED)
 # Ярлык строки, про которую кабинет отказался отвечать. Отдельный от «не найден»:
 # см. _entry_unverified.
 SOURCE_UNVERIFIED = 'не проверено'
+
+# ЯРЛЫК СТРОКИ ИЗ ДИСПЕТЧЕРСКОЙ, К КОТОРОЙ У УЧЁТКИ НЕТ ДОСТУПА.
+#
+# Измерено 02.10.2026 на выгрузке №44 (219 617 строк, 90 парков в колонке «ID
+# парка»): четыре строки были из диспетчерской 4760f107…, которой нет в списке
+# парков учётки, и кабинет отвечал на неё 403 `access_denied`. Обход принимал
+# отказ за молчание (см. FAILED_PARK_RETRIES): трижды переспрашивал, прерывался
+# «продолжим позже», и подхват начинал тот же раунд заново. Раунд «Бумажного»
+# так и не засчитался ни разу, хотя 70 477 строк остальных 89 парков уже лежали
+# в контрольной точке, — 35 перезапусков за полтора часа и ни одного файла.
+#
+# Отказ в правах — это ОТВЕТ, а не сбой: права сами не появятся, сколько ни
+# спрашивай. Поэтому такие строки получают свой ярлык и прогон идёт дальше. Врать
+# при этом по-прежнему не начинаем: «нет доступа» — не «не найден» (водитель там
+# может быть) и не «не проверено» (повтор позже ничего не даст — нужен доступ).
+SOURCE_NO_ACCESS = 'нет доступа'
 
 # ПРОВАЙДЕРЫ, ЧЬЁ ЗНАЧЕНИЕ ОБЯЗАНО ПОДТВЕРЖДАТЬСЯ КАРТОЧКОЙ.
 #
@@ -504,9 +521,65 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     if not parks:
         raise FleetError('Кабинет не отдал ни одного парка')
 
-    first_park = next((park for park in unique.values() if park), '') \
-        or str(parks[0].get('id'))
-    providers = client.edm_providers(first_park)
+    # ── шаг 0: диспетчерские, которых у учётки нет ───────────────────────────
+    # Список парков учётки уже на руках, поэтому строки из чужих диспетчерских
+    # видны до первого запроса — и спрашивать про них не нужно вовсе: кабинет
+    # ответит 403 (выгрузка №44 — см. SOURCE_NO_ACCESS). Ключ сравнения без учёта
+    # регистра: ID из файла приводятся к нижнему, а промах здесь объявил бы
+    # закрытыми все строки файла разом.
+    accessible = {_park_key(park.get('id')) for park in parks}
+    # Закрытые диспетчерские этого прогона: и вне списка, и те, что ответили 403
+    # по ходу обхода (роль в парке без права на список водителей). Вторые живут и
+    # в этапах контрольной точки: перебор после перезапуска не повторяется
+    # (probe_done), и без этого следующая попытка снова спросила бы закрытый парк
+    # карточками, а оговорка «не найден в доступных» пропала бы из отчёта.
+    denied = {_park_key(park) for park in (stages.get('denied_parks') or ()) if park}
+    denied_lock = threading.Lock()
+    for contractor_id, park_id in unique.items():
+        if park_id and contractor_id not in results \
+                and _park_key(park_id) not in accessible:
+            results[contractor_id] = _entry_no_access(contractor_id, park_id)
+            denied.add(_park_key(park_id))
+    if denied:
+        logging.warning('Провайдер ЭДО: %s строк из диспетчерских, которых нет у '
+                        'учётки кабинета (%s) — помечены «нет доступа»',
+                        sum(1 for entry in results.values()
+                            if entry.get('source') == SOURCE_NO_ACCESS),
+                        ', '.join(sorted(denied)))
+
+    def drop_denied(pairs):
+        """(парк, ID) из закрытых диспетчерских — сразу в ответ «нет доступа», без
+        запросов. Остальное возвращается как было."""
+        kept = []
+        for park_id, contractor_id in pairs:
+            if park_id and _park_key(park_id) in denied:
+                if contractor_id not in results:
+                    results[contractor_id] = _entry_no_access(contractor_id, park_id)
+                continue
+            kept.append((park_id, contractor_id))
+        return kept
+
+    # Справочник одинаков во всех диспетчерских — берём его у первой, что ответит:
+    # сначала парки файла, потом остальные парки учётки. Закрытая диспетчерская
+    # бывает и В СПИСКЕ учётки (роль без прав), и её 403 здесь вылетал бы из обхода
+    # целиком: подхват повторял бы тот же запрос до «слишком много перезапусков»,
+    # ровно как на №44. В denied отказ справочника не кладём — это другая ручка;
+    # если парк закрыт и для списка водителей, раунды узнают это сами одним запросом.
+    providers = None
+    for candidate in _provider_candidates(unique.values(), parks, accessible, denied):
+        try:
+            providers = client.edm_providers(candidate)
+        except FleetAccessDenied as error:
+            logging.warning('Провайдер ЭДО: справочник провайдеров в диспетчерской %s '
+                            'закрыт (%s) — спрашиваем другую', candidate, str(error)[:120])
+            continue
+        break
+    if providers is None:
+        # Не ответила ни одна диспетчерская учётки — это не сбой, который лечится
+        # подхватом, а учётка без прав. routes закрывает такую выгрузку сразу.
+        raise FleetAccessDenied(
+            'Справочник провайдеров ЭДО не отдала ни одна диспетчерская: у учётки '
+            'кабинета нет прав ни в одной из них')
     if not providers:
         raise FleetError('Кабинет не отдал справочник провайдеров ЭДО')
 
@@ -525,7 +598,8 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         progress(percent=8, note='В файле нет ID парка — ищем водителей по паркам '
                                 '({} шт.)'.format(len(orphans)))
         before = client.requests_count
-        found_parks = _probe_parks(client, orphans, parks, progress, stop=stop)
+        found_parks = _probe_parks(client, orphans, parks, progress, stop=stop,
+                                   denied=denied)
         park_probe_requests = client.requests_count - before
         checkpoint_rows = []
         for contractor_id, info in found_parks.items():
@@ -542,6 +616,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
                 checkpoint_rows.append((contractor_id, info['park_id'], None))
         stats['parks_probed'] = len(found_parks)
         stages['probe_done'] = True
+        stages['denied_parks'] = sorted(denied)
         save(rows=checkpoint_rows, stages=stages)
 
     # ── шаг 2: провайдер — раундами по провайдерам, парки параллельно ────────
@@ -563,13 +638,18 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
             client, big, providers, seen_providers, progress,
             total=len(unique), done_before=len(results),
             stop=stop, save=save, stages=stages, done_rounds=done_rounds,
-            segments=segments,
+            segments=segments, denied=denied,
         )
         results.update(found)
         round_leftovers.extend(pending)
         leftovers.extend(pending)
     for park_id, ids in tiny.items():
         leftovers.extend((park_id, contractor_id) for contractor_id in ids)
+    # Диспетчерские, ответившие 403 посреди раундов, раунды пропускали, а их строки
+    # остались в остатке. Разбор и карточки спросили бы их снова и снова получили
+    # бы отказ — ответ у них уже есть.
+    round_leftovers = drop_denied(round_leftovers)
+    leftovers = drop_denied(leftovers)
 
     # ── шаг 3: разбор остатка одним запросом на парк ─────────────────────────
     # Кто эти люди, мы часто уже знаем из перебора парков. Но когда ID парка был
@@ -586,7 +666,8 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         progress(percent=89, requests=client.requests_count,
                  note='Разбираем остаток: {} строк'.format(len(unknown)))
         before = client.requests_count
-        classified = _classify_leftovers(client, unknown, progress, stop=stop)
+        classified = _classify_leftovers(client, unknown, progress, stop=stop,
+                                         denied=denied)
         classify_requests = client.requests_count - before
         checkpoint_rows = []
         for contractor_id, info in classified.items():
@@ -599,6 +680,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         stats['classified'] = len(classified)
         leftovers = [(park_id, contractor_id) for park_id, contractor_id in leftovers
                      if contractor_id not in results]
+        leftovers = drop_denied(leftovers)
 
     # ── шаг 4: добор карточками ──────────────────────────────────────────────
     orphan_left = [contractor_id for contractor_id, park_id in unique.items()
@@ -623,6 +705,9 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     # чтобы убитая деплоем попытка теряла контроль, а не весь прогон.
     orphan_sample = [('', contractor_id) for contractor_id in orphan_left]
     to_card = [(park_id, contractor_id) for park_id, contractor_id in leftovers]
+    # Перебор карточками — только по открытым диспетчерским: закрытая ответит 403
+    # каждой строке, и строка без парка из-за неё стала бы «не проверено».
+    scan_parks = [park for park in parks if _park_key(park.get('id')) not in denied]
     if to_card:
         progress(percent=90, requests=client.requests_count,
                  note='Добираем из карточек: {} строк'.format(len(to_card)))
@@ -645,11 +730,21 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         def card_task(task):
             stop()
             park_id = task[0]
+            if park_id and _park_key(park_id) in denied:
+                # Диспетчерская закрылась уже на этом шаге (соседняя строка
+                # получила 403) — спрашивать её снова незачем.
+                return _entry_no_access(task[1], park_id)
             try:
-                return _card_lookup(client, task[1], park_id, parks,
+                return _card_lookup(client, task[1], park_id, scan_parks,
                                     allow_scan=allow_scan and not park_id)
             except FleetSessionExpired:
                 raise
+            except FleetAccessDenied:
+                # Единственная диспетчерская строки отказала в правах — это ответ
+                # «нет доступа», а не «не смогли проверить»: повтор ничего не даст.
+                with denied_lock:
+                    denied.add(_park_key(park_id))
+                return _entry_no_access(task[1], park_id)
             except FleetError as error:
                 # ЖИВОЙ КЛИНЧ, пойманный на проде 01.09.2026 (выгрузка №33).
                 # Молчащие диспетчерские правильно НЕ дают сказать «не найден», и
@@ -704,11 +799,15 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     if orphan_sample:
         progress(percent=94, requests=client.requests_count,
                  note='Проверяем строки без диспетчерской: {}'.format(len(orphan_sample)))
+        # Список перебора — заново, а не тот, что снят перед карточками: шаг 4 мог
+        # закрыть ещё диспетчерские, и их 403 сделал бы строку «не проверено,
+        # повторите позже» там, где повтор ничего не даст.
+        orphan_parks = [park for park in parks if _park_key(park.get('id')) not in denied]
 
         def orphan_task(task):
             stop()
             try:
-                return _card_lookup(client, task[1], '', parks, allow_scan=True)
+                return _card_lookup(client, task[1], '', orphan_parks, allow_scan=True)
             except FleetSessionExpired:
                 raise
             except FleetError as error:
@@ -787,6 +886,29 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
                              if entry.get('source') == 'карточка')
     stats['no_provider_by_kind'] = sum(1 for entry in results.values()
                                        if entry.get('source') == SOURCE_NO_PROVIDER)
+    # «Не проверено» — тоже по результату: такие строки приезжают и из контрольной
+    # точки, а счётчик по ходу дела видит только эту попытку, и после подхвата
+    # отчёт молча терял оговорку «НЕ СМОГЛИ ПРОВЕРИТЬ».
+    unverified = sum(1 for entry in results.values()
+                     if entry.get('source') == SOURCE_UNVERIFIED)
+    if unverified:
+        stats['unverified'] = unverified
+    no_access = [entry for entry in results.values()
+                 if entry.get('source') == SOURCE_NO_ACCESS]
+    # По СТРОКАМ файла, а не по уникальным ID: это число видно на экране рядом с
+    # подсказкой «убрать эти строки из файла», и оно обязано сойтись с файлом, где
+    # один ID дважды — это две строки.
+    no_access_rows = sum(1 for row in valid
+                         if (results.get(row['contractor_id']) or {}).get('source')
+                         == SOURCE_NO_ACCESS)
+    if no_access_rows:
+        stats['no_access'] = no_access_rows
+    # Закрытые диспетчерские — и этой попытки, и прошлых: строки «нет доступа»
+    # из карточек приезжают из контрольной точки, а множество denied у каждой
+    # попытки своё. Отчёт по этому списку оговаривает, что «не найден» значит «не
+    # найден в доступных диспетчерских».
+    no_access_parks = sorted(denied | {_park_key(entry.get('park_id'))
+                                       for entry in no_access if entry.get('park_id')})
 
     return {
         'results': results,
@@ -801,6 +923,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         'stats': dict(stats),
         'provider_counts': dict(seen_providers),
         'verify': verify,
+        'no_access_parks': no_access_parks,
     }
 
 
@@ -1018,6 +1141,48 @@ def _entry_unverified(contractor_id, park_id):
     }
 
 
+def _entry_no_access(contractor_id, park_id):
+    """Строка из диспетчерской, к которой у учётки кабинета нет доступа.
+
+    Четвёртый ответ про человека, и он не сводится ни к одному из прежних: не
+    «нашли провайдера», не «водителя нет ни в одной диспетчерской» (он там может
+    быть, нам просто туда нельзя) и не «спросить не смогли» (тот ответ лечится
+    повтором позже, а этот — только доступом). См. SOURCE_NO_ACCESS.
+    """
+    return {
+        'contractor_id': contractor_id,
+        'provider_id': '',
+        'provider_name': '',
+        'full_name': '',
+        'phone': '',
+        'work_status': '',
+        'employment_type': '',
+        'park_id': park_id or '',
+        'source': SOURCE_NO_ACCESS,
+        'comment': 'Нет доступа к диспетчерской: у учётки кабинета нет прав на этот '
+                   'парк, провайдера не узнать',
+    }
+
+
+def _park_key(park_id):
+    """ID парка для сравнения: без пробелов и регистра. ID из файла parse_input уже
+    приводит к нижнему, а у кабинета регистр не обещан."""
+    return str(park_id or '').strip().lower()
+
+
+def _provider_candidates(file_parks, parks, accessible, denied):
+    """У кого спрашивать справочник провайдеров, по очереди: парки файла в порядке
+    строк, затем остальные парки учётки. Без повторов, без парков вне списка
+    учётки и без уже закрытых (denied)."""
+    seen = set()
+    for park in list(file_parks) + [str(park.get('id')) for park in parks]:
+        key = _park_key(park)
+        if not key or key in seen or key in denied or key not in accessible:
+            continue
+        seen.add(key)
+        yield park
+
+
 def _needs_classification(unknown):
     """Стоит ли разбирать остаток списком, а не карточками.
 
@@ -1077,6 +1242,18 @@ def _run_parallel(client, tasks, worker, *, stop=None, on_result=None):
     return collected
 
 
+# Ответ задачи раунда «диспетчерская отказала в правах» — третий вариант рядом со
+# словарём найденного и None («не ответила, повторим»).
+_DENIED = object()
+
+
+def _open_queue(queue, denied):
+    """Очередь раунда без закрытых диспетчерских (см. SOURCE_NO_ACCESS)."""
+    if not denied:
+        return queue
+    return {park: ids for park, ids in queue.items() if _park_key(park) not in denied}
+
+
 def _split_tasks(pending, concurrency, slice_min=1000):
     """(парк, срез ID) для одного раунда.
 
@@ -1098,7 +1275,7 @@ def _split_tasks(pending, concurrency, slice_min=1000):
 
 def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
                           total, done_before=0, stop=None, save=None, stages=None,
-                          done_rounds=(), segments=None):
+                          done_rounds=(), segments=None, denied=None):
     """Провайдер для всех сразу: раунд на провайдера, парки внутри раунда параллельно.
 
     Почему именно так. Спросить можно про десять тысяч ID за раз, и пустой ответ
@@ -1117,7 +1294,14 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
     парк про архив, когда архивных в нём нет, незачем: это шесть пустых запросов
     на каждую такую диспетчерскую. Кого не знаем — спрашиваем в обоих сегментах,
     как раньше: терять архивных нельзя (в августе так потерялось 14 444 строки).
+
+    denied — закрытые диспетчерские (см. SOURCE_NO_ACCESS), множество общее с
+    вызывающим. Парк, ответивший 403, попадает туда и выбывает из всех следующих
+    раундов, а его ещё не найденные строки остаются в остатке — вызывающий
+    помечает их «нет доступа». Повторять отказ в правах бессмысленно, а прерывать
+    из-за него обход — значит зациклить выгрузку (№44, 02.10.2026).
     """
+    denied = denied if denied is not None else set()
     segments = segments or {}
     # Очередь ведём ПО СЕГМЕНТАМ: у обычного и архивного прохода она своя.
     pending = {False: {}, True: {}}
@@ -1137,6 +1321,10 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
         park_id, ids = task
         if stop:
             stop()
+        with lock:
+            if _park_key(park_id) in denied:
+                # Другой срез того же парка уже получил отказ в правах.
+                return park_id, _DENIED, task
         try:
             items = client.contractors_all(
                 park_id, contractor_ids=ids, edm_provider=provider['id'],
@@ -1144,6 +1332,15 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
             )
         except FleetSessionExpired:
             raise
+        except FleetAccessDenied as error:
+            # Отказ в ПРАВАХ, а не молчание: переспрашивать нечего — см.
+            # SOURCE_NO_ACCESS. Парк выбывает из обхода, прогон идёт дальше.
+            logging.warning('Провайдер ЭДО: нет доступа к диспетчерской %s (%s) — '
+                            'её строки помечаем «нет доступа»', park_id, str(error)[:120])
+            with lock:
+                # Сразу, а не после захода: соседние срезы этого парка ещё в очереди.
+                denied.add(_park_key(park_id))
+            return park_id, _DENIED, task
         except FleetError as error:
             # НЕ «здесь никого нет», а «мы не спросили». Разница стоила 1 250
             # ложных «не найден» на выгрузке №13 — см. FAILED_PARK_RETRIES.
@@ -1166,9 +1363,11 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
             # Раунд уже проходили в прошлой попытке, и всё найденное им лежит в
             # контрольной точке. Повторять — значит платить за это второй раз.
             continue
-        tasks = _split_tasks(pending[archive], client.concurrency)
+        # Закрытые диспетчерские не спрашиваем: их строки остаются в очереди и
+        # уезжают в остаток, где вызывающий ставит им «нет доступа».
+        tasks = _split_tasks(_open_queue(pending[archive], denied), client.concurrency)
         if not tasks and not any(ids for queue in pending.values()
-                                 for ids in queue.values()):
+                                 for ids in _open_queue(queue, denied).values()):
             break
         if not tasks:
             # В этом сегменте спрашивать некого — но в другом ещё есть.
@@ -1181,7 +1380,7 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
         # «раунд пройден» ставим только после полного раунда — незаконченный
         # обязан повториться, но повторится он уже по остатку.
         def keep(outcome, _done, _total):
-            if outcome and outcome[1]:
+            if outcome and isinstance(outcome[1], dict) and outcome[1]:
                 park_id, entries, _task = outcome
                 save(rows=[(cid, park_id, entry) for cid, entry in entries.items()])
 
@@ -1193,6 +1392,9 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
             retry = []
             with lock:
                 for park_id, entries, task in results:
+                    if entries is _DENIED:
+                        denied.add(_park_key(park_id))
+                        continue
                     if entries is None:
                         retry.append(task)
                         continue
@@ -1207,6 +1409,9 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
                         if park_id in queue:
                             queue[park_id] = [cid for cid in queue[park_id]
                                               if cid not in entries]
+                # Срез парка мог промолчать, пока соседний срез того же парка
+                # получал отказ в правах, — такой повторять уже незачем.
+                retry = [task for task in retry if _park_key(task[0]) not in denied]
             if not retry:
                 break
             attempt += 1
@@ -1224,6 +1429,7 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
         done_rounds.add(round_key)
         stages['rounds'] = sorted(done_rounds)
         stages['provider_counts'] = dict(seen_providers)
+        stages['denied_parks'] = sorted(denied)
         # Строки уже улетели в контрольную точку по ходу раунда — здесь только
         # отметка «раунд пройден целиком».
         save(stages=stages)
@@ -1262,7 +1468,7 @@ def _entry_from_list(item, provider, archive):
     }
 
 
-def _probe_parks(client, ids, parks, progress, stop=None):
+def _probe_parks(client, ids, parks, progress, stop=None, denied=None):
     """Перебор диспетчерских для строк без парка — параллельно и одним списком.
 
     Здесь выигрыш от больших пачек самый большой. Раньше каждый парк спрашивали
@@ -1279,7 +1485,13 @@ def _probe_parks(client, ids, parks, progress, stop=None):
     projection=['id']). Зато среди полей есть тип занятости, а он снимает с
     сотрудников парка 12 бесплодных раундов и по запросу карточки на каждого: на
     том же файле — 955 строк из 15 738.
+
+    denied — закрытые диспетчерские, множество общее с вызывающим. Парк, ответивший
+    403, переспрашивать бесполезно (см. SOURCE_NO_ACCESS): он попадает в denied и
+    выбывает из перебора, а отчёт оговаривает, что «не найден» тогда значит «не
+    найден в доступных диспетчерских».
     """
+    denied = denied if denied is not None else set()
     pending = set(ids)
     found = {}
     lock = threading.Lock()
@@ -1290,6 +1502,8 @@ def _probe_parks(client, ids, parks, progress, stop=None):
             stop()
         park_id = str(park.get('id'))
         with lock:
+            if _park_key(park_id) in denied:
+                return None
             snapshot = list(pending)
         if not snapshot:
             return None
@@ -1300,6 +1514,12 @@ def _probe_parks(client, ids, parks, progress, stop=None):
             )
         except FleetSessionExpired:
             raise
+        except FleetAccessDenied as error:
+            logging.warning('Провайдер ЭДО: нет доступа к диспетчерской %s при переборе '
+                            '(%s) — пропускаем её', park_id, str(error)[:120])
+            with lock:
+                denied.add(_park_key(park_id))
+            return None
         except FleetError as error:
             # Молча пропустить парк здесь — это соврать про КАЖДОГО его водителя:
             # он уедет в отчёт как «не найден ни в одной диспетчерской». Именно так
@@ -1319,7 +1539,8 @@ def _probe_parks(client, ids, parks, progress, stop=None):
     for archive in (False, True):
         if not pending:
             break
-        tasks = [(park, archive) for park in parks]
+        tasks = [(park, archive) for park in parks
+                 if _park_key(park.get('id')) not in denied]
         attempt = 0
         while tasks:
             retry = [task for task in _run_parallel(client, tasks, probe, stop=stop)
@@ -1356,7 +1577,7 @@ def _info_from_list(item, park_id, archive):
     }
 
 
-def _classify_leftovers(client, unknown, progress, stop=None):
+def _classify_leftovers(client, unknown, progress, stop=None, denied=None):
     """Кто эти люди из остатка — одним запросом на парк, без фильтра провайдера.
 
     Нужно, когда ID парка пришёл в файле: перебора диспетчерских не было, значит
@@ -1366,7 +1587,11 @@ def _classify_leftovers(client, unknown, progress, stop=None):
 
     Ненайденные здесь — это не «нет провайдера», а «в этом парке такого нет»:
     они уходят в добор карточками, где парк перебирается заново.
+
+    Парк, ответивший 403, попадает в denied (общее с вызывающим) и не
+    переспрашивается — его строки вызывающий помечает «нет доступа».
     """
+    denied = denied if denied is not None else set()
     by_park = OrderedDict()
     for park_id, contractor_id in unknown:
         if park_id:
@@ -1379,6 +1604,8 @@ def _classify_leftovers(client, unknown, progress, stop=None):
         if stop:
             stop()
         with lock:
+            if _park_key(park_id) in denied:
+                return None
             ids = [cid for cid in by_park.get(park_id, ()) if cid not in found]
         if not ids:
             return None
@@ -1388,6 +1615,12 @@ def _classify_leftovers(client, unknown, progress, stop=None):
             )
         except FleetSessionExpired:
             raise
+        except FleetAccessDenied as error:
+            logging.warning('Провайдер ЭДО: нет доступа к диспетчерской %s при разборе '
+                            'остатка (%s)', park_id, str(error)[:120])
+            with lock:
+                denied.add(_park_key(park_id))
+            return None
         except FleetError as error:
             logging.warning('Провайдер ЭДО: разбор остатка по парку %s не удался (%s) — '
                             'вернёмся к нему', park_id, str(error)[:120])
@@ -1445,6 +1678,7 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
     # ответила и водителя мы так и не нашли, честного ответа у нас нет: молчаливое
     # «не найден» здесь того же сорта, что потерянный парк в переборе.
     silent = 0
+    refused = 0
     for candidate in candidates:
         if not candidate:
             continue
@@ -1452,6 +1686,13 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
             profile = client.driver_card(candidate, contractor_id)
         except FleetSessionExpired:
             raise
+        except FleetAccessDenied as error:
+            # Отказ в правах — тоже не «здесь такого нет», но и не молчание:
+            # считаем отдельно, чтобы ниже дать строке верный ответ.
+            refused += 1
+            logging.warning('Провайдер ЭДО: нет доступа к карточке %s в парке %s (%s)',
+                            contractor_id[:8], candidate[:8], str(error)[:80])
+            continue
         except FleetError as error:
             silent += 1
             logging.warning('Провайдер ЭДО: карточка %s в парке %s не ответила (%s)',
@@ -1470,10 +1711,18 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
             'park_id': candidate,
             'source': 'карточка',
         }
-    if silent:
+    if refused and not silent and park_id and len(candidates) == 1:
+        # Спрашивать было негде: единственная диспетчерская строки закрыта. Это
+        # ответ «нет доступа» (см. SOURCE_NO_ACCESS), его ставит вызывающий.
+        raise FleetAccessDenied(
+            'Карточка водителя {}…: нет доступа к диспетчерской {}'.format(
+                contractor_id[:8], park_id))
+    if silent or refused:
+        # При переборе закрытая диспетчерская — такое же белое пятно, как
+        # молчащая: «не найден» сказать нельзя.
         raise FleetError(
             'Карточка водителя {}…: {} диспетчерских не ответили, «не найден» '
-            'сказать не можем'.format(contractor_id[:8], silent))
+            'сказать не можем'.format(contractor_id[:8], silent + refused))
     return None
 
 
