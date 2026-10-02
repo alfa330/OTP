@@ -12,13 +12,22 @@
     GET    /api/library/analytics            мониторинг: кто что читает (управляющие)
     GET    /api/library/analytics/summary    мониторинг: общая и по отделам (управляющие)
     POST   /api/library/genres               {name} — создать жанр      (управляющие)
-    PATCH  /api/library/genres/<id>          {name} — переименовать     (управляющие)
-    DELETE /api/library/genres/<id>          удалить жанр, книги остаются (управляющие)
+    PATCH  /api/library/genres/<id>          {name} — переименовать     (ведущие все отделы)
+    DELETE /api/library/genres/<id>          удалить жанр, книги остаются (ведущие все отделы)
 
 КТО ВЕДЁТ БИБЛИОТЕКУ (can_manage) — загружает и удаляет книги, правит их
 отделы и жанры, ведёт справочник жанров, видит архив и мониторинг. По ТЗ это
-были супер-админ и тренер; с 02.10.2026 — СВ и выше и, как раньше, тренер
-(MANAGER_ROLES).
+были супер-админ и тренер; с 02.10.2026 — ещё админы (руководители) и СВ.
+Тренер, руководители и супер-админ ведут ВСЕ отделы (FULL_MANAGER_ROLES), СВ —
+только СВОЙ (DEPARTMENT_MANAGER_ROLES, класс Access):
+  - видит книги, выданные его отделу, и архив среди них;
+  - меняет (жанры, архив, удаление) только книгу одного своего отдела: книга,
+    выданная и другим отделам, у него только для чтения — иначе «в архив»
+    убрало бы её и у чужих (LIBRARY_BOOK_SHARED);
+  - выдаёт книгу только своему отделу;
+  - в мониторинге — только люди его отдела;
+  - жанр создаёт, а переименовать и удалить его — у ведущих все отделы:
+    справочник общий, и правка задела бы книги чужих отделов.
 
 ОТДЕЛЫ (29.09.2026). Книга выдаётся одному или нескольким отделам — при
 загрузке их выбирают обязательно; с 02.10.2026 — любому действующему отделу
@@ -56,11 +65,16 @@ from . import queries, storage
 from .epub import MAX_EPUB_BYTES, EpubError, parse_epub
 from .schema import schema_is_ready
 
-# Кто ведёт библиотеку, по роли. Решение владельца 02.10.2026: «начиная св и
-# выше отдай доступ на редактирование, архив, мониторинг и т. д.» — СВ и выше
-# по шкале ROLE_HIERARCHY (bot_schedule2.py), в любом отделе. Тренер ведёт
-# по ТЗ (с 28.09.2026) — по шкале он ниже СВ, поэтому назван отдельно.
-MANAGER_ROLES = frozenset({'super_admin', 'admin', 'sv', 'trainer'})
+# Кто ведёт библиотеку, по роли. Решения владельца 02.10.2026: «начиная св и
+# выше отдай доступ на редактирование, архив, мониторинг и т. д.», затем
+# «сделай так, чтобы св был виден свой раздел и только, а у тренера ко всем,
+# руководителям и выше тоже выдать полный доступ».
+#   все отделы — тренер (по ТЗ, с 28.09.2026), руководители (admin: главы
+#   отделов) и супер-админ;
+FULL_MANAGER_ROLES = frozenset({'super_admin', 'admin', 'trainer'})
+#   только свой отдел — СВ (отдел — users.department_id).
+DEPARTMENT_MANAGER_ROLES = frozenset({'sv'})
+MANAGER_ROLES = FULL_MANAGER_ROLES | DEPARTMENT_MANAGER_ROLES
 # Кто читает: «обычным операторам и сотрудникам — на чтение» — все остальные
 # роли шкалы. Вместе с MANAGER_ROLES — ровно вся шкала (тест сверяет: новая
 # роль без решения не останется). То же объединение — в App.jsx (LIBRARY_ROLES).
@@ -81,8 +95,46 @@ COVER_MAX_SIDE = 1200
 
 
 def can_manage(role):
-    """Ведёт ли смотрящий библиотеку."""
+    """Ведёт ли смотрящий библиотеку (все отделы или свой)."""
     return role in MANAGER_ROLES
+
+
+class Access:
+    """Что смотрящему можно в библиотеке — решено один раз на запрос.
+
+    department_id — отдел, которым ограничен ведущий (СВ); None у ведущего
+    все отделы. У читателя manager=False: его книги отбирает _READER_SEES.
+    """
+
+    __slots__ = ('manager', 'department_id')
+
+    def __init__(self, manager=False, department_id=None):
+        self.manager = bool(manager)
+        self.department_id = int(department_id) if manager and department_id is not None else None
+
+    @property
+    def manages_all(self):
+        return self.manager and self.department_id is None
+
+    def can_edit(self, department_ids):
+        """Можно ли менять книгу с этими отделами: ведущему все — любую, СВ —
+        только выданную одному его отделу."""
+        if not self.manager:
+            return False
+        if self.department_id is None:
+            return True
+        ids = {int(value) for value in (department_ids or [])}
+        return ids == {self.department_id}
+
+
+def access_for(role, department_id):
+    """Роль и отдел смотрящего -> Access. СВ без отдела ничего не ведёт и
+    читает как все — то есть ничего не видит: книги выдаются отделам."""
+    if role in FULL_MANAGER_ROLES:
+        return Access(True)
+    if role in DEPARTMENT_MANAGER_ROLES and department_id:
+        return Access(True, department_id)
+    return Access(False)
 
 
 def can_read(role):
@@ -147,7 +199,7 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             return True
         return False
 
-    def library_route(rule, methods, *, manage=False):
+    def library_route(rule, methods, *, manage=False, manage_all=False):
         def decorator(handler):
             @bp.route(rule, methods=[*methods, 'OPTIONS'], endpoint=handler.__name__)
             @require_api_key
@@ -161,20 +213,32 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         message, status = error
                         return jsonify({"error": message}), status
                     role = normalize_role(requester[3] if requester else None)
-                    manager = can_manage(role)
                     if not can_read(role):
                         return jsonify({
                             "error": "Раздел «Библиотека» вам пока не открыт",
                             "code": "LIBRARY_FORBIDDEN",
                         }), 403
-                    if manage and not manager:
+                    # Отдел нужен только СВ — один короткий запрос; остальным
+                    # всё решает роль.
+                    department_id = None
+                    if role in DEPARTMENT_MANAGER_ROLES:
+                        with db._get_cursor() as cursor:
+                            department_id = queries.user_department_id(cursor, requester_id)
+                    access = access_for(role, department_id)
+                    if (manage or manage_all) and not access.manager:
                         return jsonify({
                             "error": "Доступно только тем, кто ведёт библиотеку",
                             "code": "LIBRARY_MANAGE_FORBIDDEN",
                         }), 403
+                    if manage_all and not access.manages_all:
+                        return jsonify({
+                            "error": "Жанры общие для всех отделов — переименовать или удалить "
+                                     "жанр может тренер или руководитель",
+                            "code": "LIBRARY_MANAGE_ALL_ONLY",
+                        }), 403
                     # Ручкам уходит готовое решение, а не роль: правило «кто
-                    # ведёт» живёт в одном месте.
-                    return handler(int(requester_id), manager, **kwargs)
+                    # ведёт и что» живёт в одном месте.
+                    return handler(int(requester_id), access, **kwargs)
                 except EpubError as exc:
                     return jsonify({"error": exc.message, "code": exc.code}), 400
                 except storage.StorageError as exc:
@@ -187,14 +251,17 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
         return decorator
 
-    def _department_error(cursor, department_ids, *, book_id=None):
-        """Ответ 400 о неверных отделах или None. Проверка — ДО любой записи:
-        файл в бакет и строка книги уходят только с годным набором отделов."""
+    def _department_error(cursor, department_ids, access, *, book_id=None):
+        """Ответ 400/403 о неверных отделах или None. Проверка — ДО любой
+        записи: файл в бакет и строка книги уходят только с годным набором."""
         if department_ids is None:
             return jsonify({"error": "Отделы переданы неверно", "code": "LIBRARY_BAD_REQUEST"}), 400
         if not department_ids:
             return jsonify({"error": "Выберите хотя бы один отдел",
                             "code": "LIBRARY_DEPARTMENTS_REQUIRED"}), 400
+        if not access.can_edit(department_ids):
+            return jsonify({"error": "Книгу можно выдать только своему отделу",
+                            "code": "LIBRARY_DEPARTMENT_NOT_YOURS"}), 403
         if queries.unknown_departments(cursor, department_ids, book_id=book_id):
             return jsonify({"error": "Такого отдела больше нет — обновите страницу",
                             "code": "LIBRARY_DEPARTMENT_UNKNOWN"}), 400
@@ -223,6 +290,33 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
     def _not_found():
         return jsonify({"error": "Книга не найдена", "code": "LIBRARY_BOOK_NOT_FOUND"}), 404
 
+    def _edit_error(cursor, book_id, access):
+        """Ответ 404/403, если эту книгу смотрящему не изменить, или None.
+
+        Ведущему все отделы — любую существующую. СВ — только книгу своего
+        отдела (иначе 404, как несуществующую), и только выданную ему одному:
+        «в архив» и «удалить» общей книги задели бы чужие отделы. Строка книги
+        берётся под замок — до правки набор отделов уже не сменится.
+        """
+        if access.manages_all:
+            return None
+        department_ids = queries.lock_book_departments(cursor, book_id)
+        if department_ids is None or access.department_id not in department_ids:
+            return _not_found()
+        if not access.can_edit(department_ids):
+            return jsonify({
+                "error": "Книга выдана и другим отделам — изменить её может тренер или руководитель",
+                "code": "LIBRARY_BOOK_SHARED",
+            }), 403
+        return None
+
+    def _view(row, access, cover_url=None):
+        view = queries.book_view(row, cover_url)
+        # Можно ли менять книгу — решает сервер: фронт прячет меню «···» у
+        # общей книги СВ, а не гадает по чужим отделам.
+        view['can_edit'] = access.can_edit(view['department_ids'])
+        return view
+
     def _covers(rows):
         try:
             return storage.cover_urls(gcs, rows) if gcs else {}
@@ -231,30 +325,35 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             return {}
 
     @library_route('', ['GET'])
-    def library_catalog(user_id, manager):
+    def library_catalog(user_id, access):
         with db._get_cursor() as cursor:
             if not _schema_ready(cursor):
                 return jsonify({"status": "success", "schema_ready": False, "books": [],
-                                "departments": [], "genres": [], "can_manage": manager}), 200
-            rows = queries.list_books(cursor, user_id, manager=manager)
+                                "departments": [], "genres": [], "can_manage": access.manager,
+                                "manage_all": access.manages_all}), 200
+            rows = queries.list_books(cursor, user_id, manager=access.manager,
+                                      department_id=access.department_id)
             # Отделы нужны тому, кто выбирает: переключатель отдела и окно
-            # публикации. Читатель видит свой отдел, выбирать ему нечего.
-            departments = queries.library_departments(cursor) if manager else []
+            # публикации. Читатель видит свой отдел, выбирать ему нечего; СВ —
+            # только свой отдел.
+            departments = (queries.library_departments(cursor, department_id=access.department_id)
+                           if access.manager else [])
             # Жанры — всем: по ним делится полка и у читателя.
             genres = queries.list_genres(cursor)
         covers = _covers(rows)
         return jsonify({
             "status": "success",
             "schema_ready": True,
-            "can_manage": manager,
+            "can_manage": access.manager,
+            "manage_all": access.manages_all,
             "max_upload_mb": MAX_EPUB_BYTES // (1024 * 1024),
             "departments": departments,
             "genres": genres,
-            "books": [queries.book_view(row, covers.get(row['id'])) for row in rows],
+            "books": [_view(row, access, covers.get(row['id'])) for row in rows],
         }), 200
 
     @library_route('/books', ['POST'], manage=True)
-    def library_upload(user_id, manager):
+    def library_upload(user_id, access):
         upload = request.files.get('file')
         if upload is None or not upload.filename:
             return jsonify({"error": "Выберите файл книги", "code": "LIBRARY_FILE_REQUIRED"}), 400
@@ -270,7 +369,7 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         department_ids = parse_ids(request.form.getlist('department_ids'))
         genre_ids = parse_ids(request.form.getlist('genre_ids'))
         with db._get_cursor() as cursor:
-            error = _department_error(cursor, department_ids) or _genre_error(cursor, genre_ids)
+            error = _department_error(cursor, department_ids, access) or _genre_error(cursor, genre_ids)
         if error:
             return error
         data = upload.read(MAX_EPUB_BYTES + 1)
@@ -303,12 +402,13 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                      book_id, parsed['title'], parsed['total_pages'], user_id, department_ids, genre_ids)
         covers = _covers([row])
         return jsonify({"status": "success",
-                        "book": queries.book_view(row, covers.get(book_id))}), 201
+                        "book": _view(row, access, covers.get(book_id))}), 201
 
     @library_route('/books/<int:book_id>', ['GET'])
-    def library_book(user_id, manager, book_id):
+    def library_book(user_id, access, book_id):
         with db._get_cursor() as cursor:
-            if queries.open_book(cursor, book_id, user_id, manager=manager) is None:
+            if queries.open_book(cursor, book_id, user_id, manager=access.manager,
+                                department_id=access.department_id) is None:
                 return _not_found()
             row = queries.get_book(cursor, book_id, user_id)
         if not row:
@@ -318,7 +418,7 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         "book": queries.reader_view(row, covers.get(book_id))}), 200
 
     @library_route('/books/<int:book_id>', ['PATCH'], manage=True)
-    def library_update(user_id, manager, book_id):
+    def library_update(user_id, access, book_id):
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return jsonify({"error": "Неверный запрос", "code": "LIBRARY_BAD_REQUEST"}), 400
@@ -334,9 +434,9 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         if 'department_ids' not in payload and 'genre_ids' not in payload and archived is None:
             return jsonify({"error": "Нечего менять", "code": "LIBRARY_BAD_REQUEST"}), 400
         with db._get_cursor() as cursor:
-            error = None
-            if 'department_ids' in payload:
-                error = _department_error(cursor, department_ids, book_id=book_id)
+            error = _edit_error(cursor, book_id, access)
+            if not error and 'department_ids' in payload:
+                error = _department_error(cursor, department_ids, access, book_id=book_id)
             if not error and 'genre_ids' in payload:
                 error = _genre_error(cursor, genre_ids)
             if error:
@@ -349,11 +449,14 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                      book_id, user_id, department_ids, genre_ids, archived)
         covers = _covers([row])
         return jsonify({"status": "success",
-                        "book": queries.book_view(row, covers.get(book_id))}), 200
+                        "book": _view(row, access, covers.get(book_id))}), 200
 
     @library_route('/books/<int:book_id>', ['DELETE'], manage=True)
-    def library_delete(user_id, manager, book_id):
+    def library_delete(user_id, access, book_id):
         with db._get_cursor() as cursor:
+            error = _edit_error(cursor, book_id, access)
+            if error:
+                return error
             outcome, refs = queries.delete_book(cursor, book_id)
         if outcome == queries.DELETE_NOT_FOUND:
             return _not_found()
@@ -366,9 +469,10 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         return jsonify({"status": "success"}), 200
 
     @library_route('/books/<int:book_id>/file', ['GET'])
-    def library_book_file(user_id, manager, book_id):
+    def library_book_file(user_id, access, book_id):
         with db._get_cursor() as cursor:
-            if queries.open_book(cursor, book_id, user_id, manager=manager) is None:
+            if queries.open_book(cursor, book_id, user_id, manager=access.manager,
+                                department_id=access.department_id) is None:
                 return _not_found()
             ref = queries.book_file_ref(cursor, book_id)
         if not ref:
@@ -385,20 +489,21 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         return response
 
     @library_route('/books/<int:book_id>/saved', ['PUT'])
-    def library_book_saved(user_id, manager, book_id):
+    def library_book_saved(user_id, access, book_id):
         payload = request.get_json(silent=True) or {}
         saved = payload.get('saved')
         if not isinstance(saved, bool):
             return jsonify({"error": "Нужно поле saved: true или false",
                             "code": "LIBRARY_BAD_REQUEST"}), 400
         with db._get_cursor() as cursor:
-            if queries.open_book(cursor, book_id, user_id, manager=manager) is None:
+            if queries.open_book(cursor, book_id, user_id, manager=access.manager,
+                                department_id=access.department_id) is None:
                 return _not_found()
             queries.set_saved(cursor, user_id, book_id, saved)
         return jsonify({"status": "success", "saved": saved}), 200
 
     @library_route('/books/<int:book_id>/progress', ['PUT'])
-    def library_book_progress(user_id, manager, book_id):
+    def library_book_progress(user_id, access, book_id):
         payload = request.get_json(silent=True) or {}
         position = str(payload.get('position') or '').strip()
         if not POSITION_RE.match(position):
@@ -412,7 +517,8 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             return jsonify({"error": "Нужны percent и page", "code": "LIBRARY_BAD_REQUEST"}), 400
         at_end = payload.get('at_end') is True
         with db._get_cursor() as cursor:
-            total_pages = queries.open_book(cursor, book_id, user_id, manager=manager)
+            total_pages = queries.open_book(cursor, book_id, user_id, manager=access.manager,
+                                department_id=access.department_id)
             if total_pages is None:
                 return _not_found()
             # Числа приходят из ридера — сервер лишь держит их в границах.
@@ -433,20 +539,23 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             },
         }), 200
 
-    def _department_arg():
+    def _department_arg(access):
+        """Отдел мониторинга: у СВ — всегда его отдел, что бы ни прислали."""
+        if access.department_id is not None:
+            return access.department_id
         raw = str(request.args.get('department_id') or '').strip()
         return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= 9 else None
 
     @library_route('/analytics', ['GET'], manage=True)
-    def library_analytics(user_id, manager):
+    def library_analytics(user_id, access):
         query = str(request.args.get('q') or '').strip()[:100]
         book_id = request.args.get('book_id', type=int)
         with db._get_cursor() as cursor:
             if not _schema_ready(cursor):
                 return jsonify({"status": "success", "rows": [], "books": [], "truncated": False}), 200
             rows, truncated = queries.analytics(cursor, query=query, book_id=book_id,
-                                                department_id=_department_arg())
-            books = queries.analytics_books(cursor)
+                                                department_id=_department_arg(access))
+            books = queries.analytics_books(cursor, department_id=access.department_id)
         return jsonify({
             "status": "success",
             "rows": rows,
@@ -459,15 +568,15 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
     # каждую букву поиска, а сводке фильтры списка не нужны — она меняется
     # только с отделом.
     @library_route('/analytics/summary', ['GET'], manage=True)
-    def library_analytics_summary(user_id, manager):
+    def library_analytics_summary(user_id, access):
         with db._get_cursor() as cursor:
             if not _schema_ready(cursor):
                 return jsonify({"status": "success", "total": None, "departments": None}), 200
-            summary = queries.analytics_summary(cursor, department_id=_department_arg())
+            summary = queries.analytics_summary(cursor, department_id=_department_arg(access))
         return jsonify({"status": "success", **summary}), 200
 
     @library_route('/genres', ['POST'], manage=True)
-    def library_genre_create(user_id, manager):
+    def library_genre_create(user_id, access):
         name, error = _genre_name()
         if error:
             return error
@@ -478,8 +587,8 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         # Уже был — отдаём его же: окно книги просто отметит существующий.
         return jsonify({"status": "success", "genre": genre, "created": created}), 201 if created else 200
 
-    @library_route('/genres/<int:genre_id>', ['PATCH'], manage=True)
-    def library_genre_rename(user_id, manager, genre_id):
+    @library_route('/genres/<int:genre_id>', ['PATCH'], manage_all=True)
+    def library_genre_rename(user_id, access, genre_id):
         name, error = _genre_name()
         if error:
             return error
@@ -500,8 +609,8 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         logging.info('library: жанр #%s переименован в «%s» пользователем %s', genre_id, name, user_id)
         return jsonify({"status": "success", "genre": genre}), 200
 
-    @library_route('/genres/<int:genre_id>', ['DELETE'], manage=True)
-    def library_genre_delete(user_id, manager, genre_id):
+    @library_route('/genres/<int:genre_id>', ['DELETE'], manage_all=True)
+    def library_genre_delete(user_id, access, genre_id):
         with db._get_cursor() as cursor:
             deleted = queries.delete_genre(cursor, genre_id)
         if not deleted:

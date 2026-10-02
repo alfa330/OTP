@@ -74,7 +74,7 @@ const NewGenreField = ({ value, creating, onChange, onCommit, onCancel }) => {
 };
 
 const LibraryBookModal = ({
-    open, mode, files = [], book = null, departments = [], initialIds = [],
+    open, mode, files = [], book = null, departments = [], initialIds = [], lockedDepartment = null,
     genres = [], initialGenreIds = [], onCreateGenre,
     busy = false, busyLabel = '', onSubmit, onClose, onPickFiles,
 }) => {
@@ -105,7 +105,9 @@ const LibraryBookModal = ({
        книг подряд, и второе открытие не должно показать отделы первой. */
     useEffect(() => {
         if (!open) return;
-        setIds([...new Set((initialIds || []).map(Number))]);
+        /* СВ выдаёт книгу только своему отделу — выбирать нечего, и поля
+           отделов в окне нет. */
+        setIds(lockedDepartment ? [lockedDepartment.id] : [...new Set((initialIds || []).map(Number))]);
         applyGenreIds([...new Set((initialGenreIds || []).map(Number))]);
         setDraft(null);
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -188,7 +190,10 @@ const LibraryBookModal = ({
     const many = publishing && files.length > 1;
     const title = publishing
         ? (files.length > 1 ? `Публикация книг: ${files.length}` : 'Публикация книги')
-        : 'Отделы и жанры';
+        : (lockedDepartment ? 'Жанры книги' : 'Отделы и жанры');
+    const publishSubtitle = lockedDepartment
+        ? `${many ? 'Их' : 'Её'} увидят сотрудники вашего отдела`
+        : `В библиотеке каких отделов ${many ? 'их' : 'её'} увидят`;
 
     return (
         <IosModal
@@ -203,7 +208,7 @@ const LibraryBookModal = ({
                 return undefined;
             }}
             title={title}
-            subtitle={publishing ? `В библиотеке каких отделов ${many ? 'их' : 'её'} увидят` : book?.title}
+            subtitle={publishing ? publishSubtitle : book?.title}
             maxWidth="max-w-lg"
             footer={(
                 <>
@@ -248,51 +253,53 @@ const LibraryBookModal = ({
                     </section>
                 )}
 
-                <section className="space-y-1.5">
-                    <div className={iosGroupLabel}>Каким отделам видно</div>
-                    <div className={`${iosCard} space-y-2 p-3.5`}>
-                        <CustomSelect
-                            variant="ios"
-                            multiple
-                            searchable
-                            bulkActions
-                            searchPlaceholder="Поиск по названию отдела…"
-                            ariaLabel="Отделы, которым видна книга"
-                            placeholder="Выберите отделы"
-                            value={ids}
-                            options={options}
-                            onChange={(next) => setIds((Array.isArray(next) ? next : []).map(Number))}
-                            renderValue={renderValue}
-                            disabled={locked}
-                        />
-                        {ids.length > 0 && (
-                            <div className="flex flex-wrap gap-1.5">
-                                {ids.map((id) => (
-                                    <span
-                                        key={id}
-                                        className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 py-1 pl-2.5 pr-1 text-[12px] text-slate-700"
-                                    >
-                                        <span className="truncate">{nameOf(id)}</span>
-                                        <button
-                                            type="button"
-                                            onClick={() => setIds((prev) => prev.filter((value) => value !== id))}
-                                            disabled={locked}
-                                            aria-label={`Убрать отдел ${nameOf(id)}`}
-                                            className="grid h-4 w-4 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                {!lockedDepartment && (
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Каким отделам видно</div>
+                        <div className={`${iosCard} space-y-2 p-3.5`}>
+                            <CustomSelect
+                                variant="ios"
+                                multiple
+                                searchable
+                                bulkActions
+                                searchPlaceholder="Поиск по названию отдела…"
+                                ariaLabel="Отделы, которым видна книга"
+                                placeholder="Выберите отделы"
+                                value={ids}
+                                options={options}
+                                onChange={(next) => setIds((Array.isArray(next) ? next : []).map(Number))}
+                                renderValue={renderValue}
+                                disabled={locked}
+                            />
+                            {ids.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                    {ids.map((id) => (
+                                        <span
+                                            key={id}
+                                            className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 py-1 pl-2.5 pr-1 text-[12px] text-slate-700"
                                         >
-                                            <X size={11} />
-                                        </button>
-                                    </span>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                    <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                        {ids.length
-                            ? `${many ? 'Книги' : 'Книгу'} увидят сотрудники только выбранных отделов.`
-                            : `Выберите хотя бы один отдел — без него ${many ? 'книги' : 'книгу'} не увидит никто.`}
-                    </p>
-                </section>
+                                            <span className="truncate">{nameOf(id)}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setIds((prev) => prev.filter((value) => value !== id))}
+                                                disabled={locked}
+                                                aria-label={`Убрать отдел ${nameOf(id)}`}
+                                                className="grid h-4 w-4 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                                            >
+                                                <X size={11} />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                        <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                            {ids.length
+                                ? `${many ? 'Книги' : 'Книгу'} увидят сотрудники только выбранных отделов.`
+                                : `Выберите хотя бы один отдел — без него ${many ? 'книги' : 'книгу'} не увидит никто.`}
+                        </p>
+                    </section>
+                )}
 
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Жанры</div>

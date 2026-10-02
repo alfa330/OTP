@@ -203,6 +203,9 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
        приходит список отделов (restoreDepartment). */
     const [departmentId, setDepartmentId] = useState('');
     const [canManage, setCanManage] = useState(false);
+    /* Ведёт все отделы (тренер, руководитель, супер-админ). СВ ведёт один
+       свой — сервер присылает ему только его отдел. */
+    const [manageAll, setManageAll] = useState(false);
     const [schemaReady, setSchemaReady] = useState(true);
     const [maxMb, setMaxMb] = useState(DEFAULT_MAX_MB);
     const [loading, setLoading] = useState(true);
@@ -250,6 +253,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     });
                 });
                 setCanManage(Boolean(body.can_manage));
+                setManageAll(Boolean(body.manage_all));
                 setDepartments(Array.isArray(body.departments) ? body.departments : []);
                 setGenres(Array.isArray(body.genres) ? body.genres : []);
                 setSchemaReady(body.schema_ready !== false);
@@ -361,7 +365,10 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 })),
         ];
     }, [books, departmentId, departments]);
-    const showDepartments = canManage && departments.length > 0;
+    /* Отдел СВ: переключателя у него нет, мониторинг и окно книги — всегда
+       этого отдела. */
+    const ownDepartment = canManage && !manageAll ? departments[0] || null : null;
+    const showDepartments = manageAll && departments.length > 0;
     /* Какие отделы можно выбрать — для строк «По отделам» в мониторинге. */
     const selectableDepartmentIds = useMemo(
         () => new Set(departmentOptions.map((item) => item.value).filter((value) => value !== '')),
@@ -487,10 +494,12 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             .finally(() => setSheetBusy(false));
     }, [sheet, updateBook, uploadFiles]);
 
+    /* Меню «···» — у книги, которую смотрящему можно менять (решает сервер):
+       общая с другими отделами книга у СВ только для чтения. */
     const menuFor = useCallback((book) => {
-        if (!canManage) return null;
+        if (!canManage || !book.can_edit) return null;
         const departmentsItem = {
-            key: 'departments', label: 'Отделы и жанры', icon: Tags,
+            key: 'departments', label: ownDepartment ? 'Жанры' : 'Отделы и жанры', icon: Tags,
             onSelect: () => setSheet({ mode: 'edit', book }),
         };
         if (book.archived) {
@@ -510,7 +519,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 onSelect: () => updateBook(book, { archived: true }, `Книга «${book.title}» убрана в архив`),
             },
         ];
-    }, [canManage, updateBook]);
+    }, [canManage, ownDepartment, updateBook]);
 
     /* Справочник жанров. Каждая ручка отвечает жанром — список правится на
        месте, без перезапроса каталога. null/false — отказ, тост уже показан. */
@@ -592,9 +601,10 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
        тот, которому книги выдаются: другому сервер новую книгу не выдаст. И
        жанр, выбранный на полке: тренер, листающий «Психологию», публикует в неё. */
     const publishDefaultIds = useMemo(() => {
+        if (ownDepartment) return [ownDepartment.id];
         const current = departments.find((item) => item.id === departmentId);
         return current && current.active !== false ? [departmentId] : [];
-    }, [departmentId, departments]);
+    }, [departmentId, departments, ownDepartment]);
     const publishDefaultGenreIds = useMemo(() => (activeGenreId === '' ? [] : [activeGenreId]), [activeGenreId]);
 
     const uploadLabel = upload
@@ -627,10 +637,15 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             }}
                         />
                         <div className="flex gap-2">
-                            <button type="button" className={iosBtnSecondary} onClick={() => setGenresOpen(true)}>
-                                <Tags size={15} />
-                                Жанры
-                            </button>
+                            {/* Справочник жанров общий для всех отделов —
+                                переименовать и удалить жанр может тот, кто
+                                ведёт все отделы. СВ создаёт жанр в окне книги. */}
+                            {manageAll && (
+                                <button type="button" className={iosBtnSecondary} onClick={() => setGenresOpen(true)}>
+                                    <Tags size={15} />
+                                    Жанры
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 className={`${iosBtnPrimary} min-w-[172px] flex-1 sm:flex-none`}
@@ -693,7 +708,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         apiBaseUrl={apiBaseUrl}
                         headers={headers}
                         reloadKey={monitoringKey}
-                        departmentId={departmentId}
+                        departmentId={ownDepartment ? ownDepartment.id : departmentId}
                         selectableDepartmentIds={selectableDepartmentIds}
                         onPickDepartment={pickDepartment}
                     />
@@ -768,6 +783,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 files={shownSheet?.files}
                 book={shownSheet?.book}
                 departments={departments}
+                lockedDepartment={ownDepartment}
                 initialIds={shownSheet?.mode === 'edit'
                     ? shownSheet.book.department_ids
                     : (shownSheet?.departmentIds || publishDefaultIds)}

@@ -38,8 +38,8 @@ GENRE_NAME_MAX = 40
 # Что видно читателю: книга не в архиве и выдана ЕГО отделу. Отдел берётся из
 # users тем же запросом, а не отдельным походом: параметр — id смотрящего.
 # Сотрудник без отдела не видит ничего — книга всегда выдана конкретным отделам.
-# Те, кто ведёт библиотеку, видят всё, включая архив, — условие к ним не
-# применяется (library/routes.py: can_manage).
+# Те, кто ведёт библиотеку, видят и архив: ведущий все отделы — все книги, СВ —
+# книги своего отдела (_IN_DEPARTMENT; library/routes.py: Access).
 _READER_SEES = """
     b.archived_at IS NULL AND EXISTS (
         SELECT 1 FROM library_book_departments bd
@@ -47,6 +47,21 @@ _READER_SEES = """
          WHERE bd.book_id = b.id AND viewer.id = %s
     )
 """
+
+# Книга выдана этому отделу — архивная тоже. Параметр — id отдела.
+_IN_DEPARTMENT = """
+    EXISTS (SELECT 1 FROM library_book_departments bd
+             WHERE bd.book_id = b.id AND bd.department_id = %s)
+"""
+
+
+def _visible(manager, user_id, department_id):
+    """-> (условие, параметры) для книг, которые видит смотрящий."""
+    if not manager:
+        return _READER_SEES, (user_id,)
+    if department_id is not None:
+        return _IN_DEPARTMENT, (department_id,)
+    return '', ()
 
 
 def _rows(cursor):
@@ -101,15 +116,17 @@ def book_view(row, cover_url=None):
     }
 
 
-def list_books(cursor, user_id, *, manager):
+def list_books(cursor, user_id, *, manager, department_id=None):
     """Каталог с закладкой и прогрессом смотрящего — одним запросом.
 
-    Управляющему — все книги всех отделов вместе с архивом: отдел и вкладку
+    Ведущему все отделы — все книги вместе с архивом: отдел и вкладку
     («Общий доступ», «Сохранённые», «Архив») фронт выбирает на месте, без
-    второго похода на сервер. Читателю — только книги его отдела не из архива.
+    второго похода на сервер. СВ — книги его отдела, тоже с архивом.
+    Читателю — только книги его отдела не из архива.
     """
-    where = '' if manager else f'WHERE {_READER_SEES}'
-    params = (user_id, user_id) if manager else (user_id, user_id, user_id)
+    condition, extra = _visible(manager, user_id, department_id)
+    where = f'WHERE {condition}' if condition else ''
+    params = (user_id, user_id, *extra)
     cursor.execute(f"""
         SELECT {_BOOK_COLUMNS},
                (s.user_id IS NOT NULL) AS saved,
@@ -123,18 +140,17 @@ def list_books(cursor, user_id, *, manager):
     return _rows(cursor)
 
 
-def open_book(cursor, book_id, user_id, *, manager):
+def open_book(cursor, book_id, user_id, *, manager, department_id=None):
     """-> число страниц книги, если смотрящему её можно открыть, иначе None.
 
     Одна дверь для всех ручек одной книги (ридер, файл, закладка, прогресс):
     чужую по отделу или архивную книгу читатель не получит ни прямым адресом,
-    ни перебором id. Ответ тот же, что у несуществующей, — 404.
+    ни перебором id; СВ — книгу чужого отдела. Ответ тот же, что у
+    несуществующей, — 404.
     """
-    if manager:
-        cursor.execute("SELECT b.total_pages FROM library_books b WHERE b.id = %s", (book_id,))
-    else:
-        cursor.execute(f"SELECT b.total_pages FROM library_books b WHERE b.id = %s AND {_READER_SEES}",
-                       (book_id, user_id))
+    condition, extra = _visible(manager, user_id, department_id)
+    where = f' AND {condition}' if condition else ''
+    cursor.execute(f"SELECT b.total_pages FROM library_books b WHERE b.id = %s{where}", (book_id, *extra))
     row = cursor.fetchone()
     return int(row[0] or 1) if row else None
 
@@ -210,13 +226,40 @@ def insert_book(cursor, *, parsed, bucket, file_blob, file_size, original_name,
 _DEPARTMENT_SELECTABLE = "(d.is_active IS NOT FALSE)"
 
 
-def library_departments(cursor):
+def user_department_id(cursor, user_id):
+    """Отдел сотрудника (users.department_id) или None."""
+    cursor.execute("SELECT department_id FROM users WHERE id = %s", (user_id,))
+    row = cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def lock_book_departments(cursor, book_id):
+    """Отделы книги под замком её строки -> список id или None, если книги нет.
+    Замок тот же, что берёт update_book/delete_book, — в одной транзакции он
+    не мешает, а чужая правка отделов дождётся конца нашей."""
+    cursor.execute("""
+        SELECT ARRAY(SELECT bd.department_id FROM library_book_departments bd
+                      WHERE bd.book_id = b.id ORDER BY bd.department_id)
+          FROM library_books b
+         WHERE b.id = %s
+           FOR UPDATE
+    """, (book_id,))
+    row = cursor.fetchone()
+    return [int(value) for value in (row[0] or [])] if row else None
+
+
+def library_departments(cursor, *, department_id=None):
     """Отделы для выбора: те, кому можно выдать книгу (active), и те, у кого
     книги уже есть (active = False, если выдать им новую уже нельзя).
 
     Второе — чтобы книга, выданная отделу, который потом выключили, не
-    показывала в окне отделов безымянное «№ 42».
+    показывала в окне отделов безымянное «№ 42». С department_id (СВ) — один
+    его отдел: выдать книгу он может только ему.
     """
+    if department_id is not None:
+        cursor.execute(f"SELECT d.id, d.name, {_DEPARTMENT_SELECTABLE} AS active FROM departments d WHERE d.id = %s",
+                       (department_id,))
+        return [{'id': row[0], 'name': row[1], 'active': bool(row[2])} for row in cursor.fetchall()]
     cursor.execute(f"""
         SELECT d.id, d.name, {_DEPARTMENT_SELECTABLE} AS active
           FROM departments d
@@ -498,10 +541,25 @@ def analytics(cursor, *, query='', book_id=None, department_id=None, limit=ANALY
     } for row in rows[:limit]], truncated
 
 
-def analytics_books(cursor):
+def analytics_books(cursor, *, department_id=None):
     """Книги для фильтра мониторинга — все, и архивные тоже: их прогресс
-    по-прежнему в списке, и найти его фильтром должно быть можно."""
-    cursor.execute("SELECT id, title, (archived_at IS NOT NULL) FROM library_books ORDER BY title, id")
+    по-прежнему в списке, и найти его фильтром должно быть можно.
+
+    С department_id (СВ) — книги, выданные отделу, и те, что открывали его
+    люди (книгу могли потом отдать другим): названий чужих полок СВ не видит.
+    """
+    if department_id is not None:
+        cursor.execute(f"""
+            SELECT b.id, b.title, (b.archived_at IS NOT NULL)
+              FROM library_books b
+             WHERE {_IN_DEPARTMENT}
+                OR EXISTS (SELECT 1 FROM library_progress p
+                             JOIN users u ON u.id = p.user_id
+                            WHERE p.book_id = b.id AND u.department_id = %s)
+             ORDER BY b.title, b.id
+        """, (department_id, department_id))
+    else:
+        cursor.execute("SELECT id, title, (archived_at IS NOT NULL) FROM library_books ORDER BY title, id")
     return [{'id': row[0], 'title': row[1], 'archived': bool(row[2])} for row in cursor.fetchall()]
 
 
