@@ -18,8 +18,8 @@
   у книги их сколько угодно (и ни одного), неверный жанр — отказ до бакета;
 - отделы к выдаче — пока только СЗоВ и ОП (решение владельца 02.10.2026);
 - ведут библиотеку супер-админ, тренер, СВ СЗоВ и ОП и двое поимённо (id),
-  читают операторы СЗоВ и ОП — на сервере и в пункте меню одними и теми же
-  списками.
+  читают операторы СЗоВ и ОП и все сотрудники HR и «Регионов» (фронт-офисы) —
+  на сервере и в пункте меню одними и теми же списками.
 
 Книги в тестах собираются здесь же из строк: реальные файлы книг в публичный
 репозиторий не кладём.
@@ -1161,7 +1161,9 @@ class LibraryManagersTests(unittest.TestCase):
                     self.assertEqual(200, client.get('/api/library/analytics/summary').status_code)
 
     def test_other_supervisors_stay_outside(self):
-        for code in ('tez', 'front_office', '', None):
+        # СВ «Регионов» (фронт-офисы) — читатель, как весь его отдел, но не
+        # ведущий: это проверяет тест про HR и «Регионы».
+        for code in ('tez', 'marketing', '', None):
             with self.subTest(code=code):
                 response = self.manager_view('sv', department_code=code)
                 self.assertEqual(403, response.status_code)
@@ -1176,12 +1178,13 @@ class LibraryManagersTests(unittest.TestCase):
         response = self.manager_view('admin', requester_id=7, department_code='szov')
         self.assertEqual(403, response.status_code)
 
-    def test_department_is_looked_up_only_for_supervisors_and_operators(self):
-        """Ручки зовут проверку на каждый запрос: отдел — поход в базу, и
-        роль с id решают без него. Один поход на запрос, не два."""
+    def test_department_is_looked_up_once_and_only_when_needed(self):
+        """Ручки зовут проверку на каждый запрос: отдел — поход в базу. Роль
+        и id решают без него, а где без отдела не решить (СВ, оператор, любой
+        сотрудник HR и «Регионов»), — один поход на запрос, не два."""
         for role, requester_id, expected in (('super_admin', 7, []), ('trainer', 7, []),
-                                             ('admin', 1, []), ('admin', 7, []), ('sv', 7, [7]),
-                                             ('operator', 7, [7])):
+                                             ('admin', 1, []), ('admin', 7, [7]), ('sv', 7, [7]),
+                                             ('operator', 7, [7]), ('hr_manager', 7, [7])):
             with self.subTest(role=role, requester_id=requester_id):
                 calls = []
                 self.manager_view(role, requester_id=requester_id, department_code='szov', department_calls=calls)
@@ -1201,11 +1204,19 @@ class LibraryManagersTests(unittest.TestCase):
         self.assertIsNotNone(readers)
         self.assertEqual({x.strip().strip("'") for x in readers.group(1).split(',') if x.strip()},
                          set(routes.READER_OPERATOR_DEPARTMENT_CODES))
+        whole = re.search(r"const LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES = \[([^\]]*)\];", self.app)
+        self.assertIsNotNone(whole)
+        self.assertEqual({x.strip().strip("'") for x in whole.group(1).split(',') if x.strip()},
+                         set(routes.READER_DEPARTMENT_CODES))
         predicate = self.app.split('const canAccessLibrarySectionForUser = (userLike) => {')[1].split('\n};')[0]
         self.assertIn("if (role === 'super_admin' || role === 'trainer') return true;", predicate)
         self.assertIn('LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))', predicate)
-        self.assertIn('if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));', predicate)
-        self.assertIn("if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));", predicate)
+        # HR и «Регионы» — до проверок роли: читают в любой роли, и СВ этих
+        # отделов не должен отсекаться веткой СВ.
+        self.assertLess(predicate.index('if (LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES.includes(code)) return true;'),
+                        predicate.index('if (isSupervisorRole(role))'))
+        self.assertIn('if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(code);', predicate)
+        self.assertIn("if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(code);", predicate)
         # Отдел — как у сервера: код, а без кода — id отдела продаж.
         helper = self.app.split('const libraryDepartmentCodeOf = (userLike) => {')[1].split('\n};')[0]
         self.assertIn('if (code) return code;', helper)
@@ -1239,8 +1250,31 @@ class LibraryManagersTests(unittest.TestCase):
                     self.assertEqual(403, response.status_code, url)
                     self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'], url)
 
+    def test_hr_and_regions_read_in_any_role_but_do_not_manage(self):
+        """«Добавь группы hr и регионы в этот селектор, и им открой доступ для
+        чтения» (02.10.2026): «Регионы» — отдел «Фронт офисы»."""
+        self.assertEqual(frozenset({'hr', 'front_office'}), routes.READER_DEPARTMENT_CODES)
+        for role, code in (('hr_manager', 'hr'), ('admin', 'hr'), ('operator', 'front_office'),
+                           ('admin', 'front_office'), ('sv', 'front_office')):
+            with self.subTest(role=role, code=code):
+                response = self.manager_view(role, department_code=code)
+                self.assertEqual(200, response.status_code)
+                self.assertIs(False, response.get_json()['can_manage'])
+                client, _ = client_for(role, department_code=code)
+                response = client.post('/api/library/genres', json={'name': 'X'})
+                self.assertEqual(403, response.status_code)
+                self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'])
+
+    def test_other_roles_of_other_departments_stay_outside(self):
+        for role, code in (('hr_manager', 'marketing'), ('accounting_manager', 'accounting'),
+                           ('admin', 'tez'), ('marketing_manager', 'marketing')):
+            with self.subTest(role=role, code=code):
+                response = self.manager_view(role, department_code=code)
+                self.assertEqual(403, response.status_code)
+                self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
+
     def test_operators_of_other_departments_stay_outside(self):
-        for code in ('tez', 'front_office', 'marketing', '', None):
+        for code in ('tez', 'marketing', 'accounting', '', None):
             with self.subTest(code=code):
                 response = self.manager_view('operator', department_code=code)
                 self.assertEqual(403, response.status_code)
@@ -1476,8 +1510,9 @@ class LibraryDepartmentCodesTests(unittest.TestCase):
     """Решение владельца 02.10.2026: «из доступных отделов сделать только
     пока СЗоВ и ОП» — по коду отдела, а не по названию."""
 
-    def test_only_szov_and_op(self):
-        self.assertEqual(('szov', 'op'), queries.LIBRARY_DEPARTMENT_CODES)
+    def test_szov_op_hr_and_regions(self):
+        """«Регионы» — отдел «Фронт офисы» (у него направление и группа «Регионы»)."""
+        self.assertEqual(('szov', 'op', 'hr', 'front_office'), queries.LIBRARY_DEPARTMENT_CODES)
 
     def test_selection_list_marks_other_departments_with_books_as_not_selectable(self):
         cursor = ScriptedCursor([(1, 'СЗоВ', True), (70, 'Тез КЦ', False)])
@@ -1486,7 +1521,8 @@ class LibraryDepartmentCodesTests(unittest.TestCase):
                          rows)
         sql, params = cursor.calls[0]
         self.assertIn('LOWER(d.code) = ANY(%s)', sql)
-        self.assertEqual((['szov', 'op'], ['szov', 'op']), params)
+        codes = ['szov', 'op', 'hr', 'front_office']
+        self.assertEqual((codes, codes), params)
 
     def test_new_book_goes_only_to_listed_departments(self):
         cursor = ScriptedCursor([(1,)])
@@ -1495,7 +1531,7 @@ class LibraryDepartmentCodesTests(unittest.TestCase):
         self.assertIn('LOWER(d.code) = ANY(%s)', sql)
         # Отдел, которому книга уже выдана, остаётся допустимым для неё.
         self.assertIn('bd.book_id = %s', sql)
-        self.assertEqual(([1, 70], ['szov', 'op'], None), params)
+        self.assertEqual(([1, 70], ['szov', 'op', 'hr', 'front_office'], None), params)
 
 
 class GenresUiTests(unittest.TestCase):

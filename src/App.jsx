@@ -2478,7 +2478,8 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
    двое поимённо — только id, ФИО в публичный репозиторий не кладём:
    1 — админ, глава СЗоВ; 313 — админ, глава ОП. Правило именное: прочие админы
    и главы отделов раздел не видят.
-   Кто читает (02.10.2026): операторы СЗоВ и ОП — книги своего отдела.
+   Кто читает (02.10.2026): операторы СЗоВ и ОП и все сотрудники HR и
+   «Регионов» (отдел «Фронт офисы»), в любой роли, — книги своего отдела.
 
    Здесь решается только «показывать ли пункт меню»; обязательную границу
    держит library/routes.py (can_manage, can_read). Тест сверяет списки:
@@ -2486,6 +2487,7 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
 const LIBRARY_MANAGER_USER_IDS = new Set([1, 313]);
 const LIBRARY_SUPERVISOR_DEPARTMENT_CODES = ['szov', 'op'];
 const LIBRARY_READER_DEPARTMENT_CODES = ['szov', 'op'];
+const LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES = ['hr', 'front_office'];
 
 /* Отдел смотрящего — как у сервера (_department_code_of_user): код, а без
    кода — id отдела продаж. У части профилей приходит только одно из двух, и
@@ -2500,8 +2502,10 @@ const canAccessLibrarySectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin' || role === 'trainer') return true;
     if (LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))) return true;
-    if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));
-    if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));
+    const code = libraryDepartmentCodeOf(userLike);
+    if (LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES.includes(code)) return true;
+    if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(code);
+    if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(code);
     return false;
 };
 

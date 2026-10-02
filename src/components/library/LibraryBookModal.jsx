@@ -122,8 +122,9 @@ const LibraryBookModal = ({
        числами: сравнение по числу, иначе в кнопке стояло «Отдел № 70». */
     const nameOf = (id) => departments.find((item) => item.id === Number(id))?.name || `Отдел № ${id}`;
 
-    /* Выдать книгу можно не каждому отделу (сейчас — СЗоВ и ОП), но отдел,
-       которому она уже выдана, остаётся в списке — иначе его не снять. */
+    /* Выдать книгу можно не каждому отделу (сейчас — СЗоВ, ОП, HR и «Фронт
+       офисы»), но отдел, которому она уже выдана, остаётся в списке — иначе
+       его не снять. */
     const options = useMemo(() => departments
         .filter((item) => item.active !== false || ids.includes(item.id))
         .map((item) => ({ value: item.id, label: item.name })), [departments, ids]);

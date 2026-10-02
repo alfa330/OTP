@@ -36,7 +36,9 @@
 архива — 409 иначе.
 
 КТО ВИДИТ РАЗДЕЛ — те, кто его ведёт, и читатели: с 02.10.2026 операторы СЗоВ
-и ОП («у операторов ОП и СЗоВ открыт доступ к разделу? если нет открывай»).
+и ОП («у операторов ОП и СЗоВ открыт доступ к разделу? если нет открывай») и
+все сотрудники HR и «Регионов» — отдела «Фронт офисы» («добавь группы hr и
+регионы в этот селектор, и им открой доступ для чтения»).
 Читатель видит только книги своего отдела не из архива, сохраняет их и
 читает; управление ему закрыто. Остальным закрыт и пункт меню (App.jsx:
 canAccessLibrarySectionForUser), и каждая ручка здесь. Открыть чтение другим —
@@ -72,9 +74,13 @@ MANAGER_USER_IDS = frozenset({1, 313})
 
 # Кому раздел открыт по одной роли, без права вести, — тем же ролям, что ведут.
 READER_ROLES = MANAGER_ROLES
-# Читатели (решение владельца 02.10.2026): операторы двух отделов — по коду
-# отдела. Тот же список — в App.jsx (LIBRARY_READER_DEPARTMENT_CODES).
+# Читатели (решения владельца 02.10.2026), по коду отдела:
+#   операторы СЗоВ и ОП (App.jsx: LIBRARY_READER_DEPARTMENT_CODES);
 READER_OPERATOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
+#   HR и «Регионы» — отдел «Фронт офисы» (у него направление и группа «Регионы»)
+#   — весь отдел, в любой роли: кадровики, операторы офисов, глава
+#   (App.jsx: LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES).
+READER_DEPARTMENT_CODES = frozenset({'hr', 'front_office'})
 
 # Место в книге: «номер главы:доля главы от 0 до 1» — 12:0.4375. Строгий
 # формат, а не произвольная строка: иначе в базу можно было бы положить что угодно.
@@ -104,13 +110,29 @@ def can_manage(role, user_id=None, department_code_of=None):
 
 
 def can_read(role, manager=False, user_id=None, department_code_of=None):
-    """Открыт ли раздел смотрящему. Отдел спрашивается только у оператора —
-    у остальных решают роль и то, ведёт ли он библиотеку."""
+    """Открыт ли раздел смотрящему. Отдел спрашивается, только когда роль и
+    «ведёт ли» не решили: читает и любой сотрудник HR и «Регионов»."""
     if manager or role in READER_ROLES:
         return True
-    if role != 'operator':
-        return False
-    return _department_code(user_id, department_code_of) in READER_OPERATOR_DEPARTMENT_CODES
+    code = _department_code(user_id, department_code_of)
+    if code in READER_DEPARTMENT_CODES:
+        return True
+    return role == 'operator' and code in READER_OPERATOR_DEPARTMENT_CODES
+
+
+def _once(department_code_of):
+    """Отдел смотрящего — один поход в базу на запрос, сколько бы проверок
+    (ведёт ли, читает ли) его ни спросили."""
+    if department_code_of is None:
+        return None
+    cache = {}
+
+    def lookup(user_id):
+        if user_id not in cache:
+            cache[user_id] = department_code_of(user_id)
+        return cache[user_id]
+
+    return lookup
 
 
 def _department_code(user_id, department_code_of):
@@ -193,8 +215,9 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         message, status = error
                         return jsonify({"error": message}), status
                     role = normalize_role(requester[3] if requester else None)
-                    manager = can_manage(role, requester_id, department_code_of)
-                    if not can_read(role, manager, requester_id, department_code_of):
+                    lookup = _once(department_code_of)
+                    manager = can_manage(role, requester_id, lookup)
+                    if not can_read(role, manager, requester_id, lookup):
                         return jsonify({
                             "error": "Раздел «Библиотека» вам пока не открыт",
                             "code": "LIBRARY_FORBIDDEN",
