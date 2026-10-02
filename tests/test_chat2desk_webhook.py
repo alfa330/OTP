@@ -49,6 +49,7 @@ NAMES = {
     '_chat2desk_webhook_status_rows', '_chat2desk_webhook_status_cache',
     'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS', 'CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS',
     '_chat_hourly_fetch_operators', '_chat_hourly_operators_cache',
+    '_chat2desk_webhook_roster_snapshot',
     '_szov_chat_wallboard_status', '_szov_chat_wallboard_timelines',
     '_szov_chat_wallboard_day_seconds', '_szov_chat_wallboard_resolve',
     '_SZOV_CHAT_WALLBOARD_STATUSES', '_SZOV_CHAT_WALLBOARD_OTHER_KEY',
@@ -611,6 +612,19 @@ class WebhookManualLogoutTests(unittest.TestCase):
         for rows in (disabled, unknown, without_time):
             self.assertEqual([row['event'] for row in rows], ['busy'])
 
+    def test_namesake_account_in_the_system_keeps_the_person(self):
+        """Две включённые учётки с одним именем: выход старой не «выводит» работающего."""
+        roster = NS['_chat2desk_webhook_roster']([
+            {'id': 1001, 'first_name': 'Алия', 'last_name': 'Тестова', 'status': 'enabled',
+             'role': 'operator', 'online': 0},
+            {'id': 1002, 'first_name': 'Алия', 'last_name': 'Тестова', 'status': 'enabled',
+             'role': 'operator', 'online': 1},
+        ])
+        carried = [self._status(datetime(2026, 9, 29, 17, 0, 1), offline_type='busy'),
+                   dict(self._status(datetime(2026, 10, 1, 22, 0)), c2d_operator_id=1002)]
+        rows = self._rows([], roster_at=datetime(2026, 10, 2, 3, 0), carried=carried, roster=roster)
+        self.assertNotIn('logout', [row['event'] for row in rows])
+
     def test_roster_carries_online_and_enabled(self):
         self.assertEqual(self._roster()[1001], {
             'name': 'Алия Тестова', 'role': 'operator', 'online': False, 'enabled': True})
@@ -618,7 +632,7 @@ class WebhookManualLogoutTests(unittest.TestCase):
         self.assertIsNone(self._roster(online=None)[1001]['online'])
 
     def test_roster_is_polled_every_five_minutes(self):
-        """Решение владельца 02.10.2026: вышедший не висит «Занятым» дольше пяти минут."""
+        """Решение владельца 02.10.2026: ростер раз в пять минут, а не раз в полчаса."""
         self.assertEqual(NS['CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS'], 300)
 
     def test_new_roster_rebuilds_the_cached_status_rows(self):
@@ -653,7 +667,17 @@ class RosterFetchTests(unittest.TestCase):
 
     def setUp(self):
         self.calls = []
+        self.fail = False
         tests = self
+
+        class _Clock:
+            """Часы идут на секунду при каждом взгляде — так виден порядок «до/после запроса»."""
+            now = 1_000_000.0
+
+            @classmethod
+            def time(cls):
+                cls.now += 1
+                return cls.now
 
         class _Response:
             status_code = 200
@@ -663,11 +687,15 @@ class RosterFetchTests(unittest.TestCase):
 
         class _Requests:
             def get(self, url, headers=None, params=None, timeout=None):
-                tests.calls.append(params)
+                if tests.fail:
+                    raise TimeoutError('Chat2Desk не ответил')
+                tests.calls.append(_Clock.time())
                 return _Response()
 
+        self.clock = _Clock
         self.ns = _namespace()
         self.ns.update({
+            'time': _Clock,
             'requests': _Requests(),
             '_chat2desk_authorization_header': lambda: 'token',
             '_chat2desk_api_base_url': lambda: 'https://api.example',
@@ -676,11 +704,10 @@ class RosterFetchTests(unittest.TestCase):
         })
 
     def test_time_is_taken_before_the_request_and_cached_with_the_rows(self):
-        started = time.time()
         rows, fetched_at = self.ns['_chat_hourly_fetch_operators'](ttl_seconds=300, with_time=True)
         self.assertEqual(rows, [{'id': 1, 'online': 0}])
-        self.assertGreaterEqual(fetched_at, started)
-        self.assertLessEqual(fetched_at, time.time())
+        # Отметка ДО запроса: снятая после, она делала бы ростер свежее, чем он есть.
+        self.assertLess(fetched_at, self.calls[0])
         # Второй заход в пределах срока — тот же список и то же время, без запроса.
         self.assertEqual(self.ns['_chat_hourly_fetch_operators'](ttl_seconds=300, with_time=True),
                          (rows, fetched_at))
@@ -691,6 +718,25 @@ class RosterFetchTests(unittest.TestCase):
         self.assertEqual(self.ns['_chat_hourly_fetch_operators'](), [{'id': 1, 'online': 0}])
         self.assertEqual(self.ns['_chat_hourly_fetch_operators'](), [{'id': 1, 'online': 0}])
         self.assertEqual(len(self.calls), 2)
+
+    def test_wallboard_asks_for_the_roster_with_its_five_minute_term(self):
+        asked = []
+        self.ns['_chat_hourly_fetch_operators'] = lambda **kwargs: asked.append(kwargs) or ([], 1.0)
+        self.ns['_chat2desk_webhook_roster_snapshot']()
+        self.assertEqual(asked, [{'ttl_seconds': self.ns['CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS'],
+                                  'with_time': True}])
+
+    def test_failed_refresh_falls_back_to_the_last_roster(self):
+        """Сбой REST в момент обновления не роняет табло: прошлый ростер — со своим временем."""
+        stale = ([{'id': 1, 'online': 0}], self.clock.now - 1000)
+        self.ns['_chat_hourly_operators_cache']['snapshot'] = stale
+        self.fail = True
+        self.assertEqual(self.ns['_chat2desk_webhook_roster_snapshot'](), stale)
+
+    def test_failed_refresh_without_any_roster_still_fails(self):
+        self.fail = True
+        with self.assertRaises(TimeoutError):
+            self.ns['_chat2desk_webhook_roster_snapshot']()
 
 
 class WebhookRouteTests(unittest.TestCase):

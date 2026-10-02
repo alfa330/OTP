@@ -693,6 +693,89 @@ class ChatWallboardSnapshotCacheTests(_Harness, unittest.TestCase):
             ns['_szov_chat_wallboard_snapshot']()
 
 
+class _FrozenDatetime(datetime):
+    """Часы снимка стоят на 02.10.2026 17:30 по Алматы."""
+
+    @classmethod
+    def now(cls, tz=None):
+        moment = cls(2026, 10, 2, 17, 30, tzinfo=ZoneInfo('Asia/Almaty'))
+        return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+
+class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
+    """Снимок целиком: ручной выход из Chat2Desk доходит до плиток (02.10.2026).
+
+    Проверяется разводка, а не само правило (оно — в test_chat2desk_webhook): ростер берётся
+    с пятиминутным сроком и моментом снятия, момент доезжает до ленты статусов, и человек,
+    после которого пришёл лишь вендорский «Занят», считается «не в системе»."""
+
+    FETCHED_AT = datetime(2026, 10, 2, 17, 6, tzinfo=ZoneInfo('Asia/Almaty')).timestamp()
+    ROSTER = [
+        dict(_operator_row('Алия Тестова', online=0, offline_type='busy'), id=1001, role='operator'),
+        dict(_operator_row('Бекзат Примеров', online=1, offline_type='busy'), id=1002, role='operator'),
+    ]
+    EVENTS = [
+        {'c2d_operator_id': 1001, 'event_at': datetime(2026, 10, 2, 9, 0), 'online': 1,
+         'offline_type': None},
+        {'c2d_operator_id': 1002, 'event_at': datetime(2026, 10, 2, 9, 30), 'online': 1,
+         'offline_type': None},
+        {'c2d_operator_id': 1002, 'event_at': datetime(2026, 10, 2, 16, 0), 'online': 1,
+         'offline_type': 'busy'},
+        # «Занят», который Chat2Desk ставит сам за секунду до ручного выхода.
+        {'c2d_operator_id': 1001, 'event_at': datetime(2026, 10, 2, 17, 0, 1), 'online': 1,
+         'offline_type': 'busy'},
+    ]
+
+    def _snapshot(self, fetch, cached=None):
+        ns = self._namespace()
+        ns.update({
+            'os': os, 'date': date, 'timedelta': timedelta, 'datetime': _FrozenDatetime,
+            '_status_import_parse_datetime': lambda value, default_date=None: None,
+            '_chat2desk_webhook_day_rows': lambda day_str: ([], True),
+            '_chat2desk_webhook_apply_open_chats': lambda rows: rows,
+        })
+        _load_names((ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig"), {
+            'build_chat_webhook_status_rows', 'chat2desk_webhook_status_name',
+            '_chat2desk_webhook_roster', '_chat2desk_webhook_status_rows',
+            '_chat2desk_webhook_status_cache', '_chat2desk_webhook_roster_snapshot',
+            '_chat_hourly_operators_cache', 'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS',
+            'CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS', 'CHAT2DESK_WEBHOOK_ROWS_TTL_SECONDS',
+            '_chat_metrics_parse_date', '_chat2desk_sync_timezone', 'CHAT2DESK_SYNC_TIMEZONE',
+        }, ns)
+        ns['_chat_hourly_fetch_operators'] = fetch
+        ns['_chat_hourly_operators_cache']['snapshot'] = cached
+        ns['db'].get_c2d_operator_status_before = lambda moment: []
+        ns['db'].get_c2d_operator_status_events = lambda day_from, day_to: list(self.EVENTS)
+        return ns, ns['_szov_chat_wallboard_fetch_snapshot']()
+
+    def test_manual_logout_reaches_the_tiles(self):
+        asked = []
+
+        def fetch(**kwargs):
+            asked.append(kwargs)
+            return list(self.ROSTER), self.FETCHED_AT
+
+        ns, snapshot = self._snapshot(fetch)
+        self.assertEqual(asked, [{'ttl_seconds': ns['CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS'],
+                                  'with_time': True}])
+        now = snapshot['now']
+        self.assertEqual((now['operators_busy'], now['operators_offline']), (1, 1))
+        self.assertEqual([(person['name'], person['status']) for person in now['operators']],
+                         [('Примеров Бекзат Примерулы', 'Занят')])
+        # Часы на линии до выхода остались за ней: онлайн с 09:00 до «Занят» в 17:00:01.
+        hours = {row['hour']: row['operators_online'] for row in snapshot['hourly']}
+        self.assertEqual((hours[9], hours[16], hours[17]), (2, 1, 0))
+
+    def test_failed_roster_refresh_keeps_the_board_alive(self):
+        """REST Chat2Desk не ответил — снимок строится по прошлому ростеру, а не падает."""
+        def fetch(**kwargs):
+            raise TimeoutError('Chat2Desk не ответил')
+
+        _ns, snapshot = self._snapshot(fetch, cached=(list(self.ROSTER), self.FETCHED_AT))
+        self.assertEqual((snapshot['now']['operators_busy'], snapshot['now']['operators_offline']),
+                         (1, 1))
+
+
 class ChatWallboardWiringTests(unittest.TestCase):
     """Разводка на фронте: переключатель направления, отдельный опрос, состав экрана."""
 

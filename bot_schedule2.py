@@ -43422,12 +43422,18 @@ def build_chat_webhook_status_rows(carried, events, day_str, roster=None, roster
             _add(event, event['event_at'])
     if roster_at is not None:
         trusted_after = roster_at - timedelta(seconds=CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS)
+        # Ленты ключуются ИМЕНЕМ учётки: у двух включённых учёток с одним именем (старую
+        # забыли отключить) выход одной лёг бы в общую ленту и «вывел» бы того, кто сейчас
+        # работает под второй.
+        maybe_in_system = {card.get('name') for card in roster.values()
+                           if card.get('enabled') and card.get('online') is not False}
         for operator_id, (row, happened_at) in last.items():
             card = roster.get(operator_id) or {}
             # Отключённые учётки висят online=1 от последнего входа, а о неизвестном
             # «в системе» (поля нет) судить нечем — выход дописываем только по явному 0.
             if (row['event'] == 'logout' or card.get('online') is not False
-                    or not card.get('enabled') or happened_at > trusted_after):
+                    or not card.get('enabled') or happened_at > trusted_after
+                    or row['operator_name'] in maybe_in_system):
                 continue
             rows.append(dict(row, event='logout'))
     return rows
@@ -43489,6 +43495,25 @@ def _chat2desk_webhook_roster(operator_rows):
     return roster
 
 
+def _chat2desk_webhook_roster_snapshot():
+    """(строки ростера, момент снятия) для табло при живом потоке событий.
+
+    Не обновился ростер (таймаут, 5xx REST Chat2Desk) — берём прошлый со СВОИМ моментом
+    снятия: состав учёток меняется редко, а выход по нему дописывается только для событий
+    старше этого момента, так что старый ростер лишнего не «выведет». Иначе сбой REST в
+    момент пятиминутного обновления ронял бы всё табло, хотя статусы и чаты идут из событий."""
+    try:
+        return _chat_hourly_fetch_operators(
+            ttl_seconds=CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS, with_time=True)
+    except Exception as exc:
+        cached = _chat_hourly_operators_cache['snapshot']
+        if cached is None:
+            raise
+        logging.warning("Табло СЗоВ (чат): ростер Chat2Desk не обновился (%s), беру снятый %.0f с назад",
+                        exc, time.time() - cached[1])
+        return cached
+
+
 def _chat2desk_webhook_apply_open_chats(operator_rows):
     """Проставляет в строки ростера СВОЙ счётчик открытых чатов вместо вендорского.
 
@@ -43541,14 +43566,14 @@ def _szov_chat_wallboard_fetch_snapshot():
     # Пока поток вебхуков жив, у вендора спрашиваем только состав учёток и кто в системе —
     # раз в пять минут. Статусы, обращения и открытые чаты берутся из событий.
     request_rows, stream_ready = _chat2desk_webhook_day_rows(day_str)
-    operator_rows, roster_fetched_at = _chat_hourly_fetch_operators(
-        ttl_seconds=CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS if stream_ready else 0, with_time=True)
     if stream_ready:
+        operator_rows, roster_fetched_at = _chat2desk_webhook_roster_snapshot()
         events = _chat2desk_webhook_status_rows(
             day_str, roster=_chat2desk_webhook_roster(operator_rows),
             roster_fetched_at=roster_fetched_at)
         operator_rows = _chat2desk_webhook_apply_open_chats(operator_rows)
     else:
+        operator_rows = _chat_hourly_fetch_operators()
         events = _szov_chat_wallboard_fetch_events(day_str)
         request_rows = _szov_chat_wallboard_day_requests(day_str)
 
