@@ -510,13 +510,21 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 rows = queries.list_orders(cursor)
         return jsonify({'items': rows})
 
-    @payments_route('/dictionaries/<name>', methods=('POST',), admin=True)
+    @payments_route('/dictionaries/<name>', methods=('POST',))
     def dictionary_save(ctx, name):
         if name not in _DICTIONARIES:
             raise ApiError('Нет такого справочника', status=404)
         payload = _payload()
         row_id = _int(payload.get('id'), 'id')
+        if not access.can_save_dictionary(ctx, name, row_id):
+            raise ApiError('Это действие доступно администратору раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
         with db._get_cursor() as cursor:
+            duplicate = queries.find_duplicate_name(
+                cursor, str(payload.get('name') or '').strip(), dictionary=name, row_id=row_id,
+                parent_id=_int(payload.get('parent_id'), 'parent_id'))
+            if duplicate:
+                raise ApiError('«%s» уже есть в справочнике' % duplicate[1],
+                               code='PAYMENTS_DUPLICATE', status=409, extra={'id': duplicate[0]})
             if name == 'projects':
                 saved = queries.upsert_project(cursor, project_id=row_id, name=_text(payload.get('name'), 'name', required=True, limit=200),
                                                is_active=_bool(payload.get('is_active', True)), actor_id=ctx['user_id'])

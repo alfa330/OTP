@@ -120,6 +120,20 @@ def can_delete_request(ctx):
     return is_section_admin(ctx)
 
 
+def can_save_dictionary(ctx, dictionary, row_id=None):
+    """Записать строку справочника.
+
+    Справочники ведёт администратор раздела. Одно исключение — НОВЫЙ
+    контрагент из формы заявки: поставщик часто впервые появляется именно в
+    заявке, и без него шаг 1 не завести. Править и удалять — только
+    администратору: переименование контрагента меняет подпись во всех
+    прошлых заявках.
+    """
+    if is_section_admin(ctx):
+        return True
+    return dictionary == 'counterparties' and not row_id and can_create_request(ctx)
+
+
 def capabilities(ctx):
     """Сводка для фронта: раздел рисует кнопки по ней, а не по роли."""
     return {

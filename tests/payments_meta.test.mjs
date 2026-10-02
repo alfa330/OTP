@@ -2,23 +2,34 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  REGISTRY_COLUMNS,
   STATE_FILTERS,
   STATE_META,
+  approverBasisLine,
   cardNumberLabel,
   daysUntil,
+  defaultRegistryColumns,
+  expenseSubline,
   describeEvent,
   dueLabel,
   fmtDate,
   fmtDateTime,
   fmtMoney,
   itemsTotal,
+  netAmount,
+  normalizeRegistryColumns,
   parseAmount,
+  passedStepsLabel,
   pluralDays,
+  priceTrend,
   requestState,
+  responsibleLines,
   routeSummary,
   rowTone,
+  splitRoute,
   stepLabel,
   toneRow,
+  trendLabel,
 } from '../src/components/payments/paymentsMeta.js';
 
 /* Правила раздела «Оплата счетов», которые раньше жили бы в разметке.
@@ -113,4 +124,73 @@ test('история читается словами, а не кодами', () 
 test('номер карты группируется по четыре', () => {
   assert.equal(cardNumberLabel('4400000000001234'), '4400 0000 0000 1234');
   assert.equal(cardNumberLabel(''), '');
+});
+
+test('колонки реестра: по умолчанию прежние семь, обязательные не снимаются, мусор выпадает', () => {
+  assert.deepEqual(defaultRegistryColumns(), ['number', 'expense', 'counterparty', 'amount', 'stage', 'responsible', 'due']);
+  assert.deepEqual(normalizeRegistryColumns(null), defaultRegistryColumns());
+  assert.deepEqual(normalizeRegistryColumns(['notes', 'project', 'gone']), ['number', 'expense', 'project', 'notes'],
+    'порядок — как в таблице, неизвестная колонка выпала, № и Расход вернулись');
+  // п. 2 дополнения Дмитриевой: все поля реестра доступны колонками
+  for (const key of ['project', 'branch', 'category', 'counterparty', 'amount', 'source', 'type', 'period',
+    'stage', 'responsible', 'paid', 'notes', 'card', 'invoice']) {
+    assert.ok(REGISTRY_COLUMNS.some((column) => column.key === key), key);
+  }
+});
+
+test('вторая строка расхода не повторяет то, что стоит своей колонкой', () => {
+  const request = { category_name: 'Аренда', project_name: 'iCORE офис', department_name: 'СЗоВ' };
+  assert.equal(expenseSubline(request, []), 'Аренда · iCORE офис · СЗоВ');
+  assert.equal(expenseSubline(request, ['project']), 'Аренда · СЗоВ');
+  assert.equal(expenseSubline(request, ['project', 'category']), 'СЗоВ');
+});
+
+test('ответственный без «Бухгалтерия / Бухгалтерия» и с основанием по Приказу', () => {
+  assert.deepEqual(responsibleLines({ status: 'active', current_role: 'accounting', current_assignee_name: 'Бухгалтерия', current_step: 8 }),
+    { name: 'Бухгалтерия', sub: '' });
+  assert.deepEqual(responsibleLines({ status: 'active', current_role: 'manager', current_assignee_name: 'Хайрихан Шерзад', current_step: 2 }),
+    { name: 'Хайрихан Шерзад', sub: 'Руководитель' });
+  assert.deepEqual(responsibleLines({ status: 'active', current_role: 'founder', current_assignee_id: 4, current_assignee_name: 'Алиева Зарина', current_step: 9, approval_order_number: '15' }),
+    { name: 'Алиева Зарина', sub: 'по Приказу №15' });
+  assert.deepEqual(responsibleLines({ status: 'done' }), { name: '—', sub: '' });
+});
+
+test('итоговая сумма — сумма минус возврат', () => {
+  assert.equal(netAmount({ amount: 1200000 }), 1200000);
+  assert.equal(netAmount({ amount: 1200000, refund_amount: 200000.5 }), 999999.5);
+  assert.equal(netAmount({ amount: '54500', refund_amount: null }), 54500);
+});
+
+test('основание согласующего — открытым текстом, и причина, если Приказ не применён', () => {
+  const byOrder = { approver_name: 'Алиева Зарина', order_id: 1, order_number: '15', evaluations: [{ order_id: 1, issued_on: '01.08.2026', applies: true }] };
+  assert.equal(approverBasisLine(byOrder), 'по Приказу №15 от 01.08.2026 вместо Учредителя');
+  const refused = { standard_label: 'Учредитель', evaluations: [{ order_id: 1, reason: 'Приказ №15 не применён. Причина: сумма счёта 6 000 000 ₸ превышает лимит 5 000 000 ₸.' }] };
+  assert.ok(approverBasisLine(refused).startsWith('Приказ №15 не применён'));
+  assert.equal(approverBasisLine({ standard_label: 'Учредитель', evaluations: [] }), '');
+  assert.equal(approverBasisLine(null), '');
+});
+
+test('маршрут: пройденная голова сворачивается, последний пройденный остаётся на виду', () => {
+  const steps = (states) => states.map((state, index) => ({ step_no: index + 1, state }));
+  const early = splitRoute(steps(['done', 'current', 'pending']));
+  assert.equal(early.folded.length, 0, 'два пройденных шага не сворачиваем');
+  const mid = splitRoute(steps(['done', 'skipped', 'done', 'done', 'current', 'pending']));
+  assert.deepEqual(mid.folded.map((s) => s.step_no), [1, 2, 3]);
+  assert.deepEqual(mid.visible.map((s) => s.step_no), [4, 5, 6]);
+  const closed = splitRoute(steps(['done', 'done', 'done', 'done']));
+  assert.deepEqual(closed.visible.map((s) => s.step_no), [4]);
+  assert.equal(passedStepsLabel(7), '7 пройденных шагов');
+  assert.equal(passedStepsLabel(2), '2 пройденных шага');
+  assert.equal(passedStepsLabel(21), '21 пройденный шаг');
+});
+
+test('динамика цены — только для того же товара', () => {
+  const rows = [
+    { request_id: 3, first_item: 'Бумага А4', unit_price: 2650 },
+    { request_id: 2, first_item: 'Ручка', unit_price: 150 },
+    { request_id: 1, first_item: 'бумага а4', unit_price: 2500 },
+  ];
+  assert.deepEqual(priceTrend(rows), { 3: 6 });
+  assert.equal(trendLabel(6), '+6 %');
+  assert.equal(trendLabel(-4), '−4 %');
 });

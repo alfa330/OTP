@@ -115,3 +115,31 @@ class FrontendWiringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DictionaryRightsTests(unittest.TestCase):
+    """Справочники ведёт администратор; исключение — новый контрагент из формы заявки."""
+
+    def setUp(self):
+        self._allowed = access.SECTION_ALLOWED_USER_IDS
+        access.SECTION_ALLOWED_USER_IDS = tuple(self._allowed) + (777,)
+
+    def tearDown(self):
+        access.SECTION_ALLOWED_USER_IDS = self._allowed
+
+    def test_admin_saves_any_dictionary(self):
+        admin = ctx(access.SECTION_ADMIN_USER_IDS[0])
+        for name in ('projects', 'categories', 'legal_entities', 'counterparties', 'contracts', 'orders'):
+            self.assertTrue(access.can_save_dictionary(admin, name))
+            self.assertTrue(access.can_save_dictionary(admin, name, row_id=5))
+
+    def test_initiator_only_adds_a_new_counterparty(self):
+        initiator = ctx(777)
+        self.assertTrue(access.can_save_dictionary(initiator, 'counterparties'))
+        self.assertFalse(access.can_save_dictionary(initiator, 'counterparties', row_id=5),
+                         'переименование контрагента меняет подпись в прошлых заявках')
+        for name in ('projects', 'categories', 'legal_entities', 'contracts', 'orders'):
+            self.assertFalse(access.can_save_dictionary(initiator, name), name)
+
+    def test_outsider_adds_nothing(self):
+        self.assertFalse(access.can_save_dictionary(ctx(999), 'counterparties'))

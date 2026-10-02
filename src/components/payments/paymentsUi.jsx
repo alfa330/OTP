@@ -1,8 +1,8 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Download, FileText, Loader2, Paperclip, Trash2, X } from 'lucide-react';
+import { Check, Columns3, Download, FileText, Loader2, Paperclip, Trash2, X } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
-import { iosBtnGhost, iosGroupLabel, iosInput } from '../ui/ios';
+import { iosBtnGhost, iosBtnSecondary, iosGroupLabel, iosInput } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import {
     ATTACHMENT_LABELS, fileSizeLabel, fmtMoney, parseAmount, requestState, stateMeta, tonePill,
@@ -245,6 +245,72 @@ export const AttachmentList = ({ attachments, apiBaseUrl, headers, canRemove, on
                     )}
                 </div>
             ))}
+        </div>
+    );
+};
+
+/* «Колонки» реестра — меню с галочками, как «Вид» в Finder: отмеченное видно
+   в таблице. Обязательные колонки отмечены и не снимаются. В Excel уходят все
+   колонки независимо от этого выбора — об этом строка внизу меню. */
+export const ColumnsMenu = ({ columns, value, onChange, onReset }) => {
+    const [open, setOpen] = useState(false);
+    const wrapRef = useRef(null);
+    useEffect(() => {
+        if (!open) return undefined;
+        const onDoc = (event) => { if (!wrapRef.current?.contains(event.target)) setOpen(false); };
+        const onKey = (event) => { if (event.key === 'Escape') setOpen(false); };
+        document.addEventListener('mousedown', onDoc);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', onDoc);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [open]);
+    const changed = columns.some((column) => Boolean(column.shown) !== value.includes(column.key));
+    return (
+        <div ref={wrapRef} className="relative shrink-0">
+            <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={open}
+                onClick={() => setOpen((prev) => !prev)}
+                className={`${iosBtnSecondary} ${open ? '!bg-slate-200 !text-slate-800' : ''}`}
+                title="Какие колонки показывать в таблице"
+            >
+                <Columns3 size={15} />
+                <span className="hidden sm:inline">Колонки</span>
+            </button>
+            {open && (
+                <div role="menu" className="absolute right-0 top-full z-40 mt-1.5 w-[252px] rounded-2xl bg-white p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80">
+                    <div className="max-h-[min(460px,60vh)] overflow-y-auto">
+                        {columns.map((column) => {
+                            const checked = value.includes(column.key);
+                            return (
+                                <button
+                                    key={column.key}
+                                    type="button"
+                                    role="menuitemcheckbox"
+                                    aria-checked={checked}
+                                    disabled={column.fixed}
+                                    onClick={() => onChange(checked ? value.filter((key) => key !== column.key) : [...value, column.key])}
+                                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-slate-800 transition hover:bg-slate-100 disabled:cursor-default disabled:text-slate-400 disabled:hover:bg-transparent"
+                                >
+                                    <span className="grid w-4 shrink-0 place-items-center">
+                                        {checked && <Check size={14} strokeWidth={2.5} className={column.fixed ? 'text-slate-300' : 'text-blue-600'} />}
+                                    </span>
+                                    {column.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div className="mt-1 flex items-center justify-between gap-2 border-t border-slate-100 px-2 pb-0.5 pt-2">
+                        <span className="text-[11.5px] leading-tight text-slate-400">В Excel — все колонки</span>
+                        {changed && (
+                            <button type="button" onClick={onReset} className="rounded-md px-1.5 py-0.5 text-[12px] font-medium text-blue-600 transition hover:bg-blue-50">Как было</button>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

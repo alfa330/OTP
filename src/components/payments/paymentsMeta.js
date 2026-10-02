@@ -274,6 +274,79 @@ export const stepLabel = (request, steps = []) => {
 export const responsibleLabel = (request) => request?.current_assignee_name
     || ROLE_LABELS[request?.current_role] || '—';
 
+/* Короткие подписи ролей для узкой колонки реестра. */
+const ROLE_SHORT = { ...ROLE_LABELS, manager: 'Руководитель' };
+
+/* Ответственный строкой реестра: кто и в какой роли. Роль второй строкой
+   печатается, только если она что-то добавляет: у шага роли имя и есть роль
+   («Бухгалтерия» дважды — шум). Согласующий счёта по Приказу подписан
+   основанием, а не ролью Учредителя, которую он замещает. */
+export const responsibleLines = (request) => {
+    if (!request || request.status !== 'active') return { name: '—', sub: '' };
+    const role = ROLE_SHORT[request.current_role] || '';
+    const name = request.current_assignee_name || role || '—';
+    if (Number(request.current_step) === 9 && request.current_assignee_id && request.approval_order_number) {
+        return { name, sub: `по Приказу №${request.approval_order_number}` };
+    }
+    return { name, sub: name === role || name === ROLE_LABELS[request.current_role] ? '' : role };
+};
+
+/* Итоговая сумма расхода: сумма − возврат (п. 5 дополнения Дмитриевой). */
+export const netAmount = (request) => {
+    const amount = parseAmount(request?.amount);
+    const refund = parseAmount(request?.refund_amount);
+    return refund > 0 ? Math.round((amount - refund) * 100) / 100 : amount;
+};
+
+/* ── Колонки реестра ───────────────────────────────────────────────────────────
+   П. 2 дополнения Дмитриевой: часть колонок в интерфейсе можно скрыть, а
+   выгрузка в Excel всегда полная. «№» и «Расход» не скрываются — без них
+   строку не узнать. Ширина — в пикселях, у «Расхода» её нет: он забирает
+   оставшееся место. Порядок списка — порядок колонок в таблице. */
+export const REGISTRY_COLUMNS = [
+    { key: 'number', label: '№ · создана', width: 168, fixed: true, shown: true },
+    { key: 'expense', label: 'Расход', fixed: true, shown: true, minWidth: 220 },
+    { key: 'project', label: 'Проект', width: 140 },
+    { key: 'branch', label: 'Филиал / регион', width: 140 },
+    { key: 'category', label: 'Категория', width: 170 },
+    { key: 'counterparty', label: 'Контрагент', width: 196, shown: true },
+    { key: 'amount', label: 'Сумма', width: 136, shown: true, align: 'right' },
+    { key: 'source', label: 'Источник', width: 104 },
+    { key: 'type', label: 'Тип оплаты', width: 128 },
+    { key: 'period', label: 'Период оплаты', width: 136 },
+    { key: 'stage', label: 'Этап', width: 212, shown: true },
+    { key: 'responsible', label: 'Ответственный', width: 176, shown: true },
+    { key: 'due', label: 'Срок', width: 136, shown: true },
+    { key: 'paid', label: 'Дата платежа', width: 116 },
+    { key: 'invoice', label: 'Счёт', width: 132 },
+    { key: 'card', label: 'Карта', width: 168 },
+    { key: 'notes', label: 'Примечания', width: 220 },
+];
+export const REGISTRY_COLUMNS_STORAGE_KEY = 'payments_registry_columns_v1';
+
+export const defaultRegistryColumns = () => REGISTRY_COLUMNS.filter((column) => column.shown).map((column) => column.key);
+
+/* Сохранённый набор → набор по порядку таблицы: неизвестные ключи (колонку
+   убрали из раздела) выпадают, обязательные возвращаются. */
+export const normalizeRegistryColumns = (saved) => {
+    if (!Array.isArray(saved) || !saved.length) return defaultRegistryColumns();
+    const wanted = new Set(saved);
+    REGISTRY_COLUMNS.filter((column) => column.fixed).forEach((column) => wanted.add(column.key));
+    return REGISTRY_COLUMNS.map((column) => column.key).filter((key) => wanted.has(key));
+};
+
+export const registryTableMinWidth = (keys) => REGISTRY_COLUMNS
+    .filter((column) => keys.includes(column.key))
+    .reduce((sum, column) => sum + (column.width || column.minWidth || 0), 0);
+
+/* Вторая строка «Расхода»: категория, проект, отдел — кроме тех, что уже
+   стоят своей колонкой, чтобы одно и то же не печаталось дважды. */
+export const expenseSubline = (request, keys = []) => [
+    keys.includes('category') ? null : request?.category_name,
+    keys.includes('project') ? null : request?.project_name,
+    request?.department_name,
+].filter(Boolean).join(' · ');
+
 export const routeSummary = (basis) => {
     if (!basis) return null;
     if (basis.approver_name) {
@@ -285,6 +358,62 @@ export const routeSummary = (basis) => {
     }
     const reasons = (basis.evaluations || []).map((item) => item.reason).filter(Boolean);
     return { approver: basis.standard_label || 'Учредитель', basisText: reasons.join(' ') || 'Стандартный маршрут', byOrder: false };
+};
+
+/* Основание согласующего счёта одной строкой — пп. 11–12 ТЗ о Приказах: в
+   карточке видно не только КТО согласует, но и ПОЧЕМУ; если Приказ не
+   применён — причина. Подробная разбивка по условиям остаётся под «i». */
+export const approverBasisLine = (basis) => {
+    if (!basis) return '';
+    if (basis.approver_name) {
+        const chosen = (basis.evaluations || []).find((item) => item.order_id === basis.order_id);
+        const issued = chosen?.issued_on ? ` от ${chosen.issued_on}` : '';
+        return `по Приказу №${basis.order_number || '—'}${issued} вместо Учредителя`;
+    }
+    const failed = (basis.evaluations || []).find((item) => item.reason);
+    return failed ? failed.reason : '';
+};
+
+/* Маршрут в карточке: пройденная голова сворачивается, чтобы текущий шаг —
+   единственное, с чем человек пришёл, — был виден без прокрутки. Последний
+   пройденный шаг остаётся на виду: «что было только что» нужно почти всегда. */
+export const ROUTE_FOLD_MIN = 3;
+export const splitRoute = (steps = []) => {
+    const firstOpen = steps.findIndex((step) => step.state === 'current' || step.state === 'pending');
+    const passed = firstOpen === -1 ? steps : steps.slice(0, firstOpen);
+    const rest = firstOpen === -1 ? [] : steps.slice(firstOpen);
+    if (passed.length < ROUTE_FOLD_MIN) return { folded: [], visible: steps };
+    return { folded: passed.slice(0, -1), visible: [passed[passed.length - 1], ...rest] };
+};
+
+/* Динамика цены в «Истории оплат» (п. 9 дополнения, «опционально»): цена
+   за единицу против прошлой оплаты ТОГО ЖЕ товара. Разные позиции между собой
+   не сравниваются — «бумага подорожала на 300 %» по сравнению с ручкой была
+   бы враньём. Строки приходят от новых к старым. Возвращает {request_id: %}. */
+export const priceTrend = (rows = []) => {
+    const result = {};
+    rows.forEach((row, index) => {
+        const price = parseAmount(row.unit_price);
+        const item = String(row.first_item || '').trim().toLowerCase();
+        if (!price || !item) return;
+        const older = rows.slice(index + 1).find((other) => (
+            parseAmount(other.unit_price) > 0 && String(other.first_item || '').trim().toLowerCase() === item));
+        if (!older) return;
+        const pct = Math.round(((price - parseAmount(older.unit_price)) / parseAmount(older.unit_price)) * 100);
+        if (pct !== 0) result[row.request_id] = pct;
+    });
+    return result;
+};
+
+export const trendLabel = (pct) => (pct > 0 ? `+${pct} %` : `−${Math.abs(pct)} %`);
+
+/* «7 пройденных шагов», «2 пройденных шага», «1 пройденный шаг». */
+export const passedStepsLabel = (count) => {
+    const mod10 = count % 10;
+    const mod100 = count % 100;
+    if (mod10 === 1 && mod100 !== 11) return `${count} пройденный шаг`;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${count} пройденных шага`;
+    return `${count} пройденных шагов`;
 };
 
 /* ── История ───────────────────────────────────────────────────────────────── */

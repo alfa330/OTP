@@ -476,6 +476,32 @@ def upsert_order(cursor, *, order_id=None, fields, project_ids, counterparty_ids
     return order_id
 
 
+_NAMED_TABLES = {
+    'projects': 'payment_projects', 'legal_entities': 'payment_legal_entities',
+    'counterparties': 'payment_counterparties', 'categories': 'payment_categories',
+}
+
+
+def find_duplicate_name(cursor, name, *, dictionary, row_id=None, parent_id=None):
+    """(id, название) другой записи справочника с тем же названием (без учёта регистра) или None.
+
+    Названия уникальны индексом; проверка ДО записи нужна, чтобы ответить
+    «уже есть» словами, а не упасть на нарушении индекса посреди транзакции.
+    У категорий уникальность — внутри родителя.
+    """
+    table = _NAMED_TABLES.get(dictionary)
+    if not table or not name:
+        return None
+    sql = "SELECT id, name FROM %s WHERE lower(name) = lower(%%s) AND id <> %%s" % table
+    params = [name, int(row_id or 0)]
+    if dictionary == 'categories':
+        sql += " AND COALESCE(parent_id, 0) = %s"
+        params.append(int(parent_id or 0))
+    cursor.execute(sql + " LIMIT 1", params)
+    row = cursor.fetchone()
+    return (row[0], row[1]) if row else None
+
+
 def delete_dictionary_row(cursor, table, row_id):
     """Удаление строки справочника. Таблица — только из белого списка."""
     allowed = {

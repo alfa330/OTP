@@ -10,10 +10,12 @@ import PaymentsDictionaries from './PaymentsDictionaries';
 import PaymentsRoles from './PaymentsRoles';
 import FixedPaymentsPanel from './FixedPaymentsPanel';
 import {
-    ROLE_LABELS, SOURCE_OPTIONS, STATE_FILTERS, TYPE_OPTIONS, dueLabel, exportFileName, fmtDateShort, fmtMoney,
-    requestState, rowTone, stateMeta, stepLabel, toneEdge, tonePill, toneRow, toneText,
+    REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY, SOURCE_META, SOURCE_OPTIONS, STATE_FILTERS, TYPE_META, TYPE_OPTIONS,
+    cardNumberLabel, defaultRegistryColumns, dueLabel, expenseSubline, exportFileName, fmtDate, fmtDateShort, fmtMoney,
+    netAmount, normalizeRegistryColumns, registryTableMinWidth, requestState, responsibleLines, rowTone, stateMeta,
+    stepLabel, toneEdge, tonePill, toneRow, toneText,
 } from './paymentsMeta';
-import { NoticeBox, StatePill, errorText } from './paymentsUi';
+import { ColumnsMenu, NoticeBox, StatePill, errorText } from './paymentsUi';
 
 /*
  * Раздел «Оплата счетов» — бизнес-процесс «Согласование — Оплата счетов» (#179).
@@ -36,7 +38,9 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 const TABS = [
     { value: 'requests', label: 'Заявки' },
-    { value: 'fixed', label: 'Фиксированные платежи' },
+    // На телефоне четыре вкладки в ширину экрана: длинное название не влезает
+    // и наезжает на соседей — там оно короткое.
+    { value: 'fixed', label: <><span className="sm:hidden">Календарь</span><span className="hidden sm:inline">Фиксированные платежи</span></> },
     { value: 'dictionaries', label: 'Справочники' },
     { value: 'roles', label: 'Участники' },
 ];
@@ -210,6 +214,116 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     }, [apiBaseUrl, headers, selection]);
 
     const steps = ping?.steps || [];
+
+    /* Набор колонок — личная настройка смотрящего, живёт в браузере. Хранилище
+       может быть недоступно (приватное окно) — тогда просто набор по умолчанию. */
+    const [columnKeys, setColumnKeys] = useState(() => {
+        try {
+            return normalizeRegistryColumns(JSON.parse(window.localStorage.getItem(REGISTRY_COLUMNS_STORAGE_KEY) || 'null'));
+        } catch {
+            return defaultRegistryColumns();
+        }
+    });
+    const changeColumns = useCallback((keys) => {
+        const next = normalizeRegistryColumns(keys);
+        setColumnKeys(next);
+        try { window.localStorage.setItem(REGISTRY_COLUMNS_STORAGE_KEY, JSON.stringify(next)); } catch { /* только в этой вкладке */ }
+    }, []);
+    const visibleColumns = useMemo(() => REGISTRY_COLUMNS.filter((column) => columnKeys.includes(column.key)), [columnKeys]);
+    const tableMinWidth = useMemo(() => Math.max(900, registryTableMinWidth(columnKeys)), [columnKeys]);
+
+    const renderCell = (key, request, text) => {
+        const st = requestState(request);
+        const active = request.status === 'active';
+        const muted = (value) => <span className={text.meta}>{value}</span>;
+        switch (key) {
+            case 'number':
+                return (
+                    <>
+                        <div className={`tabular-nums ${text.main}`}>№{request.id}</div>
+                        <div className={`truncate text-[12px] leading-4 tabular-nums ${text.meta}`}>{fmtDateShort(request.created_at)} · {request.initiator_name || '—'}</div>
+                    </>
+                );
+            case 'expense': {
+                const sub = expenseSubline(request, columnKeys);
+                return (
+                    <>
+                        <div className={`truncate ${text.main}`}>{request.expense_name}</div>
+                        {sub && <div className={`truncate text-[12.5px] ${text.body}`}>{sub}</div>}
+                    </>
+                );
+            }
+            case 'project': return request.project_name ? <div className={`truncate ${text.main}`}>{request.project_name}</div> : muted('—');
+            case 'branch': return request.branch ? <div className={`truncate ${text.main}`}>{request.branch}</div> : muted('—');
+            case 'category':
+                return request.category_name ? (
+                    <>
+                        <div className={`truncate ${text.main}`}>{request.category_name}</div>
+                        {request.subcategory_name && <div className={`truncate text-[12.5px] ${text.body}`}>{request.subcategory_name}</div>}
+                    </>
+                ) : muted('—');
+            case 'counterparty':
+                return (
+                    <>
+                        <div className={`truncate ${text.main}`}>{request.counterparty_name || '—'}</div>
+                        {request.legal_entity_name && <div className={`truncate text-[12.5px] ${text.body}`}>от {request.legal_entity_name}</div>}
+                    </>
+                );
+            case 'amount':
+                return (
+                    <div className="whitespace-nowrap">
+                        <div className={`font-medium tabular-nums ${text.main}`}>{fmtMoney(netAmount(request))}</div>
+                        {request.refund_amount > 0 && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>возврат {fmtMoney(request.refund_amount)}</div>}
+                    </div>
+                );
+            case 'source': return <div className={`truncate ${text.main}`}>{SOURCE_META[request.payment_source]?.label || '—'}</div>;
+            case 'type': return <div className={`truncate ${text.main}`}>{TYPE_META[request.payment_type]?.label || '—'}</div>;
+            case 'period': return request.payment_period ? <div className={`truncate ${text.main}`}>{request.payment_period}</div> : muted('—');
+            case 'stage':
+                return active ? (
+                    <>
+                        <div className={`truncate ${text.main}`}>{stepLabel(request, steps)}</div>
+                        <div className={`truncate text-[12px] leading-4 ${text.meta}`}>шаг {request.current_step} из 12{st === 'blocked' ? ' · ожидает договор' : ''}</div>
+                    </>
+                ) : <StatePill request={request} />;
+            case 'responsible': {
+                if (!active) return muted('—');
+                const who = responsibleLines(request);
+                return (
+                    <>
+                        <div className={`truncate ${text.main}`}>{who.name}</div>
+                        {who.sub && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{who.sub}</div>}
+                    </>
+                );
+            }
+            case 'due':
+                // Срок важен, пока заявка не оплачена; после оплаты и у закрытой
+                // строка «к 28.09.2026» только повторяла бы дату над ней.
+                if (request.due_on && active && Number(request.current_step) <= 10) {
+                    return (
+                        <div className="whitespace-nowrap">
+                            <div className={`tabular-nums ${text.main}`}>{fmtDateShort(request.due_on)}</div>
+                            <div className={`truncate text-[12px] leading-4 ${st === 'overdue' ? 'font-medium text-rose-700' : text.meta}`}>{dueLabel(request)}</div>
+                        </div>
+                    );
+                }
+                return request.paid_on && !columnKeys.includes('paid')
+                    ? <div className={`whitespace-nowrap text-[12.5px] tabular-nums ${text.body}`}>оплачено {fmtDateShort(request.paid_on)}</div>
+                    : muted('—');
+            case 'paid': return request.paid_on ? <div className={`tabular-nums ${text.main}`}>{fmtDate(request.paid_on)}</div> : muted('—');
+            case 'invoice':
+                return request.invoice_number || request.invoice_date ? (
+                    <>
+                        <div className={`truncate tabular-nums ${text.main}`}>{request.invoice_number ? `№${request.invoice_number}` : '—'}</div>
+                        {request.invoice_date && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>от {fmtDate(request.invoice_date)}</div>}
+                    </>
+                ) : muted('—');
+            case 'card': return request.card_number ? <div className={`truncate tabular-nums ${text.main}`}>{cardNumberLabel(request.card_number)}</div> : muted('—');
+            case 'notes': return request.notes ? <div className={`line-clamp-2 text-[12.5px] ${text.body}`}>{request.notes}</div> : muted('—');
+            default: return null;
+        }
+    };
+
     const capabilities = ping?.capabilities || {};
     const rolesReady = ping?.roles_ready !== false;
     const isAdmin = Boolean(capabilities.is_admin);
@@ -271,14 +385,14 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 )}
             </header>
 
-            <div className="mt-4 overflow-x-auto">
+            <div className="-mx-3 mt-4 overflow-x-auto px-3 [scrollbar-width:none] sm:mx-0 sm:px-0">
                 <IosSegmented
                     value={tab}
                     options={TABS.map((item) => ({ ...item, count: item.value === 'requests' ? counters.mine : undefined }))}
                     onChange={setTab}
                     size="lg"
                     ariaLabel="Раздел"
-                    className="min-w-[560px] sm:min-w-0"
+                    className="min-w-max sm:min-w-0"
                 />
             </div>
 
@@ -311,15 +425,20 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 onChange={(event) => setSearch(event.target.value)}
                             />
                         </div>
-                        <button
-                            type="button"
-                            className={`${filtersActive ? iosBtnPrimary : iosBtnSecondary} shrink-0 self-start sm:self-auto`}
-                            onClick={() => setFiltersOpen((prev) => !prev)}
-                        >
-                            <SlidersHorizontal size={15} />
-                            Фильтры
-                            {filtersActive > 0 && <span className="tabular-nums">· {filtersActive}</span>}
-                        </button>
+                        <div className="flex items-center gap-2 self-start sm:self-auto">
+                            <button
+                                type="button"
+                                className={`${filtersActive ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
+                                onClick={() => setFiltersOpen((prev) => !prev)}
+                            >
+                                <SlidersHorizontal size={15} />
+                                Фильтры
+                                {filtersActive > 0 && <span className="tabular-nums">· {filtersActive}</span>}
+                            </button>
+                            <div className="hidden md:block">
+                                <ColumnsMenu columns={REGISTRY_COLUMNS} value={columnKeys} onChange={changeColumns} onReset={() => changeColumns(defaultRegistryColumns())} />
+                            </div>
+                        </div>
                     </div>
 
                     <div className="mt-3 flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
@@ -405,77 +524,31 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
                     {/* Таблица на широком экране, карточки на телефоне. */}
                     <div className={`${iosCard} mt-4 hidden overflow-x-auto md:block`}>
-                        <table className="w-full min-w-[980px] border-collapse text-[13.5px]">
+                        <table className="w-full table-fixed border-collapse text-[13.5px]" style={{ minWidth: tableMinWidth }}>
+                            <colgroup>
+                                {visibleColumns.map((column) => <col key={column.key} style={column.width ? { width: column.width } : undefined} />)}
+                            </colgroup>
                             <thead>
                                 <tr className="border-b border-slate-200/70 bg-slate-50 text-left text-[11.5px] uppercase tracking-wider text-slate-500">
-                                    <th className="px-3.5 py-2.5 font-semibold">№ · создана</th>
-                                    <th className="px-3.5 py-2.5 font-semibold">Расход</th>
-                                    <th className="px-3.5 py-2.5 font-semibold">Контрагент</th>
-                                    <th className="px-3.5 py-2.5 text-right font-semibold">Сумма</th>
-                                    <th className="px-3.5 py-2.5 font-semibold">Этап</th>
-                                    <th className="px-3.5 py-2.5 font-semibold">Ответственный</th>
-                                    <th className="px-3.5 py-2.5 font-semibold">Срок</th>
+                                    {visibleColumns.map((column) => (
+                                        <th key={column.key} className={`truncate px-3.5 py-2.5 font-semibold ${column.align === 'right' ? 'text-right' : ''}`}>{column.label}</th>
+                                    ))}
                                 </tr>
                             </thead>
                             <tbody>
                                 {items.map((request, index) => {
                                     const tone = rowTone(request);
-                                    const text = toneText(tone);
-                                    const st = requestState(request);
                                     return (
                                         <tr
                                             key={request.id}
                                             onClick={() => setOpenedId(request.id)}
                                             className={`h-[60px] cursor-pointer transition hover:brightness-[0.97] ${index > 0 ? 'border-t border-slate-900/[0.06]' : ''} ${toneRow(tone)}`}
                                         >
-                                            <td className="px-3.5 py-2.5 align-top whitespace-nowrap">
-                                                <div className={`tabular-nums ${text.main}`}>№{request.id}</div>
-                                                <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>{fmtDateShort(request.created_at)} · {request.initiator_name || '—'}</div>
-                                            </td>
-                                            <td className="max-w-[300px] px-3.5 py-2.5 align-top">
-                                                <div className={`truncate ${text.main}`}>{request.expense_name}</div>
-                                                <div className={`truncate text-[12.5px] ${text.body}`}>
-                                                    {[request.category_name, request.project_name, request.department_name].filter(Boolean).join(' · ') || '—'}
-                                                </div>
-                                            </td>
-                                            <td className="max-w-[220px] px-3.5 py-2.5 align-top">
-                                                <div className={`truncate ${text.main}`}>{request.counterparty_name || '—'}</div>
-                                                {request.legal_entity_name && <div className={`truncate text-[12.5px] ${text.body}`}>от {request.legal_entity_name}</div>}
-                                            </td>
-                                            <td className="px-3.5 py-2.5 text-right align-top whitespace-nowrap">
-                                                <div className={`font-medium tabular-nums ${text.main}`}>{fmtMoney(request.amount)}</div>
-                                                {request.refund_amount > 0 && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>возврат {fmtMoney(request.refund_amount)}</div>}
-                                            </td>
-                                            <td className="max-w-[240px] px-3.5 py-2.5 align-top">
-                                                {request.status === 'active' ? (
-                                                    <>
-                                                        <div className={`truncate ${text.main}`}>{stepLabel(request, steps)}</div>
-                                                        <div className={`text-[12px] leading-4 ${text.meta}`}>шаг {request.current_step} из 12{st === 'blocked' ? ' · ожидает договор' : ''}</div>
-                                                    </>
-                                                ) : (
-                                                    <StatePill request={request} />
-                                                )}
-                                            </td>
-                                            <td className="max-w-[180px] px-3.5 py-2.5 align-top">
-                                                {request.status === 'active' ? (
-                                                    <>
-                                                        <div className={`truncate ${text.main}`}>{request.current_assignee_name || ROLE_LABELS[request.current_role] || '—'}</div>
-                                                        <div className={`text-[12px] leading-4 ${text.meta}`}>{ROLE_LABELS[request.current_role] || ''}</div>
-                                                    </>
-                                                ) : (
-                                                    <span className={text.meta}>—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-3.5 py-2.5 align-top whitespace-nowrap">
-                                                {request.due_on ? (
-                                                    <>
-                                                        <div className={`tabular-nums ${text.main}`}>{fmtDateShort(request.due_on)}</div>
-                                                        <div className={`text-[12px] leading-4 ${st === 'overdue' ? 'font-medium text-rose-700' : text.meta}`}>{dueLabel(request)}</div>
-                                                    </>
-                                                ) : (
-                                                    request.paid_on ? <div className={`text-[12.5px] tabular-nums ${text.body}`}>оплачено {fmtDateShort(request.paid_on)}</div> : <span className={text.meta}>—</span>
-                                                )}
-                                            </td>
+                                            {visibleColumns.map((column) => (
+                                                <td key={column.key} className={`px-3.5 py-2.5 align-top ${column.align === 'right' ? 'text-right' : ''}`}>
+                                                    {renderCell(column.key, request, toneText(tone))}
+                                                </td>
+                                            ))}
                                         </tr>
                                     );
                                 })}
@@ -503,13 +576,13 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 >
                                     <div className="flex items-baseline justify-between gap-2">
                                         <span className="truncate text-[14px] font-medium text-slate-900">{request.expense_name}</span>
-                                        <span className="shrink-0 text-[14px] font-semibold tabular-nums text-slate-900">{fmtMoney(request.amount)}</span>
+                                        <span className="shrink-0 text-[14px] font-semibold tabular-nums text-slate-900">{fmtMoney(netAmount(request))}</span>
                                     </div>
                                     <div className="mt-0.5 truncate text-[12.5px] text-slate-500">№{request.id} · {request.counterparty_name || '—'}</div>
                                     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-slate-600">
                                         {request.status === 'active' ? (
                                             <span className={`rounded-full px-2 py-0.5 ${tonePill(stateMeta(requestState(request)).tone || 'current').fill}`}>
-                                                {request.current_step}/12 · {request.current_assignee_name || ROLE_LABELS[request.current_role] || '—'}
+                                                {request.current_step}/12 · {responsibleLines(request).name}
                                             </span>
                                         ) : <StatePill request={request} />}
                                         {request.due_on && <span className="tabular-nums">{dueLabel(request)}</span>}
@@ -590,6 +663,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 request={editing}
                 items={editingItems}
                 stepFiles={steps.find((s) => s.no === 1)?.files || []}
+                canAddCounterparty={Boolean(capabilities.can_create)}
                 onSaved={(data) => {
                     applyChanged(data?.request);
                     if (data?.request?.id) setOpenedId(data.request.id);

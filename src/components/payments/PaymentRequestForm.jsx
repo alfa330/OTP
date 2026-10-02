@@ -5,7 +5,8 @@ import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSeg
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import {
-    CONTRACT_THRESHOLD, SOURCE_OPTIONS, TYPE_OPTIONS, fmtDate, fmtMoney, itemsTotal, parseAmount,
+    CONTRACT_THRESHOLD, SOURCE_OPTIONS, TYPE_OPTIONS, fmtDate, fmtMoney, itemsTotal, parseAmount, priceTrend,
+    trendLabel,
 } from './paymentsMeta';
 import {
     AmountInput, ErrorBox, Field, FilePicker, NoticeBox, UserSelect, appendPayloadFiles, errorText,
@@ -95,7 +96,7 @@ const HISTORY_DEBOUNCE_MS = 400;
 
 const PaymentRequestForm = ({
     open, onClose, apiBaseUrl, headers, dictionaries, users, me, request = null, items = [], onSaved, showToast,
-    stepFiles = [],
+    stepFiles = [], canAddCounterparty = false,
 }) => {
     const editing = Boolean(request);
     const [draft, setDraft] = useState(() => emptyDraft(me, dictionaries?.manager));
@@ -103,10 +104,12 @@ const PaymentRequestForm = ({
     const [files, setFiles] = useState([]);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
+    const errorRef = useRef(null);
     const [managerEditing, setManagerEditing] = useState(false);
     const [history, setHistory] = useState([]);
     const [newCounterparty, setNewCounterparty] = useState('');
     const [creatingCounterparty, setCreatingCounterparty] = useState(false);
+    const [addingCounterparty, setAddingCounterparty] = useState(false);
     const [localDicts, setLocalDicts] = useState(dictionaries);
 
     useEffect(() => { setLocalDicts(dictionaries); }, [dictionaries]);
@@ -114,12 +117,19 @@ const PaymentRequestForm = ({
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
 
+    // Кнопка отправки — в подвале, а ошибка — над формой: без прокрутки
+    // человек жмёт «Создать», и ничего видимого не происходит.
+    useEffect(() => {
+        if (error) errorRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }, [error]);
+
     useEffect(() => {
         if (!open) return;
         setError('');
         setFiles([]);
         setManagerEditing(false);
         setNewCounterparty('');
+        setAddingCounterparty(false);
         if (request) {
             const next = draftFromRequest(request, items);
             setDraft(next);
@@ -157,6 +167,7 @@ const PaymentRequestForm = ({
 
     const manager = useMemo(() => (users || []).find((user) => user.id === draft.manager_id) || null, [users, draft.manager_id]);
     const contractNeeded = total > CONTRACT_THRESHOLD && draft.counterparty_id;
+    const trend = useMemo(() => priceTrend(history), [history]);
 
     // Справка «История оплат»: похожие ранее оплаченные заявки — по контрагенту,
     // категории и названию. Спрашивается сама, без кнопки (п. 9 дополнения).
@@ -196,12 +207,18 @@ const PaymentRequestForm = ({
         if (!name) return;
         setCreatingCounterparty(true);
         try {
-            const response = await axios.post(`${apiBaseUrl}/api/payments/dictionaries/counterparties`, { name }, { headers: headers() });
+            // Такой контрагент уже есть (сервер отвечает 409 с его id) — просто выбираем его.
+            const response = await axios.post(`${apiBaseUrl}/api/payments/dictionaries/counterparties`, { name }, {
+                headers: headers(),
+                validateStatus: (status) => (status >= 200 && status < 300) || status === 409,
+            });
             const id = response.data?.id;
+            if (!id) throw new Error(response.data?.error || 'Не удалось добавить контрагента');
             const refreshed = await axios.get(`${apiBaseUrl}/api/payments/dictionaries`, { headers: headers() });
             setLocalDicts(refreshed.data);
             set('counterparty_id', id);
             setNewCounterparty('');
+            setAddingCounterparty(false);
         } catch (err) {
             toastRef.current?.(errorText(err, 'Не удалось добавить контрагента'), 'error');
         } finally {
@@ -276,7 +293,7 @@ const PaymentRequestForm = ({
             )}
         >
             <div className="space-y-4">
-                <ErrorBox text={error} />
+                <div ref={errorRef} className="scroll-mt-4"><ErrorBox text={error} /></div>
 
                 <IosSection title="Что закупаем">
                     <Field label="Наименование расхода" required hint="Коротко и конкретно: «Бумага А4 для офиса», а не «хоз. товары». Подробности — в позициях ниже.">
@@ -383,7 +400,7 @@ const PaymentRequestForm = ({
                 </IosSection>
 
                 <IosSection title="Поставщик и оплата">
-                    <Field label="Контрагент" required hint="Поставщик товара или услуги. Нет в списке — впишите название ниже и нажмите «Добавить».">
+                    <Field label="Контрагент" required hint="Поставщик товара или услуги. Нет в списке — «Новый контрагент»: достаточно названия, БИН и реквизиты бухгалтерия допишет в справочнике.">
                         <CustomSelect
                             value={draft.counterparty_id}
                             onChange={(value) => setDraft((prev) => ({ ...prev, counterparty_id: value, contract_id: null }))}
@@ -393,20 +410,33 @@ const PaymentRequestForm = ({
                             searchable
                             ariaLabel="Контрагент"
                         />
-                        <div className="mt-1.5 flex gap-2">
+                    </Field>
+                    {/* Новый контрагент — по запросу, а не полем на виду: в большинстве
+                        заявок поставщик уже есть в справочнике. */}
+                    {canAddCounterparty && (addingCounterparty ? (
+                        <div className="-mt-1 flex gap-2">
                             <input
+                                autoFocus
                                 className={`${iosInput} py-2 text-[13px]`}
-                                placeholder="Новый контрагент: название"
+                                placeholder="Название нового контрагента"
                                 value={newCounterparty}
                                 onChange={(event) => setNewCounterparty(event.target.value)}
-                                onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); createCounterparty(); } }}
+                                onKeyDown={(event) => {
+                                    if (event.key === 'Enter') { event.preventDefault(); createCounterparty(); }
+                                    if (event.key === 'Escape') { event.stopPropagation(); setAddingCounterparty(false); setNewCounterparty(''); }
+                                }}
                                 maxLength={200}
                             />
-                            <button type="button" className={`${iosBtnSecondary} shrink-0 py-2`} disabled={!newCounterparty.trim() || creatingCounterparty} onClick={createCounterparty}>
-                                {creatingCounterparty ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Добавить
+                            <button type="button" className={`${iosBtnPrimary} shrink-0 py-2`} disabled={!newCounterparty.trim() || creatingCounterparty} onClick={createCounterparty}>
+                                {creatingCounterparty ? <Loader2 size={14} className="animate-spin" /> : null} Добавить
                             </button>
+                            <button type="button" className={`${iosBtnGhost} shrink-0 py-2`} onClick={() => { setAddingCounterparty(false); setNewCounterparty(''); }}>Отмена</button>
                         </div>
-                    </Field>
+                    ) : (
+                        <button type="button" className="-mt-1.5 inline-flex items-center gap-1 px-1 text-[12.5px] font-medium text-blue-600 transition hover:underline" onClick={() => setAddingCounterparty(true)}>
+                            <Plus size={13} /> Новый контрагент
+                        </button>
+                    ))}
 
                     {history.length > 0 && (
                         <NoticeBox tone="blue" text="">
@@ -420,6 +450,7 @@ const PaymentRequestForm = ({
                                         <span className="tabular-nums text-blue-900/80">
                                             {fmtDate(row.paid_on)} · {fmtMoney(row.paid_amount ?? row.amount)}
                                             {row.unit_price ? ` · ${fmtMoney(row.unit_price)}/ед.` : ''}
+                                            {trend[row.request_id] ? <span className="ml-1 font-medium text-blue-900">{trendLabel(trend[row.request_id])}</span> : null}
                                         </span>
                                     </div>
                                 ))}
@@ -427,12 +458,14 @@ const PaymentRequestForm = ({
                         </NoticeBox>
                     )}
 
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    {/* Сегменты — своей строкой каждый: «Ежемесячный» и «Фиксированный»
+                        в половине ширины окна не помещались и вылезали за карточку. */}
+                    <div className="flex flex-wrap gap-x-6 gap-y-3">
                         <Field label="Источник оплаты" required>
-                            <IosSegmented value={draft.payment_source} options={SOURCE_OPTIONS} onChange={(value) => set('payment_source', value)} stretch ariaLabel="Источник оплаты" />
+                            <div><IosSegmented value={draft.payment_source} options={SOURCE_OPTIONS} onChange={(value) => set('payment_source', value)} ariaLabel="Источник оплаты" /></div>
                         </Field>
                         <Field label="Тип оплаты" required>
-                            <IosSegmented value={draft.payment_type} options={TYPE_OPTIONS} onChange={(value) => set('payment_type', value)} stretch ariaLabel="Тип оплаты" />
+                            <div><IosSegmented value={draft.payment_type} options={TYPE_OPTIONS} onChange={(value) => set('payment_type', value)} ariaLabel="Тип оплаты" /></div>
                         </Field>
                     </div>
 
