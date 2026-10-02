@@ -129,17 +129,78 @@ export const bookInDepartment = (book, departmentId) => {
     return ids.includes(Number(departmentId));
 };
 
+/* Книга этого жанра? Пустой жанр ('' / null) — «Все жанры». */
+export const bookInGenre = (book, genreId) => {
+    if (genreId === '' || genreId === null || genreId === undefined) return true;
+    const ids = Array.isArray(book?.genre_ids) ? book.genre_ids : [];
+    return ids.includes(Number(genreId));
+};
+
 /*
- * Что показать на вкладке: книги выбранного отдела, а из них —
+ * Что показать на вкладке: книги выбранного отдела и жанра, а из них —
  * «Общий доступ» (всё не из архива), «Сохранённые» (свои закладки не из
- * архива) или «Архив». Каталог приходит один раз, отдел и вкладка делят его
- * на месте.
+ * архива) или «Архив». Каталог приходит один раз, отдел, жанр и вкладка
+ * делят его на месте.
  */
-export const filterBooks = (books, tab, departmentId = '') => {
-    const list = (Array.isArray(books) ? books : []).filter((book) => bookInDepartment(book, departmentId));
+export const filterBooks = (books, tab, departmentId = '', genreId = '') => {
+    const list = (Array.isArray(books) ? books : [])
+        .filter((book) => bookInDepartment(book, departmentId) && bookInGenre(book, genreId));
     if (tab === LIBRARY_TABS.archive) return list.filter((book) => book?.archived);
     const shelf = list.filter((book) => !book?.archived);
     return tab === LIBRARY_TABS.saved ? shelf.filter((book) => book?.saved) : shelf;
+};
+
+/* Жанры — по алфавиту по-русски, без учёта регистра: сервер сортирует
+   LOWER(name) в своей сортировке базы, и «Ё» там уезжала бы в конец. */
+const GENRE_COLLATOR = new Intl.Collator('ru', { sensitivity: 'base', numeric: true });
+
+export const sortGenres = (genres) => (Array.isArray(genres) ? [...genres] : [])
+    .sort((a, b) => GENRE_COLLATOR.compare(String(a?.name || ''), String(b?.name || '')) || (a?.id || 0) - (b?.id || 0));
+
+/* Сколько книг у каждого жанра. Книга нескольких жанров считается у каждого. */
+export const genreBookCounts = (books) => {
+    const counts = new Map();
+    for (const book of Array.isArray(books) ? books : []) {
+        for (const id of Array.isArray(book?.genre_ids) ? book.genre_ids : []) {
+            counts.set(id, (counts.get(id) || 0) + 1);
+        }
+    }
+    return counts;
+};
+
+/* Жанры для строки фильтра: только те, у которых на этой полке есть книги.
+   Жанр без книг здесь — нажатие, ведущее в пустоту. */
+export const genresOnShelf = (genres, shelfBooks) => {
+    const counts = genreBookCounts(shelfBooks);
+    return sortGenres(genres).filter((genre) => counts.get(genre.id));
+};
+
+/* Имя жанра — как его увидит сервер (library/queries.py: normalize_genre_name):
+   пробелы схлопнуты, управляющие знаки выброшены. Длина — GENRE_NAME_MAX. */
+export const GENRE_NAME_MAX = 40;
+
+export const normalizeGenreName = (value) => String(value ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ');
+
+/* Жанр с таким именем без учёта регистра — «психология» и «Психология» один. */
+export const findGenreByName = (genres, name) => {
+    const key = normalizeGenreName(name).toLocaleLowerCase('ru');
+    if (!key) return null;
+    return (Array.isArray(genres) ? genres : [])
+        .find((genre) => normalizeGenreName(genre?.name).toLocaleLowerCase('ru') === key) || null;
+};
+
+/* «1 книга», «3 книги», «12 книг». */
+export const formatBookCount = (value) => {
+    const count = Math.max(0, Math.trunc(Number(value) || 0));
+    const tens = count % 100;
+    const ones = count % 10;
+    const word = tens >= 11 && tens <= 14 ? 'книг' : ones === 1 ? 'книга' : ones >= 2 && ones <= 4 ? 'книги' : 'книг';
+    return `${count} ${word}`;
 };
 
 /* Книг на полке (не в архиве) у каждого отдела — для счётчиков в выборе
@@ -163,7 +224,10 @@ export const DEPARTMENT_STORAGE_KEY = 'otp.library.department';
 export const restoreDepartment = (stored, departments) => {
     const id = Number(stored);
     if (!Number.isInteger(id) || id <= 0) return '';
-    return (Array.isArray(departments) ? departments : []).some((item) => item?.id === id) ? id : '';
+    /* Только отдел, которому книги выдаются: прочие в выборе отдела не стоят
+       (сейчас — всё, кроме СЗоВ и ОП), и кнопка показала бы чужое название. */
+    return (Array.isArray(departments) ? departments : [])
+        .some((item) => item?.id === id && item?.active !== false) ? id : '';
 };
 
 /* Дата последней активности для мониторинга. Сервер отдаёт часы Алматы БЕЗ

@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """Схема раздела «Библиотека» (задача #282).
 
-Четыре таблицы под префиксом `library_`:
+Шесть таблиц под префиксом `library_`:
 
     library_books             книга: описание, оглавление, разметка страниц, где
                               файл; archived_at — книга в архиве
     library_book_departments  каким отделам книга видна (один или несколько)
     library_saved             «Сохранённые» — личная подборка читателя
     library_progress          где читатель остановился и сколько прочитал
+    library_genres            жанры — общий справочник библиотеки
+    library_book_genres       жанры книги (ни одного, один или несколько)
 
-Порядок важен: обе личные таблицы и отделы книги ссылаются на library_books, а
-та — на users.
+Порядок важен: обе личные таблицы, отделы и жанры книги ссылаются на
+library_books, а та — на users.
 
 Архив — не удаление: книга пропадает из каталога у читателей, но закладки и
 прогресс остаются, и мониторинг по-прежнему показывает, кто её читал. Удаляется
@@ -96,6 +98,27 @@ _STATEMENTS = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_library_book_departments_department"
     " ON library_book_departments (department_id, book_id)",
+    # Жанры (02.10.2026). Справочник общий на всю библиотеку, а не на отдел:
+    # жанр — свойство книги, а книга бывает выдана нескольким отделам сразу.
+    # Имя уникально без учёта регистра: «Психология» и «психология» — один жанр.
+    """
+    CREATE TABLE IF NOT EXISTS library_genres (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT %(now)s
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_library_genres_name ON library_genres (LOWER(name))",
+    # Удалённый жанр снимается с книг каскадом, удалённая книга — тоже.
+    """
+    CREATE TABLE IF NOT EXISTS library_book_genres (
+        book_id INTEGER NOT NULL REFERENCES library_books(id) ON DELETE CASCADE,
+        genre_id INTEGER NOT NULL REFERENCES library_genres(id) ON DELETE CASCADE,
+        PRIMARY KEY (book_id, genre_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_library_book_genres_genre ON library_book_genres (genre_id, book_id)",
 )
 
 # Книги, загруженные до разделения по отделам (28–29.09.2026), получают отдел
@@ -129,6 +152,6 @@ def init_library_schema(cursor):
 
 def schema_is_ready(cursor):
     # Последний объект схемы: есть он — есть и всё, что создано до него.
-    # Проверка по library_progress пустила бы запросы с отделами книг на
-    # базу, где до отделов миграция ещё не дошла, — 500 вместо «разворачивается».
-    return _table_exists(cursor, 'library_book_departments')
+    # Проверка по таблице постарше пустила бы запросы с жанрами книг на базу,
+    # где до жанров миграция ещё не дошла, — 500 вместо «разворачивается».
+    return _table_exists(cursor, 'library_book_genres')

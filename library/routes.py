@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """HTTP «Библиотеки» (Flask Blueprint), задача #282.
 
-    GET    /api/library                      каталог + права смотрящего (+ отделы управляющим)
-    POST   /api/library/books                загрузить .epub + отделы   (управляющие)
+    GET    /api/library                      каталог + жанры + права (+ отделы управляющим)
+    POST   /api/library/books                загрузить .epub + отделы и жанры (управляющие)
     GET    /api/library/books/<id>           книга для ридера: оглавление, страницы, место
-    PATCH  /api/library/books/<id>           {department_ids?, archived?} (управляющие)
+    PATCH  /api/library/books/<id>           {department_ids?, genre_ids?, archived?} (управляющие)
     DELETE /api/library/books/<id>           удалить книгу из архива    (управляющие)
     GET    /api/library/books/<id>/file      сам файл .epub для ридера
     PUT    /api/library/books/<id>/saved     {saved: bool} — «Сохранённые»
     PUT    /api/library/books/<id>/progress  {position, percent, page, at_end}
     GET    /api/library/analytics            мониторинг: кто что читает (управляющие)
     GET    /api/library/analytics/summary    мониторинг: общая и по отделам (управляющие)
+    POST   /api/library/genres               {name} — создать жанр      (управляющие)
+    PATCH  /api/library/genres/<id>          {name} — переименовать     (управляющие)
+    DELETE /api/library/genres/<id>          удалить жанр, книги остаются (управляющие)
 
 КТО УПРАВЛЯЕТ — ровно по ТЗ: супер-админ и тренер (MANAGER_ROLES). Они
 загружают и удаляют книги и видят мониторинг.
@@ -21,6 +24,10 @@
 архива (queries._READER_SEES), и каждая ручка одной книги проходит ту же
 дверь (queries.open_book): чужая или архивная книга отвечает 404, как
 несуществующая.
+
+ЖАНРЫ (02.10.2026). Общий справочник библиотеки: жанры создают управляющие —
+в окне книги или в окне «Жанры», — и у книги их сколько угодно, в том числе
+ни одного. Каталог отдаёт справочник всем: по жанрам делится полка.
 
 АРХИВ. Книгу убирают в архив, а не удаляют: закладки и прогресс остаются, в
 мониторинге видно, кто её читал. Удалить насовсем можно только книгу из
@@ -76,11 +83,12 @@ def can_read(role):
     return role in READER_ROLES
 
 
-def parse_department_ids(values):
-    """Отделы из запроса -> список id или None, если прислали не числа.
+def parse_ids(values):
+    """Отделы или жанры из запроса -> список id или None, если прислали не числа.
 
     Приходят списком (JSON) или повтором поля формы (загрузка книги идёт
-    multipart). Пустой список — не ошибка разбора: его отвергает вызывающий.
+    multipart). Пустой список — не ошибка разбора: отделов без него не
+    бывает (это решает вызывающий), а жанров у книги может и не быть.
     """
     if not isinstance(values, (list, tuple)):
         return None
@@ -178,9 +186,29 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             return jsonify({"error": "Выберите хотя бы один отдел",
                             "code": "LIBRARY_DEPARTMENTS_REQUIRED"}), 400
         if queries.unknown_departments(cursor, department_ids, book_id=book_id):
-            return jsonify({"error": "Такого отдела нет или он выключен — обновите страницу",
+            return jsonify({"error": "Этому отделу книги не выдаются — обновите страницу",
                             "code": "LIBRARY_DEPARTMENT_UNKNOWN"}), 400
         return None
+
+    def _genre_error(cursor, genre_ids):
+        """Ответ 400 о неверных жанрах или None — так же ДО любой записи."""
+        if genre_ids is None:
+            return jsonify({"error": "Жанры переданы неверно", "code": "LIBRARY_BAD_REQUEST"}), 400
+        if queries.unknown_genres(cursor, genre_ids):
+            return jsonify({"error": "Такого жанра больше нет — обновите страницу",
+                            "code": "LIBRARY_GENRE_UNKNOWN"}), 400
+        return None
+
+    def _genre_name():
+        """Имя жанра из тела запроса -> (имя, None) или (None, ответ 400)."""
+        payload = request.get_json(silent=True)
+        name = queries.normalize_genre_name(payload.get('name') if isinstance(payload, dict) else None)
+        if not name:
+            return None, (jsonify({
+                "error": f"Название жанра — от 1 до {queries.GENRE_NAME_MAX} знаков",
+                "code": "LIBRARY_GENRE_NAME",
+            }), 400)
+        return name, None
 
     def _not_found():
         return jsonify({"error": "Книга не найдена", "code": "LIBRARY_BOOK_NOT_FOUND"}), 404
@@ -198,11 +226,13 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         with db._get_cursor() as cursor:
             if not _schema_ready(cursor):
                 return jsonify({"status": "success", "schema_ready": False, "books": [],
-                                "departments": [], "can_manage": manager}), 200
+                                "departments": [], "genres": [], "can_manage": manager}), 200
             rows = queries.list_books(cursor, user_id, manager=manager)
             # Отделы нужны тому, кто выбирает: переключатель отдела и окно
             # публикации. Читатель видит свой отдел, выбирать ему нечего.
             departments = queries.library_departments(cursor) if manager else []
+            # Жанры — всем: по ним делится полка и у читателя.
+            genres = queries.list_genres(cursor)
         covers = _covers(rows)
         return jsonify({
             "status": "success",
@@ -210,6 +240,7 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             "can_manage": manager,
             "max_upload_mb": MAX_EPUB_BYTES // (1024 * 1024),
             "departments": departments,
+            "genres": genres,
             "books": [queries.book_view(row, covers.get(row['id'])) for row in rows],
         }), 200
 
@@ -227,9 +258,10 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
         if (request.content_length or 0) > MAX_EPUB_BYTES + 1024 * 1024:
             return jsonify({"error": f"Файл больше {MAX_EPUB_BYTES // (1024 * 1024)} МБ",
                             "code": "LIBRARY_EPUB_TOO_LARGE"}), 413
-        department_ids = parse_department_ids(request.form.getlist('department_ids'))
+        department_ids = parse_ids(request.form.getlist('department_ids'))
+        genre_ids = parse_ids(request.form.getlist('genre_ids'))
         with db._get_cursor() as cursor:
-            error = _department_error(cursor, department_ids)
+            error = _department_error(cursor, department_ids) or _genre_error(cursor, genre_ids)
         if error:
             return error
         data = upload.read(MAX_EPUB_BYTES + 1)
@@ -252,14 +284,14 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     cursor, parsed=parsed, bucket=bucket, file_blob=file_blob,
                     file_size=len(data), original_name=original_name,
                     cover_blob=cover_blob, cover_type=cover_type, uploaded_by=user_id,
-                    department_ids=department_ids)
+                    department_ids=department_ids, genre_ids=genre_ids)
                 row = queries.get_book(cursor, book_id, user_id)
         except Exception:
             # Строка не легла — файлы в бакете никому не нужны.
             storage.drop_blobs(gcs, uploaded)
             raise
-        logging.info('library: загружена книга #%s «%s» (%s стр.) пользователем %s, отделы %s',
-                     book_id, parsed['title'], parsed['total_pages'], user_id, department_ids)
+        logging.info('library: загружена книга #%s «%s» (%s стр.) пользователем %s, отделы %s, жанры %s',
+                     book_id, parsed['title'], parsed['total_pages'], user_id, department_ids, genre_ids)
         covers = _covers([row])
         return jsonify({"status": "success",
                         "book": queries.book_view(row, covers.get(book_id))}), 201
@@ -283,23 +315,29 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             return jsonify({"error": "Неверный запрос", "code": "LIBRARY_BAD_REQUEST"}), 400
         department_ids = None
         if 'department_ids' in payload:
-            department_ids = parse_department_ids(payload.get('department_ids'))
+            department_ids = parse_ids(payload.get('department_ids'))
+        genre_ids = None
+        if 'genre_ids' in payload:
+            genre_ids = parse_ids(payload.get('genre_ids'))
         archived = payload.get('archived')
         if archived is not None and not isinstance(archived, bool):
             return jsonify({"error": "Поле archived: true или false", "code": "LIBRARY_BAD_REQUEST"}), 400
-        if 'department_ids' not in payload and archived is None:
+        if 'department_ids' not in payload and 'genre_ids' not in payload and archived is None:
             return jsonify({"error": "Нечего менять", "code": "LIBRARY_BAD_REQUEST"}), 400
         with db._get_cursor() as cursor:
+            error = None
             if 'department_ids' in payload:
                 error = _department_error(cursor, department_ids, book_id=book_id)
-                if error:
-                    return error
-            if not queries.update_book(cursor, book_id, user_id,
-                                       department_ids=department_ids, archived=archived):
+            if not error and 'genre_ids' in payload:
+                error = _genre_error(cursor, genre_ids)
+            if error:
+                return error
+            if not queries.update_book(cursor, book_id, user_id, department_ids=department_ids,
+                                       genre_ids=genre_ids, archived=archived):
                 return _not_found()
             row = queries.get_book(cursor, book_id, user_id)
-        logging.info('library: книга #%s изменена пользователем %s (отделы %s, архив %s)',
-                     book_id, user_id, department_ids, archived)
+        logging.info('library: книга #%s изменена пользователем %s (отделы %s, жанры %s, архив %s)',
+                     book_id, user_id, department_ids, genre_ids, archived)
         covers = _covers([row])
         return jsonify({"status": "success",
                         "book": queries.book_view(row, covers.get(book_id))}), 200
@@ -418,5 +456,48 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 return jsonify({"status": "success", "total": None, "departments": None}), 200
             summary = queries.analytics_summary(cursor, department_id=_department_arg())
         return jsonify({"status": "success", **summary}), 200
+
+    @library_route('/genres', ['POST'], manage=True)
+    def library_genre_create(user_id, role):
+        name, error = _genre_name()
+        if error:
+            return error
+        with db._get_cursor() as cursor:
+            genre, created = queries.create_genre(cursor, name, user_id)
+        if created:
+            logging.info('library: жанр #%s «%s» создан пользователем %s', genre['id'], genre['name'], user_id)
+        # Уже был — отдаём его же: окно книги просто отметит существующий.
+        return jsonify({"status": "success", "genre": genre, "created": created}), 201 if created else 200
+
+    @library_route('/genres/<int:genre_id>', ['PATCH'], manage=True)
+    def library_genre_rename(user_id, role, genre_id):
+        name, error = _genre_name()
+        if error:
+            return error
+        taken = jsonify({"error": "Жанр с таким названием уже есть", "code": "LIBRARY_GENRE_EXISTS"}), 409
+        try:
+            with db._get_cursor() as cursor:
+                outcome, genre = queries.rename_genre(cursor, genre_id, name)
+        except Exception as exc:  # noqa: BLE001
+            # Два переименования в одно имя разом: проверку прошли оба, а
+            # уникальный индекс пустил одно — второму тот же 409, не 500.
+            if getattr(exc, 'pgcode', None) == '23505':
+                return taken
+            raise
+        if outcome == queries.GENRE_NAME_TAKEN:
+            return taken
+        if outcome == queries.GENRE_NOT_FOUND:
+            return jsonify({"error": "Жанр не найден", "code": "LIBRARY_GENRE_NOT_FOUND"}), 404
+        logging.info('library: жанр #%s переименован в «%s» пользователем %s', genre_id, name, user_id)
+        return jsonify({"status": "success", "genre": genre}), 200
+
+    @library_route('/genres/<int:genre_id>', ['DELETE'], manage=True)
+    def library_genre_delete(user_id, role, genre_id):
+        with db._get_cursor() as cursor:
+            deleted = queries.delete_genre(cursor, genre_id)
+        if not deleted:
+            return jsonify({"error": "Жанр не найден", "code": "LIBRARY_GENRE_NOT_FOUND"}), 404
+        logging.info('library: жанр #%s удалён пользователем %s', genre_id, user_id)
+        return jsonify({"status": "success"}), 200
 
     return bp

@@ -5,9 +5,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    LIBRARY_TABS, STATUS_LABELS, bookInDepartment, currentTocIndex, filterBooks, formatActivity, formatDay,
-    formatPercent, formatPosition, isEpubFile, pageAtFraction, pageForOffset, parsePosition, progressFromPosition,
-    restoreDepartment, shelfCountByDepartment,
+    LIBRARY_TABS, STATUS_LABELS, bookInDepartment, bookInGenre, currentTocIndex, filterBooks, findGenreByName,
+    formatActivity, formatBookCount, formatDay, formatPercent, formatPosition, genreBookCounts, genresOnShelf,
+    isEpubFile, normalizeGenreName, pageAtFraction, pageForOffset, parsePosition, progressFromPosition,
+    restoreDepartment, shelfCountByDepartment, sortGenres,
 } from '../src/components/library/libraryMeta.js';
 
 const PAGE_CASES = [
@@ -208,4 +209,76 @@ test('запомненный отдел: только из списка, ина�
     assert.equal(restoreDepartment('abc', departments), '');
     assert.equal(restoreDepartment('-1', departments), '');
     assert.equal(restoreDepartment('3', null), '');
+});
+
+test('запомненный отдел, которому книги больше не выдаются, — «Все отделы»', () => {
+    const departments = [{ id: 1, active: true }, { id: 70, active: false }];
+    assert.equal(restoreDepartment('1', departments), 1);
+    assert.equal(restoreDepartment('70', departments), '');
+});
+
+/* Жанры (02.10.2026): у книги их сколько угодно, полка делится строкой жанров. */
+const GENRE_SHELF = [
+    { id: 1, department_ids: [1], genre_ids: [10, 20], saved: true, archived: false },
+    { id: 2, department_ids: [1], genre_ids: [20], saved: false, archived: false },
+    { id: 3, department_ids: [3], genre_ids: [30], saved: false, archived: true },
+    { id: 4, department_ids: [3], saved: false, archived: false },
+];
+const GENRES = [
+    { id: 20, name: 'психология' }, { id: 10, name: 'Бизнес' }, { id: 30, name: 'Ёмкие истории' },
+    { id: 40, name: 'Пустой' }, { id: 50, name: 'Европа' },
+];
+
+test('жанр: его книги, «Все жанры» — все; книга без жанра — только во «Всех»', () => {
+    const ids = (tab, dept, genre) => filterBooks(GENRE_SHELF, tab, dept, genre).map((b) => b.id);
+    assert.deepEqual(ids(LIBRARY_TABS.all, '', ''), [1, 2, 4]);
+    assert.deepEqual(ids(LIBRARY_TABS.all, '', 20), [1, 2]);
+    assert.deepEqual(ids(LIBRARY_TABS.all, '', '10'), [1]);
+    assert.deepEqual(ids(LIBRARY_TABS.saved, '', 20), [1]);
+    assert.deepEqual(ids(LIBRARY_TABS.archive, '', 30), [3]);
+    assert.deepEqual(ids(LIBRARY_TABS.all, 3, 20), []);
+    assert.equal(bookInGenre(GENRE_SHELF[3], null), true);
+    assert.equal(bookInGenre(GENRE_SHELF[3], 10), false);
+});
+
+test('строка жанров — только жанры с книгами на этой полке, по алфавиту', () => {
+    const shelf = filterBooks(GENRE_SHELF, LIBRARY_TABS.all, '');
+    assert.deepEqual(genresOnShelf(GENRES, shelf).map((g) => g.id), [10, 20]);
+    const archive = filterBooks(GENRE_SHELF, LIBRARY_TABS.archive, '');
+    assert.deepEqual(genresOnShelf(GENRES, archive).map((g) => g.id), [30]);
+    assert.deepEqual(genresOnShelf(GENRES, []), []);
+    assert.deepEqual(genresOnShelf(null, shelf), []);
+});
+
+test('жанры сортируются по-русски без учёта регистра, «Ё» — после «Е»', () => {
+    assert.deepEqual(sortGenres(GENRES).map((g) => g.name), ['Бизнес', 'Европа', 'Ёмкие истории', 'психология', 'Пустой']);
+    // Исходный список не меняется — он состояние React.
+    assert.equal(GENRES[0].id, 20);
+});
+
+test('счётчик жанра — книга нескольких жанров считается у каждого, архив тоже', () => {
+    const counts = genreBookCounts(GENRE_SHELF);
+    assert.equal(counts.get(20), 2);
+    assert.equal(counts.get(10), 1);
+    assert.equal(counts.get(30), 1);
+    assert.equal(counts.has(40), false);
+});
+
+test('имя жанра: пробелы схлопнуты, регистр при поиске дубля не важен', () => {
+    assert.equal(normalizeGenreName('  Личная \u0000 эффективность\n '), 'Личная эффективность');
+    assert.equal(normalizeGenreName(null), '');
+    assert.equal(findGenreByName(GENRES, '  ПСИХОЛОГИЯ ')?.id, 20);
+    assert.equal(findGenreByName(GENRES, 'ёмкие  истории')?.id, 30);
+    assert.equal(findGenreByName(GENRES, 'Роман'), null);
+    assert.equal(findGenreByName(GENRES, '   '), null);
+});
+
+test('«1 книга», «3 книги», «12 книг», «21 книга»', () => {
+    assert.equal(formatBookCount(1), '1 книга');
+    assert.equal(formatBookCount(3), '3 книги');
+    assert.equal(formatBookCount(5), '5 книг');
+    assert.equal(formatBookCount(12), '12 книг');
+    assert.equal(formatBookCount(21), '21 книга');
+    assert.equal(formatBookCount(114), '114 книг');
+    assert.equal(formatBookCount(0), '0 книг');
 });

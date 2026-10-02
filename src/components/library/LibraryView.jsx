@@ -1,7 +1,7 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, Bookmark, BookOpen, Building2, CheckCircle2, Loader2, Trash2, Upload,
+    Archive, ArchiveRestore, Bookmark, BookOpen, CheckCircle2, Loader2, Tags, Trash2, Upload,
 } from 'lucide-react';
 import { CoverPlaceholder } from './LibraryCover';
 import {
@@ -10,10 +10,12 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import lazyWithRetry from '../../utils/lazyWithRetry';
 import LibraryMonitoring from './LibraryMonitoring';
-import LibraryDepartmentsModal from './LibraryDepartmentsModal';
+import LibraryBookModal from './LibraryBookModal';
+import LibraryGenresModal from './LibraryGenresModal';
 import {
     DEPARTMENT_STORAGE_KEY, EPUB_ACCEPT, LIBRARY_TABS, STATUS_FINISHED, STATUS_IN_PROGRESS, STATUS_LABELS,
-    filterBooks, formatPercent, isEpubFile, restoreDepartment, shelfCountByDepartment,
+    bookInGenre, filterBooks, formatPercent, genreBookCounts, genresOnShelf, isEpubFile, restoreDepartment,
+    shelfCountByDepartment,
 } from './libraryMeta';
 
 /* Ридер (распаковка EPUB, движок страниц) — отдельным чанком, не вместе с
@@ -44,12 +46,32 @@ const CATALOG_STALE_MS = 60 * 60 * 1000;
  * Архив — вкладка управляющих: книга убрана с полки, но не удалена (прогресс
  * читателей цел, её можно вернуть). Удалить насовсем можно только отсюда.
  *
+ * Жанры (02.10.2026): общий справочник, у книги — сколько угодно жанров.
+ * Полка делится строкой жанров под вкладками (как подборки в «Книгах» Apple):
+ * в строке только жанры, у которых на этой полке есть книги. Справочник
+ * ведут управляющие — кнопка «Жанры» в шапке и «Новый жанр» в окне книги.
+ *
  * Карточка книги — как в ТЗ (п. 3): обложка, название и автор, прогресс в
  * процентах, статус и кнопка «Сохранить». Цвет только у «Закончено»: это
  * единственное состояние, о котором стоит сказать отдельно.
  */
 
 const DEFAULT_MAX_MB = 50;
+
+/* Пилюля строки жанров. Выбранная — тёмная, как выбранная страница в
+   IosPager: это навигация по полке, а не отметка. */
+const GenreChip = ({ active, onClick, children }) => (
+    <button
+        type="button"
+        role="radio"
+        aria-checked={active}
+        onClick={onClick}
+        className={`inline-flex h-[30px] max-w-[220px] items-center rounded-full px-3.5 text-[12.5px] font-medium transition active:scale-[0.97] ${
+            active ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-800'}`}
+    >
+        <span className="truncate">{children}</span>
+    </button>
+);
 
 const BookStatus = ({ progress }) => {
     const status = progress?.status;
@@ -172,6 +194,11 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const [books, setBooks] = useState([]);
     const [departments, setDepartments] = useState([]);
+    const [genres, setGenres] = useState([]);
+    /* '' — «Все жанры». Не запоминается: жанр — способ найти книгу сейчас,
+       а не «своя полка», как отдел. */
+    const [genreId, setGenreId] = useState('');
+    const [genresOpen, setGenresOpen] = useState(false);
     /* '' — «Все отделы». Восстанавливается из памяти браузера, когда
        приходит список отделов (restoreDepartment). */
     const [departmentId, setDepartmentId] = useState('');
@@ -186,8 +213,8 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     /* Чья обложка сейчас в ридере (улетела из карточки). */
     const [liftedId, setLiftedId] = useState(null);
     const [upload, setUpload] = useState(null);
-    /* Окно отделов: { mode: 'publish', files } после выбора файла или
-       { mode: 'edit', book } из меню карточки. */
+    /* Окно книги (отделы и жанры): { mode: 'publish', files } после выбора
+       файла или { mode: 'edit', book } из меню карточки. */
     const [sheet, setSheet] = useState(null);
     const [sheetBusy, setSheetBusy] = useState(false);
     const [toDelete, setToDelete] = useState(null);
@@ -224,6 +251,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 });
                 setCanManage(Boolean(body.can_manage));
                 setDepartments(Array.isArray(body.departments) ? body.departments : []);
+                setGenres(Array.isArray(body.genres) ? body.genres : []);
                 setSchemaReady(body.schema_ready !== false);
                 if (body.max_upload_mb) setMaxMb(body.max_upload_mb);
             })
@@ -287,7 +315,18 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         try { window.localStorage.setItem(DEPARTMENT_STORAGE_KEY, String(next)); } catch { /* хранилище закрыто */ }
     }, []);
 
-    const shown = useMemo(() => filterBooks(books, tab, departmentId), [books, tab, departmentId]);
+    /* Строка жанров — по полке без учёта жанра: иначе выбранный жанр оставлял
+       бы в строке только себя. Жанр, которого на этой полке нет (сменили
+       вкладку или отдел), не держит пустой экран — показываются все книги. */
+    const shelfBooks = useMemo(() => filterBooks(books, tab, departmentId), [books, tab, departmentId]);
+    const genreChips = useMemo(() => genresOnShelf(genres, shelfBooks), [genres, shelfBooks]);
+    const activeGenreId = genreChips.some((genre) => genre.id === genreId) ? genreId : '';
+    const shown = useMemo(
+        () => shelfBooks.filter((book) => bookInGenre(book, activeGenreId)),
+        [activeGenreId, shelfBooks],
+    );
+    /* Сколько книг у жанра — во всей библиотеке, с архивом: для окна «Жанры». */
+    const genreCounts = useMemo(() => genreBookCounts(books), [books]);
     const counts = useMemo(() => ({
         all: filterBooks(books, LIBRARY_TABS.all, departmentId).length,
         saved: filterBooks(books, LIBRARY_TABS.saved, departmentId).length,
@@ -303,16 +342,17 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     /* Выбор отдела: рядом с каждым — сколько книг у него на полке. Отдел без
        книг приглушён: выбрать можно (чтобы опубликовать туда первую), но
-       видно, что там пусто. Выключенный отдел в списке, только пока у него
-       есть книги — или пока он выбран: иначе кнопка показала бы «Все отделы»
-       над данными одного отдела (убрали в архив его последнюю книгу). */
+       видно, что там пусто. В списке — только отделы, которым книги
+       выдаются (решение владельца 02.10.2026: пока СЗоВ и ОП), и выбранный:
+       иначе кнопка показала бы «Все отделы» над данными одного отдела. Книги
+       прочих отделов видны во «Всех отделах». */
     const departmentOptions = useMemo(() => {
         const shelf = shelfCountByDepartment(books);
         const onShelf = books.filter((book) => !book.archived).length;
         return [
             { value: '', label: 'Все отделы', meta: onShelf ? String(onShelf) : undefined },
             ...departments
-                .filter((item) => item.active !== false || shelf.get(item.id) || item.id === departmentId)
+                .filter((item) => item.active !== false || item.id === departmentId)
                 .map((item) => ({
                     value: item.id,
                     label: item.name,
@@ -379,7 +419,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         if (accepted.length) setSheet((prev) => (prev?.mode === 'publish' ? { ...prev, files: accepted } : { mode: 'publish', files: accepted }));
     }, [maxMb, toast]);
 
-    const uploadFiles = useCallback(async (list, departmentIds) => {
+    const uploadFiles = useCallback(async (list, departmentIds, genreIds) => {
         setSheetBusy(true);
         const failed = [];
         for (let index = 0; index < list.length; index += 1) {
@@ -387,6 +427,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             const form = new FormData();
             form.append('file', file);
             departmentIds.forEach((id) => form.append('department_ids', String(id)));
+            genreIds.forEach((id) => form.append('genre_ids', String(id)));
             setUpload({ name: file.name, percent: 0, index: index + 1, total: list.length });
             try {
                 // eslint-disable-next-line no-await-in-loop
@@ -410,12 +451,12 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         setUpload(null);
         setSheetBusy(false);
         setMonitoringKey((value) => value + 1);
-        /* Не легли — окно остаётся с ними и с теми же отделами: повторить
-           одним нажатием, а не выбирать файл и отделы заново. */
-        setSheet(failed.length ? { mode: 'publish', files: failed, departmentIds } : null);
+        /* Не легли — окно остаётся с ними и с теми же отделами и жанрами:
+           повторить одним нажатием, а не выбирать всё заново. */
+        setSheet(failed.length ? { mode: 'publish', files: failed, departmentIds, genreIds } : null);
     }, [apiBaseUrl, headers, toast]);
 
-    /* Правка книги (отделы, архив) — ответ сервера заменяет карточку целиком. */
+    /* Правка книги (отделы, жанры, архив) — ответ сервера заменяет карточку целиком. */
     const updateBook = useCallback((book, changes, message) => axios
         .patch(`${apiBaseUrl}/api/library/books/${book.id}`, changes, { headers: headers() })
         .then((response) => {
@@ -433,14 +474,15 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             return false;
         }), [apiBaseUrl, headers, toast]);
 
-    const submitSheet = useCallback((departmentIds) => {
+    const submitSheet = useCallback(({ departmentIds, genreIds }) => {
         if (!sheet) return;
         if (sheet.mode === 'publish') {
-            uploadFiles(sheet.files, departmentIds);
+            uploadFiles(sheet.files, departmentIds, genreIds);
             return;
         }
         setSheetBusy(true);
-        updateBook(sheet.book, { department_ids: departmentIds }, `Отделы книги «${sheet.book.title}» сохранены`)
+        updateBook(sheet.book, { department_ids: departmentIds, genre_ids: genreIds },
+            `Книга «${sheet.book.title}» сохранена`)
             .then((ok) => { if (ok) setSheet(null); })
             .finally(() => setSheetBusy(false));
     }, [sheet, updateBook, uploadFiles]);
@@ -448,7 +490,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const menuFor = useCallback((book) => {
         if (!canManage) return null;
         const departmentsItem = {
-            key: 'departments', label: 'Отделы', icon: Building2,
+            key: 'departments', label: 'Отделы и жанры', icon: Tags,
             onSelect: () => setSheet({ mode: 'edit', book }),
         };
         if (book.archived) {
@@ -469,6 +511,62 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             },
         ];
     }, [canManage, updateBook]);
+
+    /* Справочник жанров. Каждая ручка отвечает жанром — список правится на
+       месте, без перезапроса каталога. null/false — отказ, тост уже показан. */
+    const genreError = useCallback((error, fallback) => {
+        toast(error?.response?.data?.error || fallback, 'error');
+    }, [toast]);
+
+    const createGenre = useCallback((name) => axios
+        .post(`${apiBaseUrl}/api/library/genres`, { name }, { headers: headers() })
+        .then((response) => {
+            const genre = response.data?.genre;
+            if (!genre) return null;
+            setGenres((prev) => (prev.some((item) => item.id === genre.id) ? prev : [...prev, genre]));
+            return genre;
+        })
+        .catch((error) => { genreError(error, 'Не удалось создать жанр'); return null; }), [apiBaseUrl, genreError, headers]);
+
+    /* Удалённый жанр уходит и из книг: сервер снял его каскадом, карточкам
+       незачем ждать перезапроса каталога. */
+    const dropGenre = useCallback((genre) => {
+        setGenres((prev) => prev.filter((item) => item.id !== genre.id));
+        setBooks((prev) => prev.map((book) => (book.genre_ids?.includes(genre.id)
+            ? { ...book, genre_ids: book.genre_ids.filter((id) => id !== genre.id) }
+            : book)));
+        setGenreId((current) => (current === genre.id ? '' : current));
+    }, []);
+
+    /* Не найден — жанр удалили с другого компьютера: строка уходит из
+       списка, а не остаётся «живой», отказывая на каждую правку. */
+    const renameGenre = useCallback((genre, name) => axios
+        .patch(`${apiBaseUrl}/api/library/genres/${genre.id}`, { name }, { headers: headers() })
+        .then((response) => {
+            const updated = response.data?.genre;
+            if (updated) setGenres((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+            return true;
+        })
+        .catch((error) => {
+            if (error?.response?.status === 404) dropGenre(genre);
+            genreError(error, 'Не удалось переименовать жанр');
+            return false;
+        }), [apiBaseUrl, dropGenre, genreError, headers]);
+
+    /* Не найден (удалили с другого компьютера) — для этого экрана то же,
+       что удалён. */
+    const deleteGenre = useCallback((genre) => axios
+        .delete(`${apiBaseUrl}/api/library/genres/${genre.id}`, { headers: headers() })
+        .catch((error) => {
+            if (error?.response?.status === 404) return null;
+            throw error;
+        })
+        .then(() => {
+            dropGenre(genre);
+            toast(`Жанр «${genre.name}» удалён`);
+            return true;
+        })
+        .catch((error) => { genreError(error, 'Не удалось удалить жанр'); return false; }), [apiBaseUrl, dropGenre, genreError, headers, toast]);
 
     const confirmDelete = useCallback(() => {
         if (!toDelete) return;
@@ -491,11 +589,13 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const shownSheet = sheet || lastSheetRef.current;
 
     /* Окно публикации заранее отмечает отдел, выбранный в разделе, — только
-       действующий: выключенному сервер новую книгу не выдаст. */
+       тот, которому книги выдаются: другому сервер новую книгу не выдаст. И
+       жанр, выбранный на полке: тренер, листающий «Психологию», публикует в неё. */
     const publishDefaultIds = useMemo(() => {
         const current = departments.find((item) => item.id === departmentId);
         return current && current.active !== false ? [departmentId] : [];
     }, [departmentId, departments]);
+    const publishDefaultGenreIds = useMemo(() => (activeGenreId === '' ? [] : [activeGenreId]), [activeGenreId]);
 
     const uploadLabel = upload
         ? (upload.percent < 100
@@ -526,15 +626,21 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 event.target.value = '';
                             }}
                         />
-                        <button
-                            type="button"
-                            className={`${iosBtnPrimary} min-w-[172px]`}
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={sheetBusy}
-                        >
-                            <Upload size={15} />
-                            Загрузить книгу
-                        </button>
+                        <div className="flex gap-2">
+                            <button type="button" className={iosBtnSecondary} onClick={() => setGenresOpen(true)}>
+                                <Tags size={15} />
+                                Жанры
+                            </button>
+                            <button
+                                type="button"
+                                className={`${iosBtnPrimary} min-w-[172px] flex-1 sm:flex-none`}
+                                onClick={() => fileInputRef.current?.click()}
+                                disabled={sheetBusy}
+                            >
+                                <Upload size={15} />
+                                Загрузить книгу
+                            </button>
+                        </div>
                         {/* В каком виде нужна книга — до выбора файла, а не
                             сообщением об ошибке после. */}
                         <span className="text-[11.5px] text-slate-400">Формат EPUB, до {maxMb} МБ</span>
@@ -565,6 +671,21 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     />
                 )}
             </div>
+
+            {/* Жанры полки — пилюлями в одну строку, на телефоне она листается
+                вбок. Нет ни одного жанра с книгами — строки нет вовсе. */}
+            {tab !== LIBRARY_TABS.monitoring && !loading && genreChips.length > 0 && (
+                <div className="mt-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    <div role="radiogroup" aria-label="Жанр" className="flex min-w-max gap-1.5">
+                        <GenreChip active={activeGenreId === ''} onClick={() => setGenreId('')}>Все жанры</GenreChip>
+                        {genreChips.map((genre) => (
+                            <GenreChip key={genre.id} active={activeGenreId === genre.id} onClick={() => setGenreId(genre.id)}>
+                                {genre.name}
+                            </GenreChip>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <div className="mt-4">
                 {tab === LIBRARY_TABS.monitoring && canManage ? (
@@ -641,7 +762,7 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 </Suspense>
             )}
 
-            <LibraryDepartmentsModal
+            <LibraryBookModal
                 open={Boolean(sheet)}
                 mode={shownSheet?.mode}
                 files={shownSheet?.files}
@@ -650,11 +771,26 @@ const LibraryView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 initialIds={shownSheet?.mode === 'edit'
                     ? shownSheet.book.department_ids
                     : (shownSheet?.departmentIds || publishDefaultIds)}
+                genres={genres}
+                initialGenreIds={shownSheet?.mode === 'edit'
+                    ? shownSheet.book.genre_ids
+                    : (shownSheet?.genreIds || publishDefaultGenreIds)}
+                onCreateGenre={createGenre}
                 busy={sheetBusy}
                 busyLabel={uploadLabel}
                 onSubmit={submitSheet}
                 onClose={() => setSheet(null)}
                 onPickFiles={() => fileInputRef.current?.click()}
+            />
+
+            <LibraryGenresModal
+                open={genresOpen}
+                genres={genres}
+                counts={genreCounts}
+                onClose={() => setGenresOpen(false)}
+                onCreate={createGenre}
+                onRename={renameGenre}
+                onDelete={deleteGenre}
             />
 
             <IosModal

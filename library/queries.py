@@ -20,14 +20,26 @@ ANALYTICS_LIMIT = 1000
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
-# Отделы книги — массивом прямо в строке: книг десятки, подзапрос по индексу
-# дешевле второго похода в базу и склейки в питоне.
+# Каким отделам книгу можно выдать. Решение владельца 02.10.2026: «из доступных
+# отделов сделать только пока СЗоВ и ОП». По коду отдела, а не по названию:
+# название отдела переименовывают, код — нет. Отдел вне списка, которому
+# книга уже выдана, остаётся у неё (и в выборе — чтобы его можно было снять).
+LIBRARY_DEPARTMENT_CODES = ('szov', 'op')
+
+# Отделы и жанры книги — массивами прямо в строке: книг десятки, подзапрос по
+# индексу дешевле второго похода в базу и склейки в питоне.
 _BOOK_COLUMNS = """
     b.id, b.title, b.author, b.language, b.bucket, b.cover_blob, b.cover_type,
     b.total_pages, b.created_at, b.archived_at,
     ARRAY(SELECT bd.department_id FROM library_book_departments bd
-           WHERE bd.book_id = b.id ORDER BY bd.department_id) AS department_ids
+           WHERE bd.book_id = b.id ORDER BY bd.department_id) AS department_ids,
+    ARRAY(SELECT bg.genre_id FROM library_book_genres bg
+           WHERE bg.book_id = b.id ORDER BY bg.genre_id) AS genre_ids
 """
+
+# Длина имени жанра: «Личная эффективность» — 20 знаков, сорок хватает с
+# запасом, а длиннее — уже не жанр, а описание, и на чипе оно не уместится.
+GENRE_NAME_MAX = 40
 
 # Что видно читателю: книга не в архиве и выдана ЕГО отделу. Отдел берётся из
 # users тем же запросом, а не отдельным походом: параметр — id смотрящего.
@@ -79,6 +91,7 @@ def book_view(row, cover_url=None):
         'total_pages': int(row.get('total_pages') or 1),
         'created_at': _iso(row.get('created_at')),
         'department_ids': [int(value) for value in (row.get('department_ids') or [])],
+        'genre_ids': [int(value) for value in (row.get('genre_ids') or [])],
         'archived': row.get('archived_at') is not None,
         'archived_at': _iso(row.get('archived_at')),
         'saved': bool(row.get('saved')),
@@ -174,7 +187,7 @@ def book_file_ref(cursor, book_id):
 
 
 def insert_book(cursor, *, parsed, bucket, file_blob, file_size, original_name,
-                cover_blob, cover_type, uploaded_by, department_ids):
+                cover_blob, cover_type, uploaded_by, department_ids, genre_ids=()):
     cursor.execute(f"""
         INSERT INTO library_books (
             title, author, language, bucket, file_blob, file_size, original_name,
@@ -190,41 +203,144 @@ def insert_book(cursor, *, parsed, bucket, file_blob, file_size, original_name,
     ))
     book_id = cursor.fetchone()[0]
     set_book_departments(cursor, book_id, department_ids)
+    if genre_ids:
+        set_book_genres(cursor, book_id, genre_ids)
     return book_id
 
 
-def library_departments(cursor):
-    """Отделы для выбора: действующие и те, у кого уже есть книги.
+# Отдел, которому можно выдать книгу: действующий и из списка библиотеки.
+_DEPARTMENT_SELECTABLE = "(d.is_active IS NOT FALSE AND LOWER(d.code) = ANY(%s))"
 
-    Второе — чтобы книга, выданная отделу, который потом выключили, не
-    показывала в окне отделов безымянное «№ 42».
+
+def library_departments(cursor):
+    """Отделы для выбора: те, кому можно выдать книгу (active), и те, у кого
+    книги уже есть (active = False, если выдать им новую уже нельзя).
+
+    Второе — чтобы книга, выданная отделу, который потом выключили или убрали
+    из списка библиотеки, не показывала в окне отделов безымянное «№ 42».
     """
-    cursor.execute("""
-        SELECT d.id, d.name, (d.is_active IS NOT FALSE) AS active
+    codes = list(LIBRARY_DEPARTMENT_CODES)
+    cursor.execute(f"""
+        SELECT d.id, d.name, {_DEPARTMENT_SELECTABLE} AS active
           FROM departments d
-         WHERE d.is_active IS NOT FALSE
+         WHERE {_DEPARTMENT_SELECTABLE}
             OR EXISTS (SELECT 1 FROM library_book_departments bd WHERE bd.department_id = d.id)
          ORDER BY d.name, d.id
-    """)
+    """, (codes, codes))
     return [{'id': row[0], 'name': row[1], 'active': bool(row[2])} for row in cursor.fetchall()]
 
 
 def unknown_departments(cursor, department_ids, *, book_id=None):
-    """-> id из списка, которым книгу выдать нельзя (нет такого отдела или он
-    выключен). Выключенный отдел, которому книга УЖЕ выдана, можно оставить:
-    правка названия отделов книги не должна требовать сначала его снять."""
+    """-> id из списка, которым книгу выдать нельзя (нет такого отдела, он
+    выключен или не из списка библиотеки). Отдел, которому книга УЖЕ выдана,
+    можно оставить: правка отделов книги не должна требовать сначала его снять."""
     ids = sorted({int(value) for value in department_ids})
     if not ids:
         return []
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT d.id FROM departments d
          WHERE d.id = ANY(%s)
-           AND (d.is_active IS NOT FALSE OR EXISTS (
+           AND ({_DEPARTMENT_SELECTABLE} OR EXISTS (
                 SELECT 1 FROM library_book_departments bd
                  WHERE bd.department_id = d.id AND bd.book_id = %s))
-    """, (ids, book_id))
+    """, (ids, list(LIBRARY_DEPARTMENT_CODES), book_id))
     known = {row[0] for row in cursor.fetchall()}
     return [value for value in ids if value not in known]
+
+
+def normalize_genre_name(value):
+    """Имя жанра из запроса -> чистая строка или '' (такого имени не бывает).
+
+    Пробелы схлопываются (двойной пробел из копипаста дал бы «второй» жанр),
+    непечатаемые знаки выбрасываются: NUL Postgres в TEXT не примет вовсе.
+    """
+    if not isinstance(value, str):
+        return ''
+    text = ' '.join(''.join(ch if ch.isprintable() else ' ' for ch in value).split())
+    return text if len(text) <= GENRE_NAME_MAX else ''
+
+
+def list_genres(cursor):
+    cursor.execute("SELECT id, name FROM library_genres ORDER BY LOWER(name), id")
+    return [{'id': row[0], 'name': row[1]} for row in cursor.fetchall()]
+
+
+def create_genre(cursor, name, user_id):
+    """-> (жанр, создан ли). Жанр с таким именем (без учёта регистра) уже
+    есть — возвращается он: два тренера, создающих «Психологию» одновременно,
+    получат один жанр, а не ошибку у второго.
+
+    Одним запросом: DO UPDATE (а не DO NOTHING) возвращает и существующую
+    строку, так что между «не вставилось» и «найди» не остаётся окна, в
+    которое жанр успели бы удалить. Имя существующего жанра не меняется;
+    xmax = 0 бывает только у только что вставленной строки.
+    """
+    cursor.execute("""
+        INSERT INTO library_genres (name, created_by) VALUES (%s, %s)
+        ON CONFLICT ((LOWER(name))) DO UPDATE SET name = library_genres.name
+        RETURNING id, name, (xmax = 0) AS created
+    """, (name, user_id))
+    row = cursor.fetchone()
+    return {'id': row[0], 'name': row[1]}, bool(row[2])
+
+
+GENRE_RENAMED = 'renamed'
+GENRE_NOT_FOUND = 'not_found'
+GENRE_NAME_TAKEN = 'taken'
+
+
+def rename_genre(cursor, genre_id, name):
+    """-> (GENRE_*, жанр или None). Смена одного регистра («бизнес» ->
+    «Бизнес») — переименование того же жанра, а не занятое имя."""
+    cursor.execute("SELECT 1 FROM library_genres WHERE LOWER(name) = LOWER(%s) AND id <> %s",
+                   (name, genre_id))
+    if cursor.fetchone():
+        return GENRE_NAME_TAKEN, None
+    cursor.execute("UPDATE library_genres SET name = %s WHERE id = %s RETURNING id, name", (name, genre_id))
+    row = cursor.fetchone()
+    if not row:
+        return GENRE_NOT_FOUND, None
+    return GENRE_RENAMED, {'id': row[0], 'name': row[1]}
+
+
+def delete_genre(cursor, genre_id):
+    """Удаляет жанр; с книг он снимается каскадом, сами книги остаются.
+    -> False, если жанра нет."""
+    cursor.execute("DELETE FROM library_genres WHERE id = %s RETURNING id", (genre_id,))
+    return cursor.fetchone() is not None
+
+
+def unknown_genres(cursor, genre_ids):
+    """-> id из списка, которых нет в справочнике (жанр удалили, пока окно
+    книги было открыто)."""
+    ids = sorted({int(value) for value in genre_ids})
+    if not ids:
+        return []
+    cursor.execute("SELECT id FROM library_genres WHERE id = ANY(%s)", (ids,))
+    known = {row[0] for row in cursor.fetchall()}
+    return [value for value in ids if value not in known]
+
+
+def set_book_genres(cursor, book_id, genre_ids):
+    """Заменяет жанры книги на данный набор (проверенный заранее). Пустой
+    набор — книга без жанра, это не ошибка.
+
+    Вставляются только жанры, которые есть, и под FOR KEY SHARE: проверка
+    набора и запись разнесены (при загрузке между ними — файл в бакет), и
+    жанр, удалённый другим управляющим в эту секунду, иначе ронял бы вставку
+    внешним ключом в 500. Так книга ложится без него — ровно то же, что
+    сделал бы каскад, удали его секундой позже.
+    """
+    ids = sorted({int(value) for value in genre_ids})
+    cursor.execute("DELETE FROM library_book_genres WHERE book_id = %s AND NOT (genre_id = ANY(%s))",
+                   (book_id, ids))
+    if ids:
+        cursor.execute("""
+            INSERT INTO library_book_genres (book_id, genre_id)
+            SELECT %s, g.id FROM library_genres g WHERE g.id = ANY(%s)
+            FOR KEY SHARE
+            ON CONFLICT DO NOTHING
+        """, (book_id, ids))
 
 
 def set_book_departments(cursor, book_id, department_ids):
@@ -239,8 +355,8 @@ def set_book_departments(cursor, book_id, department_ids):
     """, (book_id, ids))
 
 
-def update_book(cursor, book_id, user_id, *, department_ids=None, archived=None):
-    """Отделы и архив книги. -> False, если книги нет.
+def update_book(cursor, book_id, user_id, *, department_ids=None, genre_ids=None, archived=None):
+    """Отделы, жанры и архив книги. -> False, если книги нет.
 
     Строка книги берётся под замок: две правки подряд (снять отдел и тут же
     убрать в архив) не должны перемешать наборы отделов.
@@ -250,6 +366,8 @@ def update_book(cursor, book_id, user_id, *, department_ids=None, archived=None)
         return False
     if department_ids is not None:
         set_book_departments(cursor, book_id, department_ids)
+    if genre_ids is not None:
+        set_book_genres(cursor, book_id, genre_ids)
     if archived is True:
         # Повторное «в архив» не переписывает дату: книга в архиве с того
         # дня, когда её туда убрали впервые.

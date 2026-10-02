@@ -13,7 +13,10 @@
   ручкой; удалить насовсем — только из архива;
 - прогресс: 100 % и «Закончено» ставит только последняя страница;
 - формула страницы одна на сервере и в ридере;
-- раздел доходит до меню и до тренера.
+- раздел доходит до меню и до тренера;
+- жанры: справочник ведут только управляющие, имя уникально без регистра,
+  у книги их сколько угодно (и ни одного), неверный жанр — отказ до бакета;
+- отделы к выдаче — пока только СЗоВ и ОП (решение владельца 02.10.2026).
 
 Книги в тестах собираются здесь же из строк: реальные файлы книг в публичный
 репозиторий не кладём.
@@ -422,7 +425,7 @@ def book_row(**extra):
     row = {
         'id': 5, 'title': 'Книга', 'author': 'Автор', 'language': 'ru', 'bucket': 'test-bucket',
         'cover_blob': None, 'cover_type': None, 'total_pages': 285, 'created_at': None,
-        'archived_at': None, 'department_ids': [1, 3],
+        'archived_at': None, 'department_ids': [1, 3], 'genre_ids': [2],
         'saved': False, 'percent': None, 'page': None, 'finished_at': None, 'progress_updated_at': None,
     }
     row.update(extra)
@@ -441,6 +444,7 @@ class PermissionTests(unittest.TestCase):
             with self.subTest(role=role), \
                     mock.patch.object(routes, 'schema_is_ready', return_value=True), \
                     mock.patch.object(queries, 'list_books', return_value=[book_row()]) as list_books, \
+                    mock.patch.object(queries, 'list_genres', return_value=[{'id': 2, 'name': 'Психология'}]), \
                     mock.patch.object(queries, 'library_departments', return_value=departments):
                 client, _ = client_for(role)
                 response = client.get('/api/library')
@@ -452,6 +456,8 @@ class PermissionTests(unittest.TestCase):
                 self.assertIs(True, list_books.call_args.kwargs['manager'])
                 self.assertEqual(departments, body['departments'])
                 self.assertEqual([1, 3], body['books'][0]['department_ids'])
+                self.assertEqual([2], body['books'][0]['genre_ids'])
+                self.assertEqual([{'id': 2, 'name': 'Психология'}], body['genres'])
                 self.assertIs(False, body['books'][0]['archived'])
 
     def test_section_is_closed_to_everyone_else_for_now(self):
@@ -523,6 +529,8 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(7, inserted['uploaded_by'])
         # Повтор поля формы — несколько отделов; дубли схлопываются.
         self.assertEqual([1, 3], inserted['department_ids'])
+        # Жанр — по желанию: без поля книга ложится без жанра.
+        self.assertEqual([], inserted['genre_ids'])
         paths = [path for _bucket, path in fake.uploaded]
         self.assertTrue(any(path.startswith('library/books/') for path in paths))
         self.assertTrue(any(path.startswith('library/covers/') for path in paths))
@@ -665,8 +673,10 @@ class DepartmentAccessTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_reader_catalog_is_filtered_by_the_server_and_has_no_department_list(self):
+        genres = [{'id': 2, 'name': 'Психология'}]
         with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
                 mock.patch.object(queries, 'list_books', return_value=[]) as list_books, \
+                mock.patch.object(queries, 'list_genres', return_value=genres), \
                 mock.patch.object(queries, 'library_departments') as library_departments:
             client, _ = client_for('operator')
             body = client.get('/api/library').get_json()
@@ -674,6 +684,8 @@ class DepartmentAccessTests(unittest.TestCase):
         library_departments.assert_not_called()
         self.assertEqual([], body['departments'])
         self.assertIs(False, body['can_manage'])
+        # Жанры — и читателю: по ним делится его полка.
+        self.assertEqual(genres, body['genres'])
 
     def test_every_book_door_answers_404_for_a_book_of_another_department(self):
         requests = (
@@ -716,13 +728,15 @@ class BookUpdateTests(unittest.TestCase):
     def test_departments_and_archive_change_in_one_request(self):
         response, update_book = self.patch({'department_ids': [3, 1], 'archived': True})
         self.assertEqual(200, response.status_code, response.get_json())
-        self.assertEqual({'department_ids': [1, 3], 'archived': True}, update_book.call_args.kwargs)
+        self.assertEqual({'department_ids': [1, 3], 'genre_ids': None, 'archived': True},
+                         update_book.call_args.kwargs)
         self.assertIs(True, response.get_json()['book']['archived'])
 
     def test_archive_alone_does_not_touch_departments(self):
         response, update_book = self.patch({'archived': False})
         self.assertEqual(200, response.status_code)
-        self.assertEqual({'department_ids': None, 'archived': False}, update_book.call_args.kwargs)
+        self.assertEqual({'department_ids': None, 'genre_ids': None, 'archived': False},
+                         update_book.call_args.kwargs)
 
     def test_bad_payloads_change_nothing(self):
         cases = (
@@ -755,12 +769,12 @@ class BookUpdateTests(unittest.TestCase):
                 self.assertEqual(400, response.status_code)
                 update_book.assert_not_called()
 
-    def test_parse_department_ids(self):
-        self.assertEqual([1, 2], routes.parse_department_ids(['2', 1, '1']))
-        self.assertEqual([], routes.parse_department_ids([]))
+    def test_parse_ids(self):
+        self.assertEqual([1, 2], routes.parse_ids(['2', 1, '1']))
+        self.assertEqual([], routes.parse_ids([]))
         for bad in (None, '1', [None], ['1a'], [' '], [False], ['1' * 10], ['²'], ['①'], ['٣']):
             with self.subTest(bad=bad):
-                self.assertIsNone(routes.parse_department_ids(bad))
+                self.assertIsNone(routes.parse_ids(bad))
 
 
 class QueryViewTests(unittest.TestCase):
@@ -927,17 +941,26 @@ class SchemaTests(unittest.TestCase):
                 self.assertEqual(('public.library_book_departments',), cursor.calls[0][1])
                 self.assertEqual(backfilled, any('INSERT INTO library_book_departments' in text for text in sql))
 
-    def test_readiness_waits_for_the_departments_table(self):
+    def test_readiness_waits_for_the_last_table(self):
+        """Готовность — по последней таблице схемы (жанры книги): по таблице
+        постарше запросы с жанрами пошли бы в базу без них — 500."""
         from library import schema as library_schema
         cursor = ScriptedCursor((False,))
         self.assertFalse(library_schema.schema_is_ready(cursor))
-        self.assertEqual(('public.library_book_departments',), cursor.calls[0][1])
+        self.assertEqual(('public.library_book_genres',), cursor.calls[0][1])
+        last_table = [text for text in library_schema._STATEMENTS if 'CREATE TABLE' in text][-1]
+        self.assertIn('CREATE TABLE IF NOT EXISTS library_book_genres', last_table)
 
     def test_schema_is_idempotent_and_checks_percent(self):
         from library.schema import _STATEMENTS
         text = '\n'.join(_STATEMENTS)
-        for table in ('library_books', 'library_saved', 'library_progress', 'library_book_departments'):
+        for table in ('library_books', 'library_saved', 'library_progress', 'library_book_departments',
+                      'library_genres', 'library_book_genres'):
             self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', text)
+        # Имя жанра уникально без учёта регистра; create_genre опирается на
+        # этот индекс в ON CONFLICT ((LOWER(name))).
+        self.assertIn('CREATE UNIQUE INDEX IF NOT EXISTS uq_library_genres_name ON library_genres (LOWER(name))', text)
+        self.assertIn('genre_id INTEGER NOT NULL REFERENCES library_genres(id) ON DELETE CASCADE', text)
         self.assertIn('ADD COLUMN IF NOT EXISTS archived_at', text)
         self.assertNotIn('CREATE TABLE library', text)
         self.assertIn('CHECK (percent >= 0 AND percent <= 100)', text)
@@ -1034,7 +1057,7 @@ class DepartmentsUiTests(unittest.TestCase):
         base = ROOT / 'src/components/library'
         cls.view = (base / 'LibraryView.jsx').read_text(encoding='utf-8')
         cls.monitoring = (base / 'LibraryMonitoring.jsx').read_text(encoding='utf-8')
-        cls.sheet = (base / 'LibraryDepartmentsModal.jsx').read_text(encoding='utf-8')
+        cls.sheet = (base / 'LibraryBookModal.jsx').read_text(encoding='utf-8')
 
     def test_publishing_sends_the_chosen_departments(self):
         self.assertIn("form.append('department_ids', String(id))", self.view)
@@ -1071,7 +1094,9 @@ class DepartmentsUiTests(unittest.TestCase):
         self.assertIn("current && current.active !== false ? [departmentId] : []", self.view)
 
     def test_busy_sheet_keeps_its_back_gesture_entry(self):
-        self.assertIn('if (busy) return false;', self.sheet)
+        # locked = загрузка книги ИЛИ создание жанра (разбор 02.10.2026).
+        self.assertIn('const locked = busy || creating;', self.sheet)
+        self.assertIn('if (locked) return false;', self.sheet)
 
     def test_tab_strip_has_no_negative_margin(self):
         """mobile-shell.css гасит -mx-* внутри .main-content, и полоса вкладок
@@ -1086,6 +1111,302 @@ class DepartmentsUiTests(unittest.TestCase):
         self.assertIn('departmentId={departmentId}', self.view)
         self.assertIn('/api/library/analytics/summary', self.monitoring)
         self.assertIn("params.set('department_id', String(departmentId))", self.monitoring)
+
+
+class GenreRouteTests(unittest.TestCase):
+    """Справочник жанров (02.10.2026): ведут его только управляющие."""
+
+    def test_create_returns_new_or_existing_genre(self):
+        client, _ = client_for('trainer')
+        for created, status in ((True, 201), (False, 200)):
+            with self.subTest(created=created), \
+                    mock.patch.object(queries, 'create_genre',
+                                      return_value=({'id': 4, 'name': 'Психология'}, created)) as create:
+                response = client.post('/api/library/genres', json={'name': '  Психология  '})
+            self.assertEqual(status, response.status_code)
+            self.assertEqual({'id': 4, 'name': 'Психология'}, response.get_json()['genre'])
+            self.assertIs(created, response.get_json()['created'])
+            # Имя приходит в запрос уже очищенным, автор — смотрящий.
+            self.assertEqual(('Психология', 7), create.call_args.args[1:])
+
+    def test_bad_names_change_nothing(self):
+        client, _ = client_for('trainer')
+        for body in ({}, {'name': ''}, {'name': '   '}, {'name': 'x' * 41}, {'name': 5}, ['Психология'], 'name'):
+            with self.subTest(body=body), \
+                    mock.patch.object(queries, 'create_genre') as create, \
+                    mock.patch.object(queries, 'rename_genre') as rename:
+                for response in (client.post('/api/library/genres', json=body),
+                                 client.patch('/api/library/genres/4', json=body)):
+                    self.assertEqual(400, response.status_code)
+                    self.assertEqual('LIBRARY_GENRE_NAME', response.get_json()['code'])
+                create.assert_not_called()
+                rename.assert_not_called()
+
+    def test_rename_outcomes(self):
+        client, _ = client_for('trainer')
+        cases = (
+            ((queries.GENRE_RENAMED, {'id': 4, 'name': 'Бизнес'}), 200, None),
+            ((queries.GENRE_NAME_TAKEN, None), 409, 'LIBRARY_GENRE_EXISTS'),
+            ((queries.GENRE_NOT_FOUND, None), 404, 'LIBRARY_GENRE_NOT_FOUND'),
+        )
+        for outcome, status, code in cases:
+            with self.subTest(outcome=outcome[0]), \
+                    mock.patch.object(queries, 'rename_genre', return_value=outcome):
+                response = client.patch('/api/library/genres/4', json={'name': 'Бизнес'})
+            self.assertEqual(status, response.status_code)
+            if code:
+                self.assertEqual(code, response.get_json()['code'])
+            else:
+                self.assertEqual({'id': 4, 'name': 'Бизнес'}, response.get_json()['genre'])
+
+    def test_rename_race_on_unique_index_is_409_not_500(self):
+        class UniqueViolation(Exception):
+            pgcode = '23505'
+
+        client, _ = client_for('trainer')
+        with mock.patch.object(queries, 'rename_genre', side_effect=UniqueViolation()):
+            response = client.patch('/api/library/genres/4', json={'name': 'Бизнес'})
+        self.assertEqual(409, response.status_code)
+        self.assertEqual('LIBRARY_GENRE_EXISTS', response.get_json()['code'])
+        with mock.patch.object(queries, 'rename_genre', side_effect=RuntimeError('db down')):
+            self.assertEqual(500, client.patch('/api/library/genres/4', json={'name': 'Бизнес'}).status_code)
+
+    def test_delete(self):
+        client, _ = client_for('super_admin')
+        with mock.patch.object(queries, 'delete_genre', return_value=True) as delete:
+            self.assertEqual(200, client.delete('/api/library/genres/4').status_code)
+        self.assertEqual(4, delete.call_args.args[1])
+        with mock.patch.object(queries, 'delete_genre', return_value=False):
+            response = client.delete('/api/library/genres/4')
+        self.assertEqual(404, response.status_code)
+        self.assertEqual('LIBRARY_GENRE_NOT_FOUND', response.get_json()['code'])
+
+    def test_readers_cannot_touch_the_genre_list(self):
+        with mock.patch.object(routes, 'READER_ROLES', frozenset({'operator', 'sv', 'admin'})), \
+                mock.patch.object(queries, 'create_genre') as create, \
+                mock.patch.object(queries, 'rename_genre') as rename, \
+                mock.patch.object(queries, 'delete_genre') as delete:
+            for role in ('operator', 'sv', 'admin'):
+                with self.subTest(role=role):
+                    client, _ = client_for(role)
+                    for response in (client.post('/api/library/genres', json={'name': 'X'}),
+                                     client.patch('/api/library/genres/4', json={'name': 'X'}),
+                                     client.delete('/api/library/genres/4')):
+                        self.assertEqual(403, response.status_code)
+                        self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'])
+            for untouched in (create, rename, delete):
+                untouched.assert_not_called()
+
+
+class BookGenreTests(unittest.TestCase):
+    """Жанры книги: при загрузке и правке, неверные — отказ до записи."""
+
+    def test_upload_passes_genres(self):
+        inserted = {}
+
+        def insert_book(cursor, **kwargs):
+            inserted.update(kwargs)
+            return 5
+
+        client, _ = client_for('trainer')
+        with mock.patch.object(queries, 'insert_book', side_effect=insert_book), \
+                mock.patch.object(queries, 'unknown_departments', return_value=[]), \
+                mock.patch.object(queries, 'unknown_genres', return_value=[]), \
+                mock.patch.object(queries, 'get_book', return_value=book_row()):
+            response = client.post('/api/library/books', data={
+                'file': (io.BytesIO(epub3_book()), 'book.epub'), 'department_ids': ['1'],
+                'genre_ids': ['4', '2', '4'],
+            }, content_type='multipart/form-data')
+        self.assertEqual(201, response.status_code, response.get_json())
+        self.assertEqual([2, 4], inserted['genre_ids'])
+
+    def test_bad_or_unknown_genre_stops_the_upload_before_the_bucket(self):
+        for extra, code, unknown in (({'genre_ids': ['abc']}, 'LIBRARY_BAD_REQUEST', []),
+                                     ({'genre_ids': ['99']}, 'LIBRARY_GENRE_UNKNOWN', [99])):
+            with self.subTest(extra=extra):
+                client, fake = client_for('trainer')
+                with mock.patch.object(queries, 'unknown_departments', return_value=[]), \
+                        mock.patch.object(queries, 'unknown_genres', return_value=unknown), \
+                        mock.patch.object(queries, 'insert_book') as insert_book:
+                    response = client.post('/api/library/books', data={
+                        'file': (io.BytesIO(epub3_book()), 'book.epub'), 'department_ids': ['1'], **extra,
+                    }, content_type='multipart/form-data')
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(code, response.get_json()['code'])
+                self.assertEqual({}, fake.uploaded)
+                insert_book.assert_not_called()
+
+    def patch(self, payload, *, unknown=()):
+        client, _ = client_for('trainer')
+        with mock.patch.object(queries, 'unknown_departments', return_value=[]), \
+                mock.patch.object(queries, 'unknown_genres', return_value=list(unknown)), \
+                mock.patch.object(queries, 'update_book', return_value=True) as update_book, \
+                mock.patch.object(queries, 'get_book', return_value=book_row()):
+            response = client.patch('/api/library/books/5', json=payload)
+        return response, update_book
+
+    def test_genres_alone_and_empty_genres(self):
+        response, update_book = self.patch({'genre_ids': [4, 2]})
+        self.assertEqual(200, response.status_code, response.get_json())
+        self.assertEqual({'department_ids': None, 'genre_ids': [2, 4], 'archived': None},
+                         update_book.call_args.kwargs)
+        # Снять все жанры — можно: книга без жанра не ошибка, в отличие от отделов.
+        response, update_book = self.patch({'genre_ids': []})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([], update_book.call_args.kwargs['genre_ids'])
+
+    def test_bad_genres_change_nothing(self):
+        for payload, code, unknown in (({'genre_ids': '1,2'}, 'LIBRARY_BAD_REQUEST', ()),
+                                       ({'genre_ids': [True]}, 'LIBRARY_BAD_REQUEST', ()),
+                                       ({'genre_ids': [3]}, 'LIBRARY_GENRE_UNKNOWN', (3,)),
+                                       ({'department_ids': [1], 'genre_ids': [3]}, 'LIBRARY_GENRE_UNKNOWN', (3,))):
+            with self.subTest(payload=payload):
+                response, update_book = self.patch(payload, unknown=unknown)
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(code, response.get_json()['code'])
+                update_book.assert_not_called()
+
+
+class GenreQueryTests(unittest.TestCase):
+    def test_name_is_cleaned_like_the_client_does(self):
+        self.assertEqual('Личная эффективность', queries.normalize_genre_name('  Личная \x00 эффективность\n '))
+        self.assertEqual('x' * 40, queries.normalize_genre_name('x' * 40))
+        for bad in ('x' * 41, '', '   ', None, 5, ['a']):
+            with self.subTest(bad=bad):
+                self.assertEqual('', queries.normalize_genre_name(bad))
+        meta = (ROOT / 'src/components/library/libraryMeta.js').read_text(encoding='utf-8')
+        self.assertIn(f'export const GENRE_NAME_MAX = {queries.GENRE_NAME_MAX};', meta)
+
+    def test_create_returns_the_existing_genre_in_one_statement(self):
+        cursor = ScriptedCursor((4, 'Психология', False))
+        genre, created = queries.create_genre(cursor, 'психология', 7)
+        self.assertEqual(({'id': 4, 'name': 'Психология'}, False), (genre, created))
+        self.assertEqual(1, len(cursor.calls))
+        # Имя существующего жанра не переписывается регистром нового.
+        self.assertIn('ON CONFLICT ((LOWER(name))) DO UPDATE SET name = library_genres.name', cursor.calls[0][0])
+        self.assertIn('(xmax = 0) AS created', cursor.calls[0][0])
+        self.assertEqual(('психология', 7), cursor.calls[0][1])
+
+    def test_rename_checks_other_genres_only(self):
+        cursor = ScriptedCursor(None, (4, 'Бизнес'))
+        self.assertEqual((queries.GENRE_RENAMED, {'id': 4, 'name': 'Бизнес'}),
+                         queries.rename_genre(cursor, 4, 'Бизнес'))
+        self.assertIn('id <> %s', cursor.calls[0][0])
+        self.assertEqual(('Бизнес', 4), cursor.calls[0][1])
+        cursor = ScriptedCursor((1,))
+        self.assertEqual((queries.GENRE_NAME_TAKEN, None), queries.rename_genre(cursor, 4, 'Бизнес'))
+        self.assertEqual(1, len(cursor.calls))
+
+    def test_empty_genre_set_only_deletes(self):
+        cursor = ScriptedCursor()
+        queries.set_book_genres(cursor, 5, [])
+        self.assertEqual(1, len(cursor.calls))
+        self.assertIn('DELETE FROM library_book_genres', cursor.calls[0][0])
+        cursor = ScriptedCursor()
+        queries.set_book_genres(cursor, 5, [3, 1, 3])
+        self.assertEqual((5, [1, 3]), cursor.calls[1][1])
+
+    def test_genre_deleted_meanwhile_is_skipped_not_a_500(self):
+        """Набор жанров проверен до записи, а при загрузке между проверкой и
+        записью — файл в бакет. Жанр, удалённый в эту секунду, не должен
+        ронять вставку внешним ключом (23503 -> 500, проверено на Postgres
+        стенда): вставляются только живые жанры, под FOR KEY SHARE."""
+        cursor = ScriptedCursor()
+        queries.set_book_genres(cursor, 5, [4])
+        insert = cursor.calls[1][0]
+        self.assertIn('SELECT %s, g.id FROM library_genres g WHERE g.id = ANY(%s) FOR KEY SHARE', insert)
+        self.assertNotIn('unnest', insert)
+
+    def test_book_columns_carry_genres(self):
+        text = ' '.join(queries._BOOK_COLUMNS.split())
+        self.assertIn('FROM library_book_genres bg WHERE bg.book_id = b.id', text)
+        self.assertEqual([2], queries.book_view(book_row())['genre_ids'])
+        self.assertEqual([], queries.book_view(book_row(genre_ids=None))['genre_ids'])
+
+
+class LibraryDepartmentCodesTests(unittest.TestCase):
+    """Решение владельца 02.10.2026: «из доступных отделов сделать только
+    пока СЗоВ и ОП» — по коду отдела, а не по названию."""
+
+    def test_only_szov_and_op(self):
+        self.assertEqual(('szov', 'op'), queries.LIBRARY_DEPARTMENT_CODES)
+
+    def test_selection_list_marks_other_departments_with_books_as_not_selectable(self):
+        cursor = ScriptedCursor([(1, 'СЗоВ', True), (70, 'Тез КЦ', False)])
+        rows = queries.library_departments(cursor)
+        self.assertEqual([{'id': 1, 'name': 'СЗоВ', 'active': True}, {'id': 70, 'name': 'Тез КЦ', 'active': False}],
+                         rows)
+        sql, params = cursor.calls[0]
+        self.assertIn('LOWER(d.code) = ANY(%s)', sql)
+        self.assertEqual((['szov', 'op'], ['szov', 'op']), params)
+
+    def test_new_book_goes_only_to_listed_departments(self):
+        cursor = ScriptedCursor([(1,)])
+        self.assertEqual([70], queries.unknown_departments(cursor, [70, 1]))
+        sql, params = cursor.calls[0]
+        self.assertIn('LOWER(d.code) = ANY(%s)', sql)
+        # Отдел, которому книга уже выдана, остаётся допустимым для неё.
+        self.assertIn('bd.book_id = %s', sql)
+        self.assertEqual(([1, 70], ['szov', 'op'], None), params)
+
+
+class GenresUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        base = ROOT / 'src/components/library'
+        cls.view = (base / 'LibraryView.jsx').read_text(encoding='utf-8')
+        cls.sheet = (base / 'LibraryBookModal.jsx').read_text(encoding='utf-8')
+        cls.genres = (base / 'LibraryGenresModal.jsx').read_text(encoding='utf-8')
+
+    def test_publishing_and_editing_send_genres(self):
+        self.assertIn("form.append('genre_ids', String(id))", self.view)
+        self.assertIn('{ department_ids: departmentIds, genre_ids: genreIds }', self.view)
+        self.assertIn('onSubmit?.({ departmentIds: ids, genreIds: genreIdsRef.current })', self.sheet)
+
+    def test_save_creates_the_typed_genre_first(self):
+        """Набрали жанр и сразу «Сохранить»: окно само создаёт набранное и
+        сохраняет книгу уже с ним; не создался — книга не сохраняется."""
+        self.assertIn('if (!(await commitDraft())) return;', self.sheet)
+        self.assertIn('onClick={submit}', self.sheet)
+
+    def test_cancel_never_creates_a_genre(self):
+        """Уход фокуса жанр не создаёт: щелчок по «Отмене» уводит фокус из
+        поля, и отменённое окно оставляло бы жанр в общем справочнике."""
+        self.assertNotIn('onBlur', self.sheet)
+
+    def test_window_is_locked_while_a_genre_is_created(self):
+        """Пока жанр создаётся, «Отмена», крестик и жест «назад» не
+        закрывают окно — иначе ответ после «Отмены» сохранил бы книгу."""
+        self.assertIn('const locked = busy || creating;', self.sheet)
+        self.assertIn('if (locked) return false;', self.sheet)
+        self.assertIn('onClick={onClose} disabled={locked}', self.sheet)
+
+    def test_failed_rename_does_not_grab_focus_back(self):
+        """Поле, забирающее фокус после отказа, слало бы тот же запрос и тот
+        же тост на каждый щелчок мимо него (разбор 02.10.2026)."""
+        start = self.genres.index('const saveRename = async () => {')
+        body = self.genres[start:self.genres.index('};', start)]
+        self.assertNotIn('focus()', body)
+        self.assertIn('if (error?.response?.status === 404) dropGenre(genre);', self.view)
+
+    def test_genre_strip_lives_outside_monitoring(self):
+        self.assertIn('tab !== LIBRARY_TABS.monitoring && !loading && genreChips.length > 0', self.view)
+
+    def test_genre_management_is_for_managers(self):
+        start = self.view.index('{canManage && schemaReady && (')
+        self.assertLess(start, self.view.index('onClick={() => setGenresOpen(true)}'))
+        self.assertIn("label: 'Отделы и жанры'", self.view)
+
+    def test_genre_fields_do_not_send_twice(self):
+        """Enter сохраняет, поле гаснет, браузер шлёт blur со старым
+        состоянием — без флага в ref ушёл бы второй запрос."""
+        self.assertIn('if (creatingRef.current) return false;', self.sheet)
+        self.assertIn('if (busyRef.current || !editingRef.current) return;', self.genres)
+        for source in (self.sheet, self.genres):
+            self.assertNotIn('disabled={saving}', source)
+
+    def test_department_select_lists_only_selectable_departments(self):
+        self.assertIn('.filter((item) => item.active !== false || item.id === departmentId)', self.view)
 
 
 class ReaderRulesTests(unittest.TestCase):
