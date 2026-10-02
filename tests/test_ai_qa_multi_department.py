@@ -380,12 +380,13 @@ class SchemaConstraintTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    """Промпт зависит от субъекта И отдела, но у звонка ОП обязан не меняться."""
+    """Промпт зависит от субъекта И отдела, а у звонка ОП меняется только осознанно."""
 
     # Тот же эталон, что в tests/test_ai_qa_chat_subject.py: prompt_hash входит
     # в evaluation_fingerprint, и правка пометила бы все оценки звонков продаж
     # устаревшими — то есть потребовала бы переоценки за деньги.
-    CALL_PROMPT_HASH = "36eeb3fd743d6d67a2888e7344c1c232a25a24c5312a9e02e70c9f22e4921f46"
+    CALL_PROMPT_HASH = "820d35a83ef2cabd1431ceb7b7c0cee952ccefb3d009b792d72d922f88bb0778"
+    PASSENGER_BLOCK = "ОТДЕЛ РАБОТАЕТ С ВОДИТЕЛЯМИ, А НЕ С ПАССАЖИРАМИ:"
 
     def setUp(self):
         self.crits = [{"idx": 0, "name": "X", "description": "Y",
@@ -429,6 +430,65 @@ class PromptTests(unittest.TestCase):
         prompt = evaluator.build_system(self.crits, "wz_episode", "op")
         self.assertIn("переписок отдела продаж", prompt)
         self.assertEqual(prompt, evaluator.build_system(self.crits, "wz_episode"))
+
+    def test_driver_departments_get_the_passenger_block(self):
+        """СЗоВ и ОП работают с водителями: блок про пассажиров идёт в промпт
+        звонка и переписки этих отделов, а Тез КЦ владелец не называл."""
+        from call_qa.evaluation import evaluator
+        with_block = [(None, "call"), ("op", "call"), ("op", "imported_call"),
+                      ("op", "wz_episode"), ("szov", "call"), ("szov", "imported_call"),
+                      ("SZOV", "imported_call"), ("szov", "c2d_snapshot")]
+        for department, kind in with_block:
+            with self.subTest(department=department, subject=kind):
+                prompt = evaluator.build_system(self.crits, kind, department)
+                self.assertEqual(prompt.count(self.PASSENGER_BLOCK), 1)
+                # блок — часть вступления, до правил и критериев
+                self.assertLess(prompt.index(self.PASSENGER_BLOCK), prompt.index("ПРАВИЛА:"))
+                self.assertIn("оператору достаточно озвучить доступную альтернативу", prompt)
+                self.assertIn("ставь по ним N/A", prompt)
+                # Владелец освободил только от решения вопроса пассажира: в A/B
+                # без этой фразы модель ставила N/A даже приветствию.
+                self.assertIn("Приветствие, вежливость, речь, прощание, грубость, нецензурную "
+                              "лексику и верность озвученной альтернативы оценивай как обычно",
+                              prompt)
+                self.assertIn("обычно даже не учитываются. Это пояснение, а не основание для N/A",
+                              prompt)
+        # Пустой отдел у переписки ChatApp — всё равно Тез КЦ: сбой поиска отдела
+        # не должен дописывать блок чатам, которых владелец не называл.
+        without_block = [("tez", "call"), ("tez", "imported_call"), ("tez", "ca_episode"),
+                         (None, "ca_episode"), ("", "ca_episode")]
+        for department, kind in without_block:
+            with self.subTest(department=department, subject=kind):
+                prompt = evaluator.build_system(self.crits, kind, department)
+                self.assertNotIn(self.PASSENGER_BLOCK, prompt)
+                self.assertNotIn("пассажир", prompt.lower())
+
+    def test_profanity_rule_reaches_every_prompt(self):
+        """Решение владельца 02.10.2026: замены мата («фигня» и подобные) — та же
+        нецензурная лексика, что и мат, а «блин» — только стилистика. Правило в
+        общем шаблоне, поэтому оно у всех отделов и у звонков, и у переписки."""
+        from call_qa.evaluation import evaluator
+        for department in (None, "op", "szov", "tez"):
+            for kind in ("call", "imported_call", "wz_episode", "c2d_snapshot", "ca_episode"):
+                with self.subTest(department=department, subject=kind):
+                    prompt = evaluator.build_system(self.crits, kind, department)
+                    rules = prompt[prompt.index("ПРАВИЛА:"):prompt.index("КРИТЕРИИ НАПРАВЛЕНИЯ:")]
+                    self.assertIn("6. Нецензурная лексика оператора", rules)
+                    self.assertIn("«фигня», «нафиг», «хрен», «капец»", rules)
+                    self.assertIn("вердикт Incorrect по критическому критерию шкалы о грубости",
+                                  rules)
+                    self.assertIn("«Блин» — не нецензурная лексика", rules)
+                    # «только минус по Стилистике» — именно минус, а не «учти»: на
+                    # шкале без слова «просторечие» модель иначе ставила Correct.
+                    self.assertIn("по критерию о стилистике речи (если он есть в шкале) это минус",
+                                  rules)
+                    self.assertIn("Брань клиента — не нарушение оператора", rules)
+                    # в сомнении вердикт назван: без этого модель штрафовала с низкой
+                    # уверенностью, и звонок с бранью звонящего получал 0
+                    self.assertIn("Incorrect за него не ставь", rules)
+                    self.assertIn("confidence не выше 0.5", rules)
+                    # правило о форме ответа осталось последним
+                    self.assertIn("\n7. Верни строго структуру по схеме", rules)
 
     def test_fingerprint_uses_the_prompt_that_is_actually_sent(self):
         """prompt_hash считался от промпта ЗВОНКА для любого субъекта — прогон
