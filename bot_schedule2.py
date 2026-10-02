@@ -64840,6 +64840,23 @@ except Exception:
     logging.exception("Раздел «Учёт воды»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Термокороба» (условия выдачи термокоробов по фронт-офисам, #363) ──
+# Тот же приём, что у «Посылок» и «Учёта воды». QR-замка нет: на экране адреса
+# офисов и числа, ни одного водителя (thermoboxes/access.py).
+try:
+    from thermoboxes.routes import build_thermoboxes_blueprint  # noqa: E402
+
+    app.register_blueprint(build_thermoboxes_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раздел «Термокороба»: Blueprint подключён на /api/thermoboxes")
+except Exception:
+    logging.exception("Раздел «Термокороба»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Оплата счетов» (бизнес-процесс «Согласование — Оплата счетов», #179) ──
 # Тот же приём, что у вики, обращений и посылок. Периметр на время выката —
 # один человек (payments/access.py), поэтому QR-гейта здесь нет: раздел открыт

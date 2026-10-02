@@ -6908,6 +6908,7 @@ class Database:
             self._init_library_schema_tx(cursor)
             self._init_complaints_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
+            self._init_thermoboxes_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -63710,6 +63711,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT water_schema")
+
+    def _init_thermoboxes_schema_tx(self, cursor):
+        """Схема раздела «Термокороба» (#363) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете thermoboxes/schema.py, как у посылок и воды; импорт
+        локальный, иначе цикл. Стоит ПОСЛЕ _init_wiki_schema_tx:
+        `thermobox_offices.office_id` — внешний ключ на `wiki_offices`. Не
+        развернулась — раздел честно скажет о себе (schema_ready=false),
+        остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT thermoboxes_schema")
+        try:
+            from thermoboxes.schema import init_thermoboxes_schema
+            init_thermoboxes_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT thermoboxes_schema")
+            logging.exception(
+                "Схема раздела «Термокороба» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT thermoboxes_schema")
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и
