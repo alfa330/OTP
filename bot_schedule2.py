@@ -11831,12 +11831,12 @@ def api_resource_fte_chat_billing_grouping():
 # Выгрузка биллинга чата. Показатели те же, что на экране, и в том же порядке —
 # файл должен читаться как снимок вкладки, иначе его нечем сверить.
 # «AR» здесь нет: у чата такого понятия не существует (все обращения доходят),
-# и «Потеряно» здесь тоже нет — есть «Без ответа».
+# и «Потеряно» здесь тоже нет — есть «Без ответа». Средней оценки водителей тоже нет —
+# её убрали с экрана и из выгрузок (просьба владельца 02.10.2026).
 # Время — только в минутах с одним знаком (задача #343: «2,5 мин, 7 мин, 12 мин»).
 # Числом, а не текстом: по колонке должны работать формулы. Общий формат Excel сам
 # показывает 7 без «,0» и 2,5 с запятой.
 _CHAT_BILLING_EXPORT_PCT_FMT = '0.0%'
-_CHAT_BILLING_EXPORT_RATING_FMT = '0.0'
 
 _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS = [
     ('chats', 'Поступило', 12, None),
@@ -11845,7 +11845,6 @@ _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS = [
     ('first_reply', 'Ср. реакция на 1 сообщение, мин', 18, None),
     ('sl', 'SL', 10, _CHAT_BILLING_EXPORT_PCT_FMT),
     ('inner_reply', 'Ср. время ответа внутри чата, мин', 18, None),
-    ('rating', 'Ср. оценка водителей', 12, _CHAT_BILLING_EXPORT_RATING_FMT),
 ]
 
 _CHAT_BILLING_EXPORT_DETAIL_COLUMNS = [
@@ -11891,16 +11890,15 @@ def _chat_billing_export_ratio(numerator, denominator):
 
 
 def _chat_billing_export_metrics(item):
-    """Семь значений строки в порядке _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS."""
+    """Шесть значений строки в порядке _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS."""
     item = item or {}
     chats = item.get('chats') or 0
     answered = item.get('answered') or 0
     # Средняя первая реакция делится на ОТВЕТИВШИХ, а не на все обращения: у чата
     # без ответа времени реакции нет вовсе, и в среднее его класть нечем. Время
-    # ответа и оценка — так же, на обращения, где они есть.
+    # ответа — так же, на обращения, где оно есть.
     avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), answered)
     avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
-    avg_rating = _chat_billing_export_ratio(item.get('rating_sum'), item.get('rated'))
     return [
         chats,
         answered,
@@ -11908,7 +11906,6 @@ def _chat_billing_export_metrics(item):
         _chat_billing_minutes(avg_first),
         _chat_billing_export_ratio(item.get('answered_sl'), chats),
         _chat_billing_minutes(avg_inner),
-        None if avg_rating is None else _chat_billing_round_half_up(avg_rating, 1),
     ]
 
 
@@ -11956,7 +11953,6 @@ _CHAT_BILLING_DAILY_COLUMNS = (
     ('plan_match', '% совпадения прогноза', 14, '0%'),
     ('first_reply', 'Среднее время реакции на 1 сообщение оператора (в минутах) в разрезе парков', 24, None),
     ('inner_reply', 'Среднее время ответа внутри чата (в минутах) в разрезе парков', 24, None),
-    ('rating', 'Сред оценка водителей в разрезе парков', 16, '0.0'),
     ('planned_hours', 'План по часам', 12, '0'),
     ('fact_hours', 'Факт по часам', 12, '0'),
     ('hours_delta', '% Пере/Недоработки', 13, '0%'),
@@ -11967,8 +11963,6 @@ _CHAT_BILLING_DAILY_DAY_KEYS = ('date', 'planned_hours', 'fact_hours', 'hours_de
 _CHAT_BILLING_DAILY_BASE_FMT = '0'
 # Заголовок «Нужно удалить» в файле красный — служебная колонка.
 _CHAT_BILLING_DAILY_RED_HEADER_KEYS = frozenset({'plan_input'})
-# Порог оценки, ниже которого образец красит её тёмно-красным.
-CHAT_BILLING_LOW_RATING = 4.5
 # Парки, которых нет в файле (просьба владельца 29.09.2026); экран «Таксопарков» их
 # по-прежнему показывает. Строка уходит вместе со своим планом и чатами — итог дня
 # остаётся суммой видимых строк, как если бы её удалили в самом Excel.
@@ -12004,15 +11998,11 @@ def _chat_billing_day_comment(day):
         day_label = str(day.get('date') or '')
     plan = totals.get('plan_chats')
     avg_first = _chat_billing_export_ratio(totals.get('first_reply_seconds'), totals.get('answered'))
-    avg_rating = _chat_billing_export_ratio(totals.get('rating_sum'), totals.get('rated'))
-    rating_text = ('—' if avg_rating is None
-                   else f"{_chat_billing_round_half_up(avg_rating, 1):.1f}".replace('.', ','))
     return (
         f"Ежедневный отчет по чатам за {day_label}\n"
         f"План чатов: {'—' if plan is None else int(_chat_billing_round_half_up(plan, 0))}\n"
         f"Факт чатов: {int(totals.get('chats') or 0)}\n"
-        f"ASA - {_chat_billing_minutes_label(avg_first)} минуты\n"
-        f"Средняя оценка по чатам - {rating_text}"
+        f"ASA - {_chat_billing_minutes_label(avg_first)} минуты"
     )
 
 
@@ -12025,7 +12015,6 @@ def _chat_billing_daily_values(item, day_date=None):
     chats = int(item.get('chats') or 0)
     avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), item.get('answered'))
     avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
-    avg_rating = _chat_billing_export_ratio(item.get('rating_sum'), item.get('rated'))
     return {
         'date': day_date,
         'park': item.get('park'),
@@ -12033,7 +12022,6 @@ def _chat_billing_daily_values(item, day_date=None):
         'chats': chats or None,
         'first_reply': _chat_billing_minutes(avg_first),
         'inner_reply': _chat_billing_minutes(avg_inner),
-        'rating': None if avg_rating is None else _chat_billing_round_half_up(avg_rating, 1),
     }
 
 
@@ -12098,11 +12086,8 @@ def _chat_billing_daily_workbook(params, report):
         return styles[style_key]
 
     def _cell_style(key, value, fill=None, num_format=None):
-        color = None
-        if key == 'rating' and value is not None and value < CHAT_BILLING_LOW_RATING:
-            color = '#9C0006'
         fmt = (num_format or formats.get(key)) if value is not None else None
-        return _style(fmt, fill, color, 'left' if key == 'park' else 'center')
+        return _style(fmt, fill, align='left' if key == 'park' else 'center')
 
     def _put(ws, row, key, value, fill=None, num_format=None):
         style = _cell_style(key, value, fill, num_format)
@@ -12165,7 +12150,7 @@ def _chat_billing_daily_workbook(params, report):
             else:
                 _put(ws, row, 'plan', None)
                 _put(ws, row, 'plan_match', None)
-            for key in ('first_reply', 'inner_reply', 'rating'):
+            for key in ('first_reply', 'inner_reply'):
                 _put(ws, row, key, values[key])
 
         # Дата, часы работы и комментарий — одной ячейкой на блок парков.

@@ -1913,11 +1913,10 @@ def get_chat_overview(db, week_start_value: Any = None,
 #
 # Задача #343 добавила то, по чему СЗоВ отчитывается перед таксопарками:
 #   Ср. время ответа — `average_replies_time` (время между репликой клиента и ответом
-#     оператора внутри чата), простое среднее по обращениям, где ответы были;
-#   Ср. оценка — `rating_score` водителя, простое среднее по оценённым обращениям.
-# Оценка привязана к обращению, то есть к дню и часу его НАЧАЛА — как и всё остальное в
-# биллинге. Официальная оценка чатника в «Учёте часов» раскладывается по времени самой
-# оценки и за вычетом необоснованных, поэтому за день может отличаться на единицы.
+#     оператора внутри чата), простое среднее по обращениям, где ответы были.
+# Средней оценки водителей в биллинге нет — ни на экране, ни в выгрузках (просьба
+# владельца 02.10.2026). Оценка отдельного обращения осталась только в детализации;
+# официальная оценка чатника — в «Учёте часов».
 
 CHAT_BILLING_MAX_RANGE_DAYS = 31
 CHAT_BILLING_SL_SECONDS_LIMITS = (1, 600)
@@ -1935,7 +1934,7 @@ CHAT_BILLING_NO_TRANSPORT = "Без канала"
 # поэтому считаются по ОБРАЩЕНИЯМ всех дней (сумма / сколько), а не средним средних.
 CHAT_BILLING_METRICS = (
     "chats", "answered", "no_reply", "answered_sl", "first_reply_seconds",
-    "inner_reply_seconds", "inner_replied", "rating_sum", "rated",
+    "inner_reply_seconds", "inner_replied",
 )
 CHAT_BILLING_OPERATOR_METRICS = CHAT_BILLING_METRICS + (
     "incoming_messages", "outgoing_messages",
@@ -1948,7 +1947,7 @@ _CHAT_BILLING_TRANSPORT_SQL = (
     "COALESCE(NULLIF(r.transport, ''), '%s')" % CHAT_BILLING_NO_TRANSPORT)
 _CHAT_BILLING_OPERATOR_SQL = "COALESCE(NULLIF(u.name, ''), NULLIF(r.c2d_operator_name, ''))"
 
-# Восемь агрегатов в порядке _chat_billing_metrics_row. Один %s — порог SL, поэтому
+# Шесть агрегатов в порядке _chat_billing_metrics_row. Один %s — порог SL, поэтому
 # параметры запроса всегда начинаются с него.
 _CHAT_BILLING_METRICS_SQL = """
     COUNT(*)::int,
@@ -1956,11 +1955,9 @@ _CHAT_BILLING_METRICS_SQL = """
     COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
     COALESCE(SUM(r.reaction_time), 0)::float,
     COALESCE(SUM(r.average_replies_time), 0)::float,
-    COUNT(r.average_replies_time)::int,
-    COALESCE(SUM(r.rating_score), 0)::float,
-    COUNT(r.rating_score)::int
+    COUNT(r.average_replies_time)::int
 """
-_CHAT_BILLING_METRICS_SQL_WIDTH = 8
+_CHAT_BILLING_METRICS_SQL_WIDTH = 6
 
 
 def _chat_billing_window(day_from: date, day_to: date,
@@ -1990,9 +1987,9 @@ def _chat_billing_merge(target: Dict[str, int], row: Dict[str, int],
 
 
 def _chat_billing_metrics_row(values: Tuple[Any, ...]) -> Dict[str, Any]:
-    """Счётчики из восьми агрегатов _CHAT_BILLING_METRICS_SQL."""
+    """Счётчики из шести агрегатов _CHAT_BILLING_METRICS_SQL."""
     (chats, answered, answered_sl, reply_sum,
-     inner_sum, inner_replied, rating_sum, rated) = values
+     inner_sum, inner_replied) = values
     chats = max(0, int(chats or 0))
     answered = max(0, int(answered or 0))
     return {
@@ -2005,10 +2002,6 @@ def _chat_billing_metrics_row(values: Tuple[Any, ...]) -> Dict[str, Any]:
         "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
         "inner_reply_seconds": int(round(_to_float(inner_sum, 0.0))),
         "inner_replied": max(0, int(inner_replied or 0)),
-        # Сумма оценок дробная не бывает, но колонка REAL — округляем, чтобы в
-        # ответ не уезжал хвост двоичной дроби.
-        "rating_sum": round(_to_float(rating_sum, 0.0), 4),
-        "rated": max(0, int(rated or 0)),
     }
 
 
@@ -2149,7 +2142,7 @@ def _chat_billing_hour_blank() -> Dict[str, Any]:
 def build_chat_billing_grouping(raw_rows: List[Tuple[Any, ...]], minute_from: int = 0,
                                 minute_to: int = 1439,
                                 park: Optional[str] = None) -> Dict[str, Any]:
-    """«Группировка» из строк (день, час, парк, восемь агрегатов).
+    """«Группировка» из строк (день, час, парк, шесть агрегатов).
 
     `parks` — все таксопарки периода по убыванию объёма, независимо от выбранного:
     по нему строится список выбора, и он не должен сжиматься до одного пункта.

@@ -7,7 +7,6 @@ import {
   chatBillingMinutes,
   formatChatBillingMinutes,
   formatChatBillingMinutesUnit,
-  formatChatBillingRating,
 } from '../src/components/resources/chatBillingMetrics.js';
 
 // Intl в node может ставить неразрывный пробел — сравниваем по видимому тексту.
@@ -33,20 +32,16 @@ test('округление «половина вверх» совпадает с
 test('у каждого среднего свой знаменатель', () => {
   const averages = chatBillingAverages({
     chats: 10, answered: 8, answered_sl: 5, first_reply_seconds: 1200,
-    inner_reply_seconds: 900, inner_replied: 6, rating_sum: 13, rated: 3,
+    inner_reply_seconds: 900, inner_replied: 6,
   });
   assert.equal(averages.firstReplySeconds, 150);
   assert.equal(averages.innerReplySeconds, 150);
   assert.equal(averages.sl, 0.5);
-  assert.equal(formatChatBillingRating(averages.rating), '4,3');
+  // Средней оценки водителей в биллинге нет (просьба владельца 02.10.2026).
+  assert.deepEqual(Object.keys(averages).sort(), ['firstReplySeconds', 'innerReplySeconds', 'sl']);
   const empty = chatBillingAverages({ chats: 3, answered: 0 });
   assert.equal(empty.firstReplySeconds, null);
   assert.equal(empty.innerReplySeconds, null);
-  assert.equal(empty.rating, null);
-  assert.equal(formatChatBillingRating(empty.rating), '—');
-  assert.equal(formatChatBillingRating(5), '5,0');
-  // Как в ежедневном отчёте СЗоВ: один знак, половина вверх.
-  assert.equal(formatChatBillingRating(4.25), '4,3');
 });
 
 test('час группировки — промежуток', () => {

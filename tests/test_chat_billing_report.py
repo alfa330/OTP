@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""«Биллинг чатов» (задача #343): оценка, время ответа и первая реакция в минутах,
-план чатов и сотрудники, выгрузки в формате отчётов СЗоВ — «Ежедневный отчёт по чатам»
-и «Отчёт с группировкой по часам»."""
+"""«Биллинг чатов» (задача #343): время ответа и первая реакция в минутах, план чатов
+и сотрудники, выгрузки в формате отчётов СЗоВ — «Ежедневный отчёт по чатам» и «Отчёт с
+группировкой по часам». Средней оценки водителей нет ни на экране, ни в выгрузках
+(просьба владельца 02.10.2026)."""
 import ast
 import copy
 import math
@@ -62,7 +63,6 @@ FUNCTION_NAMES = (
 )
 CONST_NAMES = (
     "_CHAT_BILLING_EXPORT_PCT_FMT",
-    "_CHAT_BILLING_EXPORT_RATING_FMT",
     "_CHAT_BILLING_EXPORT_SUMMARY_COLUMNS",
     "_CHAT_BILLING_EXPORT_DETAIL_COLUMNS",
     "_CHAT_BILLING_SHEET_FORBIDDEN",
@@ -71,7 +71,6 @@ CONST_NAMES = (
     "_CHAT_BILLING_DAILY_DAY_KEYS",
     "_CHAT_BILLING_DAILY_BASE_FMT",
     "_CHAT_BILLING_DAILY_RED_HEADER_KEYS",
-    "CHAT_BILLING_LOW_RATING",
     "_CHAT_BILLING_DAILY_HIDDEN_PARKS",
     "_CHAT_BILLING_HOURLY_COLUMNS",
     "_CHAT_BILLING_HOURLY_STAFF_KEYS",
@@ -116,9 +115,8 @@ def _lot_parts_method():
     return ns["_hourly_lot_parts_for_date"]
 
 
-def _aggregates(chats, answered, answered_sl, reply_sum, inner_sum, inner_replied,
-                rating_sum, rated):
-    return (chats, answered, answered_sl, reply_sum, inner_sum, inner_replied, rating_sum, rated)
+def _aggregates(chats, answered, answered_sl, reply_sum, inner_sum, inner_replied):
+    return (chats, answered, answered_sl, reply_sum, inner_sum, inner_replied)
 
 
 class _RowsCursor:
@@ -148,19 +146,19 @@ class _RowsDb:
 
 
 GROUPING_ROWS = [
-    (date(2026, 9, 16), 9, "Jana Taxi", *_aggregates(10, 9, 7, 540.0, 1200.0, 8, 13.0, 3)),
-    (date(2026, 9, 16), 9, "Ноль такси", *_aggregates(4, 4, 4, 100.0, 300.0, 4, 10.0, 2)),
-    (date(2026, 9, 16), 23, "Jana Taxi", *_aggregates(2, 1, 0, 200.0, 0.0, 0, 0.0, 0)),
-    (date(2026, 9, 17), 0, "Jana Taxi", *_aggregates(1, 1, 1, 30.0, 60.0, 1, 5.0, 1)),
+    (date(2026, 9, 16), 9, "Jana Taxi", *_aggregates(10, 9, 7, 540.0, 1200.0, 8)),
+    (date(2026, 9, 16), 9, "Ноль такси", *_aggregates(4, 4, 4, 100.0, 300.0, 4)),
+    (date(2026, 9, 16), 23, "Jana Taxi", *_aggregates(2, 1, 0, 200.0, 0.0, 0)),
+    (date(2026, 9, 17), 0, "Jana Taxi", *_aggregates(1, 1, 1, 30.0, 60.0, 1)),
 ]
 
 
 def _park_report(extra_rows=()):
     db = _RowsDb([
-        (date(2026, 9, 16), "Jana Taxi", "", *_aggregates(60, 58, 50, 3480.0, 9000.0, 50, 90.0, 20)),
-        (date(2026, 9, 16), "Ноль такси", "", *_aggregates(30, 30, 25, 900.0, 3000.0, 25, 36.0, 9)),
+        (date(2026, 9, 16), "Jana Taxi", "", *_aggregates(60, 58, 50, 3480.0, 9000.0, 50)),
+        (date(2026, 9, 16), "Ноль такси", "", *_aggregates(30, 30, 25, 900.0, 3000.0, 25)),
         *extra_rows,
-        (date(2026, 9, 17), "Jana Taxi", "", *_aggregates(40, 40, 38, 400.0, 2000.0, 20, 42.0, 10)),
+        (date(2026, 9, 17), "Jana Taxi", "", *_aggregates(40, 40, 38, 400.0, 2000.0, 20)),
     ])
     return get_chat_billing_report(db, date(2026, 9, 16), date(2026, 9, 17))
 
@@ -171,30 +169,30 @@ EXPORT_DAY_PLAN = sum(1000 * share for name, share in CHAT_BILLING_PARK_SHARES i
 
 
 class ChatBillingMetricsTests(unittest.TestCase):
-    def test_every_cut_parses_the_same_eight_aggregates(self):
+    def test_every_cut_parses_the_same_six_aggregates(self):
         db = _RowsDb([(date(2026, 9, 16), "Jana Taxi", "",
-                       *_aggregates(10, 9, 7, 540.4, 1200.6, 8, 13.0, 3))])
+                       *_aggregates(10, 9, 7, 540.4, 1200.6, 8))])
         report = get_chat_billing_report(db, date(2026, 9, 16), date(2026, 9, 16), sl_seconds=45)
         self.assertEqual(report["totals"], {
             "chats": 10, "answered": 9, "no_reply": 1, "answered_sl": 7,
             "first_reply_seconds": 540, "inner_reply_seconds": 1201, "inner_replied": 8,
-            "rating_sum": 13.0, "rated": 3,
         })
         sql, params = db.cursor.calls[0]
         # Порог SL — первый параметр: он стоит в SELECT раньше условий WHERE.
         self.assertEqual(params[0], 45)
-        for fragment in ("SUM(r.average_replies_time)", "COUNT(r.average_replies_time)",
-                         "SUM(r.rating_score)", "COUNT(r.rating_score)"):
+        for fragment in ("SUM(r.average_replies_time)", "COUNT(r.average_replies_time)"):
             self.assertIn(fragment, sql)
+        # Средняя оценка водителей убрана из биллинга (просьба владельца 02.10.2026).
+        self.assertNotIn("rating_score", sql)
         # «Факт чатов» — обращения без автоматических опросов после чата: ручной отчёт
         # считал и строки request_type='rating', и завышал объём примерно вдвое.
         self.assertIn("r.request_type = %s", sql)
         self.assertIn("common", params)
 
         operators = get_chat_billing_operators(_RowsDb([
-            (date(2026, 9, 16), "Асель", *_aggregates(5, 5, 4, 100.0, 250.0, 5, 24.0, 5), 30, 20),
+            (date(2026, 9, 16), "Асель", *_aggregates(5, 5, 4, 100.0, 250.0, 5), 30, 20),
         ]), date(2026, 9, 16), date(2026, 9, 16))
-        self.assertEqual(operators["totals"]["rated"], 5)
+        self.assertEqual(operators["totals"]["inner_replied"], 5)
         self.assertEqual(operators["totals"]["inner_reply_seconds"], 250)
         self.assertEqual(operators["totals"]["incoming_messages"], 30)
         self.assertEqual(operators["totals"]["outgoing_messages"], 20)
@@ -211,11 +209,26 @@ class ChatBillingMetricsTests(unittest.TestCase):
 
     def test_metric_keys_are_the_ones_the_screen_reads(self):
         source = VIEW_PATH.read_text(encoding="utf-8") + METRICS_JS_PATH.read_text(encoding="utf-8")
-        for key in ("inner_reply_seconds", "inner_replied", "rating_sum", "rated",
+        for key in ("inner_reply_seconds", "inner_replied",
                     "plan_chats", "staff_planned", "staff_fact", "planned_hours", "fact_hours"):
             self.assertIn(key, source, f"витрина не читает {key}")
-        for key in ("inner_reply_seconds", "inner_replied", "rating_sum", "rated"):
+        for key in ("inner_reply_seconds", "inner_replied"):
             self.assertIn(key, CHAT_BILLING_METRICS)
+
+    def test_screen_has_no_average_driver_rating(self):
+        # Просьба владельца 02.10.2026: средней оценки водителей в биллинге чата нет —
+        # ни карточки, ни колонки в «Таксопарках» и «Чатниках», ни плитки на телефоне.
+        # Оценка отдельного обращения в «Детализации» осталась — это не средняя.
+        for key in ("rating_sum", "rated"):
+            self.assertNotIn(key, CHAT_BILLING_METRICS)
+        view = VIEW_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("Ср. оценка водителей", view)
+        self.assertNotIn("formatChatBillingRating", view)
+        for name in ("const CHAT_BILLING_CELLS = {", "const CHAT_BILLING_COLUMN_SETS = {"):
+            block = view[view.index(name):]
+            block = block[:block.index("\n};")]
+            self.assertNotIn("rating", block, name)
+        self.assertNotIn("rating", METRICS_JS_PATH.read_text(encoding="utf-8"))
 
 
 class ChatBillingGroupingTests(unittest.TestCase):
@@ -224,7 +237,7 @@ class ChatBillingGroupingTests(unittest.TestCase):
         self.assertEqual([day["date"] for day in report["days"]], ["2026-09-16", "2026-09-17"])
         self.assertEqual([len(day["hours"]) for day in report["days"]], [24, 24])
         nine = report["days"][0]["hours"][9]
-        self.assertEqual((nine["hour"], nine["chats"], nine["rated"]), (9, 14, 5))
+        self.assertEqual((nine["hour"], nine["chats"], nine["answered"]), (9, 14, 13))
         # Пустой час — нули, а не пропуск строки.
         self.assertEqual(report["days"][0]["hours"][10]["chats"], 0)
         day_sum = sum(day["totals"]["chats"] for day in report["days"])
@@ -509,9 +522,23 @@ class ChatBillingExportTests(unittest.TestCase):
         values = self.ns["_chat_billing_export_metrics"]({
             "chats": 10, "answered": 8, "no_reply": 2, "answered_sl": 5,
             "first_reply_seconds": 1200, "inner_reply_seconds": 900, "inner_replied": 6,
-            "rating_sum": 13.0, "rated": 3,
         })
-        self.assertEqual(values, [10, 8, 2, 2.5, 0.5, 2.5, 4.3])
+        self.assertEqual(values, [10, 8, 2, 2.5, 0.5, 2.5])
+
+    def test_operator_export_has_no_average_rating(self):
+        # Средняя оценка водителей убрана и из выгрузки «Чатников» (02.10.2026).
+        report = get_chat_billing_operators(_RowsDb([
+            (date(2026, 9, 16), "Асель", *_aggregates(5, 5, 4, 100.0, 250.0, 5), 30, 20),
+        ]), date(2026, 9, 16), date(2026, 9, 16))
+        workbook = self._load(self.ns["_chat_billing_export_workbook"](
+            "operator", self.params, report, None))
+        self.assertEqual(workbook.sheetnames, ["Итого за период", "По дням"])
+        titles = ["Чатник", "Поступило", "Обслужено", "Без ответа",
+                  "Ср. реакция на 1 сообщение, мин", "SL", "Ср. время ответа внутри чата, мин"]
+        # Строка шапки идёт до последней занятой колонки листа: лишняя колонка в данных
+        # дала бы в конце шапки пустую ячейку.
+        self.assertEqual([cell.value for cell in workbook["Итого за период"][4]], titles)
+        self.assertEqual([cell.value for cell in workbook["По дням"][4]], ["Дата"] + titles)
 
     def test_detail_values_are_minutes_and_keep_the_number(self):
         titles = [title for _, title, _ in self.ns["_CHAT_BILLING_EXPORT_DETAIL_COLUMNS"]]
@@ -552,8 +579,7 @@ class ChatBillingExportTests(unittest.TestCase):
             "% совпадения прогноза",
             "Среднее время реакции на 1 сообщение оператора (в минутах) в разрезе парков",
             "Среднее время ответа внутри чата (в минутах) в разрезе парков",
-            "Сред оценка водителей в разрезе парков", "План по часам", "Факт по часам",
-            "% Пере/Недоработки", "Комментарии",
+            "План по часам", "Факт по часам", "% Пере/Недоработки", "Комментарии",
         ])
         # Заголовок служебной колонки красный, как в файле.
         self.assertEqual(ws["C1"].font.color.rgb[-6:], "FF0000")
@@ -565,13 +591,13 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertAlmostEqual(jana[3], 146.9962424736294)
         self.assertEqual(jana[4], 60)
         self.assertAlmostEqual(jana[5], 60 / 146.9962424736294)
-        # 3480 сек на 58 отвеченных = 1 мин; 9000 на 50 = 3 мин; 90 на 20 = 4,5.
-        self.assertEqual(jana[6:9], [1.0, 3.0, 4.5])
+        # 3480 сек на 58 отвеченных = 1 мин; 9000 на 50 = 3 мин.
+        self.assertEqual(jana[6:8], [1.0, 3.0])
         self.assertEqual(ws["C3"].number_format, "0.0")
-        self.assertEqual(rows[1][9:12], [60.0, 48.0, -0.2])
+        self.assertEqual(rows[1][8:11], [60.0, 48.0, -0.2])
         # План дня — без доли Global: 816,83 − 28,29 = 788,54.
         self.assertIn("Ежедневный отчет по чатам за 16.09.2026\nПлан чатов: 789\nФакт чатов: 90",
-                      rows[1][12])
+                      rows[1][11])
         tenge = rows[4]
         self.assertEqual(tenge[1:3], ["Tenge Taxi", 0.06903888813436553])
         self.assertEqual((tenge[4], tenge[5]), (None, 0))
@@ -587,7 +613,7 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertEqual(total[6], round((3480 + 900) / 88 / 60, 1))
         merged = [str(item) for item in ws.merged_cells.ranges]
         self.assertIn("A2:A15", merged)
-        self.assertIn("M2:M15", merged)
+        self.assertIn("L2:L15", merged)
         self.assertEqual(ws["A16"].fill.fgColor.rgb[-6:], "9DC3E6")
         self.assertEqual(ws["D16"].fill.fgColor.rgb[-6:], "9DC3E6")
 
@@ -608,12 +634,12 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertEqual(second[3], None)
         self.assertIsNone(wf["D17"].value)
         self.assertEqual(rows[30][2:6], [None, None, 40, None])
-        self.assertIn("План чатов: —", rows[16][12])
+        self.assertIn("План чатов: —", rows[16][11])
         # Плана часов нет — пусто, а не ноль.
-        self.assertEqual(second[9:12], [None, None, None])
+        self.assertEqual(second[8:11], [None, None, None])
 
     def test_daily_workbook_leaves_global_out(self):
-        global_chats = _aggregates(5, 5, 0, 3000.0, 600.0, 5, 10.0, 5)
+        global_chats = _aggregates(5, 5, 0, 3000.0, 600.0, 5)
         # 17.09 плана нет (чатов неделей раньше в базе нет) — Global уходит и из такого дня.
         report = attach_chat_billing_plan(_park_report([
             (date(2026, 9, 16), "Global", "", *global_chats),
@@ -635,26 +661,30 @@ class ChatBillingExportTests(unittest.TestCase):
         self.assertEqual(total[4], 90)
         self.assertEqual(total[6], round((3480 + 900) / 88 / 60, 1))
         self.assertEqual(total[7], round((9000 + 3000) / 75 / 60, 1))
-        self.assertEqual(total[8], round((90.0 + 36.0) / 29, 1))
         self.assertAlmostEqual(total[3], EXPORT_DAY_PLAN, places=9)
         self.assertAlmostEqual(total[5], 90 / EXPORT_DAY_PLAN)
-        self.assertIn("План чатов: 789\nФакт чатов: 90", rows[1][12])
+        self.assertIn("План чатов: 789\nФакт чатов: 90", rows[1][11])
         # Сохранённый план дня — ровно то, что Excel посчитает формулой по видимым строкам.
         wf = formulas.active
         self.assertEqual(wf["D16"].value, "=SUM(D2:D15)")
         self.assertAlmostEqual(sum(row[3] for row in rows[1:15] if row[3] is not None), total[3],
                                places=9)
-        # День без плана: итог — только Jana Taxi (400/40 сек, 2000/20 сек, 42/10).
-        self.assertEqual(rows[30][2:9], [None, None, 40, None, 0.2, 1.7, 4.2])
-        self.assertIn("Факт чатов: 40", rows[16][12])
+        # День без плана: итог — только Jana Taxi (400/40 сек, 2000/20 сек).
+        self.assertEqual(rows[30][2:8], [None, None, 40, None, 0.2, 1.7])
+        self.assertIn("Факт чатов: 40", rows[16][11])
 
-    def test_daily_workbook_marks_low_rating(self):
-        report = self._daily_report()
-        report["days"][0]["parks"][-1]["rating_sum"] = 26.0  # Ноль такси: 26 / 9 = 2,9
-        ws = self._daily_books(report)[1].active
-        self.assertEqual(ws["I15"].value, 2.9)
-        self.assertEqual(ws["I15"].font.color.rgb[-6:], "9C0006")
-        self.assertNotEqual(str(getattr(ws["I3"].font.color, "rgb", ""))[-6:], "9C0006")
+    def test_daily_workbook_has_no_average_rating(self):
+        # Средняя оценка водителей убрана из выгрузки (просьба владельца 02.10.2026):
+        # ни колонки в блоке парков, ни строки в комментарии дня.
+        self.assertNotIn("rating", [column[0] for column in self.ns["_CHAT_BILLING_DAILY_COLUMNS"]])
+        rows = [list(row) for row in self._daily_books(self._daily_report())[1].active.iter_rows(
+            values_only=True)]
+        self.assertFalse([title for title in rows[0] if "оценк" in str(title).lower()])
+        comment = rows[1][-1]
+        self.assertTrue(comment.startswith("Ежедневный отчет по чатам за 16.09.2026"))
+        self.assertNotIn("оценк", comment.lower())
+        # Итог дня: (3480 + 900) сек на 88 отвеченных = 0,8 мин — им комментарий и кончается.
+        self.assertEqual(comment.splitlines()[-1], "ASA - 0,8 минуты")
 
     def test_daily_workbook_keeps_park_names_as_text(self):
         report = self._daily_report()

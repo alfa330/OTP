@@ -16,11 +16,11 @@ const roundHalfUp = (value, digits) => {
 
 // Средние всегда «сумма / сколько»: за период — по обращениям всех дней, а не
 // среднее средних. Знаменатель у каждого свой: первая реакция — у отвеченных,
-// время ответа — у обращений, где оператор отвечал, оценка — у оценённых.
+// время ответа — у обращений, где оператор отвечал. Средней оценки водителей в
+// биллинге нет (просьба владельца 02.10.2026).
 export const chatBillingAverages = (item = {}) => ({
   firstReplySeconds: ratio(item?.first_reply_seconds, item?.answered),
   innerReplySeconds: ratio(item?.inner_reply_seconds, item?.inner_replied),
-  rating: ratio(item?.rating_sum, item?.rated),
   sl: ratio(item?.answered_sl, item?.chats),
 });
 
@@ -32,8 +32,6 @@ export const chatBillingMinutes = (seconds) => {
 };
 
 const MINUTES_FORMAT = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
-// Оценка — с одним знаком, как в ежедневном отчёте СЗоВ («4,7»).
-const RATING_FORMAT = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 export const formatChatBillingMinutes = (seconds) => {
   const minutes = chatBillingMinutes(seconds);
@@ -45,12 +43,6 @@ export const formatChatBillingMinutesUnit = (seconds) => {
   const label = formatChatBillingMinutes(seconds);
   return label === '—' ? label : `${label} мин`;
 };
-
-export const formatChatBillingRating = (value) => (
-  value === null || value === undefined || !Number.isFinite(Number(value))
-    ? '—'
-    : RATING_FORMAT.format(roundHalfUp(value, 1))
-);
 
 // Час «Группировки» — промежуток, а не точка: в строку 09:00–10:00 идут обращения,
 // начавшиеся с 09:00:00 до 09:59:59.

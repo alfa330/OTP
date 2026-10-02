@@ -49,7 +49,6 @@ import {
   chatBillingHourLabel,
   formatChatBillingMinutes,
   formatChatBillingMinutesUnit,
-  formatChatBillingRating,
 } from './chatBillingMetrics';
 import {
   BILLING_GROUPING_COLUMNS,
@@ -92,7 +91,6 @@ import {
   PhoneMissed,
   Plus,
   ShieldAlert,
-  Star,
   Target,
   Timer,
   TrendingUp,
@@ -1777,14 +1775,6 @@ const CHAT_BILLING_CELLS = {
     hint: 'Между сообщением клиента и ответом оператора внутри чата',
     render: (item, averages) => ({ value: formatChatBillingMinutes(averages.innerReplySeconds), className: 'text-slate-700' }),
   },
-  rating: {
-    hint: 'Оценка водителя после чата, по пятибалльной шкале',
-    render: (item, averages) => ({
-      value: formatChatBillingRating(averages.rating),
-      className: 'text-slate-700',
-      title: averages.rating === null ? undefined : `Оценок: ${formatInt(item.rated)}`,
-    }),
-  },
   // Сотрудники — головы часа: по сменам аукциона чата и по онлайну от минуты.
   staff_planned: {
     hint: 'Чатники по сменам аукциона чата (без телефонных смен)',
@@ -1812,6 +1802,8 @@ const CHAT_BILLING_CELLS = {
 
 // Колонки разрезов: [ключ ячейки, подпись]. «Таксопарки» и «Группировка» повторяют
 // образцы СЗоВ — «Ежедневный отчёт по чатам» и «Отчёт с группировкой по часам».
+// Средней оценки водителей нет ни в одном разрезе — её убрали из биллинга и выгрузок
+// (просьба владельца 02.10.2026).
 const CHAT_BILLING_COLUMN_SETS = {
   park: [
     ['plan_chats', 'План (чатов)'],
@@ -1819,7 +1811,6 @@ const CHAT_BILLING_COLUMN_SETS = {
     ['plan_match', '% совпадения прогноза'],
     ['first_reply', 'Ср. реакция на 1 сообщение, мин'],
     ['inner_reply', 'Ср. время ответа внутри чата, мин'],
-    ['rating', 'Ср. оценка водителей'],
   ],
   operator: [
     ['chats', 'Поступило'],
@@ -1828,7 +1819,6 @@ const CHAT_BILLING_COLUMN_SETS = {
     ['first_reply', 'Ср. реакция на 1 сообщение, мин'],
     ['sl', 'SL'],
     ['inner_reply', 'Ср. время ответа внутри чата, мин'],
-    ['rating', 'Ср. оценка водителей'],
   ],
   grouping: [
     ['chats', 'Поступившие чаты'],
@@ -2033,7 +2023,7 @@ const CHAT_DIRECTION = {
     slDefaultSeconds: CHAT_BILLING_SL_DEFAULT_SECONDS,
     arClass: chatBillingShareClass,
     title: 'Биллинг чатов',
-    text: 'Обращения из базы: объём, скорость ответа и оценки водителей по дням за выбранный период и окно времени.',
+    text: 'Обращения из базы: объём и скорость ответа по дням за выбранный период и окно времени.',
     loadingText: 'Собираем обращения...',
     errorText: 'Не удалось получить данные по обращениям',
     detailTitle: 'Детализация обращений',
@@ -6064,12 +6054,6 @@ const ResourceFteView = ({
           { key: 'first', label: 'Ср. реакция на 1 сообщение', value: formatChatBillingMinutesUnit(billingChatAverages.firstReplySeconds) },
           { key: 'sl', label: 'SL', value: billingChatSlRatio === null ? '—' : formatPercent(billingChatSlRatio, 1), hint: `реакция ≤ ${billingSlSeconds} сек`, tone: phoneSlTone(billingChatSlRatio) },
           { key: 'inner', label: 'Ср. ответ внутри чата', value: formatChatBillingMinutesUnit(billingChatAverages.innerReplySeconds) },
-          {
-            key: 'rating',
-            label: 'Ср. оценка водителей',
-            value: formatChatBillingRating(billingChatAverages.rating),
-            hint: Number(billingTotals.rated) > 0 ? `оценок ${formatInt(billingTotals.rated)}` : 'оценок нет',
-          },
         ];
       } else if (billingMode === 'operator') {
         tiles = [
@@ -8286,9 +8270,9 @@ const ResourceFteView = ({
             ) && (
               <>
                 {billingMode !== 'detail' && (!cfg.hasBillingTalkTime ? (
-                  // AR у чата нет (см. chatBillingShareClass). Семь карточек — двумя полными
-                  // рядами: объём и скорость с оценкой. Одной сеткой седьмая осталась бы
-                  // одна в ряду, а пустая ячейка читается как «сюда что-то не приехало».
+                  // AR у чата нет (см. chatBillingShareClass). Шесть карточек — двумя рядами
+                  // по три: объём и скорость. Средней оценки водителей нет — её убрали из
+                  // биллинга (просьба владельца 02.10.2026).
                   <div className="space-y-3">
                     <div className="grid gap-3 md:grid-cols-3">
                       <StatCard icon={MessageSquare} label="Поступило" value={formatInt(billingTotals.chats)} hint="Обращения за период" tone="blue" />
@@ -8303,7 +8287,7 @@ const ResourceFteView = ({
                         tone="rose"
                       />
                     </div>
-                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="grid gap-3 md:grid-cols-3">
                       <StatCard
                         icon={Clock3}
                         label="Ср. реакция на 1 сообщение"
@@ -8323,13 +8307,6 @@ const ResourceFteView = ({
                         label="Ср. время ответа внутри чата"
                         value={formatChatBillingMinutesUnit(billingChatAverages.innerReplySeconds)}
                         hint="Между сообщением клиента и ответом"
-                        tone="slate"
-                      />
-                      <StatCard
-                        icon={Star}
-                        label="Ср. оценка водителей"
-                        value={formatChatBillingRating(billingChatAverages.rating)}
-                        hint={Number(billingTotals.rated) > 0 ? `Оценок водителей: ${formatInt(billingTotals.rated)}` : 'Оценок за период нет'}
                         tone="slate"
                       />
                     </div>
