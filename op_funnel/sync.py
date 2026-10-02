@@ -579,10 +579,13 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
 # перечитает всё сам.
 INCREMENTAL_MAX_LAG = timedelta(hours=24)
 INCREMENTAL_OVERLAP = timedelta(minutes=5)
+# Пометка инкремента в журнале прогонов: по ней же журнал прячет их из списка
+# (queries.read_runs) и по ней инкремент ищет, откуда продолжать.
+INCREMENTAL_NOTE = 'incremental'
 
 
 def sync_amo_changes(db, since=None, started_by=None):
-    """Догнать изменения сделок amoCRM с последнего инкремента (раз в 15 минут).
+    """Догнать изменения сделок amoCRM с последнего инкремента (раз в 3 минуты).
 
     Что делает и чего не делает — важно оба:
 
@@ -610,12 +613,18 @@ def sync_amo_changes(db, since=None, started_by=None):
         # Лаг спрашиваем у БАЗЫ (NOW() - started_at), а не вычитаем её метку из
         # своих часов: у процесса UTC+5, у базы UTC, и разность «своё минус
         # чужое» промахивалась бы ровно на пять часов.
+        # Только от инкрементов: полный прогон перечитывает сделки СВОЕГО периода, а
+        # не всё изменившееся. Догрузка прошлых дней из «Касаний» между двумя
+        # инкрементами сдвигала начало окна вперёд, и сделка, заведённая в этом
+        # промежутке и больше не менявшаяся, не попадала в снимок вовсе (разбор
+        # «Принятия лида в работу», 02.10.2026).
         with db._get_cursor() as cursor:
             cursor.execute(
                 """SELECT EXTRACT(EPOCH FROM (NOW() - MAX(started_at))) AS lag
                      FROM op_funnel_sync_runs
-                    WHERE direction_code = %s AND source = %s AND status = 'ok'""",
-                (direction_code, source))
+                    WHERE direction_code = %s AND source = %s AND status = 'ok'
+                      AND note = %s""",
+                (direction_code, source, INCREMENTAL_NOTE))
             row = queries._one(cursor) or {}
         lag = row.get('lag')
         lag_seconds = float(lag) if lag is not None else INCREMENTAL_MAX_LAG.total_seconds()
@@ -630,7 +639,7 @@ def sync_amo_changes(db, since=None, started_by=None):
                'error': None}
     with db._get_cursor() as cursor:
         run_id = queries.start_run(cursor, direction_code, source, now.date(), now.date(),
-                                   started_by, 'incremental')
+                                   started_by, INCREMENTAL_NOTE)
         summary['run_id'] = run_id
     try:
         with db._get_cursor() as cursor:

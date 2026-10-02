@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
 DB_PATH = ROOT / "database.py"
 
-HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
+HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent", "_op_broadcast_wait",
            "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
            "_op_broadcast_attach_period", "_op_broadcast_caption", "_op_broadcast_period_notes",
            "_op_broadcast_bridge_note", "_wallboard_format_asa",
@@ -186,6 +186,14 @@ class HourSampleGateTests(unittest.TestCase):
         self.assertIn('15,4 %', notes[0])
 
 
+def lead_block(day_seconds, hours, group_ids=(36,)):
+    """Блок «Принятие лида в работу» снимка: итог дня и часы {час: (взято, среднее, с)}."""
+    return {'deals': 100, 'taken': sum(taken for taken, _ in hours.values()),
+            'avg_seconds': day_seconds, 'group_ids': list(group_ids), 'synced_age_seconds': 60,
+            'hourly': [{'hour': hour, 'taken': hours.get(hour, (0, None))[0],
+                        'avg_seconds': hours.get(hour, (0, None))[1]} for hour in range(24)]}
+
+
 def hourly(day_hours):
     """Разрез по часам снимка: {час: (входящих, потеряно, SL)}, остальные часы пустые."""
     rows = []
@@ -206,15 +214,19 @@ class PeriodTests(unittest.TestCase):
         self.attach = self.ns["_op_broadcast_attach_period"]
         self.asked = []
 
-    def day_parts(self, day):
-        self.asked.append(day)
-        return {'day': day.isoformat(),
-                'totals': {'arrived': 400, 'answered': 380, 'missed': 20, 'ar': 0.05, 'sl': 0.81},
-                'hourly': hourly({23: (12, 1, 0.75)})}
+    def day_parts(self, day, with_leads=False):
+        self.asked.append((day, with_leads) if with_leads else day)
+        out = {'day': day.isoformat(),
+               'totals': {'arrived': 400, 'answered': 380, 'missed': 20, 'ar': 0.05, 'sl': 0.81},
+               'hourly': hourly({23: (12, 1, 0.75)})}
+        if with_leads:
+            out['lead_speed'] = lead_block(day_seconds=420, hours={23: (3, 95)})
+        return out
 
     def today(self, day='2026-09-17'):
         data = snapshot()
-        data.update(day=day, hourly=hourly({9: (30, 3, 0.7), 10: (8, 0, 1.0)}))
+        data.update(day=day, hourly=hourly({9: (30, 3, 0.7), 10: (8, 0, 1.0)}),
+                    lead_speed=lead_block(day_seconds=252, hours={9: (12, 4530), 10: (2, 31)}))
         return data
 
     def test_scheduled_send_reports_the_hour_that_just_ended(self):
@@ -231,13 +243,36 @@ class PeriodTests(unittest.TestCase):
         self.assertEqual(out['hour_totals']['missed'], 3)
 
     def test_midnight_reports_the_day_that_ended(self):
-        # В 00:00 снимок уже живёт новыми сутками: итог дня и час 23–24 берутся расчётом 16.09.
+        # В 00:00 снимок уже живёт новыми сутками: итог дня и час 23–24 берутся расчётом 16.09 —
+        # вместе с «Принятием лида» тех суток, а не новых.
         out = self.attach(self.today('2026-09-17'), datetime(2026, 9, 17, 0, 0, 3), self.day_parts)
-        self.assertEqual(self.asked, [date(2026, 9, 16)])
+        self.assertEqual(self.asked, [(date(2026, 9, 16), True)])
         self.assertEqual((out['day'], out['day_label'], out['hour_label'], out['hour_day']),
                          ('2026-09-16', 'За 16.09', '23:00–24:00', '16.09'))
         self.assertEqual((out['totals']['arrived'], out['hour_totals']['arrived']), (400, 12))
+        self.assertEqual((out['totals']['lead_take_seconds'], out['hour_totals']['lead_take_seconds']),
+                         (420, 95))
         self.assertEqual(out['now'], snapshot()['now'])          # люди — «на сейчас», из снимка
+
+    def test_lead_take_speed_of_the_day_and_of_the_hour(self):
+        """Владелец 02.10.2026: «в показателях за час тоже». День — блок снимка, час — сделки,
+        взятые в работу в этот час; час без взятых — прочерк, а не ноль."""
+        out = self.attach(self.today(), datetime(2026, 9, 17, 10, 0, 1), self.day_parts)
+        self.assertEqual((out['totals']['lead_take_seconds'], out['hour_totals']['lead_take_seconds']),
+                         (252, 4530))
+        quiet = self.attach(self.today(), datetime(2026, 9, 17, 5, 0), self.day_parts)
+        self.assertIsNone(quiet['hour_totals']['lead_take_seconds'])
+        without = self.today()
+        without['lead_speed'] = None             # сделки не прочитались или группа не «Основа»
+        out = self.attach(without, datetime(2026, 9, 17, 10, 0), self.day_parts)
+        self.assertEqual((out['totals']['lead_take_seconds'], out['hour_totals']['lead_take_seconds']),
+                         (None, None))
+        self.assertNotIn('lead_take_seconds', self.today()['totals'], 'снимок табло не меняется')
+
+    def test_wait_reads_like_the_wall(self):
+        wait = self.ns['_op_broadcast_wait']
+        self.assertEqual([wait(None), wait(0), wait(59), wait(252), wait(3599), wait(4530), wait(-3)],
+                         ['—', '0:00', '0:59', '4:12', '59:59', '1:15:30', '0:00'])
 
     def test_midnight_with_the_snapshot_still_on_the_old_day_needs_no_recount(self):
         out = self.attach(self.today('2026-09-16'), datetime(2026, 9, 17, 0, 0, 3), self.day_parts)
@@ -252,7 +287,8 @@ class PeriodTests(unittest.TestCase):
         header, rows, block = table(text)
         self.assertEqual(header, ['День', '09–10'])
         self.assertEqual(list(rows), ['Входящих', 'Принято', 'Потеряно', 'AR', 'SL', 'Разговор',
-                                      'ASA', 'Исходящих'])
+                                      'ASA', 'Исходящих', 'Принятие лида'])
+        self.assertEqual(rows['Принятие лида'], ['4:12', '1:15:30'])
         self.assertEqual((rows['Входящих'], rows['Принято'], rows['Потеряно']),
                          (['100', '30'], ['96', '27'], ['4', '3']))
         self.assertEqual((rows['AR'], rows['SL']), (['4,0 %', '10,0 %'], ['90,0 %', '70,0 %']))
@@ -338,22 +374,25 @@ class PeriodTests(unittest.TestCase):
         return captured['stat']
 
     def test_day_picture_mirrors_the_wall_rows_with_asa(self):
-        """Второй ряд показателей дня — ровно как на стене (SL · разговор · ASA · исходящих),
-        люди «на сейчас» — отдельным рядом: седьмая плитка в одном ряду не читалась."""
+        """Второй ряд показателей дня — как на стене (SL · разговор · ASA · исходящих · принятие
+        лида), люди «на сейчас» — отдельным рядом: седьмая плитка в одном ряду не читалась."""
         out = self.attach(self.today(), datetime(2026, 9, 17, 10, 0), self.day_parts)
         rows = self._tiles('_op_render_wallboard_png', out)
         self.assertEqual([[label for label, _ in row] for row in rows], [
-            ['SL', 'Разговор', 'ASA', 'Исходящих'],
+            ['SL', 'Разговор', 'ASA', 'Исходящих', 'Принятие лида'],
             ['Онлайн', 'В разговоре', 'Перерыв'],
         ])
         self.assertEqual(rows[0][2], ('ASA', '6'))
+        self.assertEqual(rows[0][4], ('Принятие лида', '4:12'))
 
-    def test_hour_picture_carries_asa(self):
+    def test_hour_picture_carries_asa_and_lead_take_speed(self):
         out = self.attach(self.today(), datetime(2026, 9, 17, 10, 0), self.day_parts)
         self.assertEqual(self._tiles('_op_render_hour_png', out),
-                         [('SL', '70,0 %'), ('Разговор', '1:00'), ('ASA', '4'), ('Исходящих', '0')])
+                         [('SL', '70,0 %'), ('Разговор', '1:00'), ('ASA', '4'), ('Исходящих', '0'),
+                          ('Принятие лида', '1:15:30')])
         quiet = self.attach(self.today(), datetime(2026, 9, 17, 5, 0), self.day_parts)
         self.assertEqual(self._tiles('_op_render_hour_png', quiet)[2], ('ASA', '—'))
+        self.assertEqual(self._tiles('_op_render_hour_png', quiet)[4], ('Принятие лида', '—'))
 
 
 class CaptionTests(unittest.TestCase):
@@ -480,6 +519,8 @@ class WiringTests(unittest.TestCase):
         collect = collect[:collect.index("\n\n\n")]
         self.assertIn("globals().get('_op_wallboard_day_parts')", collect)
         self.assertIn("return _op_broadcast_attach_period(data, now, day_parts)", collect)
+        # «Принятие лида» закончившихся суток просит только полуночная ветка — и группе тоже.
+        self.assertIn("return loader(day, group_id, with_leads=with_leads)", collect)
         prepare = self.source[self.source.index("async def _op_broadcast_prepare("):]
         prepare = prepare[:prepare.index("\n\n\n")]
         self.assertIn("('op_board.png', _op_render_wallboard_png)", prepare)
@@ -544,6 +585,16 @@ class GroupBroadcastTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in out['operators']], [1])
         self.assertEqual(out['group_label'], 'Основа')
         self.assertEqual(calls, [date(2026, 9, 23)], 'итоги группы — расчётом тех же суток')
+
+    def test_lead_take_speed_goes_only_to_osnova(self):
+        """«Принятие лида» — показатель «Основы», как на стене: чату ЯР — прочерк, а не чужая цифра."""
+        data = self._snapshot()
+        data['lead_speed'] = lead_block(day_seconds=252, hours={9: (1, 60)})
+        parts = lambda day: {'totals': {'arrived': 7}, 'hourly': []}
+        view = self.ns['_op_broadcast_group_view']
+        self.assertEqual(view(data, 36, parts)['lead_speed']['avg_seconds'], 252)
+        self.assertIsNone(view(data, 15, parts)['lead_speed'])
+        self.assertEqual(data['lead_speed']['avg_seconds'], 252, 'снимок стены не тронут')
 
     def test_disbanded_group_is_named_by_its_number_not_the_whole_department(self):
         """Группу расформировали, а чат остался настроен на неё: честнее прислать «группа 99»

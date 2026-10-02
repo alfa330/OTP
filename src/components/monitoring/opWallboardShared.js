@@ -10,6 +10,7 @@ import {
     formatPercent,
     slTone,
 } from './szovWallboardShared';
+import { opLeadSyncStaleSeconds } from './opWallboardLeads';
 
 /*
  * Общая начинка «Табло ОП» — отдел продаж на телефонии FreePBX.
@@ -178,6 +179,19 @@ export const OP_METRICS = [
         }),
     },
     {
+        // Владелец, 02.10.2026: «время поступления лида в amoCRM и момент попытки дозвона по основе».
+        // Среднее по сегодняшним сделкам «Основы», у которых попытка уже была; считает сервер
+        // (op_wallboard/lead_speed.py). У групп без сделок amoCRM блока нет — прочерк, как AR и SL
+        // у групп без входящих. Цвета нет: нормы владелец не называл.
+        key: 'op_lead_take', group: 'day', label: 'Принятие лида в работу',
+        hint: (s) => {
+            const taken = s?.lead_speed?.taken;
+            return `Среднее от создания сделки в amoCRM до первого набора клиента оператором Основы${
+                taken ? ` · сделок с попыткой: ${formatInt(taken)}` : ''}`;
+        },
+        read: (s) => ({ value: formatSeconds(s.lead_speed?.avg_seconds) }),
+    },
+    {
         key: 'op_online', group: 'now', label: 'Онлайн',
         hint: 'Свободны и в разговоре',
         read: (s) => ({ value: formatCount(s.now?.operators_online), tone: 'info' }),
@@ -236,6 +250,17 @@ export const opFreshnessNotice = (snapshot) => {
         return `Данные моста устарели: последнее обновление ${formatDuration(age)} назад`;
     }
     return null;
+};
+
+/*
+ * Список сделок для «Принятия лида в работу» замер, а мост жив (порог — в opWallboardLeads.js).
+ * Читается по виду выбранной группы: у ЯР и «Потока» плитка — прочерк, и предупреждать про неё
+ * там нечего.
+ */
+export const opLeadSyncNotice = (snapshot) => {
+    const age = opLeadSyncStaleSeconds(snapshot);
+    return age === null ? null
+        : `Сделки amoCRM не обновлялись ${formatDuration(age)} — «Принятие лида» считается по старому списку`;
 };
 
 /** Отметка времени для шапки: по последнему живому приращению моста, а не по снимку. */

@@ -30,6 +30,9 @@ export const opGroupView = (snapshot, group) => {
         hourly: group.hourly,
         now: group.now,
         operators: (snapshot.operators || []).filter((row) => row.group_id === group.id),
+        // «Принятие лида в работу» — показатель «Основы»: сделки amoCRM обзванивает только она. У ЯР
+        // и «Потока» своих сделок там нет, и цифра «Основы» под их именем была бы чужой — прочерк.
+        lead_speed: (snapshot.lead_speed?.group_ids || []).includes(group.id) ? snapshot.lead_speed : null,
     };
 };
 

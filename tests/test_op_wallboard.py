@@ -695,6 +695,24 @@ class RouteTests(unittest.TestCase):
                                     lambda cursor, day, days=7: list(self.announcement_deltas))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # «Принятие лида в работу»: сделки «Основы» из снимка воронки и звонки по ним.
+        self.lead_deals = []
+        self.lead_touches = []
+        self.lead_sync_age = 300
+        self.lead_reads = []
+
+        def lead_deals(cursor, day):
+            self.lead_reads.append(day)
+            if isinstance(self.lead_deals, Exception):
+                raise self.lead_deals
+            return list(self.lead_deals)
+
+        for name, value in (('load_lead_deals', lead_deals),
+                            ('load_lead_touches', lambda cursor, day: list(self.lead_touches)),
+                            ('load_lead_sync_age', lambda cursor, day: self.lead_sync_age)):
+            patcher = mock.patch.object(op_routes, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         def fetch_guarded_cache(**kwargs):
             if self.fail_fetch:
@@ -805,6 +823,98 @@ class RouteTests(unittest.TestCase):
         self.assertEqual((row['group_id'], row['group_label']), (36, 'Основа'))
         self.assertEqual(row['entry_at'], '%sT00:00:01' % today.isoformat())
 
+    def _lead_day(self):
+        now = datetime.now(timezone(timedelta(hours=5))).replace(tzinfo=None, microsecond=0)
+        self.memberships = {1: {'group_id': 36, 'group_name': 'Ешан Алмас группа Основа',
+                                'model': 'op_osnova'}}
+        # Относительно «сейчас», а не от полуночи: набор обязан быть в прошлом в любой час прогона.
+        created = now - timedelta(minutes=5)
+        self.lead_deals = [{'lead_key': '57060147', 'created_at': created,
+                            'phones': '7015550001', 'phone': '7015550001'}]
+        self.lead_touches = [
+            # Ручной набор оператором «Основы» (вн. 6650 у Иванова) через 50 с после сделки.
+            {'started_at': created + timedelta(seconds=50), 'phone': '7015550001', 'ext': '6650',
+             'call_type': 'Исходящий', 'talk_seconds': 0, 'dial_seconds': 20, 'queue': '',
+             'recording_url': ''},
+            # Чужой номер в тех же сутках: к сделке не относится.
+            {'started_at': created + timedelta(seconds=5), 'phone': '7015559999', 'ext': '6650',
+             'call_type': 'Исходящий', 'talk_seconds': 0, 'dial_seconds': 20, 'queue': '',
+             'recording_url': ''},
+        ]
+
+    def test_snapshot_carries_lead_take_speed_of_osnova(self):
+        """Владелец 02.10.2026: «время поступления лида в amoCRM и момент попытки дозвона по основе»."""
+        self.requester['role'] = 'admin'
+        self._lead_day()
+        body = self.client.get('/api/op_wallboard/snapshot').get_json()
+        block = body['lead_speed']
+        self.assertEqual((block['deals'], block['taken'], block['avg_seconds']), (1, 1, 50))
+        self.assertEqual(block['group_ids'], [36])
+        self.assertGreaterEqual(block['synced_age_seconds'], 300)
+
+    def _clock(self, start=1_000_000.0):
+        """Часы ручки под управлением теста: кэш блока лидов живёт по time.time()."""
+        clock = {'now': start}
+        fake = mock.Mock()
+        fake.time = lambda: clock['now']
+        patcher = mock.patch.object(op_routes, 'time', fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return clock
+
+    def test_lead_take_speed_is_read_once_a_minute_not_every_snapshot(self):
+        self.requester['role'] = 'admin'
+        self._lead_day()
+        clock = self._clock()
+        for step in (0, 30, 29):          # 0 → 59 с: одно чтение на все снимки
+            clock['now'] += step
+            self.assertEqual(self.client.get('/api/op_wallboard/snapshot').status_code, 200)
+        self.assertEqual(len(self.lead_reads), 1)
+        clock['now'] += 2                 # 61 с — минута прошла, читаем заново
+        self.client.get('/api/op_wallboard/snapshot')
+        self.assertEqual(len(self.lead_reads), 2)
+        # Сутки — алматинские: с 00:00 до 05:00 по UTC были бы ещё вчерашние сделки.
+        today = datetime.now(timezone(timedelta(hours=5))).date()
+        self.assertEqual(set(self.lead_reads), {today})
+
+    def test_failed_reread_keeps_the_last_reading_of_the_day_and_ages_it(self):
+        """Прошлое чтение тех же суток лучше прочерка; возраст списка растёт вместе со временем."""
+        self.requester['role'] = 'admin'
+        self._lead_day()
+        clock = self._clock()
+        first = self.client.get('/api/op_wallboard/snapshot').get_json()['lead_speed']
+        self.lead_deals = RuntimeError('op_funnel_leads недоступна')
+        clock['now'] += 90
+        with self.assertLogs(op_routes.log, level='ERROR'):
+            after = self.client.get('/api/op_wallboard/snapshot').get_json()['lead_speed']
+        self.assertEqual((after['taken'], after['avg_seconds']), (first['taken'], first['avg_seconds']))
+        self.assertEqual(after['synced_age_seconds'], first['synced_age_seconds'] + 90)
+
+    def test_past_day_carries_its_lead_take_speed_for_the_midnight_broadcast(self):
+        """В 00:00 отбивка говорит о закончившихся сутках: «Принятие лида» тех суток считается
+        заново (с разбивкой по часам), у группы не «Основы» его нет, как на стене."""
+        self._lead_day()
+        day = datetime.now(timezone(timedelta(hours=5))).date()
+        parts = self.bp.day_parts(day, with_leads=True)
+        block = parts['lead_speed']
+        self.assertEqual((block['taken'], block['avg_seconds'], block['group_ids']), (1, 50, [36]))
+        self.assertIsNone(block['synced_age_seconds'])
+        self.assertEqual(sum(item['taken'] for item in block['hourly']), 1)
+        self.assertIsNone(self.bp.day_parts(day, 15, with_leads=True)['lead_speed'])
+        self.assertEqual(self.bp.day_parts(day, 36, with_leads=True)['lead_speed']['avg_seconds'], 50)
+        # Днём разрезу группы сделки не нужны: блок берётся из снимка, второй раз не читается.
+        reads = len(self.lead_reads)
+        self.assertNotIn('lead_speed', self.bp.day_parts(day, 36))
+        self.assertEqual(len(self.lead_reads), reads)
+
+    def test_lead_failure_leaves_the_rest_of_the_board_whole(self):
+        self.requester['role'] = 'admin'
+        self.lead_deals = RuntimeError('op_funnel_leads недоступна')
+        with self.assertLogs(op_routes.log, level='ERROR'):
+            body = self.client.get('/api/op_wallboard/snapshot').get_json()
+        self.assertIsNone(body['lead_speed'])
+        self.assertEqual(body['totals']['arrived'], 1)
+
     def test_journal_is_open_only_for_people_on_the_board(self):
         self.assertEqual(self.client.get('/api/op_wallboard/journal?operator_id=1').status_code, 403)
         self.requester['role'] = 'admin'
@@ -879,6 +989,34 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(self.shared.count('s.totals?.avg_wait_seconds'), 1)
         self.assertEqual(self.view.count('metricKey="op_avg_wait"'), 1)
         self.assertIn('SL и ASA не считаются', self.shared)
+
+    def test_lead_take_tile_reads_the_server_block_in_a_three_by_three_grid(self):
+        """Владелец 02.10.2026: «средняя скорость принятия в работу лида». Девятая плитка дня — та же
+        сетка по три, без пустых ячеек; цифру считает сервер, экран только показывает."""
+        metric = re.search(r"key: 'op_lead_take'.*?\n    \},", self.shared, flags=re.DOTALL).group(0)
+        self.assertIn("label: 'Принятие лида в работу'", metric)
+        self.assertIn('value: formatSeconds(s.lead_speed?.avg_seconds)', metric)
+        self.assertNotIn('tone', metric)   # нормы владелец не называл — без цвета
+        body = self.view[self.view.index('function OpWallboardBody'):self.view.index('const clockLabel')]
+        self.assertEqual(body.count('metricKey="op_lead_take"'), 1)
+        day = body[body.index('title="Показатели за день"'):body.index('title="По часам"')]
+        self.assertEqual(day.count('<Grid cols={3}>'), 1)
+        self.assertEqual(day.count('<MetricStatTile'), 9)
+        # Уже lg сетка в две колонки: девятая плитка там во всю строку, а не рядом с пустой ячейкой.
+        self.assertIn('<div className="col-span-2 grid lg:col-span-1">\n'
+                      '                        <MetricStatTile metricKey="op_lead_take"',
+                      day.replace('\r\n', '\n'))
+
+    def test_stale_deal_list_is_said_only_when_it_is_stale(self):
+        """Порог исполняет node-тест (op_wallboard_leads.test.mjs); здесь — проводка: чип читает вид
+        выбранной группы, у ЯР и «Потока» плитка — прочерк, и предупреждать про неё нечего."""
+        leads = (MONITORING / 'opWallboardLeads.js').read_text(encoding='utf-8-sig')
+        self.assertIn('export const OP_LEAD_SYNC_WARN_SECONDS = 15 * 60;', leads)
+        self.assertNotIn('import ', leads)   # модуль грузит node напрямую
+        self.assertIn("import { opLeadSyncStaleSeconds } from './opWallboardLeads';", self.shared)
+        self.assertIn('const age = opLeadSyncStaleSeconds(snapshot);', self.shared)
+        self.assertIn('const leadSync = useMemo(() => opLeadSyncNotice(view), [view]);', self.view)
+        self.assertIn('{leadSync ? (', self.view)
 
     def test_widget_button_is_the_same_as_szov(self):
         """Кнопка виджета — общая с СЗоВ (экспорт), а не третья копия."""

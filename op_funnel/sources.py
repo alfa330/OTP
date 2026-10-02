@@ -39,6 +39,7 @@ UTC нельзя: в проекте на этом горели — отчёт р
 
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta
 
 # Правило нормализации телефона — ОДНО на портал: то же, которым касания
@@ -568,6 +569,39 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
     return leads, stage_names, users, loss_reasons, contact_phones
 
 
+# Инкремент ходит раз в 3 минуты (владелец, 02.10.2026). Вход в amoCRM — веб-формой, токен живёт
+# ~40 минут: новый клиент на каждый прогон дал бы 480 входов в сутки вместо одного на срок токена
+# (клиент сам перелогинится по сроку и на 401). Справочники — этапы, пользователи, причины —
+# правят руками и редко: они перечитываются раз в 15 минут, как ходил раньше весь инкремент, а
+# незнакомый этап или причина в выдаче перечитывает их сразу. Пул инкремента — один поток
+# (op_funnel_pool), поэтому общий клиент не делят два потока.
+INCREMENTAL_DICTIONARY_TTL_SECONDS = 15 * 60
+_incremental = {'client': None, 'dictionaries': None, 'dictionaries_at': 0.0}
+
+
+def _incremental_client():
+    from amocrm import leads as amo_leads  # локально: модуль читает окружение на импорте
+
+    if _incremental['client'] is None:
+        _incremental['client'] = amo_leads.AmoClient()
+    return _incremental['client']
+
+
+def _incremental_dictionaries(client, leads):
+    """(этапы, пользователи, причины) для прогона инкремента — из кэша, пока он свежий и знает
+    все этапы и причины выдачи."""
+    cached = _incremental['dictionaries']
+    if cached is not None and time.time() - _incremental['dictionaries_at'] < INCREMENTAL_DICTIONARY_TTL_SECONDS:
+        stage_names, _users, loss_reasons = cached
+        if all(lead.get('status_id') in stage_names
+               and (not lead.get('loss_reason_id') or lead.get('loss_reason_id') in loss_reasons)
+               for lead in leads):
+            return cached
+    value = (load_amo_stage_names(client), load_amo_users(client), load_amo_loss_reasons(client))
+    _incremental.update(dictionaries=value, dictionaries_at=time.time())
+    return value
+
+
 def fetch_amo_changed_leads(since_epoch, client=None):
     """Сделки воронки «Отдел продаж», ИЗМЕНИВШИЕСЯ с момента `since_epoch` (unix-время).
 
@@ -575,46 +609,49 @@ def fetch_amo_changed_leads(since_epoch, client=None):
     amoCRM unix — и naive datetime на этой границе уже промахивался на пять
     часов. Unix-время одинаково у всех троих.
 
-    Основа выгрузки раз в 15 минут (ТЗ #317, раздел 4: «не реже 1 раза в
-    15 мин»). Фильтр по `updated_at` даёт ровно то, что поменялось, а не 86
-    страниц всей воронки: полный проход идёт 85–130 секунд и в 13% прогонов
-    amoCRM рвёт его на середине — гонять такое каждые четверть часа нельзя.
+    Основа выгрузки раз в 3 минуты (ТЗ #317, раздел 4: «не реже 1 раза в
+    15 мин»; с 02.10.2026 чаще — ради табло «Принятие лида»). Фильтр по `updated_at`
+    даёт ровно то, что поменялось, а не 86 страниц всей воронки: полный проход идёт
+    85–130 секунд и в 13% прогонов amoCRM рвёт его на середине — гонять такое так
+    часто нельзя.
 
     Возвращает то же, что fetch_amo_sales_leads: (сделки, этапы, пользователи,
     причины, телефоны контактов). Телефоны нужны — новая сделка без них не
-    свяжется ни с одним разговором.
+    свяжется ни с одним разговором. Без своего `client` — общий клиент инкремента;
+    после сбоя он сбрасывается, и следующий прогон входит заново.
     """
-    from amocrm import leads as amo_leads  # локально: модуль читает окружение на импорте
-
-    client = client or amo_leads.AmoClient()
-    stage_names = load_amo_stage_names(client)
-    users = load_amo_users(client)
-    loss_reasons = load_amo_loss_reasons(client)
-
-    url = '/api/v4/leads'
-    params = {
-        'limit': _AMO_PAGE_LIMIT,
-        'page': 1,
-        'with': 'loss_reason,contacts',
-        'filter[pipeline_id]': AMO_SALES_PIPELINE_ID,
-        'filter[updated_at][from]': int(since_epoch),
-        'order[updated_at]': 'asc',
-    }
-    leads = []
-    while True:
-        data = client.get(url, params)
-        if not data:
-            break
-        page = ((data or {}).get('_embedded') or {}).get('leads') or []
-        if not page:
-            break
-        leads.extend(page)
-        next_url = ((data.get('_links') or {}).get('next') or {}).get('href')
-        if not next_url:
-            break
-        url, params = next_url, None
-    contact_ids = {cid for lead in leads for cid in _amo_contact_ids(lead)}
-    contact_phones = load_amo_contact_phones(client, contact_ids)
+    shared = client is None
+    client = client or _incremental_client()
+    try:
+        url = '/api/v4/leads'
+        params = {
+            'limit': _AMO_PAGE_LIMIT,
+            'page': 1,
+            'with': 'loss_reason,contacts',
+            'filter[pipeline_id]': AMO_SALES_PIPELINE_ID,
+            'filter[updated_at][from]': int(since_epoch),
+            'order[updated_at]': 'asc',
+        }
+        leads = []
+        while True:
+            data = client.get(url, params)
+            if not data:
+                break
+            page = ((data or {}).get('_embedded') or {}).get('leads') or []
+            if not page:
+                break
+            leads.extend(page)
+            next_url = ((data.get('_links') or {}).get('next') or {}).get('href')
+            if not next_url:
+                break
+            url, params = next_url, None
+        stage_names, users, loss_reasons = _incremental_dictionaries(client, leads)
+        contact_ids = {cid for lead in leads for cid in _amo_contact_ids(lead)}
+        contact_phones = load_amo_contact_phones(client, contact_ids)
+    except Exception:
+        if shared:
+            _incremental['client'] = None
+        raise
     log.info('op_funnel: amoCRM отдал %d изменившихся сделок с %s',
              len(leads), datetime.fromtimestamp(int(since_epoch)).strftime('%d.%m %H:%M'))
     return leads, stage_names, users, loss_reasons, contact_phones

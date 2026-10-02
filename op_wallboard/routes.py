@@ -12,7 +12,8 @@
 импорт был бы циклом.
 
 Момент ответа (SL, ожидание, разговор) берётся не из CDR, а из событий iCORE Phone за
-сутки — см. `snapshot.attach_answer_moments` и докстринг `snapshot`.
+сутки — см. `snapshot.attach_answer_moments` и докстринг `snapshot`. «Принятие лида в
+работу» — из снимка сделок «Воронки ОП» и звонков по их телефонам, см. `lead_speed`.
 """
 
 import logging
@@ -24,8 +25,9 @@ from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request, send_file
 
-from cdr import directory as directory_mod, queries
-from . import chat as chat_mod, chat_export as chat_export_mod, snapshot as snapshot_mod
+from cdr import directory as directory_mod, leads as cdr_leads_mod, queries, touches as touches_mod
+from . import (chat as chat_mod, chat_export as chat_export_mod, lead_speed as lead_speed_mod,
+               snapshot as snapshot_mod)
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +142,63 @@ def load_announcement_deltas(cursor, day, days=ANNOUNCEMENT_LOOKBACK_DAYS):
          GROUP BY 1, 2
     """, (day - timedelta(days=days), day))
     return [(row[0], int(row[1]), int(row[2])) for row in cursor.fetchall()]
+
+
+def load_lead_deals(cursor, day, direction=lead_speed_mod.LEAD_DIRECTION,
+                    source=lead_speed_mod.LEAD_SOURCE):
+    """Сделки «Основы» из снимка «Воронки ОП», созданные в эти сутки: ключ, создание, телефоны.
+
+    Сутки сделки amoCRM в снимке — дата её создания (`op_funnel.sources.amo_rows`), поэтому
+    `work_day` отбирает ровно созданные сегодня, по индексу (direction_code, work_day). Около
+    тысячи строк в сутки."""
+    cursor.execute("""
+        SELECT lead_key, created_at, phones, phone
+          FROM op_funnel_leads
+         WHERE direction_code = %s AND source = %s AND work_day = %s
+           AND created_at IS NOT NULL
+    """, (direction, source, day))
+    return [{'lead_key': row[0], 'created_at': row[1], 'phones': row[2] or '', 'phone': row[3] or ''}
+            for row in cursor.fetchall()]
+
+
+def load_lead_touches(cursor, day, grace=cdr_leads_mod.GRACE):
+    """Исходящие и принятые входящие суток — сырьё `lead_speed.take_speed`.
+
+    С хвостом прошлых суток длиной в допуск окна сделки: сделка, заведённая в 00:01, владеет
+    звонком 23:59 — так же читает и режим «Сделки» (`cdr.lead_queries.TOUCH_LOOKBACK_DAYS`).
+    Без фильтра по телефонам: тысяча номеров массивом стоит базе дороже, чем две тысячи строк
+    суток по индексу call_day, а отбор по телефонам сделок — дело памяти."""
+    day_start = datetime.combine(day, datetime.min.time())
+    cursor.execute("""
+        SELECT started_at, phone, ext, call_type, talk_seconds, dial_seconds, queue, recording_url
+          FROM cdr_touches
+         WHERE call_day BETWEEN %s AND %s
+           AND started_at >= %s
+           AND (call_type = %s OR (call_type = %s AND talk_seconds > 0))
+    """, (day - timedelta(days=1), day, day_start - grace, touches_mod.TYPE_OUT, touches_mod.TYPE_IN))
+    return [{'started_at': row[0], 'phone': row[1] or '', 'ext': row[2] or '', 'call_type': row[3],
+             'talk_seconds': int(row[4] or 0), 'dial_seconds': int(row[5] or 0),
+             'queue': row[6] or '', 'recording_url': row[7] or ''}
+            for row in cursor.fetchall()]
+
+
+def load_lead_sync_age(cursor, day, direction=lead_speed_mod.LEAD_DIRECTION,
+                       source=lead_speed_mod.LEAD_SOURCE):
+    """Сколько секунд назад сделки этих суток последний раз перечитались удачно; None — ни разу.
+
+    Только прогоны, чей период накрывает сутки: инкремент пишет период «сегодня», а ночная
+    выгрузка (вчера и позавчера) и догрузка прошлых дней из «Касаний» сегодняшних сделок не
+    трогают — с ними замерший список выглядел бы свежим. Возраст считает база: метки журнала —
+    её NOW(), то есть UTC без пояса, а у процесса часы Алматы, и разность «своё минус чужое»
+    промахнулась бы на пять часов."""
+    cursor.execute("""
+        SELECT EXTRACT(EPOCH FROM (NOW() - MAX(finished_at)))
+          FROM op_funnel_sync_runs
+         WHERE direction_code = %s AND source = %s AND status = 'ok'
+           AND period_from <= %s AND period_to >= %s
+    """, (direction, source, day, day))
+    row = cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
 
 
 # Аккаунт Wazzup верификаторов. «Поток» (второй аккаунт) на табло не идёт — решение владельца
@@ -272,7 +331,8 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                                  ar_min_percent=snapshot_mod.DEFAULT_AR_MIN_PERCENT,
                                  ar_max_percent=snapshot_mod.DEFAULT_AR_MAX_PERCENT,
                                  chat_ttl_seconds=30, chat_stale_max_seconds=600,
-                                 chat_settings=None, chat_export_max_days=chat_export_mod.MAX_DAYS):
+                                 chat_settings=None, chat_export_max_days=chat_export_mod.MAX_DAYS,
+                                 lead_ttl_seconds=60):
     bp = Blueprint('op_wallboard', __name__, url_prefix='/api/op_wallboard')
     cache = {'ts': 0.0, 'payload': None}
     lock = threading.Lock()
@@ -332,7 +392,7 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         return snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
                                                   _is_talking)
 
-    def _day_parts(day, group_id=None):
+    def _day_parts(day, group_id=None, with_leads=False):
         """Итоги и разрез по часам за ЛЮБЫЕ сутки, мимо кэша снимка.
 
         Нужны отбивке в полночь: в 00:00 последний полный час (23:00–24:00) и итог дня
@@ -340,9 +400,14 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         автоинформаторов считаются на те сутки заново и в часовой кэш снимка не пишутся.
 
         group_id — итоги одной группы (отбивка «по группе»): касания отбираются тем же
-        правилом, что фильтр группы на табло (`snapshot.touches_of_group`)."""
+        правилом, что фильтр группы на табло (`snapshot.touches_of_group`).
+
+        with_leads — ещё и «Принятие лида в работу» тех суток (`lead_speed`): только по
+        запросу, отбивке в полночь. Разрезу группы днём блок берётся из снимка, и читать
+        сделки второй раз незачем. У группы не «Основы» блока нет, как на стене."""
         dept = department_id()
         people = load_people(dept, day) if dept is not None else []
+        memberships = {}
         with db._get_cursor() as cursor:
             try:
                 announce_seconds = snapshot_mod.announcement_seconds_from_deltas(
@@ -351,12 +416,19 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 log.exception('%s: длины автоинформаторов за %s не посчитались', label, day)
                 announce_seconds = {}
             touches = _measured_touches(cursor, day, people, announce_seconds)
-            if group_id is not None:
+            if group_id is not None or with_leads:
                 memberships = _memberships(cursor, people, day)
+            if group_id is not None:
                 touches = snapshot_mod.touches_of_group(
                     touches, people, memberships, load_queue_answers(cursor, day), int(group_id))
         parts = snapshot_mod.aggregate(touches, sl_seconds)
-        return {'day': day.isoformat(), 'totals': parts['totals'], 'hourly': parts['hourly']}
+        out = {'day': day.isoformat(), 'totals': parts['totals'], 'hourly': parts['hourly']}
+        if with_leads:
+            block = _lead_past_day(day, snapshot_mod.on_board(people, memberships), memberships)
+            if block is not None and group_id is not None and int(group_id) not in block['group_ids']:
+                block = None
+            out['lead_speed'] = block
+        return out
 
     # Кто какую очередь принимает — тоже свойство недели, а не десяти секунд: сырьё раз в час.
     # Хозяин очереди считается на каждый снимок заново — он зависит от состава групп.
@@ -383,6 +455,65 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             log.exception('%s: группы сотрудников не прочитались', label)
             return {}
 
+    # Сделки «Основы» и звонки по их телефонам — сырьё «Принятия лида в работу». Снимок сделок
+    # обновляется раз в 3 минуты, касания — раз в 20 с: перечитывать их на каждый снимок (раз в
+    # десять секунд) незачем, раз в минуту. Своя транзакция: сбой здесь не должен оборвать
+    # запросы снимка — в общей транзакции следующий запрос упал бы «transaction is aborted».
+    lead_cache = {'ts': 0.0, 'day': None, 'value': None}
+
+    def _lead_raw(day, now_ts):
+        if lead_cache['day'] == day and now_ts - lead_cache['ts'] < lead_ttl_seconds:
+            return lead_cache['value']
+        try:
+            with db._get_cursor() as cursor:
+                deals = load_lead_deals(cursor, day)
+                phones = {phone for deal in deals for phone in cdr_leads_mod.lead_phones(deal)}
+                touches = [touch for touch in load_lead_touches(cursor, day)
+                           if touch['phone'] in phones]
+                sync_age = load_lead_sync_age(cursor, day)
+            value = {'deals': deals, 'touches': touches, 'sync_age': sync_age, 'read_ts': now_ts}
+        except Exception:  # noqa: BLE001
+            # Без сделок плитка показывает прочерк, остальное табло целое. Прошлое чтение тех же
+            # суток лучше прочерка: звонки в нём отстают, но не больше чем на минуту-другую.
+            log.exception('%s: сделки amoCRM для принятия лида не прочитались', label)
+            value = lead_cache['value'] if lead_cache['day'] == day else None
+        lead_cache.update(ts=now_ts, day=day, value=value)
+        return value
+
+    def _lead_speed(day, now, people, memberships, now_ts):
+        """Блок снимка «Принятие лида в работу» или None, если сделки не прочитались."""
+        raw = _lead_raw(day, now_ts)
+        if raw is None:
+            return None
+        exts, group_ids = lead_speed_mod.osnova_scope(people, memberships)
+        block = lead_speed_mod.take_speed(raw['deals'], raw['touches'], exts, now)
+        age = raw['sync_age']
+        block.update(group_ids=group_ids,
+                     synced_age_seconds=None if age is None
+                     else age + max(0, int(now_ts - raw['read_ts'])))
+        return block
+
+    def _lead_past_day(day, people, memberships):
+        """«Принятие лида» за любые сутки мимо кэша; None, если сделки не прочитались.
+
+        Наборы — до конца тех суток, но не позже «сейчас»: в полночь это итог закончившегося
+        дня. Возраст списка сделок здесь не нужен — предупреждение живёт только на стене."""
+        try:
+            with db._get_cursor() as cursor:
+                deals = load_lead_deals(cursor, day)
+                phones = {phone for deal in deals for phone in cdr_leads_mod.lead_phones(deal)}
+                touches = [touch for touch in load_lead_touches(cursor, day)
+                           if touch['phone'] in phones]
+        except Exception:  # noqa: BLE001
+            log.exception('%s: сделки amoCRM за %s для принятия лида не прочитались', label, day)
+            return None
+        end = datetime.combine(day + timedelta(days=1), datetime.min.time()) - timedelta(microseconds=1)
+        now = min(datetime.now(_ALMATY).replace(tzinfo=None), end)
+        exts, group_ids = lead_speed_mod.osnova_scope(people, memberships)
+        block = lead_speed_mod.take_speed(deals, touches, exts, now)
+        block.update(group_ids=group_ids, synced_age_seconds=None)
+        return block
+
     def _fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
@@ -408,13 +539,18 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             # а не уносит с собой всё табло.
             log.exception('%s: статусы iCORE Phone не прочитались', label)
             statuses = {}
+        try:
+            lead_speed = _lead_speed(day, now, people, memberships, time.time())
+        except Exception:  # noqa: BLE001
+            log.exception('%s: принятие лида в работу не посчиталось', label)
+            lead_speed = None
         return snapshot_mod.assemble(
             day=day, touches=touches, people=people, live_statuses=statuses,
             status_entry=status_entry, resolve_name=_resolve_name(),
             bridge_state=bridge_state, now=now, sl_seconds=sl_seconds,
             ar_min_percent=ar_min_percent, ar_max_percent=ar_max_percent,
             announce_seconds=announce_seconds, memberships=memberships,
-            queue_owners=queue_owners, phone_events=phone_events)
+            queue_owners=queue_owners, phone_events=phone_events, lead_speed=lead_speed)
 
     def _snapshot():
         """Снимок из общего кэша — один на всех зрителей и на отбивку. Бросает, если

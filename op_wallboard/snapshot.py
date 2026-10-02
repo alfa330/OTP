@@ -522,14 +522,18 @@ def count_now(people_rows):
 def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
              bridge_state, now, sl_seconds=DEFAULT_SL_SECONDS,
              ar_min_percent=DEFAULT_AR_MIN_PERCENT, ar_max_percent=DEFAULT_AR_MAX_PERCENT,
-             announce_seconds=None, memberships=None, queue_owners=None, phone_events=None):
+             announce_seconds=None, memberships=None, queue_owners=None, phone_events=None,
+             lead_speed=None):
     """Снимок целиком. `bridge_state` — строка `cdr_agent_state` (live_at, last_seen_at);
     `announce_seconds` — {очередь: длина автоинформатора}, по которой касаниям уже поставлен
     `queued_at` (отдаётся в снимке для прозрачности: видно, от чего отсчитано ожидание).
 
     `memberships` — {operator_id: группа} (`group_catalog`), `queue_owners` — {очередь: id группы}
     (`queue_owner_groups`), `phone_events` — события телефонов с вечера прошлых суток: из них
-    разрезы по группам и время входа (ТЗ #339). Без них снимок прежний."""
+    разрезы по группам и время входа (ТЗ #339). Без них снимок прежний.
+
+    `lead_speed` — готовый блок «Принятие лида в работу» (`lead_speed.take_speed` + группы
+    «Основы» и возраст снимка сделок); None — сделки не прочитались, на экране прочерк."""
     parts = aggregate(touches, sl_seconds)
     rows = build_people(people, live_statuses, status_entry, parts['by_ext'], resolve_name)
     catalog = group_catalog(memberships)
@@ -550,6 +554,7 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
         'now': count_now(rows),
         'operators': rows,
         'groups': groups,
+        'lead_speed': lead_speed,
         'bridge': {
             'connected': bool(bridge_state and bridge_state.get('connected')),
             'last_seen_at': _local_stamp((bridge_state or {}).get('last_seen_at')),

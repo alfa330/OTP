@@ -46339,8 +46339,9 @@ def _op_broadcast_attach_period(data, now, day_parts):
     hour_start = hour_end - timedelta(hours=1)
     report_day = hour_start.date()
     if str(out.get('day') or '') != report_day.isoformat():
-        parts = day_parts(report_day)
-        out.update(day=parts['day'], totals=parts['totals'], hourly=parts['hourly'])
+        parts = day_parts(report_day, with_leads=True)
+        out.update(day=parts['day'], totals=parts['totals'], hourly=parts['hourly'],
+                   lead_speed=parts.get('lead_speed'))
     out['day_closed'] = report_day != now.date()
     out['day_label'] = ('За %s' % report_day.strftime('%d.%m')) if out['day_closed'] else 'За день'
     # Пометка периода у «Обратите внимание»: «за день» или, в полночь, «за день 16.09».
@@ -46354,6 +46355,15 @@ def _op_broadcast_attach_period(data, now, day_parts):
     # это будут прочерки, а не падение отбивки.
     out['hour_totals'] = next((dict(item) for item in (out.get('hourly') or [])
                                if item.get('hour') == hour_start.hour), {})
+    # «Принятие лида в работу» (владелец, 02.10.2026: «в показателях за час тоже»): день — блок
+    # снимка, час — сделки, взятые в работу в этот час (op_wallboard/lead_speed.py). Кладётся в
+    # те же словари итогов, что читают плитки и таблица; нет блока (не «Основа», сделки не
+    # прочитались) — прочерк.
+    lead = out.get('lead_speed') or {}
+    lead_hour = next((item for item in (lead.get('hourly') or [])
+                      if item.get('hour') == hour_start.hour), {})
+    out['totals'] = dict(out.get('totals') or {}, lead_take_seconds=lead.get('avg_seconds'))
+    out['hour_totals']['lead_take_seconds'] = lead_hour.get('avg_seconds')
     return out
 
 
@@ -46374,6 +46384,9 @@ def _op_broadcast_group_view(data, group_id, day_parts):
     out['operators'] = [row for row in (data.get('operators') or []) if row.get('group_id') == group_id]
     out['group_id'] = group_id
     out['group_label'] = (group or {}).get('label') or 'группа %s' % group_id
+    # «Принятие лида» — показатель «Основы»: у остальных групп своих сделок amoCRM нет, как на стене.
+    lead = data.get('lead_speed') or {}
+    out['lead_speed'] = data.get('lead_speed') if group_id in (lead.get('group_ids') or []) else None
     return out
 
 
@@ -46410,11 +46423,11 @@ def _op_broadcast_collect(scheduled=False, now=None, group_id=None):
     data['stamp'] = ('%s.%s %s' % (stamp[8:10], stamp[5:7], stamp[11:16])) if len(stamp) >= 16 else ''
     now = now or datetime.now(ZoneInfo(OP_BROADCAST_TIMEZONE)).replace(tzinfo=None)
 
-    def day_parts(day):
+    def day_parts(day, with_leads=False):
         loader = globals().get('_op_wallboard_day_parts')
         if loader is None:
             raise RuntimeError('Табло ОП не подключено — итогов прошлых суток взять негде')
-        return loader(day, group_id) if group_id is not None else loader(day)
+        return loader(day, group_id, with_leads=with_leads)
 
     if group_id is not None:
         data = _op_broadcast_group_view(data, int(group_id), day_parts)
@@ -46432,6 +46445,18 @@ def _op_broadcast_duration(seconds):
         return '—'
     seconds = int(seconds)
     return '%d:%02d' % (seconds // 60, seconds % 60)
+
+
+def _op_broadcast_wait(seconds):
+    """«Принятие лида» — как на стене (formatDuration): «М:СС», а от часа — «Ч:ММ:СС»: ожидание
+    звонка бывает и в часы, и «75:30» читалось бы хуже, чем «1:15:30» на экране рядом."""
+    if seconds is None:
+        return '—'
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    if hours:
+        return '%d:%02d:%02d' % (hours, rest // 60, rest % 60)
+    return '%d:%02d' % (rest // 60, rest % 60)
 
 
 def _op_broadcast_period_notes(data, totals, period):
@@ -46511,6 +46536,8 @@ _OP_BROADCAST_TABLE_ROWS = (
     # ASA у ОП — это avg_wait_seconds снимка: ожидание принятых от входа в очередь до ответа.
     ('ASA', lambda t: _wallboard_format_asa(t.get('avg_wait_seconds'))),
     ('Исходящих', lambda t: str(_szov_wallboard_int(t.get('outgoing')))),
+    # От сделки в amoCRM до первого набора; в час — по сделкам, взятым в работу в этот час.
+    ('Принятие лида', lambda t: _op_broadcast_wait(t.get('lead_take_seconds'))),
 )
 
 
@@ -46595,13 +46622,15 @@ def _op_render_wallboard_png(data):
     """PNG «Табло ОП»: те же плитки, что на стене, тем же рисовальщиком, что у СЗоВ."""
     totals = data.get('totals') or {}
     now = data.get('now') or {}
-    # Два ряда: второй ряд показателей дня — ровно как на стене, под ним люди «на сейчас».
+    # Два ряда: второй ряд показателей дня — как на стене, с «Принятием лида» рядом с исходящими
+    # (подпись короче, чем на стене: «…в работу» не влезает в пятую плитку ряда); под ним люди.
     stat_tiles = [
         [
             ('SL', _op_broadcast_percent(totals.get('sl'))),
             ('Разговор', _op_broadcast_duration(totals.get('avg_talk_seconds'))),
             ('ASA', _wallboard_format_asa(totals.get('avg_wait_seconds'))),
             ('Исходящих', str(_szov_wallboard_int(totals.get('outgoing')))),
+            ('Принятие лида', _op_broadcast_wait(totals.get('lead_take_seconds'))),
         ],
         [
             ('Онлайн', str(_szov_wallboard_int(now.get('operators_online')))),
@@ -46624,6 +46653,8 @@ def _op_render_hour_png(data):
         ('Разговор', _op_broadcast_duration(hour.get('avg_talk_seconds'))),
         ('ASA', _wallboard_format_asa(hour.get('avg_wait_seconds'))),
         ('Исходящих', str(_szov_wallboard_int(hour.get('outgoing')))),
+        # Сделки, взятые в работу в этот час: первый набор пришёлся на него.
+        ('Принятие лида', _op_broadcast_wait(hour.get('lead_take_seconds'))),
     ]
     return _szov_render_tiles_png('Табло ОП · за час',
                                   '%s · %s · %s' % (_op_broadcast_scope(data), data.get('hour_label') or '',
@@ -47096,13 +47127,20 @@ async def cdr_missed_amo_job():
                      ', '.join('%s %s' % (key, value) for key, value in sorted(summary.items())))
 
 
-async def op_funnel_amo_incremental_job():
-    """Догон изменений сделок amoCRM раз в 15 минут + связывание разборов со сделками.
+OP_FUNNEL_LINK_INTERVAL_SECONDS = 15 * 60
+_op_funnel_link_state = {'at': 0.0}
 
-    Требование ТЗ #317 (раздел 4): «не реже 1 раза в 15 мин». Инкремент по
-    `updated_at` — десятки сделок за четверть часа, а не 86 страниц воронки.
-    Следом — связывание НОВЫХ разборов со сделками (только тех, у кого связи
-    ещё нет): свежий разбор получает свой канал и парк, не дожидаясь ночи.
+
+async def op_funnel_amo_incremental_job():
+    """Догон изменений сделок amoCRM раз в 3 минуты + связывание разборов со сделками раз в 15.
+
+    Требование ТЗ #317 (раздел 4): «не реже 1 раза в 15 мин»; с 02.10.2026 — раз в 3 минуты,
+    по просьбе владельца: сделки нужны табло «Принятие лида в работу» почти сразу. Инкремент по
+    `updated_at` — десятки сделок за прогон, а не 86 страниц воронки.
+    Следом — связывание НОВЫХ разборов со сделками (только тех, у кого связи ещё нет): свежий
+    разбор получает свой канал и парк, не дожидаясь ночи. Связывание — не чаще раза в
+    15 минут, как и было: каждый раз оно проходит словарём парков по всей таблице сделок, и
+    впятеро чаще базе с 0,1 CPU это незачем — разборы приходят реже, чем сделки.
 
     Тот же пул op_funnel_pool (один поток), что у ночной выгрузки: два прогона
     по одним таблицам одновременно — это гонка за одни и те же строки.
@@ -47118,12 +47156,16 @@ async def op_funnel_amo_incremental_job():
             op_funnel_pool, lambda: op_funnel_sync.sync_amo_changes(db))
         if summary.get('status') != 'ok':
             logging.warning("Воронка ОП: инкремент amoCRM не удался: %s", summary.get('error'))
-        elif summary.get('leads_seen'):
+        elif summary.get('leads_written'):
+            # В лог — только когда снимок поменялся: прогонов теперь 480 в сутки.
             logging.info("Воронка ОП: инкремент amoCRM — сделок %s, в снимок %s, в журнал этапов %s",
                          summary.get('leads_seen'), summary.get('leads_written'),
                          summary.get('stage_rows'))
     except Exception as exc:
         logging.error("Воронка ОП: инкремент amoCRM упал: %s", exc, exc_info=True)
+    if time.time() - _op_funnel_link_state['at'] < OP_FUNNEL_LINK_INTERVAL_SECONDS:
+        return
+    _op_funnel_link_state['at'] = time.time()
     try:
         linked = await loop.run_in_executor(
             op_funnel_pool, lambda: _ai_qa_marketing_link_now(full=False))
@@ -69490,20 +69532,22 @@ if __name__ == '__main__':
     except Exception:
         logging.exception("Воронка ОП: планировщик НЕ подключён")
 
-    # ── Маркетинговый мониторинг: инкремент amoCRM и связывание раз в 15 минут ──
-    # Минуты 3/18/33/48, а не 0/15/30/45: на «круглых» минутах уже стоят
-    # выгрузка лидов по источникам (x:10) и другие джобы, и толпиться с ними на
-    # одном коннекте к amoCRM незачем.
+    # ── «Воронка ОП» и маркетинговый мониторинг: инкремент amoCRM раз в 3 минуты ──
+    # Раз в 3 минуты — владелец 02.10.2026: сделки нужны табло «Принятие лида в работу» почти
+    # сразу, а не через четверть часа (связывание разборов сама джоба держит раз в 15 минут).
+    # Минуты 2/5/8…/59: мимо 0/15/30/45 и x:10, где уже стоят отбивки и выгрузка лидов по
+    # источникам. Прогон — секунды (95 % за неделю до 8 с); если массовая правка в amoCRM
+    # растянет его дольше трёх минут, следующий запуск просто пропустится.
     try:
         scheduler.add_job(
             op_funnel_amo_incremental_job,
-            CronTrigger(minute='3,18,33,48', timezone=ZoneInfo('Asia/Almaty')),
+            CronTrigger(minute='2-59/3', timezone=ZoneInfo('Asia/Almaty')),
             id='op_funnel_amo_incremental',
-            misfire_grace_time=300,
+            misfire_grace_time=120,
             max_instances=1,
             coalesce=True
         )
-        logging.info("⏰ Маркетинговый мониторинг: инкремент amoCRM и связывание каждые 15 минут")
+        logging.info("⏰ Воронка ОП: инкремент amoCRM каждые 3 минуты, связывание разборов — раз в 15")
     except Exception:
         logging.exception("Маркетинговый мониторинг: планировщик НЕ подключён")
 

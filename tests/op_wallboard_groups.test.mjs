@@ -46,6 +46,14 @@ test('выбранная группа подменяет итоги, часы, �
     assert.equal(view.day, '2026-09-17');
 });
 
+test('«Принятие лида в работу» — только у «Основы» и во «Все», у ЯР прочерк', () => {
+    const withLeads = { ...snapshot, lead_speed: { group_ids: [36], avg_seconds: 252, taken: 41 } };
+    assert.equal(opGroupView(withLeads, opSelectedGroup(withLeads, '36')).lead_speed.avg_seconds, 252);
+    assert.equal(opGroupView(withLeads, opSelectedGroup(withLeads, '15')).lead_speed, null);
+    assert.equal(opGroupView(withLeads, null).lead_speed.avg_seconds, 252);
+    assert.equal(opGroupView(snapshot, opSelectedGroup(snapshot, '36')).lead_speed, null);
+});
+
 test('«Все» и исчезнувшая группа — снимок отдела как есть', () => {
     assert.equal(opGroupView(snapshot, opSelectedGroup(snapshot, OP_GROUP_ALL)), snapshot);
     assert.equal(opSelectedGroup(snapshot, '38'), null);

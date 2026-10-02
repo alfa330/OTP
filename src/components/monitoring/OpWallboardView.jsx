@@ -18,6 +18,7 @@ import {
     opClockLabel,
     opDataGapNotice,
     opFreshnessNotice,
+    opLeadSyncNotice,
     opMetricHint,
     opChatClockLabel,
     opChatFreshnessNotice,
@@ -268,20 +269,25 @@ function OpWallboardBody({ snapshot, hourRange = null, scale = 1, showGroup = fa
                 </Grid>
             </Section>
             <Section icon="fa-chart-bar" title="Показатели за день">
-                <Grid>
+                {/* Девять плиток — три ряда по три, одной сеткой: при четырёх в ряд девятая стояла
+                    бы одна с тремя пустыми ячейками, а пустая ячейка со стены читается как «сюда
+                    что-то не приехало». Ряды по смыслу: объём входящих, качество их обслуживания,
+                    разговор и исходящая работа — с принятием лида в работу рядом с исходящими. */}
+                <Grid cols={3}>
                     <MetricStatTile metricKey="op_arrived" snapshot={snapshot} scale={scale} />
                     <MetricStatTile metricKey="op_answered" snapshot={snapshot} scale={scale} />
                     <MetricStatTile metricKey="op_missed" snapshot={snapshot} scale={scale} />
                     <MetricStatTile metricKey="op_ar" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="op_sl" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="op_avg_wait" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="op_avg_talk" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="op_outgoing" snapshot={snapshot} scale={scale} />
+                    {/* Уже lg сетка в две колонки (на телефоне — и в оболочке): девятая плитка там
+                        во всю строку, а не одна рядом с пустой ячейкой. */}
+                    <div className="col-span-2 grid lg:col-span-1">
+                        <MetricStatTile metricKey="op_lead_take" snapshot={snapshot} scale={scale} />
+                    </div>
                 </Grid>
-                <div className="mt-3">
-                    <Grid>
-                        <MetricStatTile metricKey="op_sl" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="op_avg_talk" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="op_avg_wait" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="op_outgoing" snapshot={snapshot} scale={scale} />
-                    </Grid>
-                </div>
             </Section>
             <Section icon="fa-clock" title="По часам" right={<HourlyLegend />}>
                 <HourlyBars snapshot={snapshot} range={hourRange} scale={scale} />
@@ -347,6 +353,9 @@ function OpLineWallboard({
     // Прочерк в SL и ожидании без объяснения читался бы как поломка табло: причина — в данных
     // станции, и сказать об этом надо один раз, серым, рядом с заголовком.
     const dataGap = useMemo(() => opDataGapNotice(snapshot), [snapshot]);
+    // Список сделок amoCRM замер, а мост жив: плитка «Принятие лида» считает по старым сделкам.
+    // По виду группы: у ЯР и «Потока» плитка — прочерк, предупреждать про неё там нечего.
+    const leadSync = useMemo(() => opLeadSyncNotice(view), [view]);
 
     const groupSwitch = groupOptions.length > 1 ? (
         <IosSegmented
@@ -377,6 +386,12 @@ function OpLineWallboard({
                     <div className="mt-1 inline-flex items-center gap-2 rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] text-slate-600">
                         <FaIcon className="fas fa-circle-info"></FaIcon>
                         {dataGap}
+                    </div>
+                ) : null}
+                {leadSync ? (
+                    <div className="mt-1 inline-flex items-center gap-2 rounded-full bg-amber-50 px-2.5 py-0.5 text-[12px] text-amber-800 ring-1 ring-amber-200">
+                        <FaIcon className="fas fa-triangle-exclamation"></FaIcon>
+                        {leadSync}
                     </div>
                 ) : null}
             </div>

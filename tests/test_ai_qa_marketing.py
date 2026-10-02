@@ -228,7 +228,8 @@ class WiringTests(unittest.TestCase):
                       '/api/ai-qa/marketing/relink'):
             self.assertIn(f"@app.route('{route}'", src)
         self.assertIn("id='op_funnel_amo_incremental'", src)
-        self.assertIn("minute='3,18,33,48'", src)
+        # Раз в 3 минуты с 02.10.2026 (ТЗ #317 требует не реже 15 мин) — см. test_op_funnel_incremental.
+        self.assertIn("minute='2-59/3'", src)
         # Обе формы массива: axios шлёт со скобками, curl — без.
         self.assertIn("request.args.getlist(key + '[]')", src)
         # Карточка несёт сделку.
