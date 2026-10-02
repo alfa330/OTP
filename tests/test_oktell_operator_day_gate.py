@@ -219,6 +219,19 @@ class OperatorLookupRestrictTests(unittest.TestCase):
         ids = {info["id"] for infos in lookup.values() for info in infos}
         self.assertEqual(ids, {2})
 
+    def test_status_rides_along_and_exclude_fired_still_works(self):
+        """Статус сотрудника (колонка 9) едет в lookup: табло СЗоВ «Чат» по нему не пускает
+        уволенных в «Не в системе», не выкидывая их из lookup (их часы в прошлых днях нужны)."""
+        rows = [row + (status,) for row, status in zip(self._operators(), ("working", "fired", "dismissal"))]
+        self.ns["db"] = _FakeDB(all_operators=rows)
+        statuses = {info["id"]: info["status"] for infos in self.build_lookup().values() for info in infos}
+        self.assertEqual(statuses, {1: "working", 2: "fired", 3: "dismissal"})
+        kept = {info["id"] for infos in self.build_lookup(exclude_fired=True).values() for info in infos}
+        self.assertEqual(kept, {1})
+        # Старые строки без колонки статуса: пустой статус, а не исключение.
+        self.ns["db"] = _FakeDB(all_operators=self._operators())
+        self.assertEqual({info["status"] for infos in self.build_lookup().values() for info in infos}, {""})
+
 
 if __name__ == "__main__":
     unittest.main()

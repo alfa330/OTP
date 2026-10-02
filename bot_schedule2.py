@@ -35136,11 +35136,14 @@ def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_t
             'id': operator_id,
             'name': operator_name,
             'direction_name': str(row[7] or '').strip() if len(row) > 7 else '',
-            'calculation_model_code': str(row[8] or '').strip().lower() if len(row) > 8 else ''
+            'calculation_model_code': str(row[8] or '').strip().lower() if len(row) > 8 else '',
+            # Статус сотрудника едет рядом: табло СЗоВ «Чат» не показывает уволенных в «Не в
+            # системе», но держит их в lookup — иначе пропали бы их часы в прошлых днях.
+            'status': str(row[9] or '').strip() if len(row) > 9 else '',
         }
         if exclude_chat_managers and _operator_info_is_chat_manager(operator_info):
             continue
-        if exclude_fired and len(row) > 9 and str(row[9] or '').strip() in ('fired', 'dismissal'):
+        if exclude_fired and operator_info['status'] in ('fired', 'dismissal'):
             continue
         for key in _status_import_operator_name_variants(operator_name):
             lookup.setdefault(key, [])
@@ -43210,11 +43213,13 @@ def _szov_chat_wallboard_last_visit(row):
     text = re.sub(r'\s*(?:UTC|Z)$', '+00:00', text, flags=re.IGNORECASE)
     try:
         moment = datetime.fromisoformat(text)
-    except ValueError:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        # Перевод зоны тоже внутри: у «9999-12-31T23:59:59 UTC» сдвиг на +5 часов выходит за
+        # календарь (OverflowError), и одна кривая строка ростера уронила бы весь снимок.
+        return moment.astimezone(ZoneInfo(CHAT_HOURLY_TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, OverflowError):
         return ''
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(ZoneInfo(CHAT_HOURLY_TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def _szov_chat_wallboard_left_at(entries, rows):
@@ -43245,8 +43250,8 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
     качества, и один и тот же «7 в работе» одинаково выглядит у того, кто отвечает за минуту,
     и у того, кто держит клиента десять.
     Вышедшие идут отдельным списком `offline_operators` (запрос владельца 02.10.2026): раньше
-    табло знало о них только число «Не в системе», а кто это и с какого часа — нет. Список
-    сходится с числом человек в человека: оба собираются в одних и тех же ветках ниже."""
+    табло знало о них только число «Не в системе», а кто это и с какого часа — нет. Число
+    `operators_offline` — длина этого списка: по сотруднику одна строка, уволенных нет."""
     counts = {key: 0 for key in _SZOV_CHAT_WALLBOARD_STATUS_ORDER}
     people = []
     offline_people = []
@@ -43305,6 +43310,7 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
                 'operator_id': operator.get('id'),
                 'name': operator.get('name') or oktell_name,
                 'since': _szov_chat_wallboard_left_at(entries, [row]),
+                'status': operator.get('status') or '',
             })
     # Учётка могла быть отключена посреди дня — в живом списке её уже нет, а события за сутки
     # остались. На линии такой человек не стоит (учётки больше нет), поэтому считаем его
@@ -43317,13 +43323,33 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
     for oktell_name, entries in timelines.items():
         if oktell_name in seen or not entries:
             continue
-        counts['offline'] = counts.get('offline', 0) + 1
+        # Только если учётка работала СЕГОДНЯ. Перенесённый со вчера статус лежит на
+        # 00:00:00 у любой учётки, тронутой за неделю хранения событий, — и отключённая
+        # давно (уволили, завели новую) неделю висела бы «не в системе», а потом молча пропала.
+        if not any(entry[0] > 0 for entry in entries):
+            continue
         operator = _szov_chat_wallboard_resolve(oktell_name, lookup) or {}
         offline_people.append({
             'operator_id': operator.get('id'),
             'name': operator.get('name') or oktell_name,
             'since': _szov_chat_wallboard_left_at(entries, rows_by_name.get(oktell_name)),
+            'status': operator.get('status') or '',
         })
+    # «Не в системе» — сотрудники, а не учётки. Учёток у человека бывает две (старую забыли
+    # отключить, новую завели с другим написанием имени): если хоть одна из них на смене, в
+    # «Не в системе» его нет, иначе строка одна — с самым поздним выходом. Уволенных здесь нет:
+    # учётку при увольнении отключают не всегда, а «не на смене» уволенный уже не стоит.
+    # Число на плитке — длина этого же списка, поэтому разойтись они не могут.
+    on_shift_ids = {item['operator_id'] for item in people}
+    latest = {}
+    for item in offline_people:
+        if item.pop('status', '') in ('fired', 'dismissal') or item['operator_id'] in on_shift_ids:
+            continue
+        key = item['operator_id'] if item['operator_id'] is not None else ('name', item['name'])
+        current = latest.get(key)
+        if current is None or item['since'] > current['since']:
+            latest[key] = item
+    offline_people = list(latest.values())
     people.sort(key=lambda item: (
         _SZOV_CHAT_WALLBOARD_STATUS_RANK.get(item['status_key'], len(_SZOV_CHAT_WALLBOARD_STATUS_ORDER)),
         -int(item['open_chats'] or 0), item['name']))
@@ -43338,7 +43364,7 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, r
         'operators_on_break': counts.get('break', 0) + counts.get('tech', 0),
         'operators_on_holiday': counts.get('holiday', 0),
         'operators_other': counts.get(_SZOV_CHAT_WALLBOARD_OTHER_KEY, 0),
-        'operators_offline': counts.get('offline', 0),
+        'operators_offline': len(offline_people),
         'open_chats': open_chats_total,
         'operators': people,
         'offline_operators': offline_people,

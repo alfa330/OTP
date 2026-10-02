@@ -74,20 +74,32 @@ export const Section = ({ icon, title, right = null, children }) => (
 /*
  * Сетка плиток. По умолчанию четыре в ряд, `cols` нужен там, где показателей ровно три: иначе
  * четвёртая ячейка остаётся пустой дырой и со стены читается как «сюда что-то не приехало».
+ * Пять в ряд — только с xl: на узком мониторе рядом с колонкой людей пятая плитка сжала бы
+ * крупные цифры до переноса; ниже xl они идут по две.
  * Классы перечислены целиком, а не склеены из числа: Tailwind собирает их по тексту файла и
  * имени, собранного в рантайме, в бандле просто не окажется.
  */
-const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4' };
+const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'xl:grid-cols-5' };
 
 export const Grid = ({ cols = 4, children }) => (
     <div className={`grid grid-cols-2 gap-4 ${GRID_COLS[cols] || GRID_COLS[4]}`}>{children}</div>
 );
 
-/** Ключевая плитка: цветной фон, самая крупная цифра. */
-export const KeyTile = ({ label, value, hint = null, tone = 'neutral', scale = 1 }) => {
+/*
+ * Ключевая плитка: цветной фон, самая крупная цифра. С `onClick` плитка становится кнопкой —
+ * число на ней ведёт к тому, из кого оно складывается (вид тот же, отличает только курсор и
+ * отклик на наведение). `className` — для места в сетке (например, на всю ширину на телефоне).
+ */
+export const KeyTile = ({ label, value, hint = null, tone = 'neutral', scale = 1,
+                          onClick = null, title = null, className = '' }) => {
     const palette = KEY_PALETTE[tone] || KEY_PALETTE.neutral;
+    const Root = onClick ? 'button' : 'div';
     return (
-        <div className={`flex flex-col items-center gap-2 rounded-2xl px-4 py-6 text-center ${palette.bg}`}>
+        <Root
+            {...(onClick ? { type: 'button', onClick, title: title || undefined } : {})}
+            className={`flex flex-col items-center gap-2 rounded-2xl px-4 py-6 text-center ${palette.bg} ${
+                onClick ? 'cursor-pointer transition hover:brightness-[0.97] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/60' : ''} ${className}`}
+        >
             <div className={`text-[15px] font-semibold ${palette.text}`}>{label}</div>
             <div
                 className={`font-semibold tabular-nums leading-none ${palette.text}`}
@@ -96,7 +108,7 @@ export const KeyTile = ({ label, value, hint = null, tone = 'neutral', scale = 1
                 {value}
             </div>
             {hint ? <div className={`text-[13px] leading-tight ${palette.hint}`}>{hint}</div> : null}
-        </div>
+        </Root>
     );
 };
 

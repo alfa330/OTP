@@ -30,8 +30,9 @@ import {
  * направления стоит в шапке, раскладка повторяет «Линию», чтобы взгляд не переучивался.
  *
  * Что показываем и почему именно это:
- *   - счётчики «сейчас» — сколько чатников на линии, сколько заняты и сколько на тренинге
- *     (запрос владельца); открытые чаты в этом ряду играют роль очереди с «Линии»;
+ *   - счётчики «сейчас» — сколько чатников на линии, сколько заняты, сколько на тренинге и
+ *     сколько не в системе (запросы владельца); открытые чаты в этом ряду играют роль очереди
+ *     с «Линии»;
  *   - график по часам — среднее время ответа ВНУТРИ чата (левая ось, минуты) против того,
  *     сколько чатников держало линию в этот час (правая ось, люди; занятые и на тренинге линию
  *     не держат, их минуты в сумму не идут).
@@ -84,12 +85,10 @@ const OfflinePeopleList = ({ items, day, nameSize }) => (
  * Страниц у колонки две — «На смене» и «Не в системе» (запрос владельца 02.10.2026). Раньше
  * вышедших было видно только числом внизу колонки, а кто это — со стены не узнать. Общим
  * списком их не показать: смена утонула бы среди тех, кто ушёл домой. Число людей стоит на
- * каждой вкладке, по умолчанию открыта смена — на стене смотрят прежде всего её. Вкладка —
- * состояние экрана, как и режим подсказки графика: встроенный и полноэкранный режим
- * переключаются каждый сам за себя.
+ * каждой вкладке, по умолчанию открыта смена — на стене смотрят прежде всего её. Вкладкой
+ * управляет тело табло (`page`/`onPageChange`): её открывает и плитка «Не в системе» слева.
  */
-const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, scale = 1 }) => {
-    const [page, setPage] = useState('shift');
+export const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, scale = 1, page, onPageChange }) => {
     const items = Array.isArray(people) ? people : [];
     const offlineItems = Array.isArray(offlinePeople) ? offlinePeople : [];
     const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
@@ -98,7 +97,7 @@ const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, scale = 1
             <IosSegmented
                 stretch
                 value={page}
-                onChange={setPage}
+                onChange={onPageChange}
                 ariaLabel="Чатники"
                 className="mb-2"
                 options={[
@@ -386,6 +385,9 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     // Режим подсказки графика — состояние экрана, а не данных: в снимке ему делать нечего, а
     // полноэкранный режим и встроенный переключаются каждый сам за себя.
     const [tooltipMode, setTooltipMode] = useState(HOURLY_TOOLTIP_MODES[0].key);
+    // Страница правой колонки: «На смене» или «Не в системе». Живёт здесь, а не в колонке:
+    // её открывает и плитка «Не в системе» — число ведёт к тому, кто за ним стоит.
+    const [peoplePage, setPeoplePage] = useState('shift');
     const now = snapshot?.now || {};
     const today = snapshot?.today || {};
     const targetSeconds = Number(snapshot?.target_seconds) || 120;
@@ -393,7 +395,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     const innerTone = inner === null || inner === undefined
         ? 'neutral' : (Number(inner) <= targetSeconds ? 'good' : 'bad');
 
-    // «Закрытие чатов» и «не в системе» своих плиток не имеют — как тренинг и тех.причина на
+    // Перерыв и «Закрытие чатов» своих плиток не имеют — как тренинг и тех.причина на
     // «Линии», показываем их приглушённой строкой и только когда есть кого показывать.
     const asideParts = [
         [Number(now.operators_on_break) || 0, 'на перерыве'],
@@ -409,14 +411,22 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]" style={{ fontFamily: APPLE_FONT }}>
             <div className="space-y-4">
                 <Section icon="fa-bolt" title="Чатники · сейчас">
-                    <Grid>
+                    {/* «Не в системе» — плиткой на самом табло (запрос владельца 02.10.2026: числа
+                        только во вкладке справа мало). Стоит рядом с остальными людьми, до чатов;
+                        нажатие открывает справа список — кто это и с какого момента. */}
+                    <Grid cols={5}>
                         <KeyTile label="Онлайн" value={formatInt(now.operators_online)} tone="info" scale={scale}
                                  hint="держат линию" />
                         <KeyTile label="Занят" value={formatInt(now.operators_busy)} tone="violet" scale={scale}
                                  hint="в системе, но не на линии" />
                         <KeyTile label="Тренинг" value={formatInt(now.operators_on_training)} tone="good" scale={scale} />
+                        <KeyTile label="Не в системе" value={formatInt(now.operators_offline)} tone="neutral"
+                                 scale={scale} title="Показать, кто не в системе"
+                                 onClick={() => setPeoplePage('offline')} />
+                        {/* Пятая плитка ниже xl идёт на всю ширину: иначе рядом с ней пустая
+                            ячейка, а она читается как «сюда что-то не приехало». */}
                         <KeyTile label="Открыто чатов" value={formatInt(now.open_chats)} tone="neutral" scale={scale}
-                                 hint="в работе у чатников" />
+                                 hint="в работе у чатников" className="col-span-2 xl:col-span-1" />
                     </Grid>
                     {asideParts.length > 0 ? (
                         <div className="mt-3 px-1 text-[14px] text-slate-400">Ещё {asideParts.join(' · ')}</div>
@@ -463,7 +473,8 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
             </div>
 
             <ChatPeopleColumn people={now.operators} offlinePeople={now.offline_operators} day={snapshot?.day}
-                              targetSeconds={targetSeconds} scale={scale} />
+                              targetSeconds={targetSeconds} scale={scale}
+                              page={peoplePage} onPageChange={setPeoplePage} />
         </div>
     );
 }

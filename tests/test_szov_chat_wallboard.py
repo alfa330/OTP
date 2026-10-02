@@ -607,9 +607,54 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
         ns = self._namespace()
         events = [_event('Алия Тестова', 'online', '2026-10-02 09:00:00')]
         rows = [dict(_operator_row('Алия Тестова', online=0, status='disabled'),
-                     last_visit='2026-10-02T06:30:00 UTC')]
+                     last_visit='2026-10-02T06:30:00 UTC'),
+                # У коллеги на смене last_visit свежий: чужая строка дала бы «вышла только что».
+                dict(_operator_row('Бекзат Примеров'), last_visit='2026-10-02T16:49:58 UTC')]
         now = self._now(ns, events, rows)
         self.assertEqual(now['offline_operators'][0]['since'], '2026-10-02 11:30:00')
+
+    def test_long_disabled_account_with_only_a_carried_status_is_not_listed(self):
+        """Учётку отключили давно: сегодня у неё только перенесённый на 00:00 статус. Это не
+        «вышла сегодня» — иначе она неделю висела бы в списке, а потом молча пропала."""
+        ns = self._namespace()
+        events = [_event('Алия Тестова', 'busy', '2026-10-02 00:00:00')]
+        rows = [dict(_operator_row('Алия Тестова', online=0, status='disabled'),
+                     last_visit='2026-09-30T18:59:46 UTC')]
+        now = self._now(ns, events, rows)
+        self.assertEqual((now['offline_operators'], now['operators_offline']), ([], 0))
+
+    def test_one_employee_is_one_row(self):
+        """Две учётки одного сотрудника (старую забыли отключить, новую завели с другим
+        написанием): если хоть одна на смене — в «Не в системе» его нет; иначе строка одна, с
+        самым поздним выходом, и в числе это один человек, а не две учётки."""
+        alia = CHAT_MANAGERS['Алия Тестова']
+        ns = self._namespace(operators={'Алия Тестова': alia, 'Тестова Алия': alia})
+        old_account = dict(_operator_row('Тестова Алия', online=0), last_visit='2026-09-28T10:00:00 UTC')
+        now = self._now(ns, [_event('Алия Тестова', 'online', '2026-10-02 09:00:00')],
+                        [_operator_row('Алия Тестова'), old_account])
+        self.assertEqual([person['name'] for person in now['operators']], ['Тестова Алия Тестовна'])
+        self.assertEqual((now['offline_operators'], now['operators_offline']), ([], 0))
+        now = self._now(ns, [], [dict(_operator_row('Алия Тестова', online=0),
+                                      last_visit='2026-10-02T11:00:00 UTC'), old_account])
+        self.assertEqual(now['offline_operators'], [
+            {'operator_id': 235, 'name': 'Тестова Алия Тестовна', 'since': '2026-10-02 16:00:00'}])
+        self.assertEqual(now['operators_offline'], 1)
+
+    def test_fired_chatter_is_not_listed_but_still_seen_on_shift(self):
+        """Уволенный с невыключенной учёткой — не «чатник не на смене»: ни в списке, ни в числе
+        его нет. Но если под учёткой работают, на смене он виден: линию держит живой человек."""
+        for status in ('fired', 'dismissal'):
+            fired = dict(CHAT_MANAGERS['Алия Тестова'], status=status)
+            ns = self._namespace(operators=dict(CHAT_MANAGERS, **{'Алия Тестова': fired}))
+            now = self._now(ns, [], [dict(_operator_row('Алия Тестова', online=0),
+                                          last_visit='2026-09-15T05:00:00 UTC'),
+                                     _operator_row('Дана Ночная', online=0)])
+            self.assertEqual([person['name'] for person in now['offline_operators']],
+                             ['Ночная Дана Сменовна'], status)
+            self.assertEqual(now['operators_offline'], 1, status)
+            now = self._now(ns, [_event('Алия Тестова', 'online', '2026-10-02 09:00:00')],
+                            [_operator_row('Алия Тестова')])
+            self.assertEqual(now['operators_online'], 1, status)
 
     def test_people_out_of_the_system_are_listed_by_name(self):
         """Запрос владельца 02.10.2026: видно не только СКОЛЬКО чатников не в системе, но и КТО.
@@ -680,7 +725,9 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
         self.assertEqual(visit('2026-10-02T13:59:52Z'), '2026-10-02 18:59:52')
         self.assertEqual(visit('2026-10-02T13:59:52+00:00'), '2026-10-02 18:59:52')
         self.assertEqual(visit('2026-10-02T21:00:00 utc'), '2026-10-03 02:00:00')  # сутки сменились
-        for broken in (None, '', 'вчера', '2026-13-45T99:00:00 UTC'):
+        # «9999-12-31T23:59:59 UTC» разбирается, но сдвиг на +5 часов выходит за календарь
+        # (OverflowError) — без перехвата одна такая строка ростера уронила бы весь снимок.
+        for broken in (None, '', 'вчера', '2026-13-45T99:00:00 UTC', '9999-12-31T23:59:59 UTC'):
             self.assertEqual(visit(broken), '', broken)
 
     def test_fresh_exits_come_first(self):
@@ -825,7 +872,10 @@ class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
 
     FETCHED_AT = datetime(2026, 10, 2, 17, 6, tzinfo=ZoneInfo('Asia/Almaty')).timestamp()
     ROSTER = [
-        dict(_operator_row('Алия Тестова', online=0, offline_type='busy'), id=1001, role='operator'),
+        # last_visit — на 29 с позже вендорского «Занят»: момент выхода должен доехать до списка
+        # через настоящий путь ростера (подмена открытых чатов копирует строку).
+        dict(_operator_row('Алия Тестова', online=0, offline_type='busy'), id=1001, role='operator',
+             last_visit='2026-10-02T12:00:30 UTC'),
         dict(_operator_row('Бекзат Примеров', online=1, offline_type='busy'), id=1002, role='operator'),
     ]
     EVENTS = [
@@ -846,10 +896,10 @@ class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
             'os': os, 'date': date, 'timedelta': timedelta, 'datetime': _FrozenDatetime,
             '_status_import_parse_datetime': lambda value, default_date=None: None,
             '_chat2desk_webhook_day_rows': lambda day_str: ([], True),
-            '_chat2desk_webhook_apply_open_chats': lambda rows: rows,
         })
         _load_names((ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig"), {
             'build_chat_webhook_status_rows', 'chat2desk_webhook_status_name',
+            '_chat2desk_webhook_apply_open_chats',
             '_chat2desk_webhook_roster', '_chat2desk_webhook_status_rows',
             '_chat2desk_webhook_status_cache', '_chat2desk_webhook_roster_snapshot',
             '_chat_hourly_operators_cache', 'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS',
@@ -858,6 +908,7 @@ class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
         }, ns)
         ns['_chat_hourly_fetch_operators'] = fetch
         ns['_chat_hourly_operators_cache']['snapshot'] = cached
+        ns['db'].get_c2d_open_chats_by_operator = lambda: {}
         ns['db'].get_c2d_operator_status_before = lambda moment: []
         ns['db'].get_c2d_operator_status_events = lambda day_from, day_to: list(self.EVENTS)
         return ns, ns['_szov_chat_wallboard_fetch_snapshot']()
@@ -876,10 +927,12 @@ class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
         self.assertEqual((now['operators_busy'], now['operators_offline']), (1, 1))
         self.assertEqual([(person['name'], person['status']) for person in now['operators']],
                          [('Примеров Бекзат Примерулы', 'Занят')])
-        # Вышедшая — на странице «Не в системе», с моментом выхода (вендорский «Занят»).
+        # Вышедшая — на странице «Не в системе», с моментом выхода по last_visit ростера: он
+        # позже вендорского «Занят» в 17:00:01 и доезжает сквозь подмену открытых чатов.
         self.assertEqual(now['offline_operators'],
                          [{'operator_id': 235, 'name': 'Тестова Алия Тестовна',
-                           'since': '2026-10-02 17:00:01'}])
+                           'since': '2026-10-02 17:00:30'}])
+        self.assertEqual(snapshot['day'], '2026-10-02')
         # Часы на линии до выхода остались за ней: онлайн с 09:00 до «Занят» в 17:00:01.
         hours = {row['hour']: row['operators_online'] for row in snapshot['hourly']}
         self.assertEqual((hours[9], hours[16], hours[17]), (2, 1, 0))
@@ -980,12 +1033,29 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn('<IosSegmented', column)
         self.assertIn("{ value: 'shift', label: 'На смене', count: items.length }", column)
         self.assertIn("{ value: 'offline', label: 'Не в системе', count: offlineItems.length }", column)
-        # По умолчанию открыта смена: на стене смотрят прежде всего её.
-        self.assertIn("useState('shift')", column)
         self.assertIn("formatOfflineSince(item.since, day)", column)
-        # Прежняя строка с одним числом ушла: число теперь на вкладке.
+        # Прежняя строка с одним числом ушла: число теперь на вкладке и плиткой на табло.
         self.assertNotIn('Не в системе: {', self.board)
         self.assertIn('offlinePeople={now.offline_operators} day={snapshot?.day}', self.board)
+        # Вкладкой управляет тело табло, по умолчанию открыта смена: на стене смотрят её.
+        self.assertIn("const [peoplePage, setPeoplePage] = useState('shift');", self.board)
+        self.assertIn('page={peoplePage} onPageChange={setPeoplePage}', self.board)
+
+    def test_board_shows_how_many_are_out_of_the_system(self):
+        """Уточнение владельца 02.10.2026: число «не в системе» должно быть на самом табло, а не
+        только во вкладке справа. Плитка стоит в ряду «Чатники · сейчас» рядом с остальными
+        людьми и по нажатию открывает справа список — кто это."""
+        tiles = self.board[self.board.index('title="Чатники · сейчас"'):
+                           self.board.index('title="Показатели за день"')]
+        self.assertIn('<Grid cols={5}>', tiles)
+        self.assertIn('<KeyTile label="Не в системе" value={formatInt(now.operators_offline)}', tiles)
+        self.assertIn("onClick={() => setPeoplePage('offline')}", tiles)
+        # Люди — до чатов: «Не в системе» стоит перед «Открыто чатов».
+        self.assertLess(tiles.index('label="Не в системе"'), tiles.index('label="Открыто чатов"'))
+        # Пять в ряд — только с xl, ниже пятая плитка на всю ширину, без пустой ячейки рядом.
+        grid = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardTiles.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("5: 'xl:grid-cols-5'", grid)
+        self.assertIn('className="col-span-2 xl:col-span-1"', tiles)
 
     def test_chat_board_shows_the_three_asked_counters(self):
         for label in ('label="Онлайн"', 'label="Занят"', 'label="Тренинг"'):
@@ -1017,7 +1087,8 @@ class ChatWallboardWiringTests(unittest.TestCase):
         tiles = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardTiles.jsx").read_text(
             encoding="utf-8-sig")
         # Классы перечислены целиком: собранное в рантайме имя Tailwind в бандл не положит.
-        self.assertIn("const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4' };", tiles)
+        self.assertIn("const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'xl:grid-cols-5' };",
+                      tiles)
 
     def test_holiday_is_closing_chats_not_a_vacation(self):
         """Подпись из справочника Chat2Desk (GET /v1/operators/statuses): `holiday` — это
