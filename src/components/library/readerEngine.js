@@ -500,9 +500,13 @@ export class ReaderEngine {
         return -1;
     }
 
-    /* С чего открывать новую книгу: первая линейная глава с ТЕКСТОМ. Отдельная
-       страница-обложка в начале книги не нужна — обложку читатель только что
-       видел раскрывающейся; пролистав назад, он найдёт её на месте. */
+    /* Страница-обложка (epubLoader.js: findCoverPage) — не страница книги:
+       обложку показывает закрытая книга (LibraryReader). */
+    isCover(index) { return Boolean(this.loader.spine[index]?.cover); }
+
+    /* С чего открывать новую книгу: первая линейная глава с ТЕКСТОМ. Страница-
+       обложка в счёт не идёт вовсе (она нелинейная); текст первым — на случай
+       обложки, которую распознать не удалось: картинка без единого знака. */
     firstLinear() {
         const chars = (index) => Number(this.book?.spine?.[index]?.chars) || 0;
         const withText = this.loader.spine.findIndex((item, index) => item.linear && chars(index) > 0);
@@ -793,7 +797,9 @@ export class ReaderEngine {
             return false;
         };
         return this.busy(async () => {
-            const target = this.loader.spine[section] ? section : this.firstLinear();
+            // Место на странице-обложке (сохранено, когда она была страницей)
+            // — это начало книги.
+            const target = this.loader.spine[section] && !this.isCover(section) ? section : this.firstLinear();
             const [main, second] = this.views;
             main.setSide(this.spread ? 'left' : 'single');
             if (this.spread) second.setSide('right');
@@ -817,6 +823,25 @@ export class ReaderEngine {
             this.prefetch();
             return true;
         });
+    }
+
+    /* Первый экран книги: назад листать некуда — дальше только закрыть её. */
+    isFirstPage() {
+        return Boolean(this.pos) && this.pos.page === 0 && this.linearBefore(this.pos.section) < 0;
+    }
+
+    /* Читатель в самом начале: на первом экране книги или там, откуда
+       открывается новая (firstLinear: до неё — разве что листы без текста). */
+    atBeginning() {
+        return Boolean(this.pos) && this.pos.page === 0
+            && (this.pos.section === this.firstLinear() || this.linearBefore(this.pos.section) < 0);
+    }
+
+    /* Книга лежит закрытой в начале: смена размера окна кладёт её снова на
+       первый экран. Без этого перекладка держала бы середину прошлого
+       разворота — стр. 1–2 на одной странице стали бы стр. 2. */
+    pinStart() {
+        if (this.pos) this.anchorPlace = { section: this.pos.section, fraction: 0 };
     }
 
     /* ---------- соседние экраны ---------- */
@@ -1226,6 +1251,12 @@ export class ReaderEngine {
        перехода — переход повторяется на новой вёрстке. */
     async jumpTo(section, anchor = '', fraction = 0, kind = 'jump') {
         if (this.closing) return false;
+        // Ссылка на страницу-обложку ведёт в начало книги: страницей она не
+        // показывается (закрыть книгу на обложке решает LibraryReader).
+        if (this.isCover(section)) {
+            const start = this.firstLinear();
+            return this.isCover(start) ? false : this.jumpTo(start, '', 0, kind);
+        }
         if (this.turn && !this.completeNow()) return false;
         if (this.turn || !this.metrics) return false;
         if (this.preparing) {
@@ -1337,7 +1368,8 @@ export class ReaderEngine {
 
     paginationKey() {
         const m = this.metrics;
-        return `lr-pages:v4:${this.cacheKey}:${m.mode}:${m.pageWidth - m.pad.inner - m.pad.outer}x${m.height - m.pad.top - m.pad.bottom}:${m.fontSize}`;
+        // v5: страница-обложка больше не страница — номера сдвинулись.
+        return `lr-pages:v5:${this.cacheKey}:${m.mode}:${m.pageWidth - m.pad.inner - m.pad.outer}x${m.height - m.pad.top - m.pad.bottom}:${m.fontSize}`;
     }
 
     applyPagination(pages, anchorPages, done) {

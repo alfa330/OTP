@@ -6,6 +6,10 @@
  *      развороте — на место правой страницы, у книги справа срез страниц),
  *      фон ридера проявляется под ней.
  *   2. Ожидание: книга ещё распаковывается — закрытая книга лежит на столе.
+ *      В начале книги она так и остаётся лежать, пока её не откроют: обложка
+ *      — не страница, и показывать её листом «1» значило бы читать её дважды.
+ *      На развороте закрытая книга лежит ПО ЦЕНТРУ стола (shift), а не на
+ *      месте правой страницы: так лежит закрытая книга, а не половина открытой.
  *   3. Раскрытие: обложка поворачивается вокруг корешка. На развороте тот же
  *      лист проходит ребром над корешком и ложится налево уже левой страницей —
  *      это сама страница движка, её поворот продолжает поворот обложки (одна
@@ -13,7 +17,8 @@
  *      ложащегося листа — свет, тень книги на столе растёт вслед за листом.
  *      На одной странице (телефон, узкое окно) обложка распахивается влево,
  *      как дверца, и уходит.
- *   4. Закрытие — те же кадры в обратную сторону, потом полёт в карточку.
+ *   4. Закрытие — те же кадры в обратную сторону, потом полёт в карточку (или
+ *      книга остаётся лежать закрытой — пролистали назад с первой страницы).
  *
  * ВСЁ — transform и opacity через Web Animations: такие анимации идут в потоке
  * композитора, и распаковка книги, вёрстка главы или подсчёт страниц в это
@@ -125,8 +130,15 @@ export const reverseFrames = (frames) => frames
  * Одна страница (single): обложка распахивается влево, взгляд — из середины
  * страницы; к ребру (90°) она уже растаяла — на телефоне дальше край экрана,
  * на компьютере изнанка легла бы на стол серым пятном.
+ *
+ * shift (только разворот): насколько закрытая книга лежит левее правой
+ * страницы — половина ширины страницы, когда она по центру стола. До середины
+ * хода, пока обложка встаёт ребром над корешком, она съезжает на место правой
+ * страницы, а раскрытая книга (pan — сдвиг всего ридера) — следом, тем же
+ * движением: в середине хода корешок уже на месте, и лист обложки сменяется
+ * левой страницей ровно над ним.
  */
-export const hingeFrames = ({ spread, pageWidth }) => {
+export const hingeFrames = ({ spread, pageWidth, shift = 0 }) => {
     const p = perspectiveFor(pageWidth);
     const cover = spread
         ? (deg) => `perspective(${p}px) rotateY(${deg}deg)`
@@ -159,6 +171,10 @@ export const hingeFrames = ({ spread, pageWidth }) => {
     }
 
     const leaf = (deg) => `perspective(${p}px) rotateY(${deg}deg)`;
+    const slide = (offset) => round(shift * Math.min(1, offset / 0.5));
+    // Сдвиг — первой функцией у каждого кадра: списки функций у соседних кадров
+    // обязаны совпадать, иначе браузер не интерполирует их по частям.
+    const moved = (offset, transform) => (shift ? `translateX(${slide(offset)}px) ${transform}` : transform);
     // Тень книги на столе идёт за следом листа: след ≈ cos угла от стола.
     const footprint = [0.5, 0.6, 0.7, 0.8, 0.9, 1].map((offset) => {
         const angle = Math.PI * (1 - offset);            // 90° → 0° в радианах
@@ -166,10 +182,10 @@ export const hingeFrames = ({ spread, pageWidth }) => {
     });
     return {
         cover: [
-            { offset: 0, transform: cover(0), opacity: 1 },
-            { offset: 0.5, transform: cover(-90), opacity: 1 },
-            { offset: 0.5, transform: cover(-90), opacity: 0 },
-            { offset: 1, transform: cover(-180), opacity: 0 },
+            { offset: 0, transform: moved(0, cover(0)), opacity: 1 },
+            { offset: 0.5, transform: moved(0.5, cover(-90)), opacity: 1 },
+            { offset: 0.5, transform: moved(0.5, cover(-90)), opacity: 0 },
+            { offset: 1, transform: moved(1, cover(-180)), opacity: 0 },
         ],
         coverLight: [
             { offset: 0, opacity: 0 },
@@ -177,12 +193,21 @@ export const hingeFrames = ({ spread, pageWidth }) => {
             { offset: 1, opacity: 0.45 },
         ],
         cast: [
-            { offset: 0, opacity: 0, transform: 'scaleX(1)' },
-            { offset: 0.14, opacity: 1, transform: 'scaleX(0.78)' },
-            { offset: 0.5, opacity: 0.3, transform: 'scaleX(0.08)' },
-            { offset: 0.6, opacity: 0, transform: 'scaleX(0.04)' },
-            { offset: 1, opacity: 0, transform: 'scaleX(0.04)' },
+            { offset: 0, opacity: 0, transform: moved(0, 'scaleX(1)') },
+            { offset: 0.14, opacity: 1, transform: moved(0.14, 'scaleX(0.78)') },
+            { offset: 0.5, opacity: 0.3, transform: moved(0.5, 'scaleX(0.08)') },
+            { offset: 0.6, opacity: 0, transform: moved(0.6, 'scaleX(0.04)') },
+            { offset: 1, opacity: 0, transform: moved(1, 'scaleX(0.04)') },
         ],
+        // Весь ридер (страницы движка) — тем же сдвигом: правая страница всё
+        // время ровно под обложкой. Без shift двигать нечего — и ключа нет.
+        ...(shift ? {
+            pan: [
+                { offset: 0, transform: `translateX(${round(-shift)}px)` },
+                { offset: 0.5, transform: 'translateX(0px)' },
+                { offset: 1, transform: 'translateX(0px)' },
+            ],
+        } : {}),
         leaf: [
             { offset: 0, transform: leaf(180), opacity: 0 },
             { offset: 0.5, transform: leaf(90), opacity: 0 },

@@ -31,6 +31,12 @@ import {
  * ПОРЯДОК ГЛАВ — ровно как у сервера (library/epub.py): каждый itemref, даже
  * ссылка в пустоту, — отдельная глава. На этом совпадении держатся номера
  * страниц и проценты.
+ *
+ * СТРАНИЦА-ОБЛОЖКА (findCoverPage) — не страница книги: обложку ридер
+ * показывает закрытой книгой (LibraryReader), а повторённая страницей «1» она
+ * читалась как лишний лист. Глава остаётся на своём месте в порядке (номера
+ * глав совпадают с сервером), но помечается cover и необязательной (linear:
+ * false): листание и счёт страниц её пропускают.
  */
 
 const XLINK = 'http://www.w3.org/1999/xlink';
@@ -59,6 +65,13 @@ const SVG_PURIFY_CONFIG = {
 /* Атрибуты-адреса, которые после переписывания обязаны вести только в книгу. */
 const URL_ATTRS = ['src', 'href', 'xlink:href', 'background', 'poster', 'action', 'formaction', 'data', 'codebase', 'srcset'];
 const isExternal = (value) => /^[a-z][a-z0-9+.-]*:/i.test(value) || /^\/\//.test(value);
+
+/* Страница-обложка — в самом начале книги, одна картинка и почти без текста:
+   подпись «Обложка» или скрытое название книги бывают, абзацев — нет. Читаем
+   с потолком: у книги одним файлом первая «страница» — вся книга, и
+   распаковывать её целиком ради проверки незачем. */
+const COVER_TEXT_LIMIT = 160;
+const COVER_PAGE_BYTES = 256 * 1024;
 
 const parseXml = (text, type = 'application/xml') => {
     const doc = new DOMParser().parseFromString(text, type);
@@ -136,6 +149,41 @@ const markLead = (fragment) => {
         if (!(element.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING)) break;
         element.classList.add('lr-lead', 'lr-lead-empty');
     }
+};
+
+const isPicturePage = (raw, type) => {
+    const doc = (type !== 'text/html' && parseXml(raw, 'application/xhtml+xml'))
+        || new DOMParser().parseFromString(raw, 'text/html');
+    const body = doc.body || doc.querySelector('body') || doc.documentElement;
+    if (!body) return false;
+    const pictures = byLocalName(body, 'img').length + byLocalName(body, 'image').length;
+    const text = String(body.textContent || '').replace(/\s+/g, ' ').trim();
+    return pictures === 1 && text.length <= COVER_TEXT_LIMIT;
+};
+
+/* Где в порядке глав страница-обложка: -1 — её нет. Сначала там, где её
+   объявила сама книга (guide, type="cover"), — если она не дальше первой
+   обязательной главы; иначе — первая обязательная глава. В обоих случаях
+   страница обязана выглядеть обложкой (isPicturePage): ссылка guide на
+   титульный лист с текстом обложкой его не делает. */
+const findCoverPage = async ({ opf, opfDir, spine, indexOfPath, typeOfPath, readLimited }) => {
+    const firstLinear = spine.findIndex((item) => item.linear);
+    if (firstLinear < 0) return -1;
+    const declared = byLocalName(opf, 'reference')
+        .find((ref) => String(ref.getAttribute('type') || '').toLowerCase() === 'cover');
+    const declaredPath = declared
+        ? resolvePath(opfDir, String(declared.getAttribute('href') || '').split('#')[0])
+        : '';
+    const declaredIndex = declaredPath ? indexOfPath.get(declaredPath.toLowerCase()) : undefined;
+    const candidates = [...new Set([declaredIndex, firstLinear])]
+        .filter((index) => Number.isInteger(index) && index >= 0 && index <= firstLinear);
+    for (const index of candidates) {
+        const item = spine[index];
+        // eslint-disable-next-line no-await-in-loop
+        const raw = item?.path ? await readLimited(item.path) : null;
+        if (raw && isPicturePage(raw, typeOfPath.get(item.path.toLowerCase()))) return index;
+    }
+    return -1;
 };
 
 const markTypography = (fragment) => {
@@ -217,6 +265,18 @@ export async function openEpub(data) {
     spine.forEach((item, index) => {
         if (item.path && !indexOfPath.has(item.path.toLowerCase())) indexOfPath.set(item.path.toLowerCase(), index);
     });
+
+    const readLimited = async (path) => {
+        const entry = entryOf(path);
+        if (!entry) return null;
+        try {
+            return decodeText(await readEntry(entry, COVER_PAGE_BYTES));
+        } catch {
+            return null;   // больше потолка — не обложка
+        }
+    };
+    const coverIndex = await findCoverPage({ opf, opfDir, spine, indexOfPath, typeOfPath, readLimited });
+    if (coverIndex >= 0) spine[coverIndex] = { ...spine[coverIndex], linear: false, cover: true };
 
     let destroyed = false;
     // path -> Promise<blob-адрес | ''>: одновременные запросы делят один blob.
@@ -357,5 +417,7 @@ export async function openEpub(data) {
         blobUrls.clear();
     };
 
-    return { spine, loadSection, indexOfPath: (path) => indexOfPath.get(String(path).toLowerCase()), destroy };
+    return {
+        spine, coverIndex, loadSection, indexOfPath: (path) => indexOfPath.get(String(path).toLowerCase()), destroy,
+    };
 }

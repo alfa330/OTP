@@ -1720,5 +1720,82 @@ class ReaderRulesTests(unittest.TestCase):
         self.assertNotIn('<iframe', self.reader + self.engine)
 
 
+
+class ClosedBookTests(unittest.TestCase):
+    """Обложка — закрытая книга, а не страница «1» (просьба владельца
+    02.10.2026: «должен отображаться как закрытая книга, а обложка книги стала
+    ещё одной страницей»)."""
+
+    @classmethod
+    def setUpClass(cls):
+        base = ROOT / 'src/components/library'
+        cls.reader = (base / 'LibraryReader.jsx').read_text(encoding='utf-8')
+        cls.engine = (base / 'readerEngine.js').read_text(encoding='utf-8')
+        cls.loader = (base / 'epubLoader.js').read_text(encoding='utf-8')
+
+    def test_cover_page_is_found_where_the_book_declares_it_or_first(self):
+        """guide type="cover" — если не дальше первой обязательной главы; иначе
+        первая обязательная. И в обоих случаях страница обязана выглядеть
+        обложкой: одна картинка и почти без текста."""
+        self.assertIn(".find((ref) => String(ref.getAttribute('type') || '').toLowerCase() === 'cover')", self.loader)
+        self.assertIn('index <= firstLinear', self.loader)
+        self.assertIn('return pictures === 1 && text.length <= COVER_TEXT_LIMIT;', self.loader)
+        # Книга одним файлом: первая «страница» — вся книга, читать её целиком
+        # ради проверки нельзя.
+        self.assertIn('await readEntry(entry, COVER_PAGE_BYTES)', self.loader)
+
+    def test_cover_page_keeps_its_index_but_is_not_a_page(self):
+        """Номера глав совпадают с сервером (на них держатся места и проценты),
+        поэтому глава остаётся в порядке — только нелинейной."""
+        self.assertIn('spine[coverIndex] = { ...spine[coverIndex], linear: false, cover: true };', self.loader)
+        self.assertIn("isCover(index) { return Boolean(this.loader.spine[index]?.cover); }", self.engine)
+        # Место на обложке (сохранено, когда она была страницей) и ссылка на
+        # неё ведут в начало книги.
+        self.assertIn('!this.isCover(section) ? section : this.firstLinear()', self.engine)
+        self.assertIn('if (this.isCover(section)) {', self.engine)
+        # Номера страниц без обложки — старый кэш вёрстки к ним не подходит.
+        self.assertIn('`lr-pages:v5:', self.engine)
+        self.assertNotIn('lr-pages:v4', self.engine)
+
+    def test_book_rests_closed_at_the_beginning(self):
+        self.assertIn("&& !restAtStart) {", self.reader)
+        self.assertIn('const rest = flight && (!saved || engine.atBeginning());', self.reader)
+        # Пока книга закрыта, смена размера окна кладёт её на первый экран.
+        self.assertIn('if (rest) engine.pinStart();', self.reader)
+
+    def test_closed_book_is_not_counted_as_started(self):
+        """Заглянувший на обложку книгу не начал: место сохраняется, когда её
+        открыли."""
+        start = self.reader.index('const handlePosition = useCallback(')
+        body = self.reader[start:self.reader.index('}, [queueSave]);', start)]
+        self.assertIn('if (restingRef.current) return;', body)
+        self.assertLess(body.index('if (restingRef.current) return;'), body.index('queueSave('))
+        opener = self.reader[self.reader.index('const openBook = useCallback('):]
+        opener = opener[:opener.index('}, []);')]
+        self.assertIn("handlePositionRef.current({ ...placeRef.current, kind: 'open' })", opener)
+
+    def test_back_from_the_first_page_closes_the_book(self):
+        self.assertIn('if (!forward && flight && engine?.isFirstPage()) {', self.reader)
+        self.assertIn('if (dx > 0 && flight && engineRef.current?.isFirstPage()) {', self.reader)
+        self.assertIn('return Boolean(this.pos) && this.pos.page === 0 && this.linearBefore(this.pos.section) < 0;',
+                      self.engine)
+
+    def test_closed_book_lies_in_the_middle_and_slides_open(self):
+        self.assertIn("left: stageBox.left + metrics.left + (metrics.mode === 'spread' ? metrics.pageWidth / 2 : 0),",
+                      self.reader)
+        # Сдвиг — и у обложки, и у всего ридера: в раскрытии, закрытии с первой
+        # страницы и закрытии перед уходом.
+        self.assertEqual(3, self.reader.count('hingeFrames({ ...parts, shift: closedShiftRef.current })'))
+        self.assertIn('play(hostRef.current, frames.pan, options)', self.reader)
+        self.assertEqual(2, self.reader.count('play(hostRef.current, back(frames.pan), options)'))
+
+    def test_toc_is_above_the_closed_cover(self):
+        """Закрытая книга лежит слоем над ридером; оглавление, открытое на ней,
+        иначе оказалось бы под обложкой."""
+        self.assertIn("style={{ zIndex: READER_Z + 2, fontFamily: APPLE_FONT, pointerEvents: tocOpen ? 'auto' : 'none' }}",
+                      self.reader)
+        self.assertIn('disabled={!(ready || resting) || !toc.length}', self.reader)
+
+
 if __name__ == '__main__':
     unittest.main()

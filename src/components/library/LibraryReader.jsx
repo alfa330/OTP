@@ -148,12 +148,15 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     const [stageBox, setStageBox] = useState(null);
     /*
      * Раскрытие книги (bookOpening.js):
-     *   flying  — обложка летит из карточки на место закрытой книги;
-     *   closed  — закрытая книга лежит, пока книга распаковывается;
-     *   opening — обложка раскрывается, левая страница ложится;
-     *   open    — читаем (только здесь книга слушает клавиши и касания);
-     *   closing — книга захлопывается;
-     *   leaving — закрытая книга летит обратно в карточку.
+     *   flying   — обложка летит из карточки на место закрытой книги;
+     *   closed   — закрытая книга лежит, пока книга распаковывается, а в
+     *              начале книги — пока её не откроют (restAtStart);
+     *   opening  — обложка раскрывается, левая страница ложится;
+     *   open     — читаем (только здесь книга слушает клавиши и касания);
+     *   shutting — пролистали назад с первой страницы: книга закрывается и
+     *              остаётся лежать (closed);
+     *   closing  — книга захлопывается перед уходом;
+     *   leaving  — закрытая книга летит обратно в карточку.
      * Без обложки из каталога и при «уменьшить движение» — сразу open.
      */
     const flight = Boolean(origin?.rect && !reduceMotion);
@@ -161,6 +164,11 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     const stageNowRef = useRef(stage);
     stageNowRef.current = stage;
     const closingRef = useRef(false);
+    /* Обложка — не страница: в начале книги закрытая книга лежит, пока её не
+       откроют (нажатием, свайпом, стрелкой, пунктом оглавления). Место при
+       этом не сохраняется — заглянувший на обложку книгу ещё не начал. */
+    const [restAtStart, setRestAtStart] = useState(false);
+    const restingRef = useRef(false);
     const animsRef = useRef([]);
     const coverGoneRef = useRef(false);
     const pendingMetricsRef = useRef(null);
@@ -238,6 +246,9 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         // сноске — тоже. Ход страницы или переход по оглавлению — уже чтение.
         if (place.kind === 'link') { sideTripRef.current = true; return; }
         if (place.kind === 'refresh') return;   // пересчитались только номера
+        // Книга лежит закрытой: на обложку заглянули, но книгу не открыли —
+        // «В процессе» она станет, когда её откроют (openBook сохранит место).
+        if (restingRef.current) return;
         if (place.kind === 'layout' && sideTripRef.current) return;
         if (place.kind !== 'layout') sideTripRef.current = false;
         queueSave({
@@ -290,7 +301,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     // страница движка, и перекладка подменила бы её посреди движения.
     useEffect(() => {
         if (!metrics || !engineRef.current) return;
-        if (['opening', 'closing', 'leaving'].includes(stageNowRef.current)) {
+        if (['opening', 'shutting', 'closing', 'leaving'].includes(stageNowRef.current)) {
             pendingMetricsRef.current = metrics;
             return;
         }
@@ -300,10 +311,14 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
 
     /* ---------- раскрытие книги (bookOpening.js) ---------- */
 
-    // Место закрытой книги на экране: на развороте — правая страница, на
-    // одной странице — она сама.
+    // Место закрытой книги на экране: на развороте — по центру стола, на
+    // половину страницы левее правой (раскрываясь, книга съезжает на место —
+    // hingeFrames: shift), на одной странице — она сама.
+    const closedShift = metrics?.mode === 'spread' ? metrics.pageWidth / 2 : 0;
+    const closedShiftRef = useRef(0);
+    closedShiftRef.current = closedShift;
     const closedRect = useMemo(() => (metrics && stageBox ? {
-        left: stageBox.left + metrics.left + (metrics.mode === 'spread' ? metrics.pageWidth : 0),
+        left: stageBox.left + metrics.left + (metrics.mode === 'spread' ? metrics.pageWidth / 2 : 0),
         top: stageBox.top + metrics.top,
         width: metrics.pageWidth,
         height: metrics.height,
@@ -356,10 +371,13 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         play(hingeRef.current, [{ opacity: 1 }, { opacity: 0 }], { duration: OPENING_MS.coverFade, easing: 'ease-out' });
     }, [phase, flight]);
 
-    // Книга распакована, закрытая книга лежит — раскрыть.
+    // Книга распакована, закрытая книга лежит — раскрыть. В начале книги — нет:
+    // её откроет читатель (openBook).
     useEffect(() => {
-        if (stage === 'closed' && phase === 'ready' && engineRef.current && !closingRef.current) setStage('opening');
-    }, [stage, phase]);
+        if (stage === 'closed' && phase === 'ready' && engineRef.current && !closingRef.current && !restAtStart) {
+            setStage('opening');
+        }
+    }, [stage, phase, restAtStart]);
 
     const finishOpening = useCallback((list) => {
         // Обложку прячем раньше, чем снимаем её анимации: иначе на кадр она
@@ -383,7 +401,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         const engine = engineRef.current;
         if (!engine) return;
         const parts = engine.openingParts();
-        const frames = hingeFrames(parts);
+        const frames = hingeFrames({ ...parts, shift: closedShiftRef.current });
         const options = {
             duration: parts.spread ? OPENING_MS.hingeSpread : OPENING_MS.hingeSingle,
             easing: OPENING_EASING.hinge,
@@ -391,10 +409,14 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         if (stageRef.current) stageRef.current.style.overflow = 'visible';
         // Срез страниц дальше рисует сама книга — на том же месте.
         if (edgeRef.current) edgeRef.current.style.visibility = 'hidden';
+        // Прошлые движения (полёт или закрытие с первой страницы) кончились
+        // ровно в начальном кадре этого — снимаем их, чтобы не складывались.
+        animsRef.current.forEach((animation) => animation.cancel());
         const list = together([
             play(hingeRef.current, frames.cover, options),
             play(lightRef.current, frames.coverLight, options),
             play(castRef.current, frames.cast, options),
+            play(hostRef.current, frames.pan, options),
             play(parts.leaf, frames.leaf, options),
             play(parts.leafShade, frames.leafShade, options),
             play(parts.shadow, frames.bookShadow, options),
@@ -403,6 +425,63 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         animsRef.current = list;
         settled(list).then((done) => { if (done && !closingRef.current) finishOpening(list); });
     }, [stage, finishOpening]);
+
+    /* Открыть закрытую книгу (она лежит в начале): обложка раскрывается, а
+       место — начало книги — сохраняется только теперь. */
+    const openBook = useCallback(() => {
+        if (closingRef.current || stageNowRef.current !== 'closed' || !restingRef.current) return;
+        restingRef.current = false;
+        setRestAtStart(false);
+        setStage('opening');
+        if (placeRef.current) handlePositionRef.current({ ...placeRef.current, kind: 'open' });
+    }, []);
+
+    /* Пролистали назад с первой страницы — книга закрывается и остаётся лежать
+       закрытой, как настоящая: дальше назад — только её обложка. */
+    const shutBook = useCallback(() => {
+        if (!flight || closingRef.current || stageNowRef.current !== 'open' || !engineRef.current) return;
+        setTocOpen(false);
+        setStage('shutting');
+    }, [flight]);
+
+    useLayoutEffect(() => {
+        if (stage !== 'shutting') return;
+        const engine = engineRef.current;
+        if (!engine) return;
+        const parts = engine.openingParts();
+        const frames = hingeFrames({ ...parts, shift: closedShiftRef.current });
+        const options = {
+            duration: parts.spread ? OPENING_MS.closeSpread : OPENING_MS.closeSingle,
+            easing: OPENING_EASING.close,
+        };
+        if (stageRef.current) stageRef.current.style.overflow = 'visible';
+        if (hingeRef.current) hingeRef.current.style.visibility = 'visible';
+        if (castRef.current) castRef.current.style.visibility = 'visible';
+        animsRef.current.forEach((animation) => animation.cancel());
+        const back = (keyframes) => (keyframes ? reverseFrames(keyframes) : null);
+        const list = together([
+            play(hingeRef.current, back(frames.cover), options),
+            play(lightRef.current, back(frames.coverLight), options),
+            play(castRef.current, back(frames.cast), options),
+            play(hostRef.current, back(frames.pan), options),
+            play(parts.leaf, back(frames.leaf), options),
+            play(parts.leafShade, back(frames.leafShade), options),
+            play(parts.shadow, back(frames.bookShadow), options),
+            play(parts.edgeLeft, back(frames.edgeLeft), options),
+        ].filter(Boolean));
+        animsRef.current = list;
+        // Последние кадры держатся (fill), пока книгу не откроют снова: под
+        // обложкой страниц не видно (closed прячет ридер), а снимет их раскрытие.
+        settled(list).then((done) => {
+            if (!done || closingRef.current) return;
+            if (stageRef.current) stageRef.current.style.overflow = '';
+            restingRef.current = true;
+            engine.pinStart();
+            setRestAtStart(true);
+            setStage('closed');
+            rootRef.current?.focus({ preventScroll: true });
+        });
+    }, [stage]);
 
     /* ---------- открытие книги ---------- */
 
@@ -444,11 +523,19 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
             if (flight) engine.hold();
             engine.layout(metricsRef.current);
             const saved = parsePosition(info.progress?.position);
+            // Новая книга ляжет закрытой — её место не сохраняется заранее.
+            restingRef.current = flight && !saved;
             await engine.openAt(saved ? saved.section : -1, saved ? saved.fraction : 0);
             // Открытие, прерванное сменой размера, движок повторяет сам —
             // раскрывать книгу можно, только когда страницы действительно легли.
             await engine.placed;
             if (!cancelled) {
+                // В начале книги она лежит закрытой, пока её не откроют:
+                // новая книга и та, где остановились на первой странице.
+                const rest = flight && (!saved || engine.atBeginning());
+                restingRef.current = rest;
+                if (rest) engine.pinStart();
+                setRestAtStart(rest);
                 setPhase('ready');
                 rootRef.current?.focus({ preventScroll: true });
             }
@@ -504,6 +591,9 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
             // Движок замирает: начатый ход досчитан, начатый переход доделан, новых
             // нет — иначе они подменили бы страницу посреди захлопывания.
             if (engine) await engine.beginClosing();
+            // Книга уже закрывается с первой страницы — дать ей закрыться: дальше
+            // путь тот же, что у лежащей закрытой.
+            if (stageNowRef.current === 'shutting') await settled(animsRef.current);
             const now = stageNowRef.current;
             if (!flight || coverGoneRef.current) {
                 await settled([fadeRoot()]);
@@ -517,7 +607,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
             } else if (now === 'open' && engine) {
                 setStage('closing');
                 const parts = engine.openingParts();
-                const frames = hingeFrames(parts);
+                const frames = hingeFrames({ ...parts, shift: closedShiftRef.current });
                 const options = {
                     duration: parts.spread ? OPENING_MS.closeSpread : OPENING_MS.closeSingle,
                     easing: OPENING_EASING.close,
@@ -530,6 +620,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     play(hingeRef.current, back(frames.cover), options),
                     play(lightRef.current, back(frames.coverLight), options),
                     play(castRef.current, back(frames.cast), options),
+                    play(hostRef.current, back(frames.pan), options),
                     play(parts.leaf, back(frames.leaf), options),
                     play(parts.leafShade, back(frames.leafShade), options),
                     play(parts.shadow, back(frames.bookShadow), options),
@@ -577,11 +668,23 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     }, [artAspect, flight, flush, onClose, origin, reduceMotion]);
 
     const ready = phase === 'ready' && stage === 'open';
+    // Закрытая книга в начале ждёт читателя: вперёд — открыть её.
+    const resting = phase === 'ready' && stage === 'closed' && restAtStart;
 
     const flip = useCallback((forward) => {
+        if (resting) {
+            if (forward) openBook();
+            return;
+        }
         if (!ready) return;
-        engineRef.current?.flip(forward);
-    }, [ready]);
+        const engine = engineRef.current;
+        // Назад с первой страницы — закрыть книгу: дальше только обложка.
+        if (!forward && flight && engine?.isFirstPage()) {
+            shutBook();
+            return;
+        }
+        engine?.flip(forward);
+    }, [flight, openBook, ready, resting, shutBook]);
 
     escapeRef.current = () => { if (tocOpen) setTocOpen(false); else close(); };
 
@@ -617,7 +720,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
             if (event.ctrlKey || event.metaKey) return;
             const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY);
             if (horizontal) event.preventDefault();
-            if (tocOpen || !ready) return;
+            if (tocOpen || !(ready || resting)) return;
             const state = wheelRef.current;
             state.sum += horizontal ? event.deltaX : event.deltaY;
             clearTimeout(state.timer);
@@ -630,7 +733,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         };
         stage.addEventListener('wheel', onWheel, { passive: false });
         return () => stage.removeEventListener('wheel', onWheel);
-    }, [flip, ready, tocOpen]);
+    }, [flip, ready, resting, tocOpen]);
 
     /* ---------- касания и мышь по книге ---------- */
 
@@ -750,6 +853,13 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
         const dy = event.clientY - gesture.startY;
         if (!gesture.dragging) {
             if (!gesture.canDrag || Math.abs(dx) < DRAG_START_PX || Math.abs(dx) < Math.abs(dy)) return;
+            // Назад с первой страницы листа нет — книга закрывается.
+            if (dx > 0 && flight && engineRef.current?.isFirstPage()) {
+                gestureRef.current = null;
+                gesture.detach?.();
+                shutBook();
+                return;
+            }
             gesture.dragging = true;
             gesture.forward = dx < 0;
             try { hostRef.current?.setPointerCapture(event.pointerId); } catch { /* уже отпущен */ }
@@ -771,6 +881,20 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     };
 
     useEffect(() => () => gestureRef.current?.detach?.(), []);
+
+    /* Закрытая книга: свайп влево — открыть, как перелистнуть обложку. */
+    const coverSwipeRef = useRef(null);
+    const onCoverPointerDown = (event) => {
+        if (!event.isPrimary) return;
+        coverSwipeRef.current = { x: event.clientX, y: event.clientY };
+    };
+    const onCoverPointerUp = (event) => {
+        const start = coverSwipeRef.current;
+        coverSwipeRef.current = null;
+        if (!start) return;
+        const dx = event.clientX - start.x;
+        if (dx < -40 && Math.abs(dx) > Math.abs(event.clientY - start.y)) openBook();
+    };
 
     /* Нажатие по «столу» вокруг книги — тоже перелистывание. Только если и
        нажали на столе: выделение текста, отпущенное за краем книги, шлёт
@@ -812,10 +936,27 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
 
     const goTo = useCallback((item) => {
         setTocOpen(false);
-        if (!Number.isInteger(item?.spine)) return;
+        const engine = engineRef.current;
+        if (!Number.isInteger(item?.spine) || !engine) return;
         setReturnTo(null);
-        engineRef.current?.jumpTo(item.spine, item.anchor || '');
-    }, []);
+        // «Обложка» в оглавлении — это закрытая книга, а не страница: в начало
+        // книги и закрыть её (раскроется она уже на первой странице).
+        if (engine.isCover(item.spine)) {
+            if (stageNowRef.current !== 'open' || !flight) {
+                if (!restingRef.current) engine.jumpTo(item.spine);
+                return;
+            }
+            if (engine.isFirstPage()) shutBook();
+            else engine.jumpTo(item.spine).then((moved) => { if (moved) shutBook(); });
+            return;
+        }
+        // Глава, выбранная на закрытой книге, — книга раскрывается на ней.
+        if (restingRef.current) {
+            engine.jumpTo(item.spine, item.anchor || '').then((moved) => { if (moved) openBook(); });
+            return;
+        }
+        engine.jumpTo(item.spine, item.anchor || '');
+    }, [flight, openBook, shutBook]);
 
     // «Вернуться» не закрывает номер страницы: на одной странице номер —
     // посередине внизу, кнопка встаёт над ним; на развороте посередине корешок.
@@ -862,7 +1003,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     <button
                         type="button"
                         onClick={() => setTocOpen(true)}
-                        disabled={!ready || !toc.length}
+                        disabled={!(ready || resting) || !toc.length}
                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-black/[0.05] active:scale-95 disabled:opacity-35"
                         style={{ color: chromeText }}
                         aria-label="Оглавление"
@@ -905,23 +1046,26 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                         onContextMenu={(event) => { if (isNarrow) event.preventDefault(); }}
                     />
 
-                    {ready && metrics && !metrics.narrow && metrics.left > 70 && (
+                    {(ready || resting) && metrics && !metrics.narrow && metrics.left > 70 && (
                         <>
-                            <button
-                                type="button"
-                                onClick={() => flip(false)}
-                                className={deskChevron}
-                                style={{ left: Math.max(8, metrics.left / 2 - 22), color: chromeText }}
-                                aria-label="Предыдущая страница"
-                            >
-                                <ChevronLeft size={26} />
-                            </button>
+                            {/* Закрытую книгу назад не листают — стрелка только вперёд. */}
+                            {ready && (
+                                <button
+                                    type="button"
+                                    onClick={() => flip(false)}
+                                    className={deskChevron}
+                                    style={{ left: Math.max(8, metrics.left / 2 - 22), color: chromeText }}
+                                    aria-label="Предыдущая страница"
+                                >
+                                    <ChevronLeft size={26} />
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => flip(true)}
                                 className={deskChevron}
                                 style={{ right: Math.max(8, metrics.left / 2 - 22), color: chromeText }}
-                                aria-label="Следующая страница"
+                                aria-label={resting ? 'Открыть книгу' : 'Следующая страница'}
                             >
                                 <ChevronRight size={26} />
                             </button>
@@ -969,7 +1113,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                 >
                     <AnimatePresence mode="wait" initial={false}>
                         <motion.span
-                            key={phase === 'loading' ? 'loading' : 'ready'}
+                            key={phase === 'loading' ? 'loading' : resting ? 'resting' : 'ready'}
                             className="flex items-center gap-1.5"
                             initial={{ opacity: 0, y: 3 }}
                             animate={{ opacity: 1, y: 0 }}
@@ -979,7 +1123,10 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                             {/* Без полёта обложки «Открываю книгу…» стоит посреди
                                 сцены — второй раз внизу он не нужен. */}
                             {phase === 'loading' && flight && slow && (<><Loader2 size={13} className="animate-spin" /> Открываю книгу…</>)}
-                            {phase === 'ready' && (
+                            {/* Закрытая книга: процент «0 %» ни о чём, а как её
+                                открыть — не очевидно. */}
+                            {phase === 'ready' && resting && <span>Нажмите на обложку, чтобы открыть</span>}
+                            {phase === 'ready' && !resting && (
                                 <>
                                     {leftText && !showDone && <span>{leftText}</span>}
                                     {leftText && !showDone && <span className="opacity-40">·</span>}
@@ -992,23 +1139,6 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     </AnimatePresence>
                 </footer>
 
-                <AnimatePresence>
-                    {tocOpen && (
-                        <LibraryToc
-                            key="toc"
-                            narrow={isNarrow}
-                            night={night}
-                            book={book}
-                            toc={toc}
-                            pages={pagination?.toc || []}
-                            folio={folio}
-                            total={total}
-                            currentIndex={tocIndex}
-                            onSelect={goTo}
-                            onClose={() => setTocOpen(false)}
-                        />
-                    )}
-                </AnimatePresence>
             </div>
 
             {/* Закрытая книга (bookOpening.js). Слой над ридером: при раскрытии
@@ -1031,14 +1161,26 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     />
                     <div
                         ref={hingeRef}
-                        aria-hidden="true"
-                        className="pointer-events-none fixed"
+                        // В начале книги закрытая книга — кнопка: её открывают
+                        // нажатием (и клавишами — Enter, пробел, стрелка).
+                        role={resting ? 'button' : undefined}
+                        tabIndex={resting ? 0 : undefined}
+                        aria-hidden={resting ? undefined : 'true'}
+                        aria-label={resting ? 'Открыть книгу' : undefined}
+                        onClick={resting ? openBook : undefined}
+                        onPointerDown={resting ? onCoverPointerDown : undefined}
+                        onPointerUp={resting ? onCoverPointerUp : undefined}
+                        onKeyDown={resting ? (event) => {
+                            if (event.key === 'Enter') { event.preventDefault(); openBook(); }
+                        } : undefined}
+                        className={`fixed outline-none ${resting ? 'cursor-pointer' : 'pointer-events-none'}`}
                         style={{
                             left: closedRect.left, top: closedRect.top, width: closedRect.width, height: closedRect.height,
                             zIndex: READER_Z + 1,
                             transformOrigin: '0 50%',
                             willChange: 'transform, opacity',
                             visibility: stage === 'open' ? 'hidden' : 'visible',
+                            touchAction: resting ? 'none' : undefined,
                         }}
                     >
                         <div ref={frameRef} className="absolute inset-0" style={{ transformOrigin: '0 0', willChange: 'transform' }}>
@@ -1104,6 +1246,32 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     </div>
                 </>
             )}
+
+            {/* Оглавление — своим слоем над закрытой книгой: она лежит выше
+                ридера (при раскрытии поднимается над шапкой), и открытое на
+                закрытой книге оглавление иначе оказалось бы под обложкой. */}
+            <div
+                className="fixed inset-0"
+                style={{ zIndex: READER_Z + 2, fontFamily: APPLE_FONT, pointerEvents: tocOpen ? 'auto' : 'none' }}
+            >
+                <AnimatePresence>
+                    {tocOpen && (
+                        <LibraryToc
+                            key="toc"
+                            narrow={isNarrow}
+                            night={night}
+                            book={book}
+                            toc={toc}
+                            pages={pagination?.toc || []}
+                            folio={folio}
+                            total={total}
+                            currentIndex={tocIndex}
+                            onSelect={goTo}
+                            onClose={() => setTocOpen(false)}
+                        />
+                    )}
+                </AnimatePresence>
+            </div>
         </>
     );
 };

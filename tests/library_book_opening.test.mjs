@@ -111,3 +111,41 @@ test('открытие и закрытие укладываются в секу�
     assert.ok(OPENING_MS.flyIn + OPENING_MS.hingeSpread <= 1500);
     assert.ok(OPENING_MS.closeSpread * 0.8 + OPENING_MS.flyOut <= 950);
 });
+
+/* Закрытая книга лежит по центру стола (02.10.2026): раскрываясь, она съезжает
+   на место правой страницы, а весь ридер — следом. Правая страница всё время
+   ровно под обложкой, и к середине хода (обложка ребром над корешком) обе уже
+   на месте — левая страница сменяет обложку прямо над корешком. */
+const shiftOf = (transform) => Number((/translateX\((-?[\d.]+)px\)/.exec(transform) || [])[1] || 0);
+
+test('закрытая книга по центру: обложка и ридер съезжают вместе к середине хода', () => {
+    const pageWidth = 539;
+    const shift = pageWidth / 2;
+    const frames = hingeFrames({ spread: true, pageWidth, shift });
+    // Обложка лежит на shift левее правой страницы; ридер сдвинут на −shift.
+    for (const offset of [0, 0.5, 1]) {
+        const cover = frames.cover.find((key) => key.offset === offset);
+        const pan = frames.pan.find((key) => key.offset === offset);
+        assert.equal(shiftOf(cover.transform) - shift, shiftOf(pan.transform), `offset ${offset}`);
+    }
+    assert.equal(shiftOf(frames.pan[0].transform), -shift);
+    assert.equal(shiftOf(frames.pan.find((key) => key.offset === 0.5).transform), 0);
+    // Тень под поднятой обложкой едет с ней.
+    assert.equal(shiftOf(frames.cast.find((key) => key.offset === 0.5).transform), shift);
+    // Списки функций у всех кадров обложки одинаковые — иначе нет интерполяции.
+    const shape = (transform) => transform.replace(/-?[\d.]+/g, 'N');
+    assert.equal(new Set(frames.cover.map((key) => shape(key.transform))).size, 1);
+});
+
+test('закрытие с первой страницы — те же кадры сдвига задом наперёд', () => {
+    const frames = hingeFrames({ spread: true, pageWidth: 539, shift: 269.5 });
+    const back = reverseFrames(frames.pan);
+    assert.equal(back[0].transform, frames.pan[frames.pan.length - 1].transform);
+    assert.equal(back[back.length - 1].transform, frames.pan[0].transform);
+});
+
+test('без сдвига кадры прежние: на телефоне и без центрирования двигать нечего', () => {
+    assert.equal(hingeFrames({ spread: true, pageWidth: 539 }).pan, undefined);
+    assert.equal(hingeFrames({ spread: false, pageWidth: 390, shift: 100 }).pan, undefined);
+    assert.ok(!hingeFrames({ spread: true, pageWidth: 539 }).cover[0].transform.includes('translateX'));
+});
