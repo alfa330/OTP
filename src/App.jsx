@@ -2598,6 +2598,11 @@ const canAccessDriverChatsSectionForUser = (userLike) => {
    cdr/access.py. */
 const TOUCHES_SECTION_DEPARTMENT_CODE = 'op';
 
+/* Поимённо — сверх роли и отдела, по решению владельца 02.10.2026: 471 и 472,
+   сотрудники «Маркетинга» (ФИО в публичный репозиторий не пишем). Зеркало
+   EXTRA_ACCESS_USER_IDS в cdr/access.py — тест сверяет списки. */
+const TOUCHES_EXTRA_ACCESS_USER_IDS = new Set([471, 472]);
+
 const isTouchesSectionDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
     && aiQaHeadDepartmentCodesOf(userLike).includes(TOUCHES_SECTION_DEPARTMENT_CODE)
@@ -2606,6 +2611,7 @@ const isTouchesSectionDepartmentHead = (userLike) => (
 const canAccessTouchesSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
+    if (TOUCHES_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))) return true;
     if (role === 'trainer') return false;
     // Глава отдела с базовой admin-ролью — не глобальный админ: звонки продаж
     // главам чужих отделов не нужны (глава ОП проходит проверкой ниже).
@@ -2620,8 +2626,8 @@ const canAccessTouchesSectionForUser = (userLike) => {
 };
 
 /* «Воронка ОП» — ежедневная воронка обзвона по четырём направлениям отдела
-   продаж (задачи #301, #302, #303, #305). Аудитория та же, что у «Касаний»:
-   глобальные админы, глава отдела продаж и его супервайзеры.
+   продаж (задачи #301, #302, #303, #305). Аудитория та же, что у «Касаний»,
+   кроме поимённых: глобальные админы, глава отдела продаж и его супервайзеры.
 
    Предикат СВОЙ, а не переиспользованный от «Касаний», по двум причинам. Первая:
    разделы разные, и завтра одному из них могут открыть другую аудиторию — общий
@@ -42419,9 +42425,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
             const canAccessOlxAdsSection = canAccessOlxAdsForUser(user);
-            // «Касания»: глобальные админы, глава отдела продаж и СВ ОП.
+            // «Касания»: глобальные админы, глава отдела продаж, СВ ОП и двое поимённо.
             const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
-            // «Воронка ОП»: та же аудитория, что у «Касаний».
+            // «Воронка ОП»: та же аудитория, что у «Касаний», кроме поимённых.
             const canAccessOpFunnelSection = canAccessOpFunnelSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             const canAccessTezWallboardSection = canAccessTezWallboardForUser(user);
@@ -54273,8 +54279,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         Пункт объявлен ОДИН раз здесь, в общей части
                                         меню, как «Вики», «Обращения» и «Посылки»:
                                         аудитория разнородная (глобальные админы, глава
-                                        ОП, СВ ОП), и по ролевым ветвям его легко забыть
-                                        в одной — так уже было с «Ботом опозданий».
+                                        ОП, СВ ОП, двое поимённо), и по ролевым ветвям
+                                        его легко забыть в одной — так уже было с
+                                        «Ботом опозданий».
                                         Кто что может внутри, считает бэкенд. */}
                                     {canAccessTouchesSection && (
                                     <SidebarDeptScope section="touches" activeCode={activeDeptCode}>
@@ -54296,8 +54303,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         #301, #302, #303, #305: Основа, Поток, Яндекс
                                         Регистрация, Верификатор). Пункт объявлен ОДИН
                                         раз здесь, рядом с «Касаниями»: аудитория та же
-                                        и такая же разнородная, а по ролевым ветвям
-                                        пункт легко забыть в одной из них.
+                                        (кроме поимённых) и такая же разнородная, а по
+                                        ролевым ветвям пункт легко забыть в одной из них.
                                         Какие направления человек увидит внутри, решает
                                         бэкенд: СВ получает только свои. */}
                                     {canAccessOpFunnelSection && (

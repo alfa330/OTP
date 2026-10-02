@@ -15,14 +15,19 @@
 Модуль `cdr.access` чистый — ни базы, ни Flask, поэтому импортируется напрямую.
 """
 
+import re
 import unittest
+from pathlib import Path
 
 from cdr import access
 
+APP_JSX = Path(__file__).resolve().parents[1] / 'src' / 'App.jsx'
 
-def ctx(role='operator', department_code=None, headed_ids=None, headed_codes=None):
+
+def ctx(role='operator', department_code=None, headed_ids=None, headed_codes=None,
+        user_id=1):
     return {
-        'user_id': 1, 'name': 'Кто-то', 'role': role,
+        'user_id': user_id, 'name': 'Кто-то', 'role': role,
         'department_id': None, 'department_code': department_code,
         'headed_department_ids': headed_ids or [],
         'headed_department_codes': headed_codes or [],
@@ -106,6 +111,62 @@ class CapabilitiesTests(unittest.TestCase):
         caps = access.capabilities(ctx(role='operator', department_code='szov'))
         self.assertFalse(caps['can_open'])
         self.assertFalse(caps['can_sync'])
+
+
+class NamedGrantTests(unittest.TestCase):
+    """Поимённый допуск (02.10.2026): двое из «Маркетинга», id 471 и 472.
+
+    Их должность (marketing_manager) раздел не знает и сводит к оператору, а
+    отдел у них не ОП, — по роли и отделу им закрыто. Опасны оба промаха:
+    поимённым не открылось и открылось всему «Маркетингу» (там ещё четверо и
+    глава отдела).
+    """
+
+    GRANTED = (471, 472)
+
+    def test_grant_lists_exactly_the_people_named_by_the_owner(self):
+        self.assertEqual(access.EXTRA_ACCESS_USER_IDS, frozenset(self.GRANTED))
+
+    def test_named_people_get_the_whole_section(self):
+        for user_id in self.GRANTED:
+            with self.subTest(user_id=user_id):
+                who = ctx(role='marketing_manager', department_code='marketing',
+                          user_id=user_id)
+                self.assertTrue(access.can_open_section(who))
+                self.assertTrue(access.can_sync(who))
+                caps = access.capabilities(who)
+                self.assertTrue(caps['can_open'])
+                self.assertTrue(caps['can_sync'])
+                # Поимённый — не глобальный админ: эта ветка ему ничего не добавляет.
+                self.assertFalse(caps['is_global_admin'])
+
+    def test_the_rest_of_marketing_stays_out(self):
+        self.assertFalse(access.can_open_section(
+            ctx(role='marketing_manager', department_code='marketing', user_id=474)))
+        # Глава «Маркетинга» с ролью admin: назначение главой заменяет роль.
+        self.assertFalse(access.can_open_section(
+            ctx(role='admin', department_code='marketing', headed_ids=[1041],
+                headed_codes=['marketing'], user_id=415)))
+
+    def test_missing_or_broken_id_is_closed_not_crashing(self):
+        for user_id in (None, '', 'abc'):
+            with self.subTest(user_id=user_id):
+                self.assertFalse(access.can_open_section(
+                    ctx(role='marketing_manager', department_code='marketing',
+                        user_id=user_id)))
+
+
+class FrontendMirrorTests(unittest.TestCase):
+    """Пункт меню рисует фронт по своему списку. Разойдись он с серверным —
+    человек увидит пункт и получит 403 или получит допуск без пункта в меню.
+    Поведение предиката проверяет tests/cdr_touches_access.test.mjs."""
+
+    def test_menu_list_matches_the_backend(self):
+        app = APP_JSX.read_text(encoding='utf-8')
+        match = re.search(r'const TOUCHES_EXTRA_ACCESS_USER_IDS = new Set\(\[([\d,\s]*)\]\);', app)
+        self.assertIsNotNone(match, 'список TOUCHES_EXTRA_ACCESS_USER_IDS не найден')
+        listed = {int(x) for x in match.group(1).split(',') if x.strip()}
+        self.assertEqual(listed, set(access.EXTRA_ACCESS_USER_IDS))
 
 
 if __name__ == '__main__':
