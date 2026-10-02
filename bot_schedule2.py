@@ -64991,6 +64991,24 @@ except Exception:
     logging.exception("Раздел «Термокороба»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Списки Байги» (итоги еженедельной акции Байга, #356) ──────────────
+# Тот же приём, что у «Посылок». В строках ФИО и номер ВУ водителя, поэтому у
+# операторов раздел закрыт тем же QR-ключом (baiga/access.py).
+try:
+    from baiga.routes import build_baiga_blueprint  # noqa: E402
+
+    app.register_blueprint(build_baiga_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+    ))
+    logging.info("Раздел «Списки Байги»: Blueprint подключён на /api/baiga")
+except Exception:
+    logging.exception("Раздел «Списки Байги»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Оплата счетов» (бизнес-процесс «Согласование — Оплата счетов», #179) ──
 # Тот же приём, что у вики, обращений и посылок. Периметр на время выката —
 # один человек (payments/access.py), поэтому QR-гейта здесь нет: раздел открыт

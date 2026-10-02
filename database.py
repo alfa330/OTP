@@ -6909,6 +6909,7 @@ class Database:
             self._init_complaints_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
+            self._init_baiga_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -63840,6 +63841,28 @@ class Database:
                     (updated_ids,)
                 )
         return len(updated_ids)
+
+    def _init_baiga_schema_tx(self, cursor):
+        """Схема раздела «Списки Байги» (#356) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете baiga/schema.py, как у посылок и термокоробов; импорт
+        локальный, иначе цикл. Не развернулась — раздел честно скажет о себе
+        (schema_ready=false), остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT baiga_schema")
+        try:
+            from baiga.schema import init_baiga_schema
+            init_baiga_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT baiga_schema")
+            logging.exception(
+                "Схема раздела «Списки Байги» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT baiga_schema")
 
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и

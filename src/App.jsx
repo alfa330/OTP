@@ -130,6 +130,7 @@ import {
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_ACCOUNT_QUERY_PARAM, WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
+import { stripBaigaParams } from './components/baiga/baigaMeta';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 import lazyWithRetry from './utils/lazyWithRetry';
 
@@ -229,6 +230,7 @@ const ComplaintsView = lazyWithRetry(() => import('./components/complaints/Compl
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const WaterView = lazyWithRetry(() => import('./components/water/WaterView'));
 const ThermoboxesView = lazyWithRetry(() => import('./components/thermoboxes/ThermoboxesView'));
+const BaigaView = lazyWithRetry(() => import('./components/baiga/BaigaView'));
 const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
@@ -416,6 +418,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
  *   water — фронт-офисы, СЗоВ и ОП (canAccessWaterSectionForUser);
  *   thermoboxes — THERMOBOXES_SECTION_DEPARTMENT_CODES;
+ *   baiga — BAIGA_SECTION_DEPARTMENT_CODES;
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
@@ -485,6 +488,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     parcels: ['front_office', 'szov'],
     water: ['front_office', 'szov', 'op'],
     thermoboxes: ['front_office', 'szov'],
+    baiga: ['marketing', 'szov'],
     sign_links: ['front_office', 'szov', 'op'],
 };
 
@@ -758,6 +762,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     parcels: 'Unclaimed parcels',
     water: 'Water accounting',
     thermoboxes: 'Thermoboxes',
+    baiga: 'Baiga lists',
     sign_links: 'Signing links',
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
@@ -2474,6 +2479,41 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
     );
 };
 
+/* «Списки Байги» (#356) — итоги еженедельной акции Байга.
+
+   Аналитик загружает неделю (поимённо — роли «аналитик» в портале нет),
+   маркетинг и руководители ищут и выгружают, поддержка (СЗоВ) ищет и смотрит,
+   глобальный админ — всё. Тренер раздел не просил.
+
+   Здесь решается только «показывать ли пункт меню»; кто выгружает и грузит,
+   считает baiga/access.py. В строках ФИО и номер ВУ водителя, поэтому у
+   операторов раздел за QR-замком, как «Посылки». */
+const BAIGA_SECTION_DEPARTMENT_CODES = ['marketing', 'szov'];
+
+/* Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
+   Зеркало baiga/access.py: ANALYST_USER_IDS — тест сверяет списки. */
+const BAIGA_ANALYST_USER_IDS = new Set([]);
+
+/* ПИЛОТ (02.10.2026): пока флаг стоит, пункт меню и экран есть только у
+   супер-админа. Сервер закрыт тем же флагом (baiga/access.py:
+   PILOT_SUPER_ADMIN_ONLY); снимать — в обоих местах. */
+const BAIGA_PILOT_SUPER_ADMIN_ONLY = true;
+
+const canAccessBaigaSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;
+    if (BAIGA_ANALYST_USER_IDS.has(Number(userLike?.id))) return true;
+    // Глава чужого отдела с базовой admin-ролью — не глобальный админ, но
+    // «руководители» в разделе все: итоги акции смотрит глава любого отдела.
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (role === 'trainer') return false;
+    if (isDepartmentHead(userLike)) return true;
+    return BAIGA_SECTION_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+    );
+};
+
 /* «Библиотека» (#282). Раздел видят те, кто его ведёт (загружает книги, правит
    их отделы и жанры, видит архив и мониторинг), и читатели.
 
@@ -2931,6 +2971,8 @@ const buildAppViewUrl = (nextView) => {
             url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
             url.searchParams.delete(WAZZUP_ACCOUNT_QUERY_PARAM);
         }
+        /* Фильтры «Списков Байги» (метки bg_*, baigaMeta.js) — тоже. */
+        if (nextView !== 'baiga') stripBaigaParams(url);
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -2979,6 +3021,10 @@ const syncAppViewWithUrl = (nextView) => {
             url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
             url.searchParams.delete(WAZZUP_ACCOUNT_QUERY_PARAM);
         }
+        /* Фильтры «Списков Байги» (метки bg_*) раздел пишет сам, а уход из
+           него уже не видит. То же условие «не baiga»: иначе ссылка на
+           выборку теряла бы фильтры сразу после входа. */
+        if (nextView !== 'baiga') stripBaigaParams(url);
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {
@@ -42420,6 +42466,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
+            const canAccessBaigaSection = canAccessBaigaSectionForUser(user);
             // «Библиотека» (#282): ведут СВ и выше и тренер, читают все остальные
             // сотрудники (canAccessLibrarySectionForUser). Сервер закрыт тем же
             // правилом (library/routes.py: can_manage, can_read).
@@ -51990,6 +52037,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'water' && canAccessWaterSection) return;
                 // «Термокороба» — тот же периметр и та же причина.
                 if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
+                // «Списки Байги» — свой предикат: раздел маркетинга и СЗоВ плюс
+                // руководители любого отдела, а у части отделов есть allowlist.
+                if (view === 'baiga' && canAccessBaigaSection) return;
                 // «Ссылка на подписание» — тот же периметр и та же причина.
                 if (view === 'sign_links' && canAccessSignLinksSection) return;
                 // «Чаты водителей» — свой предикат: раздел живёт в одном отделе,
@@ -52021,7 +52071,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -54038,6 +54088,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
                                         canAccessWaterSection && deptAllowsInner('water'),
                                         canAccessThermoboxesSection && deptAllowsInner('thermoboxes'),
+                                        canAccessBaigaSection && deptAllowsInner('baiga'),
                                         canAccessSignLinksSection && deptAllowsInner('sign_links'),
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
                                         canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
@@ -54183,6 +54234,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-box-open"></FaIcon>
                                                 <span className="sidebar-text">Термокороба</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Списки Байги» — итоги еженедельной акции Байга (#356).
+                                        Аудитория — маркетинг, СЗоВ и руководители любого
+                                        отдела, поэтому пункт объявлен ОДИН раз здесь, в общей
+                                        части меню. Кто выгружает и грузит недели, считает
+                                        бэкенд (baiga/access.py). */}
+                                    {canAccessBaigaSection && (
+                                    <SidebarDeptScope section="baiga" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'baiga')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'baiga' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-trophy"></FaIcon>
+                                                <span className="sidebar-text">Списки Байги</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -54809,6 +54880,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessParcelsSection,
                 canAccessWaterSection,
                 canAccessThermoboxesSection,
+                canAccessBaigaSection,
                 canAccessLibrarySection,
                 canAccessSignLinksSection,
                 canAccessTouchesSection,
@@ -55323,6 +55395,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
+                        {/* «Списки Байги» — за QR-замком, как «Посылки»: в строках ФИО и
+                            номер ВУ водителя. Сервер держит тот же гейт (baiga/access.py). */}
+                        {view === "baiga" && canAccessBaigaSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Списки Байги"
+                                description="В списках ФИО и номера ВУ водителей. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <BaigaView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        ))}
                         {view === "sign_links" && canAccessSignLinksSection && (sensitiveSectionsLocked ? (
                             <SensitiveSectionGate
                                 sectionTitle="Ссылка на подписание"
