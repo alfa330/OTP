@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Периметр раздела «Оплата счетов» и его проводка во фронте.
 
-Владелец сказал: «раздел доступный пока что только мне». Проверяем именно это:
+Владелец сказал: «раздел доступный пока что только мне»; 02.10.2026 к пилоту
+добавлен соисполнитель задачи #179. Проверяем именно это:
   * бэкенд пускает только id из SECTION_ALLOWED_USER_IDS — роль не помогает,
     даже super_admin;
   * фронт держит ТОТ ЖЕ список — иначе раздел показывается одному человеку,
@@ -37,9 +38,9 @@ class SectionGateTests(unittest.TestCase):
         user_id = access.SECTION_ALLOWED_USER_IDS[0]
         self.assertTrue(access.can_open_section({'user_id': str(user_id)}))
 
-    def test_pilot_perimeter_is_the_owner_only(self):
-        self.assertEqual(tuple(access.SECTION_ALLOWED_USER_IDS), (2,))
-        self.assertEqual(tuple(access.SECTION_ADMIN_USER_IDS), (2,))
+    def test_pilot_perimeter_is_owner_and_coexecutor(self):
+        self.assertEqual(tuple(access.SECTION_ALLOWED_USER_IDS), (2, 448))
+        self.assertEqual(tuple(access.SECTION_ADMIN_USER_IDS), (2, 448))
 
 
 class StepPermissionTests(unittest.TestCase):
