@@ -60,12 +60,18 @@ MAX_WINDOW = timedelta(hours=26)
 
 _COLUMNS = ('time', 'callid', 'queuename', 'agent', 'event', 'data1', 'data2', 'data3')
 
+# Порядок — по времени, а не по id. `ORDER BY id LIMIT` соблазняет оптимизатор MariaDB идти
+# первичным ключом с начала таблицы (сотня миллионов строк) вместо окна по индексу времени:
+# так он решил для суток 03.09.2026 (EXPLAIN: PRIMARY, type=index), запрос упирался в таймаут,
+# и сутки не перечитывались (02.10.2026). Индекс по времени у InnoDB хранит строки в порядке
+# (time, id) — `ORDER BY time, id` он отдаёт сам, без сортировки, у любых суток. Разбору
+# (queue_facts.build_facts) порядок строк не важен.
 _QUEUE_SQL = (
     "SELECT time, callid, queuename, agent, event, data1, data2, data3 "
     "  FROM queuelog "
     " WHERE time >= %s AND time < %s "
     "   AND event IN (" + ', '.join(['%s'] * len(queue_facts.WANTED_EVENTS)) + ") "
-    " ORDER BY id "
+    " ORDER BY time, id "
     " LIMIT %s"
 )
 
@@ -242,8 +248,8 @@ class PbxDb:
             # Молча обрезанное окно — это молча испорченные ожидания на табло.
             log.warning('Журнал очередей: упёрлись в потолок %d строк за %s — %s',
                         MAX_ROWS, start, end)
-            # Строки идут по id, то есть по времени записи: всё, что позже последней,
-            # осталось на станции. Отметка — время последней, а не конец окна.
+            # Строки идут по времени: всё, что позже последней, осталось на станции.
+            # Отметка — время последней, а не конец окна.
             self.covered_until = rows[-1][0] if rows else start
         else:
             self.covered_until = end

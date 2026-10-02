@@ -107,7 +107,7 @@ from cdr import (hangups as hangups_mod, queue_facts as queue_facts_mod,  # noqa
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.6.0'
+VERSION = '1.6.1'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'

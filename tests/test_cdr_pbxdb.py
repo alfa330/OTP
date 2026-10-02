@@ -88,6 +88,15 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(params[0], START)
         self.assertEqual(params[-1], pbxdb.MAX_ROWS)
 
+    def test_rows_go_by_time_so_the_time_index_is_used_on_any_day(self):
+        """`ORDER BY id LIMIT` толкал оптимизатор станции в первичный ключ с начала таблицы:
+        сутки 03.09.2026 упирались в таймаут на каждой перечитке. По времени порядок отдаёт сам
+        индекс времени — у любых суток."""
+        self.source.queue_rows(START, END)
+        sql, _params = self.conn.queries[0]
+        self.assertIn('ORDER BY time, id', sql)
+        self.assertNotIn('ORDER BY id', sql)
+
     def test_only_the_events_we_need_are_asked_for(self):
         self.source.queue_rows(START, END)
         _sql, params = self.conn.queries[0]
