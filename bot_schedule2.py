@@ -5176,6 +5176,30 @@ def _upload_task_attachments_to_gcs(files, stage='initial'):
     return attachments, uploaded_blob_paths, gcs_bucket
 
 
+def _convert_legacy_task_photos():
+    """Фото во вложениях задач, загруженные до перевода в WebP, → WebP.
+
+    Добор при старте (task_photos.convert_legacy): переведённые записи в
+    выборку больше не попадают, так что на следующих стартах в ней остаются
+    единицы, оставленные как есть (схема draw.io и т. п.). Итог пишется в
+    журнал, только когда что-то переведено или не вышло: пересмотр оставленных
+    не должен шуметь на каждом старте. Зовётся своим потоком, а не через
+    executor_pool — там четыре места на весь бот.
+    """
+    try:
+        import task_photos
+        rows = db.list_legacy_task_photo_attachments(task_photos.LEGACY_BEFORE,
+                                                     task_photos.LEGACY_TYPES)
+        stats = task_photos.convert_legacy(rows, get_gcs_client, db.swap_task_attachment_file)
+        if stats['converted'] or stats['failed']:
+            logging.info(
+                "Задачи: старые фото в WebP — переведено %d, оставлено как есть %d, не вышло %d",
+                stats['converted'], stats['kept'], stats['failed'],
+            )
+    except Exception:
+        logging.exception("Задачи: старые фото в WebP не переведены")
+
+
 @app.before_request
 def hydrate_user_context_from_jwt():
     if not request.path.startswith('/api/'):
@@ -69291,6 +69315,12 @@ if __name__ == '__main__':
         sync_schedule_statuses_to_user_statuses_job()
     except Exception:
         logging.exception("Initial auto status sync failed")
+
+    # Старые фото задач → WebP. Через минуту, а не в момент старта: разовой
+    # работе спешить некуда, а старт и так нагружает базу.
+    _legacy_task_photos_timer = threading.Timer(60, _convert_legacy_task_photos)
+    _legacy_task_photos_timer.daemon = True
+    _legacy_task_photos_timer.start()
     
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")

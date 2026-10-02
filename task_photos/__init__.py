@@ -40,6 +40,13 @@ TIFF-скана — все страницы, кроме первой, у PNG и�
 <img> не умеет слать заголовок авторизации; прокси означал бы N запросов через
 Flask на карточку. Подпись — один запрос на карточку, а байты браузер берёт
 прямо из бакета. Тот же приём, что у «Посылок» (parcels/photos.py).
+
+СТАРЫЕ ФОТО (convert_legacy). Перевод при загрузке появился 24.09.2026, а
+загруженное раньше так и лежало PNG и JPEG (на 02.10.2026 — 53 снимка; со
+слов владельца, «фото в задачах сохраняются в PNG»). Добор переводит их по
+тем же правилам, что и загрузку: переведённая запись становится image/webp и
+в выборку больше не попадает. Оставленные как есть (схема draw.io и т. п.)
+пересматриваются на каждом старте — их единицы, и в журнал это не пишется.
 """
 
 import io
@@ -47,15 +54,17 @@ import logging
 import os
 import re
 import time
-from datetime import timedelta
+import uuid
+from datetime import datetime, timedelta
 
 from wiki import images as wiki_images
 
 # Что показываем плиткой. Список намеренно узкий и совпадает с фронтом
 # (src/components/tasks/taskPhotos.js: PHOTO_PREVIEW_TYPES): расхождение
 # выглядело бы как «плитка есть, а картинки в ней нет». HEIC нет — Chrome его не
-# рисует; SVG нет — это документ, а не снимок. Новые фото после этой правки
-# приходят сюда уже как image/webp; JPEG и PNG в списке — ради загруженных раньше.
+# рисует; SVG нет — это документ, а не снимок. Фото лежат в WebP (и новые, и
+# старые после convert_legacy); JPEG и PNG в списке — ради оставленных как есть:
+# схема draw.io, кадр больше потолка.
 PREVIEW_TYPES = ('image/jpeg', 'image/png', 'image/webp', 'image/gif')
 
 # Что переводим в WebP: снимки и скриншоты. Правило владельца — про «фотки», а
@@ -80,6 +89,20 @@ _EXT_TYPES = {
     '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
 }
 _OPAQUE_TYPES = ('', 'application/octet-stream', 'binary/octet-stream')
+
+# Основа имени, от которой осталось одно расширение: так secure_filename
+# сохранял в базу кириллические имена до перевода в WebP («фото.png» → «png»).
+_BARE_NAMES = {ext.lstrip('.') for ext in _EXT_TYPES}
+
+# Добор старых фото (convert_legacy). Граница — день после выкладки 70f0955e
+# (24.09.2026), с которой загрузка переводит фото сама; в часах Алматы, как и
+# task_attachments.created_at. Позже неё PNG и JPEG лежат намеренно (схема
+# draw.io, кадр больше потолка), и перебирать их на каждом старте незачем.
+LEGACY_BEFORE = datetime(2026, 9, 25)
+
+# Что добор берёт из базы: снимки, ещё не ставшие WebP. Файлов без типа среди
+# старых вложений нет (боевая база, 02.10.2026), поэтому их ветки здесь нет.
+LEGACY_TYPES = tuple(kind for kind in CONVERT_TYPES if kind != 'image/webp')
 
 # Сторона миниатюры. 480, а не 76: плитка рисуется и на экране с двойной
 # плотностью, и шире на телефоне (сетка в четыре колонки), а пережать уже
@@ -135,10 +158,13 @@ def webp_file_name(original_name):
 
     Берём ИСХОДНОЕ имя, а не то, что уже прошло secure_filename: тот выбрасывает
     кириллицу, и «фото.jpg» доезжает до базы как «jpg» — после перевода вышло бы
-    «jpg.webp». Нелатинское имя становится «photo.webp».
+    «jpg.webp». Нелатинское имя становится «photo.webp». У старых вложений
+    исходного имени уже нет, в базе лежит «jpg» — он тоже становится «photo.webp».
     """
     base = os.path.splitext(os.path.basename(str(original_name or '').replace('\\', '/')))[0]
     safe = re.sub(r'[^A-Za-z0-9._-]+', '_', base).strip('._')[:120]
+    if safe.lower() in _BARE_NAMES:
+        safe = ''
     return (safe or 'photo') + '.webp'
 
 
@@ -218,6 +244,116 @@ def prepare(data, *, filename, content_type):
         'file_name': webp_file_name(filename),
         'thumb': thumb[0] if thumb else None,
     }
+
+
+def legacy_blob_path(old_path, file_name):
+    """Путь переведённого старого фото: та же папка дня, новое имя.
+
+    Новый uuid, а не замена расширения: старый файл стирается после подмены, и
+    совпади пути, стёрся бы как раз новый.
+    """
+    folder = os.path.dirname(str(old_path or ''))
+    name = f'{uuid.uuid4().hex}_{file_name}'
+    return f'{folder}/{name}' if folder else name
+
+
+def _drop(bucket, paths):
+    for path in paths:
+        try:
+            bucket.blob(path).delete()
+        except Exception:
+            logging.warning('Задачи: лишний файл %s остался в бакете', path, exc_info=True)
+
+
+def convert_legacy(rows, client_getter, swap):
+    """Старые фото во вложениях → WebP с миниатюрой, по правилам загрузки (prepare).
+
+    rows — записи из Database.list_legacy_task_photo_attachments; swap(id,
+    бакет, старый путь, новое) подменяет файл в записи и отвечает, вышло ли:
+    запись могли тем временем удалить вместе с задачей. Порядок шагов — ради
+    необратимого: новый файл ложится в бакет ДО подмены, старый стирается
+    только ПОСЛЕ неё. Сбой посередине оставит в бакете лишний файл, но не
+    запись без файла.
+
+    Стирается только то, про что ТОЧНО известно, что запись на него не
+    смотрит: новое — когда подмена честно ответила «нет», старое — когда «да».
+    Исключение из swap — исход неизвестен: COMMIT мог дойти до базы, а ответ
+    потеряться, и тогда запись уже смотрит на новый файл. В этом случае не
+    стирается ничего.
+
+    Клиент хранилища строится при первой картинке; его сбой роняет весь
+    прогон — без хранилища перебирать записи незачем. Возвращает счётчики:
+    converted — переведено, kept — оставлено как есть по правилам prepare,
+    failed — не вышло сейчас (сеть, запись изменилась); записи, оставшиеся
+    старыми, возьмёт следующий прогон.
+    """
+    stats = {'converted': 0, 'kept': 0, 'failed': 0}
+    held = []
+    for row in rows or []:
+        attachment_id = row.get('id')
+        bucket_name = str(row.get('gcs_bucket') or '').strip()
+        old_path = str(row.get('gcs_blob_path') or '').strip()
+        if not bucket_name or not old_path or not photo_kind(row.get('file_name'),
+                                                             row.get('content_type')):
+            stats['kept'] += 1
+            continue
+        if not held:
+            held.append(client_getter())
+        bucket = held[0].bucket(bucket_name)
+        try:
+            data = bucket.blob(old_path).download_as_bytes()
+        except Exception as error:
+            # Строкой, без трассировки: пропавший из бакета файл будет так же
+            # не скачиваться на каждом старте, а причина — в тексте ошибки.
+            logging.warning('Задачи: старое фото #%s не скачалось: %s', attachment_id, error)
+            stats['failed'] += 1
+            continue
+        photo = prepare(data, filename=row.get('file_name'), content_type=row.get('content_type'))
+        if not photo:
+            stats['kept'] += 1
+            continue
+
+        new_path = legacy_blob_path(old_path, photo['file_name'])
+        try:
+            bucket.blob(new_path).upload_from_string(photo['data'], content_type='image/webp')
+        except Exception:
+            logging.warning('Задачи: WebP старого фото #%s не лёг в бакет', attachment_id,
+                            exc_info=True)
+            stats['failed'] += 1
+            continue
+        uploaded = [new_path]
+        thumb_path = None
+        if photo['thumb']:
+            candidate = thumb_blob_path(new_path)
+            try:
+                bucket.blob(candidate).upload_from_string(photo['thumb'], content_type='image/webp')
+                uploaded.append(candidate)
+                thumb_path = candidate
+            except Exception:
+                # Как при загрузке: без миниатюры плитка покажет полный кадр.
+                logging.warning('Задачи: миниатюра старого фото #%s не легла',
+                                attachment_id, exc_info=True)
+        try:
+            swapped = swap(attachment_id, bucket_name, old_path, {
+                'file_name': photo['file_name'],
+                'content_type': photo['content_type'],
+                'file_size': len(photo['data']),
+                'gcs_blob_path': new_path,
+                'thumb_blob_path': thumb_path,
+            })
+        except Exception:
+            logging.warning('Задачи: подмена старого фото #%s без ответа, файлы оставлены: '
+                            'старый %s, новый %s', attachment_id, old_path, new_path,
+                            exc_info=True)
+            stats['failed'] += 1
+            continue
+        if not swapped:
+            _drop(bucket, uploaded)
+            stats['failed'] += 1
+            continue
+        _drop(bucket, [old_path])
+        stats['converted'] += 1
+    return stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────

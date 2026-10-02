@@ -63665,6 +63665,60 @@ class Database:
                 for item in cursor.fetchall()
             ]
 
+    def list_legacy_task_photo_attachments(self, uploaded_before, content_types, limit=500):
+        """Снимки во вложениях задач, загруженные до перевода фото в WebP.
+
+        Выборка добора task_photos.convert_legacy: переведённая запись становится
+        image/webp и сюда больше не попадает, поэтому повторный прогон видит
+        только оставленное как есть.
+        """
+        types = [str(item).lower() for item in (content_types or [])]
+        if not types:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, file_name, content_type, gcs_bucket, gcs_blob_path
+                FROM task_attachments
+                WHERE created_at < %s
+                  AND COALESCE(storage_type, 'db') = 'gcs'
+                  AND gcs_bucket IS NOT NULL AND gcs_blob_path IS NOT NULL
+                  AND lower(trim(split_part(COALESCE(content_type, ''), ';', 1))) = ANY(%s)
+                ORDER BY id ASC
+                LIMIT %s
+            """, (uploaded_before, types, int(limit)))
+            return [
+                {
+                    "id": item[0],
+                    "file_name": item[1],
+                    "content_type": item[2],
+                    "gcs_bucket": item[3],
+                    "gcs_blob_path": item[4],
+                }
+                for item in cursor.fetchall()
+            ]
+
+    def swap_task_attachment_file(self, attachment_id, gcs_bucket, old_blob_path, new):
+        """Подменяет файл вложения переведённым (task_photos.convert_legacy).
+
+        Подмена — только если запись всё ещё указывает на старый файл: за время
+        перевода её могли удалить вместе с задачей или перевести другим
+        прогоном. False — подмены не было, и новый файл вызывающему не нужен.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE task_attachments
+                SET file_name = %s, content_type = %s, file_size = %s,
+                    gcs_blob_path = %s, thumb_blob_path = %s
+                WHERE id = %s AND storage_type = 'gcs'
+                  AND gcs_bucket = %s AND gcs_blob_path = %s
+                RETURNING id
+            """, (
+                new['file_name'], new['content_type'], int(new['file_size']),
+                new['gcs_blob_path'], new.get('thumb_blob_path'),
+                int(attachment_id), gcs_bucket, old_blob_path,
+            ))
+            return cursor.fetchone() is not None
+
 
     def _init_library_schema_tx(self, cursor):
         """Схема раздела «Библиотека» (задача #282) — своим SAVEPOINT'ом.

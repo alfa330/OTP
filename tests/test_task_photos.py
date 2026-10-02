@@ -122,6 +122,13 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(task_photos.webp_file_name('C:\\Users\\a\\скрин 1.png'), '1.webp')
         self.assertEqual(task_photos.webp_file_name('...'), 'photo.webp')
 
+    def test_old_name_already_eaten_by_secure_filename(self):
+        """У старых вложений в базе от «фото.png» осталось «png» — это не имя."""
+        for stored in ('png', 'jpg', 'JPEG'):
+            self.assertEqual(task_photos.webp_file_name(stored), 'photo.webp')
+        self.assertEqual(task_photos.webp_file_name('attachment_1'), 'attachment_1.webp')
+        self.assertEqual(task_photos.webp_file_name('IMG_1234.jpg'), 'IMG_1234.webp')
+
     def test_transparency_survives(self):
         result = task_photos.prepare(_image_bytes('PNG', mode='RGBA'), filename='a.png',
                                      content_type='image/png')
@@ -202,6 +209,11 @@ class _Blob:
         if self.bucket.fail_on and self.bucket.fail_on in self.path:
             raise RuntimeError('storage down')
         self.bucket.uploaded[self.path] = (data, content_type)
+
+    def download_as_bytes(self):
+        if self.path not in self.bucket.uploaded:
+            raise RuntimeError('404 No such object')
+        return self.bucket.uploaded[self.path][0]
 
     def delete(self):
         self.bucket.deleted.append(self.path)
@@ -296,6 +308,290 @@ class UploadTest(unittest.TestCase):
     def test_size_limit_is_checked_on_the_original(self):
         with self.assertRaises(ValueError):
             self.upload([_Upload('a.jpg', b'x' * (10 * 1024 * 1024 + 1), 'image/jpeg')])
+
+
+@unittest.skipIf(Image is None, 'Pillow не установлен')
+class LegacyConvertTest(unittest.TestCase):
+    """Добор старых фото: подмена записи и порядок необратимых шагов."""
+
+    OLD = 'TaskAttachments/tasks/initial/2026/05/01/ab12_png'
+
+    def setUp(self):
+        self.bucket = _Bucket()
+        self.swaps = []
+        self.seen_at_swap = []
+        self.swap_result = True
+        self.builds = 0
+
+    def client(self):
+        self.builds += 1
+        return _Client(self.bucket)
+
+    def swap(self, attachment_id, bucket_name, old_path, new):
+        # Что лежит в бакете в момент подмены: новый файл уже, старый ещё.
+        self.seen_at_swap.append((new['gcs_blob_path'] in self.bucket.uploaded,
+                                  old_path in self.bucket.deleted))
+        self.swaps.append((attachment_id, bucket_name, old_path, new))
+        if isinstance(self.swap_result, Exception):
+            raise self.swap_result
+        return self.swap_result
+
+    def row(self, **changes):
+        row = {'id': 7, 'file_name': 'png', 'content_type': 'image/png',
+               'gcs_bucket': 'b', 'gcs_blob_path': self.OLD}
+        row.update(changes)
+        return row
+
+    def put(self, data, path=OLD):
+        self.bucket.uploaded[path] = (data, None)
+
+    def convert(self, rows):
+        return task_photos.convert_legacy(rows, self.client, self.swap)
+
+    def test_old_png_becomes_webp_and_the_original_goes_after_the_swap(self):
+        self.put(_image_bytes('PNG', size=(1600, 1200)))
+        self.assertEqual(self.convert([self.row()]), {'converted': 1, 'kept': 0, 'failed': 0})
+        [(attachment_id, bucket_name, old_path, new)] = self.swaps
+        self.assertEqual((attachment_id, bucket_name, old_path), (7, 'b', self.OLD))
+        self.assertEqual(self.seen_at_swap, [(True, False)])
+        self.assertEqual(new['content_type'], 'image/webp')
+        self.assertEqual(new['file_name'], 'photo.webp', 'в базе от имени осталось «png»')
+        self.assertTrue(new['gcs_blob_path'].startswith('TaskAttachments/tasks/initial/2026/05/01/'))
+        self.assertTrue(new['gcs_blob_path'].endswith('_photo.webp'))
+        data, content_type = self.bucket.uploaded[new['gcs_blob_path']]
+        self.assertEqual(content_type, 'image/webp')
+        self.assertEqual(new['file_size'], len(data))
+        with Image.open(io.BytesIO(data)) as img:
+            self.assertEqual((img.format, img.size), ('WEBP', (1600, 1200)), 'без ужатия')
+        self.assertEqual(new['thumb_blob_path'], task_photos.thumb_blob_path(new['gcs_blob_path']))
+        self.assertEqual(self.bucket.uploaded[new['thumb_blob_path']][1], 'image/webp')
+        self.assertEqual(self.bucket.deleted, [self.OLD])
+
+    def test_jpeg_keeps_its_latin_name(self):
+        old = 'T/tasks/result/2026/03/17/cd_IMG_1.jpg'
+        self.put(_image_bytes('JPEG', size=(300, 200)), old)
+        self.convert([self.row(file_name='IMG_1.jpg', content_type='image/jpeg',
+                               gcs_blob_path=old)])
+        [(_id, _bucket, _old, new)] = self.swaps
+        self.assertEqual(new['file_name'], 'IMG_1.webp')
+        self.assertIsNone(new['thumb_blob_path'], 'кадр меньше плитки — миниатюры нет')
+        self.assertEqual(len(self.bucket.uploaded), 2, 'старый файл и новый, без миниатюры')
+
+    def test_diagram_stays_as_it_is(self):
+        """Те же правила, что у загрузки: схема draw.io теряла бы исходник."""
+        from PIL import PngImagePlugin
+        info = PngImagePlugin.PngInfo()
+        info.add_text('mxfile', '%3Cmxfile%3E')
+        diagram = io.BytesIO()
+        Image.new('RGB', (400, 300)).save(diagram, format='PNG', pnginfo=info)
+        self.put(diagram.getvalue())
+        self.assertEqual(self.convert([self.row()]), {'converted': 0, 'kept': 1, 'failed': 0})
+        self.assertEqual((self.swaps, self.bucket.deleted), ([], []))
+        self.assertEqual(list(self.bucket.uploaded), [self.OLD])
+
+    def test_lost_row_takes_the_new_files_back_and_keeps_the_old(self):
+        """Задачу удалили, пока фото переводилось: подмена честно ответила «нет»,
+        и стирать можно только своё — старый файл уберёт удаление задачи."""
+        self.swap_result = False
+        self.put(_image_bytes('PNG', size=(1600, 1200)))
+        with self.assertNoLogs(level='WARNING'):
+            stats = self.convert([self.row()])
+        self.assertEqual(stats, {'converted': 0, 'kept': 0, 'failed': 1})
+        new = self.swaps[0][3]
+        self.assertEqual(sorted(self.bucket.deleted),
+                         sorted([new['gcs_blob_path'], new['thumb_blob_path']]))
+
+    def test_swap_without_an_answer_deletes_nothing(self):
+        """Обрыв связи на COMMIT: база могла подмену записать, а ответ потерять.
+        Стёрли бы новый файл — запись смотрела бы в пустоту, и добор её больше
+        не выбрал бы (она уже image/webp). Лишний файл в бакете безвреден."""
+        self.swap_result = RuntimeError('server closed the connection unexpectedly')
+        self.put(_image_bytes('PNG', size=(1600, 1200)))
+        with self.assertLogs(level='WARNING') as logs:
+            stats = self.convert([self.row()])
+        self.assertEqual(stats, {'converted': 0, 'kept': 0, 'failed': 1})
+        self.assertEqual(self.bucket.deleted, [])
+        new = self.swaps[0][3]
+        self.assertIn(new['gcs_blob_path'], self.bucket.uploaded)
+        self.assertIn(self.OLD, logs.output[-1], 'по журналу видно, какие файлы остались')
+        self.assertIn(new['gcs_blob_path'], logs.output[-1])
+
+    def test_webp_upload_failure_touches_nothing(self):
+        self.bucket.fail_on = '_photo.webp'
+        self.put(_image_bytes('PNG', size=(1600, 1200)))
+        with self.assertLogs(level='WARNING'):
+            stats = self.convert([self.row()])
+        self.assertEqual(stats, {'converted': 0, 'kept': 0, 'failed': 1})
+        self.assertEqual((self.swaps, self.bucket.deleted), ([], []))
+        self.assertEqual(list(self.bucket.uploaded), [self.OLD])
+
+    def test_missing_original_is_left_for_the_next_run(self):
+        with self.assertLogs(level='WARNING'):
+            stats = self.convert([self.row()])
+        self.assertEqual(stats, {'converted': 0, 'kept': 0, 'failed': 1})
+        self.assertEqual((self.swaps, self.bucket.uploaded, self.bucket.deleted), ([], {}, []))
+
+    def test_thumbnail_failure_does_not_cancel_the_swap(self):
+        self.bucket.fail_on = '_thumb.webp'
+        self.put(_image_bytes('PNG', size=(1600, 1200)))
+        with self.assertLogs(level='WARNING'):
+            stats = self.convert([self.row()])
+        self.assertEqual(stats['converted'], 1)
+        self.assertIsNone(self.swaps[0][3]['thumb_blob_path'])
+
+    def test_original_left_behind_is_still_a_conversion(self):
+        """Запись уже смотрит на WebP — сбой уборки старого файла её не отменяет."""
+        self.put(_image_bytes('PNG', size=(1600, 1200)))
+
+        def failing_delete(blob):
+            raise RuntimeError('503')
+        original = _Blob.delete
+        _Blob.delete = failing_delete
+        self.addCleanup(setattr, _Blob, 'delete', original)
+        with self.assertLogs(level='WARNING'):
+            stats = self.convert([self.row()])
+        self.assertEqual(stats['converted'], 1)
+
+    def test_storage_client_only_for_photos_and_only_once(self):
+        self.assertEqual(self.convert([self.row(content_type='application/pdf')]),
+                         {'converted': 0, 'kept': 1, 'failed': 0})
+        self.assertEqual(self.builds, 0, 'не картинка — хранилище не нужно')
+        self.put(_image_bytes('PNG'), 'p/1_a.png')
+        self.put(_image_bytes('JPEG'), 'p/2_b.jpg')
+        stats = self.convert([self.row(id=1, gcs_blob_path='p/1_a.png'),
+                              self.row(id=2, content_type='image/jpeg', gcs_blob_path='p/2_b.jpg')])
+        self.assertEqual(stats['converted'], 2)
+        self.assertEqual(self.builds, 1)
+
+    def test_storage_outage_stops_the_whole_run(self):
+        def broken():
+            raise RuntimeError('no credentials')
+        with self.assertRaises(RuntimeError):
+            task_photos.convert_legacy([self.row()], broken, self.swap)
+
+    def test_new_path_never_equals_the_old_one(self):
+        """Старый файл стирается после подмены — совпади пути, стёрся бы новый."""
+        for old in ('T/a/x.webp', 'x.webp', ''):
+            path = task_photos.legacy_blob_path(old, 'x.webp')
+            self.assertNotEqual(path, old)
+            self.assertEqual(os.path.dirname(path), os.path.dirname(old))
+
+
+class LegacyQueryTest(unittest.TestCase):
+    """Настоящие методы базы добора — выборка и подмена «если не изменилась»."""
+
+    def test_selection_is_old_photos_that_are_not_webp_yet(self):
+        method = _database_method('list_legacy_task_photo_attachments')
+        cursor = _Cursor(None, [(3, 'png', 'image/png', 'b', 'p/3_png')])
+        fake = MagicMock()
+        fake._get_cursor = lambda: _Ctx(cursor)
+        result = method(fake, task_photos.LEGACY_BEFORE, task_photos.LEGACY_TYPES)
+        self.assertEqual(result, [{'id': 3, 'file_name': 'png', 'content_type': 'image/png',
+                                   'gcs_bucket': 'b', 'gcs_blob_path': 'p/3_png'}])
+        query, params = cursor.queries[-1]
+        self.assertIn('WHERE created_at < %s', query)
+        self.assertIn("COALESCE(storage_type, 'db') = 'gcs'", query)
+        self.assertIn("lower(trim(split_part(COALESCE(content_type, ''), ';', 1))) = ANY(%s)", query)
+        self.assertEqual(params, (task_photos.LEGACY_BEFORE, list(task_photos.LEGACY_TYPES), 500))
+        self.assertNotIn('image/webp', params[1], 'иначе переведённое бралось бы снова')
+        self.assertIn('image/png', params[1])
+        self.assertIn('image/jpeg', params[1])
+
+    def test_boundary_is_the_day_after_the_upload_started_converting(self):
+        self.assertEqual(task_photos.LEGACY_BEFORE, datetime(2026, 9, 25))
+
+    def test_swap_only_while_the_row_points_to_the_old_file(self):
+        method = _database_method('swap_task_attachment_file')
+        for returned, expected in (((7,), True), (None, False)):
+            cursor = _UpdateCursor(returned)
+            fake = MagicMock()
+            fake._get_cursor = lambda: _Ctx(cursor)
+            new = {'file_name': 'photo.webp', 'content_type': 'image/webp', 'file_size': 12,
+                   'gcs_blob_path': 'p/new_photo.webp', 'thumb_blob_path': None}
+            self.assertIs(method(fake, 7, 'b', 'p/old_png', new), expected)
+            query, params = cursor.queries[-1]
+            self.assertIn('UPDATE task_attachments', query)
+            self.assertIn('WHERE id = %s AND storage_type = \'gcs\' AND gcs_bucket = %s '
+                          'AND gcs_blob_path = %s RETURNING id', query)
+            self.assertEqual(params, ('photo.webp', 'image/webp', 12, 'p/new_photo.webp', None,
+                                      7, 'b', 'p/old_png'))
+
+
+class _UpdateCursor:
+    def __init__(self, returned):
+        self.returned = returned
+        self.queries = []
+
+    def execute(self, query, params=None):
+        self.queries.append((' '.join(query.split()), params))
+
+    def fetchone(self):
+        return self.returned
+
+
+class LegacyJobTest(unittest.TestCase):
+    """Настоящая _convert_legacy_task_photos из монолита: имена, тишина, отказы."""
+
+    def job(self, rows=(), list_error=None):
+        calls = {'convert': [], 'client': 0}
+        fake_db = MagicMock()
+        if list_error:
+            fake_db.list_legacy_task_photo_attachments.side_effect = list_error
+        else:
+            fake_db.list_legacy_task_photo_attachments.return_value = list(rows)
+
+        def get_gcs_client():
+            calls['client'] += 1
+            return _Client(_Bucket())
+        calls['getter'] = get_gcs_client
+        run = _bot_function('_convert_legacy_task_photos', {
+            'db': fake_db, 'get_gcs_client': get_gcs_client, 'logging': logging,
+        })
+        return run, fake_db, calls
+
+    def fake_converter(self, stats):
+        original = task_photos.convert_legacy
+        seen = []
+
+        def fake_convert(rows, client_getter, swap):
+            seen.append((rows, client_getter, swap))
+            return dict(stats)
+        task_photos.convert_legacy = fake_convert
+        self.addCleanup(setattr, task_photos, 'convert_legacy', original)
+        return seen
+
+    def test_nothing_left_is_one_quiet_query(self):
+        run, fake_db, calls = self.job()
+        with self.assertNoLogs(level='INFO'):
+            run()
+        fake_db.list_legacy_task_photo_attachments.assert_called_once_with(
+            task_photos.LEGACY_BEFORE, task_photos.LEGACY_TYPES)
+        self.assertEqual(calls['client'], 0)
+        fake_db.swap_task_attachment_file.assert_not_called()
+
+    def test_rows_go_through_the_converter_and_are_counted(self):
+        seen = self.fake_converter({'converted': 2, 'kept': 1, 'failed': 0})
+        run, fake_db, calls = self.job(rows=[{'id': 1}])
+        with self.assertLogs(level='INFO') as logs:
+            run()
+        [(rows, client_getter, swap)] = seen
+        self.assertEqual(rows, [{'id': 1}])
+        self.assertIs(client_getter, calls['getter'], 'фабрика клиента, а не готовый клиент')
+        self.assertEqual(calls['client'], 0, 'клиент строит сам конвертер — лениво')
+        self.assertIs(swap, fake_db.swap_task_attachment_file)
+        self.assertIn('переведено 2, оставлено как есть 1, не вышло 0', logs.output[-1])
+
+    def test_only_kept_rows_left_is_silent(self):
+        """Схема draw.io пересматривается на каждом старте — и не шумит там."""
+        self.fake_converter({'converted': 0, 'kept': 2, 'failed': 0})
+        run, _fake_db, _calls = self.job(rows=[{'id': 1}, {'id': 2}])
+        with self.assertNoLogs(level='INFO'):
+            run()
+
+    def test_failure_is_logged_not_raised(self):
+        run, _fake_db, _calls = self.job(list_error=RuntimeError('pool exhausted'))
+        with self.assertLogs(level='ERROR'):
+            run()
 
 
 class DeleteBlobsTest(unittest.TestCase):
@@ -469,6 +765,15 @@ class WiringTest(unittest.TestCase):
     def test_webp_is_not_turned_into_a_sticker(self):
         sender = BOT_PY.split('def _send_task_completion_attachments_to_telegram', 1)[1][:3500]
         self.assertIn("data['disable_content_type_detection'] = 'true'", sender)
+
+    def test_old_photos_are_converted_once_in_their_own_thread(self):
+        """Не через executor_pool: там четыре места на весь бот."""
+        main = BOT_PY.split("\nif __name__ == '__main__':", 1)[1]
+        timer = main.index('_legacy_task_photos_timer = threading.Timer(60, _convert_legacy_task_photos)')
+        daemon = main.index('_legacy_task_photos_timer.daemon = True', timer)
+        main.index('_legacy_task_photos_timer.start()', daemon)
+        job = BOT_PY.split('\ndef _convert_legacy_task_photos', 1)[1].split('\ndef ', 1)[0]
+        self.assertNotIn('run_in_executor', job)
 
 
 class FrontendTest(unittest.TestCase):
