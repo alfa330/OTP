@@ -2470,6 +2470,34 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
     );
 };
 
+/* «Библиотека» (#282). Раздел видят те, кто его ведёт: загружает книги, правит
+   их отделы и жанры, видит архив и мониторинг. Читателей у раздела пока нет
+   («у других пока даже раздел не будет отображаться», 28.09.2026).
+
+   Кто ведёт (решение владельца 02.10.2026): супер-админ, тренер, СВ СЗоВ и ОП и
+   двое поимённо — только id, ФИО в публичный репозиторий не кладём:
+   1 — админ, глава СЗоВ; 313 — админ, глава ОП. Правило именное: прочие админы
+   и главы отделов раздел не видят.
+
+   Здесь решается только «показывать ли пункт меню»; обязательную границу
+   держит library/routes.py (can_manage, MANAGER_USER_IDS). Тест сверяет
+   списки: дополнять — в обоих местах. */
+const LIBRARY_MANAGER_USER_IDS = new Set([1, 313]);
+const LIBRARY_SUPERVISOR_DEPARTMENT_CODES = ['szov', 'op'];
+
+const canAccessLibrarySectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin' || role === 'trainer') return true;
+    if (LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))) return true;
+    if (!isSupervisorRole(role)) return false;
+    // Сверяем и код отдела, и id отдела продаж: у части профилей приходит
+    // только одно из двух (та же ловушка, что у isAiQaSupervisor).
+    if (isOpSalesSupervisorForAiQa(userLike)) return true;
+    return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+    );
+};
+
 /* «Ссылка на подписание» — ИИН водителя → ссылка на подписание документов
    через eGov Mobile, генерация на сервере (просьба владельца 16.09.2026).
 
@@ -42390,11 +42418,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
-            // «Библиотека» (#282): пока только супер-админ и тренер — решение
-            // владельца 28.09.2026 («у других пока даже раздел не будет
-            // отображаться»). Сервер закрыт тем же правилом (library/routes.py:
-            // READER_ROLES); открывать чтение другим — там и здесь вместе.
-            const canAccessLibrarySection = isSuperAdmin || currentUserRole === 'trainer';
+            // «Библиотека» (#282): только те, кто её ведёт, — супер-админ, тренер,
+            // СВ СЗоВ и ОП и двое поимённо (canAccessLibrarySectionForUser).
+            // Сервер закрыт тем же правилом (library/routes.py: can_manage).
+            const canAccessLibrarySection = canAccessLibrarySectionForUser(user);
             const canAccessSignLinksSection = canAccessSignLinksSectionForUser(user);
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
@@ -45998,6 +46025,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
+                    (requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&
                     // «Жалобы»: ссылка из группы ведёт на ?view=complaints&complaint_id=<id>.
                     (requestedViewFromUrl !== 'complaints' || canAccessComplaintsSection);
                 if (canOpenRequestedView) {
@@ -46016,7 +46044,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, canAccessCrmSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -51982,12 +52010,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // сразу: у ОП есть allowlist, и проверка ниже до op_funnel не
                 // дошла бы (та же ловушка, что описана у «Ограничителя Перезвона»).
                 if (view === 'op_funnel' && canAccessOpFunnelSection) return;
+                // «Библиотека» — свой предикат: её ведут СВ отдела продаж, а у ОП
+                // есть allowlist, и проверка ниже выбросила бы их из раздела.
+                if (view === 'library' && canAccessLibrarySection) return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).

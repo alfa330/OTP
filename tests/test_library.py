@@ -16,7 +16,9 @@
 - раздел доходит до меню и до тренера;
 - жанры: справочник ведут только управляющие, имя уникально без регистра,
   у книги их сколько угодно (и ни одного), неверный жанр — отказ до бакета;
-- отделы к выдаче — пока только СЗоВ и ОП (решение владельца 02.10.2026).
+- отделы к выдаче — пока только СЗоВ и ОП (решение владельца 02.10.2026);
+- ведут библиотеку супер-админ, тренер, СВ СЗоВ и ОП и двое поимённо (id) —
+  на сервере и в пункте меню одними и теми же списками.
 
 Книги в тестах собираются здесь же из строк: реальные файлы книг в публичный
 репозиторий не кладём.
@@ -405,10 +407,16 @@ class FakeGcs:
         return _Bucket()
 
 
-def client_for(role, *, gcs=None, requester_id=7):
+def client_for(role, *, gcs=None, requester_id=7, department_code=None, department_calls=None):
     from flask import Flask
 
     fake = gcs if gcs is not None else FakeGcs()
+
+    def department_code_of(user_id):
+        if department_calls is not None:
+            department_calls.append(user_id)
+        return department_code
+
     app = Flask(__name__)
     app.register_blueprint(routes.build_library_blueprint(
         db=FakeDb(),
@@ -417,6 +425,7 @@ def client_for(role, *, gcs=None, requester_id=7):
         resolve_requester=lambda: (requester_id, (requester_id, None, 'Тест', role), None),
         normalize_role=lambda value: str(value or '').strip().lower(),
         gcs={'bucket_name': lambda: 'test-bucket', 'client': lambda: fake},
+        department_code_of=department_code_of,
     ))
     return app.test_client(), fake
 
@@ -461,8 +470,9 @@ class PermissionTests(unittest.TestCase):
                 self.assertIs(False, body['books'][0]['archived'])
 
     def test_section_is_closed_to_everyone_else_for_now(self):
-        """Решение владельца 28.09.2026: пока раздел только у супер-админа и
-        тренера — остальным закрыта каждая ручка, не только управление."""
+        """Решение владельца 28.09.2026: раздел только у тех, кто его ведёт, —
+        остальным закрыта каждая ручка, не только управление. СВ здесь без
+        отдела, админ — не из именного списка."""
         self.assertEqual(routes.MANAGER_ROLES, routes.READER_ROLES)
         requests = (
             ('get', '/api/library', {}),
@@ -1011,7 +1021,7 @@ class FrontendWiringTests(unittest.TestCase):
     def test_screen_is_rendered_behind_the_predicate(self):
         self.assertIn("{view === 'library' && canAccessLibrarySection && (", self.app)
         # Пока раздел только у супер-админа и тренера — по роли, не по отделу.
-        self.assertIn("const canAccessLibrarySection = isSuperAdmin || currentUserRole === 'trainer';", self.app)
+        self.assertIn('const canAccessLibrarySection = canAccessLibrarySectionForUser(user);', self.app)
         self.assertIn("import('./components/library/LibraryView')", self.app)
 
     def test_trainer_is_not_thrown_out_of_the_section(self):
@@ -1111,6 +1121,99 @@ class DepartmentsUiTests(unittest.TestCase):
         self.assertIn('departmentId={departmentId}', self.view)
         self.assertIn('/api/library/analytics/summary', self.monitoring)
         self.assertIn("params.set('department_id', String(departmentId))", self.monitoring)
+
+
+class LibraryManagersTests(unittest.TestCase):
+    """Кто ведёт библиотеку — решение владельца 02.10.2026: «жанры, правки и
+    мониторинг и т. д. должны видеть супервайзеры (СЗоВ и ОП), тренер, <двое
+    поимённо> и суперадмины». Именные — только id: ФИО в публичный
+    репозиторий не кладём."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = (ROOT / 'src/App.jsx').read_text(encoding='utf-8')
+
+    def manager_view(self, role, **kwargs):
+        with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                mock.patch.object(queries, 'list_books', return_value=[]), \
+                mock.patch.object(queries, 'list_genres', return_value=[]), \
+                mock.patch.object(queries, 'library_departments', return_value=[]):
+            client, _ = client_for(role, **kwargs)
+            return client.get('/api/library')
+
+    def test_rule_is_exactly_what_the_owner_listed(self):
+        self.assertEqual(frozenset({'super_admin', 'trainer'}), routes.MANAGER_ROLES)
+        self.assertEqual(frozenset({'szov', 'op'}), routes.MANAGER_SUPERVISOR_DEPARTMENT_CODES)
+        self.assertEqual(frozenset({1, 313}), routes.MANAGER_USER_IDS)
+
+    def test_supervisors_of_szov_and_op_run_the_library(self):
+        for code in ('szov', 'op', 'SZOV'):
+            with self.subTest(code=code):
+                response = self.manager_view('sv', department_code=code)
+                self.assertEqual(200, response.status_code)
+                self.assertIs(True, response.get_json()['can_manage'])
+                client, _ = client_for('sv', department_code=code)
+                with mock.patch.object(queries, 'create_genre', return_value=({'id': 4, 'name': 'X'}, True)):
+                    self.assertEqual(201, client.post('/api/library/genres', json={'name': 'X'}).status_code)
+                with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                        mock.patch.object(queries, 'analytics_summary', return_value={'total': {}, 'departments': []}):
+                    self.assertEqual(200, client.get('/api/library/analytics/summary').status_code)
+
+    def test_other_supervisors_stay_outside(self):
+        for code in ('tez', 'front_office', '', None):
+            with self.subTest(code=code):
+                response = self.manager_view('sv', department_code=code)
+                self.assertEqual(403, response.status_code)
+                self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
+
+    def test_named_people_run_the_library_other_admins_do_not(self):
+        for requester_id in sorted(routes.MANAGER_USER_IDS):
+            with self.subTest(requester_id=requester_id):
+                response = self.manager_view('admin', requester_id=requester_id)
+                self.assertEqual(200, response.status_code)
+                self.assertIs(True, response.get_json()['can_manage'])
+        response = self.manager_view('admin', requester_id=7, department_code='szov')
+        self.assertEqual(403, response.status_code)
+
+    def test_department_is_looked_up_only_for_supervisors(self):
+        """Ручки зовут проверку на каждый запрос: отдел — поход в базу, и
+        роль с id решают без него."""
+        for role, requester_id, expected in (('super_admin', 7, []), ('trainer', 7, []),
+                                             ('admin', 1, []), ('operator', 7, []), ('sv', 7, [7])):
+            with self.subTest(role=role, requester_id=requester_id):
+                calls = []
+                self.manager_view(role, requester_id=requester_id, department_code='szov', department_calls=calls)
+                self.assertEqual(expected, calls)
+
+    def test_menu_uses_the_same_lists(self):
+        """Пункт меню и сервер обязаны совпадать — иначе человек видит пункт, а
+        раздел отвечает отказом (или наоборот)."""
+        ids = re.search(r'const LIBRARY_MANAGER_USER_IDS = new Set\(\[([0-9,\s]*)\]\);', self.app)
+        self.assertIsNotNone(ids)
+        self.assertEqual({int(x) for x in ids.group(1).split(',') if x.strip()}, set(routes.MANAGER_USER_IDS))
+        codes = re.search(r"const LIBRARY_SUPERVISOR_DEPARTMENT_CODES = \[([^\]]*)\];", self.app)
+        self.assertIsNotNone(codes)
+        self.assertEqual({x.strip().strip("'") for x in codes.group(1).split(',') if x.strip()},
+                         set(routes.MANAGER_SUPERVISOR_DEPARTMENT_CODES))
+        predicate = self.app.split('const canAccessLibrarySectionForUser = (userLike) => {')[1].split('\n};')[0]
+        self.assertIn("if (role === 'super_admin' || role === 'trainer') return true;", predicate)
+        self.assertIn('LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))', predicate)
+        # СВ ОП узнаётся и по id отдела: у части профилей нет кода.
+        self.assertIn('if (isOpSalesSupervisorForAiQa(userLike)) return true;', predicate)
+
+    def test_op_supervisors_are_not_thrown_out_by_the_department_guard(self):
+        """У ОП есть allowlist разделов: без своей строки гард отдела выбросил
+        бы СВ ОП из «Библиотеки» сразу после входа (как было с «Воронкой ОП»)."""
+        guard = self.app.index("if (view === 'library' && canAccessLibrarySection) return;")
+        fallback = self.app.index('if (departmentAllowsView(user, view)) return;')
+        self.assertLess(guard, fallback)
+        self.assertIn("(requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&", self.app)
+
+    def test_blueprint_gets_the_department_lookup(self):
+        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        block = source[source.index('from library.routes import build_library_blueprint'):]
+        block = block[:block.index('))')]
+        self.assertIn('department_code_of=_department_code_of_user,', block)
 
 
 class GenreRouteTests(unittest.TestCase):
