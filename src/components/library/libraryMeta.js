@@ -224,8 +224,8 @@ export const DEPARTMENT_STORAGE_KEY = 'otp.library.department';
 export const restoreDepartment = (stored, departments) => {
     const id = Number(stored);
     if (!Number.isInteger(id) || id <= 0) return '';
-    /* Только отдел, которому книги выдаются: прочие в выборе отдела не стоят
-       (сейчас — всё, кроме СЗоВ и ОП), и кнопка показала бы чужое название. */
+    /* Только отдел, которому книги выдаются: выключенный в выборе отдела не
+       стоит, и кнопка показала бы чужое название. */
     return (Array.isArray(departments) ? departments : [])
         .some((item) => item?.id === id && item?.active !== false) ? id : '';
 };

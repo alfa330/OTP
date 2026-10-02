@@ -20,14 +20,6 @@ ANALYTICS_LIMIT = 1000
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
-# Каким отделам книгу можно выдать. Решения владельца 02.10.2026: «из доступных
-# отделов сделать только пока СЗоВ и ОП», затем «добавь группы hr и регионы в
-# этот селектор» — HR и отдел «Фронт офисы» (у него направление и группа
-# «Регионы»). По коду отдела, а не по названию: название отдела
-# переименовывают, код — нет. Отдел вне списка, которому книга уже выдана,
-# остаётся у неё (и в выборе — чтобы его можно было снять).
-LIBRARY_DEPARTMENT_CODES = ('szov', 'op', 'hr', 'front_office')
-
 # Отделы и жанры книги — массивами прямо в строке: книг десятки, подзапрос по
 # индексу дешевле второго похода в базу и склейки в питоне.
 _BOOK_COLUMNS = """
@@ -210,32 +202,35 @@ def insert_book(cursor, *, parsed, bucket, file_blob, file_size, original_name,
     return book_id
 
 
-# Отдел, которому можно выдать книгу: действующий и из списка библиотеки.
-_DEPARTMENT_SELECTABLE = "(d.is_active IS NOT FALSE AND LOWER(d.code) = ANY(%s))"
+# Отдел, которому можно выдать книгу, — любой действующий. Решения владельца
+# 02.10.2026: сначала «только пока СЗоВ и ОП», потом ещё HR и «Регионы», и в
+# тот же день «на данный момент в селекторе добавь все отделы». Выключенный
+# отдел, которому книга уже выдана, остаётся у неё (и в выборе — чтобы его
+# можно было снять).
+_DEPARTMENT_SELECTABLE = "(d.is_active IS NOT FALSE)"
 
 
 def library_departments(cursor):
     """Отделы для выбора: те, кому можно выдать книгу (active), и те, у кого
     книги уже есть (active = False, если выдать им новую уже нельзя).
 
-    Второе — чтобы книга, выданная отделу, который потом выключили или убрали
-    из списка библиотеки, не показывала в окне отделов безымянное «№ 42».
+    Второе — чтобы книга, выданная отделу, который потом выключили, не
+    показывала в окне отделов безымянное «№ 42».
     """
-    codes = list(LIBRARY_DEPARTMENT_CODES)
     cursor.execute(f"""
         SELECT d.id, d.name, {_DEPARTMENT_SELECTABLE} AS active
           FROM departments d
          WHERE {_DEPARTMENT_SELECTABLE}
             OR EXISTS (SELECT 1 FROM library_book_departments bd WHERE bd.department_id = d.id)
          ORDER BY d.name, d.id
-    """, (codes, codes))
+    """)
     return [{'id': row[0], 'name': row[1], 'active': bool(row[2])} for row in cursor.fetchall()]
 
 
 def unknown_departments(cursor, department_ids, *, book_id=None):
-    """-> id из списка, которым книгу выдать нельзя (нет такого отдела, он
-    выключен или не из списка библиотеки). Отдел, которому книга УЖЕ выдана,
-    можно оставить: правка отделов книги не должна требовать сначала его снять."""
+    """-> id из списка, которым книгу выдать нельзя (нет такого отдела или он
+    выключен). Отдел, которому книга УЖЕ выдана, можно оставить: правка
+    отделов книги не должна требовать сначала его снять."""
     ids = sorted({int(value) for value in department_ids})
     if not ids:
         return []
@@ -245,7 +240,7 @@ def unknown_departments(cursor, department_ids, *, book_id=None):
            AND ({_DEPARTMENT_SELECTABLE} OR EXISTS (
                 SELECT 1 FROM library_book_departments bd
                  WHERE bd.department_id = d.id AND bd.book_id = %s))
-    """, (ids, list(LIBRARY_DEPARTMENT_CODES), book_id))
+    """, (ids, book_id))
     known = {row[0] for row in cursor.fetchall()}
     return [value for value in ids if value not in known]
 

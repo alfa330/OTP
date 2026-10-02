@@ -65066,9 +65066,8 @@ except Exception:
 
 # ── Раздел «Библиотека» (задача #282) ────────────────────────────────────────
 # Каталог книг EPUB, веб-ридер и мониторинг чтения. Ведут библиотеку (загрузка,
-# жанры, мониторинг) супер-админ, тренер, СВ СЗоВ и ОП и двое поимённо
-# (library/routes.py: can_manage); читают ещё операторы СЗоВ и ОП (can_read).
-# Отдел СВ и оператора — _department_code_of_user: он же сверяет id отдела продаж.
+# жанры, архив, мониторинг) СВ и выше и тренер (library/routes.py: can_manage),
+# читают все остальные сотрудники — книги своего отдела (can_read).
 # Бакет — тот же каскад env, что у новостей: своя переменная не нужна, пока
 # книги не захотят развести по сроку хранения.
 try:
@@ -65081,7 +65080,6 @@ try:
         resolve_requester=_resolve_requester,
         normalize_role=_normalize_user_role,
         gcs={'bucket_name': _news_bucket_name, 'client': get_gcs_client},
-        department_code_of=_department_code_of_user,
     ))
     logging.info("Раздел «Библиотека»: Blueprint подключён на /api/library")
 except Exception:

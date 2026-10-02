@@ -17,11 +17,12 @@
 
 КТО ВЕДЁТ БИБЛИОТЕКУ (can_manage) — загружает и удаляет книги, правит их
 отделы и жанры, ведёт справочник жанров, видит архив и мониторинг. По ТЗ это
-были супер-админ и тренер; решение владельца 02.10.2026 добавило СВ СЗоВ и ОП
-и двух человек поимённо (MANAGER_USER_IDS).
+были супер-админ и тренер; с 02.10.2026 — СВ и выше и, как раньше, тренер
+(MANAGER_ROLES).
 
 ОТДЕЛЫ (29.09.2026). Книга выдаётся одному или нескольким отделам — при
-загрузке их выбирают обязательно. Управляющие видят книги всех отделов и
+загрузке их выбирают обязательно; с 02.10.2026 — любому действующему отделу
+(queries._DEPARTMENT_SELECTABLE). Управляющие видят книги всех отделов и
 выбирают отдел в разделе сами; читатель — только книги своего отдела не из
 архива (queries._READER_SEES), и каждая ручка одной книги проходит ту же
 дверь (queries.open_book): чужая или архивная книга отвечает 404, как
@@ -35,14 +36,11 @@
 мониторинге видно, кто её читал. Удалить насовсем можно только книгу из
 архива — 409 иначе.
 
-КТО ВИДИТ РАЗДЕЛ — те, кто его ведёт, и читатели: с 02.10.2026 операторы СЗоВ
-и ОП («у операторов ОП и СЗоВ открыт доступ к разделу? если нет открывай») и
-все сотрудники HR и «Регионов» — отдела «Фронт офисы» («добавь группы hr и
-регионы в этот селектор, и им открой доступ для чтения»).
-Читатель видит только книги своего отдела не из архива, сохраняет их и
-читает; управление ему закрыто. Остальным закрыт и пункт меню (App.jsx:
-canAccessLibrarySectionForUser), и каждая ручка здесь. Открыть чтение другим —
-расширить правило здесь и тот предикат вместе.
+КТО ВИДИТ РАЗДЕЛ — с 02.10.2026 все сотрудники: кто не ведёт библиотеку,
+тот её читает (READER_ROLES). Читатель видит только книги своего отдела не из
+архива, сохраняет их и читает; управление ему закрыто. Роль вне шкалы
+(пустая, незнакомая) не пускается никуда: ни пунктом меню (App.jsx:
+canAccessLibrarySectionForUser), ни одной ручкой здесь.
 
 Фабрика получает зависимости аргументами и не импортирует bot_schedule2 —
 тот сам подключает этот модуль (тот же приём, что у news и my_data).
@@ -58,29 +56,15 @@ from . import queries, storage
 from .epub import MAX_EPUB_BYTES, EpubError, parse_epub
 from .schema import schema_is_ready
 
-# Кто ведёт библиотеку. Решение владельца 02.10.2026: «жанры, правки и
-# мониторинг и т. д. должны видеть супервайзеры (СЗоВ и ОП), тренер, <двое
-# поимённо> и суперадмины». Три независимых основания:
-#   роль целиком — супер-админ и тренер (по ТЗ, с 28.09.2026);
-MANAGER_ROLES = frozenset({'super_admin', 'trainer'})
-#   супервайзер одного из двух отделов — по коду отдела;
-MANAGER_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
-#   поимённо — только id, ФИО в публичный репозиторий не кладём:
-#     1   — админ, глава СЗоВ;
-#     313 — админ, глава ОП.
-#   Правило именное: прочие админы и главы отделов сюда не входят. Тот же
-#   список — в App.jsx (LIBRARY_MANAGER_USER_IDS), тест сверяет оба.
-MANAGER_USER_IDS = frozenset({1, 313})
-
-# Кому раздел открыт по одной роли, без права вести, — тем же ролям, что ведут.
-READER_ROLES = MANAGER_ROLES
-# Читатели (решения владельца 02.10.2026), по коду отдела:
-#   операторы СЗоВ и ОП (App.jsx: LIBRARY_READER_DEPARTMENT_CODES);
-READER_OPERATOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
-#   HR и «Регионы» — отдел «Фронт офисы» (у него направление и группа «Регионы»)
-#   — весь отдел, в любой роли: кадровики, операторы офисов, глава
-#   (App.jsx: LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES).
-READER_DEPARTMENT_CODES = frozenset({'hr', 'front_office'})
+# Кто ведёт библиотеку, по роли. Решение владельца 02.10.2026: «начиная св и
+# выше отдай доступ на редактирование, архив, мониторинг и т. д.» — СВ и выше
+# по шкале ROLE_HIERARCHY (bot_schedule2.py), в любом отделе. Тренер ведёт
+# по ТЗ (с 28.09.2026) — по шкале он ниже СВ, поэтому назван отдельно.
+MANAGER_ROLES = frozenset({'super_admin', 'admin', 'sv', 'trainer'})
+# Кто читает: «обычным операторам и сотрудникам — на чтение» — все остальные
+# роли шкалы. Вместе с MANAGER_ROLES — ровно вся шкала (тест сверяет: новая
+# роль без решения не останется). То же объединение — в App.jsx (LIBRARY_ROLES).
+READER_ROLES = frozenset({'operator', 'trainee', 'hr_manager', 'accounting_manager', 'marketing_manager'})
 
 # Место в книге: «номер главы:доля главы от 0 до 1» — 12:0.4375. Строгий
 # формат, а не произвольная строка: иначе в базу можно было бы положить что угодно.
@@ -96,49 +80,14 @@ _FILE_CACHE = 'private, max-age=604800, immutable'
 COVER_MAX_SIDE = 1200
 
 
-def can_manage(role, user_id=None, department_code_of=None):
-    """Ведёт ли смотрящий библиотеку. Отдел спрашивается только у СВ: роль и
-    id решают без похода в базу, а ручки библиотеки зовут проверку на каждый
-    запрос."""
-    if role in MANAGER_ROLES:
-        return True
-    if user_id is not None and int(user_id) in MANAGER_USER_IDS:
-        return True
-    if role != 'sv':
-        return False
-    return _department_code(user_id, department_code_of) in MANAGER_SUPERVISOR_DEPARTMENT_CODES
+def can_manage(role):
+    """Ведёт ли смотрящий библиотеку."""
+    return role in MANAGER_ROLES
 
 
-def can_read(role, manager=False, user_id=None, department_code_of=None):
-    """Открыт ли раздел смотрящему. Отдел спрашивается, только когда роль и
-    «ведёт ли» не решили: читает и любой сотрудник HR и «Регионов»."""
-    if manager or role in READER_ROLES:
-        return True
-    code = _department_code(user_id, department_code_of)
-    if code in READER_DEPARTMENT_CODES:
-        return True
-    return role == 'operator' and code in READER_OPERATOR_DEPARTMENT_CODES
-
-
-def _once(department_code_of):
-    """Отдел смотрящего — один поход в базу на запрос, сколько бы проверок
-    (ведёт ли, читает ли) его ни спросили."""
-    if department_code_of is None:
-        return None
-    cache = {}
-
-    def lookup(user_id):
-        if user_id not in cache:
-            cache[user_id] = department_code_of(user_id)
-        return cache[user_id]
-
-    return lookup
-
-
-def _department_code(user_id, department_code_of):
-    if department_code_of is None or user_id is None:
-        return ''
-    return str(department_code_of(int(user_id)) or '').strip().lower()
+def can_read(role):
+    """Открыт ли раздел смотрящему: тем, кто ведёт, и читателям."""
+    return role in MANAGER_ROLES or role in READER_ROLES
 
 
 def parse_ids(values):
@@ -183,12 +132,9 @@ def _prepare_cover(cover):
 
 
 def build_library_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                            resolve_requester, normalize_role, gcs=None, department_code_of=None):
+                            resolve_requester, normalize_role, gcs=None):
     """gcs — {'bucket_name': callable, 'client': callable}. Без него каталог и
-    чтение уже загруженного работают, а загрузка честно отвечает 503.
-
-    department_code_of(user_id) -> код отдела: по нему узнаются СВ СЗоВ и ОП.
-    Не передан — СВ библиотеку не ведут (безопасное умолчание)."""
+    чтение уже загруженного работают, а загрузка честно отвечает 503."""
 
     bp = Blueprint('library', __name__, url_prefix='/api/library')
     schema_ready_once = []
@@ -215,9 +161,8 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         message, status = error
                         return jsonify({"error": message}), status
                     role = normalize_role(requester[3] if requester else None)
-                    lookup = _once(department_code_of)
-                    manager = can_manage(role, requester_id, lookup)
-                    if not can_read(role, manager, requester_id, lookup):
+                    manager = can_manage(role)
+                    if not can_read(role):
                         return jsonify({
                             "error": "Раздел «Библиотека» вам пока не открыт",
                             "code": "LIBRARY_FORBIDDEN",
@@ -227,8 +172,8 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                             "error": "Доступно только тем, кто ведёт библиотеку",
                             "code": "LIBRARY_MANAGE_FORBIDDEN",
                         }), 403
-                    # Ручкам уходит готовое решение, а не роль: отдел СВ —
-                    # поход в базу, и делать его второй раз в ручке незачем.
+                    # Ручкам уходит готовое решение, а не роль: правило «кто
+                    # ведёт» живёт в одном месте.
                     return handler(int(requester_id), manager, **kwargs)
                 except EpubError as exc:
                     return jsonify({"error": exc.message, "code": exc.code}), 400
@@ -251,7 +196,7 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
             return jsonify({"error": "Выберите хотя бы один отдел",
                             "code": "LIBRARY_DEPARTMENTS_REQUIRED"}), 400
         if queries.unknown_departments(cursor, department_ids, book_id=book_id):
-            return jsonify({"error": "Этому отделу книги не выдаются — обновите страницу",
+            return jsonify({"error": "Такого отдела больше нет — обновите страницу",
                             "code": "LIBRARY_DEPARTMENT_UNKNOWN"}), 400
         return None
 

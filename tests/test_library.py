@@ -25,7 +25,9 @@
 репозиторий не кладём.
 """
 
+import ast
 import contextlib
+import inspect
 import io
 import re
 import unittest
@@ -408,16 +410,10 @@ class FakeGcs:
         return _Bucket()
 
 
-def client_for(role, *, gcs=None, requester_id=7, department_code=None, department_calls=None):
+def client_for(role, *, gcs=None, requester_id=7):
     from flask import Flask
 
     fake = gcs if gcs is not None else FakeGcs()
-
-    def department_code_of(user_id):
-        if department_calls is not None:
-            department_calls.append(user_id)
-        return department_code
-
     app = Flask(__name__)
     app.register_blueprint(routes.build_library_blueprint(
         db=FakeDb(),
@@ -426,7 +422,6 @@ def client_for(role, *, gcs=None, requester_id=7, department_code=None, departme
         resolve_requester=lambda: (requester_id, (requester_id, None, 'Тест', role), None),
         normalize_role=lambda value: str(value or '').strip().lower(),
         gcs={'bucket_name': lambda: 'test-bucket', 'client': lambda: fake},
-        department_code_of=department_code_of,
     ))
     return app.test_client(), fake
 
@@ -443,14 +438,30 @@ def book_row(**extra):
 
 
 class PermissionTests(unittest.TestCase):
-    """ТЗ: «Супер-админ / Тренер» — буквально, без админов и глав отделов."""
+    """Решение владельца 02.10.2026: «начиная св и выше отдай доступ на
+    редактирование, архив, мониторинг и т. д., а обычным операторам и
+    сотрудникам — на чтение». Тренер ведёт по ТЗ."""
 
-    def test_manager_roles_are_exactly_super_admin_and_trainer(self):
-        self.assertEqual(frozenset({'super_admin', 'trainer'}), routes.MANAGER_ROLES)
+    def test_manager_roles_are_sv_and_above_and_the_trainer(self):
+        self.assertEqual(frozenset({'super_admin', 'admin', 'sv', 'trainer'}), routes.MANAGER_ROLES)
+        self.assertEqual(frozenset({'operator', 'trainee', 'hr_manager', 'accounting_manager', 'marketing_manager'}),
+                         routes.READER_ROLES)
+
+    def test_rule_covers_the_whole_role_scale(self):
+        """«СВ и выше» — по шкале сервера, а вместе с читателями — вся шкала:
+        роль, добавленная в шкалу позже, уронит тест, а не останется молча за
+        дверью библиотеки."""
+        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        scale = ast.literal_eval(re.search(r'^ROLE_HIERARCHY = (\{.*?\n\})', source, re.M | re.S).group(1))
+        self.assertEqual({role for role, level in scale.items() if level >= scale['sv']},
+                         routes.MANAGER_ROLES - {'trainer'})
+        self.assertLess(scale['trainer'], scale['sv'])
+        self.assertEqual(set(scale), routes.MANAGER_ROLES | routes.READER_ROLES)
+        self.assertFalse(routes.MANAGER_ROLES & routes.READER_ROLES)
 
     def test_catalog_reports_manage_right_by_role(self):
         departments = [{'id': 1, 'name': 'СЗоВ', 'active': True}]
-        for role in ('trainer', 'super_admin'):
+        for role in sorted(routes.MANAGER_ROLES):
             with self.subTest(role=role), \
                     mock.patch.object(routes, 'schema_is_ready', return_value=True), \
                     mock.patch.object(queries, 'list_books', return_value=[book_row()]) as list_books, \
@@ -470,11 +481,9 @@ class PermissionTests(unittest.TestCase):
                 self.assertEqual([{'id': 2, 'name': 'Психология'}], body['genres'])
                 self.assertIs(False, body['books'][0]['archived'])
 
-    def test_section_is_closed_to_everyone_else_for_now(self):
-        """Раздел только у тех, кто его ведёт, и у читателей — остальным закрыта
-        каждая ручка, не только управление. СВ и оператор здесь без отдела,
-        админ — не из именного списка."""
-        self.assertEqual(routes.MANAGER_ROLES, routes.READER_ROLES)
+    def test_section_is_closed_to_roles_outside_the_scale(self):
+        """Пустая или незнакомая роль — не сотрудник: закрыта каждая ручка, не
+        только управление."""
         requests = (
             ('get', '/api/library', {}),
             ('get', '/api/library/books/5', {}),
@@ -482,7 +491,7 @@ class PermissionTests(unittest.TestCase):
             ('put', '/api/library/books/5/progress', {'json': {'position': '0:0', 'percent': 1, 'page': 1}}),
             ('put', '/api/library/books/5/saved', {'json': {'saved': True}}),
         )
-        for role in ('operator', 'trainee', 'sv', 'admin', 'head', ''):
+        for role in ('head', 'guest', ''):
             client, _ = client_for(role)
             for method, url, kwargs in requests:
                 with self.subTest(role=role, url=url):
@@ -490,18 +499,35 @@ class PermissionTests(unittest.TestCase):
                     self.assertEqual(403, response.status_code)
                     self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
 
-    def test_upload_delete_and_monitoring_are_closed_to_readers(self):
-        # Даже когда раздел откроют читателям (READER_ROLES шире) — управление
-        # остаётся за супер-админом и тренером.
-        with mock.patch.object(routes, 'READER_ROLES', frozenset({'operator', 'trainee', 'sv', 'admin'})):
-            for role in ('operator', 'trainee', 'sv', 'admin'):
-                with self.subTest(role=role):
-                    client, _ = client_for(role)
-                    self.assertEqual(403, client.post('/api/library/books', data={}).status_code)
-                    self.assertEqual(403, client.patch('/api/library/books/5', json={'archived': True}).status_code)
-                    self.assertEqual(403, client.delete('/api/library/books/5').status_code)
-                    self.assertEqual(403, client.get('/api/library/analytics').status_code)
-                    self.assertEqual(403, client.get('/api/library/analytics/summary').status_code)
+    def test_readers_see_the_catalog_but_not_the_management(self):
+        """Читатель видит книги своего отдела (их отбирает сервер); списка
+        отделов и ни одной ручки управления у него нет."""
+        manage = (
+            ('post', '/api/library/genres', {'json': {'name': 'X'}}),
+            ('patch', '/api/library/genres/4', {'json': {'name': 'X'}}),
+            ('delete', '/api/library/genres/4', {}),
+            ('post', '/api/library/books', {'data': {}}),
+            ('patch', '/api/library/books/5', {'json': {'archived': True}}),
+            ('delete', '/api/library/books/5', {}),
+            ('get', '/api/library/analytics', {}),
+            ('get', '/api/library/analytics/summary', {}),
+        )
+        for role in sorted(routes.READER_ROLES):
+            with self.subTest(role=role), \
+                    mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                    mock.patch.object(queries, 'list_books', return_value=[]) as list_books, \
+                    mock.patch.object(queries, 'list_genres', return_value=[]), \
+                    mock.patch.object(queries, 'library_departments') as library_departments:
+                client, _ = client_for(role)
+                response = client.get('/api/library')
+                self.assertEqual(200, response.status_code)
+                self.assertIs(False, response.get_json()['can_manage'])
+                self.assertIs(False, list_books.call_args.kwargs['manager'])
+                library_departments.assert_not_called()
+                for method, url, kwargs in manage:
+                    response = getattr(client, method)(url, **kwargs)
+                    self.assertEqual(403, response.status_code, url)
+                    self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'], url)
 
     def test_upload_accepts_only_epub_extension(self):
         client, _ = client_for('trainer')
@@ -674,14 +700,7 @@ class ProgressTests(unittest.TestCase):
 
 class DepartmentAccessTests(unittest.TestCase):
     """Читатель видит книги только своего отдела и не из архива — и каталогом,
-    и каждой ручкой одной книги. Раздел пока закрыт для всех, кроме
-    управляющих, поэтому дверь читателя проверяется с расширенным
-    READER_ROLES — так, как её откроют."""
-
-    def setUp(self):
-        patcher = mock.patch.object(routes, 'READER_ROLES', frozenset({'super_admin', 'trainer', 'operator'}))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    и каждой ручкой одной книги."""
 
     def test_reader_catalog_is_filtered_by_the_server_and_has_no_department_list(self):
         genres = [{'id': 2, 'name': 'Психология'}]
@@ -1125,174 +1144,56 @@ class DepartmentsUiTests(unittest.TestCase):
 
 
 class LibraryManagersTests(unittest.TestCase):
-    """Кто ведёт библиотеку — решение владельца 02.10.2026: «жанры, правки и
-    мониторинг и т. д. должны видеть супервайзеры (СЗоВ и ОП), тренер, <двое
-    поимённо> и суперадмины». Именные — только id: ФИО в публичный
-    репозиторий не кладём."""
+    """Кто ведёт библиотеку — решение владельца 02.10.2026: «начиная св и выше
+    отдай доступ на редактирование, архив, мониторинг и т. д.» — по роли, в
+    любом отделе."""
 
     @classmethod
     def setUpClass(cls):
         cls.app = (ROOT / 'src/App.jsx').read_text(encoding='utf-8')
 
-    def manager_view(self, role, **kwargs):
-        with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
-                mock.patch.object(queries, 'list_books', return_value=[]), \
-                mock.patch.object(queries, 'list_genres', return_value=[]), \
-                mock.patch.object(queries, 'library_departments', return_value=[]):
-            client, _ = client_for(role, **kwargs)
-            return client.get('/api/library')
-
-    def test_rule_is_exactly_what_the_owner_listed(self):
-        self.assertEqual(frozenset({'super_admin', 'trainer'}), routes.MANAGER_ROLES)
-        self.assertEqual(frozenset({'szov', 'op'}), routes.MANAGER_SUPERVISOR_DEPARTMENT_CODES)
-        self.assertEqual(frozenset({1, 313}), routes.MANAGER_USER_IDS)
-
-    def test_supervisors_of_szov_and_op_run_the_library(self):
-        for code in ('szov', 'op', 'SZOV'):
-            with self.subTest(code=code):
-                response = self.manager_view('sv', department_code=code)
-                self.assertEqual(200, response.status_code)
-                self.assertIs(True, response.get_json()['can_manage'])
-                client, _ = client_for('sv', department_code=code)
+    def test_sv_and_above_run_the_library_in_any_department(self):
+        for role in ('sv', 'admin', 'super_admin', 'trainer'):
+            with self.subTest(role=role):
+                client, _ = client_for(role)
+                with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                        mock.patch.object(queries, 'list_books', return_value=[]), \
+                        mock.patch.object(queries, 'list_genres', return_value=[]), \
+                        mock.patch.object(queries, 'library_departments', return_value=[]):
+                    self.assertIs(True, client.get('/api/library').get_json()['can_manage'])
                 with mock.patch.object(queries, 'create_genre', return_value=({'id': 4, 'name': 'X'}, True)):
                     self.assertEqual(201, client.post('/api/library/genres', json={'name': 'X'}).status_code)
                 with mock.patch.object(routes, 'schema_is_ready', return_value=True), \
                         mock.patch.object(queries, 'analytics_summary', return_value={'total': {}, 'departments': []}):
                     self.assertEqual(200, client.get('/api/library/analytics/summary').status_code)
 
-    def test_other_supervisors_stay_outside(self):
-        # СВ «Регионов» (фронт-офисы) — читатель, как весь его отдел, но не
-        # ведущий: это проверяет тест про HR и «Регионы».
-        for code in ('tez', 'marketing', '', None):
-            with self.subTest(code=code):
-                response = self.manager_view('sv', department_code=code)
-                self.assertEqual(403, response.status_code)
-                self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
-
-    def test_named_people_run_the_library_other_admins_do_not(self):
-        for requester_id in sorted(routes.MANAGER_USER_IDS):
-            with self.subTest(requester_id=requester_id):
-                response = self.manager_view('admin', requester_id=requester_id)
-                self.assertEqual(200, response.status_code)
-                self.assertIs(True, response.get_json()['can_manage'])
-        response = self.manager_view('admin', requester_id=7, department_code='szov')
-        self.assertEqual(403, response.status_code)
-
-    def test_department_is_looked_up_once_and_only_when_needed(self):
-        """Ручки зовут проверку на каждый запрос: отдел — поход в базу. Роль
-        и id решают без него, а где без отдела не решить (СВ, оператор, любой
-        сотрудник HR и «Регионов»), — один поход на запрос, не два."""
-        for role, requester_id, expected in (('super_admin', 7, []), ('trainer', 7, []),
-                                             ('admin', 1, []), ('admin', 7, [7]), ('sv', 7, [7]),
-                                             ('operator', 7, [7]), ('hr_manager', 7, [7])):
-            with self.subTest(role=role, requester_id=requester_id):
-                calls = []
-                self.manager_view(role, requester_id=requester_id, department_code='szov', department_calls=calls)
-                self.assertEqual(expected, calls)
-
-    def test_menu_uses_the_same_lists(self):
+    def test_menu_uses_the_same_roles(self):
         """Пункт меню и сервер обязаны совпадать — иначе человек видит пункт, а
         раздел отвечает отказом (или наоборот)."""
-        ids = re.search(r'const LIBRARY_MANAGER_USER_IDS = new Set\(\[([0-9,\s]*)\]\);', self.app)
-        self.assertIsNotNone(ids)
-        self.assertEqual({int(x) for x in ids.group(1).split(',') if x.strip()}, set(routes.MANAGER_USER_IDS))
-        codes = re.search(r"const LIBRARY_SUPERVISOR_DEPARTMENT_CODES = \[([^\]]*)\];", self.app)
-        self.assertIsNotNone(codes)
-        self.assertEqual({x.strip().strip("'") for x in codes.group(1).split(',') if x.strip()},
-                         set(routes.MANAGER_SUPERVISOR_DEPARTMENT_CODES))
-        readers = re.search(r"const LIBRARY_READER_DEPARTMENT_CODES = \[([^\]]*)\];", self.app)
-        self.assertIsNotNone(readers)
-        self.assertEqual({x.strip().strip("'") for x in readers.group(1).split(',') if x.strip()},
-                         set(routes.READER_OPERATOR_DEPARTMENT_CODES))
-        whole = re.search(r"const LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES = \[([^\]]*)\];", self.app)
-        self.assertIsNotNone(whole)
-        self.assertEqual({x.strip().strip("'") for x in whole.group(1).split(',') if x.strip()},
-                         set(routes.READER_DEPARTMENT_CODES))
-        predicate = self.app.split('const canAccessLibrarySectionForUser = (userLike) => {')[1].split('\n};')[0]
-        self.assertIn("if (role === 'super_admin' || role === 'trainer') return true;", predicate)
-        self.assertIn('LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))', predicate)
-        # HR и «Регионы» — до проверок роли: читают в любой роли, и СВ этих
-        # отделов не должен отсекаться веткой СВ.
-        self.assertLess(predicate.index('if (LIBRARY_READER_ANY_ROLE_DEPARTMENT_CODES.includes(code)) return true;'),
-                        predicate.index('if (isSupervisorRole(role))'))
-        self.assertIn('if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(code);', predicate)
-        self.assertIn("if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(code);", predicate)
-        # Отдел — как у сервера: код, а без кода — id отдела продаж.
-        helper = self.app.split('const libraryDepartmentCodeOf = (userLike) => {')[1].split('\n};')[0]
-        self.assertIn('if (code) return code;', helper)
-        self.assertIn("=== AI_QA_OP_DEPARTMENT_ID ? 'op' : ''", helper)
+        roles = re.search(r"const LIBRARY_ROLES = \[([^\]]*)\];", self.app)
+        self.assertIsNotNone(roles)
+        self.assertEqual({x.strip().strip("'") for x in roles.group(1).split(',') if x.strip()},
+                         set(routes.MANAGER_ROLES | routes.READER_ROLES))
+        self.assertIn('const canAccessLibrarySectionForUser = (userLike) => '
+                      'LIBRARY_ROLES.includes(normalizeRole(userLike?.role));', self.app)
 
-    def test_operators_of_szov_and_op_read_but_do_not_manage(self):
-        """Решение владельца 02.10.2026: «у операторов ОП и СЗоВ открыт доступ
-        к разделу? если нет открывай». Читатель видит книги своего отдела
-        (их отбирает сервер), списка отделов и управления у него нет."""
-        for code in ('szov', 'op'):
-            with self.subTest(code=code), \
-                    mock.patch.object(routes, 'schema_is_ready', return_value=True), \
-                    mock.patch.object(queries, 'list_books', return_value=[]) as list_books, \
-                    mock.patch.object(queries, 'list_genres', return_value=[]), \
-                    mock.patch.object(queries, 'library_departments') as library_departments:
-                client, _ = client_for('operator', department_code=code)
-                body = client.get('/api/library').get_json()
-                self.assertIs(False, body['can_manage'])
-                self.assertIs(False, list_books.call_args.kwargs['manager'])
-                library_departments.assert_not_called()
-                for method, url, kwargs in (
-                        ('post', '/api/library/genres', {'json': {'name': 'X'}}),
-                        ('patch', '/api/library/genres/4', {'json': {'name': 'X'}}),
-                        ('delete', '/api/library/genres/4', {}),
-                        ('post', '/api/library/books', {'data': {}}),
-                        ('patch', '/api/library/books/5', {'json': {'archived': True}}),
-                        ('delete', '/api/library/books/5', {}),
-                        ('get', '/api/library/analytics', {}),
-                        ('get', '/api/library/analytics/summary', {})):
-                    response = getattr(client, method)(url, **kwargs)
-                    self.assertEqual(403, response.status_code, url)
-                    self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'], url)
-
-    def test_hr_and_regions_read_in_any_role_but_do_not_manage(self):
-        """«Добавь группы hr и регионы в этот селектор, и им открой доступ для
-        чтения» (02.10.2026): «Регионы» — отдел «Фронт офисы»."""
-        self.assertEqual(frozenset({'hr', 'front_office'}), routes.READER_DEPARTMENT_CODES)
-        for role, code in (('hr_manager', 'hr'), ('admin', 'hr'), ('operator', 'front_office'),
-                           ('admin', 'front_office'), ('sv', 'front_office')):
-            with self.subTest(role=role, code=code):
-                response = self.manager_view(role, department_code=code)
-                self.assertEqual(200, response.status_code)
-                self.assertIs(False, response.get_json()['can_manage'])
-                client, _ = client_for(role, department_code=code)
-                response = client.post('/api/library/genres', json={'name': 'X'})
-                self.assertEqual(403, response.status_code)
-                self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'])
-
-    def test_other_roles_of_other_departments_stay_outside(self):
-        for role, code in (('hr_manager', 'marketing'), ('accounting_manager', 'accounting'),
-                           ('admin', 'tez'), ('marketing_manager', 'marketing')):
-            with self.subTest(role=role, code=code):
-                response = self.manager_view(role, department_code=code)
-                self.assertEqual(403, response.status_code)
-                self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
-
-    def test_operators_of_other_departments_stay_outside(self):
-        for code in ('tez', 'marketing', 'accounting', '', None):
-            with self.subTest(code=code):
-                response = self.manager_view('operator', department_code=code)
-                self.assertEqual(403, response.status_code)
-                self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
-
-    def test_op_supervisors_are_not_thrown_out_by_the_department_guard(self):
-        """У ОП есть allowlist разделов: без своей строки гард отдела выбросил
-        бы СВ ОП из «Библиотеки» сразу после входа (как было с «Воронкой ОП»)."""
+    def test_department_guard_lets_every_department_in(self):
+        """У части отделов (ОП, ТЭЗ, HR…) есть allowlist разделов: без своей
+        строки гард отдела выбросил бы их из «Библиотеки» сразу после входа
+        (как было с «Воронкой ОП»)."""
         guard = self.app.index("if (view === 'library' && canAccessLibrarySection) return;")
         fallback = self.app.index('if (departmentAllowsView(user, view)) return;')
         self.assertLess(guard, fallback)
         self.assertIn("(requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&", self.app)
 
-    def test_blueprint_gets_the_department_lookup(self):
+    def test_blueprint_is_built_with_exactly_the_factory_arguments(self):
+        """Лишний или пропавший аргумент — TypeError при старте, и раздел молча
+        не подключится: подключение обёрнуто в try."""
         source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
-        block = source[source.index('from library.routes import build_library_blueprint'):]
-        block = block[:block.index('))')]
-        self.assertIn('department_code_of=_department_code_of_user,', block)
+        block = source[source.index('app.register_blueprint(build_library_blueprint('):]
+        block = block[:block.index('\n    ))')]
+        passed = set(re.findall(r'^ {8}(\w+)=', block, re.M))
+        self.assertEqual(set(inspect.signature(routes.build_library_blueprint).parameters), passed)
 
 
 class GenreRouteTests(unittest.TestCase):
@@ -1364,11 +1265,10 @@ class GenreRouteTests(unittest.TestCase):
         self.assertEqual('LIBRARY_GENRE_NOT_FOUND', response.get_json()['code'])
 
     def test_readers_cannot_touch_the_genre_list(self):
-        with mock.patch.object(routes, 'READER_ROLES', frozenset({'operator', 'sv', 'admin'})), \
-                mock.patch.object(queries, 'create_genre') as create, \
+        with mock.patch.object(queries, 'create_genre') as create, \
                 mock.patch.object(queries, 'rename_genre') as rename, \
                 mock.patch.object(queries, 'delete_genre') as delete:
-            for role in ('operator', 'sv', 'admin'):
+            for role in sorted(routes.READER_ROLES):
                 with self.subTest(role=role):
                     client, _ = client_for(role)
                     for response in (client.post('/api/library/genres', json={'name': 'X'}),
@@ -1506,32 +1406,32 @@ class GenreQueryTests(unittest.TestCase):
         self.assertEqual([], queries.book_view(book_row(genre_ids=None))['genre_ids'])
 
 
-class LibraryDepartmentCodesTests(unittest.TestCase):
-    """Решение владельца 02.10.2026: «из доступных отделов сделать только
-    пока СЗоВ и ОП» — по коду отдела, а не по названию."""
+class LibraryDepartmentSelectionTests(unittest.TestCase):
+    """Решение владельца 02.10.2026: «на данный момент в селекторе добавь все
+    отделы» — любой действующий отдел, без списка кодов."""
 
-    def test_szov_op_hr_and_regions(self):
-        """«Регионы» — отдел «Фронт офисы» (у него направление и группа «Регионы»)."""
-        self.assertEqual(('szov', 'op', 'hr', 'front_office'), queries.LIBRARY_DEPARTMENT_CODES)
+    def test_any_active_department_is_selectable(self):
+        self.assertEqual('(d.is_active IS NOT FALSE)', queries._DEPARTMENT_SELECTABLE)
 
-    def test_selection_list_marks_other_departments_with_books_as_not_selectable(self):
+    def test_selection_list_marks_switched_off_departments_with_books_as_not_selectable(self):
         cursor = ScriptedCursor([(1, 'СЗоВ', True), (70, 'Тез КЦ', False)])
         rows = queries.library_departments(cursor)
         self.assertEqual([{'id': 1, 'name': 'СЗоВ', 'active': True}, {'id': 70, 'name': 'Тез КЦ', 'active': False}],
                          rows)
         sql, params = cursor.calls[0]
-        self.assertIn('LOWER(d.code) = ANY(%s)', sql)
-        codes = ['szov', 'op', 'hr', 'front_office']
-        self.assertEqual((codes, codes), params)
+        self.assertIn('WHERE (d.is_active IS NOT FALSE) OR EXISTS', sql)
+        self.assertNotIn('d.code', sql)
+        self.assertEqual((), params)
 
-    def test_new_book_goes_only_to_listed_departments(self):
+    def test_new_book_goes_to_any_active_department(self):
         cursor = ScriptedCursor([(1,)])
         self.assertEqual([70], queries.unknown_departments(cursor, [70, 1]))
         sql, params = cursor.calls[0]
-        self.assertIn('LOWER(d.code) = ANY(%s)', sql)
+        self.assertIn('AND ((d.is_active IS NOT FALSE) OR EXISTS', sql)
+        self.assertNotIn('d.code', sql)
         # Отдел, которому книга уже выдана, остаётся допустимым для неё.
         self.assertIn('bd.book_id = %s', sql)
-        self.assertEqual(([1, 70], ['szov', 'op', 'hr', 'front_office'], None), params)
+        self.assertEqual(([1, 70], None), params)
 
 
 class GenresUiTests(unittest.TestCase):
