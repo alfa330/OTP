@@ -46,6 +46,9 @@ NAMES = {
     'chat2desk_webhook_signature', 'chat2desk_webhook_signature_ok',
     'chat2desk_webhook_status_name', 'build_chat_webhook_status_rows',
     '_chat2desk_webhook_roster', '_chat2desk_operator_display_name',
+    '_chat2desk_webhook_status_rows', '_chat2desk_webhook_status_cache',
+    'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS', 'CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS',
+    '_chat_hourly_fetch_operators', '_chat_hourly_operators_cache',
     '_szov_chat_wallboard_status', '_szov_chat_wallboard_timelines',
     '_szov_chat_wallboard_day_seconds', '_szov_chat_wallboard_resolve',
     '_SZOV_CHAT_WALLBOARD_STATUSES', '_SZOV_CHAT_WALLBOARD_OTHER_KEY',
@@ -513,6 +516,181 @@ class WebhookStatusRowsTests(unittest.TestCase):
         self.assertEqual([(entry[0], entry[1]) for entry in timelines['Айман Абдрахманова']],
                          [(0, 'online'), (43200, 'break'), (45000, 'online')])
         self.assertEqual(unmatched, [])
+
+
+class WebhookManualLogoutTests(unittest.TestCase):
+    """Ручной выход («Выйти») вендор событием не шлёт — его дописывает ростер.
+
+    02.10.2026 на стене стояло «Занят 7», и все семь уже вышли: за секунду до ручного
+    выхода Chat2Desk сам ставит «Занят» и присылает только его. Автовыход по бездействию
+    приходит событием с online=0 — его ростер трогать не должен."""
+
+    NAME = 'Алия Тестова'
+
+    def _roster(self, online=0, status='enabled', **extra):
+        row = {'id': 1001, 'first_name': 'Алия', 'last_name': 'Тестова',
+               'status': status, 'role': 'operator', 'online': online}
+        row.update(extra)
+        return NS['_chat2desk_webhook_roster']([row])
+
+    def _status(self, at, online=1, offline_type=None):
+        return {'c2d_operator_id': 1001, 'event_at': at,
+                'online': online, 'offline_type': offline_type}
+
+    def _rows(self, events, roster_at, carried=(), roster=None):
+        return NS['build_chat_webhook_status_rows'](
+            list(carried), events, '2026-10-02',
+            roster=self._roster() if roster is None else roster, roster_at=roster_at)
+
+    def _timeline(self, rows):
+        timelines, _unmatched = NS['_szov_chat_wallboard_timelines'](
+            rows, {self.NAME: 1}, truncated=False)
+        return [(entry[0], entry[1]) for entry in timelines[self.NAME]]
+
+    def test_manual_logout_is_taken_from_the_roster(self):
+        """Выход — временем того «Занят»: вендор ставит его за секунду до выхода."""
+        rows = self._rows([self._status(datetime(2026, 10, 2, 9, 0)),
+                           self._status(datetime(2026, 10, 2, 17, 0, 1), offline_type='busy')],
+                          roster_at=datetime(2026, 10, 2, 17, 6))
+        self.assertEqual([(row['created_at'], row['event']) for row in rows], [
+            ('2026-10-02 09:00:00', 'online'),
+            ('2026-10-02 17:00:01', 'busy'),
+            ('2026-10-02 17:00:01', 'logout'),
+        ])
+        # Человек ушёл со стены, а его часы на линии до выхода остались целы.
+        self.assertEqual(self._timeline(rows),
+                         [(32400, 'online'), (61201, 'busy'), (61201, 'offline')])
+
+    def test_person_who_left_yesterday_opens_the_day_offline(self):
+        """Ушла вчера в 22:09 — сегодня с полуночи не в системе, а не «Занят» весь день."""
+        rows = self._rows([], roster_at=datetime(2026, 10, 2, 9, 0),
+                          carried=[self._status(datetime(2026, 10, 1, 22, 9, 36),
+                                                offline_type='busy')])
+        self.assertEqual([(row['created_at'], row['event']) for row in rows], [
+            ('2026-10-02 00:00:00', 'busy'),
+            ('2026-10-02 00:00:00', 'logout'),
+        ])
+        self.assertEqual(self._timeline(rows)[-1], (0, 'offline'))
+
+    def test_roster_taken_before_the_last_event_is_not_trusted(self):
+        """Вошёл после снятия ростера — его «не в системе» уже устарело."""
+        rows = self._rows([self._status(datetime(2026, 10, 2, 17, 5))],
+                          roster_at=datetime(2026, 10, 2, 17, 4))
+        self.assertEqual([row['event'] for row in rows], ['online'])
+
+    def test_roster_within_the_margin_waits_for_the_next_one(self):
+        """Часы вендора и наши расходятся на секунды — минуту ростеру не верим."""
+        margin = NS['CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS']
+        busy = self._status(datetime(2026, 10, 2, 17, 0, 1), offline_type='busy')
+        too_early = self._rows([busy], roster_at=busy['event_at'] + timedelta(seconds=margin - 1))
+        self.assertEqual([row['event'] for row in too_early], ['busy'])
+        in_time = self._rows([busy], roster_at=busy['event_at'] + timedelta(seconds=margin))
+        self.assertEqual([row['event'] for row in in_time], ['busy', 'logout'])
+
+    def test_vendor_logout_is_not_doubled(self):
+        """Автовыход по бездействию пришёл событием — второй выход не нужен."""
+        rows = self._rows([self._status(datetime(2026, 10, 2, 9, 0)),
+                           self._status(datetime(2026, 10, 2, 9, 30), online=0,
+                                        offline_type='busy')],
+                          roster_at=datetime(2026, 10, 2, 10, 0))
+        self.assertEqual([row['event'] for row in rows], ['online', 'logout'])
+
+    def test_person_in_the_system_keeps_the_status(self):
+        """Ростер говорит «в системе» — «Занят» настоящий, его не трогаем."""
+        rows = self._rows([self._status(datetime(2026, 10, 2, 17, 0), offline_type='busy')],
+                          roster_at=datetime(2026, 10, 2, 18, 0), roster=self._roster(online=1))
+        self.assertEqual([row['event'] for row in rows], ['busy'])
+
+    def test_disabled_or_unknown_accounts_are_left_alone(self):
+        """Выход дописываем только по явному online=0 у включённой учётки."""
+        busy = [self._status(datetime(2026, 10, 2, 17, 0), offline_type='busy')]
+        late = datetime(2026, 10, 2, 18, 0)
+        disabled = self._rows(busy, roster_at=late, roster=self._roster(status='disabled'))
+        unknown = self._rows(busy, roster_at=late, roster=self._roster(online=None))
+        without_time = self._rows(busy, roster_at=None)
+        for rows in (disabled, unknown, without_time):
+            self.assertEqual([row['event'] for row in rows], ['busy'])
+
+    def test_roster_carries_online_and_enabled(self):
+        self.assertEqual(self._roster()[1001], {
+            'name': 'Алия Тестова', 'role': 'operator', 'online': False, 'enabled': True})
+        self.assertIs(self._roster(online='1')[1001]['online'], True)
+        self.assertIsNone(self._roster(online=None)[1001]['online'])
+
+    def test_roster_is_polled_every_five_minutes(self):
+        """Решение владельца 02.10.2026: вышедший не висит «Занятым» дольше пяти минут."""
+        self.assertEqual(NS['CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS'], 300)
+
+    def test_new_roster_rebuilds_the_cached_status_rows(self):
+        """Ростер сменился — ленту пересобираем сразу, не дожидаясь срока кэша."""
+        calls = []
+
+        class _Db:
+            def get_c2d_operator_status_before(self, moment):
+                calls.append(moment)
+                return []
+
+            def get_c2d_operator_status_events(self, day_from, day_to):
+                return [{'c2d_operator_id': 1001, 'online': 1, 'offline_type': 'busy',
+                         'event_at': datetime(2026, 10, 2, 17, 0, 1)}]
+
+        ns = _namespace()
+        ns['db'] = _Db()
+        roster = self._roster()
+        before = datetime(2026, 10, 2, 17, 0, tzinfo=ALMATY).timestamp()
+        after = datetime(2026, 10, 2, 17, 6, tzinfo=ALMATY).timestamp()
+        first = ns['_chat2desk_webhook_status_rows']('2026-10-02', roster, roster_fetched_at=before)
+        again = ns['_chat2desk_webhook_status_rows']('2026-10-02', roster, roster_fetched_at=before)
+        fresh = ns['_chat2desk_webhook_status_rows']('2026-10-02', roster, roster_fetched_at=after)
+        self.assertEqual(len(calls), 2)
+        self.assertIs(again, first)
+        self.assertEqual([row['event'] for row in first], ['busy'])
+        self.assertEqual([row['event'] for row in fresh], ['busy', 'logout'])
+
+
+class RosterFetchTests(unittest.TestCase):
+    """Ростер и момент его снятия едут вместе: по моменту решается, верить ли «не в системе»."""
+
+    def setUp(self):
+        self.calls = []
+        tests = self
+
+        class _Response:
+            status_code = 200
+
+            def json(self):
+                return {'data': [{'id': 1, 'online': 0}]}
+
+        class _Requests:
+            def get(self, url, headers=None, params=None, timeout=None):
+                tests.calls.append(params)
+                return _Response()
+
+        self.ns = _namespace()
+        self.ns.update({
+            'requests': _Requests(),
+            '_chat2desk_authorization_header': lambda: 'token',
+            '_chat2desk_api_base_url': lambda: 'https://api.example',
+            '_chat2desk_extract_response_rows': lambda payload: payload.get('data') or [],
+            'CHAT2DESK_API_TIMEOUT_SECONDS': 45,
+        })
+
+    def test_time_is_taken_before_the_request_and_cached_with_the_rows(self):
+        started = time.time()
+        rows, fetched_at = self.ns['_chat_hourly_fetch_operators'](ttl_seconds=300, with_time=True)
+        self.assertEqual(rows, [{'id': 1, 'online': 0}])
+        self.assertGreaterEqual(fetched_at, started)
+        self.assertLessEqual(fetched_at, time.time())
+        # Второй заход в пределах срока — тот же список и то же время, без запроса.
+        self.assertEqual(self.ns['_chat_hourly_fetch_operators'](ttl_seconds=300, with_time=True),
+                         (rows, fetched_at))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_hourly_report_still_gets_plain_rows_every_time(self):
+        """Почасовому отчёту нужен живой статус: без срока — каждый раз заново."""
+        self.assertEqual(self.ns['_chat_hourly_fetch_operators'](), [{'id': 1, 'online': 0}])
+        self.assertEqual(self.ns['_chat_hourly_fetch_operators'](), [{'id': 1, 'online': 0}])
+        self.assertEqual(len(self.calls), 2)
 
 
 class WebhookRouteTests(unittest.TestCase):

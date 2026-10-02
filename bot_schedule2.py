@@ -42272,21 +42272,29 @@ def _chat2desk_webhook_operator_names():
     return names
 
 
-_chat_hourly_operators_cache = {'ts': 0.0, 'rows': None}
+# Строки и момент снятия лежат ОДНИМ кортежем: тот же список тянет почасовой отчёт из
+# другого потока, и два отдельных ключа могли бы склеить строки одного снятия со временем
+# другого.
+_chat_hourly_operators_cache = {'snapshot': None}
 
 
-def _chat_hourly_fetch_operators(ttl_seconds=0):
+def _chat_hourly_fetch_operators(ttl_seconds=0, *, with_time=False):
     """Живой список операторов Chat2Desk: кто залогинен и на каком статусе.
 
     Один запрос вместо перебора operator_events за день — там пришлось бы качать тысячи
     строк, чтобы найти последнее событие каждого оператора.
     `ttl_seconds` — сколько держать ответ. Ноль (по умолчанию) означает «каждый раз
     заново»: почасовому отчёту нужен именно живой статус. Табло при живом потоке
-    вебхуков берёт отсюда только состав учёток, статусы у него из событий, — и просит
-    долгий срок, потому что состав меняется раз в никогда, а вызов стоит квоты."""
-    cache = _chat_hourly_operators_cache
-    if ttl_seconds and cache['rows'] is not None and time.time() - cache['ts'] < ttl_seconds:
-        return cache['rows']
+    вебхуков берёт отсюда состав учёток и признак «в системе» (ручной выход событием не
+    приходит, см. `build_chat_webhook_status_rows`), статусы у него из событий, — и
+    просит срок в пять минут: вызов стоит квоты.
+    `with_time=True` — вернуть (строки, момент снятия). Момент — `time.time()` ДО запроса:
+    табло верит «не в системе» из списка, только если список снят позже последнего
+    события человека, и ранняя отметка тут ошибается в безопасную сторону."""
+    cached = _chat_hourly_operators_cache['snapshot']
+    if ttl_seconds and cached is not None and time.time() - cached[1] < ttl_seconds:
+        return cached if with_time else cached[0]
+    fetched_at = time.time()
     authorization = _chat2desk_authorization_header()
     if not authorization:
         raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
@@ -42310,8 +42318,9 @@ def _chat_hourly_fetch_operators(ttl_seconds=0):
         offset += len(page_rows)
         if len(page_rows) < 200:
             break
-    _chat_hourly_operators_cache.update(ts=time.time(), rows=rows)
-    return rows
+    cached = (rows, fetched_at)
+    _chat_hourly_operators_cache['snapshot'] = cached
+    return cached if with_time else rows
 
 
 def _chat_hourly_operator_states(operator_rows):
@@ -43322,17 +43331,23 @@ def _szov_chat_wallboard_day_requests(day_str):
 # статуса событием (`operator_status_changed`; в теле оно зовётся `operator_status_updated`),
 # поэтому лента статусов собирается из той же таблицы, что и обращения.
 # Что осталось за опросом и почему: `/v1/operators` — это РОСТЕР, список существующих учёток с
-# ролями. Он меняется раз в никогда, и события его не заменяют: в них есть id и почта, но нет
-# ни имени учётки, ни признака «учётка включена». Поэтому ростер тянем редко (раз в полчаса),
-# а не каждые две минуты, и берём из него только состав, а не статусы.
+# ролями. События его не заменяют: в них есть id и почта, но нет ни имени учётки, ни признака
+# «учётка включена». И второе, без чего табло врёт: РУЧНОЙ выход («Выйти») вендор событием не
+# присылает, а ростер знает, кто в системе (`online`). Поэтому ростер тянем раз в пять минут
+# (решение владельца 02.10.2026: при открытом табло это до ~9 тыс. запросов в месяц из 100 тыс.),
+# а не каждые две минуты, и берём из него состав и признак «в системе», а статусы — из событий.
 # Открытые чаты («7 в работе» у человека) вендор отдавал полем `opened_dialogs` того же
-# ростера — раз в полчаса такая цифра врала бы. Считаем её сами из событий: обращение с
-# сообщениями и без `close_request` открыто, и это ровно то же определение.
+# ростера — пятиминутной давности цифра врала бы рядом с живым статусом. Считаем её сами из
+# событий: обращение с сообщениями и без `close_request` открыто, и это ровно то же определение.
 
 CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS = _env_int(
-    'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS', 1800, minimum=60, maximum=7200)
+    'CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS', 300, minimum=60, maximum=7200)
+# На сколько ростер должен быть свежее последнего события человека, чтобы его «не в системе»
+# перекрыло это событие. Часы вендора и наши расходятся на секунды, а событие входа доходит с
+# задержкой: без запаса только что вошедший мог бы на один ростер стать «вышедшим».
+CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS = 60
 
-_chat2desk_webhook_status_cache = {'day': None, 'ts': 0.0, 'rows': None}
+_chat2desk_webhook_status_cache = {'day': None, 'ts': 0.0, 'rows': None, 'roster_fetched_at': None}
 
 
 def chat2desk_webhook_status_name(online, offline_type):
@@ -43347,7 +43362,7 @@ def chat2desk_webhook_status_name(online, offline_type):
     return status or 'online'
 
 
-def build_chat_webhook_status_rows(carried, events, day_str, roster=None):
+def build_chat_webhook_status_rows(carried, events, day_str, roster=None, roster_at=None):
     """События статусов -> строки в форме отчёта `operator_events`.
 
     Форма вендорская намеренно: ленты статусов, часы «на линии» и список смены строит
@@ -43356,8 +43371,17 @@ def build_chat_webhook_status_rows(carried, events, day_str, roster=None):
     `carried` — последний статус каждого чатника ДО начала суток. Он становится событием
     на 00:00:00: человек, заступивший вчера вечером и не трогавший статус, иначе выглядел
     бы «не в системе» — событий за сегодня у него нет вовсе.
-    `roster` — {id: {name, role}} из `/v1/operators`: в событии есть id и почта, а ленты
-    ключуются именем учётки."""
+    `roster` — {id: {name, role, online, enabled}} из `/v1/operators`: в событии есть id и
+    почта, а ленты ключуются именем учётки.
+    `roster_at` — когда снят ростер (стенные часы). РУЧНОЙ выход вендор событием не шлёт
+    (01–02.10.2026: ни одного из 21, а автовыход по бездействию — 27 из 27): за секунду до
+    выхода он сам ставит «Занят» и присылает только его, и вышедший висел «Занятым» до
+    следующего входа — 02.10.2026 так стояли все семь «занятых» на стене. Поэтому если
+    ростер снят позже последнего события человека и говорит online=0, выход дописываем
+    сами, временем того события: у «Занят» перед выходом оно совпадает с выходом до
+    секунды, а у прочих статусов на табло ни на что не влияет — в людей на линии идёт
+    только онлайн. Онлайн последним бывает, лишь если вендор потерял само «Занят»; тогда
+    минуты от него до выхода не засчитаются — это лучше, чем человек «на линии» до ночи."""
     roster = roster or {}
 
     def _row(event, moment):
@@ -43382,44 +43406,68 @@ def build_chat_webhook_status_rows(carried, events, day_str, roster=None):
         day_start = datetime(parsed_day.year, parsed_day.month, parsed_day.day)
 
     rows = []
-    for event in carried or []:
-        if day_start is None:
-            continue
-        row = _row(event, day_start)
-        if row:
-            rows.append(row)
-    for event in events or []:
-        moment = event.get('event_at')
-        if moment is None:
-            continue
+    last = {}  # id учётки -> (её последняя строка, когда событие было у вендора)
+
+    def _add(event, moment):
         row = _row(event, moment)
         if row:
             rows.append(row)
+            last[int(event['c2d_operator_id'])] = (row, event.get('event_at') or moment)
+
+    for event in carried or []:
+        if day_start is not None:
+            _add(event, day_start)
+    for event in events or []:
+        if event.get('event_at') is not None:
+            _add(event, event['event_at'])
+    if roster_at is not None:
+        trusted_after = roster_at - timedelta(seconds=CHAT2DESK_WEBHOOK_ROSTER_MARGIN_SECONDS)
+        for operator_id, (row, happened_at) in last.items():
+            card = roster.get(operator_id) or {}
+            # Отключённые учётки висят online=1 от последнего входа, а о неизвестном
+            # «в системе» (поля нет) судить нечем — выход дописываем только по явному 0.
+            if (row['event'] == 'logout' or card.get('online') is not False
+                    or not card.get('enabled') or happened_at > trusted_after):
+                continue
+            rows.append(dict(row, event='logout'))
     return rows
 
 
-def _chat2desk_webhook_status_rows(day_str, roster=None):
-    """Лента статусов суток из событий. Кэш тот же по сроку, что у обращений."""
+def _chat2desk_webhook_status_rows(day_str, roster=None, roster_fetched_at=None):
+    """Лента статусов суток из событий. Кэш тот же по сроку, что у обращений.
+
+    `roster_fetched_at` — когда снят ростер (`time.time()`): по нему дописываются ручные
+    выходы, поэтому новый ростер сбрасывает кэш, не дожидаясь срока."""
     now = time.time()
     cache = _chat2desk_webhook_status_cache
     if (cache['day'] == day_str and cache['rows'] is not None
+            and cache.get('roster_fetched_at') == roster_fetched_at
             and now - cache['ts'] < CHAT2DESK_WEBHOOK_ROWS_TTL_SECONDS):
         return cache['rows']
     day = _chat_metrics_parse_date(day_str)
     if day is None:
         return []
     day_start = datetime(day.year, day.month, day.day)
+    roster_at = None
+    if roster_fetched_at:
+        # События лежат стенными часами той же зоны (`_chat2desk_webhook_events`).
+        roster_at = datetime.fromtimestamp(
+            roster_fetched_at, _chat2desk_sync_timezone()).replace(tzinfo=None)
     rows = build_chat_webhook_status_rows(
         db.get_c2d_operator_status_before(day_start),
         db.get_c2d_operator_status_events(day, day),
         day_str,
-        roster=roster)
-    cache.update(day=day_str, ts=now, rows=rows)
+        roster=roster,
+        roster_at=roster_at)
+    cache.update(day=day_str, ts=now, rows=rows, roster_fetched_at=roster_fetched_at)
     return rows
 
 
 def _chat2desk_webhook_roster(operator_rows):
-    """{id учётки Chat2Desk: {name, role}} из живого списка операторов."""
+    """{id учётки Chat2Desk: {name, role, online, enabled}} из живого списка операторов.
+
+    `online` и `enabled` нужны ради ручного выхода, который вендор событием не шлёт (см.
+    `build_chat_webhook_status_rows`); `online` без поля — None, то есть «неизвестно»."""
     roster = {}
     for row in operator_rows or []:
         if not isinstance(row, dict):
@@ -43431,7 +43479,13 @@ def _chat2desk_webhook_roster(operator_rows):
         name = _chat2desk_operator_display_name(row)
         if not name:
             continue
-        roster[operator_id] = {'name': name, 'role': str(row.get('role') or '').strip()}
+        online = _chat_hourly_number(row.get('online'))
+        roster[operator_id] = {
+            'name': name,
+            'role': str(row.get('role') or '').strip(),
+            'online': None if online is None else bool(online),
+            'enabled': str(row.get('status') or '').strip().lower() == 'enabled',
+        }
     return roster
 
 
@@ -43484,14 +43538,15 @@ def _szov_chat_wallboard_fetch_snapshot():
     now_seconds = max(1, now.hour * 3600 + now.minute * 60 + now.second)
 
     lookup, department_id = _szov_chat_wallboard_operator_lookup()
-    # Пока поток вебхуков жив, у вендора спрашиваем только состав учёток — и раз в
-    # полчаса. Статусы, обращения и открытые чаты берутся из событий.
+    # Пока поток вебхуков жив, у вендора спрашиваем только состав учёток и кто в системе —
+    # раз в пять минут. Статусы, обращения и открытые чаты берутся из событий.
     request_rows, stream_ready = _chat2desk_webhook_day_rows(day_str)
-    operator_rows = _chat_hourly_fetch_operators(
-        ttl_seconds=CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS if stream_ready else 0)
+    operator_rows, roster_fetched_at = _chat_hourly_fetch_operators(
+        ttl_seconds=CHAT2DESK_WEBHOOK_ROSTER_TTL_SECONDS if stream_ready else 0, with_time=True)
     if stream_ready:
         events = _chat2desk_webhook_status_rows(
-            day_str, roster=_chat2desk_webhook_roster(operator_rows))
+            day_str, roster=_chat2desk_webhook_roster(operator_rows),
+            roster_fetched_at=roster_fetched_at)
         operator_rows = _chat2desk_webhook_apply_open_chats(operator_rows)
     else:
         events = _szov_chat_wallboard_fetch_events(day_str)
@@ -43503,8 +43558,8 @@ def _szov_chat_wallboard_fetch_snapshot():
     timelines, unmatched_events = _szov_chat_wallboard_timelines(
         events, lookup, truncated=False if stream_ready else None)
     # Ночная смена, начатая вчера: событий сегодня нет, а линию человек держит с полуночи.
-    # При живом потоке её даёт перенесённый статус на 00:00, а живым флагам ростера верить
-    # уже нельзя — он обновляется раз в полчаса.
+    # При живом потоке её даёт перенесённый статус на 00:00, и достраивать её ещё и по
+    # флагам ростера незачем — это нужно только при опросе.
     for row in (operator_rows or []) if not stream_ready else []:
         if not isinstance(row, dict) or str(row.get('status') or '').strip().lower() != 'enabled':
             continue
