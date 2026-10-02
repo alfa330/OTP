@@ -63736,6 +63736,57 @@ class Database:
         else:
             cursor.execute("RELEASE SAVEPOINT thermoboxes_schema")
 
+    def update_cdr_call_end_parties(self):
+        """Кто положил трубку — звонкам отдела продаж (FreePBX) в пуле и в оценках.
+
+        Звонок ОП ложится в пул (imported_calls: external_id — linkedid станции, notes
+        оканчиваются на ':cdr', телефон — '7' и десять цифр касания) со стороной, которую
+        касание знало в ту минуту. Исходящим её до моста 1.6.0 не знал никто, и такие звонки
+        лежат с 'unknown'. Здесь сторона из cdr_touches доезжает до пула и до уже сделанных
+        оценок (calls), как у Oktell и Binotel в update_imported_call_end_parties. Известную
+        сторону не переписываем.
+
+        Проход общий, а не по присланным суткам: касание ищется по первичному ключу, а звонок,
+        который не обновился из-за сбоя, подберёт любая следующая присылка суток. Ключ —
+        (linkedid, телефон), то есть ровно то касание, что легло в пул. Возвращает число
+        обновлённых звонков пула."""
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                WITH known AS (
+                    SELECT ic.id, t.hangup_side
+                      FROM imported_calls AS ic
+                      JOIN cdr_touches AS t
+                        ON t.linkedid = ic.external_id
+                       AND t.phone = right(ic.phone_normalized, 10)
+                     WHERE ic.notes LIKE %(cdr)s
+                       AND (ic.call_end_party IS NULL OR ic.call_end_party = 'unknown')
+                       AND t.hangup_side IN ('client', 'operator')
+                )
+                UPDATE imported_calls AS ic
+                   SET call_end_party = known.hangup_side
+                  FROM known
+                 WHERE ic.id = known.id
+                   AND (ic.call_end_party IS NULL OR ic.call_end_party = 'unknown')
+                RETURNING ic.id
+                """,
+                {'cdr': '%:cdr'}
+            )
+            updated_ids = [row[0] for row in cur.fetchall()]
+            if updated_ids:
+                cur.execute(
+                    """
+                    UPDATE calls AS c
+                    SET call_end_party = ic.call_end_party
+                    FROM imported_calls AS ic
+                    WHERE c.imported_call_id = ic.id
+                      AND c.imported_call_id = ANY(%s)
+                      AND (c.call_end_party IS NULL OR c.call_end_party = 'unknown')
+                    """,
+                    (updated_ids,)
+                )
+        return len(updated_ids)
+
 
 # Объявлено ПОСЛЕ Database намеренно: тесты разбирают этот файл через ast и
 # берут первый класс модуля как Database. Методам имя нужно только в момент

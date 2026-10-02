@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS cdr_touches (
     queued_at             TIMESTAMP,   -- вход в очередь (ENTERQUEUE)
     wait_seconds          INTEGER,     -- ожидание до ответа ИЛИ до отказа клиента
     talk_measured_seconds INTEGER,     -- разговор без ожидания (COMPLETE*)
-    hangup_side           VARCHAR(16) NOT NULL DEFAULT '',  -- client | operator | ''
+    hangup_side           VARCHAR(16) NOT NULL DEFAULT '',  -- client | operator | '' (исходящему — по CEL)
 
     -- Наш номер, десять цифр: входящему его набрал клиент, исходящему с него
     -- позвонили. Парк по нему выводится при чтении (cdr/lines.py), а не хранится:

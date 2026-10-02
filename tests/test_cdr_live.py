@@ -383,6 +383,102 @@ class LiveTailBeforeQueueTests(unittest.TestCase):
         self.assertEqual(touches['1.1']['queued_at'], '2026-09-15 09:00:26')
 
 
+def out_row(linkedid, calldate, billsec=139, client='+77000000101'):
+    """Исходящий оператора 6687 через транк, с разговором и записью."""
+    return {'calldate': calldate, 'clid': '', 'src': '77475777778', 'dst': '7778*' + client,
+            'dcontext': 'from-internal', 'channel': 'PJSIP/6687-0006fb28',
+            'dstchannel': 'PJSIP/+77475777778-0006fb29', 'duration': billsec + 13,
+            'billsec': billsec, 'disposition': 'ANSWERED', 'uniqueid': linkedid, 'did': '',
+            'linkedid': linkedid, 'recording_url': None,
+            'recordingfile': 'out-7778*%s-6687-20260915-105759-%s.wav' % (client, linkedid)}
+
+
+class _CelJournal(_Journal):
+    """База станции, у которой есть и CEL: кто положил трубку (мост 1.6.0)."""
+
+    def __init__(self, sides=None, cel_fail=None, **kwargs):
+        super().__init__(**kwargs)
+        self.sides = dict(sides or {})
+        self.cel_fail = cel_fail
+        self.cel_calls = []
+
+    def hangup_sides(self, linkedids):
+        self.cel_calls.append(list(linkedids))
+        if self.cel_fail:
+            raise self.cel_fail
+        return {linkedid: self.sides[linkedid] for linkedid in linkedids if linkedid in self.sides}
+
+
+class LiveTailHangupTests(unittest.TestCase):
+    """Отбой случается один раз: хвост спрашивает о звонке однажды и помнит ответ."""
+
+    def setUp(self):
+        self.posts = []
+        self.station = _Station([out_row('7.7', '2026-09-15 10:57:59'),
+                                 cdr_row('1.1', '2026-09-15 09:00:00')])
+        self.journal = _CelJournal(sides={'7.7': 'client'})
+        self.tail = live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                                  self.station, 20, today=lambda: TODAY, pbxdb=self.journal)
+
+    def _touch(self, post, linkedid):
+        return next(t for t in self.posts[post][1]['touches'] if t['linkedid'] == linkedid)
+
+    def test_outgoing_talk_rides_with_its_side(self):
+        self.tail.step(now=1000.0)
+        self.assertEqual(self._touch(0, '7.7')['hangup_side'], 'client')
+        self.assertEqual(self.journal.cel_calls, [['7.7']], 'входящий у CEL не спрашивается')
+
+    def test_only_this_days_calls_are_asked(self):
+        """Час запаса до полуночи склеивается, но на портал не едет — и CEL о нём не спрашиваем."""
+        self.station.rows.append(out_row('6.6', '2026-09-14 23:30:00', client='+77000000102'))
+        self.journal.sides['6.6'] = 'operator'
+        self.tail.step(now=1000.0)
+        self.assertEqual(self.journal.cel_calls, [['7.7']])
+
+    def test_known_answer_is_not_asked_again(self):
+        self.tail.step(now=1000.0)
+        self.tail.cycles = live.FULL_REFRESH_EVERY       # и полный проход не спрашивает заново
+        self.tail.step(now=1020.0)
+        self.assertEqual(self.journal.cel_calls, [['7.7']])
+
+    def test_call_not_yet_written_whole_is_asked_again_and_then_ships_again(self):
+        """CEL ещё не знает звонок целиком — касание едет без стороны, а когда она появится,
+        уезжает второй раз: отпечаток касания включает сторону отбоя."""
+        self.journal.sides = {}
+        self.tail.step(now=1000.0)
+        self.assertFalse(self._touch(0, '7.7')['hangup_side'])
+        self.journal.sides = {'7.7': 'operator'}
+        self.tail.step(now=1020.0)
+        self.assertEqual(len(self.journal.cel_calls), 2)
+        self.assertEqual(self.posts[1][1]['touches'], [dict(self._touch(0, '7.7'),
+                                                            hangup_side='operator')])
+
+    def test_asking_stops_after_the_attempt_ceiling(self):
+        self.journal.sides = {}
+        for cycle in range(live.HANGUP_ATTEMPTS + 3):
+            self.tail.step(now=1000.0 + 20 * cycle)
+        self.assertEqual(len(self.journal.cel_calls), live.HANGUP_ATTEMPTS)
+
+    def test_cel_failure_keeps_the_tail_and_counts_as_an_attempt(self):
+        self.journal.cel_fail = RuntimeError('база станции не ответила')
+        self.tail.step(now=1000.0)
+        self.assertFalse(self._touch(0, '7.7')['hangup_side'], 'касания едут и без CEL')
+        self.assertEqual(self.tail.hangup_asked, {'7.7': 1})
+
+    def test_new_day_forgets_the_answers(self):
+        self.tail.step(now=1000.0)
+        self.tail._today = lambda: TODAY + timedelta(days=1)
+        self.station.rows = []
+        self.tail.step(now=1020.0)
+        self.assertEqual((self.tail.hangups, self.tail.hangup_asked), ({}, {}))
+
+    def test_without_a_database_nothing_is_asked(self):
+        tail = live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                             self.station, 20, today=lambda: TODAY)
+        tail.step(now=1000.0)
+        self.assertFalse(self._touch(0, '7.7')['hangup_side'])
+
+
 def _epoch(text):
     """Местное время Алматы → секунды эпохи, как их передаёт мосту time.time()."""
     moment = datetime.strptime(text, '%Y-%m-%d %H:%M:%S')

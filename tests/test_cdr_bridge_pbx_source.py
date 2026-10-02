@@ -35,11 +35,14 @@ class _Db:
     enabled = True
     covered_until = None
 
-    def __init__(self, cdr=(), agents=None, fail=None):
+    def __init__(self, cdr=(), agents=None, fail=None, sides=None, cel_fail=None):
         self.cdr = list(cdr)
         self.agents = dict(agents or {})
         self.fail = fail
         self.cdr_calls = []
+        self.sides = dict(sides or {})
+        self.cel_fail = cel_fail
+        self.cel_calls = []
 
     def iter_cdr(self, from_dt, to_dt, on_page=None):
         self.cdr_calls.append((from_dt, to_dt))
@@ -49,6 +52,12 @@ class _Db:
 
     def facts(self, start, end):
         return {}
+
+    def hangup_sides(self, linkedids):
+        self.cel_calls.append(list(linkedids))
+        if self.cel_fail:
+            raise self.cel_fail
+        return {linkedid: self.sides[linkedid] for linkedid in linkedids if linkedid in self.sides}
 
     def agents_map(self):
         return dict(self.agents)
@@ -73,6 +82,16 @@ def agent_leg(linkedid, calldate, phone='+77015550101', billsec=30):
                channel='Local/6699@from-queue-0005e9cf;2', dstchannel='PJSIP/6699-0006ce50',
                duration=billsec + 2, billsec=billsec, did='', uniqueid=linkedid + '1',
                recordingfile='external-6699-%s-x-%s1.wav' % (phone, linkedid))
+
+
+def out_leg(linkedid, calldate, billsec=139, client='+77000000101', ext='6687'):
+    """Исходящий оператора через транк — строка `cdr`, как её отдаёт `pbxdb.cdr_rows`."""
+    return {'calldate': calldate, 'clid': '', 'src': '77475777778', 'dst': '7778*' + client,
+            'dcontext': 'from-internal', 'channel': 'PJSIP/%s-0006fb28' % ext,
+            'dstchannel': 'PJSIP/+77475777778-0006fb29', 'duration': billsec + 13,
+            'billsec': billsec, 'disposition': 'ANSWERED' if billsec else 'NO ANSWER',
+            'uniqueid': linkedid, 'did': '', 'linkedid': linkedid, 'recording_url': None,
+            'recordingfile': 'out-7778*%s-%s-20260915-105759-%s.wav' % (client, ext, linkedid)}
 
 
 DAY_JOB = {'day': '2026-09-15', 'from_dt': '2026-09-15T00:00:00', 'to_dt': '2026-09-16T01:00:00'}
@@ -134,6 +153,53 @@ class SourceTests(unittest.TestCase):
         bridge = self._bridge(db)
         self.assertTrue(bridge.do_day(DAY_JOB))
         self.assertEqual([t['linkedid'] for t in self.sent[0][1]['touches']], ['1.1'])
+
+
+class HangupSideTests(unittest.TestCase):
+    """Мост 1.6.0: исходящему с разговором сторону отбоя называет CEL станции."""
+
+    def _bridge(self, db):
+        bridge = agent_mod.Bridge(dict(CONFIG), station=_Station(), pbxdb_source=db)
+        self.sent = []
+        bridge._post = lambda path, payload: self.sent.append((path, payload)) or {'complete': True}
+        return bridge
+
+    def _touches(self):
+        return {t['linkedid']: t for t in self.sent[0][1]['touches']}
+
+    def test_outgoing_talk_gets_the_side_and_nothing_else_is_asked(self):
+        db = _Db(cdr=[out_leg('7.7', '2026-09-15T10:57:59'),
+                      out_leg('8.8', '2026-09-15T11:00:55', billsec=0, client='+77000000102'),
+                      leg('1.1', '2026-09-15T09:00:00'), agent_leg('1.1', '2026-09-15T09:00:05')],
+                 sides={'7.7': 'client', '8.8': 'operator', '1.1': 'operator'})
+        self.assertTrue(self._bridge(db).do_day(DAY_JOB))
+        self.assertEqual(db.cel_calls, [['7.7']],
+                         'недозвон и входящий у CEL не спрашиваются: у входящего — журнал очередей')
+        touches = self._touches()
+        self.assertEqual(touches['7.7']['hangup_side'], 'client')
+        self.assertEqual(touches['8.8']['hangup_side'], '')
+        self.assertEqual(touches['1.1']['hangup_side'], '')
+
+    def test_call_without_a_decided_side_rides_without_it(self):
+        db = _Db(cdr=[out_leg('7.7', '2026-09-15T10:57:59')], sides={'7.7': ''})
+        self.assertTrue(self._bridge(db).do_day(DAY_JOB))
+        self.assertEqual(self._touches()['7.7']['hangup_side'], '')
+
+    def test_no_outgoing_talk_no_question(self):
+        db = _Db(cdr=[leg('1.1', '2026-09-15T09:00:00'), agent_leg('1.1', '2026-09-15T09:00:05')])
+        self.assertTrue(self._bridge(db).do_day(DAY_JOB))
+        self.assertEqual(db.cel_calls, [])
+
+    def test_cel_failure_fails_the_day_instead_of_wiping_known_sides(self):
+        """Портал кладёт сутки целиком вместо прежних: сутки без стороны стёрли бы ту, что
+        уже привезена. Как у журнала очередей — отказ, сутки перечитаются."""
+        db = _Db(cdr=[out_leg('7.7', '2026-09-15T10:57:59')],
+                 cel_fail=pbxdb.PbxDbError('база станции: нет соединения'))
+        self.assertFalse(self._bridge(db).do_day(DAY_JOB))
+        path, payload = self.sent[0]
+        self.assertEqual(path, 'day')
+        self.assertNotIn('touches', payload)
+        self.assertIn('CEL', payload['error'])
 
 
 class NightlyPassTests(unittest.TestCase):

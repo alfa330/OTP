@@ -135,14 +135,20 @@ _LEAD_AUTO = {}
 
 
 def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                        resolve_requester, excel_text_warning=None, store_audio=None):
+                        resolve_requester, excel_text_warning=None, store_audio=None,
+                        share_call_end_parties=None):
     """Своего пула у раздела нет и не нужно: тяжёлую работу делает мост внутри
     корпоративной сети, а портал только читает свою базу и собирает книгу.
 
     store_audio(linkedid, audio_bytes, content_type, imported_call_id) -> audio_path —
     куда класть присланную мостом запись разговора (облако портала) и кому её
     приписать. Своего хранилища у раздела нет; без этого аргумента ручка приёма
-    записей отвечает отказом, а заказы остаются в очереди."""
+    записей отвечает отказом, а заказы остаются в очереди.
+
+    share_call_end_parties() -> сколько обновлено — дописать, кто положил трубку, звонкам
+    журнала оценок, взятым раньше, чем это стало известно (исходящим до моста 1.6.0
+    стороны не знал никто): по всем касаниям, где она уже есть. Своего журнала у раздела
+    нет; без этого аргумента сутки просто сохраняются."""
     bp = Blueprint('cdr', __name__, url_prefix='/api/cdr')
 
     # {номер: очередь} для подписи парка и момент, когда его собрали. Экземпляр портала
@@ -952,7 +958,26 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.agent_seen(cursor, days_sent=1, rows_read=rows_fetched)
         log.info('Касания: мост прислал %s — строк CDR %d, касаний %d',
                  day_value, rows_fetched, len(clean))
+        _share_call_end_parties(day_value)
         return jsonify({'status': 'ok', 'stored': len(clean), 'complete': complete})
+
+    def _share_call_end_parties(day_value):
+        """Кто положил трубку — звонкам журнала оценок, взятым раньше, чем это стало
+        известно. После каждой присылки суток: мост присылает их ночным проходом по
+        вчерашним и при перечитке. Проход общий, по всем касаниям, а не по этим суткам,
+        поэтому сбой здесь лечит любая следующая присылка; сами сутки он не роняет — они
+        уже сохранены."""
+        if share_call_end_parties is None:
+            return
+        try:
+            updated = share_call_end_parties()
+        except Exception:  # noqa: BLE001
+            log.exception('Касания: после суток %s сторона отбоя не дошла до журнала оценок',
+                          day_value)
+            return
+        if updated:
+            log.info('Касания: после суток %s кто положил трубку дописано %d звонкам журнала '
+                     'оценок', day_value, updated)
 
     @agent_route('/agent/live')
     def live(payload):

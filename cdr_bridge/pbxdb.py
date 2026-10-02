@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Чтение базы самой станции: CDR, журнал очередей и справочник номеров. Работает ИЗНУТРИ
-корпоративной сети.
+"""Чтение базы самой станции: CDR, журнал очередей, события отбоя (CEL) и справочник номеров.
+Работает ИЗНУТРИ корпоративной сети.
 
 Почему не HTTP-ручка надстройки
 -------------------------------
@@ -22,6 +22,10 @@
     мгновенно; сутки `cdr` (3–9 тыс. строк) — так же;
   * читаются только девять типов событий (`queue_facts.WANTED_EVENTS`). Паузы операторов
     и попытки дозвона (`RINGNOANSWER` — тысячи строк в сутки) остаются на станции;
+  * CEL (с 1.6.0 — кто положил трубку на исходящем, `cdr/hangups.py`) — только по
+    названным звонкам: `linkedid IN (...)` по его индексу, пачками, четыре типа событий
+    (`hangups.WANTED_EVENTS`). Окна по времени у CEL нет и не будет: индекса по `eventtime`
+    нет, это полный скан 15 млн строк;
   * никаких `INSERT`/`UPDATE`: их и грант не позволит.
 
 Учётка — только на чтение; куда мосту можно ходить по сети, решает конфигурация шлюза, а не
@@ -39,7 +43,7 @@ try:  # pymysql может не стоять — тогда мост работ�
 except ImportError:  # pragma: no cover - на боевой машине пакет есть
     pymysql = None
 
-from cdr import queue_facts
+from cdr import hangups as hangups_mod, queue_facts
 
 CONNECT_TIMEOUT = 8
 READ_TIMEOUT = 25
@@ -95,6 +99,27 @@ _CDR_SQL = (
 # Справочник номеров самой станции — то, что надстройка отдавала ручкой `/agents/map`:
 # имя в транслите («Ivanov_Ivan»), портал сверяет его с ФИО по словам (cdr/directory.py).
 _AGENTS_SQL = "SELECT extension, name FROM asterisk.users"
+
+# ── CEL: кто положил трубку (cdr/hangups.py) ─────────────────────────────────
+# Звонков в одном запросе. 778 исходящих разговоров суток 29.09.2026 — два запроса, 1 620
+# строк, 0,26 с (замер 02.10.2026 с рабочей машины).
+HANGUP_CHUNK = 500
+# Звонков за один вызов. Исходящих разговоров у ОП 500–800 в сутки; больше — уже не сутки.
+HANGUP_MAX_CALLS = 5000
+# Потолок строк на запрос: у автообзвона по три отбоя на каждую попытку очереди, но сотня
+# тысяч — это ошибка. Упёрлись — отказ: урезанный хвост назвал бы не ту сторону.
+HANGUP_MAX_ROWS = 50000
+
+_HANGUP_COLUMNS = ('linkedid', 'id', 'eventtype', 'eventtime', 'extra')
+
+
+def _hangup_sql(count):
+    return ("SELECT " + ', '.join(_HANGUP_COLUMNS) + " "
+            "  FROM cel "
+            " WHERE linkedid IN (" + ', '.join(['%s'] * count) + ") "
+            "   AND eventtype IN (" + ', '.join(['%s'] * len(hangups_mod.WANTED_EVENTS)) + ") "
+            " ORDER BY linkedid, id "
+            " LIMIT %s")
 
 
 def _text(value):
@@ -253,6 +278,32 @@ class PbxDb:
         if on_page:
             on_page(len(rows))
         return iter(rows)
+
+    def hangup_rows(self, linkedids):
+        """События отбоя названных звонков из CEL: HANGUP каждого канала, LINKEDID_END звонка и
+        переводы (`hangups.WANTED_EVENTS`).
+
+        Только по linkedid (индекс `linkedid_index`) и пачками по HANGUP_CHUNK. Источник
+        вспомогательный, как журнал очередей: без настроек — пусто, а не отказ."""
+        if not self.enabled:
+            return []
+        ids = sorted({str(value).strip() for value in (linkedids or ()) if str(value or '').strip()})
+        if len(ids) > HANGUP_MAX_CALLS:
+            raise PbxDbError('CEL: %d звонков за раз при потолке %d' % (len(ids), HANGUP_MAX_CALLS))
+        out = []
+        for start in range(0, len(ids), HANGUP_CHUNK):
+            chunk = ids[start:start + HANGUP_CHUNK]
+            rows = self._cursor_rows(_hangup_sql(len(chunk)),
+                                     chunk + list(hangups_mod.WANTED_EVENTS) + [HANGUP_MAX_ROWS])
+            if len(rows) >= HANGUP_MAX_ROWS:
+                raise PbxDbError('CEL: упёрлись в потолок %d строк на %d звонков'
+                                 % (HANGUP_MAX_ROWS, len(chunk)))
+            out.extend(dict(zip(_HANGUP_COLUMNS, row)) for row in rows)
+        return out
+
+    def hangup_sides(self, linkedids):
+        """{linkedid: кто положил трубку} — только по звонкам, записанным станцией целиком."""
+        return hangups_mod.build_sides(self.hangup_rows(linkedids))
 
     def agents_map(self):
         """ext → имя по справочнику самой станции (`asterisk.users`)."""

@@ -24,6 +24,9 @@
 iCORE, и аудит 17.09.2026 намерил из-за этого 3–5 п.п. лишнего SL. Журнал недоступен —
 касания едут как раньше, без этих полей: точность важна, но не важнее данных.
 
+Исходящему сторону отбоя называет CEL станции (с 1.6.0, `cdr/hangups.py`): у исходящего с
+разговором хвост спрашивает её один раз по linkedid и помнит ответ до конца дня.
+
 Звонки, которых ещё нет в CDR (с 1.4.0)
 --------------------------------------
 CDR пишет звонок после отбоя, а портал решает, дозвонился ли клиент в течение минуты
@@ -37,8 +40,8 @@ CDR пишет звонок после отбоя, а портал решает,
 Что он НИКОГДА не делает
 ------------------------
 Не трогает у станции ничего, кроме того же источника CDR, что читает суточное задание
-(с 1.5.0 — таблица `cdr` базы станции, окном по индексу), и чтения журнала очередей
-одним запросом по индексу.
+(с 1.5.0 — таблица `cdr` базы станции, окном по индексу), чтения журнала очередей
+одним запросом по индексу и событий отбоя новых исходящих разговоров в CEL (по linkedid).
 Не повторяет запрос после таймаута: станция низкоконкурентная, повтор только добавит ей
 работы. Не роняет мост: любая ошибка здесь — строка в журнале и следующая попытка через
 интервал, а после трёх подряд — пауза подольше. Не шлёт порталу то, что не изменилось, —
@@ -52,7 +55,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from cdr import queue_facts as queue_facts_mod, touches as touches_mod
+from cdr import hangups as hangups_mod, queue_facts as queue_facts_mod, touches as touches_mod
 from cdr_bridge.station import StationError
 
 log = logging.getLogger('cdr_bridge.live')
@@ -69,6 +72,12 @@ BACKOFF_SECONDS = 300
 # его возрасту пишет «данные устарели» (порог на экране — две минуты, в отбивке — десять).
 # Пустое приращение раз в минуту — двести байт, зато возраст на табло честный.
 HEARTBEAT_SECONDS = 60
+
+# Сколько раз спросить CEL о звонке, которого там ещё нет целиком (нет LINKEDID_END). Строка
+# CDR пишется после отбоя, события CEL — по ходу звонка, так что обычно хватает первого
+# вопроса. Потолок — чтобы звонок без LINKEDID_END (CEL выключили, сбой станции) не
+# спрашивался каждые двадцать секунд до полуночи: его подберёт ночной проход по суткам.
+HANGUP_ATTEMPTS = 6
 
 # Касание сравнивается по этим полям: прочее (URL записи) либо выводится из них, либо
 # меняется вместе с ними.
@@ -141,6 +150,8 @@ class LiveTail:
         self.rows = {}           # ключ плеча → строка CDR
         self.facts = {}          # callid → точные факты очереди (журнал станции)
         self.facts_until = None  # докуда журнал в self.facts прочитан без обрыва
+        self.hangups = {}        # linkedid → кто положил трубку по CEL ('' — не сторона разговора)
+        self.hangup_asked = {}   # linkedid → сколько раз CEL не знал звонок целиком
         self.sent = {}           # (linkedid, phone) → отпечаток отправленного касания
         self.sent_queue = None   # отпечаток последнего отправленного списка queue_calls
         self.cycles = 0
@@ -182,6 +193,8 @@ class LiveTail:
         self.rows = {}
         self.facts = {}
         self.facts_until = None
+        self.hangups = {}
+        self.hangup_asked = {}
         self.sent = {}
         self.sent_queue = None
         self.cycles = 0
@@ -214,6 +227,35 @@ class LiveTail:
             log.warning('Живой хвост: журнал очередей не прочитался: %s', exc)
             return None
 
+    def _attach_hangups(self, built, day_text):
+        """Дописать исходящим с разговором, кто положил трубку (CEL станции, cdr/hangups.py).
+
+        Отбой случается один раз, поэтому ответ станции помнится до конца дня, и о звонке
+        спрашивают, только пока его нет в памяти. Звонок, который CEL ещё не дописала, — до
+        HANGUP_ATTEMPTS раз; отказ CEL считается попыткой тоже. CEL не ответила — касания
+        едут без стороны: она не важнее самих звонков, а сутки довезёт ночной проход.
+
+        Спрашиваем только о касаниях этих суток: час запаса до полуночи склеивается, но на
+        портал не едет."""
+        if self._pbxdb is None or not getattr(self._pbxdb, 'enabled', False):
+            return built
+        today = [touch for touch in built if str(touch.get('started_at') or '')[:10] == day_text]
+        ask = [linkedid for linkedid in hangups_mod.wanted_linkedids(today)
+               if linkedid not in self.hangups
+               and self.hangup_asked.get(linkedid, 0) < HANGUP_ATTEMPTS]
+        if ask:
+            try:
+                sides = self._pbxdb.hangup_sides(ask)
+            except Exception as exc:  # noqa: BLE001
+                log.warning('Живой хвост: журнал событий каналов не прочитался: %s', exc)
+                sides = {}
+            for linkedid in ask:
+                if linkedid in sides:
+                    self.hangups[linkedid] = sides[linkedid]
+                else:
+                    self.hangup_asked[linkedid] = self.hangup_asked.get(linkedid, 0) + 1
+        return hangups_mod.attach(built, self.hangups)
+
     def step(self, now=None):
         now = time.time() if now is None else now
         today = self._today()
@@ -242,6 +284,7 @@ class LiveTail:
         built = queue_facts_mod.attach(touches_mod.build_touches(list(self.rows.values())),
                                        self.facts, journal_until=self.facts_until)
         day_text = self.day.isoformat()
+        built = self._attach_hangups(built, day_text)
         current = {}
         changed = []
         for touch in built:

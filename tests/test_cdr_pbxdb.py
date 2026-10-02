@@ -254,6 +254,75 @@ class CdrTests(unittest.TestCase):
                           'отметку полноты журнала ставит только чтение журнала')
 
 
+def cel_row(linkedid='1.1', event_id=1, eventtype='HANGUP', source='PJSIP/6687-0006fb1b',
+            at='2026-09-21 09:02:00'):
+    """Строка `cel`, как её отдаёт pymysql: (linkedid, id, eventtype, eventtime, extra)."""
+    extra = '{"hangupcause":16,"hangupsource":"%s","dialstatus":"ANSWER"}' % source
+    return (linkedid, event_id, eventtype, datetime.strptime(at, '%Y-%m-%d %H:%M:%S'),
+            extra if eventtype == 'HANGUP' else '')
+
+
+class CelTests(unittest.TestCase):
+    """С 1.6.0 мост спрашивает CEL, кто положил трубку на исходящем. У CEL нет индекса по
+    времени (окно по eventtime — полный скан 15 млн строк, проверено 21.09.2026: таймаут),
+    поэтому только по названным звонкам — по индексу linkedid — и пачками."""
+
+    def setUp(self):
+        self.conn = _Conn(rows=[cel_row(), cel_row(event_id=2, eventtype='LINKEDID_END')])
+        self.source = pbxdb.PbxDb(host='10.0.0.1', user='ro', password='x',
+                                  connect=lambda: self.conn)
+
+    def test_only_named_calls_by_the_linkedid_index(self):
+        self.source.hangup_rows(['1.1', '2.2'])
+        self.assertEqual(len(self.conn.queries), 1)
+        sql, params = self.conn.queries[0]
+        self.assertIn('FROM cel WHERE linkedid IN (%s, %s) AND eventtype IN (%s, %s, %s, %s)', sql)
+        self.assertNotIn('eventtime >=', sql, 'окно по времени у CEL — полный скан')
+        self.assertIn('LIMIT %s', sql)
+        self.assertEqual(params, ['1.1', '2.2', 'HANGUP', 'LINKEDID_END', 'BLINDTRANSFER',
+                                  'ATTENDEDTRANSFER', pbxdb.HANGUP_MAX_ROWS],
+                         'отбои, конец звонка и переводы — больше ничего (каналы, мосты, приложения)')
+
+    def test_rows_come_back_as_named_fields(self):
+        rows = self.source.hangup_rows(['1.1'])
+        self.assertEqual(rows[0]['linkedid'], '1.1')
+        self.assertEqual(rows[0]['eventtype'], 'HANGUP')
+        self.assertIn('hangupsource', rows[0]['extra'])
+
+    def test_calls_are_asked_in_chunks_without_duplicates(self):
+        with mock.patch.object(pbxdb, 'HANGUP_CHUNK', 2):
+            self.source.hangup_rows(['5.5', '1.1', '2.2', '1.1', ' 3.3 ', '', None, '4.4'])
+        tail = len(pbxdb.hangups_mod.WANTED_EVENTS) + 1          # типы событий и потолок строк
+        self.assertEqual([params[:-tail] for _sql, params in self.conn.queries],
+                         [['1.1', '2.2'], ['3.3', '4.4'], ['5.5']])
+
+    def test_no_calls_no_query(self):
+        self.assertEqual(self.source.hangup_rows([]), [])
+        self.assertEqual(self.conn.queries, [])
+
+    def test_too_many_calls_never_reach_the_station(self):
+        with mock.patch.object(pbxdb, 'HANGUP_MAX_CALLS', 2):
+            with self.assertRaises(pbxdb.PbxDbError):
+                self.source.hangup_rows(['1.1', '2.2', '3.3'])
+        self.assertEqual(self.conn.queries, [])
+
+    def test_hitting_the_row_ceiling_is_an_error_not_a_cut_tail(self):
+        """Урезанный хвост звонка назвал бы не ту сторону — лучше отказ."""
+        with mock.patch.object(pbxdb, 'HANGUP_MAX_ROWS', 2):
+            with self.assertRaises(pbxdb.PbxDbError):
+                self.source.hangup_rows(['1.1'])
+
+    def test_disabled_source_is_silent(self):
+        self.assertEqual(pbxdb.PbxDb(connect=lambda: _Conn()).hangup_rows(['1.1']), [])
+
+    def test_sides_are_built_from_the_rows(self):
+        self.assertEqual(self.source.hangup_sides(['1.1']), {'1.1': 'operator'})
+
+    def test_hangups_do_not_touch_the_journal_coverage_mark(self):
+        self.source.hangup_rows(['1.1'])
+        self.assertIsNone(self.source.covered_until)
+
+
 class DirectoryTests(unittest.TestCase):
     def test_extensions_and_names_come_from_the_stations_users(self):
         conn = _Conn(rows=[('6699', 'Ivanov_Ivan'), (6452, 'Petrova Anna'),

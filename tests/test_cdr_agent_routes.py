@@ -346,6 +346,89 @@ class AgentRouteTests(unittest.TestCase):
         self.assertEqual(self.post('directory', {'agents': []}).status_code, 400)
 
 
+class _ScopedDb(_FakeDb):
+    """База, которая знает, открыта ли сейчас транзакция ручки."""
+
+    def __init__(self):
+        super().__init__()
+        self.open_scopes = 0
+
+    def _get_cursor(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def scope():
+            self.open_scopes += 1
+            try:
+                yield self.cursor
+            finally:
+                self.open_scopes -= 1
+        return scope()
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class CallEndPartyShareTests(unittest.TestCase):
+    """Сутки от моста несут, кто положил трубку (исходящему — с моста 1.6.0). Звонки ОП,
+    взятые в журнал оценок раньше, получают сторону после каждой присылки суток."""
+
+    def setUp(self):
+        self.recorder = _Recorder()
+        patcher = mock.patch.object(cdr_routes, 'queries', self.recorder)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        token_patch = mock.patch.object(cdr_routes.config, 'agent_token', return_value=TOKEN)
+        token_patch.start()
+        self.addCleanup(token_patch.stop)
+        self.db = _ScopedDb()
+        self.calls = []
+        self.fail = None
+
+        def share():
+            # Что уже записано и открыта ли транзакция суток — в момент вызова, а не после.
+            self.calls.append((len(self.recorder.days_stored), len(self.recorder.days_done),
+                               self.db.open_scopes))
+            if self.fail:
+                raise self.fail
+            return 2
+
+        app = Flask(__name__)
+        app.register_blueprint(cdr_routes.build_cdr_blueprint(
+            db=self.db, require_api_key=lambda fn: fn,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (1, None, None), share_call_end_parties=share))
+        app.config['TESTING'] = True
+        self.client = app.test_client()
+
+    def post_day(self, payload):
+        return self.client.post('/api/cdr/agent/day', data=json.dumps(payload),
+                                headers={'Content-Type': 'application/json', 'X-Agent-Token': TOKEN})
+
+    @staticmethod
+    def _touch(linkedid, side):
+        return {'linkedid': linkedid, 'phone': '+77015550001', 'started_at': '2026-08-24 09:00:00',
+                'ext': '6650', 'call_type': 'Исходящий', 'result': 'Разговор', 'talk_seconds': 42,
+                'hangup_side': side}
+
+    def test_journal_is_caught_up_once_the_day_is_committed(self):
+        response = self.post_day({'day': '2026-08-24', 'touches': [self._touch('1.1', 'client')]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.calls, [(1, 1, 0)],
+                         'сутки записаны и закрыты, транзакция ручки завершена — потом журнал')
+
+    def test_journal_failure_does_not_fail_the_day(self):
+        """Сутки уже сохранены: отказ журнала оценок не повод отвечать мосту ошибкой и
+        гнать станцию перечитывать их снова — следующая присылка подберёт пропущенное."""
+        self.fail = RuntimeError('база недоступна')
+        response = self.post_day({'day': '2026-08-24', 'touches': [self._touch('1.1', 'client')]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['stored'], 1)
+
+    def test_refused_or_broken_day_does_not_touch_the_journal(self):
+        self.post_day({'day': '2026-08-24', 'error': 'журнал событий каналов (CEL) станции не прочитался'})
+        self.post_day({'day': '2026-08-24', 'touches': {'не': 'список'}})
+        self.assertEqual(self.calls, [])
+
+
 class CleanTouchTests(unittest.TestCase):
     """Разбор присланного — чистая функция, проверяем её отдельно от Flask."""
 

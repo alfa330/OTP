@@ -81,6 +81,9 @@ Render и до сети не дотягивается — значит, ходи
 Журнал очередей (`cdr_bridge/pbxdb.py`) даёт касаниям точные вход в очередь, момент
 ответа, ожидание и сторону отбоя — то, чего в HTTP-выдаче станции нет с 09.09.2026.
 Не настроен или не ответил — касания едут как раньше, просто без этих полей.
+
+Исходящий в очередь не входит, и сторону отбоя ему с 1.6.0 называет журнал событий
+каналов станции — CEL (`cdr/hangups.py`): кто положил трубку, оператор или клиент.
 """
 
 import argparse
@@ -99,11 +102,12 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cdr import queue_facts as queue_facts_mod, touches as touches_mod  # noqa: E402
+from cdr import (hangups as hangups_mod, queue_facts as queue_facts_mod,  # noqa: E402
+                 touches as touches_mod)
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.5.2'
+VERSION = '1.6.0'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -400,6 +404,10 @@ class Bridge:
             # перечитаются, а сохранённое останется.
             self._report_failure(day, 'журнал очередей станции не прочитался')
             return False
+        own = self._attach_hangups(own, day)
+        if own is None:
+            self._report_failure(day, 'журнал событий каналов (CEL) станции не прочитался')
+            return False
         payload = {
             'day': day,
             'rows_fetched': len(rows),
@@ -414,7 +422,8 @@ class Bridge:
                 # не знает и молча пропускает, поэтому порядок выкладки любой.
                 'line_number': t.get('line_number') or '',
                 # Точные поля журнала очередей станции; нет журнала — пусто, и портал
-                # оставит эти колонки незаполненными (см. cdr/queue_facts.py).
+                # оставит эти колонки незаполненными (см. cdr/queue_facts.py). Сторону
+                # отбоя исходящего называет CEL (cdr/hangups.py).
                 'queued_at': t.get('queued_at') or '',
                 'wait_seconds': t.get('wait_seconds'),
                 'talk_measured_seconds': t.get('talk_measured_seconds'),
@@ -454,6 +463,23 @@ class Bridge:
         # «входа не было» — такой непринятый становится «не дошёл до очереди».
         return queue_facts_mod.attach(touches, facts,
                                       journal_until=getattr(self.pbxdb, 'covered_until', None))
+
+    def _attach_hangups(self, touches, day):
+        """Дописать исходящим с разговором, кто положил трубку (CEL станции, cdr/hangups.py).
+
+        Отказ CEL при CDR из той же базы — None и отказ суток, как у журнала очередей: портал
+        кладёт сутки целиком вместо прежних, и сторона, привезённая раньше, стёрлась бы."""
+        if self.pbxdb is None or not self.pbxdb.enabled:
+            return touches
+        linkedids = hangups_mod.wanted_linkedids(touches)
+        if not linkedids:
+            return touches
+        try:
+            sides = self.pbxdb.hangup_sides(linkedids)
+        except Exception as exc:  # noqa: BLE001
+            log.warning('Сутки %s: журнал событий каналов не прочитался: %s', day, exc)
+            return None if self.cdr is self.pbxdb else touches
+        return hangups_mod.attach(touches, sides)
 
     def maybe_finalize_yesterday(self, now=None):
         """Ночной полный проход по вчерашним суткам (см. NIGHTLY_AT). True, если он был.

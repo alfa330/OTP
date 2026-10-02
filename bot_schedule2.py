@@ -65207,6 +65207,8 @@ try:
         resolve_requester=_resolve_requester,
         excel_text_warning=_excel_suppress_number_as_text_warning,
         store_audio=_cdr_store_audio,
+        # Кто положил трубку — звонкам ОП, взятым в журнал оценок до того, как мост это узнал.
+        share_call_end_parties=db.update_cdr_call_end_parties,
     ))
     logging.info("Раздел «Касания»: Blueprint подключён на /api/cdr")
 except Exception:

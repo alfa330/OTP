@@ -885,8 +885,8 @@ def sample_day_calls(cursor, exts, day, call_types, min_talk=0, max_talk=0, limi
     Принадлежность записи, как и там, проверяет вызывающий
     (cdr.touches.recording_belongs_to): это правило склейки, а не отбора.
 
-    hangup_side — кто положил трубку (журнал очереди, только у входящих): его
-    видит модель оценки (call_qa.call_end)."""
+    hangup_side — кто положил трубку (входящему — журнал очереди, исходящему — CEL
+    станции, cdr/hangups.py): его видит модель оценки (call_qa.call_end)."""
     exts = sorted({str(ext).strip() for ext in (exts or []) if str(ext or '').strip()})
     if not exts or not call_types:
         return []
