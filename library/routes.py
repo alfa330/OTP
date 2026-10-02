@@ -35,11 +35,12 @@
 мониторинге видно, кто её читал. Удалить насовсем можно только книгу из
 архива — 409 иначе.
 
-КТО ВИДИТ РАЗДЕЛ — пока только те, кто его ведёт: решение владельца 28.09.2026
-перед первой выкладкой — «у других пока даже раздел не будет отображаться».
-Остальным закрыт и пункт меню (App.jsx: canAccessLibrarySectionForUser), и
-каждая ручка здесь. Открыть чтение другим — расширить READER_ROLES и тот
-предикат вместе.
+КТО ВИДИТ РАЗДЕЛ — те, кто его ведёт, и читатели: с 02.10.2026 операторы СЗоВ
+и ОП («у операторов ОП и СЗоВ открыт доступ к разделу? если нет открывай»).
+Читатель видит только книги своего отдела не из архива, сохраняет их и
+читает; управление ему закрыто. Остальным закрыт и пункт меню (App.jsx:
+canAccessLibrarySectionForUser), и каждая ручка здесь. Открыть чтение другим —
+расширить правило здесь и тот предикат вместе.
 
 Фабрика получает зависимости аргументами и не импортирует bot_schedule2 —
 тот сам подключает этот модуль (тот же приём, что у news и my_data).
@@ -69,9 +70,11 @@ MANAGER_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
 #   список — в App.jsx (LIBRARY_MANAGER_USER_IDS), тест сверяет оба.
 MANAGER_USER_IDS = frozenset({1, 313})
 
-# Кому раздел открыт по одной роли, без права вести. Пока — тем же ролям, что
-# ведут: отдельных читателей нет (см. шапку модуля).
+# Кому раздел открыт по одной роли, без права вести, — тем же ролям, что ведут.
 READER_ROLES = MANAGER_ROLES
+# Читатели (решение владельца 02.10.2026): операторы двух отделов — по коду
+# отдела. Тот же список — в App.jsx (LIBRARY_READER_DEPARTMENT_CODES).
+READER_OPERATOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
 
 # Место в книге: «номер главы:доля главы от 0 до 1» — 12:0.4375. Строгий
 # формат, а не произвольная строка: иначе в базу можно было бы положить что угодно.
@@ -95,14 +98,25 @@ def can_manage(role, user_id=None, department_code_of=None):
         return True
     if user_id is not None and int(user_id) in MANAGER_USER_IDS:
         return True
-    if role != 'sv' or department_code_of is None or user_id is None:
+    if role != 'sv':
         return False
-    code = str(department_code_of(int(user_id)) or '').strip().lower()
-    return code in MANAGER_SUPERVISOR_DEPARTMENT_CODES
+    return _department_code(user_id, department_code_of) in MANAGER_SUPERVISOR_DEPARTMENT_CODES
 
 
-def can_read(role, manager=False):
-    return manager or role in READER_ROLES
+def can_read(role, manager=False, user_id=None, department_code_of=None):
+    """Открыт ли раздел смотрящему. Отдел спрашивается только у оператора —
+    у остальных решают роль и то, ведёт ли он библиотеку."""
+    if manager or role in READER_ROLES:
+        return True
+    if role != 'operator':
+        return False
+    return _department_code(user_id, department_code_of) in READER_OPERATOR_DEPARTMENT_CODES
+
+
+def _department_code(user_id, department_code_of):
+    if department_code_of is None or user_id is None:
+        return ''
+    return str(department_code_of(int(user_id)) or '').strip().lower()
 
 
 def parse_ids(values):
@@ -180,9 +194,9 @@ def build_library_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         return jsonify({"error": message}), status
                     role = normalize_role(requester[3] if requester else None)
                     manager = can_manage(role, requester_id, department_code_of)
-                    if not can_read(role, manager):
+                    if not can_read(role, manager, requester_id, department_code_of):
                         return jsonify({
-                            "error": "Раздел «Библиотека» пока открыт только тем, кто её ведёт",
+                            "error": "Раздел «Библиотека» вам пока не открыт",
                             "code": "LIBRARY_FORBIDDEN",
                         }), 403
                     if manage and not manager:

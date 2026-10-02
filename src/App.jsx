@@ -2470,32 +2470,38 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
     );
 };
 
-/* «Библиотека» (#282). Раздел видят те, кто его ведёт: загружает книги, правит
-   их отделы и жанры, видит архив и мониторинг. Читателей у раздела пока нет
-   («у других пока даже раздел не будет отображаться», 28.09.2026).
+/* «Библиотека» (#282). Раздел видят те, кто его ведёт (загружает книги, правит
+   их отделы и жанры, видит архив и мониторинг), и читатели.
 
    Кто ведёт (решение владельца 02.10.2026): супер-админ, тренер, СВ СЗоВ и ОП и
    двое поимённо — только id, ФИО в публичный репозиторий не кладём:
    1 — админ, глава СЗоВ; 313 — админ, глава ОП. Правило именное: прочие админы
    и главы отделов раздел не видят.
+   Кто читает (02.10.2026): операторы СЗоВ и ОП — книги своего отдела.
 
    Здесь решается только «показывать ли пункт меню»; обязательную границу
-   держит library/routes.py (can_manage, MANAGER_USER_IDS). Тест сверяет
-   списки: дополнять — в обоих местах. */
+   держит library/routes.py (can_manage, can_read). Тест сверяет списки:
+   дополнять — в обоих местах. */
 const LIBRARY_MANAGER_USER_IDS = new Set([1, 313]);
 const LIBRARY_SUPERVISOR_DEPARTMENT_CODES = ['szov', 'op'];
+const LIBRARY_READER_DEPARTMENT_CODES = ['szov', 'op'];
+
+/* Отдел смотрящего — как у сервера (_department_code_of_user): код, а без
+   кода — id отдела продаж. У части профилей приходит только одно из двух, и
+   проверка по одному полю молча теряла бы человека (как у isAiQaSupervisor). */
+const libraryDepartmentCodeOf = (userLike) => {
+    const code = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    if (code) return code;
+    return Number(userLike?.department_id ?? userLike?.departmentId) === AI_QA_OP_DEPARTMENT_ID ? 'op' : '';
+};
 
 const canAccessLibrarySectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin' || role === 'trainer') return true;
     if (LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))) return true;
-    if (!isSupervisorRole(role)) return false;
-    // Сверяем и код отдела, и id отдела продаж: у части профилей приходит
-    // только одно из двух (та же ловушка, что у isAiQaSupervisor).
-    if (isOpSalesSupervisorForAiQa(userLike)) return true;
-    return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(
-        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
-    );
+    if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));
+    if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));
+    return false;
 };
 
 /* «Ссылка на подписание» — ИИН водителя → ссылка на подписание документов
@@ -42418,9 +42424,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
             const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
-            // «Библиотека» (#282): только те, кто её ведёт, — супер-админ, тренер,
-            // СВ СЗоВ и ОП и двое поимённо (canAccessLibrarySectionForUser).
-            // Сервер закрыт тем же правилом (library/routes.py: can_manage).
+            // «Библиотека» (#282): те, кто её ведёт, — супер-админ, тренер, СВ СЗоВ
+            // и ОП и двое поимённо, — и операторы СЗоВ и ОП как читатели
+            // (canAccessLibrarySectionForUser). Сервер закрыт тем же правилом
+            // (library/routes.py: can_manage, can_read).
             const canAccessLibrarySection = canAccessLibrarySectionForUser(user);
             const canAccessSignLinksSection = canAccessSignLinksSectionForUser(user);
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
@@ -52010,8 +52017,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // сразу: у ОП есть allowlist, и проверка ниже до op_funnel не
                 // дошла бы (та же ловушка, что описана у «Ограничителя Перезвона»).
                 if (view === 'op_funnel' && canAccessOpFunnelSection) return;
-                // «Библиотека» — свой предикат: её ведут СВ отдела продаж, а у ОП
-                // есть allowlist, и проверка ниже выбросила бы их из раздела.
+                // «Библиотека» — свой предикат: её ведут СВ отдела продаж и читают
+                // его операторы, а у ОП есть allowlist, и проверка ниже выбросила
+                // бы их из раздела.
                 if (view === 'library' && canAccessLibrarySection) return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;

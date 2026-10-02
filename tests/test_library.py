@@ -17,8 +17,9 @@
 - жанры: справочник ведут только управляющие, имя уникально без регистра,
   у книги их сколько угодно (и ни одного), неверный жанр — отказ до бакета;
 - отделы к выдаче — пока только СЗоВ и ОП (решение владельца 02.10.2026);
-- ведут библиотеку супер-админ, тренер, СВ СЗоВ и ОП и двое поимённо (id) —
-  на сервере и в пункте меню одними и теми же списками.
+- ведут библиотеку супер-админ, тренер, СВ СЗоВ и ОП и двое поимённо (id),
+  читают операторы СЗоВ и ОП — на сервере и в пункте меню одними и теми же
+  списками.
 
 Книги в тестах собираются здесь же из строк: реальные файлы книг в публичный
 репозиторий не кладём.
@@ -470,9 +471,9 @@ class PermissionTests(unittest.TestCase):
                 self.assertIs(False, body['books'][0]['archived'])
 
     def test_section_is_closed_to_everyone_else_for_now(self):
-        """Решение владельца 28.09.2026: раздел только у тех, кто его ведёт, —
-        остальным закрыта каждая ручка, не только управление. СВ здесь без
-        отдела, админ — не из именного списка."""
+        """Раздел только у тех, кто его ведёт, и у читателей — остальным закрыта
+        каждая ручка, не только управление. СВ и оператор здесь без отдела,
+        админ — не из именного списка."""
         self.assertEqual(routes.MANAGER_ROLES, routes.READER_ROLES)
         requests = (
             ('get', '/api/library', {}),
@@ -1175,11 +1176,12 @@ class LibraryManagersTests(unittest.TestCase):
         response = self.manager_view('admin', requester_id=7, department_code='szov')
         self.assertEqual(403, response.status_code)
 
-    def test_department_is_looked_up_only_for_supervisors(self):
+    def test_department_is_looked_up_only_for_supervisors_and_operators(self):
         """Ручки зовут проверку на каждый запрос: отдел — поход в базу, и
-        роль с id решают без него."""
+        роль с id решают без него. Один поход на запрос, не два."""
         for role, requester_id, expected in (('super_admin', 7, []), ('trainer', 7, []),
-                                             ('admin', 1, []), ('operator', 7, []), ('sv', 7, [7])):
+                                             ('admin', 1, []), ('admin', 7, []), ('sv', 7, [7]),
+                                             ('operator', 7, [7])):
             with self.subTest(role=role, requester_id=requester_id):
                 calls = []
                 self.manager_view(role, requester_id=requester_id, department_code='szov', department_calls=calls)
@@ -1195,11 +1197,54 @@ class LibraryManagersTests(unittest.TestCase):
         self.assertIsNotNone(codes)
         self.assertEqual({x.strip().strip("'") for x in codes.group(1).split(',') if x.strip()},
                          set(routes.MANAGER_SUPERVISOR_DEPARTMENT_CODES))
+        readers = re.search(r"const LIBRARY_READER_DEPARTMENT_CODES = \[([^\]]*)\];", self.app)
+        self.assertIsNotNone(readers)
+        self.assertEqual({x.strip().strip("'") for x in readers.group(1).split(',') if x.strip()},
+                         set(routes.READER_OPERATOR_DEPARTMENT_CODES))
         predicate = self.app.split('const canAccessLibrarySectionForUser = (userLike) => {')[1].split('\n};')[0]
         self.assertIn("if (role === 'super_admin' || role === 'trainer') return true;", predicate)
         self.assertIn('LIBRARY_MANAGER_USER_IDS.has(Number(userLike?.id))', predicate)
-        # СВ ОП узнаётся и по id отдела: у части профилей нет кода.
-        self.assertIn('if (isOpSalesSupervisorForAiQa(userLike)) return true;', predicate)
+        self.assertIn('if (isSupervisorRole(role)) return LIBRARY_SUPERVISOR_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));', predicate)
+        self.assertIn("if (role === 'operator') return LIBRARY_READER_DEPARTMENT_CODES.includes(libraryDepartmentCodeOf(userLike));", predicate)
+        # Отдел — как у сервера: код, а без кода — id отдела продаж.
+        helper = self.app.split('const libraryDepartmentCodeOf = (userLike) => {')[1].split('\n};')[0]
+        self.assertIn('if (code) return code;', helper)
+        self.assertIn("=== AI_QA_OP_DEPARTMENT_ID ? 'op' : ''", helper)
+
+    def test_operators_of_szov_and_op_read_but_do_not_manage(self):
+        """Решение владельца 02.10.2026: «у операторов ОП и СЗоВ открыт доступ
+        к разделу? если нет открывай». Читатель видит книги своего отдела
+        (их отбирает сервер), списка отделов и управления у него нет."""
+        for code in ('szov', 'op'):
+            with self.subTest(code=code), \
+                    mock.patch.object(routes, 'schema_is_ready', return_value=True), \
+                    mock.patch.object(queries, 'list_books', return_value=[]) as list_books, \
+                    mock.patch.object(queries, 'list_genres', return_value=[]), \
+                    mock.patch.object(queries, 'library_departments') as library_departments:
+                client, _ = client_for('operator', department_code=code)
+                body = client.get('/api/library').get_json()
+                self.assertIs(False, body['can_manage'])
+                self.assertIs(False, list_books.call_args.kwargs['manager'])
+                library_departments.assert_not_called()
+                for method, url, kwargs in (
+                        ('post', '/api/library/genres', {'json': {'name': 'X'}}),
+                        ('patch', '/api/library/genres/4', {'json': {'name': 'X'}}),
+                        ('delete', '/api/library/genres/4', {}),
+                        ('post', '/api/library/books', {'data': {}}),
+                        ('patch', '/api/library/books/5', {'json': {'archived': True}}),
+                        ('delete', '/api/library/books/5', {}),
+                        ('get', '/api/library/analytics', {}),
+                        ('get', '/api/library/analytics/summary', {})):
+                    response = getattr(client, method)(url, **kwargs)
+                    self.assertEqual(403, response.status_code, url)
+                    self.assertEqual('LIBRARY_MANAGE_FORBIDDEN', response.get_json()['code'], url)
+
+    def test_operators_of_other_departments_stay_outside(self):
+        for code in ('tez', 'front_office', 'marketing', '', None):
+            with self.subTest(code=code):
+                response = self.manager_view('operator', department_code=code)
+                self.assertEqual(403, response.status_code)
+                self.assertEqual('LIBRARY_FORBIDDEN', response.get_json()['code'])
 
     def test_op_supervisors_are_not_thrown_out_by_the_department_guard(self):
         """У ОП есть allowlist разделов: без своей строки гард отдела выбросил
