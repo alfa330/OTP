@@ -228,6 +228,7 @@ const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsVi
 const ComplaintsView = lazyWithRetry(() => import('./components/complaints/ComplaintsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const WaterView = lazyWithRetry(() => import('./components/water/WaterView'));
+const ThermoboxesView = lazyWithRetry(() => import('./components/thermoboxes/ThermoboxesView'));
 const LibraryView = lazyWithRetry(() => import('./components/library/LibraryView'));
 const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
@@ -413,6 +414,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
  *   water — фронт-офисы и СЗоВ (canAccessWaterSectionForUser);
+ *   thermoboxes — THERMOBOXES_SECTION_DEPARTMENT_CODES;
  *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
@@ -481,6 +483,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // Реестры
     parcels: ['front_office', 'szov'],
     water: ['front_office', 'szov'],
+    thermoboxes: ['front_office', 'szov'],
     sign_links: ['front_office', 'szov', 'op'],
 };
 
@@ -753,6 +756,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
     water: 'Water accounting',
+    thermoboxes: 'Thermoboxes',
     sign_links: 'Signing links',
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
@@ -2434,6 +2438,36 @@ const canAccessWaterSectionForUser = (userLike) => {
     if (isDepartmentHead(userLike) && headed.includes('front_office')) return true;
     if (own === 'front_office') return WATER_ISSUER_USER_IDS.has(Number(userLike?.id));
     return own === 'szov' || headed.includes('szov');
+};
+
+/* «Термокороба» (#363) — условия выдачи термокоробов по фронт-офисам.
+
+   Фронт-офисы заполняют остатки и условия, колл-центр СЗоВ смотрит и по ним
+   отправляет курьеров, глобальный админ — всё. Тренер раздел не просил.
+
+   Здесь решается только «показывать ли пункт меню»; кто правит данные и
+   памятку, считает thermoboxes/access.py. QR-замка нет: в разделе адреса
+   офисов и числа, ни одного водителя. */
+const THERMOBOXES_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
+
+/* ПИЛОТ (02.10.2026): «открой доступ для суперадминов» — пока флаг стоит, пункт
+   меню и экран есть только у супер-админа. Сервер закрыт тем же флагом
+   (thermoboxes/access.py: PILOT_SUPER_ADMIN_ONLY); снимать — в обоих местах. */
+const THERMOBOXES_PILOT_SUPER_ADMIN_ONLY = true;
+
+const canAccessThermoboxesSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (THERMOBOXES_PILOT_SUPER_ADMIN_ONLY) return false;
+    if (role === 'trainer') return false;
+    // Глава чужого отдела с базовой admin-ролью — не глобальный админ.
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some(
+        (code) => THERMOBOXES_SECTION_DEPARTMENT_CODES.includes(code),
+    )) return true;
+    return THERMOBOXES_SECTION_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+    );
 };
 
 /* «Ссылка на подписание» — ИИН водителя → ссылка на подписание документов
@@ -42355,6 +42389,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessComplaintsSection = canAccessComplaintsSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessWaterSection = canAccessWaterSectionForUser(user);
+            const canAccessThermoboxesSection = canAccessThermoboxesSectionForUser(user);
             // «Библиотека» (#282): пока только супер-админ и тренер — решение
             // владельца 28.09.2026 («у других пока даже раздел не будет
             // отображаться»). Сервер закрыт тем же правилом (library/routes.py:
@@ -51923,6 +51958,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'parcels' && canAccessParcelsSection) return;
                 // «Учёт воды» — тот же периметр и та же причина.
                 if (view === 'water' && canAccessWaterSection) return;
+                // «Термокороба» — тот же периметр и та же причина.
+                if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
                 // «Ссылка на подписание» — тот же периметр и та же причина.
                 if (view === 'sign_links' && canAccessSignLinksSection) return;
                 // «Чаты водителей» — свой предикат: раздел живёт в одном отделе,
@@ -51950,7 +51987,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessThermoboxesSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -53966,6 +54003,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canAccessComplaintsSection && deptAllowsInner('complaints'),
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
                                         canAccessWaterSection && deptAllowsInner('water'),
+                                        canAccessThermoboxesSection && deptAllowsInner('thermoboxes'),
                                         canAccessSignLinksSection && deptAllowsInner('sign_links'),
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
                                         canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
@@ -54091,6 +54129,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-droplet"></FaIcon>
                                                 <span className="sidebar-text">Учёт воды</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Термокороба» — остатки и условия выдачи термокоробов по
+                                        фронт-офисам (#363). Аудитория та же, что у «Посылок»,
+                                        поэтому пункт объявлен ОДИН раз здесь, в общей части
+                                        меню. Кто правит данные и памятку, считает бэкенд
+                                        (thermoboxes/access.py). */}
+                                    {canAccessThermoboxesSection && (
+                                    <SidebarDeptScope section="thermoboxes" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'thermoboxes')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'thermoboxes' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-box-open"></FaIcon>
+                                                <span className="sidebar-text">Термокороба</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -54715,6 +54773,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessComplaintsSection,
                 canAccessParcelsSection,
                 canAccessWaterSection,
+                canAccessThermoboxesSection,
                 canAccessLibrarySection,
                 canAccessSignLinksSection,
                 canAccessTouchesSection,
@@ -55219,6 +55278,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
+                        {/* «Термокороба» — без QR-замка: в разделе нет персональных данных. */}
+                        {view === "thermoboxes" && canAccessThermoboxesSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <ThermoboxesView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
                         {view === "sign_links" && canAccessSignLinksSection && (sensitiveSectionsLocked ? (
                             <SensitiveSectionGate
                                 sectionTitle="Ссылка на подписание"
