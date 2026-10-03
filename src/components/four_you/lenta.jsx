@@ -70,6 +70,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const needsRenderRef = useRef(true);
     const loopRef = useRef(false);          // бесконечная прокрутка (когда фото достаточно)
     const countRef = useRef(0);
+    const imagesRef = useRef([]);
     const revealRef = useRef({});           // id → 0..1: появление «съезжанием» к середине
     const loadedRef = useRef({});           // id → true когда фото декодировано
     const revealActiveRef = useRef(false);  // идёт ли сейчас появление
@@ -90,6 +91,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const [editorOpen, setEditorOpen] = useState(false);
 
     countRef.current = images.length;
+    imagesRef.current = images;
 
     const authHeaders = useCallback(() => withAccessTokenHeader({
         'X-User-Id': String(user?.id || ''),
@@ -141,15 +143,32 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Превью всех фото грузим сразу. Карточка появляется по загрузке своего фото
+    // (loadedRef), а до этого стоит за краем экрана, — поэтому загрузку отмечает
+    // и сам предзагрузчик: «ленивое» фото за краем браузер не грузит никогда, и
+    // так в ленте оставались видны только первые 4 фото из 18.
+    const previewKey = images.map((item) => `${item.id}\n${item.preview_url}`).join('\n');
     useEffect(() => {
-        const preloaded = images.map((item) => {
+        const preloaded = imagesRef.current.map((item) => {
             const image = new Image();
             image.decoding = 'async';
+            const markLoaded = () => {
+                if (loadedRef.current[item.id]) return;
+                loadedRef.current[item.id] = true;
+                revealActiveRef.current = true;
+                needsRenderRef.current = true;
+            };
+            image.onload = markLoaded;
+            image.onerror = markLoaded;
             image.src = item.preview_url;
             return image;
         });
-        return () => preloaded.forEach((image) => { image.src = ''; });
-    }, [images]);
+        return () => preloaded.forEach((image) => {
+            image.onload = null;
+            image.onerror = null;
+            image.src = '';
+        });
+    }, [previewKey]);
 
     useEffect(() => {
         if (activeIndex == null) return undefined;
@@ -735,7 +754,6 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                                 className="lenta-card-photo"
                                 src={image.preview_url}
                                 alt=""
-                                loading={index < 4 ? 'eager' : 'lazy'}
                                 decoding="async"
                                 fetchPriority={index < 2 ? 'high' : 'auto'}
                                 draggable="false"

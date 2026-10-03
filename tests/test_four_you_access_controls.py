@@ -146,6 +146,20 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("const isSettled", self.lenta_source)
         self.assertIn("needsRenderRef", self.lenta_source)
 
+    def test_every_photo_loads_and_shows_in_the_feed(self):
+        """Карточка появляется по загрузке своего фото, а до этого стоит за краем
+        экрана. «Ленивое» фото (loading="lazy") за краем Chrome не грузит
+        никогда — так из 18 фото в ленте были видны только 4 первых, «нетерпеливых»
+        (03.10.2026, воспроизведено в Chrome). Поэтому ленивой загрузки в ленте
+        нет, а появление карточки отмечает и предзагрузчик всех превью."""
+        self.assertTrue("'lazy'" not in self.lenta_source and '"lazy"' not in self.lenta_source,
+                        "фото ленты снова грузятся лениво — карточки за краем не появятся")
+        start = self.lenta_source.index("const previewKey")
+        block = self.lenta_source[start:start + 1400]
+        self.assertIn("loadedRef.current[item.id] = true", block)
+        self.assertIn("image.onload = markLoaded", block)
+        self.assertIn("image.onerror = markLoaded", block)
+
     def test_higher_quality_variant_loads_seamlessly(self):
         # Превью всегда снизу; полноразмерный вариант проявляется поверх по onLoad —
         # апгрейд качества незаметен (без моргания/пустого кадра).
