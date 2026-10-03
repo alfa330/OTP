@@ -479,6 +479,75 @@ class LiveTailHangupTests(unittest.TestCase):
         self.assertFalse(self._touch(0, '7.7')['hangup_side'])
 
 
+def hung_up_rows(linkedid, client='+77015550031'):
+    """Непринятый 15.09 11:00:00 на 3010: строка очереди и плечо 6669, оба NO ANSWER — так
+    выглядит и «оператор не снял трубку», и «клиент бросил, пока звонил телефон»."""
+    queue_leg = cdr_row(linkedid, '2026-09-15 11:00:00', src=client, dst='3010',
+                        dcontext='ext-queues', disposition='NO ANSWER', billsec=8, duration=8,
+                        channel='PJSIP/+77475777778-00071051', did='7475777778', recordingfile='',
+                        dstchannel='Local/6669@from-queue-00062972;1')
+    agent_leg = cdr_row(linkedid, '2026-09-15 11:00:07', src=client, dst='6669',
+                        dcontext='from-internal', disposition='NO ANSWER', billsec=0, duration=1,
+                        uniqueid=linkedid + '3', channel='Local/6669@from-queue-00062972;2',
+                        dstchannel='PJSIP/6669-00071052',
+                        recordingfile='external-6669-%s-20260915-110007-%s3.wav' % (client, linkedid))
+    return [queue_leg, agent_leg]
+
+
+def hung_up_journal(linkedid, ring_ms='1334'):
+    return [
+        queue_event(linkedid, '2026-09-15 11:00:07', 'ENTERQUEUE', queuename='3010',
+                    data2='+77015550031'),
+        queue_event(linkedid, '2026-09-15 11:00:08', 'RINGCANCELED', queuename='3010',
+                    agent='Ivanov Ivan', data1=ring_ms),
+        queue_event(linkedid, '2026-09-15 11:00:08', 'ABANDON', queuename='3010',
+                    data1='1', data2='1', data3='1'),
+    ]
+
+
+class ClientHungUpTests(unittest.TestCase):
+    """Мост 1.7.0: «Клиент сбросил» и сколько звонил телефон доезжают до портала и хвостом,
+    и суточной присылкой; запись непринятого — пустой файл, ссылка не едет."""
+
+    def setUp(self):
+        self.posts = []
+        self.station = _Station(hung_up_rows('9.9'))
+        self.journal = _Journal(hung_up_journal('9.9'), cdr=self.station.rows)
+
+    def test_tail_ships_the_client_hung_up_result_with_the_ring(self):
+        live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                      self.station, 20, today=lambda: TODAY, pbxdb=self.journal).step(now=1000.0)
+        touch = self.posts[0][1]['touches'][0]
+        self.assertEqual((touch['result'], touch['ring_ms'], touch['ext']),
+                         ('Клиент сбросил', 1334, '6669'))
+        self.assertEqual(touch['recording_url'], '')
+        self.assertEqual(set(touch), set(live.TOUCH_FIELDS))
+
+    def test_ring_change_alone_ships_the_touch_again(self):
+        self.assertIn('ring_ms', live._FINGERPRINT_FIELDS)
+        self.assertIn('ring_ms', live.TOUCH_FIELDS)
+
+    def test_the_bridge_day_job_sends_the_same(self):
+        from cdr_bridge import agent as agent_mod
+        bridge = agent_mod.Bridge({'portal': 'http://portal.invalid', 'token': 'x',
+                                   'station': 'http://127.0.0.1:9', 'login': '', 'password': ''},
+                                  station=self.station, pbxdb_source=self.journal)
+        sent = []
+        bridge._post = lambda path, payload: sent.append((path, payload)) or {'complete': True}
+        self.assertTrue(bridge.do_day({'day': '2026-09-15', 'from_dt': '2026-09-15T00:00:00',
+                                       'to_dt': '2026-09-16T01:00:00'}))
+        touch = sent[0][1]['touches'][0]
+        self.assertEqual((touch['result'], touch['ring_ms']), ('Клиент сбросил', 1334))
+        self.assertEqual(touch['recording_url'], '')
+
+    def test_without_a_journal_the_call_stays_no_answer(self):
+        """Журнала нет — различить нечем: «Не ответил», как до 1.7.0, и без звона."""
+        live.LiveTail(lambda path, payload: self.posts.append((path, payload)),
+                      self.station, 20, today=lambda: TODAY).step(now=1000.0)
+        touch = self.posts[0][1]['touches'][0]
+        self.assertEqual((touch['result'], touch['ring_ms']), ('Не ответил', None))
+
+
 def _epoch(text):
     """Местное время Алматы → секунды эпохи, как их передаёт мосту time.time()."""
     moment = datetime.strptime(text, '%Y-%m-%d %H:%M:%S')

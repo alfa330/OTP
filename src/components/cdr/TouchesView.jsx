@@ -13,7 +13,8 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
     amoAnsweredNote, amoMark, exportFileName, hms, hours, lineCaption, percent, prettyPhone,
-    resultTone, seconds, shortDay, shortTime, silence, splitCallType, TYPE_IN_BEFORE_QUEUE,
+    resultTone, ringSeconds, seconds, shortDay, shortTime, silence, splitCallType,
+    TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
 import DealsView from './DealsView';
 
@@ -693,6 +694,14 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                                         resultTone(touch.result)}`}>
                                         {touch.result}
                                     </span>
+                                    {/* «Клиент сбросил» — сколько звонил телефон: по этой цифре
+                                        видно, что снять трубку оператор не успевал. */}
+                                    {ringSeconds(touch.ring_ms) ? (
+                                        <div className="mt-0.5 text-[11.5px] tabular-nums text-slate-400"
+                                             title="Сколько звонил телефон оператора, когда клиент положил трубку">
+                                            звонил {ringSeconds(touch.ring_ms)}
+                                        </div>
+                                    ) : null}
                                     {/* Второй строкой, как подписи в соседних ячейках: метка
                                         «в amoCRM» рядом с плашкой расширяла бы колонку. */}
                                     <div><AmoMark touch={touch} /></div>
@@ -778,6 +787,9 @@ function TouchesTable({ touches, total, page, pageCount, onPage }) {
                             ) : null}
                             {touch.wait_seconds !== null && touch.wait_seconds !== undefined ? (
                                 <span className="text-[12px] tabular-nums text-slate-400">· ждал {seconds(touch.wait_seconds)}</span>
+                            ) : null}
+                            {ringSeconds(touch.ring_ms) ? (
+                                <span className="text-[12px] tabular-nums text-slate-400">· звонил {ringSeconds(touch.ring_ms)}</span>
                             ) : null}
                             {touch.recording_url ? (
                                 <a href={touch.recording_url} target="_blank" rel="noreferrer"

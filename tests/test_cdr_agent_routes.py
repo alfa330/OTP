@@ -486,6 +486,16 @@ class CleanTouchTests(unittest.TestCase):
             self.assertIsNone(self._station_touch(wait_seconds=bad)['wait_seconds'],
                               'ожидание %r не должно доезжать' % (bad,))
 
+    def test_ring_of_a_client_hung_up_call_is_kept(self):
+        """«Клиент сбросил» (мост 1.7.0): сколько звонил телефон, мс. Ноль — значение, мусор и
+        звон дольше потолка — «неизвестно». Старый мост поля не шлёт — пусто."""
+        cleaned = self._station_touch(result='Клиент сбросил', ring_ms=1334)
+        self.assertEqual((cleaned['result'], cleaned['ring_ms']), ('Клиент сбросил', 1334))
+        self.assertEqual(self._station_touch(ring_ms=0)['ring_ms'], 0)
+        self.assertIsNone(self._station_touch()['ring_ms'])
+        for bad in ('', 'долго', -1, 10 ** 9):
+            self.assertIsNone(self._station_touch(ring_ms=bad)['ring_ms'], repr(bad))
+
 
 class TouchValuesTests(unittest.TestCase):
     """Значения для вставки идут позиционно: лишняя колонка в SQL без значения (или

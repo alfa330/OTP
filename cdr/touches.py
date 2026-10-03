@@ -87,6 +87,12 @@ RESULT_NO_ANSWER = "Не ответил"
 RESULT_BUSY = "Занято"
 RESULT_FAILED = "Не соединился"
 RESULT_BEFORE_QUEUE = "Сброс до очереди"
+# Клиент положил трубку, пока звонил телефон оператора. Строка станции ставит такому звонку
+# NO ANSWER, как и тому, где оператор не снял трубку, — различает их только журнал очередей
+# (RINGCANCELED в секунду ABANDON, см. cdr/queue_facts.py). Неделя 27.09–03.10.2026: из 106
+# «Не ответил» у входящих 105 были такими, телефон звонил меньше 2,4 с. Оператору в
+# «Потеряно» на «Табло ОП» не засчитывается, отделу — засчитывается (решение владельца 03.10).
+RESULT_CLIENT_HUNG_UP = "Клиент сбросил"
 
 _DISPOSITION_RESULT = {
     "ANSWERED": "Отвечен",
@@ -545,7 +551,11 @@ def _touch(linkedid, client, legs, resolve_operator, prefix_lines=None):
     if answered == started_text:
         answered = ""
     name, direction = resolve_operator(ext, started) if ext else ("", "")
-    url = _own_recording(pick, legs, ext)
+    # У непринятого записи нет: станция пишет файл, только пока звонок соединён (MixMonitor
+    # с флагом `b`), а соединения с оператором не было. По ссылке лежал бы WAV в 44 байта —
+    # 03.10.2026 такими были все 23 ссылки непринятых за день, и у звонка, простоявшего в
+    # очереди 625 с (12.09), тоже.
+    url = "" if call_type == TYPE_IN_MISSED else _own_recording(pick, legs, ext)
 
     return {
         "started_at": started_text,

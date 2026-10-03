@@ -170,6 +170,17 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(parts['by_ext']['6650']['talk_seconds'], 65)
         self.assertEqual(parts['by_ext']['6651']['missed'], 1)
 
+    def test_client_hung_up_while_ringing_is_lost_for_the_department_not_the_operator(self):
+        """03.10.2026 19:00:15: клиент положил трубку, пока телефон 6669 звонил 1,3 с. Решение
+        владельца: в «Потеряно» отдела звонок остаётся (был в очереди), у оператора — нет."""
+        hung_up = dict(touch(ext='6669', call_type='Входящий (не приняли)', talk=0),
+                       result='Клиент сбросил')
+        missed = touch(ext='6669', call_type='Входящий (не приняли)', talk=0)
+        parts = S.aggregate([hung_up, missed])
+        self.assertEqual((parts['totals']['arrived'], parts['totals']['missed']), (2, 2))
+        self.assertEqual(parts['by_ext']['6669']['missed'], 1, 'засчитан только «Не ответил»')
+        self.assertEqual(parts['by_ext']['6669']['answered'], 0)
+
     def test_garbage_started_at_is_skipped(self):
         self.assertEqual(S.aggregate([touch(started='вчера')])['totals']['arrived'], 0)
 

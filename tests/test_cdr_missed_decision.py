@@ -286,6 +286,17 @@ class AmoTextTests(unittest.TestCase):
         self.assertNotIn('нужно перезвонить', text)
         self.assertIn('Оператор не ответил', text)
 
+    def test_client_hung_up_is_not_called_the_operators_miss(self):
+        """«Клиент сбросил»: трубку положил клиент, пока звонил телефон, — «оператор не
+        ответил» в сделке было бы неправдой. Перезвонить всё равно нужно."""
+        text = missed.note_text(missed_call(result=T.RESULT_CLIENT_HUNG_UP, wait_seconds=1),
+                                park='Центр регистрации')
+        self.assertIn('Ждал в очереди 1 с и положил трубку, пока звонил телефон оператора.', text)
+        self.assertNotIn('оператор не ответил', text.lower())
+        self.assertIn('нужно перезвонить', text)
+        text = missed.note_text(missed_call(result=T.RESULT_CLIENT_HUNG_UP, wait_seconds=None))
+        self.assertIn('Положил трубку, пока звонил телефон оператора.', text)
+
 
 if __name__ == '__main__':
     unittest.main()

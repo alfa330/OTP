@@ -334,5 +334,152 @@ class OpenCallsTests(unittest.TestCase):
         self.assertIn('DID', Q.WANTED_EVENTS)
 
 
+HUNG_UP = '1791036015.1270581'
+HUNG_UP_PHONE = '7015550301'
+
+# Звонок 03.10.2026 19:00:15 (номер клиента учебный): 7 с приветствия «Центра регистрации»,
+# в 19:00:22 вход в очередь 3010, очередь звонит 6669, через 1334 мс клиент кладёт трубку.
+HUNG_UP_ROWS = [
+    row('2026-10-03 19:00:22', HUNG_UP, 'DID', queue='3010', data1='7475777778'),
+    row('2026-10-03 19:00:22', HUNG_UP, 'ENTERQUEUE', queue='3010',
+        data2='+7' + HUNG_UP_PHONE, data3='1'),
+    row('2026-10-03 19:00:23', HUNG_UP, 'RINGCANCELED', queue='3010',
+        agent='Ivanov Ivan', data1='1334'),
+    row('2026-10-03 19:00:23', HUNG_UP, 'ABANDON', queue='3010', data1='1', data2='1', data3='1'),
+]
+
+
+def hung_up_cdr():
+    """Сырые строки CDR того же звонка: строка очереди и плечо оператора, обе NO ANSWER."""
+    base = {'clid': '', 'src': '+7' + HUNG_UP_PHONE, 'linkedid': HUNG_UP, 'recording_url': None,
+            'did': ''}
+    return [
+        dict(base, calldate='2026-10-03T19:00:15', dst='3010', dcontext='ext-queues',
+             channel='PJSIP/+77475777778-00071051', dstchannel='Local/6669@from-queue-00062972;1',
+             duration=8, billsec=8, disposition='NO ANSWER', uniqueid=HUNG_UP,
+             did='7475777778', recordingfile=''),
+        dict(base, calldate='2026-10-03T19:00:22', dst='6669', dcontext='from-internal',
+             channel='Local/6669@from-queue-00062972;2', dstchannel='PJSIP/6669-00071052',
+             duration=1, billsec=0, disposition='NO ANSWER', uniqueid='1791036022.1270583',
+             recordingfile='external-6669-+7%s-20261003-190022-1791036022.1270583.wav'
+                           % HUNG_UP_PHONE),
+    ]
+
+
+class ClientHungUpWhileRingingTests(unittest.TestCase):
+    """«Клиент сбросил»: клиент положил трубку, пока звонил телефон оператора.
+
+    Строка станции ставит такому звонку NO ANSWER — как и тому, где оператор не снял трубку,
+    и «Касания» записывали его оператору как «Не ответил». За 27.09–03.10.2026 так было у 104
+    из 105 «Не ответил» входящих; телефон звонил меньше 2,3 с. Различает их журнал очередей:
+    RINGCANCELED (звон оборван) в ту же секунду, что ABANDON (клиент бросил)."""
+
+    def missed(self, **over):
+        base = {'linkedid': HUNG_UP, 'phone': HUNG_UP_PHONE, 'call_type': T.TYPE_IN_MISSED,
+                'started_at': '2026-10-03 19:00:15', 'answered_at': '', 'talk_seconds': 0,
+                'dial_seconds': 8, 'ext': '6669', 'queue': '3010', 'result': T.RESULT_NO_ANSWER}
+        base.update(over)
+        return base
+
+    def test_ring_cut_by_the_clients_hangup_is_measured(self):
+        fact = Q.build_facts(HUNG_UP_ROWS)[HUNG_UP]
+        self.assertEqual(fact['ring_ms'], 1334)
+        self.assertTrue(fact['lost'])
+        self.assertEqual(fact['wait_seconds'], 1)
+
+    def test_the_real_call_of_3_october_is_no_longer_on_the_operator(self):
+        """Сквозь склейку и журнал, как в мосте: строки станции → касание → факты очереди."""
+        glued = T.build_touches(hung_up_cdr())
+        self.assertEqual(len(glued), 1)
+        self.assertEqual((glued[0]['result'], glued[0]['ext']), (T.RESULT_NO_ANSWER, '6669'),
+                         'строка станции сама по себе неотличима от «оператор не снял трубку»')
+        out = Q.attach(glued, Q.build_facts(HUNG_UP_ROWS))[0]
+        self.assertEqual(out['result'], T.RESULT_CLIENT_HUNG_UP)
+        self.assertEqual(out['ring_ms'], 1334)
+        self.assertEqual(out['call_type'], T.TYPE_IN_MISSED, 'для клиента звонок остаётся непринятым')
+        self.assertEqual(out['ext'], '6669', 'чей телефон звонил — видно по-прежнему')
+        self.assertEqual(out['recording_url'], '', 'файл плеча без соединения — пустой WAV')
+
+    def test_any_missed_result_with_a_cut_ring_is_relabelled(self):
+        for result in (T.RESULT_NO_ANSWER, T.RESULT_DROPPED, T.RESULT_BUSY):
+            out = Q.attach([self.missed(result=result)], Q.build_facts(HUNG_UP_ROWS))[0]
+            self.assertEqual(out['result'], T.RESULT_CLIENT_HUNG_UP, result)
+
+    def test_phone_that_rang_to_the_end_stays_no_answer(self):
+        """30.09.2026 22:35, очередь 3042: телефон звонил все 15 с звона очереди и замолчал сам
+        (RINGNOANSWER), клиент положил трубку позже, между попытками. Это «Не ответил»."""
+        rows = [
+            row('2026-09-30 22:35:24', HUNG_UP, 'ENTERQUEUE', queue='3042', data2='+77015550302'),
+            row('2026-09-30 22:35:40', HUNG_UP, 'RINGNOANSWER', queue='3042',
+                agent='Some Operator', data1='15000'),
+            row('2026-09-30 22:37:48', HUNG_UP, 'ABANDON', queue='3042', data3='144'),
+        ]
+        facts = Q.build_facts(rows)
+        self.assertIsNone(facts[HUNG_UP]['ring_ms'])
+        out = Q.attach([self.missed()], facts)[0]
+        self.assertEqual(out['result'], T.RESULT_NO_ANSWER)
+        self.assertNotIn('ring_ms', out)
+
+    def test_ring_cut_away_from_the_clients_hangup_does_not_count(self):
+        rows = HUNG_UP_ROWS[:3] + [
+            row('2026-10-03 19:00:40', HUNG_UP, 'ABANDON', queue='3010', data3='18')]
+        self.assertIsNone(Q.build_facts(rows)[HUNG_UP]['ring_ms'])
+
+    def test_ring_cut_when_the_queue_gave_up_is_not_the_clients_hangup(self):
+        rows = HUNG_UP_ROWS[:3] + [
+            row('2026-10-03 19:00:23', HUNG_UP, 'EXITWITHTIMEOUT', queue='3010', data3='1')]
+        self.assertIsNone(Q.build_facts(rows)[HUNG_UP]['ring_ms'])
+
+    def test_events_in_any_order_and_a_second_apart_still_match(self):
+        rows = [HUNG_UP_ROWS[3], HUNG_UP_ROWS[0], HUNG_UP_ROWS[1],
+                row('2026-10-03 19:00:22', HUNG_UP, 'RINGCANCELED', queue='3010', data1='900')]
+        self.assertEqual(Q.build_facts(rows)[HUNG_UP]['ring_ms'], 900)
+
+    def test_longest_ring_is_taken_when_several_phones_rang(self):
+        rows = HUNG_UP_ROWS + [row('2026-10-03 19:00:23', HUNG_UP, 'RINGCANCELED', queue='3010',
+                                  agent='Other Operator', data1='2100')]
+        self.assertEqual(Q.build_facts(rows)[HUNG_UP]['ring_ms'], 2100)
+
+    def test_zero_ms_ring_is_a_value(self):
+        rows = HUNG_UP_ROWS[:2] + [
+            row('2026-10-03 19:00:23', HUNG_UP, 'RINGCANCELED', queue='3010', data1='0'),
+            HUNG_UP_ROWS[3]]
+        facts = Q.build_facts(rows)
+        self.assertEqual(facts[HUNG_UP]['ring_ms'], 0)
+        self.assertEqual(Q.attach([self.missed()], facts)[0]['result'], T.RESULT_CLIENT_HUNG_UP)
+        # Живой хвост: первое окно видело только вход, второе — отбой со звоном в 0 мс.
+        merged = Q.merge(Q.build_facts(HUNG_UP_ROWS[:2]), facts)
+        self.assertEqual(merged[HUNG_UP]['ring_ms'], 0)
+
+    def test_garbage_ring_length_does_not_relabel(self):
+        rows = HUNG_UP_ROWS[:2] + [
+            row('2026-10-03 19:00:23', HUNG_UP, 'RINGCANCELED', queue='3010', data1='мусор'),
+            HUNG_UP_ROWS[3]]
+        self.assertIsNone(Q.build_facts(rows)[HUNG_UP]['ring_ms'])
+
+    def test_answered_and_outgoing_are_never_relabelled(self):
+        facts = Q.build_facts(HUNG_UP_ROWS)
+        for call_type in (T.TYPE_IN, T.TYPE_OUT):
+            out = Q.attach([self.missed(call_type=call_type, result=T.RESULT_TALK)], facts)[0]
+            self.assertEqual(out['result'], T.RESULT_TALK, call_type)
+
+    def test_merge_keeps_the_ring_of_an_earlier_window(self):
+        merged = Q.merge(Q.build_facts(HUNG_UP_ROWS), Q.build_facts(HUNG_UP_ROWS[:2]))
+        self.assertEqual(merged[HUNG_UP]['ring_ms'], 1334)
+
+    def test_ring_cut_is_part_of_what_the_bridge_asks_for(self):
+        self.assertIn('RINGCANCELED', Q.WANTED_EVENTS)
+        self.assertNotIn('RINGNOANSWER', Q.WANTED_EVENTS, 'их тысячи в сутки')
+
+    def test_call_brought_back_to_the_queue_by_the_journal_has_no_recording(self):
+        """Склейка назвала звонок «не дошёл», журнал вернул его в «не приняли» — файл очереди
+        без соединения пустой (12.09.2026: 625 с в очереди, файл 44 байта)."""
+        glued = self.missed(call_type=T.TYPE_IN_BEFORE_QUEUE, result=T.RESULT_BEFORE_QUEUE,
+                            ext='', recording_url='http://rec/q-3010.wav', has_recording=True)
+        out = Q.attach([glued], Q.build_facts(HUNG_UP_ROWS[:2]))[0]
+        self.assertEqual(out['call_type'], T.TYPE_IN_MISSED)
+        self.assertEqual((out['recording_url'], out['has_recording']), ('', False))
+
+
 if __name__ == '__main__':
     unittest.main()

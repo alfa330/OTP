@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark, exportFileName, hms, hours, percent,
-    fullDay, prettyPhone, resultTone, shortDay, shortTime, silence,
+    RESULT_CLIENT_HUNG_UP, RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark, exportFileName,
+    hms, hours, percent, fullDay, prettyPhone, resultTone, ringSeconds, shortDay, shortTime,
+    silence,
 } from '../src/components/cdr/touchMeta.js';
 
 /* Подписи раздела «Касания».
@@ -96,6 +97,30 @@ test('«сброс без разговора» отличается по цве�
 
 test('незнакомый результат не остаётся без плашки', () => {
     assert.ok(resultTone('что-то новое'));
+});
+
+test('«клиент сбросил» — нейтральная плашка, без цвета вины', () => {
+    // Клиент положил трубку, пока звонил телефон: оператор не виноват, красить нечего.
+    assert.equal(RESULT_CLIENT_HUNG_UP, 'Клиент сбросил');
+    assert.match(resultTone(RESULT_CLIENT_HUNG_UP), /slate/);
+});
+
+test('звон «клиент сбросил» — с десятыми, половина вверх, как в выгрузке', () => {
+    // Двойник cdr/report.py:ring_seconds: 1250 мс и там, и здесь — 1,3 с.
+    assert.equal(ringSeconds(1334), '1,3 с');
+    assert.equal(ringSeconds(1250), '1,3 с');
+    assert.equal(ringSeconds(1249), '1,2 с');
+    assert.equal(ringSeconds(748), '0,7 с');
+    assert.equal(ringSeconds(12000), '12,0 с');
+    // Ноль — звон оборвался сразу; «0,0 с» читалось бы как ошибка.
+    assert.equal(ringSeconds(0), 'меньше 0,1 с');
+    assert.equal(ringSeconds(49), 'меньше 0,1 с');
+    // Звона нет — подписи нет.
+    assert.equal(ringSeconds(null), '');
+    assert.equal(ringSeconds(undefined), '');
+    assert.equal(ringSeconds(''), '');
+    assert.equal(ringSeconds('мусор'), '');
+    assert.equal(ringSeconds(-5), '');
 });
 
 test('имя файла собирает фронт — через CORS оно до нас не доходит', () => {

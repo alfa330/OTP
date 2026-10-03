@@ -438,7 +438,13 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
                             talk_measured=_seconds(touch.get('talk_measured_seconds')),
                             lost_wait=lost_wait)
         if person is not None:
-            person['answered' if answered else 'missed'] += 1
+            # «Клиент сбросил» — клиент положил трубку, пока у оператора звонил телефон (звон
+            # обычно меньше секунды). Отделу это потерянный звонок, оператору — нет: снять
+            # трубку он не успевал (решение владельца 03.10.2026).
+            if answered:
+                person['answered'] += 1
+            elif touch.get('result') != touches_mod.RESULT_CLIENT_HUNG_UP:
+                person['missed'] += 1
             person['talk_seconds'] += talk if answered else 0
 
     return {

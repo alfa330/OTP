@@ -314,8 +314,15 @@ def note_text(missed, park='', repeat=False):
     elif park:
         where = ' на линию %s' % park
     wait = missed.get('wait_seconds')
-    waited = (' Ждал в очереди %d с, оператор не ответил.' % int(wait)) if wait is not None \
-        else ' Оператор не ответил.'
+    if missed.get('result') == touches_mod.RESULT_CLIENT_HUNG_UP:
+        # Клиент положил трубку, пока звонил телефон: «оператор не ответил» было бы неправдой.
+        waited = ((' Ждал в очереди %d с и положил трубку, пока звонил телефон оператора.'
+                   % int(wait)) if wait is not None
+                  else ' Положил трубку, пока звонил телефон оператора.')
+    elif wait is not None:
+        waited = ' Ждал в очереди %d с, оператор не ответил.' % int(wait)
+    else:
+        waited = ' Оператор не ответил.'
     head = 'Повторный пропущенный входящий' if repeat else 'Пропущенный входящий'
     tail = ('' if repeat else ' За минуту после звонка клиенту не ответили — нужно перезвонить.')
     return '%s звонок %s%s.%s%s' % (head, when, where, waited, tail)

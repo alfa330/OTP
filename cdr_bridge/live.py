@@ -89,12 +89,15 @@ _FINGERPRINT_FIELDS = ('started_at', 'answered_at', 'ext', 'call_type', 'result'
                        # Номер линии: у заявки автообзвона он выводится из префикса
                        # набора, а префикс учится по всему дню — номер может появиться
                        # на следующем цикле, и касание обязано доехать ещё раз.
-                       'line_number')
+                       'line_number',
+                       # Сколько звонил телефон, когда клиент положил трубку (с ним же
+                       # меняется итог на «Клиент сбросил», см. cdr/queue_facts.py).
+                       'ring_ms')
 
 TOUCH_FIELDS = ('linkedid', 'phone', 'started_at', 'answered_at', 'ext', 'call_type', 'result',
                 'talk_seconds', 'dial_seconds', 'queue', 'recording_url', 'legs',
                 'queued_at', 'wait_seconds', 'talk_measured_seconds', 'hangup_side',
-                'line_number')
+                'line_number', 'ring_ms')
 
 
 def _row_key(row):

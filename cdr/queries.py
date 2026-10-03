@@ -260,7 +260,8 @@ def replace_day_touches(cursor, day, touches):
             wait_seconds = EXCLUDED.wait_seconds,
             talk_measured_seconds = EXCLUDED.talk_measured_seconds,
             hangup_side = EXCLUDED.hangup_side,
-            line_number = EXCLUDED.line_number
+            line_number = EXCLUDED.line_number,
+            ring_ms = EXCLUDED.ring_ms
     """, payload, page_size=1000)
     return len(payload)
 
@@ -273,7 +274,7 @@ _TOUCH_INSERT_SQL = """
         INSERT INTO cdr_touches (
             linkedid, phone, call_day, started_at, answered_at, ext, call_type,
             result, talk_seconds, dial_seconds, queue, recording_url, legs,
-            queued_at, wait_seconds, talk_measured_seconds, hangup_side, line_number)
+            queued_at, wait_seconds, talk_measured_seconds, hangup_side, line_number, ring_ms)
         VALUES %s
 """
 
@@ -297,7 +298,10 @@ _TOUCH_UPSERT_SQL = _TOUCH_INSERT_SQL + """
             hangup_side = CASE WHEN EXCLUDED.hangup_side <> '' THEN EXCLUDED.hangup_side
                                ELSE cdr_touches.hangup_side END,
             line_number = CASE WHEN EXCLUDED.line_number <> '' THEN EXCLUDED.line_number
-                               ELSE cdr_touches.line_number END
+                               ELSE cdr_touches.line_number END,
+            -- Звон идёт вместе с итогом «Клиент сбросил», а итог приращение пишет всегда:
+            -- оставить старый звон при новом итоге значило бы показать его не тому звонку.
+            ring_ms = EXCLUDED.ring_ms
 """
 
 
@@ -325,6 +329,7 @@ def _touch_values(day, touches):
         _int_or_none(touch.get('talk_measured_seconds')),
         (touch.get('hangup_side') or '')[:16],
         (touch.get('line_number') or '')[:16],
+        _int_or_none(touch.get('ring_ms')),
     ) for touch in touches]
 
 
@@ -551,11 +556,12 @@ TALK_SQL = "COALESCE(t.talk_measured_seconds, t.talk_seconds)"
 _COLUMNS = ("t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result, "
             + TALK_SQL + ", t.dial_seconds, t.queue, t.recording_url, "
             "t.linkedid, t.legs, t.queued_at, t.wait_seconds, t.talk_measured_seconds, "
-            "t.hangup_side, t.line_number")
+            "t.hangup_side, t.line_number, t.ring_ms")
 
 # Что робот пропущенных решил по звонку. Отдельным хвостом, а не внутри _COLUMNS: те же
-# семнадцать колонок читают сверки и тесты, и хвост в них не нужен.
+# восемнадцать колонок читают сверки и тесты, и хвост в них не нужен.
 _MISSED_COLUMNS = ", ml.status, ml.amo_lead_id, ml.reason, ml.error"
+_TOUCH_WIDTH = 18
 
 # Адрес сделки в интерфейсе amoCRM. Домен — тот же, которым ходит клиент amoCRM
 # (amocrm/leads.py, переменная AMO_DOMAIN); здесь без импорта клиента: он тянет requests.
@@ -615,7 +621,11 @@ def _row_to_touch(row):
         'talk_measured_seconds': None if row[14] is None else int(row[14]),
         'hangup_side': row[15] or '',
         'line_number': row[16] or '',
-    } | (_missed_view(*row[17:21]) if len(row) >= 21 else _missed_view(None, None, None, None))
+        # Сколько звонил телефон, когда клиент положил трубку — только у «Клиент сбросил».
+        # Строка в семнадцать колонок (сверки, собранные до колонки) звона не знает.
+        'ring_ms': None if len(row) < _TOUCH_WIDTH or row[17] is None else int(row[17]),
+    } | (_missed_view(*row[_TOUCH_WIDTH:_TOUCH_WIDTH + 4]) if len(row) >= _TOUCH_WIDTH + 4
+         else _missed_view(None, None, None, None))
 
 
 def count_touches(cursor, day_from, day_to, filters=None):

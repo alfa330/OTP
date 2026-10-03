@@ -107,7 +107,7 @@ from cdr import (hangups as hangups_mod, queue_facts as queue_facts_mod,  # noqa
 from cdr_bridge import live, pbxdb, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.6.1'
+VERSION = '1.7.0'
 
 # Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
 RECORDS_DEFAULT = 'http://127.0.0.1:8082'
@@ -428,6 +428,9 @@ class Bridge:
                 'wait_seconds': t.get('wait_seconds'),
                 'talk_measured_seconds': t.get('talk_measured_seconds'),
                 'hangup_side': t.get('hangup_side') or '',
+                # Сколько звонил телефон, когда клиент положил трубку («Клиент сбросил»).
+                # Старый портал поле не знает и пропускает.
+                'ring_ms': t.get('ring_ms'),
             } for t in own],
         }
         try:

@@ -192,7 +192,7 @@ def reclaim(cursor, linkedid, phone, status, attempts):
 
 
 _RETRY_KEYS = ('linkedid', 'phone', 'call_day', 'started_at', 'status', 'attempts',
-               'sent_epoch', 'line_number', 'queue', 'wait_seconds')
+               'sent_epoch', 'line_number', 'queue', 'wait_seconds', 'result')
 
 # sent_epoch пустой — запроса в amoCRM по строке не было вовсе (amoCRM была недоступна
 # ещё при входе): искать «заведённую, но потерянную» сделку тогда не нужно и нельзя —
@@ -202,11 +202,12 @@ _RETRY_KEYS = ('linkedid', 'phone', 'call_day', 'started_at', 'status', 'attempt
 def due_retries(cursor, limit=20):
     """Строки на повтор: упавшие, у которых вышла пауза, и зависшие в `sending`.
 
-    Касание присоединяется ради текста примечания (линия, ожидание); его может уже не быть
-    — сутки перечитаны и звонок сменил linkedid, — тогда примечание выйдет короче."""
+    Касание присоединяется ради текста примечания (линия, ожидание, итог); его может уже не
+    быть — сутки перечитаны и звонок сменил linkedid, — тогда примечание выйдет короче."""
     cursor.execute("""
         SELECT m.linkedid, m.phone, m.call_day, m.started_at, m.status, m.attempts,
-               EXTRACT(EPOCH FROM m.sent_at)::BIGINT, t.line_number, t.queue, t.wait_seconds
+               EXTRACT(EPOCH FROM m.sent_at)::BIGINT, t.line_number, t.queue, t.wait_seconds,
+               t.result
           FROM cdr_missed_leads m
           LEFT JOIN cdr_touches t ON t.linkedid = m.linkedid AND t.phone = m.phone
          WHERE (m.status = 'error'

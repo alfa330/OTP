@@ -143,10 +143,10 @@ class WriterReadTests(unittest.TestCase):
 
 
 def touch_row(status=None, lead=None, reason=None, error=None):
-    """Строка выборки: семнадцать колонок _COLUMNS и хвост журнала робота."""
+    """Строка выборки: восемнадцать колонок _COLUMNS и хвост журнала робота."""
     return (datetime(2026, 9, 28, 10, 0, 0), None, PHONE, '6728', 'Входящий (не приняли)',
             'Занято', 0, 47, '3010', None, '1790571600.1', 1, datetime(2026, 9, 28, 10, 0, 7),
-            40, None, '', '7475550078', status, lead, reason, error)
+            40, None, '', '7475550078', None, status, lead, reason, error)
 
 
 class TouchMarkTests(unittest.TestCase):
@@ -176,7 +176,7 @@ class TouchMarkTests(unittest.TestCase):
         self.assertEqual(queries._row_to_touch(touch_row('sending'))['amo_state'], '')
 
     def test_row_without_the_tail_is_a_plain_touch(self):
-        touch = queries._row_to_touch(touch_row()[:17])
+        touch = queries._row_to_touch(touch_row()[:18])
         self.assertEqual((touch['amo_state'], touch['amo_lead_id'], touch['amo_url']),
                          ('', None, ''))
 

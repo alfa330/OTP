@@ -23,6 +23,9 @@ export const RESULT_NO_ANSWER = 'Не ответил';
 export const RESULT_BUSY = 'Занято';
 export const RESULT_FAILED = 'Не соединился';
 export const RESULT_BEFORE_QUEUE = 'Сброс до очереди';
+/* Клиент положил трубку, пока звонил телефон оператора (журнал очередей станции,
+   cdr/queue_facts.py). Не «Не ответил»: снять трубку оператор не успевал. */
+export const RESULT_CLIENT_HUNG_UP = 'Клиент сбросил';
 
 /* Тон плашки результата. «Сброс без разговора» жёлтый, а не серый: это не
    «не дозвонились», а «дозвонились и бросили», и разница видна руководителю. */
@@ -33,9 +36,23 @@ export const RESULT_TONE = {
     [RESULT_BUSY]: 'bg-slate-100 text-slate-600 ring-slate-200/70',
     [RESULT_FAILED]: 'bg-rose-50 text-rose-600 ring-rose-100',
     [RESULT_BEFORE_QUEUE]: 'bg-slate-100 text-slate-500 ring-slate-200/70',
+    [RESULT_CLIENT_HUNG_UP]: 'bg-slate-100 text-slate-500 ring-slate-200/70',
 };
 
 export const resultTone = (result) => RESULT_TONE[result] || RESULT_TONE[RESULT_NO_ANSWER];
+
+/** Сколько звонил телефон, когда клиент положил трубку: мс → «1,3 с», пусто — звона нет.
+ *
+ *  С десятыми, в отличие от остальных секунд раздела: у двух третей таких звонков звон
+ *  короче секунды, и целые секунды показали бы «0 с». Двойник cdr/report.py:ring_seconds. */
+export const ringSeconds = (ms) => {
+    if (ms === null || ms === undefined || ms === '') return '';
+    const value = Number(ms);
+    if (!Number.isFinite(value) || value < 0) return '';
+    const tenths = Math.round(value / 100);
+    if (tenths === 0) return 'меньше 0,1 с';
+    return `${(tenths / 10).toFixed(1).replace('.', ',')} с`;
+};
 
 /** Секунды → «7:12» или «1:04:30». Двойник cdr/report.py:hms.
  *

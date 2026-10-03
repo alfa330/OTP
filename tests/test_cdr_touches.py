@@ -491,6 +491,37 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(touch['recording_url'], '')
         self.assertFalse(touch['has_recording'])
 
+    def test_missed_incoming_has_no_recording(self):
+        """Плечо оператора, который так и не ответил, станция записывает — но только пока
+        звонок соединён, и файл выходит пустым WAV в 44 байта (03.10.2026: все 23 ссылки
+        непринятых за день). Ссылка на тишину — шум."""
+        touch = T.build_touches([
+            row(calldate='2026-10-03T19:00:15', src='+77015550073', dst='3010',
+                dcontext='ext-queues', disposition='NO ANSWER', duration=8, billsec=8,
+                dstchannel='Local/6669@from-queue-00062972;1', uniqueid='7.1', linkedid='7.1'),
+            row(calldate='2026-10-03T19:00:22', src='+77015550073', dst='6669',
+                disposition='NO ANSWER', duration=1, dstchannel='PJSIP/6669-00071052',
+                channel='Local/6669@from-queue-00062972;2', uniqueid='7.2', linkedid='7.1',
+                recordingfile='external-6669-+77015550073-20261003-190022-7.2.wav'),
+        ])[0]
+        self.assertEqual((touch['call_type'], touch['ext']), (T.TYPE_IN_MISSED, '6669'))
+        self.assertEqual(touch['recording_url'], '')
+        self.assertFalse(touch['has_recording'])
+
+    def test_answered_incoming_keeps_its_recording(self):
+        touch = T.build_touches([
+            row(calldate='2026-10-03T19:00:15', src='+77015550074', dst='3010',
+                disposition='ANSWERED', duration=40, billsec=40,
+                dstchannel='Local/6669@from-queue-00062972;1', uniqueid='8.1', linkedid='8.1'),
+            row(calldate='2026-10-03T19:00:22', src='+77015550074', dst='6669',
+                disposition='ANSWERED', duration=33, billsec=31, dstchannel='PJSIP/6669-00071052',
+                uniqueid='8.2', linkedid='8.1',
+                recordingfile='external-6669-+77015550074-20261003-190022-8.2.wav'),
+        ])[0]
+        self.assertEqual(touch['call_type'], T.TYPE_IN)
+        self.assertTrue(touch['recording_url'].endswith(
+            'external-6669-+77015550074-20261003-190022-8.2.wav'))
+
 
 class SummaryTests(unittest.TestCase):
     def test_summary_counts_each_type_separately(self):

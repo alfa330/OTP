@@ -290,6 +290,31 @@ class StorageTests(unittest.TestCase):
         self.assertIn("line_number = CASE WHEN EXCLUDED.line_number <> ''",
                       ' '.join(queries._TOUCH_UPSERT_SQL.split()))
 
+    def test_ring_lands_in_its_column_and_follows_the_result(self):
+        """Звон «Клиент сбросил» стоит в своей колонке; приращение пишет его вместе с итогом,
+        а не держит старый (итог приращение пишет всегда), полный проход — тоже."""
+        touch = dict(self.TOUCH, result='Клиент сбросил', ring_ms=1334)
+        values = dict(zip(self.columns(), queries._touch_values(date(2026, 9, 23), [touch])[0]))
+        self.assertEqual(values['ring_ms'], 1334)
+        values = dict(zip(self.columns(), queries._touch_values(date(2026, 9, 23), [self.TOUCH])[0]))
+        self.assertIsNone(values['ring_ms'])
+        self.assertIn('ring_ms = EXCLUDED.ring_ms', ' '.join(queries._TOUCH_UPSERT_SQL.split()))
+        import inspect
+        self.assertIn('ring_ms = EXCLUDED.ring_ms',
+                      ' '.join(inspect.getsource(queries.replace_day_touches).split()))
+
+    def test_ring_is_read_back(self):
+        row = (datetime(2026, 10, 3, 19, 0, 15), None, '7015550001', '6669',
+               'Входящий (не приняли)', 'Клиент сбросил', 0, 8, '3010', None,
+               '1791036015.1270581', 2, None, 1, None, '', '7475777778', 1334)
+        self.assertEqual(queries._row_to_touch(row)['ring_ms'], 1334)
+
+    def test_schema_adds_the_ring_column(self):
+        from cdr import schema
+        self.assertIn('ring_ms', schema.CDR_SCHEMA_SQL)
+        self.assertIn('ALTER TABLE cdr_touches ADD COLUMN IF NOT EXISTS ring_ms INTEGER',
+                      schema.CDR_SCHEMA_MIGRATIONS)
+
     def test_full_day_pass_writes_the_line(self):
         import inspect
         source = ' '.join(inspect.getsource(queries.replace_day_touches).split())

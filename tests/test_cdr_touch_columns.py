@@ -27,11 +27,11 @@ ANSWERED_AT = datetime(2026, 9, 21, 19, 29, 13)
 
 
 def row(queued_at=QUEUED_AT, answered_at=ANSWERED_AT, wait=1, talk_measured=9,
-        hangup='client', linkedid=LINKEDID):
+        hangup='client', linkedid=LINKEDID, ring_ms=None):
     """Строка ровно в порядке queries._COLUMNS."""
     return (datetime(2026, 9, 21, 19, 29, 12), answered_at, '7773714269', '6656',
             'Входящий', 'Разговор', 9, 9, '3041', 'http://rec/q-3041.wav',
-            linkedid, 1, queued_at, wait, talk_measured, hangup, '7009214242')
+            linkedid, 1, queued_at, wait, talk_measured, hangup, '7009214242', ring_ms)
 
 
 def select_columns(sql):
@@ -126,6 +126,21 @@ class ExportColumnsTests(unittest.TestCase):
         values = dict(zip(self.titles(), report._touch_row(_sheet(), touch)))
         self.assertIsNone(values['Приветствие/IVR, с'])
         self.assertIsNone(values['Ожидание в очереди, с'])
+        self.assertIsNone(values['Звонил телефон, с'], 'у звонка с разговором звона нет')
+
+    def test_ring_of_a_client_hung_up_call_is_in_seconds_with_tenths(self):
+        touch = queries._row_to_touch(row(ring_ms=1334))
+        values = dict(zip(self.titles(), report._touch_row(_sheet(), touch)))
+        self.assertEqual(values['Звонил телефон, с'], 1.3)
+
+    def test_ring_rounds_half_up_like_the_screen(self):
+        """Двойник touchMeta.js:ringSeconds — там Math.round, половина вверх. `round()` Python
+        дал бы 1,2 при 1250 мс, и файл разошёлся бы с экраном."""
+        self.assertEqual(report.ring_seconds(1250), 1.3)
+        self.assertEqual(report.ring_seconds(1249), 1.2)
+        self.assertEqual(report.ring_seconds(0), 0.0)
+        self.assertIsNone(report.ring_seconds(None))
+        self.assertIsNone(report.ring_seconds('мусор'))
 
 
 def _sheet():

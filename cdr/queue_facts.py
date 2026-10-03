@@ -25,6 +25,8 @@
     COMPLETEAGENT   разговор закончил ОПЕРАТОР; поля те же
     ABANDON         клиент бросил трубку в очереди; data3 — сколько он ждал
     EXITWITHTIMEOUT очередь сдалась по таймауту; data3 — то же ожидание
+    RINGCANCELED    звон оборван: клиент положил трубку, пока звонил телефон оператора;
+                    data1 — сколько звонил, мс. Пишется в ту же секунду, что ABANDON
     RINGNOANSWER    попытка дозвона до агента; их тысячи в сутки, нам не нужны
 
 Сутки станции 21.09.2026 сходятся: 431 вход = 375 ответов + 56 брошенных.
@@ -61,6 +63,10 @@ WANTED_EVENTS = (
     'EXITWITHTIMEOUT',
     'EXITEMPTY',
     'EXITWITHKEY',
+    # Звон, оборванный отбоем клиента: без него «клиент бросил, пока звонил телефон» и
+    # «оператор не снял трубку» в строке станции неотличимы (оба NO ANSWER). 6–23 строки в
+    # сутки (27.09–03.10.2026) — на объём чтения не влияет.
+    'RINGCANCELED',
 )
 
 # Чем закончился звонок для того, кто ждал в очереди.
@@ -74,6 +80,9 @@ HANGUP_OPERATOR = 'operator'
 MAX_WAIT_SECONDS = 3600
 # Столько же на разговор не ставим: разговоры по часу редки, но бывают (разбор жалобы).
 MAX_TALK_SECONDS = 12 * 3600
+# Звон одного телефона: очередь ОП звонит оператору 5–15 с (timeout очереди). Десять минут
+# в мс — заведомо не звон, а испорченное поле.
+MAX_RING_MS = 600 * 1000
 
 
 def _moment(value):
@@ -157,7 +166,7 @@ def build_facts(rows):
         fact = facts.setdefault(callid, {
             'callid': callid, 'queue': '', 'queued_at': None, 'answered_at': None,
             'wait_seconds': None, 'talk_seconds': None, 'hangup_side': '',
-            'agent': '', 'lost': False, 'caller': '', 'did': '',
+            'agent': '', 'lost': False, 'caller': '', 'did': '', 'ring_ms': None,
         })
         queue = str(row.get('queuename') or '').strip()
         if queue and queue != 'NONE' and not fact['queue']:
@@ -186,15 +195,40 @@ def build_facts(rows):
                 fact['talk_seconds'] = talk
             if agent and agent != 'NONE' and not fact['agent']:
                 fact['agent'] = agent
+        elif event == 'RINGCANCELED':
+            fact.setdefault('_ring_cuts', []).append(
+                (moment, _seconds(row.get('data1'), MAX_RING_MS)))
         elif event in _LOST_EVENTS:
             fact['lost'] = True
             if fact['wait_seconds'] is None:
                 fact['wait_seconds'] = _seconds(row.get('data3'), MAX_WAIT_SECONDS)
             fact.setdefault('lost_at', moment)
+            if event == 'ABANDON':
+                fact.setdefault('_abandoned_at', []).append(moment)
 
     for fact in facts.values():
         _fill_gaps(fact)
+        fact['ring_ms'] = _ring_cut(fact)
     return facts
+
+
+def _ring_cut(fact):
+    """Сколько звонил телефон оператора, когда клиент положил трубку, мс — или None.
+
+    Клиент бросил трубку (ABANDON), и в ту же секунду очередь оборвала звон (RINGCANCELED):
+    телефон звонил, а снять трубку оператор не успел. Строка станции такому звонку ставит
+    NO ANSWER — так же, как звонку, где оператор не снял трубку за весь звон очереди, и в
+    «Касаниях» оба выходили «Не ответил». Звонок 03.10.2026 19:00:15: приветствие 7 с, в
+    очереди 3010 секунда, телефон 6669 звонил 1334 мс — и «Не ответил» на операторе.
+
+    Звон, оборванный не отбоем клиента (событие без ABANDON рядом), в счёт не идёт. Секунда
+    запаса — у событий время до секунды, и звон мог оборваться на её границе. При
+    одновременном дозвоне до нескольких телефонов звонили все — берётся самый долгий звон."""
+    cuts = fact.pop('_ring_cuts', None) or []
+    abandoned = fact.pop('_abandoned_at', None) or []
+    hits = [ms for moment, ms in cuts if ms is not None
+            and any(abs((end - moment).total_seconds()) <= 1 for end in abandoned)]
+    return max(hits) if hits else None
 
 
 def _fill_gaps(fact):
@@ -243,6 +277,9 @@ def merge(base, fresh):
         for field in _MERGE_FIELDS:
             if not current.get(field) and fact.get(field):
                 current[field] = fact[field]
+        # Звон в 0 мс — значение, а не пустота: проверка выше его бы не перенесла.
+        if current.get('ring_ms') is None and fact.get('ring_ms') is not None:
+            current['ring_ms'] = fact['ring_ms']
     return out
 
 
@@ -311,6 +348,9 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES, journal_until=None):
 
     Обратное — без всяких условий на полноту: «не дошёл до очереди» от склейки, у которого
     в журнале ЕСТЬ вход в очередь, возвращается в «не приняли». Событие — улика прямая.
+
+    Непринятый, у которого клиент положил трубку, пока звонил телефон оператора
+    (`_ring_cut`), получает итог «Клиент сбросил» и `ring_ms` — сколько звонил телефон.
     """
     if not facts and journal_until is None:
         return list(touches or [])
@@ -328,9 +368,10 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES, journal_until=None):
             # Склейка решает по строке станции, журнал — по событию очереди, и журнал
             # главнее: вошёл в очередь — значит, дошёл. Строка станции могла показать звонок
             # уже после очереди (таймаут → `app-blackhole`) или только его приветствие.
-            # Такой звонок — непринятый: очередь «сняла трубку», разговора не было.
+            # Такой звонок — непринятый: очередь «сняла трубку», разговора не было. Записи у
+            # непринятого нет (cdr/touches.py): файл очереди без соединения пуст.
             touch = dict(touch, call_type=touches_mod.TYPE_IN_MISSED,
-                         result=touches_mod.RESULT_DROPPED)
+                         result=touches_mod.RESULT_DROPPED, recording_url='', has_recording=False)
         if not fact or touch.get('call_type') not in incoming_types:
             out.append(touch)
             continue
@@ -346,6 +387,10 @@ def attach(touches, facts, incoming_types=INCOMING_TYPES, journal_until=None):
             enriched['wait_seconds'] = values['wait_seconds']
         if values['hangup_side']:
             enriched['hangup_side'] = values['hangup_side']
+        if fact.get('ring_ms') is not None and touch.get('call_type') == touches_mod.TYPE_IN_MISSED:
+            # Клиент положил трубку, пока звонил телефон: это не «оператор не ответил».
+            enriched['result'] = touches_mod.RESULT_CLIENT_HUNG_UP
+            enriched['ring_ms'] = fact['ring_ms']
         out.append(enriched)
     return out
 

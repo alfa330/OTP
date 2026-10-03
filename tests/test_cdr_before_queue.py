@@ -233,7 +233,9 @@ class ReachedNobodyTests(unittest.TestCase):
                       recordingfile='q-3001-%s-20260912-012354-1.1.wav' % CLIENT)
         touch = T.build_touches([timeout])[0]
         self.assertEqual(touch['call_type'], T.TYPE_IN_MISSED)
-        self.assertTrue(touch['recording_url'])
+        # Сам файл `q-3001-…` на сервере — 44 байта (проверено 03.10.2026): без соединения
+        # станция пишет пустой WAV, и ссылки у непринятого нет.
+        self.assertEqual(touch['recording_url'], '')
 
     def test_own_recording_is_kept_and_a_substituted_one_is_not(self):
         """Объявление станция записывает — ссылка остаётся. У строки приветствия файла нет, а

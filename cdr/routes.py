@@ -57,8 +57,8 @@ from io import BytesIO
 from flask import Blueprint, g, jsonify, request, send_file
 
 from . import (access, agent_auth, config, directory as directory_mod, lead_queries, lead_report,
-               leads as leads_mod, lines as lines_mod, missed_config, queries, report, schema,
-               sync, touches as touches_mod)
+               leads as leads_mod, lines as lines_mod, missed_config, queries, queue_facts,
+               report, schema, sync, touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -1230,6 +1230,18 @@ def _seconds_or_none(value):
     return number if 0 <= number <= 86400 else None
 
 
+def _ms_or_none(value):
+    """Миллисекунды звона из тела моста. Потолок — тот же, что у моста
+    (`queue_facts.MAX_RING_MS`): больше — испорченное поле, а не звон."""
+    if value is None or value == '':
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= queue_facts.MAX_RING_MS else None
+
+
 def _clean_touch(item, day_value):
     """Приводит присланное мостом касание к тому, что примет база.
 
@@ -1262,6 +1274,8 @@ def _clean_touch(item, day_value):
         'wait_seconds': _seconds_or_none(item.get('wait_seconds')),
         'talk_measured_seconds': _seconds_or_none(item.get('talk_measured_seconds')),
         'hangup_side': str(item.get('hangup_side') or '')[:16],
+        # Сколько звонил телефон, когда клиент положил трубку («Клиент сбросил»).
+        'ring_ms': _ms_or_none(item.get('ring_ms')),
         # Наш номер. Тем же правилом, что номер клиента: не десять цифр — пусто, и
         # мусор из тела запроса в колонку не попадёт. Старый мост поля не шлёт.
         'line_number': touches_mod.norm_phone(item.get('line_number')),
