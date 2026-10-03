@@ -6,6 +6,7 @@ import AnnotationLayer from './AnnotationLayer';
 import Backgrounds from './Backgrounds';
 import PhotoEditor from './PhotoEditor';
 import { normalizeAnnotations, hasVisibleAnnotations, userName } from './annotations';
+import { buildCards, copiesFor, cullFor, loopProgress } from './lentaLoop';
 import './lenta.css';
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -62,6 +63,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const dragStartXRef = useRef(0);
     const dragStartYRef = useRef(0);
     const dragStartTargetRef = useRef(0);
+    // Номер открытой КАРТОЧКИ (слота), а не фото: у фото по кругу бывают копии.
     const activeIndexRef = useRef(null);
     const expandedRef = useRef(false);
     const hoveredRef = useRef(null);
@@ -69,9 +71,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const selectedMixRef = useRef(0);
     const hoverMixRef = useRef([]);
     const needsRenderRef = useRef(true);
-    const loopRef = useRef(false);          // бесконечная прокрутка (когда фото достаточно)
-    const countRef = useRef(0);
+    const loopRef = useRef(false);          // бесконечная прокрутка (когда карточек достаточно)
+    const countRef = useRef(0);             // сколько карточек (фото × копии)
     const imagesRef = useRef([]);
+    const cardsRef = useRef([]);
     const revealRef = useRef({});           // id → 0..1: появление «съезжанием» к середине
     const loadedRef = useRef({});           // id → true когда фото декодировано
     const revealActiveRef = useRef(false);  // идёт ли сейчас появление
@@ -99,9 +102,15 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const [albumOpen, setAlbumOpen] = useState(false);
     const [albumClosing, setAlbumClosing] = useState(false);
     const [albumBackground, setAlbumBackground] = useState('none');
+    const [copies, setCopies] = useState(1);
 
-    countRef.current = images.length;
+    // Карточки ленты: фото по кругу, копиями, когда фото мало для круга без
+    // шва на этой ширине экрана (lentaLoop.js). Номер карточки — слот.
+    const cards = useMemo(() => buildCards(images, copies), [images, copies]);
+
+    countRef.current = cards.length;
     imagesRef.current = images;
+    cardsRef.current = cards;
 
     const authHeaders = useCallback(() => withAccessTokenHeader({
         'X-User-Id': String(user?.id || ''),
@@ -183,18 +192,41 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
         });
     }, [previewKey]);
 
+    // Копий для круга — от числа фото и ширины окна.
     useEffect(() => {
-        if (activeIndex == null) return undefined;
-        const indexes = [activeIndex - 1, activeIndex, activeIndex + 1]
-            .filter((index) => index >= 0 && index < images.length);
-        const preloaded = indexes.map((index) => {
+        const update = () => setCopies(copiesFor(imagesRef.current.length, window.innerWidth));
+        update();
+        window.addEventListener('resize', update);
+        return () => window.removeEventListener('resize', update);
+    }, [images.length]);
+
+    // Копий стало меньше (окно сузили) — открытая карточка могла пропасть:
+    // закрываем её сразу, без хвоста. Слот внутри новых границ — то же фото.
+    useEffect(() => {
+        const slot = activeIndexRef.current;
+        if (slot === null || slot < cards.length) return;
+        activeIndexRef.current = null;
+        expandedRef.current = false;
+        expandMixRef.current = 0;
+        selectedMixRef.current = 0;
+        setActiveIndex(null);
+        needsRenderRef.current = true;
+    }, [cards.length]);
+
+    // Полноразмерные фото открытой карточки и соседей — заранее (по кругу).
+    useEffect(() => {
+        if (activeIndex == null || !images.length) return undefined;
+        const count = images.length;
+        const photo = cards[activeIndex]?.photo ?? 0;
+        const photos = new Set([photo - 1, photo, photo + 1].map((index) => ((index % count) + count) % count));
+        const preloaded = Array.from(photos).map((index) => {
             const image = new Image();
             image.decoding = 'async';
             image.src = images[index].display_url;
             return image;
         });
         return () => preloaded.forEach((image) => { image.src = ''; });
-    }, [activeIndex, images]);
+    }, [activeIndex, images, cards]);
 
     const setCardClasses = useCallback(() => {
         cardRefs.current.forEach((card, index) => {
@@ -227,13 +259,13 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     }, []);
 
     useEffect(() => {
-        if (!images.length) return undefined;
+        if (!cards.length) return undefined;
         let animationFrame = 0;
         // Кэш применённых z-index/display, чтобы не дёргать стили зря.
-        const lastZ = new Array(images.length).fill(null);
-        const lastDisplay = new Array(images.length).fill('');
+        const lastZ = new Array(cards.length).fill(null);
+        const lastDisplay = new Array(cards.length).fill('');
 
-        const computeCull = () => Math.ceil((window.innerWidth * 0.5 + 470) / PARAMS.dirX) + 2;
+        const computeCull = () => cullFor(window.innerWidth);
 
         const getRailScreenCenter = () => {
             const rect = railRef.current.getBoundingClientRect();
@@ -244,7 +276,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             const scene = sceneRef.current;
             const rail = railRef.current;
             if (!scene || !rail) return;
-            const n = images.length;
+            const n = cards.length;
             const activeFloat = scrollRef.current / PARAMS.step;
             const railCenter = getRailScreenCenter();
             const hasActive = activeIndexRef.current !== null;
@@ -325,7 +357,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 // стороной (reveal=0, прозрачно); после загрузки reveal едет 0→1 и
                 // карточка «съезжает» к центру вместе с уже готовой картинкой.
                 if (!isActive) {
-                    const id = images[index].id;
+                    const id = cards[index].image.id;
                     let reveal = revealRef.current[id] === undefined ? 0 : revealRef.current[id];
                     // Двигаем появление только для ВИДИМЫХ (прошедших куллинг) и уже
                     // загруженных карточек: ушедшая за экран и возвращённая карточка
@@ -373,8 +405,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
 
             let progress;
             if (loop) {
-                const position = (((scrollRef.current / PARAMS.step) % n) + n) % n;
-                progress = (position / n) * 100;
+                progress = loopProgress(scrollRef.current / PARAMS.step, images.length);
             } else {
                 const max = (n - 1) * PARAMS.step;
                 progress = max <= 0 ? 0 : (scrollRef.current / max) * 100;
@@ -405,8 +436,8 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
 
         const animate = () => {
             const cullRadius = computeCull();
-            loopRef.current = images.length >= 2 * cullRadius;
-            const max = (images.length - 1) * PARAMS.step;
+            loopRef.current = cards.length >= 2 * cullRadius;
+            const max = (cards.length - 1) * PARAMS.step;
             if (!loopRef.current) targetRef.current = clamp(targetRef.current, 0, max);
             scrollRef.current = lerp(scrollRef.current, targetRef.current, 0.11);
             if (Math.abs(scrollRef.current - targetRef.current) < 0.025) scrollRef.current = targetRef.current;
@@ -458,7 +489,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             window.removeEventListener('resize', handleResize);
             window.cancelAnimationFrame(animationFrame);
         };
-    }, [images, setCardClasses]);
+    }, [cards, images.length, setCardClasses]);
 
     useEffect(() => {
         const handleKeyDown = (event) => {
@@ -555,7 +586,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             const index = Number(card.dataset.lentaCardIndex);
             if (expandedRef.current && activeIndexRef.current === index) closeCard();
             else {
-                if (images[index]) revealRef.current[images[index].id] = 1;
+                if (cards[index]) revealRef.current[cards[index].image.id] = 1;
                 openCard(index);
             }
         } else if (expandedRef.current) {
@@ -623,7 +654,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             setActiveIndex(null);
             setImages(nextImages);
             hoverMixRef.current = new Array(nextImages.length).fill(0);
-            targetRef.current = clamp(targetRef.current, 0, Math.max(0, (nextImages.length - 1) * PARAMS.step));
+            // Границы прокрутки держит цикл кадров (без круга — край ленты).
             showToast?.('Изображение удалено', 'success');
         } catch (deleteError) {
             showToast?.(deleteError?.response?.data?.error || 'Не удалось удалить изображение', 'error');
@@ -633,7 +664,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     };
 
     const toggleSelect = (index) => {
-        const image = images[index];
+        const image = cards[index]?.image;
         if (!image) return;
         setSelectedIds((prev) => {
             const next = new Set(prev);
@@ -678,7 +709,6 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             setActiveIndex(null);
             setImages(next);
             hoverMixRef.current = new Array(next.length).fill(0);
-            targetRef.current = clamp(targetRef.current, 0, Math.max(0, (next.length - 1) * PARAMS.step));
             setSelectedIds(new Set());
             setSelectMode(false);
             showToast?.(`Удалено фото: ${response?.data?.deleted_count ?? deletedSet.size}`, 'success');
@@ -772,7 +802,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
         setAlbumBackground('none');
     }, []);
 
-    const activeImage = activeIndex == null ? null : images[activeIndex];
+    const activeImage = activeIndex == null ? null : (cards[activeIndex]?.image || null);
     const activeBackground = activeImage ? (activeImage.annotations?.background || 'none') : 'none';
     const sceneBackground = albumOpen ? albumBackground : activeBackground;
     const editorImage = editorImageId ? images.find((item) => item.id === editorImageId) || null : null;
@@ -855,9 +885,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 </div>
             ) : (
                 <div ref={railRef} className="lenta-rail">
-                    {images.map((image, index) => (
+                    {cards.map(({ image, key }, index) => (
                         <article
-                            key={image.id}
+                            key={key}
                             ref={(element) => { cardRefs.current[index] = element; }}
                             className="lenta-card"
                             data-lenta-card-index={index}

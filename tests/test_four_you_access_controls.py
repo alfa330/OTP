@@ -237,7 +237,11 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("PhotoEditor", self.lenta_source)             # редактор подключён
         self.assertIn("revealRef", self.lenta_source)               # появление по загрузке фото
         self.assertIn("loadedRef.current[image.id] = true", self.lenta_source)
-        self.assertIn("loopRef.current = images.length >= 2 * cullRadius", self.lenta_source)  # зацикливание
+        # Зацикливание: по кругу идут карточки, а не фото — фото, которых мало
+        # для круга без шва на этой ширине, лента повторяет копиями (lentaLoop.js).
+        self.assertIn("loopRef.current = cards.length >= 2 * cullRadius", self.lenta_source)
+        self.assertIn("const cards = useMemo(() => buildCards(images, copies), [images, copies]);", self.lenta_source)
+        self.assertIn("setCopies(copiesFor(imagesRef.current.length, window.innerWidth))", self.lenta_source)
         self.assertIn("fy-bg-hearts", self.lenta_css)               # анимированный фон «сердечки»
 
     def test_new_photo_sidebar_badge_wiring(self):
