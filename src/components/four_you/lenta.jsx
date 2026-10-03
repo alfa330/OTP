@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import AlbumView from './AlbumView';
 import AnnotationLayer from './AnnotationLayer';
 import Backgrounds from './Backgrounds';
 import PhotoEditor from './PhotoEditor';
@@ -76,6 +77,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const revealActiveRef = useRef(false);  // идёт ли сейчас появление
     const pollCursorRef = useRef('');       // курсор поллинга разметки (annotations_updated_at)
     const editingIdRef = useRef(null);      // id фото, открытого в редакторе (его не трогает поллинг)
+    // «Альбом»: пока он открыт, лента не листается и не открывает карточки,
+    // а сами карточки разлетаются по сторонам (albumMix 0 → 1) и возвращаются.
+    const albumOpenRef = useRef(false);
+    const albumTargetRef = useRef(0);
+    const albumMixRef = useRef(0);
+    const serverOrderRef = useRef(new Map()); // id → место в порядке сервера (страницы альбома)
 
     const [images, setImages] = useState([]);
     const [activeIndex, setActiveIndex] = useState(null);
@@ -88,7 +95,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const [selectMode, setSelectMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState(() => new Set());
     const [isBulkDeleting, setIsBulkDeleting] = useState(false);
-    const [editorOpen, setEditorOpen] = useState(false);
+    const [editorImageId, setEditorImageId] = useState(null);
+    const [albumOpen, setAlbumOpen] = useState(false);
+    const [albumClosing, setAlbumClosing] = useState(false);
+    const [albumBackground, setAlbumBackground] = useState('none');
 
     countRef.current = images.length;
     imagesRef.current = images;
@@ -105,7 +115,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 headers: authHeaders(),
                 signal,
             });
-            const rows = shuffle(Array.isArray(response?.data?.images) ? response.data.images : []);
+            const served = Array.isArray(response?.data?.images) ? response.data.images : [];
+            // Альбом листается в порядке сервера (как фото добавляли), лента — вразнобой.
+            serverOrderRef.current = new Map(served.map((row, index) => [row.id, index]));
+            const rows = shuffle(served);
             setImages(rows);
             setCanUpload(Boolean(response?.data?.can_upload));
             hoverMixRef.current = new Array(rows.length).fill(0);
@@ -334,6 +347,18 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                     }
                 }
 
+                // «Альбом»: карточки разлетаются по своим сторонам и гаснут, как
+                // при открытии фото, — и тем же путём возвращаются.
+                const away = albumMixRef.current;
+                if (away > 0) {
+                    const a = smooth(away);
+                    const leftSide = distance < 0;
+                    x = lerp(x, leftSide ? PARAMS.leftDownX : PARAMS.rightUpX, a);
+                    y = lerp(y, leftSide ? PARAMS.leftDownY : PARAMS.rightUpY, a);
+                    z = lerp(z, PARAMS.splitZ, a);
+                    opacity *= 1 - a;
+                }
+
                 // Один transform вместо семи CSS-переменных — меньше записей за кадр.
                 card.style.transform = `translate3d(${x}px, ${y}px, ${z}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg) scale(${scale})`;
                 card.style.opacity = opacity;
@@ -354,12 +379,19 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 const max = (n - 1) * PARAMS.step;
                 progress = max <= 0 ? 0 : (scrollRef.current / max) * 100;
             }
-            if (progressRef.current) progressRef.current.style.width = `${clamp(progress, 0, 100)}%`;
+            if (progressRef.current) {
+                progressRef.current.style.width = `${clamp(progress, 0, 100)}%`;
+                const bar = progressRef.current.parentElement;
+                if (bar) bar.style.opacity = String(1 - albumMixRef.current);
+            }
+            // Ушедшие в альбом карточки не рисуются и не ловят указатель.
+            rail.style.visibility = albumMixRef.current >= 1 ? 'hidden' : '';
         };
 
         // Лента «в покое»: ничего не движется — тяжёлую отрисовку пропускаем.
         const isSettled = () => {
             if (revealActiveRef.current) return false;
+            if (albumMixRef.current !== albumTargetRef.current) return false;
             if (scrollRef.current !== targetRef.current) return false;
             const expandTarget = expandedRef.current ? 1 : 0;
             if (expandMixRef.current !== expandTarget || selectedMixRef.current !== expandTarget) return false;
@@ -385,6 +417,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             if (Math.abs(expandMixRef.current - expandTarget) < 0.002) expandMixRef.current = expandTarget;
             if (Math.abs(selectedMixRef.current - expandTarget) < 0.002) selectedMixRef.current = expandTarget;
 
+            const albumTarget = albumTargetRef.current;
+            albumMixRef.current = lerp(albumMixRef.current, albumTarget, 0.075);
+            if (Math.abs(albumMixRef.current - albumTarget) < 0.002) albumMixRef.current = albumTarget;
+
             if (!expandedRef.current && activeIndexRef.current !== null
                 && expandMixRef.current <= 0.002 && selectedMixRef.current <= 0.002) {
                 activeIndexRef.current = null;
@@ -403,8 +439,11 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 // прозрачность = selectedMix (0 закрыто → 1 открыто). expandMix
                 // (медленный) держит карточку «активной» дольше, чем длится
                 // затухание, поэтому к моменту размонтирования фон уже невидим.
+                // В альбоме фон несут фото раскрытого разворота (AlbumView
+                // сообщает его сам) и он гаснет вместе с уходом книги.
                 if (sceneRef.current) {
-                    sceneRef.current.style.setProperty('--fy-bg-opacity', String(selectedMixRef.current));
+                    const bgOpacity = albumOpenRef.current ? albumMixRef.current : selectedMixRef.current;
+                    sceneRef.current.style.setProperty('--fy-bg-opacity', String(bgOpacity));
                 }
                 if (isSettled()) needsRenderRef.current = false;
             }
@@ -423,6 +462,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
 
     useEffect(() => {
         const handleKeyDown = (event) => {
+            if (albumOpenRef.current) return;      // клавишами листается книга
             if (event.key === 'Escape' && expandedRef.current) closeCard();
             if (expandedRef.current) return;
             if (event.key === 'ArrowRight') targetRef.current += PARAMS.step;
@@ -478,13 +518,13 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     }, [apiBaseUrl, authHeaders]);
 
     const handleWheel = (event) => {
-        if (expandedRef.current) return;
+        if (expandedRef.current || albumOpenRef.current) return;
         const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
         targetRef.current += delta * 0.95;
     };
 
     const handlePointerDown = (event) => {
-        if (event.target.closest('[data-lenta-control]')) return;
+        if (albumOpenRef.current || event.target.closest('[data-lenta-control]')) return;
         draggingRef.current = true;
         dragStartXRef.current = event.clientX;
         dragStartYRef.current = event.clientY;
@@ -550,10 +590,13 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             const rows = Array.isArray(response?.data?.images) ? response.data.images : [];
             const prevIds = new Set(images.map((item) => item.id));
             const added = rows.filter((item) => !prevIds.has(item.id));
+            const order = serverOrderRef.current;
+            added.forEach((item) => { if (!order.has(item.id)) order.set(item.id, order.size); });
             const next = [...images, ...added];
             hoverMixRef.current = new Array(next.length).fill(0);
             setImages(next);
-            if (added.length) openCard(next.length - 1);
+            // В альбоме новые фото ложатся последними страницами, карточку не открываем.
+            if (added.length && !albumOpenRef.current) openCard(next.length - 1);
             showToast?.(`Загружено изображений: ${selectedFiles.length}`, 'success');
         } catch (uploadError) {
             showToast?.(uploadError?.response?.data?.error || 'Не удалось загрузить изображения', 'error');
@@ -563,8 +606,8 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
         }
     };
 
-    const deleteActiveImage = async () => {
-        const image = activeIndex == null ? null : images[activeIndex];
+    // Удалить фото — с открытой карточки ленты или со страницы альбома.
+    const deleteImage = async (image) => {
         if (!image || !canUpload || deletingId) return;
         if (!window.confirm('Удалить это изображение из 4 You?')) return;
         setDeletingId(image.id);
@@ -647,7 +690,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     };
 
     const saveAnnotations = async (annotations) => {
-        const image = activeIndex == null ? null : images[activeIndex];
+        const image = editorImageId ? images.find((item) => item.id === editorImageId) : null;
         if (!image) return;
         try {
             const response = await axios.put(
@@ -662,7 +705,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 ? { ...img, annotations: saved, annotations_updated_at: ts || img.annotations_updated_at }
                 : img)));
             editingIdRef.current = null;
-            setEditorOpen(false);
+            setEditorImageId(null);
             showToast?.('Разметка сохранена', 'success');
         } catch (saveError) {
             showToast?.(saveError?.response?.data?.error || 'Не удалось сохранить разметку', 'error');
@@ -670,13 +713,74 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
         }
     };
 
+    // «Декор» — с открытой карточки ленты или со страницы альбома: редактор один.
+    const openEditor = useCallback((image) => {
+        if (!image) return;
+        editingIdRef.current = image.id;
+        setEditorImageId(image.id);
+    }, []);
+
+    const closeEditor = () => {
+        editingIdRef.current = null;
+        setEditorImageId(null);
+    };
+
+    /* ---------- «Альбом» ---------- */
+
+    const reducedMotion = useMemo(() => (
+        typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ), []);
+
+    // Альбом листается в порядке сервера — как фото добавляли, а не вразнобой.
+    const albumImages = useMemo(() => {
+        const order = serverOrderRef.current;
+        const rank = (item) => (order.has(item.id) ? order.get(item.id) : Number.MAX_SAFE_INTEGER);
+        return images.slice().sort((a, b) => rank(a) - rank(b));
+    }, [images]);
+
+    const openAlbum = () => {
+        if (!images.length || albumOpenRef.current) return;
+        expandedRef.current = false;           // открытая карточка улетает со всеми
+        hoveredRef.current = null;
+        setSelectMode(false);
+        setSelectedIds(new Set());
+        albumOpenRef.current = true;
+        albumTargetRef.current = 1;
+        if (reducedMotion) albumMixRef.current = 1;
+        needsRenderRef.current = true;
+        setAlbumBackground('none');
+        setAlbumClosing(false);
+        setAlbumOpen(true);
+    };
+
+    const closeAlbum = useCallback(() => setAlbumClosing(true), []);
+
+    // Книга начала уходить — карточки возвращаются ей навстречу.
+    const handleAlbumLeave = useCallback(() => {
+        albumTargetRef.current = 0;
+        if (reducedMotion) albumMixRef.current = 0;
+        needsRenderRef.current = true;
+    }, [reducedMotion]);
+
+    const handleAlbumExited = useCallback(() => {
+        albumOpenRef.current = false;
+        albumTargetRef.current = 0;
+        needsRenderRef.current = true;
+        setAlbumOpen(false);
+        setAlbumClosing(false);
+        setAlbumBackground('none');
+    }, []);
+
     const activeImage = activeIndex == null ? null : images[activeIndex];
     const activeBackground = activeImage ? (activeImage.annotations?.background || 'none') : 'none';
+    const sceneBackground = albumOpen ? albumBackground : activeBackground;
+    const editorImage = editorImageId ? images.find((item) => item.id === editorImageId) || null : null;
 
     return (
         <section
             ref={sceneRef}
-            className={`lenta-scene${activeBackground !== 'none' ? ` lenta-scene--bg lenta-scene--bg-${activeBackground}` : ''}`}
+            className={`lenta-scene${sceneBackground !== 'none' ? ` lenta-scene--bg lenta-scene--bg-${sceneBackground}` : ''}${albumOpen ? ' lenta-scene--album' : ''}`}
             aria-label="4 You"
             onWheel={handleWheel}
             onPointerDown={handlePointerDown}
@@ -684,17 +788,29 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             onPointerUp={handlePointerUp}
             onPointerCancel={cancelPointer}
         >
-            <Backgrounds bg={activeBackground} />
+            <Backgrounds key={albumOpen ? `album-${sceneBackground}` : 'lenta'} bg={sceneBackground} />
 
-            {canUpload && (
+            {(canUpload || images.length > 0) && (
                 <div className="lenta-admin-controls" data-lenta-control>
-                    {!selectMode ? (
+                    {/* «Альбом» — всем, кому открыт раздел: смотреть и декорировать. */}
+                    {!selectMode && images.length > 0 && (
+                        <button
+                            type="button"
+                            onClick={albumOpen ? closeAlbum : openAlbum}
+                            disabled={albumClosing}
+                            aria-pressed={albumOpen}
+                        >
+                            <FaIcon className={`fas ${albumOpen ? 'fa-images' : 'fa-book'}`} />
+                            <span>{albumOpen ? 'Лента' : 'Альбом'}</span>
+                        </button>
+                    )}
+                    {canUpload && (!selectMode ? (
                         <>
                             <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
                                 <FaIcon className={`fas ${isUploading ? 'fa-spinner fa-spin' : 'fa-plus'}`} />
                                 <span>{isUploading ? `${uploadProgress}%` : 'Добавить фото'}</span>
                             </button>
-                            {images.length > 0 && (
+                            {images.length > 0 && !albumOpen && (
                                 <button type="button" onClick={enterSelectMode}>
                                     <FaIcon className="fas fa-check-square" />
                                     <span>Выбрать</span>
@@ -721,8 +837,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                                 <span>Отмена</span>
                             </button>
                         </>
+                    ))}
+                    {canUpload && (
+                        <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={handleUpload} />
                     )}
-                    <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={handleUpload} />
                 </div>
             )}
 
@@ -806,7 +924,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                                     <button
                                         type="button"
                                         className="lenta-card-action"
-                                        onClick={(event) => { event.stopPropagation(); editingIdRef.current = image.id; setEditorOpen(true); }}
+                                        onClick={(event) => { event.stopPropagation(); openEditor(image); }}
                                         title="Декорировать фото"
                                     >
                                         <FaIcon className="fas fa-pencil" />
@@ -816,7 +934,7 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                                         <button
                                             type="button"
                                             className="lenta-card-action is-danger"
-                                            onClick={(event) => { event.stopPropagation(); deleteActiveImage(); }}
+                                            onClick={(event) => { event.stopPropagation(); deleteImage(image); }}
                                             disabled={Boolean(deletingId)}
                                             title="Удалить это фото"
                                         >
@@ -831,15 +949,32 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 </div>
             )}
 
+            {albumOpen && (
+                <AlbumView
+                    images={albumImages}
+                    canDelete={canUpload}
+                    deletingId={deletingId}
+                    editorOpen={Boolean(editorImage)}
+                    closing={albumClosing}
+                    onDecorate={openEditor}
+                    onDelete={deleteImage}
+                    onBackground={setAlbumBackground}
+                    onLeave={handleAlbumLeave}
+                    onExited={handleAlbumExited}
+                    onRequestClose={closeAlbum}
+                />
+            )}
+
             <div className="lenta-progress" aria-hidden="true"><span ref={progressRef} /></div>
 
-            {editorOpen && activeImage && (
+            {editorImage && (
                 <PhotoEditor
-                    image={activeImage}
-                    annotations={activeImage.annotations}
+                    key={editorImage.id}
+                    image={editorImage}
+                    annotations={editorImage.annotations}
                     user={user}
                     onSave={saveAnnotations}
-                    onClose={() => { editingIdRef.current = null; setEditorOpen(false); }}
+                    onClose={closeEditor}
                 />
             )}
         </section>

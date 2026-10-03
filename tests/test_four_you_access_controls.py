@@ -140,7 +140,10 @@ class FourYouAccessControlTests(unittest.TestCase):
     def test_feed_is_randomized_and_optimized(self):
         # Случайный порядок фото при каждом открытии.
         self.assertIn("const shuffle = (input)", self.lenta_source)
-        self.assertIn("shuffle(Array.isArray(response?.data?.images)", self.lenta_source)
+        # Лента — вразнобой при каждом открытии; альбом берёт порядок сервера.
+        self.assertIn("const served = Array.isArray(response?.data?.images) ? response.data.images : [];",
+                      self.lenta_source)
+        self.assertIn("const rows = shuffle(served);", self.lenta_source)
         # Оптимизация без потери анимации: куллинг за экраном + пропуск кадров в покое.
         self.assertIn("cullRadius", self.lenta_source)
         self.assertIn("const isSettled", self.lenta_source)
@@ -159,6 +162,41 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("loadedRef.current[item.id] = true", block)
         self.assertIn("image.onload = markLoaded", block)
         self.assertIn("image.onerror = markLoaded", block)
+
+    def test_album_is_open_to_everyone_who_sees_the_section(self):
+        """«Альбом» нужен и тому, кто раздел только смотрит: кнопка не прячется
+        за canUpload, а «Удалить» на странице альбома — только у того, кто ведёт."""
+        start = self.lenta_source.index('className="lenta-admin-controls"')
+        controls = self.lenta_source[start - 200:start + 1800]
+        self.assertIn("{(canUpload || images.length > 0) && (", controls)
+        album_button = controls.index("{albumOpen ? 'Лента' : 'Альбом'}")
+        upload_gate = controls.index("{canUpload && (!selectMode ? (")
+        self.assertLess(album_button, upload_gate, "кнопка «Альбом» оказалась под canUpload")
+        self.assertIn("<AlbumView", self.lenta_source)
+        self.assertIn("canDelete={canUpload}", self.lenta_source)
+
+    def test_album_decor_and_delete_go_through_the_feed(self):
+        """Редактор и удаление у ленты и альбома одни: «Декор» со страницы
+        открывает тот же PhotoEditor, сохранённое попадает в общий список фото."""
+        self.assertIn("onDecorate={openEditor}", self.lenta_source)
+        self.assertIn("onDelete={deleteImage}", self.lenta_source)
+        self.assertIn("const image = editorImageId ? images.find((item) => item.id === editorImageId) : null;",
+                      self.lenta_source)
+        self.assertIn("onClick={(event) => { event.stopPropagation(); openEditor(image); }}", self.lenta_source)
+        album = (ROOT / "src" / "components" / "four_you" / "AlbumView.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("onClick={() => onDecorate(image)}", album)
+        self.assertIn("{canDelete && (", album)
+        # Разметка на странице — тем же слоем, что на карточке ленты.
+        self.assertIn("<AnnotationLayer annotations={normalizeAnnotations(annotations)} />", album)
+
+    def test_feed_is_quiet_while_the_album_is_open(self):
+        """Пока открыт альбом, колесо, жесты и клавиши листают книгу, а не ленту."""
+        for marker in (
+            "if (expandedRef.current || albumOpenRef.current) return;",
+            "if (albumOpenRef.current || event.target.closest('[data-lenta-control]')) return;",
+            "if (albumOpenRef.current) return;      // клавишами листается книга",
+        ):
+            self.assertIn(marker, self.lenta_source)
 
     def test_higher_quality_variant_loads_seamlessly(self):
         # Превью всегда снизу; полноразмерный вариант проявляется поверх по onLoad —

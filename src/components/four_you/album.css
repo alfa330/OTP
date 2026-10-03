@@ -1,0 +1,547 @@
+/*
+ * 4 You — «Альбом»: книга с фото поверх ленты (AlbumView.jsx).
+ * Страница — бумага, фото в рамке 470×630 с разметкой, подпись и номер.
+ * Места страниц, загиб листа и раскрытие обложки пишет в стили сам
+ * компонент (transform, clip-path, visibility) — здесь только вид.
+ */
+
+.fy-album {
+  --fy-paper: #fbf8f2;
+  --fy-paper-back: #f3eee6;
+  --fy-edge: #ddd5c8;
+  --fy-ink: #5e5256;
+  --fy-rose: #b0476a;
+  --fy-gold: #e8c47a;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  /* Сцена ленты лежит под сайдбаром; книга — по центру видимой части. */
+  left: var(--app-sidebar-offset, 0px);
+  z-index: 4000;
+  display: flex;
+  flex-direction: column;
+  cursor: default;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Мобильная оболочка: книга не уходит под бар. */
+body.mobile-shell .fy-album {
+  padding-bottom: calc(var(--mtb-thickness, 64px) + env(safe-area-inset-bottom));
+}
+body[data-tabbar-side="right"].mobile-shell .fy-album {
+  padding-bottom: 0;
+  padding-right: calc(var(--mtb-thickness, 64px) + env(safe-area-inset-right));
+}
+body[data-tabbar-side="left"].mobile-shell .fy-album {
+  padding-bottom: 0;
+  padding-left: calc(var(--mtb-thickness, 64px) + env(safe-area-inset-left));
+}
+
+.fy-album-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 76px 20px 0;
+}
+
+/* ---------- раскрытая книга ---------- */
+
+.fy-album-host {
+  position: absolute;
+  transition: opacity .2s ease;
+}
+
+/* Пока книга закрыта, видна только обложка. */
+.fy-album[data-stage="entering"] .fy-album-host,
+.fy-album[data-stage="closed"] .fy-album-host,
+.fy-album[data-stage="leaving"] .fy-album-host {
+  opacity: 0;
+  transition: none;
+}
+
+.fy-album-book-shadow {
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+  transform-origin: 100% 50%;
+  pointer-events: none;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, .08),
+    0 18px 40px -12px rgba(0, 0, 0, .30),
+    0 44px 80px -40px rgba(0, 0, 0, .32);
+}
+
+.fy-album[data-mode="single"] .fy-album-book-shadow {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, .08),
+    0 14px 32px -12px rgba(0, 0, 0, .28);
+}
+
+/* Толщина книги: стопки страниц у внешних краёв разворота. */
+.fy-album-edge {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  pointer-events: none;
+  background: repeating-linear-gradient(90deg, var(--fy-edge) 0 1px, var(--fy-paper) 1px 2px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .10);
+}
+.fy-album-edge--left { right: 100%; border-radius: 2px 0 0 2px; }
+.fy-album-edge--right { left: 100%; border-radius: 0 2px 2px 0; }
+
+.fy-album-clipper {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+/* ---------- страница ---------- */
+
+.fy-album-page {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  visibility: hidden;
+  transform-origin: 0 0;
+  background:
+    radial-gradient(120% 70% at 50% 0%, rgba(255, 255, 255, .55), rgba(255, 255, 255, 0) 62%),
+    var(--fy-paper);
+  contain: layout paint;
+  will-change: transform, clip-path;
+}
+
+/* Тень корешка: страница уходит в переплёт. */
+.fy-album-page::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 7;
+}
+.fy-album-page--left::after {
+  background: linear-gradient(270deg, rgba(70, 48, 36, .16) 0, rgba(70, 48, 36, .05) 3.5%, rgba(70, 48, 36, 0) 9%);
+}
+.fy-album-page--right::after {
+  background: linear-gradient(90deg, rgba(70, 48, 36, .16) 0, rgba(70, 48, 36, .05) 3.5%, rgba(70, 48, 36, 0) 9%);
+}
+.fy-album-page--single::after {
+  background: linear-gradient(90deg, rgba(70, 48, 36, .12) 0, rgba(70, 48, 36, 0) 5%);
+}
+
+.fy-album-photo {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #ece7df;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, .06),
+    0 1px 2px rgba(0, 0, 0, .14),
+    0 10px 24px -14px rgba(0, 0, 0, .45);
+}
+
+.fy-album-photo-img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+/* Полноразмерное фото проявляется поверх превью, только когда загрузилось. */
+.fy-album-photo-hi { opacity: 0; transition: opacity .35s ease; }
+.fy-album-photo-hi.is-ready { opacity: 1; }
+
+.fy-album-caption {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: calc(var(--fy-page-w, 400px) * .03);
+  color: var(--fy-ink);
+  font: italic 400 clamp(11px, calc(var(--fy-page-w, 400px) * .029), 14px)/1.35 Georgia, "Times New Roman", serif;
+  pointer-events: none;
+}
+
+.fy-album-caption p {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fy-album-caption b {
+  margin-right: 6px;
+  color: var(--fy-rose);
+  font: normal 600 .82em/1 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  letter-spacing: .01em;
+}
+
+.fy-album-folio {
+  position: absolute;
+  bottom: 4%;
+  color: rgba(80, 62, 56, .42);
+  font: 500 11px/1 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  letter-spacing: .06em;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.fy-album-page--left .fy-album-folio { left: 8%; }
+.fy-album-page--right .fy-album-folio,
+.fy-album-page--single .fy-album-folio { right: 8%; }
+
+/* «Декор» и «Удалить» — на фото, как на открытой карточке ленты. На компьютере
+   появляются под указателем, на телефоне видны всегда. */
+.fy-album-page-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity .18s ease;
+}
+.fy-album-page:hover .fy-album-page-actions,
+.fy-album-page-actions:focus-within { opacity: 1; }
+@media (hover: none) {
+  .fy-album-page-actions { opacity: 1; }
+}
+.fy-album.is-turning .fy-album-page-actions,
+.fy-album:not([data-stage="open"]) .fy-album-page-actions {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+.fy-album-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, .5);
+  border-radius: 999px;
+  background: rgba(16, 16, 16, .6);
+  color: #fff;
+  font: 700 11.5px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .22);
+  cursor: pointer;
+  transition: background .18s ease, transform .18s ease;
+}
+.fy-album-action:hover { background: rgba(16, 16, 16, .84); }
+.fy-album-action:active { transform: scale(.97); }
+.fy-album-action.is-danger:hover { background: rgba(163, 18, 47, .94); }
+.fy-album-action:disabled { opacity: .65; cursor: wait; }
+
+/* ---------- форзацы ---------- */
+
+.fy-album-endpaper {
+  position: absolute;
+  inset: 0;
+  background-color: #f2e2e3;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E%3Cpath d='M15 20.5s-5.2-3.2-5.2-6.7a2.9 2.9 0 0 1 5.2-1.7 2.9 2.9 0 0 1 5.2 1.7c0 3.5-5.2 6.7-5.2 6.7z' fill='%23b0476a' fill-opacity='.10'/%3E%3C/svg%3E"),
+    radial-gradient(110% 80% at 50% 40%, rgba(255, 255, 255, .45), rgba(255, 255, 255, 0) 70%);
+  background-size: 30px 30px, 100% 100%;
+}
+
+.fy-album-endpaper-mark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 45%;
+  text-align: center;
+  color: rgba(150, 58, 86, .55);
+  font: italic 400 calc(var(--fy-page-w, 400px) * .085)/1 Georgia, "Times New Roman", serif;
+  letter-spacing: .01em;
+}
+
+/* ---------- загиб листа ---------- */
+
+.fy-album-shade {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.fy-album-flap-shadow {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.fy-album-flap-paper {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  transform-origin: 0 0;
+  background: var(--fy-paper-back);
+  will-change: transform, clip-path;
+}
+
+/* Сквозь бумагу оборота чуть просвечивает фото с лица страницы. */
+.fy-album-flap-photo {
+  position: absolute;
+  object-fit: cover;
+  opacity: .13;
+  pointer-events: none;
+}
+
+.fy-album-flap-gloss {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 6;
+  transform-origin: 0 0;
+  pointer-events: none;
+  visibility: hidden;
+  will-change: transform, clip-path;
+}
+
+/* Свет на листе, который при раскрытии ложится налево форзацем. */
+.fy-album-leaf-shade {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 4;
+  pointer-events: none;
+  visibility: hidden;
+  transform-origin: 100% 50%;
+  background: linear-gradient(90deg, rgba(0, 0, 0, .16), rgba(0, 0, 0, .34));
+}
+
+/* ---------- закрытая книга ---------- */
+
+.fy-album-closed {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.fy-album-cast {
+  position: absolute;
+  opacity: 0;
+  transform-origin: 0 50%;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(0, 0, 0, .30), rgba(0, 0, 0, .12) 38%, rgba(0, 0, 0, 0) 100%);
+}
+
+.fy-album-cover {
+  position: absolute;
+  transform-origin: 0 50%;
+  will-change: transform, opacity;
+  outline: none;
+}
+.fy-album-cover.is-active { pointer-events: auto; cursor: pointer; }
+.fy-album-cover.is-active:focus-visible .fy-album-cover-face {
+  box-shadow:
+    0 0 0 3px rgba(232, 196, 122, .55),
+    inset 0 0 0 1px rgba(0, 0, 0, .22),
+    0 18px 36px -12px rgba(0, 0, 0, .42);
+}
+
+/* Переплёт: ткань винного цвета с тиснением золотом. */
+.fy-album-cover-face {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 2px 6px 6px 2px;
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, .028) 0 1px, rgba(255, 255, 255, 0) 1px 3px),
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, .045) 0 1px, rgba(0, 0, 0, 0) 1px 3px),
+    radial-gradient(130% 90% at 28% 16%, rgba(255, 255, 255, .17), rgba(255, 255, 255, 0) 58%),
+    linear-gradient(158deg, #9b3450 0%, #7a2440 46%, #571730 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, .22),
+    inset 0 1px 0 rgba(255, 255, 255, .10),
+    0 1px 2px rgba(0, 0, 0, .12),
+    0 18px 36px -12px rgba(0, 0, 0, .42),
+    0 44px 70px -36px rgba(0, 0, 0, .34);
+}
+
+/* Сгиб переплёта у корешка. */
+.fy-album-cover-spine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 9%;
+  background: linear-gradient(90deg, rgba(0, 0, 0, .38), rgba(0, 0, 0, .12) 22%, rgba(255, 255, 255, .10) 34%, rgba(0, 0, 0, .08) 52%, rgba(0, 0, 0, 0) 100%);
+}
+
+/* Двойная золотая рамка. */
+.fy-album-cover-frame {
+  position: absolute;
+  top: 6.5%;
+  bottom: 6.5%;
+  left: 13%;
+  right: 7%;
+  border: 1px solid rgba(232, 196, 122, .72);
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 5px rgba(232, 196, 122, 0), inset 0 0 0 6px rgba(232, 196, 122, .32);
+}
+
+.fy-album-cover-title {
+  position: absolute;
+  left: 13%;
+  right: 7%;
+  top: 37%;
+  text-align: center;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 400;
+  font-size: calc(var(--fy-page-w, 400px) * .2);
+  line-height: 1;
+  letter-spacing: .005em;
+  white-space: nowrap;
+  color: var(--fy-gold);
+  background: linear-gradient(176deg, #fff1c9 0%, #f0cf86 30%, #c99a48 58%, #f6dc9a 82%, #d9ac5c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 1px 0 rgba(40, 6, 16, .55));
+}
+
+.fy-album-cover-ornament {
+  position: absolute;
+  left: 13%;
+  right: 7%;
+  top: 61%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: rgba(236, 202, 130, .9);
+}
+.fy-album-cover-ornament::before,
+.fy-album-cover-ornament::after {
+  content: "";
+  width: 16%;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(236, 202, 130, 0), rgba(236, 202, 130, .85));
+}
+.fy-album-cover-ornament::after { transform: scaleX(-1); }
+.fy-album-cover-ornament svg {
+  width: calc(var(--fy-page-w, 400px) * .036);
+  height: auto;
+  filter: drop-shadow(0 1px 0 rgba(40, 6, 16, .5));
+}
+
+/* Свет: обложка темнеет, отворачиваясь от него. */
+.fy-album-cover-light {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Срез страниц у закрытой книги на столе. */
+.fy-album-cover-edge {
+  position: absolute;
+  left: 100%;
+  top: 3px;
+  bottom: 3px;
+  width: 6px;
+  border-radius: 0 2px 2px 0;
+  background: repeating-linear-gradient(90deg, var(--fy-edge) 0 1px, var(--fy-paper) 1px 2px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .10);
+}
+
+/* ---------- листание ---------- */
+
+.fy-album-nav {
+  flex: 0 0 auto;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity .3s ease;
+}
+
+.fy-album[data-stage="entering"] .fy-album-nav,
+.fy-album[data-stage="leaving"] .fy-album-nav {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fy-album-nav-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 38px;
+  padding: 0 4px;
+  border: 1px solid rgba(0, 0, 0, .12);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .9);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .08);
+  backdrop-filter: blur(9px);
+  -webkit-backdrop-filter: blur(9px);
+}
+
+.fy-album-nav-pill button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: #101010;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background .15s ease, opacity .15s ease;
+}
+.fy-album-nav-pill button:hover:not(:disabled) { background: rgba(0, 0, 0, .06); }
+.fy-album-nav-pill button:disabled { opacity: .3; cursor: default; }
+
+.fy-album-nav-label {
+  min-width: 96px;
+  padding: 0 8px;
+  text-align: center;
+  color: rgba(16, 16, 16, .7);
+  font: 600 12px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .fy-album-stage { margin: 70px 12px 0; }
+  .fy-album-nav { height: 60px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fy-album-host,
+  .fy-album-nav,
+  .fy-album-photo-hi { transition: none; }
+}
+
+/* Фон сцены в альбоме: у каждого разворота свой — новый проявляется мягко. */
+.lenta-scene--album .fy-bg {
+  animation: fy-album-bg-in .6s ease both;
+}
+@keyframes fy-album-bg-in {
+  from { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lenta-scene--album .fy-bg { animation: none; }
+}
