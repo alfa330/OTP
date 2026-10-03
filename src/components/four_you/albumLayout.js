@@ -39,8 +39,11 @@ export const albumMetrics = (stageWidth, stageHeight) => {
             top: Math.max(0, Math.round((height - pageHeight) / 2)),
         };
     }
-    const pageWidth = Math.max(120, Math.min(Math.floor(height * PAGE_RATIO), width - 24, MAX_PAGE_WIDTH));
-    const pageHeight = Math.round(pageWidth / PAGE_RATIO);
+    // Нижняя граница 120 — но не выше сцены: на низком телефоне боком книга
+    // иначе заходила под полосу листания.
+    const byHeight = Math.floor(height * PAGE_RATIO);
+    const pageWidth = Math.max(Math.min(120, byHeight), Math.min(byHeight, width - 24, MAX_PAGE_WIDTH));
+    const pageHeight = Math.min(height, Math.round(pageWidth / PAGE_RATIO));
     return {
         mode: 'single',
         pageWidth,
@@ -50,6 +53,9 @@ export const albumMetrics = (stageWidth, stageHeight) => {
         top: Math.max(0, Math.round((height - pageHeight) / 2)),
     };
 };
+
+/* Полоса номера страницы внизу: номер стоит в ней, подпись в неё не заходит. */
+export const folioBand = (pageHeight) => Math.round(pageHeight * 0.04) + 14;
 
 /* Где на странице рамка фото и подпись под ней. Поля — доли ширины страницы:
    у маленькой страницы поля в пикселях съели бы фото. */
@@ -65,9 +71,15 @@ export const pageLayout = (pageWidth, pageHeight) => {
         photoWidth = Math.round(photoHeight * PHOTO_ASPECT);
     }
     const left = Math.round((pageWidth - photoWidth) / 2);
+    const captionTop = top + photoHeight;
     return {
         photo: { left, top, width: photoWidth, height: photoHeight },
-        caption: { left, top: top + photoHeight, width: photoWidth, height: Math.max(0, pageHeight - top - photoHeight) },
+        caption: {
+            left,
+            top: captionTop,
+            width: photoWidth,
+            height: Math.max(0, pageHeight - captionTop - folioBand(pageHeight)),
+        },
     };
 };
 
@@ -143,17 +155,19 @@ export const turnPlan = (mode, place, forward, count) => {
         : { target, still: null, leaf: photo(place - 1), flap: photo(place - 1), under: photo(place) };
 };
 
-/* Страницы, которые держим готовыми: место и соседние. Ход начинается сразу,
-   без ожидания загрузки, — всё, что назовёт turnPlan, уже на столе. */
+/* Страницы, которые держим готовыми: место и по два соседних в каждую сторону.
+   Ход начинается сразу, без ожидания загрузки, — всё, что назовёт turnPlan,
+   уже на столе. Второй сосед нужен быстрому второму нажатию: прошлый ход
+   досчитывается мгновенно, место уже новое, а React ещё не перерисовал. */
 export const windowPages = (mode, place, count) => {
     if (!placeCount(mode, count)) return [];
     const at = clampPlace(mode, place, count);
     if (mode === 'spread') {
         const pages = spreadPages(count);
-        return pages.slice(Math.max(0, 2 * at - 2), Math.min(pages.length, 2 * at + 4));
+        return pages.slice(Math.max(0, 2 * at - 4), Math.min(pages.length, 2 * at + 6));
     }
     const out = [];
-    for (let index = Math.max(0, at - 1); index <= Math.min(count - 1, at + 1); index += 1) {
+    for (let index = Math.max(0, at - 2); index <= Math.min(count - 1, at + 2); index += 1) {
         out.push({ kind: 'photo', index });
     }
     return out;

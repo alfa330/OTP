@@ -55,12 +55,14 @@ body[data-tabbar-side="left"].mobile-shell .fy-album {
   transition: opacity .2s ease;
 }
 
-/* Пока книга закрыта, видна только обложка. */
+/* Пока книга закрыта, видна только обложка; невидимая раскрытая книга не ловит
+   указатель (иначе над пустым столом — рука, а клик ничего не делает). */
 .fy-album[data-stage="entering"] .fy-album-host,
 .fy-album[data-stage="closed"] .fy-album-host,
 .fy-album[data-stage="leaving"] .fy-album-host {
   opacity: 0;
   transition: none;
+  pointer-events: none;
 }
 
 .fy-album-book-shadow {
@@ -161,8 +163,11 @@ body[data-tabbar-side="left"].mobile-shell .fy-album {
 .fy-album-photo-hi { opacity: 0; transition: opacity .35s ease; }
 .fy-album-photo-hi.is-ready { opacity: 1; }
 
+/* Высоту подписи ограничивает полоса номера страницы (pageLayout): номер не
+   ложится на текст, лишнее обрезается. */
 .fy-album-caption {
   position: absolute;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -529,19 +534,42 @@ body[data-tabbar-side="left"].mobile-shell .fy-album {
   .fy-album-nav { height: 60px; }
 }
 
+/* Низкий экран (телефон боком): поля сцены и полоса листания — меньше. */
+@media (max-height: 420px) {
+  .fy-album-stage { margin-top: 60px; }
+  .fy-album-nav { height: 50px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .fy-album-host,
   .fy-album-nav,
   .fy-album-photo-hi { transition: none; }
 }
 
-/* Фон сцены в альбоме: у каждого разворота свой — новый проявляется мягко. */
-.lenta-scene--album .fy-bg {
+/* Фон сцены в альбоме — от фото разворота (AlbumBackdrop в lenta.jsx). Слои
+   сменяются наплывом: новый проявляется, прежний гаснет и только потом
+   снимается, — ни при листании, ни при закрытии и уходе книги фон не
+   обрывается за кадр. Прозрачность слоя — своя, не от карточки ленты. */
+.fy-album-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
   animation: fy-album-bg-in .6s ease both;
 }
+.fy-album-backdrop.is-leaving {
+  animation: fy-album-bg-out .6s ease both;
+}
+.fy-album-backdrop .fy-bg { opacity: 1; }
 @keyframes fy-album-bg-in {
   from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fy-album-bg-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .lenta-scene--album .fy-bg { animation: none; }
+  .fy-album-backdrop,
+  .fy-album-backdrop.is-leaving { animation: none; }
 }

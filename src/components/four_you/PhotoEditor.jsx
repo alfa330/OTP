@@ -171,7 +171,10 @@ const PhotoEditor = ({ image, annotations, user, onSave, onClose }) => {
     const selItem = sel ? (sel.kind === 'sticker' ? stickers[sel.index] : texts[sel.index]) : null;
 
     return (
-        <div className="fy-editor" data-lenta-control>
+        // fixed inset-0 — признак окна для мобильной оболочки (mobile-shell.css):
+        // пока редактор открыт, бар разделов и колокол уходят и не закрывают
+        // панель инструментов, «Сохранить» и поле комментария.
+        <div className="fy-editor fixed inset-0" data-lenta-control>
             <div className="fy-editor-top">
                 <span className="fy-editor-title"><FaIcon className="fas fa-pencil" /> Декор фото</span>
                 <div className="fy-editor-top-actions">
@@ -226,7 +229,8 @@ const PhotoEditor = ({ image, annotations, user, onSave, onClose }) => {
                     ['bg', 'fa-image', 'Фон'],
                     ['comment', 'fa-comment', 'Коммент'],
                 ].map(([key, icon, label]) => (
-                    <button key={key} type="button" className={`fy-tool ${tool === key ? 'is-active' : ''}`} onClick={() => { setTool(key); setSel(null); }}>
+                    // На телефоне подпись инструмента скрыта — имя даёт aria-label.
+                    <button key={key} type="button" aria-label={label} className={`fy-tool ${tool === key ? 'is-active' : ''}`} onClick={() => { setTool(key); setSel(null); }}>
                         <FaIcon className={`fas ${icon}`} /><span>{label}</span>
                     </button>
                 ))}

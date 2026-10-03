@@ -141,7 +141,10 @@ const AlbumPage = memo(forwardRef(({
                     {comments.length > 0 && (
                         <div
                             className="fy-album-caption"
-                            style={{ left: layout.caption.left, top: layout.caption.top, width: layout.caption.width }}
+                            style={{
+                                left: layout.caption.left, top: layout.caption.top,
+                                width: layout.caption.width, maxHeight: layout.caption.height,
+                            }}
                         >
                             {comments.map((comment, index) => (
                                 <p key={`${comment.at || ''}-${index}`}>
@@ -609,7 +612,12 @@ const AlbumView = ({
             const next = albumMetrics(node.clientWidth, node.clientHeight);
             const now = metricsRef.current;
             if (now && now.mode === next.mode && now.pageWidth === next.pageWidth && now.height === next.height
-                && now.left === next.left && now.top === next.top) return;
+                && now.left === next.left && now.top === next.top) {
+                // Окно вернулось к размеру книги (сайдбар туда-обратно, телефон
+                // боком и обратно) — отложенный промежуточный размер не нужен.
+                pendingMetricsRef.current = null;
+                return;
+            }
             // Книга в движении (выход, раскрытие, закрытие): перекладка — после.
             if (now && ['entering', 'opening', 'shutting', 'leaving'].includes(stageNowRef.current)) {
                 pendingMetricsRef.current = next;
@@ -849,10 +857,11 @@ const AlbumView = ({
     const safePlace = clampPlace(mode, place, count);
     const background = metrics ? placeBackground(mode, safePlace, images) : 'none';
     useEffect(() => {
-        // Раскрытая книга несёт фон своих фото; закрытая — без фона. Пока
-        // книга закрывается и уходит, фон остаётся и гаснет вместе с ней.
+        // Раскрытая книга несёт фон своих фото; закрытая и уходящая — без фона.
+        // Пока книга закрывается, фон держится; сменяется он плавно (лента
+        // гасит прежний и проявляет новый, см. AlbumBackdrop в lenta.jsx).
         if (stage === 'opening' || stage === 'open') callbacksRef.current.onBackground?.(background);
-        else if (stage === 'closed' || stage === 'entering') callbacksRef.current.onBackground?.('none');
+        else if (stage === 'closed' || stage === 'entering' || stage === 'leaving') callbacksRef.current.onBackground?.('none');
     }, [stage, background]);
 
     /* ---------- жесты, клавиши, колесо ---------- */
@@ -861,6 +870,9 @@ const AlbumView = ({
         if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
         if (event.target.closest?.('[data-album-control]')) return;
         if (stageNowRef.current !== 'open') return;
+        // Лист уже под другим указателем (мышь и палец разом): не перехватываем —
+        // брошенный полузагнутым, он запер бы книгу.
+        if (gestureRef.current?.started) return;
         const spot = locate(event.clientX, event.clientY);
         if (!spot || !spot.inside) return;
         if (turnRef.current) completeNow();
@@ -872,9 +884,20 @@ const AlbumView = ({
     };
 
     useEffect(() => {
+        // Жест кончился, а отпускания не было (контекстное меню, переход в
+        // другое окно): лист не должен ходить за курсором и запирать книгу.
+        const dropGesture = () => {
+            const gesture = gestureRef.current;
+            gestureRef.current = null;
+            if (gesture?.started) engine.current.dragEnd(0);
+        };
         const onMove = (event) => {
             const gesture = gestureRef.current;
             if (!gesture || event.pointerId !== gesture.id) return;
+            if (event.pointerType === 'mouse' && event.buttons === 0) {
+                dropGesture();
+                return;
+            }
             const now = performance.now();
             const dt = now - gesture.lastT;
             if (dt > 0) {
@@ -922,10 +945,12 @@ const AlbumView = ({
         window.addEventListener('pointermove', onMove);
         window.addEventListener('pointerup', onUp);
         window.addEventListener('pointercancel', onUp);
+        window.addEventListener('blur', dropGesture);
         return () => {
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
+            window.removeEventListener('blur', dropGesture);
         };
     }, []);
 
@@ -1007,6 +1032,9 @@ const AlbumView = ({
                             className="fy-album-host"
                             style={{ left: metrics.left, top: metrics.top, width: metrics.width, height: metrics.height }}
                             onPointerDown={onPointerDown}
+                            // Пока книга не раскрыта, страниц под обложкой нет ни для
+                            // Tab, ни для экранного диктора.
+                            {...(stage === 'open' ? {} : { inert: '', 'aria-hidden': 'true' })}
                         >
                             <div ref={shadowRef} className="fy-album-book-shadow" />
                             <div ref={edgeLeftRef} className="fy-album-edge fy-album-edge--left" />

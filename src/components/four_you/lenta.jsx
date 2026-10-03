@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import AlbumBackdrop from './AlbumBackdrop';
 import AlbumView from './AlbumView';
 import AnnotationLayer from './AnnotationLayer';
 import Backgrounds from './Backgrounds';
@@ -79,7 +80,6 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
     const loadedRef = useRef({});           // id → true когда фото декодировано
     const revealActiveRef = useRef(false);  // идёт ли сейчас появление
     const pollCursorRef = useRef('');       // курсор поллинга разметки (annotations_updated_at)
-    const editingIdRef = useRef(null);      // id фото, открытого в редакторе (его не трогает поллинг)
     // «Альбом»: пока он открыт, лента не листается и не открывает карточки,
     // а сами карточки разлетаются по сторонам (albumMix 0 → 1) и возвращаются.
     const albumOpenRef = useRef(false);
@@ -263,7 +263,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
         let animationFrame = 0;
         // Кэш применённых z-index/display, чтобы не дёргать стили зря.
         const lastZ = new Array(cards.length).fill(null);
-        const lastDisplay = new Array(cards.length).fill('');
+        // null — «не знаем»: после перезапуска (удалили фото, сменилось число
+        // копий) карточки сдвигаются по номерам, а их display:none остаётся на
+        // узле; первый проход обязан записать каждой её настоящий display.
+        const lastDisplay = new Array(cards.length).fill(null);
 
         const computeCull = () => cullFor(window.innerWidth);
 
@@ -470,11 +473,9 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 // прозрачность = selectedMix (0 закрыто → 1 открыто). expandMix
                 // (медленный) держит карточку «активной» дольше, чем длится
                 // затухание, поэтому к моменту размонтирования фон уже невидим.
-                // В альбоме фон несут фото раскрытого разворота (AlbumView
-                // сообщает его сам) и он гаснет вместе с уходом книги.
+                // Фон альбома — свои слои со своей прозрачностью (AlbumBackdrop).
                 if (sceneRef.current) {
-                    const bgOpacity = albumOpenRef.current ? albumMixRef.current : selectedMixRef.current;
-                    sceneRef.current.style.setProperty('--fy-bg-opacity', String(bgOpacity));
+                    sceneRef.current.style.setProperty('--fy-bg-opacity', String(selectedMixRef.current));
                 }
                 if (isSettled()) needsRenderRef.current = false;
             }
@@ -528,7 +529,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                         }
                     });
                     pollCursorRef.current = cursor;
-                    setImages((prev) => prev.map((img) => (byId.has(img.id) && img.id !== editingIdRef.current
+                    // И фото, открытое в «Декоре»: редактор взял разметку при открытии и
+                    // от пропсов не меняется, а пропущенная правка второго человека
+                    // осталась бы на экране старой и стёрлась бы следующим сохранением.
+                    setImages((prev) => prev.map((img) => (byId.has(img.id)
                         ? { ...img, annotations: byId.get(img.id).annotations, annotations_updated_at: byId.get(img.id).annotations_updated_at }
                         : img)));
                 }
@@ -619,15 +623,21 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 },
             });
             const rows = Array.isArray(response?.data?.images) ? response.data.images : [];
-            const prevIds = new Set(images.map((item) => item.id));
-            const added = rows.filter((item) => !prevIds.has(item.id));
+            // Список — свежий, а не снимок до загрузки: за десятки секунд загрузки
+            // могли сохранить декор, прийти правки поллингом, удалить фото.
+            const base = imagesRef.current;
+            const known = new Set(base.map((item) => item.id));
+            const added = rows.filter((item) => !known.has(item.id));
             const order = serverOrderRef.current;
             added.forEach((item) => { if (!order.has(item.id)) order.set(item.id, order.size); });
-            const next = [...images, ...added];
-            hoverMixRef.current = new Array(next.length).fill(0);
-            setImages(next);
+            setImages((prev) => {
+                const ids = new Set(prev.map((item) => item.id));
+                const extra = added.filter((item) => !ids.has(item.id));
+                return extra.length ? [...prev, ...extra] : prev;
+            });
             // В альбоме новые фото ложатся последними страницами, карточку не открываем.
-            if (added.length && !albumOpenRef.current) openCard(next.length - 1);
+            // Слот в первой копии равен номеру фото.
+            if (added.length && !albumOpenRef.current) openCard(base.length + added.length - 1);
             showToast?.(`Загружено изображений: ${selectedFiles.length}`, 'success');
         } catch (uploadError) {
             showToast?.(uploadError?.response?.data?.error || 'Не удалось загрузить изображения', 'error');
@@ -646,14 +656,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             await axios.delete(`${apiBaseUrl}/api/four_you/images/${encodeURIComponent(image.id)}`, {
                 headers: authHeaders(),
             });
-            const nextImages = images.filter((item) => item.id !== image.id);
             activeIndexRef.current = null;
             expandedRef.current = false;
             expandMixRef.current = 0;
             selectedMixRef.current = 0;
             setActiveIndex(null);
-            setImages(nextImages);
-            hoverMixRef.current = new Array(nextImages.length).fill(0);
+            setImages((prev) => prev.filter((item) => item.id !== image.id));
             // Границы прокрутки держит цикл кадров (без круга — край ленты).
             showToast?.('Изображение удалено', 'success');
         } catch (deleteError) {
@@ -701,14 +709,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                 headers: authHeaders(),
             });
             const deletedSet = new Set(response?.data?.deleted_ids || ids);
-            const next = images.filter((item) => !deletedSet.has(item.id));
             activeIndexRef.current = null;
             expandedRef.current = false;
             expandMixRef.current = 0;
             selectedMixRef.current = 0;
             setActiveIndex(null);
-            setImages(next);
-            hoverMixRef.current = new Array(next.length).fill(0);
+            setImages((prev) => prev.filter((item) => !deletedSet.has(item.id)));
             setSelectedIds(new Set());
             setSelectMode(false);
             showToast?.(`Удалено фото: ${response?.data?.deleted_count ?? deletedSet.size}`, 'success');
@@ -730,11 +736,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             );
             const saved = response?.data?.annotations || annotations;
             const ts = response?.data?.annotations_updated_at;
-            if (ts && (!pollCursorRef.current || ts > pollCursorRef.current)) pollCursorRef.current = ts;
+            // Курсор поллинга не двигаем: перескочив на время сохранения, он
+            // пропустил бы ещё не опрошенные правки других фото. Следующий опрос
+            // один раз вернёт это же сохранение — безвредно.
             setImages((prev) => prev.map((img) => (img.id === image.id
                 ? { ...img, annotations: saved, annotations_updated_at: ts || img.annotations_updated_at }
                 : img)));
-            editingIdRef.current = null;
             setEditorImageId(null);
             showToast?.('Разметка сохранена', 'success');
         } catch (saveError) {
@@ -745,15 +752,10 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
 
     // «Декор» — с открытой карточки ленты или со страницы альбома: редактор один.
     const openEditor = useCallback((image) => {
-        if (!image) return;
-        editingIdRef.current = image.id;
-        setEditorImageId(image.id);
+        if (image) setEditorImageId(image.id);
     }, []);
 
-    const closeEditor = () => {
-        editingIdRef.current = null;
-        setEditorImageId(null);
-    };
+    const closeEditor = () => setEditorImageId(null);
 
     /* ---------- «Альбом» ---------- */
 
@@ -804,13 +806,12 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
 
     const activeImage = activeIndex == null ? null : (cards[activeIndex]?.image || null);
     const activeBackground = activeImage ? (activeImage.annotations?.background || 'none') : 'none';
-    const sceneBackground = albumOpen ? albumBackground : activeBackground;
     const editorImage = editorImageId ? images.find((item) => item.id === editorImageId) || null : null;
 
     return (
         <section
             ref={sceneRef}
-            className={`lenta-scene${sceneBackground !== 'none' ? ` lenta-scene--bg lenta-scene--bg-${sceneBackground}` : ''}${albumOpen ? ' lenta-scene--album' : ''}`}
+            className={`lenta-scene${activeBackground !== 'none' ? ` lenta-scene--bg lenta-scene--bg-${activeBackground}` : ''}${albumOpen ? ' lenta-scene--album' : ''}`}
             aria-label="4 You"
             onWheel={handleWheel}
             onPointerDown={handlePointerDown}
@@ -818,7 +819,11 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
             onPointerUp={handlePointerUp}
             onPointerCancel={cancelPointer}
         >
-            <Backgrounds key={albumOpen ? `album-${sceneBackground}` : 'lenta'} bg={sceneBackground} />
+            {/* Фон открытой карточки ленты гаснет вместе с ней (selectedMix);
+                у альбома свои слои с наплывом — они не обрываются ни при
+                листании, ни при входе в альбом и выходе из него. */}
+            <Backgrounds bg={activeBackground} />
+            <AlbumBackdrop bg={albumOpen ? albumBackground : 'none'} />
 
             {(canUpload || images.length > 0) && (
                 <div className="lenta-admin-controls" data-lenta-control>
@@ -828,7 +833,8 @@ const Lenta = ({ user, apiBaseUrl, withAccessTokenHeader, showToast, onSeen }) =
                             type="button"
                             onClick={albumOpen ? closeAlbum : openAlbum}
                             disabled={albumClosing}
-                            aria-pressed={albumOpen}
+                            // На телефоне подпись скрыта — имя кнопке даёт aria-label.
+                            aria-label={albumOpen ? 'Вернуться в ленту' : 'Открыть альбом'}
                         >
                             <FaIcon className={`fas ${albumOpen ? 'fa-images' : 'fa-book'}`} />
                             <span>{albumOpen ? 'Лента' : 'Альбом'}</span>

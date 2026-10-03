@@ -189,6 +189,60 @@ class FourYouAccessControlTests(unittest.TestCase):
         # Разметка на странице — тем же слоем, что на карточке ленты.
         self.assertIn("<AnnotationLayer annotations={normalizeAnnotations(annotations)} />", album)
 
+    def test_concurrent_changes_are_not_rolled_back(self):
+        """Загрузка идёт десятки секунд: за это время в альбоме сохраняют декор,
+        удаляют фото, приходят правки поллингом. Список собирается от свежего
+        состояния, а не от снимка до загрузки (иначе декор откатывался, а
+        удалённое фото возвращалось призраком)."""
+        upload = self.lenta_source[self.lenta_source.index("const handleUpload"):]
+        upload = upload[:upload.index("const deleteImage")]
+        self.assertIn("const base = imagesRef.current;", upload)
+        self.assertIn("setImages((prev) => {", upload)
+        self.assertNotIn("setImages(next)", upload)
+        self.assertIn("setImages((prev) => prev.filter((item) => item.id !== image.id));", self.lenta_source)
+        self.assertIn("setImages((prev) => prev.filter((item) => !deletedSet.has(item.id)));", self.lenta_source)
+
+    def test_poll_updates_the_photo_open_in_the_editor(self):
+        """Редактор берёт разметку при открытии и от пропсов не меняется, поэтому
+        поллинг обновляет и фото, открытое в «Декоре»: пропущенная правка второго
+        человека иначе осталась бы старой и стёрлась бы следующим сохранением.
+        Сохранение курсор поллинга не двигает — не перескакивает чужие правки."""
+        self.assertNotIn("editingIdRef", self.lenta_source)
+        self.assertIn("setImages((prev) => prev.map((img) => (byId.has(img.id)\n", self.lenta_source.replace("\r\n", "\n"))
+        save = self.lenta_source[self.lenta_source.index("const saveAnnotations"):]
+        save = save[:save.index("const openEditor")]
+        self.assertNotIn("pollCursorRef.current =", save)
+
+    def test_hidden_cards_get_their_display_back_after_reindex(self):
+        """После удаления фото (или смены числа копий) карточки сдвигаются по
+        номерам, а display:none остаётся на узле; кэш «неизвестно» заставляет
+        первый проход записать каждой карточке её настоящий display — иначе в
+        ленте оставалась «дырка»."""
+        self.assertIn("const lastDisplay = new Array(cards.length).fill(null);", self.lenta_source)
+
+    def test_phone_shell_does_not_cover_controls_and_editor(self):
+        """Колокол (правый верхний угол) и бар разделов лежат выше всей сцены
+        4 You: кнопки ленты на телефоне — в левом углу, а редактор помечен как
+        окно (fixed inset-0) — оболочка прячет бар и колокол, пока он открыт."""
+        editor = (ROOT / "src" / "components" / "four_you" / "PhotoEditor.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn('<div className="fy-editor fixed inset-0" data-lenta-control>', editor)
+        css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
+        rule = css[css.index("body.mobile-shell .lenta-admin-controls {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("right: auto;", rule)
+        self.assertIn("left: calc(12px + env(safe-area-inset-left));", rule)
+        self.assertIn('body[data-tabbar-side="left"].mobile-shell .lenta-admin-controls', css)
+        # Подпись кнопки на телефоне скрыта — имя ей даёт aria-label.
+        self.assertIn("aria-label={albumOpen ? 'Вернуться в ленту' : 'Открыть альбом'}", self.lenta_source)
+
+    def test_album_background_cross_fades(self):
+        """Фон альбома — свои слои с наплывом (AlbumBackdrop): прежний гаснет и
+        снимается по концу анимации, а не обрывается за кадр."""
+        self.assertIn("<AlbumBackdrop bg={albumOpen ? albumBackground : 'none'} />", self.lenta_source)
+        self.assertIn("<Backgrounds bg={activeBackground} />", self.lenta_source)
+        backdrop = (ROOT / "src" / "components" / "four_you" / "AlbumBackdrop.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("if (layer.leaving && event.target === event.currentTarget) drop(layer.id);", backdrop)
+
     def test_feed_is_quiet_while_the_album_is_open(self):
         """Пока открыт альбом, колесо, жесты и клавиши листают книгу, а не ленту."""
         for marker in (

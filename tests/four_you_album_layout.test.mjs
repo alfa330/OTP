@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    PHOTO_ASPECT, albumMetrics, clampPlace, pageLayout, pageSide, photoOfPlace, placeBackground,
+    PHOTO_ASPECT, albumMetrics, clampPlace, folioBand, pageLayout, pageSide, photoOfPlace, placeBackground,
     placeCount, placeLabel, placeOfPhoto, placePages, spreadPages, stackWidths, turnPlan, windowPages,
 } from '../src/components/four_you/albumLayout.js';
 
@@ -26,6 +26,16 @@ test('широкий экран — разворот, узкий — одна с
 
     // Низкое широкое окно: страница уже 280 — разворот не читается.
     assert.equal(albumMetrics(1600, 380).mode, 'single');
+
+    // Низкий телефон боком (Android 360 dp, бар справа): сцена 696×136.
+    // Нижняя граница страницы не выше сцены — книга не заходит под листание.
+    for (const [w, h] of [[696, 136], [600, 90], [854, 160], [300, 120]]) {
+        const m = albumMetrics(w, h);
+        assert.ok(m.top >= 0 && m.top + m.height <= h, `${w}x${h}: ${JSON.stringify(m)}`);
+        assert.ok(m.left >= 0 && m.left + m.width <= w, `${w}x${h}: ${JSON.stringify(m)}`);
+        // И не сплющена: рамка фото и разметка рассчитаны на страницу 0.7.
+        assert.ok(Math.abs(m.pageWidth / m.height - 0.7) < 0.02, `${w}x${h}: ${JSON.stringify(m)}`);
+    }
 });
 
 test('рамка фото — пропорции карточки ленты и холста редактора', () => {
@@ -34,7 +44,9 @@ test('рамка фото — пропорции карточки ленты и 
         assert.ok(Math.abs(photo.width / photo.height - PHOTO_ASPECT) < 0.01, `${w}x${h}`);
         assert.ok(photo.left >= 0 && photo.left + photo.width <= w, `${w}x${h}`);
         assert.ok(photo.top + photo.height <= h, `${w}x${h}`);
-        assert.ok(caption.height >= Math.round(w * 0.15) - 1, `${w}x${h}: подписи нужно место`);
+        // Подпись кончается над полосой номера страницы: номер не ложится на текст.
+        assert.ok(caption.height > 0, `${w}x${h}: подписи нужно место`);
+        assert.ok(caption.top + caption.height + folioBand(h) <= h, `${w}x${h}`);
     }
 });
 
@@ -57,10 +69,17 @@ test('всё, что назовёт ход листа, уже лежит гот�
                 for (const forward of [true, false]) {
                     const plan = turnPlan(mode, place, forward, count);
                     if (!plan) continue;
-                    for (const role of ['leaf', 'under', 'still', 'flap']) {
-                        if (plan[role] === null && mode === 'single' && role === 'still') continue;
-                        assert.ok(plan[role], `${mode} count=${count} place=${place} ${forward ? '→' : '←'} ${role}`);
-                        assert.ok(has(ready, plan[role]), `${mode} count=${count} place=${place} ${forward ? '→' : '←'} ${role}`);
+                    // Второе быстрое нажатие в ту же сторону: прошлый ход досчитан
+                    // мгновенно, место уже новое, а страницы ещё те, что были.
+                    const next = turnPlan(mode, plan.target, forward, count);
+                    for (const [label, step] of [['ход', plan], ['второй ход', next]]) {
+                        if (!step) continue;
+                        for (const role of ['leaf', 'under', 'still', 'flap']) {
+                            if (step[role] === null && mode === 'single' && role === 'still') continue;
+                            const where = `${mode} count=${count} place=${place} ${forward ? '→' : '←'} ${label} ${role}`;
+                            assert.ok(step[role], where);
+                            assert.ok(has(ready, step[role]), where);
+                        }
                     }
                 }
             }
