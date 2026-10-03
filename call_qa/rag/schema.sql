@@ -1348,3 +1348,56 @@ CREATE INDEX IF NOT EXISTS idx_ai_qa_daily_samples_day
     ON ai_qa_daily_samples (sample_day, direction_id, family);
 CREATE INDEX IF NOT EXISTS idx_ai_qa_daily_samples_open
     ON ai_qa_daily_samples (sample_day) WHERE status = 'picked';
+
+-- Сводка дня «ИИ-оценки» (call_qa.digest): что ИИ увидел в разговорах дня отдела —
+-- раздел на каждую шкалу (направление) и «Главное» по отделу. Строка на (отдел,
+-- день) — перегенерация перезаписывает её на месте: истории версий сводке не
+-- нужно, нужен один актуальный текст на утро.
+--
+-- running_since — генерация идёт (её берут условным UPDATE, а не локом: при
+-- выкладке два инстанса живут одновременно, и каждый мог бы начать свою). Старше
+-- 20 минут — значит, инстанс умер посреди генерации, и её можно забрать заново.
+-- Прежний текст во время перегенерации остаётся на экране: человек читает
+-- вчерашнюю версию, пока пишется новая, а не пустую страницу.
+-- inputs_hash — отпечаток набора оценок дня (digest.data.inputs_hash): по нему
+-- экран говорит «появились новые оценки — обновить».
+CREATE TABLE IF NOT EXISTS ai_qa_day_digests (
+    id              bigserial PRIMARY KEY,
+    department_code text NOT NULL,
+    digest_day      date NOT NULL,
+    status          text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'ready', 'failed')),
+    headline        text,
+    overview_html   text,
+    sections        jsonb NOT NULL DEFAULT '[]'::jsonb,
+    stats           jsonb NOT NULL DEFAULT '{}'::jsonb,
+    inputs_hash     text,
+    inputs_count    integer NOT NULL DEFAULT 0,
+    model           text,
+    usage           jsonb NOT NULL DEFAULT '{}'::jsonb,
+    elapsed_s       real,
+    last_error      text,
+    triggered_by    text,
+    running_since   timestamptz,
+    generated_at    timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (department_code, digest_day)
+);
+
+-- Переписка с ИИ в окне сводки — своя у каждого человека и каждого дня отдела.
+-- body у вопроса — текст человека, у ответа — готовый очищенный HTML (с кнопками
+-- разговоров): перечитывать историю модель не просят, её показывают как есть.
+CREATE TABLE IF NOT EXISTS ai_qa_digest_messages (
+    id              bigserial PRIMARY KEY,
+    department_code text NOT NULL,
+    digest_day      date NOT NULL,
+    user_id         integer NOT NULL,
+    role            text NOT NULL CHECK (role IN ('user', 'assistant')),
+    body            text NOT NULL,
+    model           text,
+    usage           jsonb,
+    elapsed_s       real,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ai_qa_digest_messages_thread
+    ON ai_qa_digest_messages (department_code, digest_day, user_id, id);

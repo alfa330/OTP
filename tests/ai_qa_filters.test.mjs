@@ -199,9 +199,15 @@ test('оба списка и оба подбора получают отбор, 
     assert.ok(view.includes('<QaFilters'), 'панель не подключена');
 
     const list = readLf('src/components/call_qa/EvaluationsList.jsx');
-    // Список, подбор случайного и подтяжка из АТС — три места.
-    assert.equal((list.match(/filtersToParams\(filters\)/g) || []).length, 2);
+    // Во вкладке — подбор случайного и подтяжка из АТС…
+    assert.equal((list.match(/filtersToParams\(filters\)/g) || []).length, 1);
     assert.ok(list.includes('pullParamsFromFilters(filters)'), 'подтяжка из АТС без отбора');
+    // …а сам список — дни и строки дня — в общем хуке «по дням» (useDayList):
+    // «Звонки» и «Чаты» разложены по дням, как очередь, и оба запроса обязаны
+    // нести отбор, иначе строка дня обещала бы одно, а экран дня показывал другое.
+    const days = readLf('src/components/call_qa/useDayList.js');
+    assert.equal((days.match(/filtersToParams\(filtersRef\.current\)/g) || []).length, 2,
+        'список дней или экран дня без отбора');
 
     const chats = readLf('src/components/call_qa/ChatQueue.jsx');
     assert.ok(chats.includes('...filtersToParams(filters)'), 'подбор переписки без отбора');

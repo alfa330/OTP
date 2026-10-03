@@ -585,7 +585,11 @@ def _call_vertex(model, system, user, history=(), max_tokens=None, timeout=None)
     return {'text': text, 'finish': finish, 'elapsed': elapsed,
             'usage': {'prompt_tokens': usage.get('promptTokenCount'),
                       'completion_tokens': usage.get('candidatesTokenCount'),
-                      'thoughts_tokens': usage.get('thoughtsTokenCount')}}
+                      'thoughts_tokens': usage.get('thoughtsTokenCount'),
+                      # Неявный кеш Gemini: сколько входа взято из кеша (оплачивается
+                      # десятой долей). Чат сводки ИИ-оценки держит весь день в
+                      # системной части ради него — без этой цифры экономию не видно.
+                      'cached_tokens': usage.get('cachedContentTokenCount')}}
 
 
 # ── Z.ai (GLM): резерв, который в отличие от прочих ТЯНЕТ сборку статьи ──────

@@ -213,10 +213,12 @@ class WiringTests(unittest.TestCase):
         src = _read('call_qa', 'api.py')
         self.assertIn('from .marketing import filters as mkt', src)
         # Списки — с колонками сделки, счётчики — с той же связкой при отборе.
-        self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=with_deals)'), 2)
-        # Счётчик очереди, итоги дней очереди, фильтр подтяжки, набор субъектов
-        # и очередь «Обзора».
-        self.assertEqual(src.count('_marketing_join(cur, filters)'), 5)
+        # Списков три: очередь, оценённое и экран дня оценённого («Звонки» и
+        # «Чаты» по дням, 02.10.2026) — у всех трёх сделка видна в строке.
+        self.assertEqual(src.count('_marketing_join(cur, filters, need_columns=with_deals)'), 3)
+        # Счётчик очереди, итоги дней очереди, фильтр подтяжки, набор субъектов,
+        # очередь «Обзора» и сводка дней оценённого.
+        self.assertEqual(src.count('_marketing_join(cur, filters)'), 6)
         self.assertIn("marketing = filters.get('marketing')", src)
         self.assertIn('def marketing_options(', src)
         self.assertIn('def deal_for_subject(', src)
@@ -258,8 +260,11 @@ class WiringTests(unittest.TestCase):
         for piece in ('/api/ai-qa/marketing-options', '/api/ai-qa/presets', '/api/ai-qa/export',
                       'function MarketingFilters', 'Сначала этап «Закрыто и не реализовано»'):
             self.assertIn(piece, panel)
-        for name in ('EvaluationsList.jsx', 'QueueList.jsx', 'CallReviewCard.jsx'):
+        for name in ('QueueList.jsx', 'CallReviewCard.jsx'):
             self.assertIn("import DealBadge from './DealBadge'", _read('src', 'components', 'call_qa', name))
+        # Строки «Звонков» и «Чатов» (экран дня) рисует тот же QueueList, что и
+        # очередь, — сделка в строке у них та же.
+        self.assertIn("<QueueList items={items}", _read('src', 'components', 'call_qa', 'EvaluationsList.jsx'))
 
 
 
@@ -635,7 +640,7 @@ class MarketingAccessTests(unittest.TestCase):
 
     def test_lists_skip_deals_without_access(self):
         api = _read('call_qa', 'api.py')
-        self.assertEqual(api.count('deal_join = _marketing_join(cur, filters, need_columns=with_deals)'), 2)
+        self.assertEqual(api.count('deal_join = _marketing_join(cur, filters, need_columns=with_deals)'), 3)
 
     def test_frontend_follows_server_flag(self):
         view = _read('src', 'components', 'call_qa', 'CallQaView.jsx')

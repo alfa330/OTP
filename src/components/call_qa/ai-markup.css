@@ -1,0 +1,299 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   РАЗМЕТКА ОТВЕТА ИИ в «ИИ-оценке»: сводка дня и чат.
+
+   Модель пишет те же блоки, что в статьях вики (wiki-blocks.css: вводка,
+   плашка, карточки, показатели, шаги, чипы, галочки), и рисует их тот же
+   файл — поэтому контейнер носит классы .wiki-scope (переменные палитры,
+   их же перекрывает личный тёмный слой) и .wiki-prose (к нему привязаны все
+   правила блоков). Здесь — только масштаб: блоки вики рассчитаны на статью с
+   кеглем 16 px и полями в rem, а сводка живёт в разделе с кеглем 13–14 px, и
+   вводка в 18 px на её фоне выглядела бы заголовком.
+
+   Специфичность — два класса (.qa-markup.wiki-prose): так эти правила
+   перекрывают и wiki-blocks.css, и общие правила .wiki-prose из
+   wiki-theme.css, которые оказываются в документе, если человек уже открывал
+   «Вики» в этой вкладке. Без этого вид сводки зависел бы от того, куда
+   человек заходил до неё.
+
+   ЦВЕТ ЗДЕСЬ НЕ ЗАДАЁТСЯ — только размеры. Текст и заголовки красят
+   wiki-theme.css (var(--wiki-ink), его перекрашивает тёмный слой) и тоны блоков
+   из wiki-blocks.css (заголовок плашки danger — красный, как в статьях). Свой
+   литерал цвета с той же специфичностью перебил бы и то и другое.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.qa-markup.wiki-prose {
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.qa-markup.wiki-prose h3 {
+    margin: 20px 0 6px;
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+}
+
+/* Заголовок вне блоков; у заголовков плашки, карточки и показателя свои
+   правила ниже. */
+.qa-markup.wiki-prose > h4 {
+    margin: 12px 0 4px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.qa-markup.wiki-prose p {
+    margin: 6px 0;
+    line-height: 1.6;
+}
+
+.qa-markup.wiki-prose :is(ul, ol):not([data-variant]) {
+    margin: 6px 0;
+    padding-left: 1.25rem;
+}
+
+.qa-markup.wiki-prose li { margin: 3px 0; }
+.qa-markup.wiki-prose li > p { margin: 0; }
+
+.qa-markup.wiki-prose blockquote {
+    margin: 8px 0;
+    padding: 6px 12px;
+    border-left-width: 3px;
+    font-size: 13.5px;
+}
+
+.qa-markup.wiki-prose table {
+    width: 100%;
+    min-width: 0;
+    margin: 10px 0;
+    font-size: 13px;
+}
+
+.qa-markup.wiki-prose :is(th, td) {
+    min-width: 0;
+    padding: 6px 10px;
+}
+
+.qa-markup.wiki-prose th { font-size: 11px; }
+
+/* ── Блоки вики в масштабе раздела ──────────────────────────────────────── */
+
+.qa-markup.wiki-prose [data-wiki-block='lead'] {
+    margin: 0 0 14px;
+    padding: 12px 16px;
+    border-left-width: 3px;
+    border-radius: 0 12px 12px 0;
+    font-size: 15px;
+    font-weight: 450;
+    line-height: 1.55;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='note'] {
+    margin: 12px 0;
+    padding: 11px 14px 11px 40px;
+    border-radius: 12px;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='note']::before {
+    left: 14px;
+    top: 13px;
+    width: 16px;
+    height: 16px;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='note'] h4 {
+    margin: 0 0 3px;
+    font-size: 14px;
+}
+
+.qa-markup.wiki-prose :is([data-wiki-block='note'], [data-wiki-block='card'], [data-wiki-block='lead']) p {
+    margin: 4px 0;
+    line-height: 1.55;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='cards'],
+.qa-markup.wiki-prose [data-wiki-block='stats'] {
+    margin: 12px 0;
+    gap: 10px;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='card'] {
+    padding: 12px 14px;
+    border-radius: 12px;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='card'] h4 {
+    margin: 0 0 4px;
+    font-size: 14px;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='stat'] {
+    padding: 12px 14px;
+    border-radius: 12px;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='stat'] h4 {
+    margin: 0;
+    font-size: 22px;
+    line-height: 1.15;
+}
+
+.qa-markup.wiki-prose [data-wiki-block='stat'] p {
+    margin: 3px 0 0;
+    font-size: 12.5px;
+    line-height: 1.4;
+}
+
+.qa-markup.wiki-prose ol[data-variant='steps'] { margin: 10px 0; }
+.qa-markup.wiki-prose ul[data-variant='chips'] { margin: 8px 0; gap: 6px; }
+
+.qa-markup.wiki-prose ul[data-variant='chips'] > li {
+    padding: 3px 10px;
+    font-size: 12.5px;
+}
+
+.qa-markup.wiki-prose :is(ul[data-variant='checks'], ul[data-variant='crosses']) { margin: 8px 0; }
+
+/* На узком экране сетки складываются в столбец: две карточки по 150 px на
+   телефоне — это две колонки по три слова в строке. */
+@media (max-width: 640px) {
+    .qa-markup.wiki-prose :is([data-wiki-block='cards'], [data-wiki-block='stats'])[data-cols] {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* ── Чат: ещё компактнее ────────────────────────────────────────────────── */
+
+.qa-markup--chat.wiki-prose { font-size: 13.5px; line-height: 1.55; }
+.qa-markup--chat.wiki-prose h3 { margin: 12px 0 4px; font-size: 14px; }
+.qa-markup--chat.wiki-prose [data-wiki-block='lead'] { font-size: 14px; padding: 9px 12px; margin-bottom: 10px; }
+.qa-markup--chat.wiki-prose :is([data-wiki-block='cards'], [data-wiki-block='stats'])[data-cols] {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+/* ── Ссылка на разговор ────────────────────────────────────────────────────
+   Метку [[#12]] сервер превращает в span[data-qa-ref], а витрина — в кнопку
+   (AiMarkup.jsx). Вид — пилюля как у тега в «Почте»: значок телефона или
+   облачка, затем «Фамилия И. · 14:09» (или одно время, если фамилия уже
+   стоит рядом в тексте). Значок — маской по SVG, а не символом: ⏵ и ☎
+   в Chrome на macOS рисуются цветным эмодзи. */
+/* Цвет пилюли — синий раздела (кнопки «ИИ-оценки»), а не индиго вики: ссылка
+   ведёт в карточку раздела. Переменными — чтобы тёмный слой перекрасил её
+   одним правилом ниже. */
+.qa-markup {
+    --qa-ref-ink: #1d4ed8;
+    --qa-ref-ink-hover: #1e40af;
+    --qa-ref-bg: rgba(59, 130, 246, 0.1);
+    --qa-ref-bg-hover: rgba(59, 130, 246, 0.18);
+    --qa-ref-ring: rgba(59, 130, 246, 0.55);
+    --qa-ref-muted-bg: rgba(15, 23, 42, 0.07);
+}
+
+html[data-otp-theme="dark"] .qa-markup {
+    --qa-ref-ink: #93c5fd;
+    --qa-ref-ink-hover: #bfdbfe;
+    --qa-ref-bg: rgba(96, 165, 250, 0.16);
+    --qa-ref-bg-hover: rgba(96, 165, 250, 0.26);
+    --qa-ref-ring: rgba(147, 197, 253, 0.6);
+    --qa-ref-muted-bg: rgba(255, 255, 255, 0.1);
+}
+
+.qa-markup .qa-ref {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0 0 0 1px;
+    padding: 0 7px 0 6px;
+    height: 20px;
+    vertical-align: 1px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--qa-ref-bg);
+    color: var(--qa-ref-ink);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 550;
+    line-height: 20px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.qa-markup .qa-ref:hover { background: var(--qa-ref-bg-hover); color: var(--qa-ref-ink-hover); }
+.qa-markup .qa-ref:active { transform: scale(0.97); }
+
+.qa-markup .qa-ref:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--qa-ref-ring);
+}
+
+.qa-markup .qa-ref::before {
+    content: '';
+    width: 11px;
+    height: 11px;
+    flex: none;
+    background-color: currentColor;
+    -webkit-mask: var(--qa-ref-icon) center / contain no-repeat;
+    mask: var(--qa-ref-icon) center / contain no-repeat;
+}
+
+.qa-markup .qa-ref[data-qa-kind='call'] {
+    --qa-ref-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z'/%3E%3C/svg%3E");
+}
+
+.qa-markup .qa-ref[data-qa-kind='chat'] {
+    --qa-ref-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/%3E%3C/svg%3E");
+}
+
+/* Внутри цветной плашки синяя пилюля спорила бы с тоном — берёт цвет текста
+   плашки и нейтральную подложку. */
+.qa-markup [data-wiki-block='note'] .qa-ref,
+.qa-markup [data-wiki-block='card'][data-tone] .qa-ref {
+    background: var(--qa-ref-muted-bg);
+    color: var(--tone-ink, var(--qa-ref-ink));
+}
+
+.qa-markup [data-wiki-block='note'][data-tone='dark'] .qa-ref {
+    background: rgba(255, 255, 255, 0.14);
+    color: #e2e8f0;
+}
+
+/* ── Телефон: слой вики на это не рассчитан ───────────────────────────────
+   wiki-mobile.css (его тянет wiki-theme.css) под body.mobile-shell красит корень
+   .wiki-scope серым полотном с полями и ставит тексту статьи кегль 17 px,
+   заголовкам 19 px — для статьи вики, на весь экран. Сводка и ответ ИИ в чате
+   живут в карточке и пузыре раздела: здесь возвращается их масштаб. Вес —
+   выше правил слоя (у тех до (0,4,3)): лишние два класса .qa-scope.wiki-scope. */
+body.mobile-shell .main-content .wiki-scope.qa-scope:not([class~="fixed"]) {
+    padding: 0;
+    background: none;
+}
+
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose { font-size: 14px; line-height: 1.6; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose p { margin: 6px 0; line-height: 1.6; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose h3 { margin: 20px 0 6px; font-size: 15px; line-height: 1.3; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose h4 { font-size: 14px; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose [data-wiki-block='stat'] h4 { font-size: 22px; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose :is(ul, ol):not([data-variant]) { padding-left: 1.25rem; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose :is(ul, ol)[data-variant] { padding-left: 0; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose :is(ul, ol):not([data-variant]) > li { margin: 3px 0; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose blockquote { font-size: 13.5px; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose :is(th, td) { padding: 6px 10px; font-size: 13px; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose th { font-size: 11px; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose [data-wiki-block] :is(p, li),
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose ol[data-variant] > li {
+    font-size: inherit;
+    line-height: 1.55;
+}
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose [data-wiki-block='stat'] p { font-size: 12.5px; line-height: 1.4; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose ul[data-variant='chips'] > li { font-size: 12.5px; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup--chat.wiki-prose { font-size: 13.5px; line-height: 1.55; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup--chat.wiki-prose h3 { margin: 12px 0 4px; font-size: 14px; }
+
+/* ── Края без отступов ─────────────────────────────────────────────────────
+   Последними и с весом выше правил блоков и списков (у тех (0,3,0) и (0,3,1)):
+   иначе ответ, который кончается списком или плашкой, получал лишние 6–12 px
+   внизу пузыря, а раздел, начатый плашкой, — сверху. */
+.qa-markup.qa-markup.wiki-prose > :first-child { margin-top: 0; }
+.qa-markup.qa-markup.wiki-prose > :last-child { margin-bottom: 0; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose > :first-child { margin-top: 0; }
+body.mobile-shell .wiki-scope.qa-scope .qa-markup.wiki-prose > :last-child { margin-bottom: 0; }

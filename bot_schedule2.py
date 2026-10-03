@@ -530,6 +530,11 @@ op_funnel_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='op-funnel
 # что проходы всё равно идут строго по одному — второй упрётся в advisory-лок.
 # Оценки внутри прохода параллелит сама выборка (AI_QA_DAILY_SAMPLE_WORKERS).
 ai_qa_sample_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ai-qa-sample')
+# Сводка дня «ИИ-оценки» (call_qa.digest) — своё ОДНО место: генерация отдела —
+# минута вызовов модели, и в общем пуле она держала бы четверть приложения, а в
+# пуле выборки ждала бы конца многочасового прохода. Отделы и так идут по
+# очереди: параллельные вызовы в одну модель Vertex выедают квоту друг у друга.
+ai_qa_digest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ai-qa-digest')
 # Кабинет Binotel (сторона завершения разговора) ждут с потолком, а сам экспорт
 # идёт здесь: зависший кабинет держит этот поток, а не запрос «Из АТС» или проход
 # выборки (_binotel_panel_day_end_parties).
@@ -7510,7 +7515,78 @@ def ai_qa_daily_sample_job(day=None, triggered_by='scheduler'):
         _ai_qa_sample_state()
     logging.info("ai-qa выборка %s (%s): %s, итог %s, %s с", result.get('day'), triggered_by,
                  result.get('status'), result.get('totals'), result.get('elapsed_s'))
+    if result.get('status') == 'success' and qa_config.AI_QA_DIGEST_ENABLED:
+        # Сводку пишем после КАЖДОГО прохода: второй проход добирает выборку, и
+        # сводка без его разговоров была бы неполной. Повтор с тем же набором
+        # оценок модель не зовёт (digest.service.generate → «fresh»).
+        _ai_qa_queue_digest(result.get('day'), None, f"after-sample:{triggered_by}")
     return result
+
+
+# Сводки «ИИ-оценки», которые стоят в очереди пула или пишутся сейчас:
+# {(отдел или None — все, день)}. База знает только о начатой генерации
+# (running_since), а между нажатием и стартом задача может ждать в пуле за
+# ночной, — без этого экран решил бы, что генерация уже кончилась.
+AI_QA_DIGEST_QUEUED_LOCK = threading.Lock()
+AI_QA_DIGEST_QUEUED = set()
+
+
+def _ai_qa_digest_queued(department, day_iso):
+    with AI_QA_DIGEST_QUEUED_LOCK:
+        return (department, day_iso) in AI_QA_DIGEST_QUEUED
+
+
+def _ai_qa_digest_departments():
+    return [call_qa_config.normalise_department_code(code) for code in call_qa_config.DEPARTMENT_CODES]
+
+
+def ai_qa_digest_job(day, department=None, triggered_by='manual', force=False):
+    """Написать сводку дня (call_qa.digest): одного отдела или всех по очереди.
+
+    Отделы — по очереди: параллельные вызовы в одну модель Vertex выедают квоту
+    друг у друга. Отметка «пишется» снимается с отдела сразу, как он дописан, а
+    не после последнего: иначе экран отдела, который уже готов, ещё минуты
+    показывал бы «ИИ пишет сводку…», а нажатие «Дописать» в это время терялось бы
+    ответом «уже пишется»."""
+    from call_qa.digest import service as qa_digest
+    day_iso = day.isoformat()
+    results = {}
+    try:
+        for code in ([department] if department else _ai_qa_digest_departments()):
+            try:
+                results[code] = qa_digest.generate(code, day, triggered_by=triggered_by, force=force)
+            except Exception:
+                logging.exception("ai-qa сводка %s (%s): задача упала", day_iso, code)
+                results[code] = {'status': 'failed'}
+            finally:
+                with AI_QA_DIGEST_QUEUED_LOCK:
+                    AI_QA_DIGEST_QUEUED.discard((code, day_iso))
+        return results.get(department) if department else results
+    finally:
+        with AI_QA_DIGEST_QUEUED_LOCK:
+            AI_QA_DIGEST_QUEUED.discard((department, day_iso))
+
+
+def _ai_qa_queue_digest(day, department, triggered_by, force=False):
+    """Поставить сводку в пул. False — та же уже стоит в очереди или пишется.
+
+    Проход по всем отделам (department=None) отмечает каждый отдел отдельно —
+    по этим отметкам экран и ручки знают, какой отдел ещё ждёт своей очереди."""
+    try:
+        day = day if isinstance(day, dt_date) else dt_date.fromisoformat(str(day))
+    except (TypeError, ValueError):
+        logging.warning("ai-qa сводка: непонятный день %r — пропускаю", day)
+        return False
+    day_iso = day.isoformat()
+    key = (department, day_iso)
+    with AI_QA_DIGEST_QUEUED_LOCK:
+        if key in AI_QA_DIGEST_QUEUED:
+            return False
+        AI_QA_DIGEST_QUEUED.add(key)
+        if department is None:
+            AI_QA_DIGEST_QUEUED.update((code, day_iso) for code in _ai_qa_digest_departments())
+    ai_qa_digest_pool.submit(ai_qa_digest_job, day, department, triggered_by, force)
+    return True
 
 
 def _ai_qa_pull_response_code(response):
@@ -7747,6 +7823,18 @@ def api_ai_qa_evaluations():
         filters, filters_err = _ai_qa_list_filters()
         if filters_err:
             return filters_err
+        # Экран одного дня «Звонков» и «Чатов» — день как в сводке
+        # (/evaluations/days), «none» — разговоры без даты.
+        day = (request.args.get('day') or '').strip()
+        if day:
+            from call_qa.api import evaluations_day, QUEUE_NO_DAY
+            if day != QUEUE_NO_DAY and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day):
+                return jsonify({"error": "day: ожидается ГГГГ-ММ-ДД"}), 400
+            page = evaluations_day(day, limit=limit, offset=offset, allowed_direction_ids=scope,
+                                   subject_kind=subject, department=department, filters=filters,
+                                   with_deals=_ai_qa_can_use_marketing(requester_id))
+            return jsonify({"status": "success", **page, "day": day, "subject": subject,
+                            "department": department, "limit": limit, "offset": offset}), 200
         items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                  subject_kind=subject, department=department,
                                  filters=filters,
@@ -7759,6 +7847,243 @@ def api_ai_qa_evaluations():
     except Exception as error:
         logging.exception("ai-qa evaluations failed")
         return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/evaluations/days', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_evaluations_days():
+    """«Звонки» и «Чаты» по дням разговора: сводка каждого дня (оценено,
+    критических, проверено людьми, средние баллы, кто работал). Скоуп, отдел,
+    вид субъекта и фильтры — те же, что у списка оценённого, иначе «оценено 30»
+    на строке дня не сошлось бы со строками экрана дня."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import evaluations_days
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
+        summary = evaluations_days(allowed_direction_ids=_ai_qa_direction_scope(requester_id),
+                                   subject_kind=subject, department=department, filters=filters)
+        return jsonify({"status": "success", **summary, "subject": subject,
+                        "department": department}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("ai-qa evaluations days failed")
+        return jsonify({"error": str(error)}), 500
+
+
+# ── Сводка дня «ИИ-оценки» (call_qa.digest) ──────────────────────────────────
+#
+# После ночного прохода выборки модель (та же, что пишет статьи вики) пишет по
+# разговорам дня сводку: острые ситуации, повторяющиеся ошибки, где не хватает
+# знаний, что беспокоит клиентов, кому нужна помощь — раздел на каждое
+# направление и «Главное» по отделу. Рядом — чат с ИИ о том же дне. Права — те
+# же, что у раздела: отдел из селектора, у СВ — только разделы его направлений.
+
+def _ai_qa_iso(value):
+    return value.isoformat() if hasattr(value, 'isoformat') else value
+
+
+def _ai_qa_digest_day(value):
+    """День сводки из запроса: ГГГГ-ММ-ДД, не позже сегодняшнего по Алматы."""
+    raw = str(value or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', raw):
+        raise ValueError("day: ожидается дата ГГГГ-ММ-ДД")
+    day = dt_date.fromisoformat(raw)
+    if day > datetime.now(ZoneInfo('Asia/Almaty')).date():
+        raise ValueError("Сводка бывает только за прошедшие дни и сегодняшний")
+    return day
+
+
+def _ai_qa_chat_guard():
+    """Чат сводки: те же, кому открыт раздел, и наблюдатель «Маркетинга».
+
+    _ai_qa_guard пускает наблюдателя на запись только в перечень ручек
+    (AI_QA_OBSERVER_ACTION_ENDPOINTS), а вопрос в чате — это POST вне его. Но
+    вопрос ничего общего не меняет: пишется только своя переписка человека, —
+    поэтому наблюдателю он открыт."""
+    requester_id, err = _ai_qa_guard()
+    if not err:
+        return requester_id, None
+    requester_id = getattr(g, 'user_id', None)
+    if requester_id is not None and _is_marketing_observer(requester_id):
+        return requester_id, None
+    return None, err
+
+
+def _ai_qa_digest_message(message):
+    return {"id": message.get("id"), "role": message.get("role"), "body": message.get("body"),
+            "created_at": _ai_qa_iso(message.get("created_at"))}
+
+
+@app.route('/api/ai-qa/digests', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_digests():
+    """Дни для вкладки «Сводка»: дни с оценёнными разговорами отдела, их цифры и
+    заголовок сводки (у зрителя со скоупом — заголовок его раздела)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import evaluations_days, QUEUE_NO_DAY
+        from call_qa.digest import service as qa_digest
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "Сводка пишется по одному отделу — выберите отдел"}), 400
+        scope = _ai_qa_direction_scope(requester_id)
+        summary = evaluations_days(allowed_direction_ids=scope, department=department)
+        days = [d for d in summary.get("days") or [] if d.get("day") != QUEUE_NO_DAY]
+        known = qa_digest.headlines(department, [d["day"] for d in days], scope)
+        for day in days:
+            info = known.get(day["day"]) or {}
+            day["headline"] = info.get("headline") or ""
+            day["digest_status"] = info.get("status") or "none"
+            day["running"] = bool(info.get("running")) or _ai_qa_digest_queued(department, day["day"])
+            # Сводка есть, но все разделы с людьми зрителя — общие с чужими
+            # направлениями и ему не показываются.
+            day["digest_hidden"] = bool(info.get("hidden"))
+        return jsonify({"status": "success", "days": days, "department": department}), 200
+    except Exception as error:
+        logging.exception("ai-qa digests failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/ai-qa/digest', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_digest():
+    """GET ?day= — сводка дня для зрителя; POST {day, force} — написать/обновить.
+
+    Генерация идёт в своём пуле, ответ — 202 сразу; экран опрашивает GET, пока
+    running. Тот же набор оценок второй раз модели не отдаётся («fresh»), а
+    принудительно переписать — только супер-админ: это новый счёт за модель."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    from call_qa.digest import service as qa_digest
+    try:
+        department, dept_err = _ai_qa_requested_department(
+            requester_id, (request.get_json(silent=True) or {}).get('department')
+            if request.method == 'POST' else None)
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "Сводка пишется по одному отделу — выберите отдел"}), 400
+        body = (request.get_json(silent=True) or {}) if request.method == 'POST' else {}
+        day = _ai_qa_digest_day(body.get('day') if request.method == 'POST' else request.args.get('day'))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    scope = _ai_qa_direction_scope(requester_id)
+    user = db.get_user(id=requester_id) if requester_id else None
+    role = user[3] if user else None
+    is_super = _is_super_admin_role(_normalize_user_role(role) if user else None)
+    if request.method == 'GET':
+        queued = _ai_qa_digest_queued(department, day.isoformat())
+        if request.args.get('light'):
+            # Опрос, пока сводка пишется: только её состояние, без чтения дня.
+            try:
+                state = qa_digest.status(department, day)
+            except Exception:
+                logging.exception("ai-qa digest status failed")
+                return jsonify({"error": "не удалось узнать состояние сводки"}), 500
+            state["running"] = bool(state.get("running")) or queued
+            state["generated_at"] = _ai_qa_iso(state.get("generated_at"))
+            return jsonify({"status": "success", **state}), 200
+        try:
+            view = qa_digest.read(department, day, scope)
+        except Exception:
+            logging.exception("ai-qa digest read failed")
+            return jsonify({"error": "не удалось загрузить сводку"}), 500
+        view["running"] = bool(view.get("running")) or queued
+        view["generated_at"] = _ai_qa_iso(view.get("generated_at"))
+        # Генерация идёт через _ai_qa_guard (POST): наблюдателя «Маркетинга» он
+        # пускает на запись только в ручки AI_QA_OBSERVER_ACTION_ENDPOINTS, а
+        # сводки там нет, — кнопок «Составить»/«Обновить» ему не показываем.
+        view["can_generate"] = ((requester_id is not None
+                                 and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS)
+                                or not _is_marketing_observer(requester_id, role))
+        view["can_force"] = is_super
+        return jsonify({"status": "success", **view}), 200
+
+    force = bool(body.get('force')) and is_super
+    try:
+        current = qa_digest.read(department, day, None)
+    except Exception:
+        logging.exception("ai-qa digest pre-check failed")
+        return jsonify({"error": "не удалось проверить сводку"}), 500
+    if current.get("running") or _ai_qa_digest_queued(department, day.isoformat()):
+        return jsonify({"status": "running"}), 202
+    if not current.get("evaluated"):
+        return jsonify({"error": "За этот день нет оценённых разговоров — сводку писать не из чего"}), 409
+    # Недописанная сводка (упал раздел, нет «Главного») свежей не считается:
+    # generate допишет только недостающее.
+    if (current.get("status") == "ready" and not current.get("stale")
+            and not current.get("incomplete") and not force):
+        return jsonify({"status": "fresh", "message": "Сводка уже учитывает все оценки дня"}), 200
+    _ai_qa_queue_digest(day, department, f"manual:{requester_id}", force=force)
+    return jsonify({"status": "queued"}), 202
+
+
+@app.route('/api/ai-qa/digest/chat', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_digest_chat():
+    """Переписка с ИИ в окне сводки: GET — своя история дня, POST {day, question} —
+    вопрос (ответ ждём синхронно: 5–15 с), DELETE — начать заново.
+
+    Данные дня — в скоупе зрителя: чат читает разговоры тем же предикатом, что
+    списки раздела, и ничего за пределами своих направлений не видит."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_chat_guard()
+    if err:
+        return err
+    from call_qa.digest import service as qa_digest
+    body = (request.get_json(silent=True) or {}) if request.method == 'POST' else {}
+    try:
+        department, dept_err = _ai_qa_requested_department(
+            requester_id, body.get('department') if request.method == 'POST' else None)
+        if dept_err:
+            return dept_err
+        if not department:
+            return jsonify({"error": "Чат сводки — по одному отделу, выберите отдел"}), 400
+        day = _ai_qa_digest_day(body.get('day') if request.method == 'POST' else request.args.get('day'))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    try:
+        if request.method == 'GET':
+            messages = qa_digest.thread(department, day, int(requester_id))
+            return jsonify({"status": "success",
+                            "messages": [_ai_qa_digest_message(m) for m in messages]}), 200
+        if request.method == 'DELETE':
+            removed = qa_digest.clear(department, day, int(requester_id))
+            return jsonify({"status": "success", "removed": removed}), 200
+        result = qa_digest.ask(department, day, body.get('question'), user_id=int(requester_id),
+                               allowed_direction_ids=_ai_qa_direction_scope(requester_id))
+        return jsonify({"status": "success", "question": _ai_qa_digest_message(result["question"]),
+                        "answer": _ai_qa_digest_message(result["answer"]),
+                        "elapsed_s": result.get("elapsed_s")}), 200
+    except qa_digest.DigestError as error:
+        return jsonify({"error": str(error)}), 409
+    except Exception as error:
+        logging.exception("ai-qa digest chat failed")
+        name = type(error).__name__
+        if name == 'ProviderError':
+            return jsonify({"error": "ИИ сейчас не отвечает — попробуйте через минуту"}), 503
+        return jsonify({"error": "не удалось получить ответ ИИ"}), 500
 
 
 # ── «Моя оценка» в карточке ИИ-оценки ─────────────────────────────────────────

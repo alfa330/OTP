@@ -5758,6 +5758,193 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
                 pass
 
 
+# ── «Звонки» и «Чаты» по дням разговора ───────────────────────────────────────
+#
+# Владелец 02.10.2026: вкладки оценённого перевести «на такой же формат, как
+# очередь ревью» — дни по месяцам, по нажатию экран дня со списком. Отбор тот же,
+# что у плоского списка (evaluations_list): последняя оценка субъекта, скоуп,
+# отдел, вид субъекта и фильтры панели. Иначе «оценено 30» на строке дня не
+# сошлось бы с тридцатью строками экрана дня.
+
+# Критическое — по тому же правилу, что метка очереди (review_queue.review_reasons):
+# критерий транскрипта, критический, вердикт «Неверно» (или Error — так GLM изредка
+# пишет его вне схемы). Считается в SQL, а не в Python: сводке дней не нужны сами
+# критерии, только признак, и тянуть ради него карточки целиком незачем.
+_SUBJECT_CRITICAL = """EXISTS (SELECT 1 FROM jsonb_array_elements(
+        CASE WHEN jsonb_typeof(rc.payload->'criteria') = 'array'
+             THEN rc.payload->'criteria' ELSE '[]'::jsonb END) cr
+     WHERE cr->>'source' = 'transcript' AND lower(COALESCE(cr->>'is_critical', '')) = 'true'
+       AND cr->>'ai' IN ('Incorrect', 'Error'))"""
+
+_LATEST_EVALUATIONS = """(SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                                rc.subject_kind, rc.call_id, rc.model, rc.created_at, rc.payload
+                           FROM ai_review_cache rc
+                          ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
+
+_EVAL_META_JOIN = """
+                 LEFT JOIN ai_evaluation_meta m
+                        ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
+                           AND m.model = rc.model"""
+
+EVAL_DAY_MAX = 200
+
+
+def _evaluations_where(cur, allowed_direction_ids, subject_kind, department, filters):
+    """WHERE оценённого — общий для сводки дней и экрана дня. None — показывать нечего."""
+    scope_sql, scope_params = _direction_predicate(
+        cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+    if scope_sql is None:
+        return None
+    kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+    filter_sql, filter_params = _list_filters_predicate(
+        cur, filters, allowed_direction_ids, department)
+    if filter_sql is None:
+        return None
+    return (" WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql,
+            (*scope_params, *kind_params, *filter_params))
+
+
+def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=None,
+                     filters=None) -> dict:
+    """Оценённое ИИ по дням разговора — сводка каждого дня для строк списка дней.
+
+    День — день разговора (_SUBJECT_DAY), как у очереди и фильтра периода. Строка
+    дня отвечает на то же, что строка очереди, только про всё оценённое: сколько
+    оценено, сколько из них критических, сколько уже проверено людьми (и в скольких
+    ИИ поправили), средние баллы ИИ и человека, кто работал."""
+    empty = {"days": [], "total": 0}
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        where = _evaluations_where(cur, allowed_direction_ids, subject_kind, department, filters)
+        if where is None:
+            cur.close(); conn.close()
+            return empty
+        where_sql, where_params = where
+        cur.execute(
+            f"""SELECT day, COUNT(*),
+                       COUNT(*) FILTER (WHERE outcome IS NOT NULL OR human IS NOT NULL),
+                       COUNT(*) FILTER (WHERE outcome = 'adjudicated'),
+                       COUNT(*) FILTER (WHERE critical),
+                       AVG(ai), AVG(human), COUNT(human), COUNT(DISTINCT who),
+                       array_agg(direction)
+                  FROM (SELECT {_SUBJECT_DAY} AS day, m.review_outcome AS outcome,
+                               {_SUBJECT_AI_SCORE} AS ai, {_SUBJECT_HUMAN_SCORE} AS human,
+                               {_SUBJECT_CRITICAL} AS critical,
+                               COALESCE({_SUBJECT_OPERATOR_ID}::text, {_SUBJECT_OPERATOR}) AS who,
+                               d.name AS direction
+                          FROM {_LATEST_EVALUATIONS}"""
+            + _SUBJECT_JOIN + _marketing_join(cur, filters) + _EVAL_META_JOIN
+            + where_sql + """) t
+                 GROUP BY day""",
+            where_params)
+        rows = cur.fetchall(); cur.close(); conn.close()
+        out = []
+        total = 0
+        for (day, evaluated, reviewed, corrected, critical, ai_avg, human_avg, human_n, operators,
+             directions) in rows:
+            total += int(evaluated or 0)
+            counted = Counter(name for name in (directions or []) if name)
+            out.append({
+                "day": day.isoformat() if day else QUEUE_NO_DAY,
+                "evaluated": int(evaluated or 0), "reviewed": int(reviewed or 0),
+                "corrected": int(corrected or 0), "critical": int(critical or 0),
+                "ai_avg": round(float(ai_avg), 1) if ai_avg is not None else None,
+                "human_avg": round(float(human_avg), 1) if human_avg is not None else None,
+                "human_n": int(human_n or 0), "operators": int(operators or 0),
+                "directions": [{"name": name, "n": n} for name, n in counted.most_common()],
+            })
+        out.sort(key=lambda d: (d["day"] != QUEUE_NO_DAY, d["day"]), reverse=True)
+        return {"days": out, "total": total}
+    except Exception:
+        logging.exception("ai-qa: оценённое по дням недоступно")
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def evaluations_day(day: str, limit: int = 50, offset: int = 0, allowed_direction_ids=None,
+                    subject_kind=None, department=None, filters=None,
+                    with_deals=True) -> dict:
+    """Разговоры одного дня оценённого — строки экрана дня «Звонков» и «Чатов».
+
+    Форма строки — как у очереди (QueueList рисует обе): время, сотрудник,
+    метки, баллы ИИ и человека. Метки — только те, что меняют взгляд на разговор
+    (критическое, плохой звук, нечитаемое вложение): «Спорное» и «Данные ПО» —
+    причины ОЧЕРЕДИ, а здесь уже оценённое, и на каждой строке ОП они были бы
+    шумом. Порядок — сначала критическое, дальше по времени разговора; последний
+    ключ — сам субъект, чтобы «Показать ещё» не теряла и не повторяла строк."""
+    empty = {"items": [], "total": 0}
+    if day != QUEUE_NO_DAY:
+        try:
+            date.fromisoformat(str(day))
+        except ValueError:
+            return empty
+    limit = max(1, min(int(limit), EVAL_DAY_MAX)); offset = max(0, int(offset))
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        where = _evaluations_where(cur, allowed_direction_ids, subject_kind, department, filters)
+        if where is None:
+            cur.close(); conn.close()
+            return empty
+        where_sql, where_params = where
+        if day == QUEUE_NO_DAY:
+            day_sql, day_params = f" AND {_SUBJECT_DAY} IS NULL", ()
+        else:
+            day_sql, day_params = f" AND {_SUBJECT_DAY} = %s", (day,)
+        deal_join = _marketing_join(cur, filters, need_columns=with_deals)
+        cur.execute(
+            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME},
+                       {_SUBJECT_HUMAN_SCORE}, rc.payload->>'ai_score', rc.subject_kind,
+                       {_CRITERIA_FOR_REASONS}, rc.payload->'asr_mean_conf', rc.payload->'media',
+                       rc.payload->'score_breakdown'->'unchecked_weight', m.review_outcome,
+                       TO_CHAR({_local('rc.created_at')},'DD.MM HH24:MI')"""
+            + (_DEAL_COLUMNS if deal_join else _DEAL_COLUMNS_EMPTY)
+            + f" FROM {_LATEST_EVALUATIONS}" + _SUBJECT_JOIN + deal_join + _EVAL_META_JOIN
+            + where_sql + day_sql,
+            (*where_params, *day_params))
+        rows = cur.fetchall(); cur.close(); conn.close()
+        items = []
+        for r in rows:
+            reasons = review_queue.review_reasons(r[7] or [], r[8], r[9] or {}, subject_kind=r[6])
+            loud = [reason for reason in reasons if reason in _EVAL_ROW_REASONS]
+            items.append({
+                "id": r[0], "direction": r[1], "operator": r[2] or "—", "datetime": r[3],
+                "human_score": r[4], "ai_score": _queue_score(r[5]),
+                "subject": r[6] or config.SUBJECT_CALL, "reasons": loud,
+                "unchecked_weight": int(_queue_score(r[10]) or 0),
+                "reviewed": bool(r[11]) or r[4] is not None, "outcome": r[11],
+                "evaluated_at": r[12], "day": day, "deal": _deal_row(r, 13),
+            })
+        items.sort(key=lambda item: ("critical" not in item["reasons"],
+                                     str(item.get("datetime") or ""),
+                                     str(item.get("subject") or ""), item.get("id") or 0))
+        for item in items:
+            if item["ai_score"] is not None:
+                item["ai_score"] = round(item["ai_score"])
+        return {"items": items[offset:offset + limit], "total": len(items)}
+    except Exception:
+        logging.exception("ai-qa: день оценённого недоступен")
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# Метки строки оценённого (см. evaluations_day): только меняющие взгляд на разговор.
+_EVAL_ROW_REASONS = ("critical", "asr", "media")
+
+
 _VERDICTS = ("Correct", "Deficiency", "Incorrect", "N/A")
 
 

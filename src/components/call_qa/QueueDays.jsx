@@ -1,11 +1,14 @@
-import React, { useId } from 'react';
-import { CheckCircle2, ChevronLeft, ChevronRight, Loader2, RotateCcw } from 'lucide-react';
-import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, IosHint, scoreTone } from '../ui/ios';
-import QueueList, { QuietMark, REASON, SCORE_TEXT, STALE } from './QueueList';
+import React from 'react';
+import { CheckCircle2, ChevronRight, Loader2, RotateCcw, Sparkles } from 'lucide-react';
+import { iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, IosHint, scoreTone } from '../ui/ios';
+import QueueList, { QuietMark, REASON, STALE } from './QueueList';
 import {
     commonReasons, commonRowMeta, dayNeighbours, dayTitle, itemKey, monthGroups, nextDayToReview,
-    plural, queueSummary, STALE_MARK,
+    NO_DAY, plural, queueSummary, STALE_MARK,
 } from './queueDayRules';
+import {
+    DAY_ROW_CLASS, DateLeaf, DayHeader, DayStat, MonthSection, RowChevron, Score, ShareBar,
+} from './dayKit';
 
 /* Очередь ревью по дням разговора — два экрана, как «Почта» или «Календарь» iOS.
  *
@@ -31,40 +34,6 @@ const round = (value) => (value == null ? null : Math.round(value));
 // Колонки списка дней на компьютере — одни на шапку и строки, иначе разъедутся.
 const DAY_COLUMNS = 'sm:grid sm:grid-cols-[minmax(0,1fr)_4rem_4.5rem_5.5rem_1rem] sm:items-center sm:gap-4';
 
-const WEEKDAY_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
-
-/* Листок календаря: день недели и число, как значок «Календаря» — месяц уже в
- * заголовке раздела. По числам глаз идёт по ленте дней; сегодняшний — синий. */
-function DateLeaf({ day, info }) {
-    const parts = String(day.day).split('-');
-    const date = parts.length === 3 ? Number(parts[2]) : null;
-    const today = info.relative === 'Сегодня';
-    return (
-        <div aria-hidden="true"
-             className={`flex h-11 w-11 shrink-0 flex-col items-center justify-center rounded-[10px] ${
-                 today ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-900'}`}>
-            {date == null ? (
-                <span className="text-[17px] font-semibold text-slate-400">—</span>
-            ) : (
-                <>
-                    <span className={`text-[10px] font-semibold uppercase leading-none tracking-wide ${
-                        today ? 'text-white/85' : 'text-slate-500'}`}>{WEEKDAY_SHORT[new Date(`${day.day}T12:00:00`).getDay()]}</span>
-                    <span className="mt-[3px] text-[18px] font-semibold leading-none tabular-nums">{date}</span>
-                </>
-            )}
-        </div>
-    );
-}
-
-/* Балл числом в цвет балла; нет балла — прочерк. */
-function Score({ value, className = '' }) {
-    return (
-        <span className={`font-semibold tabular-nums ${value == null ? 'text-slate-300' : SCORE_TEXT[scoreTone(value)]} ${className}`}>
-            {value ?? '—'}
-        </span>
-    );
-}
-
 /* Строка дня — кнопка на весь день. Главное — сколько ждёт проверки; критические —
  * красным (единственный красный в строке), рядом — кто работал. На компьютере
  * баллы и «проверено» — в колонках справа; на телефоне — третьей строкой. */
@@ -84,10 +53,12 @@ function DayRow({ day, onOpen }) {
         day.critical ? criticalText(day.critical) : null].filter(Boolean).join(', ');
     return (
         <button type="button" onClick={() => onOpen(day.day)} data-qa-day-tile={day.day} aria-label={label}
-                className={`group flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 focus-visible:bg-blue-50/60 focus-visible:outline-none active:bg-slate-100 sm:px-5 ${DAY_COLUMNS}`}>
+                className={`${DAY_ROW_CLASS} ${DAY_COLUMNS}`}>
             <div className="flex min-w-0 flex-1 items-center gap-3.5">
                 <DateLeaf day={day} info={info} />
-                <div className="min-w-0">
+                {/* grow basis-0, а не flex-1: оболочка телефона переносит flex с gap,
+                    и текст без основы уезжал под листок даты. */}
+                <div className="min-w-0 grow basis-0">
                     {done ? (
                         <div className="flex items-center gap-1.5 text-[14px] font-semibold text-emerald-600">
                             <CheckCircle2 size={15} aria-hidden="true" />Всё проверено
@@ -116,8 +87,7 @@ function DayRow({ day, onOpen }) {
             <span className="hidden text-right text-[13px] tabular-nums text-slate-600 sm:block">
                 {day.reviewed || 0} из {evaluated}
             </span>
-            <ChevronRight size={16} aria-hidden="true"
-                          className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-400" />
+            <RowChevron />
         </button>
     );
 }
@@ -146,60 +116,32 @@ function Overview({ days, total, truncated, onOpenDay, onRefresh }) {
                 </button>
             </div>
             {groups.map((group) => (
-                <MonthSection key={group.key} group={group} onOpenDay={onOpenDay} />
+                <QueueMonth key={group.key} group={group} onOpenDay={onOpenDay} />
             ))}
         </div>
     );
 }
 
-/* Месяц — заголовок и один список его дней. */
-function MonthSection({ group, onOpenDay }) {
-    const headingId = useId();
+/* Месяц — заголовок, «N ждут · K критических» и один список его дней. */
+function QueueMonth({ group, onOpenDay }) {
     return (
-        <section aria-labelledby={headingId} className="space-y-2">
-            <div className="flex items-baseline justify-between gap-3 px-1">
-                <h2 id={headingId} className="text-[18px] font-semibold text-slate-900">{group.title}</h2>
-                {group.open > 0 && (
-                    <span className="text-[12.5px] text-slate-500">
-                        {group.open} {waitingText(group.open)}
-                        {group.critical > 0 && <span className="text-rose-600"> · {criticalText(group.critical)}</span>}
-                    </span>
-                )}
-            </div>
-            <div className={`${iosCard} overflow-hidden`}>
-                <div aria-hidden="true"
-                     className={`hidden border-b border-slate-100 px-5 py-2 text-[11px] font-medium uppercase tracking-wide text-slate-400 ${DAY_COLUMNS}`}>
-                    <span>День</span>
-                    <span className="text-right" title="Средний балл ИИ за день">ИИ</span>
-                    <span className="text-right" title="Средний балл человека за день">Человек</span>
-                    <span className="text-right" title="Проверено человеком из оценённых ИИ">Проверено</span>
-                    <span />
-                </div>
-                <div role="list">
-                    {group.days.map((day) => (
-                        <div role="listitem" key={day.day} className="border-b border-slate-100 last:border-b-0">
-                            <DayRow day={day} onOpen={onOpenDay} />
-                        </div>
-                    ))}
-                </div>
-            </div>
-        </section>
-    );
-}
-
-/* Показатель сводки дня: подпись, крупное число, пояснение. Клетки разделены
- * волосяными линиями одной сеткой (gap-px на сером), а не рамками у каждой. */
-function DayStat({ label, value, tone = null, sub = null, subTone = 'text-slate-500', wide = false, children = null }) {
-    return (
-        <div className={`min-w-0 bg-white px-4 py-3.5 sm:px-5 ${wide ? 'col-span-2 sm:col-span-1' : ''}`}>
-            <div className="truncate text-[12px] text-slate-500">{label}</div>
-            <div className={`mt-1 text-[24px] font-semibold leading-none tabular-nums ${
-                value == null ? 'text-slate-300' : tone ? SCORE_TEXT[tone] : 'text-slate-900'}`}>
-                {value ?? '—'}
-            </div>
-            {children}
-            {sub && <div className={`mt-1.5 truncate text-[12px] ${subTone}`}>{sub}</div>}
-        </div>
+        <MonthSection group={group} columns={DAY_COLUMNS}
+                      aside={group.open > 0 && (
+                          <span className="text-[12.5px] text-slate-500">
+                              {group.open} {waitingText(group.open)}
+                              {group.critical > 0 && <span className="text-rose-600"> · {criticalText(group.critical)}</span>}
+                          </span>
+                      )}
+                      head={(
+                          <>
+                              <span>День</span>
+                              <span className="text-right" title="Средний балл ИИ за день">ИИ</span>
+                              <span className="text-right" title="Средний балл человека за день">Человек</span>
+                              <span className="text-right" title="Проверено человеком из оценённых ИИ">Проверено</span>
+                              <span />
+                          </>
+                      )}
+                      renderDay={(day) => <DayRow day={day} onOpen={onOpenDay} />} />
     );
 }
 
@@ -216,10 +158,7 @@ function DaySummary({ day }) {
                          sub={day.critical ? criticalText(day.critical) : 'критических нет'}
                          subTone={day.critical ? 'font-medium text-rose-600' : 'text-slate-400'} />
                 <DayStat label="Проверено" value={`${reviewed} из ${evaluated}`}>
-                    <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
-                        <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-500"
-                             style={{ width: `${Math.round(share * 100)}%` }} />
-                    </div>
+                    <ShareBar share={share} />
                 </DayStat>
                 <DayStat label="Поправили ИИ" value={reviewed ? day.corrected || 0 : null}
                          sub={reviewed ? `из ${reviewed} ${plural(reviewed, 'проверенного', 'проверенных', 'проверенных')}` : null} />
@@ -254,8 +193,18 @@ function CommonMarks({ keys }) {
     );
 }
 
-function DayScreen({ days, day, state, reviewedKeys, onOpen, onOpenDay, onClose, onLoadMore, onRetry }) {
-    const info = dayTitle(day.day);
+/* Переход к сводке ИИ того же дня: что ИИ увидел в разговорах дня целиком. */
+export function DigestLink({ onClick }) {
+    return (
+        <button type="button" onClick={onClick}
+                className="inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[13px] font-medium text-blue-600 transition hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 active:scale-[0.98]">
+            <Sparkles size={14} aria-hidden="true" />Сводка дня<ChevronRight size={14} aria-hidden="true" />
+        </button>
+    );
+}
+
+function DayScreen({ days, day, state, reviewedKeys, onOpen, onOpenDay, onClose, onLoadMore, onRetry,
+                    onOpenDigest = null }) {
     const items = (state?.items || []).filter((item) => !reviewedKeys.has(itemKey(item)));
     const common = commonReasons([day], items);
     const meta = commonRowMeta(items);
@@ -270,39 +219,15 @@ function DayScreen({ days, day, state, reviewedKeys, onOpen, onOpenDay, onClose,
     const done = !state?.error && !items.length && !hasMore
         && (day.open === 0 || (Boolean(state) && !state.loading));
     const loading = (!state || state.loading) && !done;
-    const arrow = 'grid h-8 w-8 place-items-center rounded-lg text-slate-600 transition hover:bg-white hover:shadow-sm disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent disabled:hover:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60';
 
     return (
         <div className="space-y-4">
-            <div className="flex items-center justify-between gap-2">
-                <button type="button" onClick={onClose} className={`${iosBtnGhost} -ml-2`}>
-                    <ChevronLeft size={16} aria-hidden="true" />Все дни
-                </button>
-                <div className="flex items-center gap-0.5 rounded-xl bg-slate-100 p-0.5">
-                    <button type="button" className={arrow} disabled={!earlier} onClick={() => onOpenDay(earlier)}
-                            aria-label={earlier ? `Предыдущий день: ${dayTitle(earlier).title}` : 'Предыдущего дня нет'}
-                            title={earlier ? dayTitle(earlier).title : undefined}>
-                        <ChevronLeft size={16} aria-hidden="true" />
-                    </button>
-                    <button type="button" className={arrow} disabled={!later} onClick={() => onOpenDay(later)}
-                            aria-label={later ? `Следующий день: ${dayTitle(later).title}` : 'Следующего дня нет'}
-                            title={later ? dayTitle(later).title : undefined}>
-                        <ChevronRight size={16} aria-hidden="true" />
-                    </button>
-                </div>
-            </div>
-
-            <div className="px-1">
-                <div className={`text-[13px] font-medium ${info.relative ? 'text-blue-600' : 'text-slate-500'}`}>
-                    {info.relative ? `${info.relative}, ${info.weekday.toLowerCase()}` : info.weekday || ' '}
-                </div>
-                {/* Фокус сюда ставит CallQaView: день открыли из списка, или в нём
-                    не осталось разговоров после проверки. */}
-                <h2 id="qa-queue-day-title" tabIndex={-1}
-                    className="rounded-md text-[24px] font-semibold leading-tight text-slate-900 outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60">
-                    {info.date}
-                </h2>
-            </div>
+            {/* Фокус на заголовок ставит CallQaView: день открыли из списка, или в
+                нём не осталось разговоров после проверки. */}
+            <DayHeader day={day.day} earlier={earlier} later={later} onClose={onClose} onOpenDay={onOpenDay}
+                       titleId="qa-queue-day-title"
+                       right={onOpenDigest && day.day !== NO_DAY
+                           && <DigestLink onClick={() => onOpenDigest(day.day)} />} />
 
             <DaySummary day={day} />
 
@@ -355,14 +280,15 @@ function DayScreen({ days, day, state, reviewedKeys, onOpen, onOpenDay, onClose,
 
 export default function QueueDays({
     days, total = 0, truncated = false, openDay = null, onOpenDay, onCloseDay,
-    dayItems, reviewedKeys, onOpen, onLoadMore, onRetryDay, onRefresh,
+    dayItems, reviewedKeys, onOpen, onLoadMore, onRetryDay, onRefresh, onOpenDigest = null,
 }) {
     const day = openDay ? days.find((item) => item.day === openDay) : null;
     if (day) {
         return (
             <DayScreen days={days} day={day} state={dayItems[day.day]} reviewedKeys={reviewedKeys}
                        onOpen={onOpen} onOpenDay={onOpenDay} onClose={onCloseDay}
-                       onLoadMore={() => onLoadMore(day.day)} onRetry={() => onRetryDay(day.day)} />
+                       onLoadMore={() => onLoadMore(day.day)} onRetry={() => onRetryDay(day.day)}
+                       onOpenDigest={onOpenDigest} />
         );
     }
     return <Overview days={days} total={total} truncated={truncated} onOpenDay={onOpenDay} onRefresh={onRefresh} />;

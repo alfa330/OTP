@@ -139,7 +139,10 @@ const rowMarks = (c, common) => {
     return { loud, quiet };
 };
 
-export default function QueueList({ items, onOpen, common = [], meta = {} }) {
+/* reasonsLabel — подпись колонки меток: в очереди это «почему в очереди», а на
+ * экране дня «Звонков» и «Чатов» те же метки (критическое, плохой звук,
+ * вложение) — просто отметки уже оценённого разговора. */
+export default function QueueList({ items, onOpen, common = [], meta = {}, reasonsLabel = 'Почему в очереди' }) {
     const marks = new Map(items.map((c) => [itemKey(c), rowMarks(c, common)]));
     const withReasons = [...marks.values()].some((m) => m.loud.length || m.quiet.length);
     const columns = withReasons ? COLUMNS : COLUMNS_NO_REASONS;
@@ -149,7 +152,7 @@ export default function QueueList({ items, onOpen, common = [], meta = {} }) {
                  aria-hidden="true">
                 <span>Время</span>
                 <span>Сотрудник</span>
-                {withReasons && <span>Почему в очереди</span>}
+                {withReasons && <span>{reasonsLabel}</span>}
                 <span className="text-right">ИИ</span>
                 <span className="text-right">Человек</span>
                 <span />

@@ -3,14 +3,14 @@ import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
     Sparkles, ListChecks, SlidersHorizontal, Database, ChevronLeft, Gauge,
-    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall,
+    Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall, ScrollText,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
 /* Высота открытой карточки — счётом до низа видимой области, а не константой
    `calc(100vh-N)`: арифметика общая с «Обращениями» и «Лидами OLX». */
 import { fitHeight, measureShell } from '../crm/layout';
-import { canPullCalls, SUBJECT_FAMILY_CALLS, SUBJECT_FAMILY_CHATS } from './subjects';
+import { canPullCalls, chatSubjectOf, SUBJECT_FAMILY_CALLS, SUBJECT_FAMILY_CHATS } from './subjects';
 import CallReviewCard from './CallReviewCard';
 import { adjudicationSummary } from './SimilarRules';
 import QaDashboard from './QaDashboard';
@@ -20,6 +20,9 @@ import AdjudicationsRag from './AdjudicationsRag';
 import ChatQueue from './ChatQueue';
 import { isChat } from './QueueList';
 import QueueDays from './QueueDays';
+import DigestView from './DigestView';
+import useDayList from './useDayList';
+import useDigest from './useDigest';
 import { applyReviewed, dayPageRequest, itemKey, mergeDayPage, NO_DAY } from './queueDayRules';
 import QaFilters from './QaFilters';
 import FindSubjectModal from './FindSubjectModal';
@@ -40,6 +43,10 @@ import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './
 
 const TABS = [
     { key: 'overview',  label: 'Обзор',          Icon: Gauge },
+    // Сводка ИИ по дням (call_qa.digest): что случилось, что повторяется, кому
+    // нужна помощь — по направлениям, и чат о том же дне. Рядом с «Обзором»:
+    // её читают первой, до очереди.
+    { key: 'digest',    label: 'Сводка',         Icon: ScrollText },
     { key: 'queue',     label: 'Очередь ревью',  Icon: ListChecks },
     { key: 'chats',     label: 'Чаты',           Icon: MessageSquare },
     // Два блока оценённого — по субъекту: переписки Верификаторов и звонки
@@ -168,6 +175,15 @@ export default function CallQaView(props) {
      * зависимостях эффекта это бесконечный перезапрос. */
     const filtersSignature = filtersKey(filters);
 
+    /* «Звонки», «Чаты» и «Сводка» — по дням, как очередь. Их состояние здесь, а
+     * не во вкладках: пока открыта карточка разговора, вкладка размонтирована, а
+     * вернуться человек должен на тот же экран дня (и в ту же переписку с ИИ). */
+    const callsList = useDayList({ apiBaseUrl, headers, department, filters,
+                                   subject: SUBJECT_FAMILY_CALLS, enabled: tab === 'evals' });
+    const chatsList = useDayList({ apiBaseUrl, headers, department, filters,
+                                   subject: chatSubjectOf(department), enabled: tab === 'chats' });
+    const digest = useDigest({ apiBaseUrl, headers, department, enabled: tab === 'digest', showToast });
+
     const [selected, setSelected] = useState(null);
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
@@ -184,6 +200,10 @@ export default function CallQaView(props) {
     const callRequest = useRef({ id: 0, controller: null });
     const queueRequest = useRef({ id: 0, controller: null });
     const returnFocus = useRef(null);
+    // Вкладка, с которой открыли карточку: строка разговора годится в правку
+    // сводки очереди, только если она и есть строка очереди (у строк «Звонков» и
+    // «Чатов» другие метки — по ним сводка дня очереди посчиталась бы неверно).
+    const openedFrom = useRef(null);
 
     /* Открытая карточка занимает экран до низа: две её колонки (запись с
        транскриптом и оценка) прокручиваются независимо, а страница — нет.
@@ -266,6 +286,7 @@ export default function CallQaView(props) {
         setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
         setReviewInteraction({ dirty: false, busy: false });
         resetQueue();
+        callsList.reset(); chatsList.reset(); digest.reset();
         // Отбор принадлежит ОТДЕЛУ: сотрудники, группы и направления у отделов
         // разные, и сохранённый выбор после переключения ссылался бы на чужого
         // человека — список молча оказался бы пустым при живых оценках.
@@ -399,6 +420,7 @@ export default function CallQaView(props) {
        этапы на «оценка идёт», не дожидаясь ответа. */
     const openCall = (c, refresh = false, { poll = false } = {}) => {
         if (!selected && typeof document !== 'undefined') returnFocus.current = document.activeElement;
+        if (!selected) openedFrom.current = tab;
         callRequest.current.controller?.abort();
         clearPendingTimers();
         const controller = new AbortController();
@@ -471,12 +493,43 @@ export default function CallQaView(props) {
          длинной ленты), фокус на заголовок дня, если открыли из списка;
        — «Все дни» — обратно к строке этого дня. */
     const queueReturn = useRef(null);
+    // Куда вернуться в сводке после карточки, открытой по ссылке из неё; лента
+    // чата восстанавливает свою прокрутку сама, при монтировании (chatRestore).
+    const digestReturn = useRef(null);
+    const [digestChatRestore, setDigestChatRestore] = useState(null);
     useEffect(() => {
         const back = queueReturn.current;
         if (selected || !back) return;
         queueReturn.current = null;
         const esc = (value) => (window.CSS?.escape ? window.CSS.escape(value) : String(value));
-        const title = document.getElementById('qa-queue-day-title');
+        const title = document.getElementById(back.titleId || 'qa-queue-day-title');
+        if (back.digest) {
+            // Из карточки — обратно в сводку: туда же по прокрутке (прокручивается
+            // .main-content, а в оболочке телефона — сам документ) и на ТУ ЖЕ
+            // кнопку разговора: в той же колонке (сводка или чат), в том же ответе
+            // ИИ и той же по счёту — одинаковых ссылок в тексте бывает несколько.
+            setDigestChatRestore(null);
+            const scroller = document.querySelector('.main-content');
+            if (scroller && Number.isFinite(back.scrollTop)) scroller.scrollTop = back.scrollTop;
+            if (Number.isFinite(back.windowY)) window.scrollTo(0, back.windowY);
+            const pane = back.pane && document.querySelector(`[data-qa-pane="${esc(back.pane)}"]`);
+            const holder = (back.message && pane?.querySelector(`[data-qa-message="${esc(back.message)}"]`))
+                || pane || document;
+            const refs = back.ref ? [...holder.querySelectorAll(`[data-qa-ref="${esc(back.ref)}"]`)] : [];
+            const ref = refs[back.index] || refs[0];
+            if (ref && ref.offsetParent !== null) {
+                // Ленту чата прокрутку восстанавливает сама (chatRestore) — когда у
+                // неё появится высота; двигать её отсюда значило бы сбить это место.
+                const box = ref.getBoundingClientRect();
+                if (back.pane !== 'chat' && (box.top < 0 || box.bottom > window.innerHeight)) {
+                    ref.scrollIntoView({ block: 'center' });
+                }
+                ref.focus({ preventScroll: true });
+            } else {
+                title?.focus({ preventScroll: true });
+            }
+            return;
+        }
         if (back.tile) {
             const tile = document.querySelector(`[data-qa-day-tile="${esc(back.tile)}"]`);
             tile?.scrollIntoView({ block: 'center' });
@@ -484,7 +537,7 @@ export default function CallQaView(props) {
             return;
         }
         if (back.dayOpened) {
-            const panel = document.getElementById('qa-panel-queue');
+            const panel = document.getElementById(`qa-panel-${tab}`);
             if (panel && panel.getBoundingClientRect().top < 0) panel.scrollIntoView({ block: 'start' });
             if (back.focusTitle) title?.focus({ preventScroll: true });
             return;
@@ -514,6 +567,20 @@ export default function CallQaView(props) {
             const at = rows.findIndex((item) => itemKey(item) === key);
             const next = at >= 0 ? rows[at + 1] || rows[at - 1] : null;
             queueReturn.current = { key, day, next: next ? itemKey(next) : null };
+        }
+        if ((tab === 'evals' || tab === 'chats') && selected) {
+            const list = tab === 'evals' ? callsList : chatsList;
+            // Оценку могли поправить, а подбор — добавить новую: день и его строки
+            // перечитываются, не убирая строки с экрана до ответа.
+            list.refresh();
+            if (list.openDay) {
+                queueReturn.current = { key: itemKey(selected),
+                                        titleId: tab === 'evals' ? 'qa-evals-day-title' : 'qa-chats-day-title' };
+            }
+        }
+        if (tab === 'digest' && selected && digestReturn.current) {
+            queueReturn.current = { digest: true, titleId: 'qa-digest-day-title', ...digestReturn.current };
+            digestReturn.current = null;
         }
         setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
         setCallPending(null);
@@ -546,6 +613,59 @@ export default function CallQaView(props) {
     };
 
     useEffect(() => () => callRequest.current.controller?.abort(), []);
+
+    /* Переходы между экранами «по дням» с фокусом — тем же эффектом queueReturn,
+       что у очереди: открыли день из списка — фокус на его заголовок, вернулись к
+       списку — на строку этого дня. Стрелки соседнего дня фокус не уводят: он
+       остаётся на стрелке, и листать дальше можно тем же Enter (как в очереди). */
+    const withDayFocus = (list, titleId) => ({
+        ...list,
+        open: (day, { fromList = false } = {}) => {
+            queueReturn.current = { dayOpened: true, focusTitle: fromList, titleId };
+            list.open(day);
+        },
+        close: () => { queueReturn.current = { tile: list.openDay }; list.close(); },
+    });
+    const callsDays = withDayFocus(callsList, 'qa-evals-day-title');
+    const chatsDays = withDayFocus(chatsList, 'qa-chats-day-title');
+    const digestDays = withDayFocus(digest, 'qa-digest-day-title');
+
+    /* «Сводка дня» с экрана дня очереди, «Звонков» или «Чатов». */
+    const openDigestDay = (day) => {
+        if (!day || day === NO_DAY) return;
+        if (sectionInteraction.busy) {
+            showToast?.('Дождитесь завершения сохранения', 'error');
+            return;
+        }
+        setSectionInteraction({ editing: false, busy: false });
+        setTab('digest');
+        queueReturn.current = { dayOpened: true, focusTitle: true, titleId: 'qa-digest-day-title' };
+        digest.open(day);
+    };
+
+    /* Ссылка на разговор в сводке или в ответе ИИ → карточка; «Назад» вернёт
+       в сводку на то же место (digestReturn — выше, рядом с queueReturn): та же
+       прокрутка страницы и ленты чата, та же кнопка. */
+    const openFromDigest = (ref, button = null) => {
+        if (!ref?.id || !ref?.subject) return;
+        const key = `${ref.subject}:${ref.id}`;
+        const scroller = typeof document !== 'undefined' ? document.querySelector('.main-content') : null;
+        const pane = button?.closest?.('[data-qa-pane]');
+        const message = button?.closest?.('[data-qa-message]');
+        const holder = message || pane;
+        const log = typeof document !== 'undefined'
+            ? document.querySelector('[data-qa-pane="chat"] [role="log"]') : null;
+        digestReturn.current = {
+            ref: key,
+            scrollTop: scroller ? scroller.scrollTop : null,
+            windowY: typeof window !== 'undefined' ? window.scrollY : null,
+            pane: pane?.getAttribute('data-qa-pane') || null,
+            message: message?.getAttribute('data-qa-message') || null,
+            index: holder && button ? [...holder.querySelectorAll(`[data-qa-ref="${key}"]`)].indexOf(button) : 0,
+        };
+        setDigestChatRestore(log ? { day: digest.openDay, scrollTop: log.scrollTop } : null);
+        openCall({ id: ref.id, subject: ref.subject });
+    };
 
     // ИИ-подсказка формулировки разбора (правило + границы) — человек редактирует и сохраняет сам.
     const refineAdjud = async (c, d) => {
@@ -680,7 +800,8 @@ export default function CallQaView(props) {
         const key = `${kind}-${call.id}`;
         const row = Object.values(queueDayItems).flatMap((entry) => entry.items || [])
             .find((item) => itemKey(item) === key)
-            || (selected && itemKey(selected) === key && selected.day ? selected : null);
+            || (openedFrom.current === 'queue' && selected && itemKey(selected) === key && selected.day
+                ? selected : null);
         if (row) {
             setQueueReviewed((list) => (list.some((entry) => entry.key === key) ? list
                 : [...list, { key, day: row.day || NO_DAY, reasons: row.reasons || [],
@@ -702,7 +823,11 @@ export default function CallQaView(props) {
            списка привязывались к <body>, вылезали из прокрутки .main-content и
            растягивали ДОКУМЕНТ: на экране дня появлялся второй, внешний скролл на
            тысячи пикселей вниз (01.10.2026: 3968 px при окне 900). */
-        <div style={{ fontFamily: APPLE_FONT }} className="relative space-y-4">
+        /* Фон корня — для телефона: оболочка делает .main-content прозрачным, и
+           сквозь зазоры между карточками просвечивал фоновый логотип портала
+           (тот же приём, что у «Термокоробов»). На компьютере цвет совпадает с
+           .main-content, ничего не меняется. */
+        <div style={{ fontFamily: APPLE_FONT }} className="relative min-h-screen space-y-4 bg-gray-50 md:min-h-0">
             {/* Шапка раздела — только над списками. В открытой карточке разговора
                 она отнимала высоту у транскрипта и оценки, а вкладок и выбора отдела
                 там всё равно нет; заголовок для экранного диктора — в строке «Назад». */}
@@ -855,13 +980,18 @@ export default function CallQaView(props) {
                                    onOpen={openCall} onRefresh={loadQueue}
                                    onLoadMore={loadQueueDay} onRetryDay={loadQueueDay}
                                    openDay={queueDay} onCloseDay={closeQueueDay}
+                                   onOpenDigest={openDigestDay}
                                    onOpenDay={(day, opts) => openQueueDay(day, { fromTile: !queueDay || Boolean(opts?.focusTitle) })} />
                     )
             ) : tab === 'chats' ? (
                 <ChatQueue apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                            showToast={showToast} onOpen={openCall} department={department}
                            filters={filters} onResetFilters={() => setFilters(EMPTY_FILTERS)}
-                           onFind={() => setFindOpen(true)} />
+                           onFind={() => setFindOpen(true)} list={chatsDays}
+                           onOpenDigest={openDigestDay} />
+            ) : tab === 'digest' ? (
+                <DigestView digest={digestDays} scoped={isScopedSupervisor} chatRestore={digestChatRestore}
+                            onOpenRef={openFromDigest} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              department={department}
@@ -872,11 +1002,12 @@ export default function CallQaView(props) {
                    показывал им пустую вкладку при живых оценках. */
                 <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                                  onOpen={openCall} showToast={showToast}
-                                 subject={SUBJECT_FAMILY_CALLS}
+                                 subject={SUBJECT_FAMILY_CALLS} list={callsDays}
                                  department={department} canPull={canPullCalls(department)}
                                  filters={filters}
                                  onResetFilters={() => setFilters(EMPTY_FILTERS)}
-                                 onFind={() => setFindOpen(true)} />
+                                 onFind={() => setFindOpen(true)}
+                                 onOpenDigest={openDigestDay} />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl}
                                         withAccessTokenHeader={withAccessTokenHeader} directions={props.directions}

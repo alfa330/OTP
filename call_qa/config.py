@@ -518,6 +518,12 @@ AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE = max(0, int(env("AI_QA_DAILY_SAMPLE_C2D_QU
 # пределу оценки ещё доделываются (до нескольких минут каждая) — с тремя часами
 # первый проход всегда залезал бы на время второго.
 AI_QA_DAILY_SAMPLE_BUDGET_S = max(60, int(env("AI_QA_DAILY_SAMPLE_BUDGET_S", str(9000))))
+# Сводка дня (call_qa.digest) после каждого прохода выборки. Выключатель — на случай,
+# если генерацию надо остановить без выкладки: она тоже тратит деньги каждую ночь
+# (около $0,1 на отдел). Вручную, кнопкой в разделе, сводка пишется и при выключенном.
+AI_QA_DIGEST_ENABLED = str(env("AI_QA_DIGEST_ENABLED", "1")).strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 # --- Хранилища ---
 GCS_BUCKET = env("GCS_BUCKET", "my-app-audio-uploads")
