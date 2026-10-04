@@ -62,7 +62,7 @@ class FourYouAccessControlTests(unittest.TestCase):
         # показывался бы тому, кого в раздел не пускают.
         self.assertIn("can_see_four_you, _ = _four_you_access_for_requester(requester_id, requester)", self.api_source)
 
-    def test_backend_access_function_lets_in_only_the_admin(self):
+    def _real_access_function(self, section_open):
         """Настоящая функция бэкенда, а не поиск строки: её же зовут гард ручек
         и колокол уведомлений (_notifications_viewer_context)."""
         bot_path = ROOT / "bot_schedule2.py"
@@ -70,15 +70,37 @@ class FourYouAccessControlTests(unittest.TestCase):
             source_cache.function_copy(bot_path, "_normalize_user_role"),
             source_cache.function_copy(bot_path, "_four_you_access_for_requester"),
         ]
-        namespace = {"FOUR_YOU_ADMIN_USER_ID": 2}
+        namespace = {"FOUR_YOU_ADMIN_USER_ID": 2, "FOUR_YOU_SECTION_OPEN": section_open}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(bot_path), "exec"), namespace)
-        access = namespace["_four_you_access_for_requester"]
+        return namespace["_four_you_access_for_requester"]
 
-        def requester(role, status="working"):
-            # Форма строки как у get_user: role — [3], status — [11].
-            row = [None] * 12
-            row[3], row[11] = role, status
-            return tuple(row)
+    @staticmethod
+    def _requester(role, status="working"):
+        # Форма строки как у get_user: role — [3], status — [11].
+        row = [None] * 12
+        row[3], row[11] = role, status
+        return tuple(row)
+
+    def test_section_is_closed_for_everyone(self):
+        """04.10.2026 владелец: «мне тоже закрой этот раздел» — раздел закрыт для
+        всех, в том числе для того, кто его ведёт: ни ручек, ни бейджа в колоколе,
+        ни строки в шапке. Фото и разметка целы — открыть снова можно выключателем
+        FOUR_YOU_SECTION_OPEN в двух местах (бэкенд и App.jsx), значения сверяются."""
+        backend = re.findall(r"^FOUR_YOU_SECTION_OPEN = (True|False)\s*$", self.api_source, re.M)
+        frontend = re.findall(r"^const FOUR_YOU_SECTION_OPEN = (true|false);\s*$", self.app_source, re.M)
+        self.assertEqual(["False"], backend)
+        self.assertEqual(["false"], frontend)
+        self.assertTrue("os.getenv('FOUR_YOU_SECTION_OPEN'" not in self.api_source,
+                        "раздел 4 You открывается переменной окружения")
+        self.assertIn("    FOUR_YOU_SECTION_OPEN &&\n", self.app_source.replace("\r\n", "\n"))
+        access = self._real_access_function(section_open=False)
+        for user_id, role in ((2, "super_admin"), ("2", "superadmin"), (241, "operator"), (241, "super_admin")):
+            self.assertEqual((False, False), access(user_id, self._requester(role)), (user_id, role))
+
+    def test_backend_access_function_lets_in_only_the_admin(self):
+        """Если раздел откроют снова — пускает только того, кто его ведёт."""
+        access = self._real_access_function(section_open=True)
+        requester = self._requester
 
         self.assertEqual((True, True), access(2, requester("super_admin")))
         self.assertEqual((True, True), access("2", requester("superadmin")))

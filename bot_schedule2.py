@@ -3173,6 +3173,12 @@ AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip(
 AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
+# Раздел 4 You закрыт для всех, в том числе для того, кто его ведёт (04.10.2026,
+# слово владельца: «мне тоже закрой этот раздел»). Фото и разметка в базе и в
+# хранилище целы. Открыть снова — True здесь и FOUR_YOU_SECTION_OPEN в App.jsx
+# (тест сверяет оба). Константа, а не переменная окружения: забытая настройка
+# на Render не должна молча открыть раздел.
+FOUR_YOU_SECTION_OPEN = False
 # Поимённый доступ к разделу «ИИ-оценка» — сверх ролей. Проверяется ПЕРВЫМ, до
 # роли и отдела, поэтому человек из списка проходит независимо от того, как
 # сложится остальная проверка.
@@ -4397,6 +4403,9 @@ def _four_you_access_for_requester(requester_id, requester):
     # его доступ снят целиком по решению владельца (25.09.2026; возвращали 03.10,
     # снова снят 04.10.2026), и вернуть его переменной окружения нельзя —
     # такой настройки не осталось.
+    # Раздел закрыт целиком — ни ручек, ни бейджа в колоколе ни у кого.
+    if not FOUR_YOU_SECTION_OPEN:
+        return False, False
     requester_role = _normalize_user_role(requester[3] if requester else None)
     requester_id = int(requester_id or 0)
     requester_status = str(requester[11] if requester and len(requester) > 11 else '').strip().lower()

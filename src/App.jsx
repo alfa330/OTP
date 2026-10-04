@@ -296,6 +296,10 @@ const SESSION_DEPARTMENT_ALL = 'all';
 const SESSION_DEPARTMENT_NONE = 'none';
 const SESSION_DEPARTMENT_NONE_LABEL = 'Без отдела';
 const FOUR_YOU_ADMIN_USER_ID = 2;
+// Раздел 4 You закрыт для всех, в том числе для того, кто его ведёт (04.10.2026,
+// слово владельца). Зеркало — FOUR_YOU_SECTION_OPEN в bot_schedule2.py; тест
+// сверяет оба. Фото и разметка целы, открыть снова — true здесь и там.
+const FOUR_YOU_SECTION_OPEN = false;
 const AI_QA_OP_DEPARTMENT_ID = 367;
 // Кому доступна программа iCORE Phone: отдел продаж (367), Тез КЦ (560) и админы.
 // Та же константа на бэкенде (ICORE_PHONE_DEPARTMENT_IDS в bot_schedule2.py) — она
@@ -1974,6 +1978,7 @@ const canAccessResourceFteSectionForUser = (userLike) => {
 };
 
 const canManageFourYouForUser = (userLike) => (
+    FOUR_YOU_SECTION_OPEN &&
     normalizeRole(userLike?.role) === 'super_admin' &&
     Number(userLike?.id) === FOUR_YOU_ADMIN_USER_ID
 );
