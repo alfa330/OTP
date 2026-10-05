@@ -183,49 +183,95 @@ def update_office(cursor, water_office_id, fields, settings):
     return read_office(cursor, water_office_id, settings)
 
 
-def _insert_movement(cursor, water_office_id, kind, delta, stock_after, comment, actor):
+_MOVEMENT_COLUMNS = ('id', 'kind', 'delta', 'stock_after', 'comment', 'actor_name', 'created_at',
+                     'adjusts_intake')
+
+
+def _movement_row(row):
+    movement = dict(zip(_MOVEMENT_COLUMNS, row))
+    movement['created_at'] = _iso(movement['created_at'])
+    movement['adjusts_intake'] = bool(movement['adjusts_intake'])
+    return movement
+
+
+def _insert_movement(cursor, water_office_id, kind, delta, stock_after, comment, actor,
+                     adjusts_intake=False):
+    # Отметка «учесть в „Поступило“» есть только у пересчёта: поступление в
+    # этой колонке и так.
+    adjusts_intake = bool(adjusts_intake) and kind == 'recount'
     cursor.execute(
         """
         INSERT INTO water_movements (water_office_id, kind, delta, stock_after, comment,
-                                     actor_user_id, actor_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                     actor_user_id, actor_name, adjusts_intake)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id, created_at
         """,
         (int(water_office_id), kind, int(delta), int(stock_after), comment,
-         actor['user_id'], actor.get('name')))
+         actor['user_id'], actor.get('name'), adjusts_intake))
     movement_id, created_at = cursor.fetchone()
     return {'id': movement_id, 'kind': kind, 'delta': int(delta), 'stock_after': int(stock_after),
-            'comment': comment, 'actor_name': actor.get('name'), 'created_at': _iso(created_at)}
+            'comment': comment, 'actor_name': actor.get('name'), 'created_at': _iso(created_at),
+            'adjusts_intake': adjusts_intake}
 
 
-def apply_movement(cursor, office, *, kind, delta, comment, actor):
+def apply_movement(cursor, office, *, kind, delta, comment, actor, adjusts_intake=False):
     """Поступление или пересчёт по ЗАПЕРТОЙ строке офиса (read_office for_update).
 
     Возвращает строку журнала. Остаток ниже нуля не уводится — это проверяет
     вызывающий, а CHECK в таблице страхует.
+
+    adjusts_intake — пересчётом исправляют поступление, и его разница входит в
+    «Поступило» остатков (см. dashboard).
     """
     stock_after = int(office['stock']) + int(delta)
     cursor.execute(
         "UPDATE water_offices SET stock = %s, "
         "updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') WHERE id = %s",
         (stock_after, office['id']))
-    return _insert_movement(cursor, office['id'], kind, delta, stock_after, comment, actor)
+    return _insert_movement(cursor, office['id'], kind, delta, stock_after, comment, actor,
+                            adjusts_intake=adjusts_intake)
 
 
 def list_movements(cursor, water_office_id, limit=30):
     cursor.execute(
         """
-        SELECT id, kind, delta, stock_after, comment, actor_name, created_at
+        SELECT %s
           FROM water_movements
-         WHERE water_office_id = %s
+         WHERE water_office_id = %%s
          ORDER BY created_at DESC, id DESC
-         LIMIT %s
-        """,
+         LIMIT %%s
+        """ % ', '.join(_MOVEMENT_COLUMNS),
         (int(water_office_id), int(limit)))
-    return [{
-        'id': row[0], 'kind': row[1], 'delta': row[2], 'stock_after': row[3],
-        'comment': row[4], 'actor_name': row[5], 'created_at': _iso(row[6]),
-    } for row in cursor.fetchall()]
+    return [_movement_row(row) for row in cursor.fetchall()]
+
+
+def read_movement(cursor, movement_id):
+    """Строка журнала движений — или None, если такой нет."""
+    cursor.execute(
+        'SELECT %s FROM water_movements WHERE id = %%s' % ', '.join(_MOVEMENT_COLUMNS),
+        (int(movement_id),))
+    row = cursor.fetchone()
+    return _movement_row(row) if row else None
+
+
+def set_movement_adjusts_intake(cursor, movement_id, value, actor):
+    """Сменить у проведённого пересчёта отметку «учесть в „Поступило“».
+
+    Остаток не трогается: меняется только то, входит ли разница пересчёта в
+    «Поступило». Поступление отметить нельзя — условие в самом запросе, а не
+    только у вызывающего.
+    """
+    cursor.execute(
+        """
+        UPDATE water_movements
+           SET adjusts_intake = %%s, adjusts_intake_by_name = %%s,
+               adjusts_intake_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+         WHERE id = %%s AND kind = 'recount'
+        RETURNING %s
+        """ % ', '.join(_MOVEMENT_COLUMNS),
+        (bool(value), actor.get('name'), int(movement_id)))
+    row = cursor.fetchone()
+    return _movement_row(row) if row else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,6 +523,13 @@ def dashboard(cursor, settings, *, date_from, date_to, today):
     когда офис уже был в учёте и которые уже наступили: офис, заведённый три дня
     назад, иначе делил бы свои три дня выдач на тридцать и «хватало» бы ему
     вдесятеро дольше, чем на самом деле.
+
+    «Поступило» — поступления плюс разницы пересчётов, отмеченных
+    `adjusts_intake`: внесли 500, которых ещё не привезли, и сняли их
+    пересчётом — остаток стал верным, а «Поступило» без отметки так и
+    показывало бы 500 (05.10.2026). Разница со знаком и стоит в день пересчёта,
+    так что за узкий период, где есть только исправление, выйдет минус.
+    Обычный пересчёт (недостача, излишек, стартовый остаток) сюда не входит.
     """
     params = {
         'from': datetime.combine(date_from, datetime.min.time()),
@@ -500,7 +553,8 @@ def dashboard(cursor, settings, *, date_from, date_to, today):
           LEFT JOIN (
                 SELECT water_office_id, SUM(delta) AS intake
                   FROM water_movements
-                 WHERE kind = 'intake' AND created_at >= %(from)s AND created_at < %(to_next)s
+                 WHERE (kind = 'intake' OR adjusts_intake)
+                   AND created_at >= %(from)s AND created_at < %(to_next)s
                  GROUP BY water_office_id
           ) m ON m.water_office_id = o.id
          WHERE o.is_active

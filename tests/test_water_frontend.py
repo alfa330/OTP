@@ -227,6 +227,39 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(stock.count('{officePlace(row)}'), 2)  # таблица и карточки на телефоне
         self.assertIn('subtitle={officePlace(office)}', stock)
 
+    def test_recount_can_be_counted_in_intake(self):
+        """«В случае пересчёта регулировать „Поступило“» (05.10.2026): отметка —
+        в форме пересчёта и у уже сделанного пересчёта, и только руководителю."""
+        stock = _read(ROOT / 'src' / 'components' / 'water' / 'WaterStock.jsx')
+        self.assertIn("const INTAKE_FLAG_LABEL = 'Учесть в «Поступило»';", stock)
+        # В форме — только на вкладке «Пересчёт», и уходит вместе с пересчётом.
+        self.assertIn("{mode === 'recount' && (\n", stock)
+        self.assertIn('<IosToggle checked={adjustsIntake} onChange={setAdjustsIntake} disabled={saving} />', stock)
+        self.assertIn('{ stock: count, comment, adjusts_intake: adjustsIntake }', stock)
+        # Отметка живёт один пересчёт: смена вкладки или офиса её снимает.
+        self.assertIn('useEffect(() => { setAdjustsIntake(false); }, [mode, open, office?.id]);', stock)
+        # У сделанного пересчёта — меню; поступлению отмечать нечего.
+        self.assertIn("const recountMenu = canManage && movements.some((item) => item.kind === 'recount');", stock)
+        self.assertIn("{recountMenu && (item.kind === 'recount' ? (", stock)
+        self.assertIn('axios.patch(`${apiBaseUrl}/api/water/movements/${item.id}`', stock)
+        self.assertIn('{ adjusts_intake: next }', stock)
+        # «Поступило» в таблице перечитывается, остаток — нет: он не менялся.
+        self.assertIn('onIntakeChanged={load}', stock)
+        # Пояснение — под «i», а не строкой под полем.
+        self.assertIn('<InfoHint side="left" text={INTAKE_FLAG_HINT} />', stock)
+
+    def test_movement_rows_do_not_wrap_on_a_phone(self):
+        """Оболочка телефона переносит ряды с gap: у строки с отметкой число и
+        меню падали под текст, к левому краю (снимок 390×844). Правило оболочки
+        перебивается только инлайном — класс `flex-nowrap` она сама переводит в
+        перенос."""
+        stock = _read(ROOT / 'src' / 'components' / 'water' / 'WaterStock.jsx')
+        rows = stock.split('{movements.map((item) => (')[1].split('</ul>')[0]
+        self.assertIn("<li key={item.id} style={{ flexWrap: 'nowrap' }}", rows)
+        self.assertNotIn('flex-nowrap', rows)
+        shell = _read(ROOT / 'src' / 'components' / 'common' / 'mobile-shell.css')
+        self.assertIn('body.mobile-shell .main-content .flex.items-start.justify-between {', shell)
+
     def test_no_native_selects_or_date_inputs(self):
         """Эталон портала — свои пикеры: системный select/date — чужая деталь."""
         for path in (ROOT / 'src' / 'components' / 'water').glob('*.jsx'):
@@ -300,6 +333,26 @@ class SchemaTests(unittest.TestCase):
         self.assertNotIn('uq_water_welcome_account "', self.ddl)
         for column in ('canceled_at', 'canceled_by', 'canceled_by_name', 'cancel_reason'):
             self.assertIn('ADD COLUMN IF NOT EXISTS %s' % column, migrations)
+
+    def test_recount_mark_lives_in_fresh_and_live_bases(self):
+        """Отметка «учесть в „Поступило“» — и в CREATE (пустая база), и миграцией
+        (живая), по умолчанию выключена: прежние пересчёты «Поступило» не меняют."""
+        table = self.ddl.split('CREATE TABLE IF NOT EXISTS water_movements')[1].split('CREATE TABLE')[0]
+        self.assertRegex(table, r'adjusts_intake\s+BOOLEAN NOT NULL DEFAULT FALSE')
+        migrations = '\n'.join(schema._MIGRATIONS)
+        self.assertIn('ALTER TABLE water_movements ADD COLUMN IF NOT EXISTS adjusts_intake '
+                      'BOOLEAN NOT NULL DEFAULT FALSE', migrations)
+        for column in ('adjusts_intake_by_name', 'adjusts_intake_at'):
+            self.assertIn(column, table)
+            self.assertIn('ALTER TABLE water_movements ADD COLUMN IF NOT EXISTS %s ' % column, migrations)
+
+    def test_movements_are_altered_after_issues(self):
+        """Дашборд берёт таблицы в порядке «выдачи, движения». Разворот на старте
+        запирает их в том же порядке — иначе он и запрос ещё живого старого
+        экземпляра могли бы запереть друг друга крест-накрест."""
+        tables = [statement.split('ALTER TABLE ')[1].split()[0]
+                  for statement in schema._MIGRATIONS if statement.startswith('ALTER TABLE ')]
+        self.assertEqual(tables, sorted(tables, key=('water_issues', 'water_movements').index))
 
     def test_tables_before_indexes(self):
         executed = []

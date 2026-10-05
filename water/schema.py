@@ -39,6 +39,8 @@ ISSUE_KINDS = ('welcome', 'activity')
 
 # Движения остатка, кроме выдач: поступление и пересчёт (инвентаризация).
 # Пересчётом же заводится стартовый остаток, когда офис добавляют в учёт.
+# В «Поступило» остатков идут поступления и те пересчёты, что отмечены
+# `adjusts_intake` (ими исправляют неверно внесённое поступление).
 MOVEMENT_KINDS = ('intake', 'recount')
 
 # Условия программы по умолчанию — из ТЗ и ответов постановщика.
@@ -102,7 +104,14 @@ _STATEMENTS = [
         comment          TEXT,
         actor_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         actor_name       VARCHAR(200),
-        created_at       TIMESTAMP NOT NULL DEFAULT %s
+        created_at       TIMESTAMP NOT NULL DEFAULT %s,
+        -- Пересчёт, которым исправили поступление (внесли не то число, не в
+        -- тот офис, раньше, чем привезли): его разница входит в «Поступило»
+        -- остатков. Недостача и излишек на полке идут без отметки. Отметку
+        -- ставят при пересчёте и могут сменить потом — кто и когда, записано.
+        adjusts_intake          BOOLEAN NOT NULL DEFAULT FALSE,
+        adjusts_intake_by_name  VARCHAR(200),
+        adjusts_intake_at       TIMESTAMP
     )
     """ % _NOW,
 
@@ -191,6 +200,14 @@ _MIGRATIONS = [
     # «без уникальности» снаружи не видно.
     "DROP INDEX IF EXISTS uq_water_welcome_account",
     "DROP INDEX IF EXISTS uq_water_welcome_iin",
+
+    # Пересчёт, учтённый в «Поступило» (05.10.2026). Стоит ПОСЛЕ правок
+    # water_issues: дашборд берёт таблицы в том же порядке (выдачи, потом
+    # движения), и разворот на старте не запрёт их крест-накрест с запросом
+    # ещё живого старого экземпляра.
+    "ALTER TABLE water_movements ADD COLUMN IF NOT EXISTS adjusts_intake BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE water_movements ADD COLUMN IF NOT EXISTS adjusts_intake_by_name VARCHAR(200)",
+    "ALTER TABLE water_movements ADD COLUMN IF NOT EXISTS adjusts_intake_at TIMESTAMP",
 ]
 
 

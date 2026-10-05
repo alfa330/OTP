@@ -78,6 +78,7 @@ class Store:
         self.offices = {}
         self.issues = []
         self.movements = []
+        self.flag_writes = 0
         self.locks = []
         self.recipients = [{'user_id': 5, 'name': 'Руководитель', 'chat_id': 555}]
         self.candidates = [{'id': 5, 'name': 'Руководитель', 'city': None, 'has_telegram': True}]
@@ -139,15 +140,26 @@ class Store:
         self.offices[water_office_id].update(fields)
         return self.read_office(cursor, water_office_id, settings)
 
-    def apply_movement(self, cursor, office, kind, delta, comment, actor):
+    def apply_movement(self, cursor, office, kind, delta, comment, actor, adjusts_intake=False):
         raw = self.offices[office['id']]
         raw['stock'] += delta
-        movement = {'kind': kind, 'delta': delta, 'stock_after': raw['stock'], 'comment': comment}
+        movement = {'id': len(self.movements) + 1, 'kind': kind, 'delta': delta,
+                    'stock_after': raw['stock'], 'comment': comment, 'adjusts_intake': adjusts_intake}
         self.movements.append(movement)
         return movement
 
     def list_movements(self, cursor, water_office_id, limit=30):
         return list(self.movements)
+
+    def read_movement(self, cursor, movement_id):
+        found = next((item for item in self.movements if item['id'] == int(movement_id)), None)
+        return dict(found) if found else None
+
+    def set_movement_adjusts_intake(self, cursor, movement_id, value, actor):
+        found = next(item for item in self.movements if item['id'] == int(movement_id))
+        found.update(adjusts_intake=value, adjusts_intake_by_name=actor.get('name'))
+        self.flag_writes += 1
+        return dict(found)
 
     # выдачи
     def lock_driver(self, cursor, account_id, iin=None):
@@ -249,7 +261,8 @@ class _Base(unittest.TestCase):
         }
         for name in ('get_settings', 'update_settings', 'list_offices', 'read_office',
                      'taken_office_ids', 'directory_office', 'add_office', 'update_office',
-                     'apply_movement', 'list_movements', 'lock_driver', 'person_history',
+                     'apply_movement', 'list_movements', 'read_movement',
+                     'set_movement_adjusts_intake', 'lock_driver', 'person_history',
                      'create_issue', 'list_issues', 'issues_for_export', 'filter_values',
                      'issue_for_cancel', 'cancel_issue',
                      'dashboard', 'notify_candidates', 'front_office_head_ids',
@@ -342,12 +355,14 @@ class GateTests(_Base):
                 ('post', '/api/water/offices', {'office_id': 65, 'stock': 1}),
                 ('post', '/api/water/offices/%d/intake' % office_id, {'blocks': 5}),
                 ('post', '/api/water/offices/%d/recount' % office_id, {'stock': 5, 'comment': 'x'}),
+                ('patch', '/api/water/movements/1', {'adjusts_intake': True}),
                 ('patch', '/api/water/offices/%d' % office_id, {'low_threshold': 5})):
             response = getattr(self.client, method)(url, json=body)
             self.assertEqual(response.status_code, 403, url)
             self.assertEqual(response.get_json()['code'], 'WATER_MANAGE_FORBIDDEN')
         self.assertEqual(self.store.settings['min_trips'], 20)
         self.assertEqual(self.store.offices[office_id]['stock'], 50)
+        self.assertEqual(self.store.flag_writes, 0)
 
     def test_ping_carries_capabilities_and_public_settings(self):
         body = self.client.get('/api/water/ping').get_json()
@@ -742,6 +757,99 @@ class ManageTests(_Base):
                                 json={'stock': 5, 'comment': 'проверили'})
         self.assertEqual(same.get_json()['code'], 'WATER_RECOUNT_SAME')
         self.assertEqual(self.store.movements, [])
+
+    # ── Пересчёт и колонка «Поступило» (05.10.2026) ──────────────────────
+    def test_recount_goes_into_intake_only_when_marked(self):
+        """«В случае пересчёта регулировать „Поступило“»: 500 внесли раньше, чем
+        привезли, и сняли пересчётом — с отметкой разница идёт в «Поступило»,
+        без отметки (недостача на полке) — нет."""
+        office_id = self.store.add(stock=500)
+        url = '/api/water/offices/%d/recount' % office_id
+        marked = self.client.post(url, json={'stock': 0, 'comment': 'не отгрузили', 'adjusts_intake': True})
+        self.assertEqual(marked.status_code, 201)
+        self.assertIs(marked.get_json()['movement']['adjusts_intake'], True)
+        plain = self.client.post(url, json={'stock': 3, 'comment': 'нашли на полке'})
+        self.assertIs(plain.get_json()['movement']['adjusts_intake'], False)
+        explicit = self.client.post(url, json={'stock': 2, 'comment': 'разбили', 'adjusts_intake': False})
+        self.assertIs(explicit.get_json()['movement']['adjusts_intake'], False)
+        self.assertEqual([item['adjusts_intake'] for item in self.store.movements], [True, False, False])
+
+    def test_recount_mark_is_yes_or_no_only(self):
+        """Строка «false» сошла бы за «да» и молча поменяла бы колонку."""
+        office_id = self.store.add(stock=5)
+        for value in ('false', 'true', 1, 0, 'да', None, [], {}):
+            response = self.client.post('/api/water/offices/%d/recount' % office_id,
+                                        json={'stock': 3, 'comment': 'пересчитали', 'adjusts_intake': value})
+            self.assertEqual(response.status_code, 400, value)
+            self.assertEqual(response.get_json()['code'], 'WATER_INTAKE_FLAG_INVALID')
+        self.assertEqual(self.store.movements, [])
+        self.assertEqual(self.store.offices[office_id]['stock'], 5)
+
+    def test_intake_carries_no_mark(self):
+        office_id = self.store.add(stock=5)
+        response = self.client.post('/api/water/offices/%d/intake' % office_id,
+                                    json={'blocks': 20, 'adjusts_intake': True})
+        self.assertEqual(response.status_code, 201)
+        self.assertIs(self.store.movements[0]['adjusts_intake'], False)
+
+    def _recount(self, office_id, stock, **body):
+        response = self.client.post('/api/water/offices/%d/recount' % office_id,
+                                    json=dict(stock=stock, comment='пересчитали', **body))
+        return response.get_json()['movement']['id']
+
+    def test_mark_of_a_done_recount_is_switched_without_touching_the_stock(self):
+        """Пересчёты, сделанные до отметки (или с забытой отметкой), руководитель
+        правит задним числом: меняется «Поступило», остаток — нет."""
+        office_id = self.store.add(stock=500)
+        movement_id = self._recount(office_id, 0)
+        on = self.client.patch('/api/water/movements/%d' % movement_id, json={'adjusts_intake': True})
+        self.assertEqual(on.status_code, 200)
+        self.assertIs(on.get_json()['movement']['adjusts_intake'], True)
+        self.assertEqual(self.store.movements[0]['adjusts_intake_by_name'], self.viewer['name'])
+        off = self.client.patch('/api/water/movements/%d' % movement_id, json={'adjusts_intake': False})
+        self.assertIs(off.get_json()['movement']['adjusts_intake'], False)
+        self.assertEqual(self.store.offices[office_id]['stock'], 0)
+        self.assertEqual(len(self.store.movements), 1)
+
+    def test_same_mark_writes_nothing(self):
+        office_id = self.store.add(stock=5)
+        movement_id = self._recount(office_id, 3, adjusts_intake=True)
+        response = self.client.patch('/api/water/movements/%d' % movement_id, json={'adjusts_intake': True})
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.get_json()['movement']['adjusts_intake'], True)
+        self.assertEqual(self.store.flag_writes, 0)
+
+    def test_intake_cannot_be_marked(self):
+        """Поступление в «Поступило» и так — отметка у него ничего бы не значила."""
+        office_id = self.store.add(stock=5)
+        self.client.post('/api/water/offices/%d/intake' % office_id, json={'blocks': 20})
+        response = self.client.patch('/api/water/movements/1', json={'adjusts_intake': True})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'WATER_MOVEMENT_NOT_RECOUNT')
+        self.assertEqual(self.store.flag_writes, 0)
+
+    def test_mark_needs_an_existing_recount_and_a_yes_or_no(self):
+        office_id = self.store.add(stock=5)
+        movement_id = self._recount(office_id, 3)
+        missing = self.client.patch('/api/water/movements/999', json={'adjusts_intake': True})
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json()['code'], 'WATER_MOVEMENT_NOT_FOUND')
+        for body in ({}, {'adjusts_intake': 'true'}, {'adjusts_intake': 1}, {'adjusts_intake': None}):
+            response = self.client.patch('/api/water/movements/%d' % movement_id, json=body)
+            self.assertEqual(response.status_code, 400, body)
+            self.assertEqual(response.get_json()['code'], 'WATER_INTAKE_FLAG_INVALID')
+        self.assertEqual(self.store.flag_writes, 0)
+
+    def test_call_centre_reads_movements_but_does_not_mark(self):
+        office_id = self.store.add(stock=5)
+        movement_id = self._recount(office_id, 3)
+        self.viewer = person(department_code='szov')
+        listed = self.client.get('/api/water/offices/%d/movements' % office_id)
+        self.assertEqual(listed.status_code, 200)
+        self.assertIs(listed.get_json()['items'][0]['adjusts_intake'], False)
+        response = self.client.patch('/api/water/movements/%d' % movement_id, json={'adjusts_intake': True})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.store.flag_writes, 0)
 
     def test_office_threshold_override_and_reset(self):
         office_id = self.store.add(stock=15)

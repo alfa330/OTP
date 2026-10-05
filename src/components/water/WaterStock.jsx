@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { Loader2, Plus } from 'lucide-react';
 import {
-    IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
+    IosMenu, IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../ui/ios';
+import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import { fmtDateTime, shiftDaysBack, todayISO } from '../parcels/parcelMeta';
@@ -33,6 +34,15 @@ const CHIP = 'flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-left te
 
 const MOVEMENT_LABELS = { intake: 'Поступление', recount: 'Пересчёт' };
 
+/* «Поступило» в остатках — поступления плюс пересчёты с этой отметкой:
+   поступление вносят не тем числом или раньше, чем привезли воду, а снимают
+   его пересчётом (05.10.2026). Отметка одна и та же в форме пересчёта и у уже
+   сделанного пересчёта в списке. */
+const INTAKE_FLAG_LABEL = 'Учесть в «Поступило»';
+const INTAKE_FLAG_HINT = 'Включите, когда пересчётом исправляете поступление: внесли не то число, '
+    + 'не в тот офис или раньше, чем привезли. «Поступило» изменится на разницу. Недостачу и излишек '
+    + 'на полке так не отмечают. У уже сделанного пересчёта отметка меняется в списке ниже, в меню «···».';
+
 const StatusPill = ({ status }) => {
     if (status === 'enough') return null;
     const meta = stockStatus(status);
@@ -47,12 +57,16 @@ const errorOf = (requestError, fallback) => requestError?.response?.data?.error 
 
 /* ── Карточка офиса ─────────────────────────────────────────────────────── */
 
-const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, settings, onSaved, showToast }) => {
+const OfficeSheet = ({
+    open, office, onClose, canManage, apiBaseUrl, headers, settings, onSaved, onIntakeChanged, showToast,
+}) => {
     const [movements, setMovements] = useState([]);
     const [loading, setLoading] = useState(false);
     const [mode, setMode] = useState('intake');
     const [amount, setAmount] = useState('');
     const [comment, setComment] = useState('');
+    const [adjustsIntake, setAdjustsIntake] = useState(false);
+    const [markingId, setMarkingId] = useState(null);
     const [low, setLow] = useState('');
     const [buy, setBuy] = useState('');
     const [saving, setSaving] = useState(false);
@@ -77,6 +91,10 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
         // Карточку заново открывают другим офисом — от него и зависим.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, office?.id]);
+
+    // Отметка живёт один пересчёт: ушли с вкладки или закрыли карточку — снята,
+    // иначе следующий пересчёт молча ушёл бы в «Поступило».
+    useEffect(() => { setAdjustsIntake(false); }, [mode, open, office?.id]);
 
     if (!office) return null;
 
@@ -104,12 +122,33 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
         if (!amountValid) return;
         const data = mode === 'intake'
             ? await post(`/api/water/offices/${office.id}/intake`, { blocks: count, comment })
-            : await post(`/api/water/offices/${office.id}/recount`, { stock: count, comment });
+            : await post(`/api/water/offices/${office.id}/recount`,
+                { stock: count, comment, adjusts_intake: adjustsIntake });
         if (data) {
             showToast?.(mode === 'intake' ? `Поступление: +${blocksWord(count)}` : 'Остаток пересчитан', 'success');
             setAmount('');
             setComment('');
+            setAdjustsIntake(false);
             load();
+        }
+    };
+
+    /* Отметка у уже сделанного пересчёта. Остаток не меняется — пересчитывается
+       только «Поступило» в таблице остатков, её и просим перечитать. */
+    const markIntake = async (item, next) => {
+        if (markingId) return;
+        setMarkingId(item.id);
+        try {
+            const response = await axios.patch(`${apiBaseUrl}/api/water/movements/${item.id}`,
+                { adjusts_intake: next }, { headers: headers() });
+            const saved = response.data?.movement || { adjusts_intake: next };
+            setMovements((prev) => prev.map((row) => (row.id === item.id ? { ...row, ...saved } : row)));
+            onIntakeChanged?.();
+            showToast?.(next ? 'Пересчёт учтён в «Поступило»' : 'Пересчёт убран из «Поступило»', 'success');
+        } catch (requestError) {
+            showToast?.(errorOf(requestError, 'Не удалось сохранить'), 'error');
+        } finally {
+            setMarkingId(null);
         }
     };
 
@@ -126,6 +165,7 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
     };
 
     const ownThresholds = office.own_low_threshold !== null || office.own_buy_threshold !== null;
+    const recountMenu = canManage && movements.some((item) => item.kind === 'recount');
 
     return (
         <IosModal open={open} onClose={onClose} title={office.name} subtitle={officePlace(office)} maxWidth="max-w-lg">
@@ -173,6 +213,15 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
                                            onChange={(event) => setComment(event.target.value)}
                                            placeholder={mode === 'intake' ? 'Необязательно' : 'Например: пересчитали полку'} />
                                 </label>
+                                {mode === 'recount' && (
+                                    <div className="flex items-center justify-between gap-3 px-1">
+                                        <span className="flex items-center gap-1.5 text-[13px] text-slate-800">
+                                            {INTAKE_FLAG_LABEL}
+                                            <InfoHint side="left" text={INTAKE_FLAG_HINT} />
+                                        </span>
+                                        <IosToggle checked={adjustsIntake} onChange={setAdjustsIntake} disabled={saving} />
+                                    </div>
+                                )}
                                 <button type="button" className={`${iosBtnPrimary} w-full`}
                                         disabled={saving || !amountValid || (mode === 'recount' && !comment.trim())}
                                         onClick={submitMovement}>
@@ -216,21 +265,45 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
                     ) : movements.length ? (
                         <ul className="divide-y divide-slate-100">
                             {movements.map((item) => (
-                                <li key={item.id} className="flex items-start justify-between gap-3 py-2 text-[12.5px]">
+                                /* nowrap инлайном: оболочка телефона (mobile-shell.css) переносит
+                                   ряды с gap, и у строки с длинной подписью число с меню падало
+                                   под текст, к левому краю. Классом её правило не перебить. */
+                                <li key={item.id} style={{ flexWrap: 'nowrap' }}
+                                    className="flex items-start justify-between gap-3 py-2 text-[12.5px]">
                                     <div className="min-w-0">
+                                        {/* Отметка и дата не рвутся посередине: на узком экране
+                                            строка переносится между ними, а не внутри даты. */}
                                         <div className="text-slate-800">
                                             {MOVEMENT_LABELS[item.kind] || item.kind}
-                                            <span className="text-slate-400"> · {fmtDateTime(item.created_at)}</span>
+                                            {item.kind === 'recount' && item.adjusts_intake && (
+                                                <span className="text-slate-500"> · <span className="whitespace-nowrap">в «Поступило»</span></span>
+                                            )}
+                                            <span className="text-slate-400"> · <span className="whitespace-nowrap">{fmtDateTime(item.created_at)}</span></span>
                                         </div>
                                         <div className="truncate text-slate-500">
                                             {[item.actor_name, item.comment].filter(Boolean).join(' · ')}
                                         </div>
                                     </div>
-                                    <div className="shrink-0 text-right tabular-nums">
-                                        <div className={item.delta > 0 ? 'text-emerald-700' : 'text-slate-700'}>
-                                            {item.delta > 0 ? `+${item.delta}` : item.delta}
+                                    <div className="flex shrink-0 items-start gap-1">
+                                        <div className="text-right tabular-nums">
+                                            <div className={item.delta > 0 ? 'text-emerald-700' : 'text-slate-700'}>
+                                                {item.delta > 0 ? `+${item.delta}` : item.delta}
+                                            </div>
+                                            <div className="text-[11.5px] text-slate-400">стало {item.stock_after}</div>
                                         </div>
-                                        <div className="text-[11.5px] text-slate-400">стало {item.stock_after}</div>
+                                        {/* Меню — у пересчётов; у поступлений на его месте пусто той же
+                                            ширины, чтобы числа стояли в один столбец. */}
+                                        {recountMenu && (item.kind === 'recount' ? (
+                                            <IosMenu
+                                                label="Пересчёт и «Поступило»"
+                                                disabled={markingId !== null}
+                                                items={[{
+                                                    key: 'intake',
+                                                    label: item.adjusts_intake ? 'Не учитывать в «Поступило»' : INTAKE_FLAG_LABEL,
+                                                    onSelect: () => markIntake(item, !item.adjusts_intake),
+                                                }]}
+                                            />
+                                        ) : <span className="w-8 shrink-0" aria-hidden="true" />)}
                                     </div>
                                 </li>
                             ))}
@@ -503,6 +576,7 @@ const WaterStock = ({ apiBaseUrl, headers, capabilities, settings, offices, dire
                 headers={headers}
                 settings={settings}
                 onSaved={saved}
+                onIntakeChanged={load}
                 showToast={showToast}
             />
             {canManage && (

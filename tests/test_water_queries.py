@@ -112,6 +112,74 @@ class CanceledIssuesTests(unittest.TestCase):
         self.assertEqual(cursor.sql[1][1], (2, 3))
 
 
+class IntakeColumnTests(unittest.TestCase):
+    """«Поступило» остатков — поступления плюс пересчёты с отметкой (05.10.2026):
+    внесённое по ошибке поступление снимают пересчётом, и без отметки колонка
+    так и показывала бы его."""
+
+    ACTOR = {'user_id': 7, 'name': 'Руководитель'}
+
+    def test_dashboard_sums_intakes_and_marked_recounts(self):
+        from datetime import date
+        cursor = ScriptedCursor([])
+        queries.dashboard(cursor, {'low_threshold': 20, 'buy_threshold': 10},
+                          date_from=date(2026, 10, 1), date_to=date(2026, 10, 5), today=date(2026, 10, 5))
+        block = cursor.sql[0][0].split('FROM water_movements')[1].split('GROUP BY')[0]
+        self.assertIn("(kind = 'intake' OR adjusts_intake)", block)
+        # Скобки обязательны: без них период прилип бы только к пересчётам, и
+        # поступления считались бы за всё время.
+        self.assertIn('AND created_at >= %(from)s AND created_at < %(to_next)s', block)
+
+    def test_recount_keeps_the_mark_and_intake_never_does(self):
+        for kind, asked, stored in (('recount', True, True), ('recount', False, False),
+                                    ('intake', True, False), ('intake', False, False)):
+            cursor = ScriptedCursor([], [(11, datetime(2026, 10, 5, 9, 37))])
+            movement = queries.apply_movement(
+                cursor, {'id': 3, 'stock': 500}, kind=kind, delta=-500 if kind == 'recount' else 5,
+                comment='не отгрузили', actor=self.ACTOR, adjusts_intake=asked)
+            insert_sql, params = cursor.sql[1]
+            self.assertIn('adjusts_intake', insert_sql)
+            self.assertIs(params[-1], stored, (kind, asked))
+            self.assertIs(movement['adjusts_intake'], stored, (kind, asked))
+
+    def test_movements_come_with_the_mark(self):
+        at = datetime(2026, 10, 5, 9, 37)
+        cursor = ScriptedCursor([(7, 'recount', -500, 0, 'не отгрузили', 'Руководитель', at, True),
+                                 (4, 'intake', 500, 501, None, 'Руководитель', at, False)])
+        items = queries.list_movements(cursor, 1)
+        self.assertEqual([(item['id'], item['adjusts_intake']) for item in items], [(7, True), (4, False)])
+        self.assertEqual(items[0]['created_at'], at.isoformat())
+        self.assertIn('adjusts_intake', cursor.sql[0][0])
+        self.assertEqual(cursor.sql[0][1], (1, 30))
+
+    def test_mark_is_switched_on_recounts_only_and_signed(self):
+        at = datetime(2026, 10, 5, 9, 37)
+        cursor = ScriptedCursor([(7, 'recount', -500, 0, 'не отгрузили', 'Руководитель', at, True)])
+        movement = queries.set_movement_adjusts_intake(cursor, 7, True, self.ACTOR)
+        sql, params = cursor.sql[0]
+        self.assertIn("WHERE id = %s AND kind = 'recount'", sql)
+        self.assertIn('adjusts_intake_by_name = %s', sql)
+        self.assertIn('adjusts_intake_at = ', sql)
+        self.assertNotIn('stock', sql.split('RETURNING')[0])
+        self.assertEqual(params, (True, 'Руководитель', 7))
+        self.assertIs(movement['adjusts_intake'], True)
+        # Снять отметку — тем же запросом, и пишется именно «нет».
+        cursor = ScriptedCursor([(7, 'recount', -500, 0, 'не отгрузили', 'Руководитель', at, False)])
+        movement = queries.set_movement_adjusts_intake(cursor, 7, False, self.ACTOR)
+        self.assertEqual(cursor.sql[0][1], (False, 'Руководитель', 7))
+        self.assertIs(movement['adjusts_intake'], False)
+        # Поступление запрос не тронет: строки нет — и отметки нет.
+        self.assertIsNone(queries.set_movement_adjusts_intake(ScriptedCursor([]), 4, True, self.ACTOR))
+
+    def test_read_movement_gives_the_row_or_nothing(self):
+        at = datetime(2026, 10, 5, 9, 37)
+        cursor = ScriptedCursor([(7, 'recount', -500, 0, 'не отгрузили', 'Руководитель', at, False)])
+        movement = queries.read_movement(cursor, 7)
+        self.assertEqual(cursor.sql[0][1], (7,))
+        self.assertEqual((movement['kind'], movement['delta'], movement['adjusts_intake']), ('recount', -500, False))
+        self.assertIsNone(queries.read_movement(ScriptedCursor([]), 999))
+
+
 class RecipientsTests(unittest.TestCase):
     def test_gone_recipients_fall_back_to_the_head(self):
         """Выбранных уволили или у них нет Telegram — о закупке всё равно

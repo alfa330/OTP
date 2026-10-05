@@ -33,6 +33,9 @@ XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 # сто тысяч — заведомо «опечатка в числе», а не партия.
 _MAX_BLOCKS = 100000
 _MAX_COMMENT = 500
+# Отметка пересчёта «учесть в „Поступило“» — только настоящее да/нет: строка
+# «false» из чужого клиента иначе сошла бы за «да» и молча поменяла колонку.
+_INTAKE_FLAG_ERROR = 'Отметка «Учесть в „Поступило“» — только да или нет'
 _TARIFF_CODE_RE = re.compile(r'^[a-z][a-z0-9_]{1,39}$')
 
 # Период дашборда по умолчанию — последние 30 дней: средний расход за месяц
@@ -287,6 +290,10 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
         Причина обязательна: пересчёт меняет остаток без водителя и без
         накладной, и через месяц по журналу иначе не понять, куда делись блоки.
+
+        adjusts_intake — пересчётом исправляют поступление (внесли не то число,
+        не в тот офис, раньше, чем привезли): разница войдёт в «Поступило»
+        остатков. Недостача и излишек на полке идут без отметки.
         """
         data = _payload()
         stock = _int(data.get('stock'))
@@ -295,10 +302,40 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
         comment = _clean(data.get('comment'), _MAX_COMMENT)
         if not comment:
             return _bad('Напишите причину пересчёта', 'WATER_COMMENT_REQUIRED')
+        adjusts_intake = data.get('adjusts_intake', False)
+        if not isinstance(adjusts_intake, bool):
+            return _bad(_INTAKE_FLAG_ERROR, 'WATER_INTAKE_FLAG_INVALID')
         return _move(ctx, water_office_id, kind='recount', comment=comment,
-                     delta_of=lambda office: stock - int(office['stock']))
+                     delta_of=lambda office: stock - int(office['stock']),
+                     adjusts_intake=adjusts_intake)
 
-    def _move(ctx, water_office_id, *, kind, comment, delta_of):
+    @water_route('/movements/<int:movement_id>', methods=('PATCH',), need='manage')
+    def water_movement_update(movement_id, ctx):
+        """Сменить у проведённого пересчёта отметку «учесть в „Поступило“».
+
+        Остаток не меняется — меняется только то, входит ли разница пересчёта в
+        «Поступило». Нужна и для пересчётов, сделанных до появления отметки, и
+        на случай, когда её забыли или поставили зря. Поступление отметить
+        нельзя: оно в «Поступило» и так.
+        """
+        adjusts_intake = _payload().get('adjusts_intake')
+        if not isinstance(adjusts_intake, bool):
+            return _bad(_INTAKE_FLAG_ERROR, 'WATER_INTAKE_FLAG_INVALID')
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return _not_ready()
+            movement = queries.read_movement(cursor, movement_id)
+            if not movement:
+                return _bad('Запись не найдена', 'WATER_MOVEMENT_NOT_FOUND', 404)
+            if movement['kind'] != 'recount':
+                return _bad('Отметить можно только пересчёт — поступление в «Поступило» и так',
+                            'WATER_MOVEMENT_NOT_RECOUNT')
+            if movement['adjusts_intake'] != adjusts_intake:
+                movement = queries.set_movement_adjusts_intake(
+                    cursor, movement_id, adjusts_intake, _actor(ctx))
+        return jsonify({"movement": movement})
+
+    def _move(ctx, water_office_id, *, kind, comment, delta_of, adjusts_intake=False):
         outbox = []
         with db._get_cursor() as cursor:
             if not schema.schema_is_ready(cursor):
@@ -314,7 +351,8 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 return _bad('Остаток и так такой — пересчитывать нечего', 'WATER_RECOUNT_SAME')
             before = int(office['stock'])
             movement = queries.apply_movement(cursor, office, kind=kind, delta=delta,
-                                              comment=comment, actor=_actor(ctx))
+                                              comment=comment, actor=_actor(ctx),
+                                              adjusts_intake=adjusts_intake)
             office = queries.read_office(cursor, water_office_id, settings)
             _queue_buy_alert(cursor, office, before, office['stock'], settings, outbox)
         _flush(outbox)
