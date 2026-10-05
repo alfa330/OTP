@@ -1127,6 +1127,12 @@ class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
             'тех причина': ('tech', 'Техническая пауза'),
             'занят': ('talking', 'В разговоре'),
             'выключен': ('offline', 'Не в сети'),
+            # Статусы групп ОП (Основа / ЯР / Поток): «Исход» своим ключом, фаза набора,
+            # «Автодозвон» Потока и автоматический «Офлайн» за простой.
+            'исход': ('outgoing', 'Исход'),
+            'соединение': ('connecting', 'Соединение'),
+            'автодозвон': ('autodial', 'Автодозвон'),
+            'офлайн': ('idle_offline', 'Офлайн'),
         }
         ns = self._namespace()
         for status_key, (tone, label) in expected.items():
@@ -2064,8 +2070,10 @@ class TezWallboardWiringTests(unittest.TestCase):
         они — на стене молча появится безымянный серый статус, и заметят это не сразу."""
         catalog = BOT_SOURCE[BOT_SOURCE.index("_TEZ_WALLBOARD_STATUS_CATALOG = {"):
                              BOT_SOURCE.index("_TEZ_WALLBOARD_STATUS_UNKNOWN = ")]
-        tones = set(re.findall(r"\('[^']+', '([a-z]+)', \d+\)", catalog))
+        # С подчёркиванием тоже: 'idle_offline' («Офлайн» ОП) иначе выпал бы из проверки.
+        tones = set(re.findall(r"\('[^']+', '([a-z_]+)', \d+\)", catalog))
         self.assertTrue(tones)
+        self.assertIn('idle_offline', tones)
         # Плюс два разряда, которых в каталоге нет: незнание и незнакомый ключ.
         for tone in sorted(tones | {'unknown', 'other'}):
             self.assertIn(f"    {tone}: {{", self.shared, tone)

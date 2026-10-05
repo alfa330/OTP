@@ -1041,7 +1041,15 @@ SCHEDULE_AUTO_FLAG_ALLOWED = {
     SCHEDULE_AUTO_FLAG_CONFIRMED,
     SCHEDULE_AUTO_FLAG_REJECTED
 }
-SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон', 'зарезервировано'}
+# 'исход', 'соединение' и 'автодозвон' — статусы iCORE Phone у групп ОП (Основа/ЯР/Поток,
+# oktell_guard/phone.py): «Исход» у них отдельный ключ от прежнего 'перезвон', «Соединение» —
+# набор до ответа, «Автодозвон» — работа через систему автодозвона. Это рабочее время, и
+# кладём его в ОБЩИЙ набор, а не в отдельный профиль op_*: таймлайн берёт модель по текущему
+# направлению, а часы — по группе на дату, и свой профиль развёл бы флаги и часы. Oktell и
+# Binotel этих слов не шлют. 'офлайн' (простой без звонков, «выброс») — намеренно НИ в одном
+# наборе: по ТЗ это не отработанное время.
+SCHEDULE_AUTO_WORK_STATUS_KEYS = {'готов', 'занят', 'занята', 'перезвон', 'зарезервировано',
+                                  'исход', 'соединение', 'автодозвон'}
 SCHEDULE_AUTO_TALK_STATUS_KEYS = {'занят', 'занята'}
 SCHEDULE_AUTO_BREAK_STATUS_KEYS = {'перерыв', 'авто'}
 SCHEDULE_AUTO_NO_PHONE_STATUS_KEY = 'без телефона'
@@ -1086,7 +1094,13 @@ SCHEDULE_STATUS_KEY_LABELS = {
     'work in crm': 'Работа в CRM',
     'работа в crm': 'Работа в CRM',
     'break in work': 'Перерыв',
-    'inactive': 'Неактивен'
+    'inactive': 'Неактивен',
+    # Статусы iCORE Phone групп ОП — подписи как в пилюле телефона. «Офлайн» здесь —
+    # неоплачиваемый простой, не «Офлайн активность» (оплачиваемая работа вне телефона).
+    'исход': 'Исход',
+    'соединение': 'Соединение',
+    'автодозвон': 'Автодозвон',
+    'офлайн': 'Офлайн'
 }
 SCHEDULE_AUTO_FINE_RATE_PER_MINUTE = float(os.getenv('SCHEDULE_AUTO_FINE_RATE_PER_MINUTE', '50'))
 
@@ -30161,11 +30175,14 @@ class Database:
     # PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS из src/App.jsx: правило «на смене» —
     # это ВСЁ, кроме отключения и «нет на месте». Перерыв, перезвон, тренинг и
     # тех.причина сменой считаются: человек на смене, просто не на линии.
+    # «Офлайн» iCORE Phone (автовыброс ОП за простой без звонков) — тоже не на смене:
+    # по ТЗ это время не отработано, хотя телефон и остаётся запущенным.
     _HOURLY_NOT_ON_SHIFT_STATUS_KEYS = {
         'нет статуса', 'отключен', 'отключена', 'отключено',
         'logout', 'выход', 'выход из системы', 'отключение',
         'выключен', 'нет на месте',
         'inactive', 'неактивен',
+        'офлайн',
     }
     # Сколько минут часа оператор должен пробыть на смене, чтобы час ему зачёлся.
     _HOURLY_FACT_MIN_MINUTES = 30
@@ -42690,6 +42707,78 @@ class Database:
             return {}
         with self._get_cursor() as cursor:
             return dict(self._load_operator_calculation_models_tx(cursor, op_ids, as_of=as_of))
+
+    def _load_operator_status_groups_tx(self, cursor, operator_ids, as_of):
+        """Группа статусов iCORE Phone (Основа / ЯР / Поток) по операторам на дату.
+
+        Лестница та же, что у _load_operator_calculation_models_tx(as_of=...):
+        действующее на дату членство решает всегда — даже если это группа не ОП
+        (тогда группы статусов нет), а модель направления берётся только без
+        членства. Отличия намеренные: равные start_date разводятся по id (иначе
+        при пересекающихся членствах группа «прыгала» бы между запросами), и
+        `as_of` — дата Алматы из Python, а не CURRENT_DATE: часы базы в UTC, и
+        до 05:00 по Алмате она жила бы ещё вчерашним днём.
+        """
+        from oktell_guard.phone import status_group_for
+
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not op_ids:
+            return {}
+        if as_of is None:
+            as_of = datetime.now(ZoneInfo('Asia/Almaty')).date()
+        elif isinstance(as_of, datetime):
+            as_of = as_of.date()
+        cursor.execute(
+            """
+            SELECT u.id,
+                   LOWER(COALESCE(u.role, '')) AS role,
+                   LOWER(COALESCE(dep.code, '')) AS department_code,
+                   g.group_id,
+                   COALESCE(g.group_name, '') AS group_name,
+                   LOWER(COALESCE(g.calculation_model_code, '')) AS group_model,
+                   LOWER(COALESCE(d.calculation_model_code, '')) AS direction_model
+            FROM users u
+            LEFT JOIN departments dep ON dep.id = u.department_id
+            LEFT JOIN directions d ON d.id = u.direction_id
+            LEFT JOIN LATERAL (
+                SELECT gom.group_id, gr.name AS group_name, gr.calculation_model_code
+                FROM group_operator_memberships gom
+                JOIN groups gr ON gr.id = gom.group_id
+                WHERE gom.operator_id = u.id
+                  AND gom.start_date <= %(day)s::date
+                  AND (gom.end_date IS NULL OR gom.end_date >= %(day)s::date)
+                ORDER BY gom.start_date DESC, gom.id DESC
+                LIMIT 1
+            ) g ON TRUE
+            WHERE u.id = ANY(%(ids)s)
+            """,
+            {'day': as_of, 'ids': op_ids}
+        )
+        result = {}
+        for (op_id, role, department_code, group_id, group_name,
+             group_model, direction_model) in cursor.fetchall() or []:
+            result[int(op_id)] = {
+                'role': role or '',
+                'department_code': department_code or '',
+                'group_id': int(group_id) if group_id is not None else None,
+                'group_name': group_name or '',
+                'group_model': group_model or '',
+                'direction_model': direction_model or '',
+                'status_group': status_group_for(role, group_model, direction_model),
+            }
+        return result
+
+    def get_operator_status_groups(self, user_ids, as_of):
+        """{user_id: {'role', 'department_code', 'group_id', 'group_name', 'group_model',
+        'direction_model', 'status_group'}} — группа статусов iCORE Phone на дату.
+
+        status_group: 'osnova' | 'yar' | 'potok' или None (прежний набор статусов).
+        Сотрудника, которого нет в базе, в ответе нет."""
+        op_ids = [int(v) for v in (user_ids or []) if v is not None]
+        if not op_ids:
+            return {}
+        with self._get_cursor() as cursor:
+            return self._load_operator_status_groups_tx(cursor, op_ids, as_of)
 
     def _is_smz_direction(self, direction_name):
         key = self._normalize_direction_key(direction_name)

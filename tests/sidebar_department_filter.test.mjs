@@ -154,9 +154,11 @@ test('обёртка режет раздел чужого отдела и ост
     // Chat2Desk, поэтому в его наборе раздела нет (решение владельца 09.09.2026).
     assert.equal(SidebarDeptScope({ section: 'wazzup_chats', activeCode: 'op', children: item }), item);
     assert.equal(SidebarDeptScope({ section: 'wazzup_chats', activeCode: 'szov', children: item }), null);
-    // «Ограничитель Перезвона» — наоборот, раздел линии СЗоВ и только его.
+    // «Ограничитель Перезвона» — СЗоВ (агент Oktell) и с 05.10.2026 отдел продаж
+    // (автоофлайн iCORE Phone); у остальных отделов его нет.
     assert.equal(SidebarDeptScope({ section: 'oktell_guard', activeCode: 'szov', children: item }), item);
-    assert.equal(SidebarDeptScope({ section: 'oktell_guard', activeCode: 'op', children: item }), null);
+    assert.equal(SidebarDeptScope({ section: 'oktell_guard', activeCode: 'op', children: item }), item);
+    assert.equal(SidebarDeptScope({ section: 'oktell_guard', activeCode: 'tez', children: item }), null);
 });
 
 test('раздела нет в карте — селектор его не скрывает', () => {

@@ -29,5 +29,14 @@ def test_department_head_context_uses_headed_department():
 
 
 def test_head_of_other_department_still_denied():
-    ctx = {'id': 9, 'role': 'admin', 'department_code': 'op', 'is_department_head': True}
+    ctx = {'id': 9, 'role': 'admin', 'department_code': 'tez', 'is_department_head': True}
     assert access.can_view_section(ctx) is False
+
+
+def test_op_head_context_opens_only_the_sales_part():
+    """С 05.10.2026 у раздела есть часть ОП: глава ОП видит её, а не СЗоВ."""
+    ctx = {'id': 9, 'role': 'admin', 'department_code': 'op', 'is_department_head': True,
+           'headed_department_code': 'op', 'headed_department_codes': ['op']}
+    assert access.can_view_section(ctx) is True
+    assert access.visible_department_codes(ctx) == ['op']
+    assert access.visible_department_code(ctx) == ''

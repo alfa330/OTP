@@ -1,56 +1,63 @@
 """Права раздела «Списки Байги». Чистая логика: ни базы, ни Flask.
 
-Роли из постановки #356 (п. 2) ложатся на портал так:
+Кому раздел открыт — решение владельца 05.10.2026:
 
-    аналитик                  загрузка, замена и удаление недели, поиск,
-                              выгрузка, журнал — поимённо (ANALYST_USER_IDS)
-    маркетинг (marketing)     поиск и выгрузка
-    руководители              поиск и выгрузка — глава любого отдела
-    поддержка: СЗоВ (szov)    только поиск и просмотр
-    глобальный админ          всё
-    тренер                    не входит: раздел он не просил
+    супер-админ                     всё
+    глава «Маркетинга»              всё («доступ полный»): загрузка, замена и
+                                    удаление недели, выгрузка, журнал
+    аналитик, поимённо              то же — список ANALYST_USER_IDS, пока пуст
+    главы ОП и СЗоВ                 поиск и просмотр
+    супервайзеры ОП и СЗоВ          поиск и просмотр
+    операторы ОП и СЗоВ,
+    сотрудники «Маркетинга»         поиск и просмотр — после QR
+    остальные                       раздел закрыт
 
-«Аналитика» как роли или отдела в портале нет, поэтому он задаётся списком id —
-тот же приём, что у ведущих «Библиотеки». Пока список пуст, загружает
-глобальный админ; кого вписать, ответит постановщик.
+«Остальные» — это и те, кого постановка #356 (п. 2) называла шире: главы прочих
+отделов, админ, не возглавляющий отдел, тренер. Владелец перечислил круг сам, и
+расширять его «по смыслу» нельзя: в строках ФИО и номер ВУ водителя.
 
-В строках ФИО и номер ВУ, поэтому у операторов раздел закрыт QR-замком —
-правило то же, что у «Посылок» (parcels.access.requires_sensitive_qr): гейт
-общий, ключ один, двух разных QR на один экран человек не различит.
+Рядовой сотрудник входит ТОЛЬКО через QR-замок — правило и ключ те же, что у
+«Посылок» (parcels.access.requires_sensitive_qr): двух разных QR на один экран
+человек не различит. Кого замок не спрашивает и кто не назван выше (стажёр,
+тренер), тому раздел закрыт: открыть его без замка значило бы показать ФИО и
+номера ВУ без подтверждения.
 
-Хелперы ролей общие с «Посылками»: семантика «глава отдела ≠ глобальный админ»
-у портала одна.
+Главы названы отделом, а не id: назначение главой живёт в
+departments.head_user_id и переживает и смену человека, и его вторую учётку.
 """
 
-from parcels.access import (  # noqa: F401 — requires_sensitive_qr отдаётся дальше
-    is_department_head, is_global_admin, normalize_role, requires_sensitive_qr,
-)
+# Роль и QR-замок считают хелперы «Посылок»: правило у портала одно.
+from parcels.access import normalize_role, requires_sensitive_qr
 
-# ПИЛОТ (02.10.2026, так же выкладывались «Термокороба»): пока флаг стоит, раздел
-# открыт только супер-админу; всё, что ниже, — периметр ПОСЛЕ пилота, его
-# утверждает постановщик. Снимать флаг вместе с зеркалом во фронте
-# (BAIGA_PILOT_SUPER_ADMIN_ONLY в App.jsx) — тест сверяет их.
-PILOT_SUPER_ADMIN_ONLY = True
+# Выключатель: пока флаг стоит, раздел открыт только супер-админу — так он
+# выкладывался 02.10.2026 и так же закрывается обратно одной строкой. Зеркало во
+# фронте — BAIGA_PILOT_SUPER_ADMIN_ONLY в App.jsx, тест сверяет их: переключать
+# в обоих местах.
+PILOT_SUPER_ADMIN_ONLY = False
 
 # Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
 # Зеркало — BAIGA_ANALYST_USER_IDS в App.jsx (аналитику нужен пункт меню).
 ANALYST_USER_IDS = frozenset()
 
-EXPORT_DEPARTMENT_CODES = ('marketing',)   # ищут и выгружают
-VIEW_DEPARTMENT_CODES = ('szov',)          # поддержка: ищут и смотрят
+MANAGE_DEPARTMENT_CODE = 'marketing'     # глава ведёт раздел, сотрудники читают после QR
+READ_DEPARTMENT_CODES = ('op', 'szov')   # глава и СВ читают, операторы — после QR
 
-SECTION_DEPARTMENT_CODES = EXPORT_DEPARTMENT_CODES + VIEW_DEPARTMENT_CODES
+SECTION_DEPARTMENT_CODES = (MANAGE_DEPARTMENT_CODE,) + READ_DEPARTMENT_CODES
+
+_SUPERVISOR_ROLES = ('sv', 'supervisor')
 
 
 def _codes(values):
     return {str(code).strip().lower() for code in (values or []) if code}
 
 
-def _belongs_to(ctx, codes):
-    """Человек в одном из отделов — своим членством или как его глава."""
-    if _codes(ctx.get('headed_department_codes')) & set(codes):
-        return True
-    return str(ctx.get('department_code') or '').strip().lower() in codes
+def _own_code(ctx):
+    return str(ctx.get('department_code') or '').strip().lower()
+
+
+def _heads(ctx, codes):
+    """Глава хотя бы одного из отделов."""
+    return bool(_codes(ctx.get('headed_department_codes')) & set(codes))
 
 
 def is_analyst(ctx):
@@ -60,43 +67,49 @@ def is_analyst(ctx):
         return False
 
 
+def can_manage(ctx):
+    """Загрузить, заменить и удалить неделю, журнал, исходник — супер-админ,
+    глава «Маркетинга» и аналитик."""
+    if normalize_role(ctx.get('role')) == 'super_admin' or is_analyst(ctx):
+        return True
+    return _heads(ctx, (MANAGE_DEPARTMENT_CODE,))
+
+
+def can_export(ctx):
+    """Выгрузить выборку в Excel — тот, кому раздел открыт полностью.
+
+    Остальным владелец дал чтение: главы и супервайзеры ОП и СЗоВ, операторы и
+    сотрудники «Маркетинга» ищут и смотрят, файл со всеми ФИО и номерами ВУ не
+    уносят.
+    """
+    return can_manage(ctx)
+
+
+def _can_read(ctx):
+    """Искать и смотреть — без выгрузки и загрузки."""
+    if _heads(ctx, READ_DEPARTMENT_CODES):
+        return True
+    own = _own_code(ctx)
+    if normalize_role(ctx.get('role')) in _SUPERVISOR_ROLES:
+        return own in READ_DEPARTMENT_CODES
+    # Рядовой — только тот, кого спросит QR-замок: одно условие и пускает в
+    # раздел, и закрывает данные, разъехаться им негде.
+    return requires_sensitive_qr(ctx) and own in SECTION_DEPARTMENT_CODES
+
+
 def can_open_section(ctx):
     """Пускать ли в раздел. Проверяется на КАЖДОМ роуте: спрятанный пункт меню
     доступом не является. Зеркало — canAccessBaigaSectionForUser в App.jsx."""
     if PILOT_SUPER_ADMIN_ONLY:
         return normalize_role(ctx.get('role')) == 'super_admin'
-    if is_global_admin(ctx) or is_analyst(ctx):
-        return True
-    if normalize_role(ctx.get('role')) == 'trainer':
-        return False
-    # «Руководители» — глава любого отдела: итоги акции смотрят все руководители,
-    # а не только маркетинга.
-    if is_department_head(ctx):
-        return True
-    return _belongs_to(ctx, SECTION_DEPARTMENT_CODES)
-
-
-def can_export(ctx):
-    """Выгрузить выборку в Excel — маркетинг, руководители, аналитик, админ.
-
-    Поддержка сюда не входит: «операторы поддержки — только поиск и просмотр».
-    """
-    if is_global_admin(ctx) or is_analyst(ctx) or is_department_head(ctx):
-        return True
-    return _belongs_to(ctx, EXPORT_DEPARTMENT_CODES)
-
-
-def can_manage(ctx):
-    """Загрузить, заменить и удалить неделю, журнал, исходник — аналитик и
-    глобальный админ."""
-    return is_global_admin(ctx) or is_analyst(ctx)
+    return can_manage(ctx) or _can_read(ctx)
 
 
 def capabilities(ctx):
     """Сводка для фронта: экран рисует кнопки по ней, а не по роли.
 
-    Кто в раздел не пущен (пилот, чужой отдел), не получает и прав внутри: иначе
-    сводка обещала бы кнопки, на которые каждая ручка ответит 403.
+    Кто в раздел не пущен (выключатель, чужой отдел), не получает и прав внутри:
+    иначе сводка обещала бы кнопки, на которые каждая ручка ответит 403.
     """
     opened = can_open_section(ctx)
     return {

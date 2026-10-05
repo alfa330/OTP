@@ -410,8 +410,9 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  * решает лишь «показывать ли пункт при выбранном отделе». Права считает
  * бэкенд, у каждого раздела свой access.py. Состав отделов у каждой строки
  * взят из предиката самого раздела, а не придуман:
- *   oktell_guard/fleet_edm/crm_tickets/driver_chats/szov_wallboard — 'szov'
- *   (OKTELL_GUARD_DEPARTMENT_CODE и соседние константы);
+ *   fleet_edm/crm_tickets/driver_chats/szov_wallboard — 'szov'
+ *   (FLEET_EDM_DEPARTMENT_CODE и соседние константы);
+ *   oktell_guard — 'szov' и 'op' (OKTELL_GUARD_DEPARTMENT_CODES);
  *   chatapp_chats/tez_wallboard — 'tez' (CHATAPP_DEPARTMENT_CODE);
  *   touches — 'op' (TOUCHES_SECTION_DEPARTMENT_CODE);
  *   op_funnel — 'op' (OP_FUNNEL_SECTION_DEPARTMENT_CODE);
@@ -470,7 +471,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // Телефония и программы. СЗоВ в списке с 21.09.2026: раздел открыт его главе
     // и супервайзерам, и при выбранном отделе пункт обязан оставаться на месте.
     sip_settings: ['szov', 'op', 'tez'],
-    oktell_guard: ['szov'],
+    // Ограничитель: СЗоВ (агент Oktell) и с 05.10.2026 ОП (автоофлайн iCORE Phone).
+    oktell_guard: ['szov', 'op'],
     /* ПУСТОЙ список — не «забыли заполнить», а «раздел не про отдел».
        «Провайдер ЭДО» и «Рассылки» работают с водителями таксопарков через
        Fleet: к работе любого из наших отделов они не относятся, и при
@@ -493,7 +495,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     parcels: ['front_office', 'szov'],
     water: ['front_office', 'szov', 'op'],
     thermoboxes: ['front_office', 'szov'],
-    baiga: ['marketing', 'szov'],
+    baiga: ['marketing', 'op', 'szov'],
     sign_links: ['front_office', 'szov', 'op'],
 };
 
@@ -2292,10 +2294,20 @@ const canAccessOpWallboardForUser = (userLike) => {
 // агента гасит флаг can_manage с бэкенда, где can_view_section шире
 // can_manage_settings (oktell_guard/access.py).
 const OKTELL_GUARD_DEPARTMENT_CODE = 'szov';
+// С 05.10.2026 в разделе есть и отдел продаж: там «выкидывает» не агент Oktell, а
+// сам iCORE Phone — в «Офлайн» после простоя в «Исходе» у групп ЯР и Поток. Глава
+// и СВ ОП видят только свою часть (какую — решает бэкенд, visible_department_codes),
+// СЗоВ им не открывается. Отдельная константа, а не замена первой: её значение
+// сверяется с бэкендом тестом (tests/test_oktell_guard_wiring.py).
+const OKTELL_GUARD_PHONE_DEPARTMENT_CODE = 'op';
+const OKTELL_GUARD_DEPARTMENT_CODES = new Set([
+    OKTELL_GUARD_DEPARTMENT_CODE,
+    OKTELL_GUARD_PHONE_DEPARTMENT_CODE,
+]);
 
 const isOktellGuardDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
-    && aiQaHeadDepartmentCodesOf(userLike).includes(OKTELL_GUARD_DEPARTMENT_CODE)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => OKTELL_GUARD_DEPARTMENT_CODES.has(code))
 );
 
 const canAccessOktellGuardForUser = (userLike) => {
@@ -2304,9 +2316,14 @@ const canAccessOktellGuardForUser = (userLike) => {
     // Глава отдела с базовой admin-ролью — не глобальный админ.
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isOktellGuardDepartmentHead(userLike)) return true;
-    return isSupervisorRole(role)
-        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
-            === OKTELL_GUARD_DEPARTMENT_CODE;
+    if (!isSupervisorRole(role)) return false;
+    // У части профилей СВ продаж приходит только id отдела без кода — сверяем
+    // оба поля, как isOpSalesSupervisorForAiQa (сам он переиспользован другими
+    // разделами, поэтому не зовём его, а повторяем проверку).
+    if (Number(userLike?.department_id ?? userLike?.departmentId) === AI_QA_OP_DEPARTMENT_ID) return true;
+    const departmentCode = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    return departmentCode === OKTELL_GUARD_DEPARTMENT_CODE
+        || departmentCode === OKTELL_GUARD_PHONE_DEPARTMENT_CODE;
 };
 
 // Раздел «Провайдер ЭДО» — выгрузка провайдеров водителей из диспетчерских Fleet.
@@ -2488,37 +2505,43 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
 
 /* «Списки Байги» (#356) — итоги еженедельной акции Байга.
 
-   Аналитик загружает неделю (поимённо — роли «аналитик» в портале нет),
-   маркетинг и руководители ищут и выгружают, поддержка (СЗоВ) ищет и смотрит,
-   глобальный админ — всё. Тренер раздел не просил.
+   Кому открыт (решение владельца 05.10.2026):
+     супер-админ и глава «Маркетинга» — всё: загрузка недель, выгрузка, журнал;
+     главы и супервайзеры ОП и СЗоВ — ищут и смотрят;
+     операторы ОП и СЗоВ и сотрудники «Маркетинга» — ищут и смотрят после QR.
+   Остальным закрыт: тренеру, стажёру, админу вне списка, прочим отделам.
 
    Здесь решается только «показывать ли пункт меню»; кто выгружает и грузит,
-   считает baiga/access.py. В строках ФИО и номер ВУ водителя, поэтому у
-   операторов раздел за QR-замком, как «Посылки». */
-const BAIGA_SECTION_DEPARTMENT_CODES = ['marketing', 'szov'];
+   считает baiga/access.py — тест гоняет этот предикат против сервера. В строках
+   ФИО и номер ВУ водителя, поэтому рядовой входит только через QR-замок, как в
+   «Посылки». */
+const BAIGA_MANAGE_DEPARTMENT_CODE = 'marketing';
+const BAIGA_READ_DEPARTMENT_CODES = ['op', 'szov'];
+const BAIGA_SECTION_DEPARTMENT_CODES = [BAIGA_MANAGE_DEPARTMENT_CODE, ...BAIGA_READ_DEPARTMENT_CODES];
 
 /* Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
    Зеркало baiga/access.py: ANALYST_USER_IDS — тест сверяет списки. */
 const BAIGA_ANALYST_USER_IDS = new Set([]);
 
-/* ПИЛОТ (02.10.2026): пока флаг стоит, пункт меню и экран есть только у
-   супер-админа. Сервер закрыт тем же флагом (baiga/access.py:
-   PILOT_SUPER_ADMIN_ONLY); снимать — в обоих местах. */
-const BAIGA_PILOT_SUPER_ADMIN_ONLY = true;
+/* Выключатель: пока флаг стоит, пункт меню и экран есть только у супер-админа
+   (так раздел выкладывался 02.10.2026). Сервер закрыт тем же флагом
+   (baiga/access.py: PILOT_SUPER_ADMIN_ONLY); переключать — в обоих местах. */
+const BAIGA_PILOT_SUPER_ADMIN_ONLY = false;
 
 const canAccessBaigaSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
     if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;
     if (BAIGA_ANALYST_USER_IDS.has(Number(userLike?.id))) return true;
-    // Глава чужого отдела с базовой admin-ролью — не глобальный админ, но
-    // «руководители» в разделе все: итоги акции смотрит глава любого отдела.
-    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
-    if (role === 'trainer') return false;
-    if (isDepartmentHead(userLike)) return true;
-    return BAIGA_SECTION_DEPARTMENT_CODES.includes(
-        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
-    );
+    // Главы: «Маркетинга» — ведёт раздел, ОП и СЗоВ — читают.
+    if (isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some(
+        (code) => BAIGA_SECTION_DEPARTMENT_CODES.includes(code),
+    )) return true;
+    const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    if (isSupervisorRole(role)) return BAIGA_READ_DEPARTMENT_CODES.includes(own);
+    // Рядовой — только тот, кого спросит QR-замок: кого замок не спрашивает
+    // (стажёр, тренер, админ вне списка), тому раздел закрыт.
+    return sensitiveSectionQrRequiredFor(userLike) && BAIGA_SECTION_DEPARTMENT_CODES.includes(own);
 };
 
 /* «Библиотека» (#282). Раздел видят те, кто его ведёт (загружает книги, правит
@@ -14149,6 +14172,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'занята': 'Занята',
             'зарезервировано': 'Зарезервировано',
             'перезвон': 'Перезвон',
+            // Статусы iCORE Phone у групп отдела продаж (ТЗ 05.10.2026). «Исход»
+            // — отдельный ключ, а не «перезвон»: у СЗоВ «Перезвон» — пометка
+            // перерыва Oktell, и в отчёте ОП он читался бы чужим словом.
+            // «Офлайн» — простой без звонков, НЕ «Офлайн активность» (та
+            // оплачивается и живёт в ручной таблице часов).
+            'исход': 'Исход',
+            'соединение': 'Соединение',
+            'автодозвон': 'Автодозвон',
+            'офлайн': 'Офлайн',
             'перерыв': 'Перерыв',
             'авто': 'Авто',
             'вышел': 'Вышел',
@@ -14294,6 +14326,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         row: 'border-sky-100 bg-sky-50/60 text-sky-800',
                         bar: '#0ea5e9'
                     });
+                // Цвета статусов iCORE Phone — те же, что у плашки статуса в
+                // самом телефоне: оператор и руководитель видят одно и то же.
+                case 'исход':
+                    return byKey({
+                        chip: 'border-orange-200 bg-orange-50 text-orange-700',
+                        row: 'border-orange-100 bg-orange-50/60 text-orange-800',
+                        bar: '#fb923c'
+                    });
+                case 'соединение':
+                    return byKey({
+                        chip: 'border-cyan-200 bg-cyan-50 text-cyan-700',
+                        row: 'border-cyan-100 bg-cyan-50/60 text-cyan-800',
+                        bar: '#06b6d4'
+                    });
+                case 'автодозвон':
+                    return byKey({
+                        chip: 'border-blue-200 bg-blue-50 text-blue-700',
+                        row: 'border-blue-100 bg-blue-50/60 text-blue-800',
+                        bar: '#3b82f6'
+                    });
+                // «Офлайн» — простой, а не работа: красный, чтобы его нельзя
+                // было спутать ни с зелёной «Офлайн активностью», ни с серым
+                // «Выключен» (тот — вне смены, этот — на смене без звонков).
+                case 'офлайн':
+                    return byKey({
+                        chip: 'border-red-200 bg-red-50 text-red-700',
+                        row: 'border-red-100 bg-red-50/60 text-red-800',
+                        bar: '#ef4444'
+                    });
                 case 'work in crm':
                 case 'работа в crm':
                     return byKey({
@@ -14376,7 +14437,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'зарезервировано',
             'online', 'holiday', 'онлайн', 'закрытие чатов',
             // TEZ: рабочее время = active + work in crm.
-            'active', 'work in crm', 'работа в crm'
+            'active', 'work in crm', 'работа в crm',
+            // iCORE Phone, группы ОП: «Исход», набор номера и «Автодозвон» —
+            // работа (как SCHEDULE_AUTO_WORK_STATUS_KEYS на бэкенде). «Офлайн»
+            // сюда намеренно не входит: это простой, его время не оплачивается.
+            'исход', 'соединение', 'автодозвон'
             ]);
             const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set([
             'перерыв', 'авто',
@@ -14395,7 +14460,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Без этих ключей оператор вне смены считался бы фактически на смене.
             'выключен', 'нет на месте',
             // TEZ: офлайн вне смены.
-            'inactive', 'неактивен'
+            'inactive', 'неактивен',
+            // iCORE Phone: «Офлайн», куда телефон сам переводит ЯР/Поток после
+            // простоя в «Исходе». Человек формально в программе, но не работает —
+            // для плана/факта по часам он не на смене (_HOURLY_NOT_ON_SHIFT_STATUS_KEYS).
+            'офлайн'
             ]);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);
@@ -46211,7 +46280,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection]);
+                // «Списки Байги» открыты не всему отделу: стажёру и админу СЗоВ
+                // раздел закрыт, а allowlist'а у СЗоВ нет — гард отдела их не
+                // уведёт, и ссылка ?view=baiga оставляла бы пустой экран.
+                if (view === 'baiga' && !canAccessBaigaSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -52027,8 +52106,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'water' && canAccessWaterSection) return;
                 // «Термокороба» — тот же периметр и та же причина.
                 if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
-                // «Списки Байги» — свой предикат: раздел маркетинга и СЗоВ плюс
-                // руководители любого отдела, а у части отделов есть allowlist.
+                // «Списки Байги» — свой предикат: раздел открыт ОП, СЗоВ и
+                // «Маркетингу», а у ОП и «Маркетинга» есть allowlist, и проверка
+                // ниже выбросила бы их из раздела сразу после входа.
                 if (view === 'baiga' && canAccessBaigaSection) return;
                 // «Ссылка на подписание» — тот же периметр и та же причина.
                 if (view === 'sign_links' && canAccessSignLinksSection) return;
@@ -52128,13 +52208,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                // «Обращения», «Вики», «Посылки», «Чаты водителей» и «Рассылки»
-                // закрыты тем же ключом. Статус спрашиваем до отрисовки раздела:
-                // иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
-                // раздел успеет получить 403.
+                // «Обращения», «Вики», «Посылки», «Чаты водителей», «Списки Байги» и
+                // «Рассылки» закрыты тем же ключом. Статус спрашиваем до отрисовки
+                // раздела: иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
+                // раздел успеет получить 403. Раздела нет в списке — оператор, не
+                // заходивший до него в другой закрытый раздел, остаётся на
+                // «Проверяем доступ…» без кнопки QR.
                 if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'water' || view === 'driver_chats' || view === 'sign_links'
-                        || view === 'driver_mailings') {
+                        || view === 'baiga' || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -54230,8 +54312,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {/* «Списки Байги» — итоги еженедельной акции Байга (#356).
-                                        Аудитория — маркетинг, СЗоВ и руководители любого
-                                        отдела, поэтому пункт объявлен ОДИН раз здесь, в общей
+                                        Аудитория — ОП, СЗоВ и «Маркетинг» от оператора до
+                                        главы, поэтому пункт объявлен ОДИН раз здесь, в общей
                                         части меню. Кто выгружает и грузит недели, считает
                                         бэкенд (baiga/access.py). */}
                                     {canAccessBaigaSection && (

@@ -113,9 +113,15 @@ export const TEZ_STATUS_STYLE = {
     talking: { label: 'В разговоре', chip: 'bg-blue-100 text-blue-700' },
     free: { label: 'Активный', chip: 'bg-green-100 text-green-700' },
     outgoing: { label: 'Исход', chip: 'bg-amber-100 text-amber-700' },
+    // Каталог статусов на сервере у табло Тез и ОП общий (_TEZ_WALLBOARD_STATUS_CATALOG),
+    // поэтому и оформление новых ключей то же, что в OP_STATUS_STYLE (почему такие
+    // цвета — там). Без строки здесь ключ упал бы в серый «other».
+    connecting: { label: 'Соединение', chip: 'bg-cyan-100 text-cyan-700' },
+    autodial: { label: 'Автодозвон', chip: 'bg-sky-100 text-sky-700' },
     training: { label: 'Тренинг', chip: 'bg-purple-100 text-purple-700' },
     tech: { label: 'Техническая пауза', chip: 'bg-fuchsia-100 text-fuchsia-700' },
     break: { label: 'Перерыв', chip: 'bg-orange-100 text-orange-700' },
+    idle_offline: { label: 'Офлайн', chip: 'bg-red-100 text-red-700' },
     offline: { label: 'Не в сети', chip: 'bg-slate-100 text-slate-500' },
     unknown: { label: 'Нет событий', chip: 'bg-slate-50 text-slate-400 ring-1 ring-slate-200' },
     other: { label: null, chip: 'bg-slate-100 text-slate-600' },
