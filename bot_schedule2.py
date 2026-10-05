@@ -6143,6 +6143,13 @@ def _ai_qa_marketing_link_now(full=False):
         conn.close()
 
 
+def _ai_qa_attach_taxi_parks(items, department=None):
+    from call_qa.taxi_parks import attach_taxi_parks
+    attach_taxi_parks(items, department=department, oktell_query=_oktell_query,
+                     wazzup_channels=_wazzup_channels_from_api,
+                     park_label=_oktell_billing_park_label)
+
+
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_review_queue():
@@ -6174,12 +6181,14 @@ def api_ai_qa_review_queue():
                                     subject_kind=subject, department=department,
                                     filters=filters,
                                     with_deals=_ai_qa_can_use_marketing(requester_id))
+            _ai_qa_attach_taxi_parks(page["items"], department)
             return jsonify({"status": "success", **page, "day": day, "subject": subject,
                             "department": department, "limit": limit, "offset": offset}), 200
         items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                   subject_kind=subject, department=department,
                                   filters=filters,
                                   with_deals=_ai_qa_can_use_marketing(requester_id))
+        _ai_qa_attach_taxi_parks(items, department)
         total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject,
                                    department=department, filters=filters)
         return jsonify({"status": "success", "items": items, "subject": subject,
@@ -6286,6 +6295,7 @@ def api_ai_qa_call(call_id):
         # человека (панель «Моя оценка» в карточке) рядом с оценкой из журнала.
         payload = review_payload(call_id, refresh=refresh, subject_kind=subject,
                                  reviewer_id=requester_id)
+        _ai_qa_attach_taxi_parks([payload])
         # Сделка amoCRM этого разговора (ТЗ #317, п. 2.1 «обогащение записи
         # атрибутами сделки»). Отдельный запрос, а не часть review_payload:
         # оценка и без того тяжёлая, а сделка ей не нужна ни для чего.
@@ -7838,12 +7848,14 @@ def api_ai_qa_evaluations():
             page = evaluations_day(day, limit=limit, offset=offset, allowed_direction_ids=scope,
                                    subject_kind=subject, department=department, filters=filters,
                                    with_deals=_ai_qa_can_use_marketing(requester_id))
+            _ai_qa_attach_taxi_parks(page["items"], department)
             return jsonify({"status": "success", **page, "day": day, "subject": subject,
                             "department": department, "limit": limit, "offset": offset}), 200
         items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                  subject_kind=subject, department=department,
                                  filters=filters,
                                  with_deals=_ai_qa_can_use_marketing(requester_id))
+        _ai_qa_attach_taxi_parks(items, department)
         total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject,
                                   department=department, filters=filters)
         return jsonify({"status": "success", "items": items, "subject": subject,
@@ -8446,6 +8458,7 @@ def api_ai_qa_find():
             phone=request.args.get('phone'), operator_id=period.get('operator_id'),
             date_from=period.get('date_from'), date_to=period.get('date_to'),
             limit=request.args.get('limit') or 40)
+        _ai_qa_attach_taxi_parks(result["items"], department)
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import TaxiPark from './TaxiPark';
 import {
     Search, Loader2, PhoneCall, PhoneIncoming, MessageSquare, Bot, User2, ChevronRight,
     AlertCircle, Headphones, CloudDownload, ShieldAlert, BookMarked,
@@ -75,6 +76,7 @@ function ResultRow({ item, onPick, busy }) {
                     {item.messages_count != null ? ` · ${item.messages_count} сообщений` : ''}
                     {item.operator_share != null ? ` · ответы оператора ${item.operator_share}%` : ''}
                 </p>
+                <TaxiPark value={item.taxi_park} className="mt-0.5" />
             </div>
             <div className="flex shrink-0 items-center gap-2">
                 {item.ai_score != null && (

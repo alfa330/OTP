@@ -1,4 +1,5 @@
 import React from 'react';
+import TaxiPark from './TaxiPark';
 import DealBadge from './DealBadge';
 import {
     ShieldAlert, CircleHelp, Server, Volume1, ImageOff, CheckCircle2, Sparkles,
@@ -186,6 +187,7 @@ export default function QueueList({ items, onOpen, common = [], meta = {}, reaso
                                         {direction ? ` · ${direction}` : ''}
                                     </span>
                                 </div>
+                                <TaxiPark value={c.taxi_park} className="mt-0.5" />
                                 {/* На телефоне причины — под именем, сделка — рядом с ними. */}
                                 {(loud.length > 0 || quiet.length > 0 || c.deal) && (
                                     <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 sm:hidden">

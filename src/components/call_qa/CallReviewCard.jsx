@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useMemo, useRef } from 'react';
 import DealBadge from './DealBadge';
+import TaxiPark from './TaxiPark';
 import { Languages, AlertTriangle, MessageSquare, Paperclip, PhoneOff } from 'lucide-react';
 import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
@@ -330,6 +331,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onSimil
                                 <p className="mt-1 text-[13px] text-slate-500 sm:truncate">
                                     {[call.operator, call.direction, call.datetime].filter(Boolean).join(' · ')}
                                 </p>
+                                <TaxiPark value={call.taxi_park} className="mt-1" />
                             </div>
                             <div className="flex shrink-0 items-start gap-4 sm:gap-6">
                                 {/* Балл намеренно зачитывает непроверяемые критерии; без
