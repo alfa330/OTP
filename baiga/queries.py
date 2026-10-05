@@ -211,6 +211,24 @@ def assistant_rows(cursor, *, driver_keys=(), license_keys=(), limit=2000):
     return _rows(cursor, ASSISTANT_ROW_FIELDS)
 
 
+def assistant_places(cursor, *, upload_id, first, last, zachets=(), limit=13):
+    """Строки недели по месту — «кто занял первое место в Алматы»: места с first по
+    last в названных зачётах или, если зачёт не назван, в каждом. Неделя — по id
+    загрузки: строки заменённой недели сюда не попадут."""
+    params = {'upload': int(upload_id), 'first': int(first), 'last': int(last), 'limit': int(limit)}
+    named = ''
+    if zachets:
+        named = ' AND r.zachet = ANY(%(zachets)s)'
+        params['zachets'] = list(zachets)
+    cursor.execute(
+        "SELECT %s, r.upload_id, r.license_key, r.driver_key FROM baiga_rows r "
+        "WHERE r.upload_id = %%(upload)s AND r.position BETWEEN %%(first)s AND %%(last)s%s "
+        "ORDER BY r.sheet_order, r.position, r.id LIMIT %%(limit)s" % (_ROW_COLUMNS, named),
+        params,
+    )
+    return _rows(cursor, ASSISTANT_ROW_FIELDS)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Загрузка недели
 # ─────────────────────────────────────────────────────────────────────────────

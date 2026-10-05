@@ -21,17 +21,24 @@
 не читает никому, в том числе супер-админу: у этой вики свои клиенты и свои
 водители, и вопрос про Байгу там задан не по адресу.
 
-ЧТО УХОДИТ МОДЕЛИ. Только строки НАЗВАННЫХ водителей (не больше MAX_PEOPLE):
-ФИО как в файле, номер ВУ, зачёт, место, сумма, поездки, приз, город и парк.
-Список целиком, чужие строки и ID водителя модели не отдаются. Водителя обязан
-назвать сам вопрос (номер ВУ, ID, фамилия) или разговор, который он продолжает, —
-«покажи первую десятку» сюда не относится: это выгрузка, и она живёт в разделе.
+ЧТО УХОДИТ МОДЕЛИ. Строки НАЗВАННЫХ водителей (не больше MAX_PEOPLE) либо строки
+НАЗВАННОГО МЕСТА — «кто занял первое место в Алматы», «топ-3 в Астане» (не
+больше RANK_ROWS): ФИО как в файле, номер ВУ, зачёт, место, сумма, поездки,
+приз, город и парк. Список целиком, чужие строки и ID водителя модели не
+отдаются: водителя или место обязан назвать сам вопрос либо разговор, который
+он продолжает; «выгрузи зачёт» сюда не относится — выгрузка живёт в разделе.
+
+ВОПРОС ПО МЕСТУ появился на второй день (05.10.2026): владелец спросил шарик «кто
+на прошлой неделе в Алматы занял первое место?» и получил ответ по статьям —
+водитель в вопросе не назван, и списки промолчали. Место считается ВНУТРИ зачёта
+(листа файла), поэтому город вопроса — это зачёт: «Алматы» — лист
+«Алматы-Каскелен». Зачёт не назван — отвечаем этим местом в каждом зачёте.
 
 ЧТО РЕШАЕТ КОД, А НЕ МОДЕЛЬ (тот же вывод, что у всего помощника — см. шапку
 wiki/ai/answer.py): о какой неделе спросили и какой список на неё отвечает; кто
-из водителей назван; что водителя в списке НЕТ. Последнее — тоже ответ: без
-него помощник отвечал бы «в статьях этого нет», хотя ответ лежит в соседнем
-разделе.
+из водителей назван или о каком месте и зачёте речь; что водителя в списке НЕТ.
+Последнее — тоже ответ: без него помощник отвечал бы «в статьях этого нет», хотя
+ответ лежит в соседнем разделе.
 
 ГЛАВНЫЙ ВРАГ — ЛИШНЯЯ СТРОКА. Фамилий в неделе восемь сотен, и «Мороз на улице,
 рейтинг упадёт?» или «оператор Ахметова заняла первое место» совпадают с
@@ -42,7 +49,7 @@ wiki/ai/answer.py): о какой неделе спросили и какой с
 появились из тех, что сработали зря, и из тех, что зря промолчали.
 
 Разбор реплик (analyze) и сборка фрагментов (build_rows) базы не касаются:
-SQL — в queries.py, сюда он приходит двумя функциями (find, load).
+SQL — в queries.py, сюда он приходит тремя функциями (find, load, load_places).
 """
 
 import re
@@ -70,6 +77,10 @@ EXCLUDED_DEPARTMENT_CODES = ('tez',)
 # (замер файла 21–27.09.2026: 832 фамилии на 900 строк); шесть покрывают и
 # двух названных водителей с однофамильцами.
 MAX_PEOPLE = 6
+# Сколько строк уходит модели по вопросу о месте: одно место в каждом из девяти
+# зачётов недели либо первая десятка одного зачёта. Больше — уже выгрузка.
+RANK_ROWS = 12
+RANK_TOP = 10
 # Сколько слов вопроса проверяется как фамилия и сколько водителей под них
 # читается из базы до отбора.
 MAX_NAME_WORDS = 8
@@ -135,6 +146,8 @@ _L = 'a-zа-я0-9'
 
 _W_BAIGA = r'байг(?:а|и|е|у|ой|ою|ам|ами|ах)?|байге(?:де|ден|ге|нин|ни|си|син|мен)|baiga|bayga|baige'
 _W_PLACE = (r'мест(?:о|а|е|у|ом|ах)?|позици[а-я]*|рейтинг[а-я]*|занял[а-я]*|топ(?:е|а|у)?'
+            r'|победител(?:ь|я|ю|ем|е|и|ей|ям|ями)|победил(?:а|и)?|лидер(?:а|у|ом|е|ы|ов|ам|ами)?'
+            r'|лидиру(?:ет|ют)|женимпаз(?:ы|дар)?'
             r'|орын(?:ды|да|га|нан|ы)?|орн(?:ы|ын|ына|ында)')
 _W_PRIZE = (r'приз(?:а|у|ом|е|ы|ов|ами|ах)?|призов[а-я]{2,4}|призер(?:а|у|ом|ы|ов)?|выигр[а-я]*'
             r'|наград(?:а|ы|у|е|ой)?|жулде(?:си|ни|ге|син|лер)?|сыйлык(?:ты)?|сыйлыг(?:ы|ын)'
@@ -215,14 +228,23 @@ _GENERAL = frozenset((
 # с точностью до падежа (same_surname): «Яндекса», «в Астане», «Караганды».
 # Нужны правилу «незнакомая фамилия» — знакомую узнаёт база — и разбору
 # посторонних слов. К ним добавляются слова названий зачётов загруженных недель.
-_NOT_NAMES = frozenset((
+_SERVICES = frozenset((
     'яндекс yandex про pro go такси taxi uber убер индрайв indrive флит fleet crm срм '
-    'тоо ип wolt вольт glovo глово курьер комфорт эконом бизнес доставка тез tez лимонопад '
-    'казахстан алматы астана шымкент караганда актобе тараз павлодар оскемен каменогорск '
-    'семей атырау костанай кызылорда уральск орал петропавловск актау темиртау туркестан '
-    'кокшетау талдыкорган экибастуз рудный жанаозен жезказган балхаш кентау каскелен конаев '
-    'капшагай сатпаев степногорск риддер щучинск талгар есик'
+    'тоо ип wolt вольт glovo глово курьер комфорт эконом бизнес доставка тез tez лимонопад'
 ).split())
+_CITIES = frozenset((
+    'казахстан алматы алмата астана шымкент чимкент караганда актобе тараз павлодар оскемен '
+    'каменогорск семей атырау костанай кызылорда уральск орал петропавловск актау темиртау '
+    'туркестан кокшетау талдыкорган экибастуз рудный жанаозен жезказган балхаш кентау каскелен '
+    'конаев капшагай сатпаев степногорск риддер щучинск талгар есик'
+).split())
+_NOT_NAMES = _SERVICES | _CITIES
+
+# Как город называют в разговоре → слово названия зачёта. «Усть-Каменогорск» в
+# файле обрезан пределом Excel в 31 символ («Петропавловск-Уральск-Усть-Каме»),
+# поэтому и полное имя города, и казахское ведут к слову «усть».
+_CITY_ALIASES = {'алмата': 'алматы', 'чимкент': 'шымкент', 'орал': 'уральск',
+                 'оскемен': 'усть', 'каменогорск': 'усть'}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,6 +333,43 @@ _BARE_CURRENT = _bounded(r'текущ(?:ей|ую|ая)')
 _WEEK_SHIFT = _bounded(r'(?:неделей|на\s+неделю)\s+раньше|(?:за\s+)?неделю\s+до\s+(?:этого|того)')
 # Время названо, но какое — не понять: прежней неделей такой вопрос не продолжают.
 _PERIOD_UNKNOWN = _bounded(r'раньше|ранее|прежде|давно')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Место в тексте вопроса: «кто занял первое место», «топ-3», «победитель»
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ORDINAL_STEMS = (('перв', 1), ('втор', 2), ('трет', 3), ('четверт', 4), ('пят', 5), ('шест', 6),
+                  ('седьм', 7), ('восьм', 8), ('девят', 9), ('десят', 10),
+                  # казахские, уже свёрнутые: бірінші, екінші, үшінші
+                  ('биринши', 1), ('екинши', 2), ('ушинши', 3))
+_COUNT_WORDS = {'три': 3, 'пять': 5, 'десять': 10, 'тройк': 3, 'пятерк': 5, 'десятк': 10}
+# «первое место», «на первом месте», «1 место», «1-е место», «35-м месте»,
+# «место № 3»; по-казахски — «бірінші орын», «1-орын».
+_RANK_PLACE = _bounded(
+    r'(?P<word>(?:перв|втор|четверт|пят|шест|седьм|восьм|девят|десят)(?:ое|ом|ого|ому|ым)'
+    r'|трет(?:ье|ьем|ьего|ьему|ьим))\s+(?:призов[а-я]+\s+)?мест(?:о|а|е|у|ом)'
+    r'|(?P<digit>\d{1,3})\s*-?\s*(?:е|ое|ье|м|ом|ем|го|ого|му|ому)?\s*мест(?:о|а|е|у|ом)'
+    r'|мест(?:о|а|е)\s*(?:№|#|номер)\s*(?P<after>\d{1,3})'
+    r'|(?P<kazakh>биринши|екинши|ушинши)\s+орын[а-я]*'
+    r'|(?P<kdigit>\d{1,3})\s*-?\s*(?:ши|шы|инши|ыншы|нши|ншы)?\s*орын[а-я]*')
+# «топ-3», «первая тройка», «первые пять мест», «лидеры»: места с первого по N-е.
+_RANK_TOP = _bounded(
+    r'топ\s*-?\s*(?P<top>\d{1,2})'
+    r'|(?:перв(?:ая|ую|ой|ые|ых)\s+)?(?P<group>тройк|пятерк|десятк)[а-я]+'
+    r'|перв(?:ые|ых)\s+(?P<count>\d{1,2}|три|пять|десять)(?:\s+мест[а-я]*)?'
+    r'|(?P<leaders>лидер(?:ы|ов|ам|ами))')
+# Победитель — это первое место, и слово само спрашивает «кто».
+_RANK_WINNER = _bounded(r'победител[а-я]+|победил[а-я]*|выиграл[а-я]*|лидер(?:а|у|ом|е)?'
+                        r'|лидиру(?:ет|ют)|женимпаз[а-я]*')
+# «кто первый в Алматы», «кто был вторым», «а на втором?» — место без слова
+# «место». Само по себе «первый» — обычное слово, поэтому местом оно становится
+# только рядом с «кто» или в разговоре о месте (_rank_subject).
+_RANK_ALONE = {stem + ending: number
+               for stem, number in _ORDINAL_STEMS[:10] if stem != 'трет'
+               for ending in ('ый', 'ой', 'ым', 'ая', 'ое', 'ом', 'ого')}
+_RANK_ALONE.update({'трет' + ending: 3 for ending in ('ий', 'ьим', 'ья', 'ье', 'ьем', 'ьего')})
+# Слова, которыми спрашивают «кто» (в написании до свёртки: «кім» ≠ «Ким»).
+_WHO = frozenset('кто кого кому кем чей чья чье чьи кім кімге кімнің кімде'.split())
 
 _WORD = re.compile(r'[^\W\d_]+', re.UNICODE)
 _FREE_NUMBER = re.compile(r'\d')
@@ -434,6 +493,47 @@ def _parse_week(masked, today):
 # Разбор реплики
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_rank(masked):
+    """О каком месте спросили: ({'first', 'last', 'asked', 'digits'} или None, спрашивает
+    ли само слово «кто» — «победитель», «топ-3»). Разобранное гасится в masked:
+    «первое» не должно читаться ни фамилией, ни посторонним словом, а «3» —
+    «числом в вопросе».
+
+        first, last  места с первого по последнее: одно место — они равны
+        asked        сколько мест просили («топ-30»), если больше, чем отдаём
+        digits       место набрано цифрой («за 3 место» — так спрашивают и об
+                     условиях акции, continues)
+    """
+    text = ''.join(masked)
+    match = _RANK_TOP.search(text)
+    if match:
+        if match.group('leaders'):
+            count = 3
+        elif match.group('group'):
+            count = _COUNT_WORDS[match.group('group')]
+        else:
+            raw = match.group('top') or match.group('count')
+            count = _COUNT_WORDS.get(raw) or int(raw)
+        if count >= 1:
+            _mask(masked, match.start(), match.end())
+            return {'first': 1, 'last': min(count, RANK_TOP), 'asked': count, 'digits': False}, True
+    match = _RANK_PLACE.search(text)
+    if match:
+        word = match.group('word') or match.group('kazakh')
+        if word:
+            number = next(value for stem, value in _ORDINAL_STEMS if word.startswith(stem))
+        else:
+            number = int(match.group('digit') or match.group('after') or match.group('kdigit'))
+        if number >= 1:
+            _mask(masked, match.start(), match.end())
+            return {'first': number, 'last': number, 'asked': 1, 'digits': not word}, False
+    match = _RANK_WINNER.search(text)
+    if match:
+        _mask(masked, match.start(), match.end())
+        return {'first': 1, 'last': 1, 'asked': 1, 'digits': False}, True
+    return None, False
+
+
 def _license(raw, pos, *, explicit):
     key = parse.license_key(raw)
     # label — как назвать номер в ответе «нет в списке»: обычный номер — в том
@@ -501,6 +601,7 @@ def analyze(text, *, today):
     masked = list(folded)
     licenses, drivers = _parse_keys(text, masked)
     week = _parse_week(masked, today)
+    rank, asks_who = _parse_rank(masked)
 
     rest = ''.join(masked)
     spans = [match.span() for match in _WORD.finditer(rest)]
@@ -537,15 +638,26 @@ def analyze(text, *, today):
                 (index + 1 < len(tokens) and tokens[index + 1]['kind'] == 'initial')
                 or (index > 0 and tokens[index - 1]['mark'])):
             token['kind'] = 'name'
+    who = asks_who or any(token['typed'] in _WHO for token in tokens)
+    # Место без слова «место»: (номер, индекс слова). «Кто первый раз…» — не о месте.
+    ordinal = None
+    if rank is None:
+        ordinal = next(((_RANK_ALONE[token['fold']], index) for index, token in enumerate(tokens)
+                        if token['kind'] == 'name' and token['fold'] in _RANK_ALONE
+                        and not (index + 1 < len(tokens) and tokens[index + 1]['fold'] == 'раз')), None)
     return {
         'strong': bool(_STRONG.search(folded)),
-        'medium': bool(_MEDIUM.search(folded)),
+        # Вопрос о месте — вопрос темы, даже когда слова «место» в нём нет.
+        'medium': bool(_MEDIUM.search(folded)) or rank is not None or (who and ordinal is not None),
         'weak': bool(_WEAK.search(folded)) or week['asked'] is not None,
         'general': any(token['typed'] in _GENERAL for token in tokens),
         'week': week,
         'licenses': licenses,
         'drivers': drivers,
         'tokens': tokens,
+        'rank': rank,
+        'ordinal': ordinal,
+        'who': who,
         'today': today,
         # Число, оставшееся после дат, недель и номеров: «за 3 место» — признак
         # вопроса об условиях акции, а не о водителе.
@@ -573,9 +685,9 @@ def _names_someone(analysis):
 
 
 def _may_name(analysis):
-    """Может ли реплика начать разговор о водителе: в ней есть слово темы и
-    номер или слово, которое может оказаться фамилией."""
-    return bool(topic(analysis)) and _names_someone(analysis)
+    """Может ли реплика начать разговор о водителе или о месте: в ней есть слово
+    темы и номер, слово, которое может оказаться фамилией, или названо место."""
+    return bool(topic(analysis)) and (_names_someone(analysis) or analysis['rank'] is not None)
 
 
 def _worth_asking(own, priors):
@@ -744,7 +856,10 @@ def _explicit_names(analysis, names):
             found.append(([index], True))
             used.add(index)
     loose = [index for index in names if index not in used]
+    # В вопросе о месте («кто занял первое место в Жетысу») заглавное слово —
+    # город или акция, а не тот, о ком спрашивают.
     if (loose and len(loose) <= 3 and loose[0] > 0 and not analysis['numbers']
+            and analysis['rank'] is None
             and all(tokens[index]['capital'] for index in loose)):
         found.append((loose, False))
     return found
@@ -922,6 +1037,10 @@ def continues(analysis):
         return False
     if analysis['general'] or analysis['numbers'] or week['unknown']:
         return False
+    # Место цифрой — «а какой приз за 3 место?» — вопрос об условиях, как и любое
+    # число. Словом («а он занял первое место?») — про того же водителя.
+    if analysis['rank'] is not None and analysis['rank']['digits']:
+        return False
     return not any(token['kind'] == 'name' and token['capital'] for token in analysis['tokens'])
 
 
@@ -940,7 +1059,61 @@ def _week_of_turn(analysis, state):
     return kept
 
 
-def conversation(own, priors, find, *, places=frozenset()):
+def _zachet_word(word, zachets):
+    """Слово называет зачёт: «в Астане», «по Алмате», «в Усть-Каменогорске»."""
+    return _is_one_of(word, zachets) or any(
+        target in zachets and same_surname(word, alias) for alias, target in _CITY_ALIASES.items())
+
+
+def _rank_subject(analysis, state, *, zachets):
+    """Вопрос о месте: {'rank', 'zachets', 'cities'} или None.
+
+    «Кто занял первое место в Алматы», «победитель в Астане», «топ-3 в Шымкенте»;
+    в разговоре о месте — «а в Астане?», «а на втором?». Чтобы слово «место» из
+    чужого вопроса не тянуло строки («кто занял первое место в рейтинге
+    операторов»), вопрос обязан спросить «кто» или назвать зачёт — и не нести
+    посторонних слов; с самим словом «Байга» посторонние слова допустимы.
+
+        zachets  слова вопроса, называющие зачёт (свёрнутые)
+        cities   города вопроса, которых среди зачётов нет (как набраны)
+    """
+    if analysis['licenses'] or analysis['drivers']:
+        return None
+    tokens = analysis['tokens']
+    previous = state['subject'] if state is not None and 'rank' in state['subject'] else None
+    rank, alone = analysis['rank'], None
+    if rank is None and analysis['ordinal'] is not None and (analysis['who'] or previous is not None):
+        number, alone = analysis['ordinal']
+        rank = {'first': number, 'last': number, 'asked': 1, 'digits': False}
+    named, cities, strays = [], [], []
+    for index in _name_indexes(analysis):
+        if index == alone:
+            continue
+        word = tokens[index]['fold']
+        if _zachet_word(word, zachets):
+            named.append(word)
+        elif _is_one_of(word, _CITIES):
+            cities.append(tokens[index]['text'])
+        else:
+            strays.append(index)
+    level = topic(analysis)
+    if (strays and level < 3) or analysis['numbers']:
+        return None
+    if rank is None:
+        # «а в Астане?» — то же место в другом зачёте.
+        if previous is None or not (named or cities):
+            return None
+        return {'rank': previous['rank'], 'zachets': named, 'cities': cities}
+    if alone is not None and not (named or cities or previous or level == 3):
+        return None                                  # «кто первый?» — о чём угодно
+    if not (analysis['who'] or named or cities or previous):
+        return None
+    if previous is not None and not (named or cities):
+        named, cities = previous['zachets'], previous['cities']    # «а на втором?» — в том же зачёте
+    return {'rank': rank, 'zachets': named, 'cities': cities}
+
+
+def conversation(own, priors, find, *, places=frozenset(), zachets=frozenset()):
     """О ком и о какой неделе вопрос: {'subject', 'week'} или None — списки молчат.
 
     priors — прошлые вопросы человека по порядку, own — нынешний. Разговор о
@@ -956,6 +1129,9 @@ def conversation(own, priors, find, *, places=frozenset()):
     for turn in list(priors) + [own]:
         subject = accept(turn, identify(turn, find, places=places), conversation=state is not None) \
             if (_names_someone(turn) and (topic(turn) or state is not None)) else None
+        if subject is None:
+            # Водитель не назван — может быть, названо место.
+            subject = _rank_subject(turn, state, zachets=zachets)
         if subject is not None:
             state = {'subject': subject, 'week': _week_of_turn(turn, state)}
         elif state is not None and continues(turn):
@@ -1181,19 +1357,101 @@ def _missing_fragment(index, item, resolution, weeks):
                          target['period_start'], target['period_end']))
 
 
+def _sheet_names(week):
+    return [str((sheet or {}).get('name') or '') for sheet in week.get('sheets') or ()
+            if (sheet or {}).get('name')]
+
+
+def _sheet_words(name):
+    """Слова названия зачёта, по которым его узнают: «Алматы-Каскелен» → алматы,
+    каскелен. («Байга» из «МОТО БАЙГА» зачёт не назовёт: в вопросе это слово темы.)"""
+    return {word for word in _words(name) if len(word) > 2}
+
+
+def _rank_text(rank):
+    if rank['first'] == rank['last']:
+        return '%d место' % rank['first']
+    return 'места с %d по %d' % (rank['first'], rank['last'])
+
+
+def _rank_fragments(start, subject, resolution, load_places):
+    """Фрагменты вопроса о месте: строки названного места — в названных зачётах
+    или в каждом; либо честное «такого зачёта (места) нет»."""
+    target, rank = resolution['target'], subject['rank']
+    period = _period(target['period_start'], target['period_end'])
+    names = _sheet_names(target)
+    listed = ', '.join('«%s»' % name for name in names)
+
+    def note(tail, text):
+        return [_fragment(start, heading='Неделя %s › %s' % (period, tail), text=text, week=target)]
+
+    chosen = [name for name in names
+              if any(_zachet_word(word, _sheet_words(name)) for word in subject['zachets'])]
+    if (subject['zachets'] or subject['cities']) and not chosen:
+        return note('зачёты', 'В списке Байги за %s зачёта по такому городу нет. Зачёты этой недели: %s.'
+                    % (_week_text(target), listed))
+    if rank['last'] > rank['first'] and not chosen:
+        return note('зачёты', 'В списке Байги за %s зачётов %d: %s. Первые места показываются по одному '
+                              'зачёту — нужно назвать зачёт.' % (_week_text(target), len(names), listed))
+
+    rows = load_places(upload_id=target['id'], zachets=chosen, first=rank['first'], last=rank['last'],
+                       limit=RANK_ROWS + 1)
+    if not rows:
+        where = ' в зачёте %s' % ', '.join('«%s»' % name for name in chosen) if chosen else ' ни в одном зачёте'
+        sizes = {str((sheet or {}).get('name')): (sheet or {}).get('rows') for sheet in target.get('sheets') or ()}
+        known = ['в зачёте «%s» — %d' % (name, sizes[name]) for name in chosen if sizes.get(name)]
+        return note('нет в списке', 'В списке Байги за %s%s места № %d нет.%s' % (
+            _week_text(target), where, rank['first'], ' Мест %s.' % '; '.join(known) if known else ''))
+
+    head = 'Список Байги за %s%s.' % (
+        _week_text(target), ' — последний загруженный' if resolution['status'] in ('latest', 'not_yet') else '')
+    tail = []
+    if len(rows) > RANK_ROWS:
+        rows = rows[:RANK_ROWS]
+        tail.append('Показаны первые %d строк — остальные в разделе.' % RANK_ROWS)
+    elif rank['asked'] > rank['last']:
+        tail.append('Показаны первые %d мест из %d спрошенных — остальные в разделе.'
+                    % (rank['last'], rank['asked']))
+
+    def fragment(index, heading, rows, lead=()):
+        results = ['%s: %s.' % (_who(row), _result_text(row)) for row in rows]
+        lines = [head] + list(lead) + results
+        if len(rows) == 1 and _where_text(rows[0]):
+            lines.append(_where_text(rows[0]))
+        return _fragment(index, week=target, text='\n'.join(lines + tail), evidence='\n'.join(results),
+                         ref_key=_ref_key(rows[0]) if len(rows) == 1 else None,
+                         heading='Неделя %s › %s' % (period, heading))
+
+    if not chosen:
+        # Зачёт не назван: это место в каждом зачёте — одним фрагментом.
+        return [fragment(start, '%s по зачётам' % _rank_text(rank), rows,
+                         lead=['%s в каждом зачёте:' % _rank_text(rank).capitalize()])]
+    fragments = []
+    for name in chosen:
+        mine = [row for row in rows if row['zachet'] == name]
+        if mine:
+            fragments.append(fragment(start + len(fragments), name, mine))
+    return fragments
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Сборка
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _zachets(weeks):
+    """Слова, которыми называют зачёты загруженных недель. Берутся из самих
+    недель и отдельного запроса не стоят."""
+    words = set()
+    for week in weeks:
+        for name in _sheet_names(week):
+            words |= _sheet_words(name)
+    return frozenset(words)
+
+
 def _places(weeks):
     """Слова, которые фамилией не бывают: сервисы и города (_NOT_NAMES) и слова
-    названий зачётов загруженных недель («Алматы-Каскелен»). Зачёты берутся из
-    самих недель и отдельного запроса не стоят."""
-    words = set(_NOT_NAMES)
-    for week in weeks:
-        for sheet in week.get('sheets') or ():
-            words.update(word for word in _words((sheet or {}).get('name')) if len(word) > 2)
-    return frozenset(words)
+    названий зачётов загруженных недель («Алматы-Каскелен»)."""
+    return frozenset(_NOT_NAMES | _zachets(weeks))
 
 
 def _people(subject, load):
@@ -1247,14 +1505,14 @@ def _people(subject, load):
     return people
 
 
-def build_rows(own, priors, *, weeks, find, load):
-    """Фрагменты помощника из разобранных реплик. База — только через find и
-    load, поэтому тесты гоняют сборку на списке в памяти.
+def build_rows(own, priors, *, weeks, find, load, load_places):
+    """Фрагменты помощника из разобранных реплик. База — только через find, load
+    и load_places, поэтому тесты гоняют сборку на списке в памяти.
 
-    Порядок: сначала «спрошенной недели нет», потом водители, потом те, кого в
-    списках не оказалось.
+    Порядок: сначала «спрошенной недели нет», потом водители (или строки
+    названного места), потом те, кого в списках не оказалось.
     """
-    state = conversation(own, priors, find, places=_places(weeks))
+    state = conversation(own, priors, find, places=_places(weeks), zachets=_zachets(weeks))
     if state is None:
         return []
     if not weeks:
@@ -1269,6 +1527,8 @@ def build_rows(own, priors, *, weeks, find, load):
         fragments.append(_fragment(0, heading='Недели', text=note, week=resolution['target']))
     if resolution['target'] is None:
         return fragments
+    if 'rank' in subject:
+        return fragments + _rank_fragments(len(fragments), subject, resolution, load_places)
 
     target_start = resolution['target']['period_start']
     people = _people(subject, load)
@@ -1319,4 +1579,7 @@ def ai_rows(cursor, *, user_id, question, space_id, sensitive_access_granted,
     def load(**keys):
         return queries.assistant_rows(cursor, **keys)
 
-    return build_rows(own, priors, weeks=weeks, find=find, load=load)
+    def load_places(**keys):
+        return queries.assistant_places(cursor, **keys)
+
+    return build_rows(own, priors, weeks=weeks, find=find, load=load, load_places=load_places)

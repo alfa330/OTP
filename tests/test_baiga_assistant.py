@@ -11,6 +11,10 @@
   * лишняя строка: слово, совпавшее с фамилией из списка, водителя не называет,
     пока вопрос этого не подтвердил («Мороз на улице, рейтинг упадёт?»);
     незнакомое слово водителем не объявляется («водитель Яндекса», «в Астане»);
+  * вопрос по месту (05.10.2026, владелец спросил шарик «кто на прошлой неделе в
+    Алматы занял первое место?»): место словом и цифрой, «топ-3», «победитель»;
+    город вопроса — зачёт; зачёт не назван — это место в каждом зачёте; чужое
+    «первое место» («в рейтинге операторов») строк не тянет;
   * вопрос: тема трёх степеней, водитель — номер ВУ в любом написании, ID,
     фамилия в падеже и с казахскими буквами («у Жумабая», «Ли А.»); неделя —
     «на этой», «на прошлой», дата, номер; фамилия, начинающаяся со слова темы
@@ -73,7 +77,8 @@ W40 = {'id': 3, 'period_start': date(2026, 9, 28), 'period_end': date(2026, 10, 
        'week_number': 40, 'sheets': SHEETS}
 WEEKS = [W40, W39]                 # свежие сверху, как queries.list_weeks
 
-SHEET_ORDER = {'Алматы-Каскелен': 0, 'Астана': 1, 'МОТО БАЙГА': 2}
+SHEET_ORDER = {'Алматы-Каскелен': 0, 'Астана': 1, 'МОТО БАЙГА': 2,
+               'Петропавловск-Уральск-Усть-Каме': 3}
 
 
 def row(week, zachet, position, name, license_value, number, *, amount, trips,
@@ -121,8 +126,45 @@ ROWS = [
 ]
 
 
+# Недели для вопросов по месту: в каждом зачёте места идут с первого, как в файле.
+# Название четвёртого листа обрезано пределом Excel в 31 символ — так оно и
+# лежит на проде («…Усть-Каменогорск»).
+PLACE_SHEETS = [{'name': 'Алматы-Каскелен', 'rows': 3}, {'name': 'Астана', 'rows': 3},
+                {'name': 'МОТО БАЙГА', 'rows': 1}, {'name': 'Петропавловск-Уральск-Усть-Каме', 'rows': 2}]
+P39 = dict(W39, id=12, sheets=PLACE_SHEETS)
+P40 = dict(W40, id=13, sheets=PLACE_SHEETS)
+PLACE_WEEKS = [P40, P39]
+PLACE_ROWS = [
+    row(P40, 'Алматы-Каскелен', 1, 'Первов А.', 'ZP000001', 101, amount=700000, trips=430, prize='200 000 тенге'),
+    row(P40, 'Алматы-Каскелен', 2, 'Вторых Б.', 'ZP000002', 102, amount=650000, trips=410, prize='150 000 тенге'),
+    row(P40, 'Алматы-Каскелен', 3, 'Третьяк В.', 'ZP000003', 103, amount=610000, trips=400, prize='100 000 тенге',
+        city='Каскелен'),
+    row(P40, 'Астана', 1, 'Астанов Г.', 'ZP000004', 104, amount=690000, trips=420, prize='200 000 тенге', city='Астана'),
+    row(P40, 'Астана', 2, 'Сериков Д.', 'ZP000005', 105, amount=640000, trips=405, prize='150 000 тенге', city='Астана'),
+    row(P40, 'Астана', 3, 'Жумабай Е.', 'ZP000006', 106, amount=600000, trips=390, prize='100 000 тенге', city='Астана'),
+    row(P40, 'МОТО БАЙГА', 1, 'Мотов И.', 'ZP000007', 107, amount=300000, trips=200, prize='50 000 тенге'),
+    row(P40, 'Петропавловск-Уральск-Усть-Каме', 1, 'Каменев Ж.', 'ZP000008', 108, amount=500000, trips=300,
+        prize='200 000 тенге', city='Усть-Каменогорск'),
+    row(P40, 'Петропавловск-Уральск-Усть-Каме', 2, 'Уральский З.', 'ZP000009', 109, amount=480000, trips=290,
+        prize='150 000 тенге', city='Уральск'),
+    row(P39, 'Алматы-Каскелен', 1, 'Старов К.', 'ZP000010', 110, amount=680000, trips=415, prize='200 000 тенге'),
+    row(P39, 'Алматы-Каскелен', 2, 'Первов А.', 'ZP000001', 101, amount=660000, trips=412, prize='150 000 тенге'),
+    row(P39, 'Астана', 1, 'Астанов Г.', 'ZP000004', 104, amount=670000, trips=418, prize='200 000 тенге', city='Астана'),
+]
+
+
+def places(question, prior=(), *, weeks=PLACE_WEEKS, lists=None):
+    """Фрагменты к вопросу на неделях, где места идут с первого."""
+    return fragments(question, prior, weeks=weeks, rows=PLACE_ROWS, lists=lists)
+
+
+def line(name, license_value, zachet, position, amount, trips, prize):
+    return '%s (номер ВУ %s): зачёт «%s», %d место, сумма за неделю %s ₸, поездок %d, приз %s.' % (
+        name, license_value, zachet, position, amount, trips, prize)
+
+
 class Lists:
-    """Списки в памяти вместо базы: те же два вопроса, что задаёт queries.py."""
+    """Списки в памяти вместо базы: те же три вопроса, что задаёт queries.py."""
 
     def __init__(self, rows=ROWS):
         self.rows = list(rows)
@@ -150,6 +192,13 @@ class Lists:
         return sorted(rows, key=lambda r: (-r['period_start'].toordinal(), r['sheet_order'],
                                            r['position']))
 
+    def places(self, upload_id=None, zachets=(), first=1, last=1, limit=None):
+        self.calls.append(('places', upload_id, tuple(zachets), first, last, limit))
+        rows = [item for item in self.rows
+                if item['upload_id'] == upload_id and first <= item['position'] <= last
+                and (not zachets or item['zachet'] in zachets)]
+        return sorted(rows, key=lambda r: (r['sheet_order'], r['position']))[:limit]
+
 
 def analyze(text):
     return assistant.analyze(text, today=TODAY)
@@ -163,7 +212,8 @@ def fragments(question, prior=(), *, weeks=WEEKS, rows=ROWS, lists=None):
     priors = [analyze(text) for text in list(prior)[-assistant.PRIOR_TURNS:]]
     if not assistant._worth_asking(own, priors):
         return []
-    return assistant.build_rows(own, priors, weeks=list(weeks), find=lists.find, load=lists.load)
+    return assistant.build_rows(own, priors, weeks=list(weeks), find=lists.find, load=lists.load,
+                                load_places=lists.places)
 
 
 def keys(found):
@@ -283,8 +333,14 @@ class GateOrderTests(unittest.TestCase):
             test.touched.append('spaces')
             return [9]
 
+        def by_place(cursor, **asked):
+            test.touched.append('places')
+            test.assertEqual(asked['limit'], assistant.RANK_ROWS + 1)
+            return test.lists.places(**asked)
+
         patches = mock.patch.multiple(queries, load_access_context=context, list_weeks=weeks,
-                                      assistant_candidates=candidates, assistant_rows=rows)
+                                      assistant_candidates=candidates, assistant_rows=rows,
+                                      assistant_places=by_place)
         patches.start()
         self.addCleanup(patches.stop)
         patch = mock.patch('wiki.structure.space_ids_for_departments', spaces)
@@ -328,10 +384,34 @@ class GateOrderTests(unittest.TestCase):
     def test_word_that_is_no_driver_costs_one_lookup_and_no_rows(self):
         """Слово темы есть, а фамилия ли остальное — знает только база. Строк под
         такой вопрос нет, и до них дело не доходит."""
-        for question in ('какой приз за первое место в байге', 'сколько поездок нужно для бонуса',
-                         'в каком городе есть аренда'):
+        for question in ('сколько поездок нужно для бонуса', 'в каком городе есть аренда'):
             self.assertEqual(self.ask(question), [], question)
             self.assertEqual(self.touched, ['spaces', 'context', 'weeks', 'find'], question)
+        # Вопрос об условиях акции: место названо, но не спрошено «кто» и не назван зачёт.
+        self.assertEqual(self.ask('какой приз за первое место в байге'), [])
+        self.assertEqual(self.touched, ['spaces', 'context', 'weeks'])
+
+    def test_question_about_a_place_passes_the_same_gates(self):
+        """«Кто занял первое место» — тот же второй путь к строкам: право до данных."""
+        question = 'кто на прошлой неделе в алматы занял первое место?'
+        found = self.ask(question)
+        self.assertEqual(keys(found), ['ZZ123456'])
+        self.assertEqual(self.touched, ['spaces', 'context', 'weeks', 'places'])
+        self.assertEqual(self.lists.calls, [('places', W40['id'], ('Алматы-Каскелен',), 1, 1,
+                                             assistant.RANK_ROWS + 1)])
+        self.viewer = person('trainer', 'szov')
+        self.assertEqual(self.ask(question), [])
+        self.assertEqual(self.touched, ['spaces', 'context'])
+        self.viewer = person('operator', 'op')
+        self.assertEqual(self.ask(question, qr=False), [])
+        self.assertEqual(self.touched, ['spaces', 'context'])
+        self.assertEqual(keys(self.ask(question, qr=True)), ['ZZ123456'])
+        self.viewer = person('super_admin', None)
+        self.assertEqual(self.ask(question, space_id=9), [])
+        self.assertEqual(self.touched, ['spaces'])
+        # Место названо, водителя нет — вопрос всё равно «про Байгу».
+        self.ask('кто занял первое место')
+        self.assertEqual(self.touched, ['spaces', 'context', 'weeks', 'places'])
 
     def test_case_of_letters_does_not_decide(self):
         """Целиком строчными пишут часто: судить о слове по заглавной букве
@@ -399,7 +479,7 @@ class TopicTests(unittest.TestCase):
         self.assertEqual(names('скажи пожалуйста какое место занял водитель в байге на этой неделе'), [])
         self.assertEqual(names('Жусипов какое место занял'), ['жусипов'])
         # Казахское «кім» («кто») после свёртки совпало бы с фамилией «Ким».
-        self.assertEqual(names('кім бірінші орын алды'), ['биринши'])
+        self.assertEqual(names('кім бүгін орын алды'), ['бугин'])
         self.assertEqual(names('кимге приз'), [])
         self.assertEqual(names('Ким какое место'), ['ким'])
 
@@ -421,8 +501,10 @@ class TopicTests(unittest.TestCase):
         self.assertEqual(initials('в Астане т. е. первое место, г. Алматы, д. 5'), [])
 
     def test_numbers_and_general_words(self):
-        self.assertTrue(analyze('какой приз за 3 место')['numbers'])
+        self.assertTrue(analyze('какой приз за 3 поездки')['numbers'])
         self.assertFalse(analyze('какой приз у ВУ ZZ123456 за неделю 21.09.2026')['numbers'])
+        # Номер места — не «число в вопросе»: он разобран как место.
+        self.assertFalse(analyze('какой приз за 3 место')['numbers'])
         for text in ('а когда приз?', 'а какие призы есть?', 'а сколько всего призовых мест?',
                      'а как получить приз?', 'а где список?', 'қашан береді?'):
             self.assertTrue(analyze(text)['general'], text)
@@ -723,9 +805,9 @@ class DriverTests(unittest.TestCase):
                       fragments('ВУ ZX111111 приз')[0]['text'])
 
     def test_driver_must_be_named(self):
-        for question in ('какой приз за первое место в байге', 'кто на первом месте в Алматы',
-                         'какие призы в байге', 'покажи первую десятку байги',
-                         'водитель говорит что не получил приз', 'сколько заработал водитель'):
+        for question in ('какой приз за первое место в байге', 'какие призы в байге',
+                         'водитель говорит что не получил приз', 'сколько заработал водитель',
+                         'выгрузи список байги за неделю', 'покажи всех водителей байги'):
             self.assertEqual(fragments(question), [], question)
 
     def test_no_more_than_six_drivers_go_to_the_model(self):
@@ -764,7 +846,8 @@ class ExtraRowTests(unittest.TestCase):
         self.assertEqual(keys(fragments('Жусипов А. утверждает что занял первое место')), ['ZZ123456'])
         # …или в вопросе нет посторонних слов.
         self.assertEqual(keys(fragments('Жусипов какое место занял')), ['ZZ123456'])
-        self.assertEqual(fragments('Жусипов утверждает что занял первое место'), [])
+        self.assertEqual(keys(fragments('Жусипов утверждает что занял первое место')), ['ZZ123456'])
+        self.assertEqual(fragments('Жусипов утверждает что приз не начислили'), [])
         # Номер ВУ — имя твёрдое.
         self.assertEqual(keys(fragments('ZZ123456 утверждает что занял первое место')), ['ZZ123456'])
         # Неделя, поездки, список — только вопрос без посторонних слов.
@@ -843,7 +926,7 @@ class MissingTests(unittest.TestCase):
     def test_ordinary_words_are_never_declared_a_driver(self):
         for question in ('водитель говорит что не получил приз', 'какое место занял петров',
                          # город зачёта — в любом падеже
-                         'какой приз в Байге за первое место в Алматы', 'какой приз в Байге по Алматы',
+                         'какой приз в Байге по Алматы',
                          'какое место в зачёте Астана', 'Какие призы в Байге в Астане',
                          'Сколько мест призовых в Караганде', 'какие призы в байге в Каскелене',
                          # сервис, тариф, акция
@@ -854,7 +937,7 @@ class MissingTests(unittest.TestCase):
                          'водитель опаздывает, какой приз в байге',         # строчное после «водитель»
                          'какой приз за 3 место в Жетысу',                  # число — вопрос об условиях
                          # сокращения — не инициалы
-                         'Какой приз получил победитель в Астане т. е. первое место',
+                         'Какой приз в Байге в Астане т. е. в столице',
                          'Сумма заказа г. Алматы ул. Абая д. 5',
                          'КАКОЕ МЕСТО ЗАНЯЛ ВОДИТЕЛЬ ВЧЕРА ВЕЧЕРОМ',        # заглавными — всё
                          'ПРИЗ НА 500000 ТЕНГЕ КАК ПОЛУЧИТЬ',
@@ -867,6 +950,223 @@ class MissingTests(unittest.TestCase):
         found = fragments('водитель Жусипов Алмас какой приз получил')
         self.assertEqual(len(found), 1)
         self.assertIn('200 000 тенге', found[0]['text'])
+
+
+class PlaceTests(unittest.TestCase):
+    """Вопрос по месту: «кто на прошлой неделе в Алматы занял первое место?» —
+    дословно вопрос владельца шарику 05.10.2026, на который списки промолчали."""
+
+    HEAD = 'Список Байги за неделю 28.09.2026 – 04.10.2026 (неделя № 40)'
+    FIRST = [line('Первов А.', 'ZP000001', 'Алматы-Каскелен', 1, '700 000', 430, '200 000 тенге'),
+             line('Астанов Г.', 'ZP000004', 'Астана', 1, '690 000', 420, '200 000 тенге'),
+             line('Мотов И.', 'ZP000007', 'МОТО БАЙГА', 1, '300 000', 200, '50 000 тенге'),
+             line('Каменев Ж.', 'ZP000008', 'Петропавловск-Уральск-Усть-Каме', 1, '500 000', 300, '200 000 тенге')]
+    ASTANA = [FIRST[1], line('Сериков Д.', 'ZP000005', 'Астана', 2, '640 000', 405, '150 000 тенге'),
+              line('Жумабай Е.', 'ZP000006', 'Астана', 3, '600 000', 390, '100 000 тенге')]
+
+    def rank(self, text):
+        found = analyze(text)['rank']
+        return found and (found['first'], found['last'])
+
+    def test_place_as_people_say_it(self):
+        for text in ('кто занял первое место', 'на первом месте', '1 место', '1-е место', 'место № 1',
+                     'кім бірінші орын алды', '1-орын', 'победитель недели', 'кто победил', 'кто выиграл',
+                     'лидер зачёта', 'жеңімпаз кім'):
+            self.assertEqual(self.rank(text), (1, 1), text)
+        for text, place in (('второе место', 2), ('третьего места', 3), ('на 35-м месте', 35),
+                            ('105 место', 105), ('десятое место', 10), ('екінші орын', 2)):
+            self.assertEqual(self.rank(text), (place, place), text)
+        for text, last in (('топ-3', 3), ('топ 5', 5), ('первая тройка', 3), ('тройка лидеров', 3),
+                           ('первые пять мест', 5), ('первые 3 места', 3), ('первая десятка', 10),
+                           ('лидеры', 3), ('топ-30', assistant.RANK_TOP)):
+            self.assertEqual(self.rank(text), (1, last), text)
+        self.assertEqual(analyze('топ-30')['rank']['asked'], 30)
+        for text in ('35 призовых мест', 'сколько мест', 'место подачи', 'первый раз', 'в первую очередь',
+                     'у него 1.5 ставки', 'на 39 неделе', 'место 5 раз'):
+            self.assertIsNone(self.rank(text), text)
+
+    def test_who_is_asked(self):
+        for text in ('кто занял первое место', 'кому достался приз', 'кім бірінші', 'победитель в Астане',
+                     'топ-3 в Астане'):
+            self.assertTrue(analyze(text)['who'], text)
+        for text in ('какой приз за первое место', 'ким первый занял место', 'первое место в Астане'):
+            self.assertFalse(analyze(text)['who'], text)
+
+    def test_place_words_are_neither_names_nor_numbers(self):
+        parsed = analyze('кто на прошлой неделе в алматы занял 1 место?')
+        self.assertEqual((names('кто на прошлой неделе в алматы занял первое место?'), parsed['numbers']),
+                         (['алматы'], False))
+        # Место цифрой помнится: «за 3 место» спрашивают и об условиях акции.
+        self.assertTrue(parsed['rank']['digits'])
+        self.assertFalse(analyze('первое место')['rank']['digits'])
+
+    def test_the_owners_question(self):
+        found = places('кто на прошлой неделе в алматы занял первое место?')
+        self.assertEqual(texts(found), [
+            self.HEAD + '.\n' + self.FIRST[0] + '\nГород: Алматы. Таксопарк: «Тестовый парк».'])
+        item = found[0]
+        self.assertEqual((item['heading_path'], item['ref_id'], item['ref_key'], item['evidence']),
+                         ('Неделя 28.09.2026 – 04.10.2026 › Алматы-Каскелен', P40['id'], 'ZP000001', self.FIRST[0]))
+
+    def test_city_of_the_question_is_the_zachet(self):
+        """Место считается внутри зачёта — листа файла. Город называют как угодно:
+        в падеже, по-старому, по-казахски; «Усть-Каменогорск» в названии листа
+        обрезан пределом Excel."""
+        for question, key in (('кто победил в Астане', 'ZP000004'), ('победитель по Алмате', 'ZP000001'),
+                              ('кто первый в Каскелене', 'ZP000001'),
+                              ('кто занял первое место в Усть-Каменогорске', 'ZP000008'),
+                              ('кто занял первое место в Оскемене', 'ZP000008'),
+                              ('кто выиграл в Уральске', 'ZP000008'), ('кто первый в мото байге', 'ZP000007'),
+                              ('Астанада кім бірінші орын алды', 'ZP000004'),
+                              ('первое место в Астане', 'ZP000004'),          # зачёт назван — «кто» не нужно
+                              ('какой приз за первое место в Астане', 'ZP000004')):
+            self.assertEqual(keys(places(question)), [key], question)
+        self.assertEqual(keys(places('кто занял первое место в Алматы и Астане')), ['ZP000001', 'ZP000004'])
+
+    def test_no_zachet_means_this_place_in_every_zachet(self):
+        for question in ('кто занял первое место', 'кто победил на прошлой неделе', 'победители байги',
+                         'кім бірінші орын алды'):
+            found = places(question)
+            self.assertEqual(len(found), 1, question)
+            self.assertEqual(found[0]['text'].split('\n')[1:], ['1 место в каждом зачёте:'] + self.FIRST, question)
+            self.assertEqual((found[0]['heading_path'], found[0]['ref_key']),
+                             ('Неделя 28.09.2026 – 04.10.2026 › 1 место по зачётам', None), question)
+            self.assertEqual(found[0]['evidence'], '\n'.join(self.FIRST))
+        self.assertTrue(places('кто занял первое место')[0]['text'].startswith(
+            self.HEAD + ' — последний загруженный.\n'))
+
+    def test_first_places_of_one_zachet(self):
+        for question in ('топ-3 в Астане', 'первая тройка в астане', 'лидеры в Астане',
+                         'покажи первые три места в Астане'):
+            found = places(question)
+            self.assertEqual(texts(found), [self.HEAD + ' — последний загруженный.\n' + '\n'.join(self.ASTANA)],
+                             question)
+            self.assertEqual((found[0]['heading_path'], found[0]['ref_key']),
+                             ('Неделя 28.09.2026 – 04.10.2026 › Астана', None))
+        self.assertEqual(keys(places('топ-2 в Усть-Каменогорске')), [None])
+        # Просили больше, чем отдаём, — сказано прямо.
+        self.assertTrue(places('топ-30 в Астане')[0]['text'].endswith(
+            '\nПоказаны первые 10 мест из 30 спрошенных — остальные в разделе.'))
+
+    def test_first_places_need_a_zachet(self):
+        """Первые места всех зачётов разом — уже выгрузка: просим назвать зачёт."""
+        for question in ('топ-3 байги', 'покажи первую десятку байги', 'кто в тройке лидеров'):
+            self.assertEqual(texts(places(question)), [
+                'В списке Байги за неделю 28.09.2026 – 04.10.2026 (неделя № 40) зачётов 4: «Алматы-Каскелен», '
+                '«Астана», «МОТО БАЙГА», «Петропавловск-Уральск-Усть-Каме». Первые места показываются по одному '
+                'зачёту — нужно назвать зачёт.'], question)
+
+    def test_no_more_rows_than_the_limit(self):
+        sheets = [{'name': 'Зачёт %s' % letter, 'rows': 1} for letter in 'АБВГДЕЖЗИКЛМНО']
+        week = dict(W40, id=21, sheets=sheets)
+        rows = []
+        for number, sheet in enumerate(sheets):
+            SHEET_ORDER[sheet['name']] = number
+            rows.append(row(week, sheet['name'], 1, 'Победителев %s.' % sheet['name'][-1], 'ZL%06d' % number,
+                            200 + number, amount=500000, trips=300, prize='100 000 тенге'))
+        found = fragments('кто занял первое место', weeks=[week], rows=rows)
+        lines = found[0]['text'].split('\n')
+        self.assertEqual(len([text for text in lines if 'номер ВУ' in text]), assistant.RANK_ROWS)
+        self.assertEqual(lines[-1], 'Показаны первые 12 строк — остальные в разделе.')
+        self.assertEqual((assistant.RANK_ROWS, assistant.RANK_TOP), (12, 10))
+
+    def test_place_that_is_not_in_the_list(self):
+        self.assertEqual(texts(places('кто занял 50 место в Астане')), [
+            'В списке Байги за неделю 28.09.2026 – 04.10.2026 (неделя № 40) в зачёте «Астана» места № 50 нет. '
+            'Мест в зачёте «Астана» — 3.'])
+        self.assertEqual(texts(places('кто занял 50 место')), [
+            'В списке Байги за неделю 28.09.2026 – 04.10.2026 (неделя № 40) ни в одном зачёте места № 50 нет.'])
+        self.assertEqual(places('кто занял 50 место в Астане')[0]['heading_path'],
+                         'Неделя 28.09.2026 – 04.10.2026 › нет в списке')
+
+    def test_city_that_is_not_a_zachet(self):
+        for question in ('кто занял первое место в Жанаозене', 'кто победил в Экибастузе'):
+            self.assertEqual(texts(places(question)), [
+                'В списке Байги за неделю 28.09.2026 – 04.10.2026 (неделя № 40) зачёта по такому городу нет. '
+                'Зачёты этой недели: «Алматы-Каскелен», «Астана», «МОТО БАЙГА», '
+                '«Петропавловск-Уральск-Усть-Каме».'], question)
+
+    def test_somebody_elses_first_place_gets_no_rows(self):
+        for question in ('кто занял первое место в рейтинге операторов',
+                         'оператор Иванова заняла первое место в рейтинге операторов',
+                         'какой приз за первое место в байге',            # условия акции: ни «кто», ни зачёта
+                         'какой приз за 3 место в Жетысу', 'кто выиграл в Лимонопаде',
+                         'кто первый?', 'кто первый должен позвонить водителю',
+                         'кто первый раз участвует в байге', 'кто на первой линии',
+                         'кто занял первое место из 500 участников в Астане',
+                         'кто занял первое место в Астане за 2025',          # число — другой вопрос
+                         'водитель 87070000011 занял первое место в Астане',  # спросили про водителя
+                         'сколько призовых мест в Астане', 'место подачи в Алматы'):
+            self.assertEqual(places(question), [], question)
+        # Со словом «Байга» посторонние слова вопросу не мешают.
+        self.assertEqual(keys(places('кто занял первое место в байге среди таксистов Астаны')), ['ZP000004'])
+
+    def test_named_driver_is_still_a_question_about_the_driver(self):
+        self.assertEqual(keys(places('Сериков занял первое место?')), ['ZP000005'])
+        self.assertEqual(keys(places('ВУ ZP000006 занял первое место в Астане?')), ['ZP000006'])
+
+    def test_week_of_the_place(self):
+        for question, key in (('кто занял первое место в Алматы на 39 неделе', 'ZP000010'),
+                              ('кто победил в Астане на позапрошлой неделе', 'ZP000004'),
+                              ('кто занял 2 место в алматы 23.09', 'ZP000001')):
+            found = places(question)
+            self.assertEqual(keys(found), [key], question)
+            self.assertIn('21.09.2026 – 27.09.2026 (неделя № 39).', found[0]['text'], question)
+        # Прод 05.10.2026: прошлая неделя ещё не загружена — сказано, и дан последний список.
+        found = places('кто на прошлой неделе в алматы занял первое место?', weeks=[P39])
+        self.assertEqual(keys(found), [None, 'ZP000010'])
+        self.assertIn('эта неделя уже прошла, но её список ещё не загружен', found[0]['text'])
+        self.assertTrue(found[1]['text'].startswith(
+            'Список Байги за неделю 21.09.2026 – 27.09.2026 (неделя № 39) — последний загруженный.'))
+        self.assertEqual(len({item['chunk_id'] for item in found}), 2)
+        # Недели нет в разделе — другой неделей её не подменяем.
+        found = places('кто занял первое место в Алматы за неделю 07.09.2026')
+        self.assertEqual(len(found), 1)
+        self.assertIn('Списка Байги за неделю 07.09.2026 – 13.09.2026 в разделе нет.', found[0]['text'])
+
+    def test_conversation_about_a_place(self):
+        prior = ['кто занял первое место в Алматы']
+        for question, key in (('а в Астане?', 'ZP000004'), ('а на втором?', 'ZP000002'),
+                              ('а второе место?', 'ZP000002'), ('а кто третий?', 'ZP000003'),
+                              ('а на позапрошлой?', 'ZP000010'), ('а сколько он заработал?', 'ZP000001'),
+                              ('а приз какой?', 'ZP000001'), ('а Сериков?', 'ZP000005'),
+                              ('а в Усть-Каменогорске кто победил?', 'ZP000008')):
+            self.assertEqual(keys(places(question, prior)), [key], question)
+        self.assertEqual(keys(places('а на втором?', prior + ['а в Астане?'])), ['ZP000005'])
+        self.assertEqual(keys(places('а приз какой?', prior + ['а Сериков?'])), ['ZP000005'])
+        top = places('а топ-3?', prior)
+        self.assertEqual((top[0]['heading_path'], len(top[0]['text'].split('\n'))),
+                         ('Неделя 28.09.2026 – 04.10.2026 › Алматы-Каскелен', 4))
+        for question in ('а когда приз?', 'а как оформить возврат?', 'а в Астане какие условия?',
+                         'а какой адрес офиса в Астане?', 'спасибо', 'а в сентябре?'):
+            self.assertEqual(places(question, prior), [], question)
+
+    def test_place_after_a_driver_and_back(self):
+        prior = ['Сериков какое место в байге']
+        found = places('а кто на первом месте?', prior)
+        self.assertEqual(found[0]['text'].split('\n')[1:], ['1 место в каждом зачёте:'] + self.FIRST)
+        # «а в Астане?» продолжает разговор о месте, а не о водителе.
+        self.assertEqual(places('а в Астане?', prior), [])
+        # Место цифрой после разговора о водителе — вопрос об условиях, как и раньше.
+        self.assertEqual(places('а какой приз за 3 место?', prior), [])
+        self.assertEqual(keys(places('а он занял первое место?', prior)), ['ZP000005'])
+
+    def test_honest_answer_about_a_place_keeps_its_source(self):
+        question = 'кто на прошлой неделе в алматы занял первое место?'
+        result, calls = compose(question, (
+            'На прошлой неделе (28.09.2026 – 04.10.2026) первое место в зачёте «Алматы-Каскелен» занял '
+            'Первов А. (ВУ ZP000001): сумма за неделю 700 000 ₸, 430 поездок, приз 200 000 тенге.\n'
+            'ИСТОЧНИКИ: [1]'), places(question))
+        self.assertEqual((result['kind'], len(calls)), ('answer', 1))
+        self.assertIn('11. СПИСКИ БАЙГИ', calls[0]['system'])
+        self.assertEqual(baiga_keys(result), ['ZP000001'])
+        self.assertEqual(result['sources'][0]['quote'], self.FIRST[0])
+        # Несколько зачётов в одном фрагменте: чип ведёт в неделю, без водителя.
+        result, _calls = compose('кто занял первое место', (
+            'Первые места за неделю 28.09.2026 – 04.10.2026: «Алматы-Каскелен» — Первов А. (ВУ ZP000001), '
+            '«Астана» — Астанов Г. (ВУ ZP000004).\nИСТОЧНИКИ: [1]'), places('кто занял первое место'))
+        self.assertEqual([(source['ref_id'], source['ref_key']) for source in result['sources']
+                          if source['source_kind'] == 'baiga'], [(P40['id'], None)])
 
 
 class WeekAnswerTests(unittest.TestCase):
@@ -923,11 +1223,13 @@ class WeekAnswerTests(unittest.TestCase):
         # Последний день недели — она ещё идёт.
         sunday = assistant.analyze('ВУ ZZ123456 какое место на этой неделе', today=date(2026, 10, 11))
         lists = Lists()
-        text = assistant.build_rows(sunday, [], weeks=list(WEEKS), find=lists.find, load=lists.load)[0]['text']
+        text = assistant.build_rows(sunday, [], weeks=list(WEEKS), find=lists.find, load=lists.load,
+                                    load_places=lists.places)[0]['text']
         self.assertIn('в разделе пока нет: список загружают, когда неделя прошла.', text)
         # «Сегодня» — то же, по которому разобран вопрос, а не часы сервера.
         later = assistant.analyze('ВУ ZZ123456 какое место на позапрошлой неделе', today=date(2099, 1, 19))
-        text = assistant.build_rows(later, [], weeks=list(WEEKS), find=lists.find, load=lists.load)[0]['text']
+        text = assistant.build_rows(later, [], weeks=list(WEEKS), find=lists.find, load=lists.load,
+                                    load_places=lists.places)[0]['text']
         self.assertIn('в разделе пока нет: эта неделя уже прошла, но её список ещё не загружен.', text)
 
     def test_missing_week_is_not_replaced_by_another(self):
@@ -990,7 +1292,7 @@ class ConversationTests(unittest.TestCase):
                          # вопрос об условиях акции, а не о водителе
                          'а когда приз?', 'а какие призы есть?', 'а сколько всего призовых мест?',
                          'а итоги когда?', 'а список где?', 'сколько призов в байге',
-                         'а кто на первом месте?', 'а как получить приз?',
+                         'а кто получает приз?', 'а как получить приз?',
                          # другой человек или тема — заглавное незнакомое слово
                          'а приз Яндекс когда начислит', 'а приз Ахметову не пришёл',
                          # время, которое не разобрать, прежней неделей не продолжают
@@ -1056,6 +1358,7 @@ class ConversationTests(unittest.TestCase):
 
 ALL_KINDS = (
     'ВУ ZZ123456 какое место',                                  # строка водителя
+    'кто на прошлой неделе в алматы занял первое место?',       # строка по месту
     'на этой неделе водитель Жусипов какое место занял',        # «списка ещё нет» + строка
     'Ким В. какое место занял на прошлой неделе',               # нет в неделе, был раньше
     'байга ву XX999999',                                        # номера нет
@@ -1840,6 +2143,22 @@ class WiringTests(unittest.TestCase):
                          "SELECT text FROM wiki_ai_messages WHERE chat_id = %(chat_id)s AND role = 'user' "
                          "ORDER BY seq DESC LIMIT %(limit)s")
         self.assertEqual(params, {'chat_id': 5, 'limit': 12})
+
+    def test_place_query_is_parametrised_too(self):
+        cursor = _Recorder()
+        queries.assistant_places(cursor, upload_id=7, first=1, last=3, zachets=['Астана'], limit=13)
+        sql, params = cursor.calls[0]
+        self.assertIn("FROM baiga_rows r WHERE r.upload_id = %(upload)s AND r.position BETWEEN %(first)s AND "
+                      "%(last)s AND r.zachet = ANY(%(zachets)s) ORDER BY r.sheet_order, r.position, r.id "
+                      "LIMIT %(limit)s", sql)
+        self.assertEqual(params, {'upload': 7, 'first': 1, 'last': 3, 'zachets': ['Астана'], 'limit': 13})
+        for column in ('r.upload_id', 'r.license_key', 'r.driver_key', 'r.zachet', 'r.position', 'r.prize_name'):
+            self.assertIn(column, sql)
+        # Зачёт не назван — условие по зачёту не ставится вовсе.
+        queries.assistant_places(cursor, upload_id=7, first=1, last=1)
+        sql, params = cursor.calls[1]
+        self.assertNotIn('zachet = ANY', sql)
+        self.assertEqual(params, {'upload': 7, 'first': 1, 'last': 1, 'limit': 13})
 
     def test_nothing_asked_means_no_query(self):
         """Пустые ключи не превращаются в «все строки» (ловушка пустого номера ВУ)."""
