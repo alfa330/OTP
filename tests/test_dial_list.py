@@ -328,6 +328,23 @@ class WiringTests(unittest.TestCase):
         cand = inspect.getsource(dial_service.DialListService.candidate_departments)
         self.assertIn("= 'binotel' AND s.department_id IS NULL", cand)
 
+    def test_enrolled_department_keeps_mode_off_and_sip_card_follows_the_mode(self):
+        # 01.10.2026 Тез КЦ подключили к разделу, режим не включали — и «Настройки SIP»
+        # заперли карточки всех его операторов: панель считала «отдел на обзвоне» по
+        # самому списку отделов раздела. Подключение заводит строку с ВЫКЛЮЧЕННЫМ
+        # режимом, поэтому признаком для карточки может быть только enabled.
+        enroll = inspect.getsource(dial_service.DialListService.enroll_department)
+        self.assertIn('VALUES (%s, FALSE, %s)', enroll)
+        row = dial_service.DialListService._department_row(
+            (560, 'Тез КЦ', 'tez', 'binotel', True, False, 20, 0, 0))
+        self.assertIs(row['configured'], True)   # в разделе отдел есть…
+        self.assertIs(row['enabled'], False)     # …а режим выключен: телефон обычный
+        view = self._read(os.path.join('src', 'components', 'sip', 'SipSettingsView.jsx'))
+        self.assertIn('setDialListDeptIds(dialListManagedDepartmentIds(data.departments))', view)
+        self.assertNotIn('.map((d) => Number(d.department_id))', view)
+        helper = self._read(os.path.join('src', 'components', 'sip', 'dialListDepartments.js'))
+        self.assertIn('d.enabled === true', helper)
+
     def test_manager_scope_rules(self):
         class _DB:
             pass

@@ -8,6 +8,7 @@ import {
 } from '../ui/ios';
 import { departmentCodeUsesOktellCabinet } from '../../utils/departmentViews';
 import { startFileDownload } from '../../utils/fileDownload';
+import { dialListManagedDepartmentIds } from './dialListDepartments';
 
 /*
  * Раздел «Настройки SIP» (iCORE Phone).
@@ -406,9 +407,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         [withAccessTokenHeader, user?.id]
     );
 
-    // Отделы, подключённые к «Обзвону из телефона»: их сотрудникам линию Binotel
-    // назначают там, и учётку АТС здесь вводить не нужно — карточка показывает
-    // только подсказку. Отказ ручки (раздел не для этого человека) — пустой набор.
+    // Отделы, работающие через «Обзвон из телефона» (режим у отдела включён): их
+    // сотрудникам линию Binotel назначают там, и учётку АТС здесь вводить не
+    // нужно — карточка показывает только подсказку. Подключённый к разделу отдел
+    // с выключенным режимом сюда не входит (dialListManagedDepartmentIds).
+    // Отказ ручки (раздел не для этого человека) — пустой набор.
     const [dialListDeptIds, setDialListDeptIds] = useState(() => new Set());
     useEffect(() => {
         if (provider !== 'binotel') return undefined;
@@ -418,8 +421,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments`, { credentials: 'include', headers: authHeaders() });
                 if (!resp.ok) return;
                 const data = await resp.json().catch(() => ({}));
-                const ids = (Array.isArray(data.departments) ? data.departments : []).map((d) => Number(d.department_id));
-                if (!cancelled) setDialListDeptIds(new Set(ids));
+                if (!cancelled) setDialListDeptIds(dialListManagedDepartmentIds(data.departments));
             } catch {
                 /* раздел недоступен — карточки остаются обычными */
             }
