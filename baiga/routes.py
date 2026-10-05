@@ -14,12 +14,15 @@ Blueprint собирается фабрикой и получает зависи
 Ручки:
     GET    ''                      экран: права, недели, значения фильтров
     POST   /rows                   поиск: фильтры, сортировка, страница
-    POST   /export                 xlsx текущей выборки (маркетинг, руководители)
-    POST   /uploads/preview        разбор файла без записи (аналитик)
-    POST   /uploads                загрузка недели; замена — с replace=1 (аналитик)
-    DELETE /uploads/<id>           удалить неделю (аналитик)
-    GET    /uploads/<id>/file      исходник недели (аналитик)
-    GET    /journal                журнал загрузок и выгрузок (аналитик)
+    POST   /export                 xlsx текущей выборки
+    POST   /uploads/preview        разбор файла без записи
+    POST   /uploads                загрузка недели; замена — с replace=1
+    DELETE /uploads/<id>           удалить неделю
+    GET    /uploads/<id>/file      исходник недели
+    GET    /journal                журнал загрузок и выгрузок
+
+Экран и поиск — всем, кому раздел открыт; выгрузка, загрузка и журнал — тем,
+кому он открыт полностью (access.can_manage).
 
 Поиск — POST, а не GET: вставленный список ID бывает в сотни значений, и в
 адрес запроса он бы не влез.
@@ -102,8 +105,8 @@ def build_baiga_blueprint(*, db, require_api_key, build_cors_preflight_response,
     def baiga_route(rule, methods=('GET',), need=None):
         """Каркас роута: preflight, авторизация, контекст, гейты, ошибки.
 
-        need='export' — выгрузка (маркетинг, руководители, аналитик, админ);
-        need='manage' — загрузка, удаление, журнал (аналитик, админ).
+        need='export' — выгрузка; need='manage' — загрузка, удаление, журнал.
+        Кому что открыто, считает access.py.
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -137,10 +140,9 @@ def build_baiga_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         return _bad('Раздел «Списки Байги» откроется после QR-подтверждения доступа',
                                     'SENSITIVE_ACCESS_REQUIRED', 403)
                     if need == 'export' and not access.can_export(ctx):
-                        return _bad('Выгружать списки могут маркетинг и руководители',
-                                    'BAIGA_EXPORT_FORBIDDEN', 403)
+                        return _bad('Выгрузка списков вам не открыта', 'BAIGA_EXPORT_FORBIDDEN', 403)
                     if need == 'manage' and not access.can_manage(ctx):
-                        return _bad('Загружать и удалять недели может аналитик', 'BAIGA_MANAGE_FORBIDDEN', 403)
+                        return _bad('Загрузка недель и журнал вам не открыты', 'BAIGA_MANAGE_FORBIDDEN', 403)
                     return handler(*args, ctx=ctx, **kwargs)
                 except Exception as exc:  # noqa: BLE001
                     logging.exception('baiga: ошибка в %s', rule)

@@ -492,7 +492,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     parcels: ['front_office', 'szov'],
     water: ['front_office', 'szov', 'op'],
     thermoboxes: ['front_office', 'szov'],
-    baiga: ['marketing', 'szov'],
+    baiga: ['marketing', 'op', 'szov'],
     sign_links: ['front_office', 'szov', 'op'],
 };
 
@@ -2487,37 +2487,43 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
 
 /* «Списки Байги» (#356) — итоги еженедельной акции Байга.
 
-   Аналитик загружает неделю (поимённо — роли «аналитик» в портале нет),
-   маркетинг и руководители ищут и выгружают, поддержка (СЗоВ) ищет и смотрит,
-   глобальный админ — всё. Тренер раздел не просил.
+   Кому открыт (решение владельца 05.10.2026):
+     супер-админ и глава «Маркетинга» — всё: загрузка недель, выгрузка, журнал;
+     главы и супервайзеры ОП и СЗоВ — ищут и смотрят;
+     операторы ОП и СЗоВ и сотрудники «Маркетинга» — ищут и смотрят после QR.
+   Остальным закрыт: тренеру, стажёру, админу вне списка, прочим отделам.
 
    Здесь решается только «показывать ли пункт меню»; кто выгружает и грузит,
-   считает baiga/access.py. В строках ФИО и номер ВУ водителя, поэтому у
-   операторов раздел за QR-замком, как «Посылки». */
-const BAIGA_SECTION_DEPARTMENT_CODES = ['marketing', 'szov'];
+   считает baiga/access.py — тест гоняет этот предикат против сервера. В строках
+   ФИО и номер ВУ водителя, поэтому рядовой входит только через QR-замок, как в
+   «Посылки». */
+const BAIGA_MANAGE_DEPARTMENT_CODE = 'marketing';
+const BAIGA_READ_DEPARTMENT_CODES = ['op', 'szov'];
+const BAIGA_SECTION_DEPARTMENT_CODES = [BAIGA_MANAGE_DEPARTMENT_CODE, ...BAIGA_READ_DEPARTMENT_CODES];
 
 /* Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
    Зеркало baiga/access.py: ANALYST_USER_IDS — тест сверяет списки. */
 const BAIGA_ANALYST_USER_IDS = new Set([]);
 
-/* ПИЛОТ (02.10.2026): пока флаг стоит, пункт меню и экран есть только у
-   супер-админа. Сервер закрыт тем же флагом (baiga/access.py:
-   PILOT_SUPER_ADMIN_ONLY); снимать — в обоих местах. */
-const BAIGA_PILOT_SUPER_ADMIN_ONLY = true;
+/* Выключатель: пока флаг стоит, пункт меню и экран есть только у супер-админа
+   (так раздел выкладывался 02.10.2026). Сервер закрыт тем же флагом
+   (baiga/access.py: PILOT_SUPER_ADMIN_ONLY); переключать — в обоих местах. */
+const BAIGA_PILOT_SUPER_ADMIN_ONLY = false;
 
 const canAccessBaigaSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
     if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;
     if (BAIGA_ANALYST_USER_IDS.has(Number(userLike?.id))) return true;
-    // Глава чужого отдела с базовой admin-ролью — не глобальный админ, но
-    // «руководители» в разделе все: итоги акции смотрит глава любого отдела.
-    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
-    if (role === 'trainer') return false;
-    if (isDepartmentHead(userLike)) return true;
-    return BAIGA_SECTION_DEPARTMENT_CODES.includes(
-        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
-    );
+    // Главы: «Маркетинга» — ведёт раздел, ОП и СЗоВ — читают.
+    if (isDepartmentHead(userLike) && aiQaHeadDepartmentCodesOf(userLike).some(
+        (code) => BAIGA_SECTION_DEPARTMENT_CODES.includes(code),
+    )) return true;
+    const own = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    if (isSupervisorRole(role)) return BAIGA_READ_DEPARTMENT_CODES.includes(own);
+    // Рядовой — только тот, кого спросит QR-замок: кого замок не спрашивает
+    // (стажёр, тренер, админ вне списка), тому раздел закрыт.
+    return sensitiveSectionQrRequiredFor(userLike) && BAIGA_SECTION_DEPARTMENT_CODES.includes(own);
 };
 
 /* «Библиотека» (#282). Раздел видят те, кто его ведёт (загружает книги, правит
@@ -46228,7 +46234,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection]);
+                // «Списки Байги» открыты не всему отделу: стажёру и админу СЗоВ
+                // раздел закрыт, а allowlist'а у СЗоВ нет — гард отдела их не
+                // уведёт, и ссылка ?view=baiga оставляла бы пустой экран.
+                if (view === 'baiga' && !canAccessBaigaSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -52043,8 +52059,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'water' && canAccessWaterSection) return;
                 // «Термокороба» — тот же периметр и та же причина.
                 if (view === 'thermoboxes' && canAccessThermoboxesSection) return;
-                // «Списки Байги» — свой предикат: раздел маркетинга и СЗоВ плюс
-                // руководители любого отдела, а у части отделов есть allowlist.
+                // «Списки Байги» — свой предикат: раздел открыт ОП, СЗоВ и
+                // «Маркетингу», а у ОП и «Маркетинга» есть allowlist, и проверка
+                // ниже выбросила бы их из раздела сразу после входа.
                 if (view === 'baiga' && canAccessBaigaSection) return;
                 // «Ссылка на подписание» — тот же периметр и та же причина.
                 if (view === 'sign_links' && canAccessSignLinksSection) return;
@@ -52144,13 +52161,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                // «Обращения», «Вики», «Посылки», «Чаты водителей» и «Рассылки»
-                // закрыты тем же ключом. Статус спрашиваем до отрисовки раздела:
-                // иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
-                // раздел успеет получить 403.
+                // «Обращения», «Вики», «Посылки», «Чаты водителей», «Списки Байги» и
+                // «Рассылки» закрыты тем же ключом. Статус спрашиваем до отрисовки
+                // раздела: иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
+                // раздел успеет получить 403. Раздела нет в списке — оператор, не
+                // заходивший до него в другой закрытый раздел, остаётся на
+                // «Проверяем доступ…» без кнопки QR.
                 if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'water' || view === 'driver_chats' || view === 'sign_links'
-                        || view === 'driver_mailings') {
+                        || view === 'baiga' || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -54246,8 +54265,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {/* «Списки Байги» — итоги еженедельной акции Байга (#356).
-                                        Аудитория — маркетинг, СЗоВ и руководители любого
-                                        отдела, поэтому пункт объявлен ОДИН раз здесь, в общей
+                                        Аудитория — ОП, СЗоВ и «Маркетинг» от оператора до
+                                        главы, поэтому пункт объявлен ОДИН раз здесь, в общей
                                         части меню. Кто выгружает и грузит недели, считает
                                         бэкенд (baiga/access.py). */}
                                     {canAccessBaigaSection && (
