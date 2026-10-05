@@ -17,7 +17,9 @@ export default function TezDepartmentPlanSummary({ summary }) {
             Групповой план на месяц
             <InfoHint title="План на начало месяца" side="right">
               План на 1 FTE ({fmt(summary.plan_per_fte)}) × FTE на 1 число
-              {' '}({fmt(summary.fte_total, 2)}) × 0,8. Состав и ставки зафиксированы:
+              {' '}({fmt(summary.fte_total, 2)}) × 0,8. В FTE входят только операторы
+              со статусом «Работает» на 1 число: БС, больничный, отпуск и другие статусы исключаются.
+              Состав и ставки зафиксированы:
               приём, увольнение и отсутствие сотрудника в течение месяца этот FTE не меняют.
             </InfoHint>
           </div>

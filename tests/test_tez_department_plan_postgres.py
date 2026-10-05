@@ -20,8 +20,8 @@ pytestmark = pytest.mark.skipif(not PORT, reason='needs isolated local PostgreSQ
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture
-def db():
+@pytest.fixture(params=['new', 'legacy'])
+def db(request):
     import psycopg2
     conn = psycopg2.connect(host='127.0.0.1', port=int(PORT), user='postgres', dbname='postgres')
     cursor = conn.cursor()
@@ -34,7 +34,7 @@ def db():
         CREATE TABLE operator_profiles (user_id integer, rate numeric);
         CREATE TABLE groups (id integer PRIMARY KEY, department_id integer, calculation_model_code text);
         CREATE TABLE group_operator_memberships (operator_id integer, group_id integer, start_date date, end_date date);
-        CREATE TABLE operator_schedule_status_periods (operator_id integer, status_code text, start_date date, end_date date);
+        CREATE TABLE operator_schedule_status_periods (operator_id integer, status_code text, start_date date, end_date date, id serial);
         CREATE TABLE user_history (id serial, user_id integer, field_changed text, old_value text, new_value text, changed_at timestamp);
         CREATE TABLE daily_hours (operator_id integer, group_id integer, day date, work_time float);
         CREATE TABLE trainings (operator_id integer, training_date date, start_time time, end_time time, count_in_hours boolean);
@@ -51,6 +51,12 @@ def db():
     tree = source_cache.parse((ROOT / 'database.py').read_text(encoding='utf-8-sig'))
     migration = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
                      and 'CREATE TABLE IF NOT EXISTS tez_department_plan_snapshots' in n.value)
+    if request.param == 'legacy':
+        cursor.execute('''CREATE TABLE tez_department_plan_snapshots (
+            department_id integer REFERENCES departments(id), month_start date,
+            fte_total numeric(12,4) NOT NULL, operators_count integer NOT NULL,
+            captured_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (department_id, month_start))''')
     cursor.execute(migration)
     cursor.execute(migration)  # repeat deployment must be harmless
 
@@ -151,3 +157,71 @@ def test_sql_new_month_gets_its_own_snapshot_and_legacy_norm(db):
     assert float(july[0]) == 2
     assert float(august[0]) == 1.5  # A's changed rate + C, excluding B and D
     assert obj.upsert_department_monthly_plan(560, 2026, 9, 200)['norm_hours_fte'] == 168
+
+
+@pytest.mark.parametrize('status', ['bs', 'unpaid_leave', 'sick_leave', 'annual_leave', 'fired', 'dismissal'])
+def test_sql_status_on_first_not_current_card(db, status):
+    obj, cursor = db
+    cursor.execute("""INSERT INTO user_history (user_id, field_changed, old_value, new_value, changed_at)
+                      VALUES (1, 'status', %s, 'working', '2026-07-05')""", (status,))
+    result = summary(obj, 560, 2026, 7, 200, 160)
+    assert result['fte_total'] == 1  # A returned later; B worked on July 1
+    assert result['operators_count'] == 1
+    assert result['plan_total'] == 160
+    assert result['actual_hours'] == 132  # returning employees' hours still count
+
+
+@pytest.mark.parametrize('code', ['bs', 'sick_leave', 'annual_leave', 'dismissal'])
+@pytest.mark.parametrize('start,end,excluded', [
+    ('2026-06-20', '2026-06-30', False),
+    ('2026-06-20', '2026-07-01', True),
+    ('2026-07-01', None, True),
+    ('2026-07-02', None, False),
+])
+def test_sql_absence_dates_override_delayed_card_sync(db, code, start, end, excluded):
+    obj, cursor = db
+    cursor.execute('INSERT INTO operator_schedule_status_periods VALUES (1, %s, %s, %s)', (code, start, end))
+    if end == '2026-06-30':
+        status = 'fired' if code == 'dismissal' else code
+        cursor.execute("UPDATE users SET status = %s WHERE id = 1", (status,))
+        cursor.execute("""INSERT INTO user_history (user_id, field_changed, old_value, new_value, changed_at)
+                          VALUES (1, 'status', 'working', %s, '2026-06-20')""", (status,))
+    assert month_start_snapshot(obj, 560, 2026, 7)[:2] == (1 if excluded else 2, 1 if excluded else 2)
+
+
+@pytest.mark.parametrize('changed_at,expected', [
+    ('2026-06-30 23:59:59', 1), ('2026-07-01 00:00:00', 1), ('2026-07-01 00:00:01', 2),
+])
+def test_sql_status_change_at_month_boundary(db, changed_at, expected):
+    obj, cursor = db
+    cursor.execute("UPDATE users SET status = 'bs' WHERE id = 1")
+    cursor.execute("""INSERT INTO user_history (user_id, field_changed, old_value, new_value, changed_at)
+                      VALUES (1, 'status', 'working', 'bs', %s)""", (changed_at,))
+    assert month_start_snapshot(obj, 560, 2026, 7)[:2] == (expected, expected)
+
+
+def test_sql_legacy_snapshot_repaired_once_even_when_zero(db):
+    obj, cursor = db
+    cursor.execute("INSERT INTO tez_department_plan_snapshots (department_id, month_start, fte_total, operators_count) VALUES (560, '2026-07-01', 99, 99)")
+    cursor.execute("INSERT INTO operator_schedule_status_periods VALUES (1, 'bs', '2026-07-01', NULL), (2, 'annual_leave', '2026-07-01', NULL)")
+    first = month_start_snapshot(obj, 560, 2026, 7)
+    assert first[:2] == (0, 0)
+    cursor.execute('SELECT calculation_version FROM tez_department_plan_snapshots')
+    assert cursor.fetchone()[0] == 2
+    cursor.execute("DELETE FROM operator_schedule_status_periods WHERE status_code <> 'dismissal'")
+    assert month_start_snapshot(obj, 560, 2026, 7) == first
+
+
+def test_sql_finished_period_does_not_override_later_manual_status(db):
+    obj, cursor = db
+    cursor.execute("INSERT INTO operator_schedule_status_periods VALUES (1, 'bs', '2026-06-10', '2026-06-20')")
+    cursor.execute("""INSERT INTO user_history (user_id, field_changed, old_value, new_value, changed_at)
+                      VALUES (1, 'status', 'working', 'bs', '2026-06-25')""")
+    assert month_start_snapshot(obj, 560, 2026, 7)[:2] == (1, 1)
+
+
+def test_sql_active_period_wins_over_overlapping_finished_period(db):
+    obj, cursor = db
+    cursor.execute("""INSERT INTO operator_schedule_status_periods VALUES
+                      (1, 'bs', '2026-06-01', NULL), (1, 'bs', '2026-06-10', '2026-06-30')""")
+    assert month_start_snapshot(obj, 560, 2026, 7)[:2] == (1, 1)

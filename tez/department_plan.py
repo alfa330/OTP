@@ -2,11 +2,12 @@
 
 import calendar
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
 COEFFICIENT = 0.8
+SNAPSHOT_VERSION = 2
 
 
 def default_norm_hours(year, month):
@@ -14,12 +15,58 @@ def default_norm_hours(year, month):
     return math.floor(calendar.monthrange(int(year), int(month))[1] / 7 * 5 + 0.5) * 8
 
 
+def _opening_statuses(cursor, staff, start):
+    """Reconstruct card history, then apply dated schedule absences.
+
+    Period dates are authoritative: card synchronization may run hours after
+    midnight, both when an absence starts and when the employee returns.
+    """
+    statuses = {uid: status for uid, _, status in staff}
+    if not statuses:
+        return statuses
+    reference = datetime.combine(start, datetime.min.time())
+    cursor.execute("""
+        SELECT user_id, old_value, new_value, changed_at
+        FROM user_history WHERE field_changed = 'status' AND user_id = ANY(%s)
+        ORDER BY user_id, changed_at, id
+    """, (list(statuses),))
+    changed_at = {}
+    for uid, old, new, at in cursor.fetchall():
+        if uid not in changed_at:
+            statuses[uid] = old
+            changed_at[uid] = None
+        if at is not None and at <= reference:
+            statuses[uid], changed_at[uid] = new, at
+    statuses = {uid: str(status or '').strip().lower() for uid, status in statuses.items()}
+    cursor.execute("""
+        SELECT operator_id, status_code, start_date, end_date
+        FROM operator_schedule_status_periods
+        WHERE operator_id = ANY(%s) AND start_date <= %s
+        ORDER BY start_date, id
+    """, (list(statuses), start))
+    active = {}
+    for uid, code, _, end in cursor.fetchall():
+        status = 'fired' if code == 'dismissal' else code
+        if end is None or end >= start:
+            active[uid] = status
+        elif statuses[uid] == status:
+            # An expired period must not leave yesterday's absence in the
+            # opening FTE while the card still awaits synchronization.
+            last_change = changed_at.get(uid)
+            returned_at = datetime.combine(end + timedelta(days=1), datetime.min.time())
+            if last_change is None or last_change < returned_at:
+                statuses[uid] = 'working'
+    statuses.update(active)
+    return statuses
+
+
 def month_start_snapshot(db, department_id, year, month):
     """Freeze once, including zero FTE. Future months are never frozen early.
 
     First access after downtime/deployment reconstructs rates and employment
     status at midnight on the first from history, not today's employee cards.
-    A unique key + DO NOTHING makes concurrent initializations harmless.
+    Legacy snapshots are repaired once; a version-guarded upsert makes
+    concurrent initializations harmless and keeps corrected snapshots frozen.
     """
     start = date(int(year), int(month), 1)
     if start > datetime.now(ZoneInfo('Asia/Almaty')).date():
@@ -28,8 +75,8 @@ def month_start_snapshot(db, department_id, year, month):
         cursor.execute("""
             SELECT fte_total, operators_count, captured_at
             FROM tez_department_plan_snapshots
-            WHERE department_id = %s AND month_start = %s
-        """, (int(department_id), start))
+            WHERE department_id = %s AND month_start = %s AND calculation_version >= %s
+        """, (int(department_id), start, SNAPSHOT_VERSION))
         row = cursor.fetchone()
         if row:
             return row
@@ -43,22 +90,18 @@ def month_start_snapshot(db, department_id, year, month):
               AND gom.start_date <= %s
               AND (gom.end_date IS NULL OR gom.end_date >= %s)
               AND (u.hire_date IS NULL OR u.hire_date <= %s)
-              AND NOT EXISTS (
-                  SELECT 1 FROM operator_schedule_status_periods p
-                  WHERE p.operator_id = u.id AND p.status_code = 'dismissal'
-                    AND p.start_date <= %s
-                    AND (p.end_date IS NULL OR p.end_date >= %s)
-              )
-        """, (int(department_id), start, start, start, start, start))
+        """, (int(department_id), start, start, start))
         staff = cursor.fetchall()
         ids = [row[0] for row in staff]
-        reference = datetime.combine(start, datetime.min.time())
+        # The shared history helper uses an exclusive bound. Include changes
+        # recorded exactly at midnight without changing other callers.
+        reference = datetime.combine(start, datetime.min.time()) + timedelta(microseconds=1)
         rates = db._resolve_user_field_as_of_tx(cursor, ids, 'rate', reference)
-        statuses = db._resolve_user_field_as_of_tx(cursor, ids, 'status', reference)
+        statuses = _opening_statuses(cursor, staff, start)
         total, count = 0.0, 0
         for uid, current_rate, current_status in staff:
             status = str(statuses.get(uid, current_status) or '').strip().lower()
-            if status in ('fired', 'dismissal'):
+            if status != 'working':
                 continue
             rate = float(rates.get(uid, current_rate) or 0)
             if not math.isfinite(rate) or rate < 0:
@@ -67,10 +110,13 @@ def month_start_snapshot(db, department_id, year, month):
             count += 1
         cursor.execute("""
             INSERT INTO tez_department_plan_snapshots
-                (department_id, month_start, fte_total, operators_count)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (department_id, month_start) DO NOTHING
-        """, (int(department_id), start, round(total, 4), count))
+                (department_id, month_start, fte_total, operators_count, calculation_version)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (department_id, month_start) DO UPDATE
+            SET fte_total = EXCLUDED.fte_total, operators_count = EXCLUDED.operators_count,
+                calculation_version = EXCLUDED.calculation_version, captured_at = CURRENT_TIMESTAMP
+            WHERE tez_department_plan_snapshots.calculation_version < EXCLUDED.calculation_version
+        """, (int(department_id), start, round(total, 4), count, SNAPSHOT_VERSION))
         cursor.execute("""
             SELECT fte_total, operators_count, captured_at
             FROM tez_department_plan_snapshots

@@ -2721,6 +2721,8 @@ class Database:
                     captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (department_id, month_start)
                 );
+                ALTER TABLE tez_department_plan_snapshots
+                ADD COLUMN IF NOT EXISTS calculation_version INTEGER NOT NULL DEFAULT 1;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_manager_low_rating_reviews (

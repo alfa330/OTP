@@ -19,6 +19,7 @@ BOT_SOURCE = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
 class FakeDb:
     def __init__(self):
         self.snapshot = None
+        self.snapshot_version = 1
         self.staff = [(1, 0.5, 'fired'), (2, 1, 'working'), (3, 1, 'fired')]
         self.hist = {'rate': {1: '1'}, 'status': {1: 'working', 3: 'fired'}}
         self.references = []
@@ -33,13 +34,21 @@ class FakeDb:
         self.sql, self.params = sql, params
         if 'INSERT INTO tez_department_plan_snapshots' in sql:
             self.snapshot = (params[2], params[3], datetime(2026, 7, 2))
+            self.snapshot_version = params[4]
 
     def fetchone(self):
         if 'tez_department_plan_snapshots' in self.sql:
+            if 'calculation_version >=' in self.sql and self.snapshot_version < self.params[2]:
+                return None
             return self.snapshot
         return (202 if 'tez_lead_successes' in self.sql else self.groups,)
 
     def fetchall(self):
+        if 'FROM user_history' in self.sql:
+            return [(uid, 'working', status, datetime(2026, 6, 1))
+                    for uid, status in self.hist['status'].items()]
+        if 'FROM operator_schedule_status_periods' in self.sql:
+            return []
         return self.staff
 
     def _resolve_user_field_as_of_tx(self, cursor, ids, field, reference):
@@ -51,7 +60,7 @@ def test_snapshot_uses_historical_rates_and_status_and_never_changes():
     db = FakeDb()
     first = plans.month_start_snapshot(db, 560, 2026, 7)
     assert first[:2] == (2, 2)
-    assert db.references == [datetime(2026, 7, 1)] * 2
+    assert db.references == [datetime(2026, 7, 1, microsecond=1)]
     db.staff = [(100, 20, 'working')]
     db.hist = {'rate': {}, 'status': {}}
     assert plans.month_start_snapshot(db, 560, 2026, 7) == first
@@ -65,6 +74,24 @@ def test_zero_fte_is_a_snapshot_too_and_future_month_is_not():
     assert plans.month_start_snapshot(db, 560, 2026, 7) == first
     assert first[:2] == (0, 0)
     assert plans.month_start_snapshot(db, 560, 9999, 12) is None
+
+
+@pytest.mark.parametrize('status', ['bs', 'unpaid_leave', 'sick_leave', 'annual_leave', 'fired', 'dismissal'])
+def test_only_working_status_on_the_first_counts(status):
+    db = FakeDb()
+    db.staff = [(1, 1, 'working'), (2, 0.5, status)]
+    db.hist = {'rate': {}, 'status': {1: status, 2: 'working'}}
+    assert plans.month_start_snapshot(db, 560, 2026, 7)[:2] == (0.5, 1)
+
+
+def test_legacy_snapshot_is_repaired_once():
+    db = FakeDb()
+    db.snapshot = (3, 3, datetime(2026, 7, 1))
+    db.hist['status'][2] = 'bs'
+    first = plans.month_start_snapshot(db, 560, 2026, 7)
+    assert first[:2] == (1, 1)
+    db.hist['status'][2] = 'working'
+    assert plans.month_start_snapshot(db, 560, 2026, 7) == first
 
 
 @pytest.fixture
