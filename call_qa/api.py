@@ -16,6 +16,7 @@ from psycopg2.extras import Json
 from . import call_end
 from . import config
 from . import human_review as human_review_mod
+from . import speaker_roles
 from . import subjects as subjects_mod
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
@@ -1933,20 +1934,19 @@ def _lines_from_tokens(toks: list[dict]) -> list[dict]:
 
     Time ranges are retained so a human-selected excerpt can be tied back to the
     audio instead of existing only as model-generated prose.
+
+    Каждая реплика несёт исходную метку голоса (`spk`): кто из голосов оператор,
+    окончательно решает карточка по ответу оценки (speaker_roles, review_payload).
+    Подпись здесь — предварительная: оценки ещё нет, и голос выбирается по
+    самопредставлению сотрудника, а без него — кто больше говорит.
     """
-    cnt = {}
-    for t in toks:
-        sp = t.get("speaker")
-        if sp is not None:
-            cnt[sp] = cnt.get(sp, 0) + 1
-    op = max(cnt, key=cnt.get) if cnt else None  # оператор = кто больше говорит
     lines, seg = [], []
     cur_sp = object()
     line_start = line_end = None
 
     def flush():
         if seg:
-            line = {"speaker": "operator" if cur_sp == op else "client", "seg": list(seg)}
+            line = {"spk": None if cur_sp is None else str(cur_sp), "seg": list(seg)}
             if line_start is not None:
                 line["start_ms"] = line_start
             if line_end is not None:
@@ -1973,7 +1973,23 @@ def _lines_from_tokens(toks: list[dict]) -> list[dict]:
         else:
             seg.append({"t": txt, **timing})
     flush()
-    return lines
+    return speaker_roles.assign(lines, speaker_roles.resolve(lines))
+
+
+def _attach_speaker_roles(payload: dict) -> dict:
+    """Стороны звонка в карточке — по ответу оценки (speaker_roles).
+
+    Поверх результата и вне immutable-кэша, как оценка человека: подпись реплики —
+    это показ, а не часть прогона. Переписку не трогаем — у сообщения сторона
+    известна по направлению."""
+    if (payload.get("subject_kind") or config.SUBJECT_CALL) not in config.AUDIO_SUBJECT_KINDS:
+        return payload
+    lines = payload.get("transcript") or []
+    roles = speaker_roles.resolve(lines, payload.get("criteria"))
+    if roles is not None:
+        payload["transcript"] = speaker_roles.assign(lines, roles)
+        payload["speaker_roles"] = roles
+    return payload
 
 
 def _payload_reasons(payload: dict) -> list[str]:
@@ -2169,9 +2185,10 @@ def review_payload(call_id: int, refresh: bool = False,
                 raise RuntimeError("не удалось заблокировать субъект для безопасной оценки")
             payload = _evaluate_and_cache(call_id, config.CLAUDE_MODEL, refresh,
                                          subject_kind=subject_kind)
-    # Пер-критерийная оценка человека, «Моя оценка» проверяющего и итог ревью
-    # прогона — поверх результата, вне immutable-кэша.
+    # Пер-критерийная оценка человека, «Моя оценка» проверяющего, итог ревью
+    # прогона и стороны звонка — поверх результата, вне immutable-кэша.
     _attach_human_review(payload, reviewer_id=reviewer_id)
+    _attach_speaker_roles(payload)
     return _attach_ai_review(payload)
 
 
@@ -2200,7 +2217,8 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
                "languages": transcript_record.get("languages") or {},
                "mean_conf": transcript_record.get("mean_conf"),
                "low_conf_spans": transcript_record.get("low_conf_spans") or []}
-        lines = transcript_record.get("segments") or []
+        lines = speaker_roles.with_speaker_ids(transcript_record.get("segments"),
+                                               transcript_record.get("tokens"))
         transcript_cache_id = transcript_record["id"]
         transcript_hash = transcript_record["transcript_hash"]
     else:
@@ -2480,7 +2498,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
                 runtime_store.get_transcript_by_id(cached_run["transcript_cache_id"])
                 if cached_run["transcript_cache_id"] is not None else None)
             if transcript_cached:
-                cached["transcript"] = transcript_cached.get("segments") or []
+                cached["transcript"] = speaker_roles.with_speaker_ids(
+                    transcript_cached.get("segments"), transcript_cached.get("tokens"))
                 cached["languages"] = transcript_cached.get("languages") or cached.get("languages") or {}
                 cached["asr_mean_conf"] = transcript_cached.get("mean_conf") or 0
             cached["_transcript_cache_id"] = cached_run["transcript_cache_id"]
