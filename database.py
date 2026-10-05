@@ -13560,6 +13560,13 @@ class Database:
             lot_dates = self._get_shift_auction_lot_dates_tx(cursor, direction_mode=mode)
             if not lot_dates:
                 raise ValueError("AUCTION_NO_LOTS")
+            # Прошедший период в графики не сохраняем: публикация стирает дни
+            # участников и пишет взятое заново, а у прошедших дней уже есть
+            # отработанные часы — пересчёт обнулил бы их вместе со сменами.
+            # 04.10.2026 так стёрся сентябрь у 36 операторов Основы: опубликовали
+            # давно остановленный аукцион линии на 14–20.09.
+            if max(lot_dates) < self._almaty_now().date():
+                raise ValueError("AUCTION_PERIOD_ALREADY_PASSED")
 
             operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode))
             if not operator_ids:
@@ -13614,6 +13621,10 @@ class Database:
                     "start_time": start_time_value,
                     "end_time": end_time_value,
                 })
+            # Никто ничего не взял — сохранять нечего: такая публикация только
+            # очистила бы период у всех участников (так и было 04.10.2026).
+            if not claimed_by_operator_date:
+                raise ValueError("AUCTION_NOTHING_CLAIMED")
 
             cursor.execute("""
                 SELECT operator_id, day_off_date

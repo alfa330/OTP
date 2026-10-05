@@ -178,8 +178,8 @@ class DirectionTravelsWithEveryActionTests(unittest.TestCase):
         перестать быть пустым.
         """
         broken = self.source.replace(
-            "}, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify, withDirection]);",
-            "}, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify]);",
+            "}, [apiRoot, applySnapshot, buildHeaders, canManage, direction, isPublishingAuction, notify, settings.selected_operator_ids.length, settings.selected_period, settingsDirection, withDirection]);",
+            "}, [apiRoot, applySnapshot, buildHeaders, canManage, direction, isPublishingAuction, notify, settings.selected_operator_ids.length, settings.selected_period, settingsDirection]);",
             1,
         )
         self.assertNotEqual(broken, self.source, "не нашёл зависимости публикации — сторож потерял адрес")

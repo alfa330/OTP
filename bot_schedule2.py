@@ -13188,6 +13188,8 @@ def _shift_auction_test_error_response(error):
         "AUCTION_ALREADY_CLOSED": ("Аукцион уже завершен", 409),
         "AUCTION_NO_LOTS": ("В аукционе нет смен для публикации", 409),
         "AUCTION_NO_PARTICIPANTS": ("В аукционе нет участников для публикации", 409),
+        "AUCTION_PERIOD_ALREADY_PASSED": ("Период аукциона уже прошёл — сохранять его в графики нельзя", 409),
+        "AUCTION_NOTHING_CLAIMED": ("В аукционе никто не взял ни одной смены — сохранять в графики нечего", 409),
         "INVALID_AUCTION_CONTROL_ACTION": ("Неизвестное действие управления аукционом", 400),
         "NOT_TEST_PARTICIPANT": ("Вы не включены в тестовую группу аукциона", 403),
         "OPERATOR_NOT_FOUND": ("Оператор не найден", 404),

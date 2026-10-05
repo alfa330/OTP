@@ -4655,6 +4655,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [direction, setDirection] = useState(() => (
     canMonitor ? readStoredAuctionDirection() : AUCTION_DIRECTION_LINE
   ));
+  // Чей прогон сейчас лежит в settings. После переключения тумблера, пока не
+  // пришёл снапшот нового направления (или если он не загрузился), там остаются
+  // период, состав и статус ПРОШЛОГО — публиковать по ним нельзя.
+  const [settingsDirection, setSettingsDirection] = useState(null);
   const [canSwitchDirection, setCanSwitchDirection] = useState(false);
   // Чат берёт смену ЧАСТЯМИ прямо в аукционе: клик по свободной смене открывает
   // тот же таймлайн, что и добор, но кладёт кусок в текущий прогон.
@@ -4781,6 +4785,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // чата на секунду оставались бы смены линии, а ETag и курсор событий отдали бы
     // чужой снапшот как «не изменилось».
     setDirection(normalized);
+    setSettingsDirection(null);
     storeAuctionDirection(normalized);
     // Новое поколение: всё, что уже в пути, теперь относится к прошлому
     // направлению. Запрос обрываем и снимаем замок «снапшот в работе», иначе
@@ -4943,6 +4948,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // время от времени перекидывать человека обратно на прошлый прогон.
     const canSwitch = Boolean(safe.can_switch_direction);
     if (safe.direction_mode && !canSwitch) setDirection(normalizeAuctionDirection(safe.direction_mode));
+    // Направление приходит только в снапшоте раздела; ответы действий его не
+    // несут и относятся к тому же прогону, что уже на экране.
+    if (safe.direction_mode) setSettingsDirection(normalizeAuctionDirection(safe.direction_mode));
     setCanSwitchDirection(canSwitch);
     serverTimeGroupsRef.current = Array.isArray(safe.time_groups) ? safe.time_groups : [];
     if (!isStaleRealtime) {
@@ -6592,10 +6600,18 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   // направлении первого рендера, и первое «Сохранить в графики» после
   // переключения тумблера уехало бы за ПРОШЛЫМ направлением — то есть
   // опубликовало бы чужой аукцион в настоящие графики работы.
+  // Направление, период и число участников в подтверждении обязательны: 04.10.2026
+  // при тумблере на «Линии» вместо «Чата» опубликовали остановленный аукцион за
+  // прошлый месяц, и окно без этих данных не дало это заметить.
   const handlePublishAuction = useCallback(async () => {
     if (!canManage || !apiRoot || isPublishingAuction) return;
+    if (settingsDirection !== direction) {
+      notify('Аукцион этого направления ещё загружается — попробуйте через пару секунд', 'error');
+      return;
+    }
     const confirmed = window.confirm(
-      'Сохранить итоговые смены и выходные в раздел «Графики работы»? Данные за период аукциона у участников будут заменены.'
+      `Сохранить итоги аукциона «${AUCTION_DIRECTION_LABELS[direction]}» за период ${formatAuctionPeriodLabel(settings.selected_period)} в «Графики работы»?\n\n`
+      + `У участников (${settings.selected_operator_ids.length}) смены и выходные за эти дни будут заменены.`
     );
     if (!confirmed) return;
     setIsPublishingAuction(true);
@@ -6613,7 +6629,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsPublishingAuction(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify, withDirection]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, direction, isPublishingAuction, notify, settings.selected_operator_ids.length, settings.selected_period, settingsDirection, withDirection]);
 
   const openAddShiftModal = useCallback((group, date) => {
     if (!group || !date) return;
