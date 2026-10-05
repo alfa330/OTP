@@ -409,8 +409,9 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  * решает лишь «показывать ли пункт при выбранном отделе». Права считает
  * бэкенд, у каждого раздела свой access.py. Состав отделов у каждой строки
  * взят из предиката самого раздела, а не придуман:
- *   oktell_guard/fleet_edm/crm_tickets/driver_chats/szov_wallboard — 'szov'
- *   (OKTELL_GUARD_DEPARTMENT_CODE и соседние константы);
+ *   fleet_edm/crm_tickets/driver_chats/szov_wallboard — 'szov'
+ *   (FLEET_EDM_DEPARTMENT_CODE и соседние константы);
+ *   oktell_guard — 'szov' и 'op' (OKTELL_GUARD_DEPARTMENT_CODES);
  *   chatapp_chats/tez_wallboard — 'tez' (CHATAPP_DEPARTMENT_CODE);
  *   touches — 'op' (TOUCHES_SECTION_DEPARTMENT_CODE);
  *   op_funnel — 'op' (OP_FUNNEL_SECTION_DEPARTMENT_CODE);
@@ -469,7 +470,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // Телефония и программы. СЗоВ в списке с 21.09.2026: раздел открыт его главе
     // и супервайзерам, и при выбранном отделе пункт обязан оставаться на месте.
     sip_settings: ['szov', 'op', 'tez'],
-    oktell_guard: ['szov'],
+    // Ограничитель: СЗоВ (агент Oktell) и с 05.10.2026 ОП (автоофлайн iCORE Phone).
+    oktell_guard: ['szov', 'op'],
     /* ПУСТОЙ список — не «забыли заполнить», а «раздел не про отдел».
        «Провайдер ЭДО» и «Рассылки» работают с водителями таксопарков через
        Fleet: к работе любого из наших отделов они не относятся, и при
@@ -2291,10 +2293,20 @@ const canAccessOpWallboardForUser = (userLike) => {
 // агента гасит флаг can_manage с бэкенда, где can_view_section шире
 // can_manage_settings (oktell_guard/access.py).
 const OKTELL_GUARD_DEPARTMENT_CODE = 'szov';
+// С 05.10.2026 в разделе есть и отдел продаж: там «выкидывает» не агент Oktell, а
+// сам iCORE Phone — в «Офлайн» после простоя в «Исходе» у групп ЯР и Поток. Глава
+// и СВ ОП видят только свою часть (какую — решает бэкенд, visible_department_codes),
+// СЗоВ им не открывается. Отдельная константа, а не замена первой: её значение
+// сверяется с бэкендом тестом (tests/test_oktell_guard_wiring.py).
+const OKTELL_GUARD_PHONE_DEPARTMENT_CODE = 'op';
+const OKTELL_GUARD_DEPARTMENT_CODES = new Set([
+    OKTELL_GUARD_DEPARTMENT_CODE,
+    OKTELL_GUARD_PHONE_DEPARTMENT_CODE,
+]);
 
 const isOktellGuardDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
-    && aiQaHeadDepartmentCodesOf(userLike).includes(OKTELL_GUARD_DEPARTMENT_CODE)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => OKTELL_GUARD_DEPARTMENT_CODES.has(code))
 );
 
 const canAccessOktellGuardForUser = (userLike) => {
@@ -2303,9 +2315,14 @@ const canAccessOktellGuardForUser = (userLike) => {
     // Глава отдела с базовой admin-ролью — не глобальный админ.
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isOktellGuardDepartmentHead(userLike)) return true;
-    return isSupervisorRole(role)
-        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
-            === OKTELL_GUARD_DEPARTMENT_CODE;
+    if (!isSupervisorRole(role)) return false;
+    // У части профилей СВ продаж приходит только id отдела без кода — сверяем
+    // оба поля, как isOpSalesSupervisorForAiQa (сам он переиспользован другими
+    // разделами, поэтому не зовём его, а повторяем проверку).
+    if (Number(userLike?.department_id ?? userLike?.departmentId) === AI_QA_OP_DEPARTMENT_ID) return true;
+    const departmentCode = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    return departmentCode === OKTELL_GUARD_DEPARTMENT_CODE
+        || departmentCode === OKTELL_GUARD_PHONE_DEPARTMENT_CODE;
 };
 
 // Раздел «Провайдер ЭДО» — выгрузка провайдеров водителей из диспетчерских Fleet.
@@ -14175,6 +14192,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'занята': 'Занята',
             'зарезервировано': 'Зарезервировано',
             'перезвон': 'Перезвон',
+            // Статусы iCORE Phone у групп отдела продаж (ТЗ 05.10.2026). «Исход»
+            // — отдельный ключ, а не «перезвон»: у СЗоВ «Перезвон» — пометка
+            // перерыва Oktell, и в отчёте ОП он читался бы чужим словом.
+            // «Офлайн» — простой без звонков, НЕ «Офлайн активность» (та
+            // оплачивается и живёт в ручной таблице часов).
+            'исход': 'Исход',
+            'соединение': 'Соединение',
+            'автодозвон': 'Автодозвон',
+            'офлайн': 'Офлайн',
             'перерыв': 'Перерыв',
             'авто': 'Авто',
             'вышел': 'Вышел',
@@ -14320,6 +14346,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         row: 'border-sky-100 bg-sky-50/60 text-sky-800',
                         bar: '#0ea5e9'
                     });
+                // Цвета статусов iCORE Phone — те же, что у плашки статуса в
+                // самом телефоне: оператор и руководитель видят одно и то же.
+                case 'исход':
+                    return byKey({
+                        chip: 'border-orange-200 bg-orange-50 text-orange-700',
+                        row: 'border-orange-100 bg-orange-50/60 text-orange-800',
+                        bar: '#fb923c'
+                    });
+                case 'соединение':
+                    return byKey({
+                        chip: 'border-cyan-200 bg-cyan-50 text-cyan-700',
+                        row: 'border-cyan-100 bg-cyan-50/60 text-cyan-800',
+                        bar: '#06b6d4'
+                    });
+                case 'автодозвон':
+                    return byKey({
+                        chip: 'border-blue-200 bg-blue-50 text-blue-700',
+                        row: 'border-blue-100 bg-blue-50/60 text-blue-800',
+                        bar: '#3b82f6'
+                    });
+                // «Офлайн» — простой, а не работа: красный, чтобы его нельзя
+                // было спутать ни с зелёной «Офлайн активностью», ни с серым
+                // «Выключен» (тот — вне смены, этот — на смене без звонков).
+                case 'офлайн':
+                    return byKey({
+                        chip: 'border-red-200 bg-red-50 text-red-700',
+                        row: 'border-red-100 bg-red-50/60 text-red-800',
+                        bar: '#ef4444'
+                    });
                 case 'work in crm':
                 case 'работа в crm':
                     return byKey({
@@ -14402,7 +14457,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             'зарезервировано',
             'online', 'holiday', 'онлайн', 'закрытие чатов',
             // TEZ: рабочее время = active + work in crm.
-            'active', 'work in crm', 'работа в crm'
+            'active', 'work in crm', 'работа в crm',
+            // iCORE Phone, группы ОП: «Исход», набор номера и «Автодозвон» —
+            // работа (как SCHEDULE_AUTO_WORK_STATUS_KEYS на бэкенде). «Офлайн»
+            // сюда намеренно не входит: это простой, его время не оплачивается.
+            'исход', 'соединение', 'автодозвон'
             ]);
             const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set([
             'перерыв', 'авто',
@@ -14421,7 +14480,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Без этих ключей оператор вне смены считался бы фактически на смене.
             'выключен', 'нет на месте',
             // TEZ: офлайн вне смены.
-            'inactive', 'неактивен'
+            'inactive', 'неактивен',
+            // iCORE Phone: «Офлайн», куда телефон сам переводит ЯР/Поток после
+            // простоя в «Исходе». Человек формально в программе, но не работает —
+            // для плана/факта по часам он не на смене (_HOURLY_NOT_ON_SHIFT_STATUS_KEYS).
+            'офлайн'
             ]);
             const plannerImportedStatusCountsAsOnShift = (statusKeyRaw) => {
             const key = plannerStatusNormalizeKey(statusKeyRaw);

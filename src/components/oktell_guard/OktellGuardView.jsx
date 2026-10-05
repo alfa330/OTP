@@ -4,9 +4,12 @@ import useStableCallback from '../wiki/useStableCallback';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
-    IosBadge, IosHint, IosModal, IosSection, IosToggle,
+    IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle,
 } from '../ui/ios';
 import { startFileDownload } from '../../utils/fileDownload';
+import { fmtDateTime, fmtDay, fmtMinutes, fmtSize, isoDaysAgo, parseServerTime } from './oktellGuardFormat.js';
+import { PHONE_DEPARTMENT_CODE } from './oktellGuardPhone.js';
+import OktellGuardPhonePanel from './OktellGuardPhonePanel';
 
 /*
  * Раздел «Ограничитель Перезвона».
@@ -20,7 +23,20 @@ import { startFileDownload } from '../../utils/fileDownload';
  * машине сотрудника: клиент и так получает от АТС событие статуса, поэтому
  * опрашивать базу не нужно вовсе. Здесь только настройки, раздача агента и
  * то, что агенты прислали постфактум.
+ *
+ * С 05.10.2026 в разделе два отдела. Выше описан СЗоВ. У отдела продаж
+ * выкидывает не агент Oktell, а сам iCORE Phone («Офлайн» после простоя в
+ * «Исходе»), и эта часть живёт в OktellGuardPhonePanel.jsx: общего у них только
+ * переключатель отдела и запросы. Какие отделы открыты человеку, решает сервер
+ * (`departments` в GET /settings); переключатель виден, только если их больше
+ * одного — у главы и СВ он был бы одной неактивной кнопкой.
  */
+
+// Отдел линии Oktell — та же константа, что OKTELL_GUARD_DEPARTMENT_CODE в App.jsx
+// и SECTION_DEPARTMENT_CODE в oktell_guard/access.py.
+const OKTELL_DEPARTMENT_CODE = 'szov';
+
+const departmentQuery = (code) => `department=${encodeURIComponent(code || OKTELL_DEPARTMENT_CODE)}`;
 
 const TABS = [
     { id: 'employees', label: 'Сотрудники' },
@@ -31,56 +47,6 @@ const TABS = [
 // Пороги списком, а не свободным вводом: это решение про людей, и «187 секунд»
 // здесь не значит ничего, кроме опечатки.
 const THRESHOLD_PRESETS = [120, 180, 240, 300, 600];
-
-const fmtMinutes = (seconds) => {
-    const value = Number(seconds || 0);
-    if (!value) return '—';
-    if (value % 60 === 0) return `${value / 60} мин`;
-    return `${Math.floor(value / 60)} мин ${value % 60} с`;
-};
-
-/**
- * Время из базы приходит МЕСТНЫМ (Алматы), а Flask отдаёт его строкой с
- * пометкой GMT. Браузер читает такую строку как UTC и уводит момент на +5 часов
- * вперёд. Последствия были не косметические: «Молчит с …» не загоралось вообще
- * никогда (возраст отметки получался отрицательным, порог 15 минут не
- * срабатывал), то есть намертво замолчавший агент выглядел живым.
- */
-const parseServerTime = (raw) => {
-    if (!raw) return null;
-    const parsed = new Date(raw);
-    if (Number.isNaN(parsed.getTime())) return null;
-    if (!/GMT|UTC|Z$|\+00:?00$/i.test(String(raw))) return parsed;
-    // Возвращаем момент туда, где он был записан: пометку GMT поставил
-    // сериализатор, а не база.
-    return new Date(parsed.getTime() + parsed.getTimezoneOffset() * 60000);
-};
-
-const fmtDateTime = (raw) => {
-    if (!raw) return '';
-    const parsed = parseServerTime(raw);
-    if (!parsed) return String(raw).slice(0, 16).replace('T', ' ');
-    return parsed.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-};
-
-const fmtDay = (raw) => {
-    if (!raw) return '';
-    const parsed = new Date(raw);
-    if (Number.isNaN(parsed.getTime())) return String(raw).slice(0, 10);
-    return parsed.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' });
-};
-
-const fmtSize = (bytes) => {
-    const value = Number(bytes || 0);
-    if (!value) return '';
-    return `${(value / (1024 * 1024)).toFixed(1)} МБ`;
-};
-
-const isoDaysAgo = (days) => {
-    const d = new Date();
-    d.setDate(d.getDate() - days);
-    return d.toISOString().slice(0, 10);
-};
 
 /**
  * Состояние агента одной строкой.
@@ -122,6 +88,16 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
     const [saving, setSaving] = useState(false);
     const [canManage, setCanManage] = useState(false);
     const [fatal, setFatal] = useState('');
+
+    // Пусто до первого ответа: какой отдел открыть, решает сервер (первый
+    // видимый человеку). Дальше — выбранный в переключателе.
+    const [department, setDepartment] = useState('');
+    const [departments, setDepartments] = useState([]);
+    const [phoneSettingsData, setPhoneSettingsData] = useState(null);
+    // Номер последней загрузки: ответ, пришедший после следующего
+    // переключения отдела, выбрасываем — иначе быстрый щелчок СЗоВ → ОП → СЗоВ
+    // мог бы показать под «СЗоВ» список отдела продаж.
+    const loadSeq = useRef(0);
 
     const [settings, setSettings] = useState(null);
     const [release, setRelease] = useState(null);
@@ -168,33 +144,64 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
 
     /* ─── загрузка ─── */
 
-    const loadAll = useCallback(async () => {
+    // wanted — отдел, который открыть; без него сервер отдаёт первый видимый, и
+    // оба запроса получают один и тот же (порядок отделов у сервера один).
+    const loadAll = useCallback(async (wanted = department) => {
+        const seq = ++loadSeq.current;
         setLoading(true);
         try {
+            const query = wanted ? `?${departmentQuery(wanted)}` : '';
             const [settingsData, employeesData] = await Promise.all([
-                request('/settings'),
-                request('/employees'),
+                request(`/settings${query}`),
+                request(`/employees${query}`),
             ]);
-            setSettings(settingsData.settings || {});
-            setRelease(settingsData.release || null);
+            if (seq !== loadSeq.current) return;
+            // Сервер без отделов (до 05.10.2026) поля department не шлёт — это СЗоВ.
+            const resolved = settingsData.department || wanted || OKTELL_DEPARTMENT_CODE;
+            setDepartment(resolved);
+            setDepartments(Array.isArray(settingsData.departments) ? settingsData.departments : []);
             setCanManage(Boolean(settingsData.can_manage));
             setEmployees(Array.isArray(employeesData.employees) ? employeesData.employees : []);
+            if (resolved === PHONE_DEPARTMENT_CODE) {
+                setPhoneSettingsData(settingsData);
+            } else {
+                setSettings(settingsData.settings || {});
+                setRelease(settingsData.release || null);
+            }
         } catch (error) {
+            if (seq !== loadSeq.current) return;
             // Отказ в доступе — не повод пытаться снова: раздел закрыт, и
             // повтор даст только ещё одну такую же плашку.
             setFatal(error.message || 'Раздел недоступен');
             toast(`Не удалось загрузить раздел: ${error.message}`, 'error');
         } finally {
-            setLoading(false);
+            if (seq === loadSeq.current) setLoading(false);
         }
-    }, [request]);
+    }, [request, department]);
 
     // Ровно один раз на открытие раздела. Перезагрузка — по действию человека.
     useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
+    // Другой отдел — другие люди и другие права: выделение, поиск и отчёт
+    // прежнего отдела к нему не относятся, а can_manage до ответа сервера
+    // считаем нулевым (глава ОП правит только ОП).
+    const switchDepartment = useCallback((code) => {
+        if (!code || code === department) return;
+        setSelected(new Set());
+        setSearch('');
+        setReportRows([]);
+        setReportRejected(0);
+        setReportPending(0);
+        setEmployees([]);
+        setCanManage(false);
+        setFatal('');
+        setDepartment(code);
+        loadAll(code);
+    }, [department, loadAll]);
+
     const loadReport = useCallback(async () => {
         try {
-            const data = await request(`/report?from=${reportFrom}&to=${reportTo}`);
+            const data = await request(`/report?${departmentQuery(OKTELL_DEPARTMENT_CODE)}&from=${reportFrom}&to=${reportTo}`);
             setReportRows(Array.isArray(data.rows) ? data.rows : []);
             setReportRejected(Number(data.rejected || 0));
             setReportPending(Number(data.pending || 0));
@@ -203,10 +210,11 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
         }
     }, [request, reportFrom, reportTo]);
 
+    // Отчёт отдела продаж грузит своя панель: здесь — только СЗоВ.
     useEffect(() => {
-        if (tab === 'report' && !fatal) loadReport();
+        if (tab === 'report' && !fatal && department === OKTELL_DEPARTMENT_CODE) loadReport();
         /* eslint-disable-next-line react-hooks/exhaustive-deps */
-    }, [tab, reportFrom, reportTo, fatal]);
+    }, [tab, reportFrom, reportTo, fatal, department]);
 
     /* ─── сохранение ─── */
 
@@ -214,7 +222,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
         setSettings((prev) => ({ ...(prev || {}), ...patch }));   // сразу в интерфейсе, без ожидания сети
         setSaving(true);
         try {
-            const data = await request('/settings', {
+            const data = await request(`/settings?${departmentQuery(OKTELL_DEPARTMENT_CODE)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(patch),
@@ -238,7 +246,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
         if (bulkEnabled !== 'keep') payload.enabled = bulkEnabled === 'on';
 
         try {
-            const data = await request('/employees/bulk', {
+            const data = await request(`/employees/bulk?${departmentQuery(OKTELL_DEPARTMENT_CODE)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
@@ -327,28 +335,64 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
 
     /* ─── разметка ─── */
 
+    // Переключатель отдела стоит и над загрузкой, и над ошибкой: не открылся
+    // один отдел — человек должен иметь возможность вернуться в другой.
+    const departmentSwitch = departments.length > 1 ? (
+        <IosSegmented
+            value={department}
+            options={departments.map((item) => ({ value: item.code, label: item.name }))}
+            onChange={switchDepartment}
+            ariaLabel="Отдел"
+        />
+    ) : null;
+
     if (loading) {
         return (
-            <div style={{ fontFamily: APPLE_FONT }} className="p-6 text-[13.5px] text-slate-500">
-                Загрузка раздела…
+            <div style={{ fontFamily: APPLE_FONT }} className="space-y-4">
+                {departmentSwitch}
+                <div className="p-6 text-[13.5px] text-slate-500">
+                    Загрузка раздела…
+                </div>
             </div>
         );
     }
 
     if (fatal) {
         return (
-            <div style={{ fontFamily: APPLE_FONT }} className={`${iosCard} p-6 text-center`}>
-                <div className="text-[15px] font-semibold text-slate-900">Раздел недоступен</div>
-                <div className="mt-1 text-[13px] text-slate-500">{fatal}</div>
-                <button type="button" className={`${iosBtnSecondary} mt-4`} onClick={() => { setFatal(''); loadAll(); }}>
-                    Попробовать снова
-                </button>
+            <div style={{ fontFamily: APPLE_FONT }} className="space-y-4">
+                {departmentSwitch}
+                <div className={`${iosCard} p-6 text-center`}>
+                    <div className="text-[15px] font-semibold text-slate-900">Раздел недоступен</div>
+                    <div className="mt-1 text-[13px] text-slate-500">{fatal}</div>
+                    <button type="button" className={`${iosBtnSecondary} mt-4`} onClick={() => { setFatal(''); loadAll(); }}>
+                        Попробовать снова
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    // Отдел продаж — своя панель целиком: из СЗоВ там не нужно ничего (ни
+    // агента, ни Oktell, ни личных порогов), а вкладка остаётся та же.
+    if (department === PHONE_DEPARTMENT_CODE) {
+        return (
+            <div style={{ fontFamily: APPLE_FONT }} className="space-y-4 pb-24">
+                {departmentSwitch}
+                <OktellGuardPhonePanel
+                    request={request}
+                    toast={toast}
+                    tab={tab}
+                    onTabChange={setTab}
+                    initialSettings={phoneSettingsData}
+                    initialEmployees={employees}
+                />
             </div>
         );
     }
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-4 pb-24">
+            {departmentSwitch}
             {/* Шапка */}
             <div className={`${iosCard} p-4`}>
                 <div className="flex flex-wrap items-center justify-between gap-3">

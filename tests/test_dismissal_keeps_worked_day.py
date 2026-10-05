@@ -32,7 +32,10 @@ DATABASE_CLASS = next(
     if isinstance(node, ast.ClassDef) and node.name == "Database"
 )
 
-OPERATOR_WORK_KEYS = {'готов', 'занят', 'занята', 'перезвон', 'зарезервировано'}
+# Копия SCHEDULE_AUTO_WORK_STATUS_KEYS (сверяется тестом ниже): исход/соединение/автодозвон —
+# рабочие статусы iCORE Phone у групп ОП, день с ними тоже отработан.
+OPERATOR_WORK_KEYS = {'готов', 'занят', 'занята', 'перезвон', 'зарезервировано',
+                      'исход', 'соединение', 'автодозвон'}
 
 
 def _method_source(name):
@@ -144,6 +147,18 @@ class WorkedDayDetectionTests(unittest.TestCase):
         self.assertIn("JOIN operator_status_segments oss", status_sql)
         self.assertEqual(sorted(OPERATOR_WORK_KEYS), status_params[0])
         self.assertEqual((321, date(2026, 8, 31)), status_params[1:])
+
+    def test_work_keys_copy_matches_the_engine(self):
+        """Копия набора здесь не должна отставать от настоящего — иначе тест сторожит не то."""
+        real = next(
+            ast.literal_eval(node.value)
+            for node in DATABASE_MODULE.body
+            if isinstance(node, ast.Assign)
+            and any(getattr(t, "id", "") == "SCHEDULE_AUTO_WORK_STATUS_KEYS" for t in node.targets)
+        )
+        self.assertEqual(OPERATOR_WORK_KEYS, real)
+        # «Офлайн» (простой без звонков) отработанным днём не считается.
+        self.assertNotIn('офлайн', real)
 
     def test_night_shift_window_reaches_past_midnight(self):
         """Смена 20:30-00:00 заканчивается уже следующим днём — иначе хвост потерян."""

@@ -82,6 +82,7 @@ class OktellGuardSectionGateTest(unittest.TestCase):
             # тест упадёт на неожиданном вызове, а не молча позеленеет.
             ('save_settings', self._must_not_be_called('save_settings')),
             ('bulk_set_rules', self._must_not_be_called('bulk_set_rules')),
+            ('save_phone_settings', self._must_not_be_called('save_phone_settings')),
         ):
             patcher = patch.object(queries, name, replacement)
             patcher.start()
@@ -120,9 +121,11 @@ class OktellGuardSectionGateTest(unittest.TestCase):
                                  '%s %s' % (requester['role'], url))
 
     def test_operator_and_foreign_supervisor_see_nothing(self):
+        # СВ ОП с 05.10.2026 читает часть ОП (test_oktell_guard_phone.py), поэтому
+        # «чужой» СВ здесь — из отдела, которого в разделе нет вовсе.
         for requester in (context('operator'),
                           context('trainer'),
-                          context('sv', department_code='op')):
+                          context('sv', department_code='tez')):
             client = self.client(requester)
             for method, url in self.READ_ROUTES + self.WRITE_ROUTES:
                 response = getattr(client, method)(url, json={})

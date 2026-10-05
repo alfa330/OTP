@@ -30520,7 +30520,7 @@ def operator_sip_settings_endpoint():
         autodial = account.get("autodial")
         if autodial and not (autodial.get("server") and autodial.get("password")):
             autodial = None
-        return jsonify({
+        payload = {
             "status": "success",
             # Плоские поля основного аккаунта — совместимость со старым iCORE Phone.
             "settings": {
@@ -30553,8 +30553,20 @@ def operator_sip_settings_endpoint():
                 # включили (персонально → отдела → выключено). Сбой раздела не
                 # должен оставить оператора без регистрации — отсюда fallback.
                 "dial_list": _dial_list_phone_settings(requester_id),
+                # Набор статусов по группе ОП (Основа / ЯР / Поток) и правило
+                # автоофлайна. null — точно прежний набор (нет группы, Binotel,
+                # рубильник); старый телефон ключ не читает. Сбой расчёта — третье
+                # состояние, см. ниже: регистрацию он не ломает в любом случае.
+                "status_profile": _icore_phone_status_profile(requester_id, provider),
             }
-        }), 200
+        }
+        # Набор посчитать не удалось (сбой базы) — ключ не шлём вовсе. null телефон
+        # записал бы в реестр как «набора нет», и после разового сбоя на последнем
+        # обновлении дня оператор Основы стартовал бы завтра в «Исходе» с DND на
+        # всю смену. Без ключа телефон оставляет набор, который у него уже есть.
+        if payload["settings"]["status_profile"] is _ICORE_PHONE_PROFILE_UNKNOWN:
+            del payload["settings"]["status_profile"]
+        return jsonify(payload), 200
     except Exception as e:
         logging.error(f"Error in operator sip_settings: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
@@ -30857,11 +30869,12 @@ def operator_status_event_endpoint():
 
     Тело запроса (JSON):
       status_key      — ключ статуса: готов | перезвон | тренинг | перерыв |
-                        занят (в разговоре) | выключен (выход). Обязателен.
+                        занят (в разговоре) | выключен (выход); у групп ОП ещё
+                        исход | соединение | автодозвон | офлайн. Обязателен.
       event_at        — ISO-8601 локальное время события (naive, часы оператора).
                         Если не задано — берётся серверное now().
       event_kind      — 'status' | 'action' (по умолчанию выводится из ключа).
-      state_note      — необязательная заметка.
+      state_note      — необязательная заметка (у автовыброса в «офлайн» — «авто»).
       client_event_id — уникальный id события для идемпотентности (<=64).
     """
     if request.method == 'OPTIONS':
@@ -30894,6 +30907,12 @@ def operator_status_event_endpoint():
             event_kind=data.get('event_kind'),
             client_event_id=data.get('client_event_id'),
         )
+        # Автовыброс в «Офлайн» (ОП, простой без звонков) — в отчёт «Ограничителя
+        # Перезвона». Только после того, как событие легло в часы, и без права
+        # испортить ответ: телефон по ответу решает судьбу события в очереди.
+        _icore_phone_kick_after_status_event(
+            requester_id, status_key, data.get('state_note'), event_at_value,
+            data.get('client_event_id'), result)
         return jsonify({"status": "success", "result": result}), 200
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
@@ -44394,16 +44413,31 @@ def _tez_wallboard_name_list(people, rows):
 # поэтому «Активный» и «Исход», а не «Готов» и «Перезвон» из SCHEDULE_STATUS_KEY_LABELS.
 #
 # Третье число — вес сортировки: список идёт сверху вниз от работы к её отсутствию
-# (разговор → активный → исход → учёба → пауза → перерыв → не в сети). Сортировка по смыслу,
-# а не по времени, выбрана намеренно: на стене строки не должны прыгать местами при каждом
-# обновлении — глаз ищет человека по позиции, а время внутри разряда уже вторично.
+# (разговор → соединение → активный → автодозвон → исход → учёба → пауза → перерыв → офлайн →
+# не в сети). Сортировка по смыслу, а не по времени, выбрана намеренно: на стене строки не
+# должны прыгать местами при каждом обновлении — глаз ищет человека по позиции, а время
+# внутри разряда уже вторично.
+#
+# Статусы групп ОП (oktell_guard/phone.py) приходят своими ключами и получают свои разряды:
+# - 'исход' — тот же «Исход», что и 'перезвон', и тот же разряд 'outgoing' (блок «Перезвон»
+#   на табло Тез выбирает людей по разряду, а не по ключу);
+# - 'соединение' — набор до ответа. НЕ 'talking': табло ОП ищет момент ответа входящего по
+#   паре «разговор → следующее событие у конца звонка», и набор там был бы ложным ответом;
+# - 'автодозвон' — рабочий статус Потока, свой разряд: это не ручной «Исход»;
+# - 'офлайн' — простой без звонков, телефон при этом жив и на линии. НЕ 'offline' («Не в
+#   сети» = выход): иначе журнал и время входа приняли бы выброс за выход из телефона, а
+#   сверка с регистрацией линии перестала бы его проверять.
 _TEZ_WALLBOARD_STATUS_CATALOG = {
     'занят': ('В разговоре', 'talking', 10),
+    'соединение': ('Соединение', 'connecting', 15),
     'готов': ('Активный', 'free', 20),
+    'автодозвон': ('Автодозвон', 'autodial', 25),
     'перезвон': ('Исход', 'outgoing', 30),
+    'исход': ('Исход', 'outgoing', 30),
     'тренинг': ('Тренинг', 'training', 40),
     'тех причина': ('Техническая пауза', 'tech', 50),
     'перерыв': ('Перерыв', 'break', 60),
+    'офлайн': ('Офлайн', 'idle_offline', 65),
     'выключен': ('Не в сети', 'offline', 70),
 }
 # Событий нет вовсе — это НЕ «не в сети»: телефон мог просто не обновиться до версии, которая
@@ -65747,6 +65781,144 @@ def _dial_list_phone_settings(user_id):
     except Exception:
         logging.exception("dial_list: не удалось собрать настройки для телефона %s", user_id)
         return {"enabled": False}
+
+
+# ── iCORE Phone: статусы по группе ОП и автоофлайн ───────────────────────────
+# Состав статусов групп и правило выброса живут на сервере (oktell_guard/phone.py,
+# правило — в разделе «Ограничитель Перезвона»): телефон рисует меню из присланного,
+# поэтому поменять набор можно без выпуска телефона.
+
+# «Набор посчитать не удалось» — не то же самое, что «набора нет» (None): ручка
+# sip_settings по этому значению не шлёт ключ status_profile вовсе.
+_ICORE_PHONE_PROFILE_UNKNOWN = object()
+
+
+def _icore_phone_idle_rule():
+    """Правило автоофлайна ОП из раздела «Ограничитель Перезвона».
+
+    Своя транзакция и свой fallback: набор статусов не должен пропасть у всего отдела
+    из-за того, что таблица раздела недоступна (не создана, сбой).
+
+    Не прочиталось — правило уходит ВЫКЛЮЧЕННЫМ. Умолчание «включено, 5 минут» здесь
+    было бы наказанием: телефон применяет правило на лету, и разовый сбой чтения
+    превратил бы выключенное или смягчённое руководителем правило в пятиминутное —
+    оператора выбросило бы в неоплачиваемый «Офлайн». Выброс молчит до следующего
+    обновления настроек (10 минут). Умолчание «включено», когда строки в таблице
+    просто нет, осталось внутри get_phone_settings."""
+    from oktell_guard import phone as icore_phone_statuses
+    try:
+        from oktell_guard import queries as oktell_guard_queries
+        with db._get_cursor() as cursor:
+            return oktell_guard_queries.get_phone_settings(
+                cursor, icore_phone_statuses.PHONE_DEPARTMENT_CODE)
+    except Exception:
+        logging.exception("iCORE Phone: правило автоофлайна не прочитано — "
+                          "выброс в «Офлайн» приостановлен до следующего обновления")
+        rule = icore_phone_statuses.normalize_phone_settings(None)
+        rule['enabled'] = False
+        return rule
+
+
+def _icore_phone_status_profile(user_id, provider):
+    """Блок status_profile для /api/operator/sip_settings.
+
+    Три ответа:
+    - dict — набор статусов группы;
+    - None — набора точно нет: выключено переменной ICORE_PHONE_STATUS_PROFILES
+      (рубильник на случай, если с новым набором что-то пойдёт не так на линии),
+      провайдер не локальная АТС (у Binotel — Тез, удалённый КЦ — групп ОП нет, а
+      статус меняется через кабинет) или у сотрудника нет группы статусов;
+    - _ICORE_PHONE_PROFILE_UNKNOWN — любой сбой: посчитать не удалось, и выдавать
+      это за «набора нет» нельзя (телефон сохранил бы None в реестр и отработал бы
+      следующую смену на прежнем наборе). Ручка в этом случае ключ не шлёт.
+    Исключений наружу нет: без статусов по группе работать можно, без регистрации —
+    нет.
+
+    ICORE_PHONE_REPORT_CONNECTING=0 убирает фазу «Соединение» из отчёта телефона
+    (на пилюле она остаётся): каждое событие статуса пересобирает сегменты оператора
+    за трое суток, и это клапан на случай, если нагрузка от наборов окажется велика.
+    Читается на каждый запрос — до телефонов доходит за одно обновление настроек."""
+    try:
+        if not _env_bool('ICORE_PHONE_STATUS_PROFILES', True):
+            return None
+        if (provider or 'asterisk') != 'asterisk':
+            return None
+        from oktell_guard import phone as icore_phone_statuses
+        user_id = int(user_id)
+        # «Сегодня» — по Алмате, а не CURRENT_DATE базы: её часы в UTC.
+        today = _current_almaty_datetime().date()
+        info = db.get_operator_status_groups([user_id], today).get(user_id) or {}
+        group = info.get('status_group')
+        if not group:
+            return None
+        return icore_phone_statuses.status_profile_payload(
+            group, _icore_phone_idle_rule(),
+            report_connecting=_env_bool('ICORE_PHONE_REPORT_CONNECTING', True))
+    except Exception:
+        logging.exception("iCORE Phone: не удалось собрать набор статусов для %s", user_id)
+        return _ICORE_PHONE_PROFILE_UNKNOWN
+
+
+def _record_icore_phone_idle_kick(user_id, event_at, client_event_id):
+    """Записать автовыброс в «Офлайн» в журнал раздела «Ограничитель Перезвона» (ОП).
+
+    Группа — на день самого события (выброс мог доехать из очереди телефона на
+    следующий день), порог — текущий из правила (0 — правило не прочиталось: выдуманные
+    300 секунд в отчёте хуже честного «неизвестно»). Повторная доставка того же события
+    второй строки не даёт: ключ — GUID события телефона. True — строка добавлена."""
+    from oktell_guard import phone as icore_phone_statuses
+    from oktell_guard import queries as oktell_guard_queries
+    user_id = int(user_id)
+    happened_at = event_at
+    # Время храним так же, как само событие (append_operator_status_event): naive Алматы.
+    if getattr(happened_at, 'tzinfo', None) is not None:
+        happened_at = happened_at.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+    try:
+        info = db.get_operator_status_groups([user_id], happened_at.date()).get(user_id) or {}
+    except Exception:
+        # Без группы выброс всё равно факт — в отчёте он просто будет без подписи группы.
+        logging.exception("iCORE Phone: группа статусов %s для выброса не определена", user_id)
+        info = {}
+    # Порог читаем сами, а не через _icore_phone_idle_rule: её fallback — правило с
+    # умолчаниями, а в строку выброса должен попасть действовавший порог или ничего.
+    try:
+        with db._get_cursor() as cursor:
+            rule = oktell_guard_queries.get_phone_settings(
+                cursor, icore_phone_statuses.PHONE_DEPARTMENT_CODE) or {}
+        threshold_s = int(rule.get('threshold_s') or 0)
+    except Exception:
+        logging.exception("iCORE Phone: порог автоофлайна для выброса %s не прочитан", user_id)
+        threshold_s = 0
+    with db._get_cursor() as cursor:
+        return oktell_guard_queries.record_phone_kick(
+            cursor,
+            user_id=user_id,
+            happened_at=happened_at,
+            client_key=icore_phone_statuses.kick_client_key(client_event_id, user_id, happened_at),
+            department_code=icore_phone_statuses.PHONE_DEPARTMENT_CODE,
+            status_group=info.get('status_group') or '',
+            threshold_s=threshold_s,
+        )
+
+
+def _icore_phone_kick_after_status_event(user_id, status_key, state_note, event_at,
+                                         client_event_id, result):
+    """Хвост /api/operator/status_event: выброс в «Офлайн» — ещё и в отчёт раздела.
+
+    Выброс телефон шлёт обычным событием статуса ('офлайн' с пометкой 'авто') — тем же
+    путём и той же очередью на диске, что и часы, поэтому отдельной ручки нет. Повтор
+    того же состояния (noop) — не новый выброс. Никогда не бросает: ответ телефону
+    решает судьбу события в его очереди, и сбой отчёта не должен её менять."""
+    try:
+        from oktell_guard import phone as icore_phone_statuses
+        if not icore_phone_statuses.is_kick_event(status_key, state_note):
+            return False
+        if isinstance(result, dict) and result.get('noop'):
+            return False
+        return bool(_record_icore_phone_idle_kick(user_id, event_at, client_event_id))
+    except Exception:
+        logging.exception("iCORE Phone: выброс в «Офлайн» у %s не записан в отчёт", user_id)
+        return False
 
 
 # ── Раздел «Провайдер ЭДО» (выгрузка из диспетчерских Яндекс.Fleet) ──────────

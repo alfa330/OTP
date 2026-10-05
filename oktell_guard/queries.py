@@ -6,7 +6,14 @@
 Логин агента = логин человека в Oktell, и ищется он ТОЛЬКО среди сотрудников
 СЗоВ: кабинет из «Настроек SIP», а без кабинета — `users.sip_number`
 (см. OKTELL_LOGIN_SQL).
+
+Отдел продаж (iCORE Phone) живёт в своих таблицах oktell_guard_phone_*: его
+запросы ниже, в разделе «Отдел продаж», и Oktell-запросов не касаются.
 """
+
+import json
+
+from . import phone
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
@@ -721,6 +728,288 @@ def managed_days(cursor, date_from, date_to, department_code=None):
     return fetch_all(cursor)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Отдел продаж: автоофлайн iCORE Phone (ТЗ 05.10.2026)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Oktell здесь нет: «выброс» в «Офлайн» делает сам телефон, а сервер получает
+# его обычным событием статуса (/api/operator/status_event, см. phone.py) и
+# записывает в oktell_guard_phone_kicks. Ни один запрос ниже не читает Oktell-
+# таблиц, и ни один Oktell-запрос выше не читает эти — серверная сверка не
+# должна видеть строк телефона (почему — в schema.py).
+
+# Отдел продаж узнаём и по id: у части профилей код в справочнике пуст (тот же
+# довод и то же число, что у AI_QA_OP_DEPARTMENT_ID в bot_schedule2 и у фронта).
+# Только запасной путь — заполненный код решает всегда.
+OP_DEPARTMENT_FALLBACK_ID = 367
+# Код отдела строки {d} из departments. Требует параметр %(op_department_id)s.
+_DEPARTMENT_CODE_SQL = ("LOWER(COALESCE(NULLIF(btrim({d}.code), ''), "
+                        "CASE WHEN {d}.id = %(op_department_id)s THEN 'op' END, ''))")
+
+
+def _json_list(value):
+    """JSONB из драйвера — уже список; строкой он приходит, только если колонку
+    прочитали как text. Не разобралось — None, то есть «как по умолчанию»."""
+    if value is None or isinstance(value, (list, tuple)):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return value
+    return parsed if isinstance(parsed, list) else None
+
+
+def get_phone_settings(cursor, department_code=phone.PHONE_DEPARTMENT_CODE) -> dict:
+    """Правило автоофлайна отдела: нормализованное + кто и когда правил.
+
+    Строки нет (схема ещё не развернулась, отдел не засеян) — правило по
+    умолчанию: телефон не должен остаться без профиля статусов из-за пустой
+    таблицы. Ошибку самой базы не глотаем — это решает вызывающий.
+    """
+    cursor.execute(
+        """
+        SELECT s.enabled, s.threshold_s, s.warn_before_s, s.groups,
+               s.updated_by, s.updated_at, u.name AS updated_by_name
+          FROM oktell_guard_phone_settings s
+          LEFT JOIN users u ON u.id = s.updated_by
+         WHERE s.department_code = %(department_code)s
+        """,
+        {'department_code': str(department_code or '').strip().lower()},
+    )
+    row = fetch_one(cursor) or {}
+    rule = phone.normalize_phone_settings({
+        'enabled': row.get('enabled'),
+        'threshold_s': row.get('threshold_s'),
+        'warn_before_s': row.get('warn_before_s'),
+        'groups': _json_list(row.get('groups')),
+    })
+    rule.update({
+        'updated_at': row.get('updated_at'),
+        'updated_by': row.get('updated_by'),
+        'updated_by_name': row.get('updated_by_name'),
+    })
+    return rule
+
+
+def save_phone_settings(cursor, department_code, changes, updated_by=None) -> dict:
+    """Сохранить правило: присланное поверх текущего, затем нормализация.
+
+    Whitelist (phone.PHONE_SETTINGS_FIELDS), как SETTINGS_FIELDS у Oktell;
+    null в запросе = «не трогать». Нормализуется ВСЁ правило, а не только
+    присланное: уменьшили порог — предупреждение подрежется под новый порог.
+
+    Присланное проверяется ДО наложения: непригодное значение —
+    phone.PhoneSettingsError (ValueError), база не тронута. Нормализация на
+    непонятное отвечает значением по умолчанию, и без проверки «выкл» строкой
+    включало бы выбросы (см. phone.validate_phone_settings_changes).
+
+    Ничего не изменилось — строку не трогаем: «кто и когда правил» должно
+    значить настоящую правку. Форма шлёт поле и при уходе с него без изменений,
+    и СВ иначе видел бы «правил глава, только что» у правила, которое никто не
+    менял.
+    """
+    code = str(department_code or '').strip().lower()
+    checked = phone.validate_phone_settings_changes(changes)
+    current = get_phone_settings(cursor, code)
+    merged = {name: current.get(name) for name in phone.PHONE_SETTINGS_FIELDS}
+    merged.update(checked)
+    rule = phone.normalize_phone_settings(merged)
+    if all(rule[name] == current.get(name) for name in phone.PHONE_SETTINGS_FIELDS):
+        return current
+    cursor.execute(
+        """
+        INSERT INTO oktell_guard_phone_settings
+               (department_code, enabled, threshold_s, warn_before_s, groups,
+                updated_by, updated_at)
+        VALUES (%(department_code)s, %(enabled)s, %(threshold_s)s, %(warn_before_s)s,
+                %(groups)s::jsonb, %(updated_by)s, """ + _NOW + """)
+        ON CONFLICT (department_code) DO UPDATE SET
+               enabled       = EXCLUDED.enabled,
+               threshold_s   = EXCLUDED.threshold_s,
+               warn_before_s = EXCLUDED.warn_before_s,
+               groups        = EXCLUDED.groups,
+               updated_by    = EXCLUDED.updated_by,
+               updated_at    = EXCLUDED.updated_at
+        """,
+        {
+            'department_code': code,
+            'enabled': rule['enabled'],
+            'threshold_s': rule['threshold_s'],
+            'warn_before_s': rule['warn_before_s'],
+            'groups': json.dumps(rule['groups']),
+            'updated_by': updated_by,
+        },
+    )
+    return get_phone_settings(cursor, code)
+
+
+def record_phone_kick(cursor, *, user_id, happened_at, client_key,
+                      department_code=phone.PHONE_DEPARTMENT_CODE, status_group='',
+                      threshold_s=0) -> bool:
+    """Записать выброс телефона. True — строка добавлена, False — такой уже был.
+
+    Идемпотентность по client_key (phone.kick_client_key): очередь телефона
+    повторяет событие при обрыве связи, и один выброс не должен стать двумя.
+    Без ключа не пишем вовсе — повтор было бы не отличить от нового выброса.
+    """
+    key = str(client_key or '').strip()[:128]
+    if not key:
+        return False
+    try:
+        threshold = max(0, int(threshold_s or 0))
+    except (TypeError, ValueError):
+        threshold = 0
+    cursor.execute(
+        """
+        INSERT INTO oktell_guard_phone_kicks
+               (user_id, department_code, status_group, happened_at, threshold_s,
+                client_key, received_at)
+        VALUES (%(user_id)s, %(department_code)s, %(status_group)s,
+                COALESCE(%(happened_at)s, """ + _NOW + """), %(threshold_s)s,
+                %(client_key)s, """ + _NOW + """)
+        ON CONFLICT (client_key) DO NOTHING
+        RETURNING id
+        """,
+        {
+            'user_id': int(user_id) if user_id is not None else None,
+            'department_code': str(department_code or phone.PHONE_DEPARTMENT_CODE).strip().lower()[:32],
+            'status_group': str(status_group or '').strip().lower()[:16],
+            'happened_at': happened_at,
+            'threshold_s': threshold,
+            'client_key': key,
+        },
+    )
+    return cursor.fetchone() is not None
+
+
+# Группа на дату — та же лестница, что у Database._load_operator_calculation_
+# models_tx(as_of=...): действующее на дату членство решает всегда (при
+# пересечении — позднее start_date, затем больший id), направление — только без
+# него. Дата приходит из Python (Алматы): часы базы в UTC, и CURRENT_DATE до
+# 05:00 по Алматы вернул бы вчера.
+_PHONE_EMPLOYEES_SQL = """
+    SELECT u.id,
+           u.name,
+           LOWER(COALESCE(u.role, ''))                    AS role,
+           COALESCE(btrim(u.sip_number), '')              AS sip_number,
+           d.name                                         AS department_name,
+           COALESCE(g.group_name, '')                     AS group_name,
+           LOWER(COALESCE(g.calculation_model_code, ''))  AS group_model,
+           LOWER(COALESCE(dir.calculation_model_code, '')) AS direction_model,
+           COALESCE(k.kicks, 0)                           AS kicks_30d,
+           k.last_kick_at                                 AS last_kick_at
+      FROM users u
+      JOIN departments d ON d.id = u.department_id
+      LEFT JOIN directions dir ON dir.id = u.direction_id
+      LEFT JOIN LATERAL (
+            SELECT gr.name AS group_name, gr.calculation_model_code
+              FROM group_operator_memberships gom
+              JOIN groups gr ON gr.id = gom.group_id
+             WHERE gom.operator_id = u.id
+               AND gom.start_date <= %(day)s::date
+               AND (gom.end_date IS NULL OR gom.end_date >= %(day)s::date)
+             ORDER BY gom.start_date DESC, gom.id DESC
+             LIMIT 1
+      ) g ON TRUE
+      LEFT JOIN (
+            SELECT user_id, COUNT(*) AS kicks, MAX(happened_at) AS last_kick_at
+              FROM oktell_guard_phone_kicks
+             WHERE happened_at >= %(since)s
+               AND department_code = %(department_code)s
+             GROUP BY user_id
+      ) k ON k.user_id = u.id
+     WHERE LOWER(COALESCE(u.role, '')) = ANY(%(roles)s)
+       AND LOWER(COALESCE(u.status, '')) <> ALL(%(inactive)s)
+       AND """ + _DEPARTMENT_CODE_SQL.format(d='d') + """ = %(department_code)s
+     ORDER BY u.name, u.id
+"""
+
+
+def list_phone_employees(cursor, department_code, since, as_of, rule=None):
+    """Операторы и стажёры отдела — все группы, а не только те, кого касается
+    правило: Основа и человек без группы видны с «не участвует». Как и у СЗоВ,
+    прятать того, кого ограничитель не покрывает, значит прятать вопрос.
+
+    participates = правило включено и группа человека в правиле.
+    """
+    code = str(department_code or '').strip().lower()
+    if rule is None:
+        rule = get_phone_settings(cursor, code)
+    cursor.execute(_PHONE_EMPLOYEES_SQL, {
+        'department_code': code,
+        'op_department_id': OP_DEPARTMENT_FALLBACK_ID,
+        'since': since,
+        'day': as_of,
+        'roles': list(EMPLOYEE_ROLES),
+        'inactive': list(INACTIVE_STATUSES),
+    })
+    rule_groups = set(rule.get('groups') or ())
+    out = []
+    for row in fetch_all(cursor):
+        group = phone.status_group_for(row.get('role'), row.get('group_model'),
+                                       row.get('direction_model')) or ''
+        out.append({
+            'id': row.get('id'),
+            'name': row.get('name'),
+            'role': row.get('role'),
+            'sip_number': row.get('sip_number') or '',
+            'department_name': row.get('department_name'),
+            'status_group': group,
+            'group_label': phone.STATUS_GROUP_LABELS.get(group, ''),
+            'group_name': row.get('group_name') or '',
+            'participates': bool(rule.get('enabled')) and group in rule_groups,
+            'kicks_30d': int(row.get('kicks_30d') or 0),
+            'last_kick_at': row.get('last_kick_at'),
+        })
+    return out
+
+
+def phone_report(cursor, date_from, date_to, department_code=phone.PHONE_DEPARTMENT_CODE):
+    """Отчёт «за какую дату кого сколько раз выкинуло в Офлайн» по ОП.
+
+    Отдел и группа — снимок в строке выброса, а не текущие: перевод человека
+    в другую группу или отдел не переписывает прошлые дни. Если за день
+    группа менялась, показывается группа последнего выброса.
+    """
+    cursor.execute(
+        """
+        SELECT k.happened_at::date                        AS day,
+               k.user_id,
+               COALESCE(u.name, '(неизвестный)')          AS name,
+               COALESCE(btrim(u.sip_number), '')          AS sip_number,
+               (ARRAY_AGG(k.status_group ORDER BY k.happened_at DESC, k.id DESC))[1]
+                                                          AS status_group,
+               COUNT(*)                                   AS kicks,
+               MIN(k.happened_at)                         AS first_at,
+               MAX(k.happened_at)                         AS last_at
+          FROM oktell_guard_phone_kicks k
+          LEFT JOIN users u ON u.id = k.user_id
+         WHERE k.happened_at >= %(date_from)s::date
+           AND k.happened_at < %(date_to)s::date + 1
+           AND k.department_code = %(department_code)s
+         GROUP BY k.happened_at::date, k.user_id, u.name, u.sip_number
+         ORDER BY day DESC, name, k.user_id
+        """,
+        {'date_from': date_from, 'date_to': date_to,
+         'department_code': str(department_code or '').strip().lower()},
+    )
+    rows = []
+    for row in fetch_all(cursor):
+        group = str(row.get('status_group') or '')
+        rows.append({
+            'day': row.get('day'),
+            'user_id': row.get('user_id'),
+            'name': row.get('name'),
+            'sip_number': row.get('sip_number') or '',
+            'status_group': group,
+            'group_label': phone.STATUS_GROUP_LABELS.get(group, ''),
+            'kicks': int(row.get('kicks') or 0),
+            'first_at': row.get('first_at'),
+            'last_at': row.get('last_at'),
+        })
+    return rows
+
+
 def access_context(cursor, user_id):
     """Кто пришёл: роль, отдел и возглавляет ли он отдел.
 
@@ -737,27 +1026,46 @@ def access_context(cursor, user_id):
         SELECT u.id,
                u.name,
                u.role,
-               COALESCE(d.code, '')  AS department_code,
+               """ + _DEPARTMENT_CODE_SQL.format(d='d') + """ AS department_code,
                EXISTS (
                    SELECT 1 FROM departments h
                     WHERE h.head_user_id = u.id AND h.is_active
                )                     AS is_department_head,
+               -- Порядок обязателен: глава двух отделов раньше получал один из
+               -- них наугад (LIMIT 1 без ORDER BY), и раздел то открывался, то нет.
                COALESCE((
-                   SELECT h.code FROM departments h
+                   SELECT """ + _DEPARTMENT_CODE_SQL.format(d='h') + """
+                     FROM departments h
                     WHERE h.head_user_id = u.id AND h.is_active
+                    ORDER BY 1, h.id
                     LIMIT 1
-               ), '')                AS headed_department_code
+               ), '')                AS headed_department_code,
+               ARRAY(
+                   SELECT """ + _DEPARTMENT_CODE_SQL.format(d='h') + """
+                     FROM departments h
+                    WHERE h.head_user_id = u.id AND h.is_active
+                    ORDER BY 1, h.id
+               )                     AS headed_department_codes
           FROM users u
           LEFT JOIN departments d ON d.id = u.department_id
          WHERE u.id = %(user_id)s
         """,
-        {'user_id': int(user_id)},
+        {'user_id': int(user_id), 'op_department_id': OP_DEPARTMENT_FALLBACK_ID},
     )
     ctx = fetch_one(cursor)
     if not ctx:
         return None
+    headed = [str(code or '').strip().lower()
+              for code in (ctx.get('headed_department_codes') or [])]
+    headed = [code for code in headed if code]
+    if not headed and ctx.get('headed_department_code'):
+        headed = [str(ctx['headed_department_code']).strip().lower()]
+    ctx['headed_department_codes'] = headed
     # Глава отдела считается по отделу, которым он РУКОВОДИТ: его собственный
-    # department_id может быть не заполнен или указывать на другой отдел.
-    if ctx.get('is_department_head') and ctx.get('headed_department_code'):
-        ctx['department_code'] = ctx['headed_department_code']
+    # department_id может быть не заполнен или указывать на другой отдел. Если
+    # он возглавляет и свой отдел — оставляем свой: так department_code не
+    # зависит от того, какой из двух отделов раньше по алфавиту.
+    if ctx.get('is_department_head') and headed:
+        own = str(ctx.get('department_code') or '').strip().lower()
+        ctx['department_code'] = own if own in headed else headed[0]
     return ctx

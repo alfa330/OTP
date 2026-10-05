@@ -15,6 +15,10 @@
     oktell_guard_tokens       личный токен сотрудника, выданный при скачивании.
     oktell_guard_managed_days пометка «в этот день работал через наше приложение».
 
+    Отдел продаж (iCORE Phone, без Oktell):
+    oktell_guard_phone_settings правило автоофлайна, строка на отдел ('op').
+    oktell_guard_phone_kicks    выбросы в «Офлайн», которые сделал сам телефон.
+
 Почему файл в GCS, а не на диске и не в базе. Диск на Render эфемерный —
 загруженный exe исчезал бы после каждого деплоя. База выдержала бы (15 МБ в
 bytea, TOAST), но раздача шла бы через наш единственный инстанс: после выпуска
@@ -238,4 +242,59 @@ def init_oktell_guard_schema(cursor) -> None:
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS oktell_guard_managed_days_day_idx
         ON oktell_guard_managed_days (day DESC);
+    """)
+
+    # ── Отдел продаж: автоофлайн iCORE Phone (ТЗ 05.10.2026) ──────────────
+    # Правило — по строке на отдел, а не столбцы в oktell_guard_settings: та
+    # строка одна на всех и целиком про Oktell (её порог уезжает каждому агенту
+    # и в серверную сверку), и общий порог связал бы «Перезвон» СЗоВ с
+    # простоем ОП. Пока отдел один — 'op'.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS oktell_guard_phone_settings (
+            department_code VARCHAR(32) PRIMARY KEY,
+            enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+            threshold_s     INTEGER NOT NULL DEFAULT 300,
+            warn_before_s   INTEGER NOT NULL DEFAULT 60,
+            groups          JSONB NOT NULL DEFAULT '["yar","potok"]'::jsonb,
+            updated_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            updated_at      TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+        );
+    """)
+    cursor.execute("""
+        INSERT INTO oktell_guard_phone_settings (department_code) VALUES ('op')
+        ON CONFLICT (department_code) DO NOTHING;
+    """)
+
+    # Выбросы телефона — своя таблица, а не oktell_guard_violations. Тот журнал
+    # читает серверная сверка Oktell: строка с пустым или совпавшим номером
+    # «закрывала» бы чужие сегменты «Перезвона» СЗоВ, а pending-строку
+    # перепроверяли бы по истории Oktell случайного человека. Телефону сверять
+    # нечего — он говорит только о своём владельце (JWT), поэтому здесь нет ни
+    # verified, ни reason. Группа и отдел — снимок на момент выброса: человек
+    # потом может сменить группу, а отчёт за прошлое меняться не должен.
+    # client_key = 'phone|' + GUID события статуса — повторная доставка того же
+    # события из очереди телефона второй строки не даст.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS oktell_guard_phone_kicks (
+            id              BIGSERIAL PRIMARY KEY,
+            user_id         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            department_code VARCHAR(32) NOT NULL DEFAULT 'op',
+            status_group    VARCHAR(16) NOT NULL DEFAULT '',
+            happened_at     TIMESTAMP NOT NULL,
+            threshold_s     INTEGER NOT NULL DEFAULT 0,
+            client_key      VARCHAR(128) NOT NULL,
+            received_at     TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+        );
+    """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS oktell_guard_phone_kicks_client_key_idx
+        ON oktell_guard_phone_kicks (client_key);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS oktell_guard_phone_kicks_user_idx
+        ON oktell_guard_phone_kicks (user_id, happened_at DESC);
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS oktell_guard_phone_kicks_day_idx
+        ON oktell_guard_phone_kicks (happened_at DESC);
     """)

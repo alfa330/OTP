@@ -70,9 +70,17 @@ export const OP_STATUS_STYLE = {
     talking: { label: 'В разговоре', chip: 'bg-blue-100 text-blue-700' },
     free: { label: 'Активный', chip: 'bg-green-100 text-green-700' },
     outgoing: { label: 'Исход', chip: 'bg-amber-100 text-amber-700' },
+    // Статусы групп ОП (ТЗ 05.10.2026). «Соединение» — набор номера до ответа: не синий
+    // «В разговоре», иначе стена показывала бы разговором то, что ещё гудки. «Автодозвон» —
+    // работа через систему автодозвона у «Потока». «Офлайн» — простой без звонков, куда
+    // телефон переводит сам: красный, потому что это на смене и без работы, а серый
+    // «Не в сети» — человек из программы вышел.
+    connecting: { label: 'Соединение', chip: 'bg-cyan-100 text-cyan-700' },
+    autodial: { label: 'Автодозвон', chip: 'bg-sky-100 text-sky-700' },
     training: { label: 'Тренинг', chip: 'bg-purple-100 text-purple-700' },
     tech: { label: 'Техническая пауза', chip: 'bg-fuchsia-100 text-fuchsia-700' },
     break: { label: 'Перерыв', chip: 'bg-orange-100 text-orange-700' },
+    idle_offline: { label: 'Офлайн', chip: 'bg-red-100 text-red-700' },
     offline: { label: 'Не в сети', chip: 'bg-slate-100 text-slate-500' },
     unknown: { label: 'Нет событий', chip: 'bg-slate-50 text-slate-400 ring-1 ring-slate-200' },
     other: { label: null, chip: 'bg-slate-100 text-slate-600' },
@@ -193,7 +201,10 @@ export const OP_METRICS = [
     },
     {
         key: 'op_online', group: 'now', label: 'Онлайн',
-        hint: 'Свободны и в разговоре',
+        // Со статусами групп ОП (ТЗ 05.10.2026) сервер считает онлайн шире: набор номера
+        // («Соединение») и «Автодозвон» — тоже на линии. Без этого оператор Основы на время
+        // гудков выпадал бы из плитки. «Исход» и «Офлайн» сюда не входят.
+        hint: 'Свободны, набирают, на автодозвоне и в разговоре',
         read: (s) => ({ value: formatCount(s.now?.operators_online), tone: 'info' }),
     },
     {

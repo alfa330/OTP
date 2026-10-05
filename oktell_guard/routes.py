@@ -14,6 +14,12 @@ Blueprint, как у вики и «Обращений»: зависимости 
   авторизация портала плюс права: читают глава СЗоВ, глобальные админы и СВ
   СЗоВ, правят (`manage=True`) только первые двое. Разметку прав держит
   `access.py`, здесь — только расстановка `manage=` по роутам.
+
+С 05.10.2026 у раздела две части: СЗоВ (Oktell, всё как было) и отдел продаж
+(выбросы iCORE Phone в «Офлайн», правило автоофлайна — `/phone/settings`).
+Какую часть отдать, решает `?department=` (szov | op), сверенный с открытыми
+человеку частями; без него — первая открытая. Агентские роуты отдела продаж не
+касаются: выбросы телефона приходят событием статуса в монолит.
 """
 
 import hashlib
@@ -26,7 +32,7 @@ from functools import wraps
 
 from flask import Blueprint, g, jsonify, request
 
-from . import access, queries, verify
+from . import access, phone, queries, verify
 
 AGENT_TOKEN_ENV = 'OKTELL_GUARD_AGENT_TOKEN'
 # Токен публикации: им пользуется сборка, чтобы выложить новую версию сама.
@@ -252,6 +258,9 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     def section_route(rule, methods=('GET',), manage=False, gate=None):
         """gate — чем закрыт вход. По умолчанию это доступ к разделу.
 
+        manage — кто правит: True — настройки Oktell (access.can_manage_settings),
+        предикат — своя часть (правило ОП: access.can_manage_phone_settings).
+
         Отдельным кругом закрыто только скачивание exe: он положен КАЖДОМУ
         оператору СЗоВ, а раздел с настройками — нет. Передавать сюда предикат,
         а не размазывать проверку по обработчикам, важно по той же причине, по
@@ -284,7 +293,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                     # адресом.
                     if not (gate or access.can_view_section)(requester):
                         return jsonify({"error": "Раздел вам не открыт"}), 403
-                    if manage and not access.can_manage_settings(requester):
+                    # manage=True — правка Oktell; предикат — своя правка (правило
+                    # ОП): раздел человеку открыт, а эту часть он только читает.
+                    manage_check = manage if callable(manage) else access.can_manage_settings
+                    if manage and not manage_check(requester):
                         return jsonify({"error": "Недостаточно прав"}), 403
                     return handler(requester_id, requester, *args, **kwargs)
                 except Exception:
@@ -292,6 +304,44 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                     return jsonify({"error": "Внутренняя ошибка"}), 500
             return wrapper
         return decorator
+
+    def requested_department(requester):
+        """Отдел из ?department=, сверенный с открытыми человеку. → (код, ошибка).
+
+        Без параметра — первая открытая часть (СЗоВ раньше ОП): так глава и СВ
+        СЗоВ без единой правки фронта получают ровно прежние ответы, а глава и
+        СВ ОП — свою часть. Чужая часть — 403, а не пустой список: адрес ручки
+        известен, и подставленный ?department= не должен ничего показывать.
+        """
+        visible = access.visible_department_codes(requester)
+        raw = access.normalize_department_code(request.args.get('department'))
+        if not raw:
+            if not visible:
+                return None, (jsonify({"error": "Раздел вам не открыт"}), 403)
+            return visible[0], None
+        if raw not in access.SECTION_DEPARTMENT_CODES:
+            return None, (jsonify({"error": "Неизвестный отдел"}), 400)
+        if raw not in visible:
+            return None, (jsonify({"error": "Раздел вам не открыт"}), 403)
+        return raw, None
+
+    def departments_payload(requester, code):
+        """Переключатель отделов: только открытые части, в порядке показа."""
+        visible = set(access.visible_department_codes(requester))
+        return {
+            "department": code,
+            "departments": [{"code": dep_code, "name": name}
+                            for dep_code, name in access.SECTION_DEPARTMENTS
+                            if dep_code in visible],
+        }
+
+    def sees_phone_department(requester):
+        """Вход в правку правила ОП — для тех, кому часть ОП вообще открыта.
+
+        Глава СЗоВ получает «Раздел вам не открыт» (эта часть ему и правда не
+        открыта), СВ ОП — «Недостаточно прав» (видит, но не правит).
+        """
+        return access.can_view_department(requester, access.PHONE_DEPARTMENT_CODE)
 
     def signed_download_url(release, filename=None):
         """Ссылка на файл в GCS. Отдаём её и агенту, и браузеру — качают они
@@ -660,10 +710,25 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
 
     @section_route('/settings')
     def oktell_guard_settings_get(requester_id, requester):
+        department, error = requested_department(requester)
+        if error:
+            return error
+        if department == access.PHONE_DEPARTMENT_CODE:
+            # Часть ОП: только правило автоофлайна. Ничего из Oktell (адрес,
+            # пин сертификата, версия агента) сюда не уезжает.
+            with db._get_cursor() as cursor:
+                phone_settings = queries.get_phone_settings(cursor, department)
+            return jsonify(dict(
+                departments_payload(requester, department),
+                phone_settings=phone_settings,
+                can_manage=access.can_manage_phone_settings(requester),
+                group_labels=dict(phone.STATUS_GROUP_LABELS),
+                idle_groups=list(phone.IDLE_OFFLINE_GROUPS),
+            ))
         with db._get_cursor() as cursor:
             settings = queries.get_settings(cursor)
             release = queries.current_release(cursor)
-        return jsonify({
+        return jsonify(dict(departments_payload(requester, department), **{
             "settings": settings,
             "release": release and {
                 "version": release['version'],
@@ -673,24 +738,61 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 "notes": release['notes'],
             },
             "can_manage": access.can_manage_settings(requester),
-        })
+        }))
 
     @section_route('/settings', methods=('PUT', 'POST'), manage=True)
     def oktell_guard_settings_save(requester_id, requester):
+        # Это настройки Oktell. Правило ОП сохраняется своей ручкой
+        # (/phone/settings): ?department=op здесь молча переписал бы порог
+        # «Перезвона» всем агентам СЗоВ.
+        if access.normalize_department_code(request.args.get('department')) not in (
+                '', access.SECTION_DEPARTMENT_CODE):
+            return jsonify({"error": "Правило отдела продаж сохраняется отдельно"}), 400
         payload = request.get_json(silent=True) or {}
         with db._get_cursor() as cursor:
             settings = queries.save_settings(cursor, payload, updated_by=requester_id)
         return jsonify({"settings": settings})
 
+    @section_route('/phone/settings', methods=('PUT', 'POST'), gate=sees_phone_department,
+                   manage=access.can_manage_phone_settings)
+    def oktell_guard_phone_settings_save(requester_id, requester):
+        """Правило автоофлайна ОП: правят глава ОП и глобальные админы, СВ ОП
+        только читает. Присланное накладывается на текущее (любой набор полей
+        из enabled, threshold_s, warn_before_s, groups) и нормализуется.
+        Непригодное значение — 400 с причиной: молча сохранить вместо него
+        значение по умолчанию значило бы включить выбросы, которых не задавали."""
+        department = access.normalize_department_code(request.args.get('department'))
+        if department not in ('', access.PHONE_DEPARTMENT_CODE):
+            return jsonify({"error": "Неизвестный отдел"}), 400
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Ожидался объект с полями правила"}), 400
+        try:
+            with db._get_cursor() as cursor:
+                phone_settings = queries.save_phone_settings(
+                    cursor, access.PHONE_DEPARTMENT_CODE, payload, updated_by=requester_id)
+        except phone.PhoneSettingsError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"phone_settings": phone_settings})
+
     @section_route('/employees')
     def oktell_guard_employees(requester_id, requester):
+        department, error = requested_department(requester)
+        if error:
+            return error
+        today = date.today()
+        since = today - timedelta(days=30)
+        if department == access.PHONE_DEPARTMENT_CODE:
+            with db._get_cursor() as cursor:
+                employees = queries.list_phone_employees(
+                    cursor, department, since=since, as_of=today)
+            return jsonify({"department": department, "employees": employees})
         scope = access.visible_department_code(requester)
         if scope == '':
-            return jsonify({"employees": []})
-        since = date.today() - timedelta(days=30)
+            return jsonify({"department": department, "employees": []})
         with db._get_cursor() as cursor:
             employees = queries.list_employees(cursor, department_code=scope, since=since)
-        return jsonify({"employees": employees})
+        return jsonify({"department": department, "employees": employees})
 
     @section_route('/employees/bulk', methods=('POST',), manage=True)
     def oktell_guard_employees_bulk(requester_id, requester):
@@ -701,6 +803,14 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         намерения, и путать их нельзя: галочка «выключить» иначе обнуляла бы
         всем персональные пороги.
         """
+        # Персональные пороги — это Oktell (oktell_guard_user_rules). У ОП правило
+        # одно на отдел, и id людей ОП здесь стали бы их «порогом Перезвона», если
+        # человека потом переведут в СЗоВ.
+        department = access.normalize_department_code(request.args.get('department'))
+        if department == access.PHONE_DEPARTMENT_CODE:
+            return jsonify({"error": "У отдела продаж персональных правил нет"}), 400
+        if department not in ('', access.SECTION_DEPARTMENT_CODE):
+            return jsonify({"error": "Неизвестный отдел"}), 400
         payload = request.get_json(silent=True) or {}
         with db._get_cursor() as cursor:
             changed = queries.bulk_set_rules(
@@ -714,10 +824,29 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
 
     @section_route('/report')
     def oktell_guard_report(requester_id, requester):
+        department, error = requested_department(requester)
+        if error:
+            return error
+        today = date.today()
+        if department == access.PHONE_DEPARTMENT_CODE:
+            # Даты разбираем здесь: мусор в ?from= должен быть 400, а не
+            # ошибкой базы и 500.
+            try:
+                day_from = date.fromisoformat(request.args.get('from') or
+                                              str(today - timedelta(days=13)))
+                day_to = date.fromisoformat(request.args.get('to') or str(today))
+            except ValueError:
+                return jsonify({"error": "Даты — в виде ГГГГ-ММ-ДД"}), 400
+            if day_from > day_to:
+                day_from, day_to = day_to, day_from
+            with db._get_cursor() as cursor:
+                rows = queries.phone_report(cursor, day_from, day_to, department_code=department)
+            return jsonify({"department": department, "rows": rows,
+                            "from": str(day_from), "to": str(day_to),
+                            "total": sum(int(row.get('kicks') or 0) for row in rows)})
         scope = access.visible_department_code(requester)
         if scope == '':
-            return jsonify({"rows": []})
-        today = date.today()
+            return jsonify({"department": department, "rows": []})
         date_from = request.args.get('from') or str(today - timedelta(days=13))
         date_to = request.args.get('to') or str(today)
         with db._get_cursor() as cursor:
@@ -727,7 +856,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             # нельзя: в отчёт идёт только подтверждённое, и без этой цифры
             # настоящие выбросы выглядели бы как «выкидываний не было».
             pending = queries.pending_count(cursor, date_from, date_to, department_code=scope)
-        return jsonify({"rows": rows, "from": date_from, "to": date_to,
+        return jsonify({"department": department, "rows": rows, "from": date_from, "to": date_to,
                         "rejected": rejected, "pending": pending})
 
     @section_route('/download', gate=access.can_download_agent)
