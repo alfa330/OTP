@@ -4,15 +4,15 @@ import { calculateTezOpMonthlyPlan } from '../../utils/salaryFormula';
 /**
  * Ячейка «План успешек» в учёте часов (модель ОП TEZ).
  * Показывает индивидуальный план оператора и тултип с пошаговым расчётом
- * по правилам владельца (ставка / переработка / новичок / пересчитанная норма).
+ * по правилам владельца (фактические часы / норма на 1 FTE / новичок).
  * Тултип позиционируется fixed — не обрезается overflow-контейнером таблицы.
  */
-const TezOpPlanCell = ({ planPerFte, rate, normHours, factHours, hireDate, month }) => {
+const TezOpPlanCell = ({ planPerFte, normHoursFte, rate, normHours, factHours, hireDate, month }) => {
   const [tip, setTip] = useState(null); // {x, y}
 
   const result = useMemo(
-    () => calculateTezOpMonthlyPlan({ planPerFte, rate, normHours, factHours, hireDate, month }),
-    [planPerFte, rate, normHours, factHours, hireDate, month]
+    () => calculateTezOpMonthlyPlan({ planPerFte, normHoursFte, rate, normHours, factHours, hireDate, month }),
+    [planPerFte, normHoursFte, rate, normHours, factHours, hireDate, month]
   );
 
   const hasPlan = result.plan != null;

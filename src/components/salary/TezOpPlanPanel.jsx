@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import InfoHint from '../common/InfoHint';
+import TezDepartmentPlanSummary from './TezDepartmentPlanSummary';
 
 /**
  * Панель ввода общего месячного плана отдела для модели TEZ ОП
@@ -16,21 +17,9 @@ import InfoHint from '../common/InfoHint';
  *  - canEdit: можно ли редактировать (управленец своего отдела)
  *  - onSaved: колбэк после успешного сохранения (обновление колонки «План успешек»)
  */
-const closureClass = (pct) => {
-  if (pct == null || !Number.isFinite(Number(pct))) return 'text-slate-400';
-  if (pct >= 100) return 'text-emerald-700';
-  if (pct >= 60) return 'text-amber-600';
-  return 'text-rose-600';
-};
-
-// Русская запись чисел (5,5 вместо 5.5) без хвостовых нулей.
-const fmt = (value, maxDecimals = 1) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? num.toLocaleString('ru-RU', { maximumFractionDigits: maxDecimals }) : '—';
-};
-
-const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit = false, onSaved = null }) => {
+const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit = false, onSaved = null, refreshKey = 0 }) => {
   const [planPerFte, setPlanPerFte] = useState('');
+  const [normHoursFte, setNormHoursFte] = useState('');
   // Общий план отдела и его закрытие считает бэкенд и отдаёт тем же запросом.
   const [summary, setSummary] = useState(null);
   const [loaded, setLoaded] = useState(false);
@@ -46,6 +35,9 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
     if (!departmentId || !validPeriod || !userId) return;
     let cancelled = false;
     setLoaded(false);
+    setMsg('');
+    setPlanPerFte('');
+    setNormHoursFte('');
     axios
       .get(`${apiBaseUrl}/api/department_plan`, {
         params: { department_id: departmentId, year, month: monthNum },
@@ -55,28 +47,35 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
         if (cancelled) return;
         const value = resp?.data?.plan?.plan_per_fte;
         setPlanPerFte(value === undefined || value === null ? '' : String(value));
+        setNormHoursFte(String(resp?.data?.plan?.norm_hours_fte ?? ''));
         setSummary(resp?.data?.summary || null);
         setLoaded(true);
       })
       .catch(() => {
         if (!cancelled) {
           setSummary(null);
-          setLoaded(true);
+          setMsg('Не удалось загрузить настройки плана');
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, reloadKey]);
+  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, reloadKey, refreshKey]);
 
   const save = useCallback(() => {
     if (!canEdit || !departmentId || !validPeriod) return;
+    const norm = Number(normHoursFte);
+    const plan = Number(planPerFte);
+    if (!Number.isFinite(norm) || norm <= 0 || norm > 744 || !Number.isFinite(plan) || plan < 0) {
+      setMsg('Укажите план ≥ 0 и норму часов от 0 до 744 (не включая 0)');
+      return;
+    }
     setSaving(true);
     setMsg('');
     axios
       .post(
         `${apiBaseUrl}/api/department_plan`,
-        { department_id: departmentId, year, month: monthNum, plan_per_fte: parseFloat(planPerFte) || 0 },
+        { department_id: departmentId, year, month: monthNum, plan_per_fte: plan, norm_hours_fte: norm },
         { headers: { 'X-User-Id': userId } }
       )
       .then(() => {
@@ -90,32 +89,37 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
         setTimeout(() => setMsg(''), 3000);
       })
       .finally(() => setSaving(false));
-  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, planPerFte, canEdit, onSaved]);
+  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, planPerFte, normHoursFte, canEdit, onSaved]);
 
   return (
-    <div className="rounded-2xl border border-teal-200 bg-teal-50/60 px-4 py-4">
-      <div className="flex items-center gap-2 text-teal-800 font-semibold mb-3">
+    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+      <div className="flex items-center gap-2 text-slate-800 font-semibold mb-3">
         <FaIcon className="fas fa-bullseye" />
-        <span>План успешек на 1 FTE</span>
+        <span>План ОП TEZ</span>
         <InfoHint title="Как считается индивидуальный план" side="left">
-          По ставке: план × ставка. При переработке — пропорционально факт-часам
-          (план ÷ норма FTE × факт). Новичок в месяце приёма — ×0,8, при неполном месяце —
-          пропорционально рабочим дням с даты приёма. При увольнении/выходе на БС —
-          пропорционально пересчитанной норме. Норма FTE месяца = округл(дни ÷ 7 × 5) × 8 ч.
-          Расчёт по каждому оператору — в колонке «План успешек».
+          Индивидуальный план = план продаж на 1 FTE ÷ норма часов на 1 FTE ×
+          фактически отработанные часы. Весь месяц приёма для новичка действует ×0,8.
         </InfoHint>
       </div>
-      <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+        <label className="text-xs text-slate-600">План продаж на 1 FTE
         <input
           type="number"
           min="0"
           step="0.01"
           value={planPerFte}
           onChange={(e) => setPlanPerFte(e.target.value)}
-          disabled={!canEdit || !loaded}
+          disabled={!canEdit || !loaded || saving}
           placeholder="Напр. 150"
-          className="w-full sm:w-48 p-2.5 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-100"
+          className="mt-1 block w-full sm:w-48 p-2.5 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-100"
         />
+        </label>
+        <label className="text-xs text-slate-600">Норма часов на 1 FTE
+          <input type="number" min="0.01" max="744" step="0.01"
+            value={normHoursFte} onChange={(e) => setNormHoursFte(e.target.value)}
+            disabled={!canEdit || !loaded || saving}
+            className="mt-1 block w-full sm:w-48 rounded-xl border p-2.5 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-100" />
+        </label>
         {canEdit && (
           <button
             onClick={save}
@@ -130,39 +134,7 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
         )}
         {msg && <span className="text-sm font-medium text-teal-700">{msg}</span>}
       </div>
-      <p className="mt-2 text-xs text-teal-700">Общий для всего отдела, одинаков для всех операторов.</p>
-
-      {summary && (
-        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-teal-200 bg-white/80 px-3 py-2.5">
-          <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800">
-            Общий план отдела
-            <InfoHint title="Как считается общий план" side="left">
-              Сумма ставок операторов ОП, работавших в этом месяце ({fmt(summary.fte_total, 2)} FTE,
-              {' '}{summary.operators_count} чел.) × план на 1 FTE ({fmt(summary.plan_per_fte)})
-              × {fmt(summary.coefficient, 2)}. Приём или уход сотрудника
-              внутри месяца ставку не дробит, и увольнение план не уменьшает: успешки
-              ушедшего идут в факт, значит и его ставка остаётся в плане.
-              Закрытие = успешки отдела за месяц ÷ этот план.
-            </InfoHint>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-slate-500">План</div>
-            <div className="text-lg font-bold tabular-nums text-slate-800">
-              {summary.plan_total > 0 ? fmt(summary.plan_total) : '—'}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-slate-500">Успешки</div>
-            <div className="text-lg font-bold tabular-nums text-emerald-700">{summary.successes_total}</div>
-          </div>
-          <div>
-            <div className="text-[11px] uppercase tracking-wide text-slate-500">Закрытие</div>
-            <div className={`text-lg font-bold tabular-nums ${closureClass(summary.closure_pct)}`}>
-              {summary.closure_pct == null ? '—' : `${fmt(summary.closure_pct)}%`}
-            </div>
-          </div>
-        </div>
-      )}
+      {summary && <div className="mt-4"><TezDepartmentPlanSummary summary={summary} /></div>}
     </div>
   );
 };

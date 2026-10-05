@@ -61,7 +61,11 @@ class OuterContainerTests(unittest.TestCase):
         self.assertNotIn("ring-1", table_box)
 
     def test_plan_strip_is_flat_inside_the_card(self):
-        self.assertIn('<div className="mx-5 mb-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl bg-slate-50 px-4 py-3">', _desktop_markup())
+        self.assertIn('<div className="mx-5 mb-4"><TezDepartmentPlanSummary', _desktop_markup())
+        summary = (ROOT / 'src/components/salary/TezDepartmentPlanSummary.jsx').read_text(encoding='utf-8')
+        self.assertIn('<div className="rounded-xl bg-slate-50 px-4 py-3">', summary)
+        self.assertNotIn('shadow-', summary)
+        self.assertNotIn('ring-1', summary)
 
 
 class MacStyleLayoutTests(unittest.TestCase):

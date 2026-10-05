@@ -1,4 +1,4 @@
-﻿import React, { Suspense, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
+import React, { Suspense, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
@@ -14,6 +14,7 @@ import SalaryComingSoon from './components/salary/SalaryComingSoon';
 import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
 import TezLeadsPanel from './components/salary/TezLeadsPanel';
 import FullscreenSheet from './components/common/FullscreenSheet';
+import TezDepartmentPlanSummary from './components/salary/TezDepartmentPlanSummary';
 import TezOpPlanCell from './components/salary/TezOpPlanCell';
 // Колокол виден всегда и на каждом экране — поэтому обычным импортом, а не
 // lazyWithRetry: отдельным чанком он грузился бы при каждом входе, и до его
@@ -4032,6 +4033,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Сам запрос вынесен ниже (после вычисления группы/модели), чтобы работал и
         // для админов: у них свой department_code не 'tez', и гейт по отделу скрывал план.
         const [tezPlanPerFte, setTezPlanPerFte] = useState(null);
+        const [tezNormHoursFte, setTezNormHoursFte] = useState(null);
         // Общий план отдела и его закрытие приходят тем же запросом, что и план на
         // 1 FTE: { fte_total, plan_total, successes_total, closure_pct, ... }.
         const [tezPlanSummary, setTezPlanSummary] = useState(null);
@@ -5297,6 +5299,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 : [];
             if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
                 setOperators(hoursResp.data.operators);
+                setTezPlanReloadKey((key) => key + 1);
             } else {
                 setOperators([]);
                 fallbackToast('Не удалось загрузить daily hours', 'error');
@@ -6531,12 +6534,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         useEffect(() => {
             if (!isTezOpContext || tezOpDeptId == null || !user?.id) {
                 setTezPlanPerFte(null);
+                setTezNormHoursFte(null);
                 setTezPlanSummary(null);
                 return;
             }
             const [py, pm] = String(month || '').split('-').map((v) => parseInt(v, 10));
             if (!Number.isFinite(py) || !Number.isFinite(pm)) {
                 setTezPlanPerFte(null);
+                setTezNormHoursFte(null);
                 setTezPlanSummary(null);
                 return;
             }
@@ -6550,11 +6555,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (cancelled) return;
                     const v = resp?.data?.plan?.plan_per_fte;
                     setTezPlanPerFte(v === undefined || v === null ? null : Number(v));
+                    setTezNormHoursFte(resp?.data?.plan?.norm_hours_fte ?? null);
                     setTezPlanSummary(resp?.data?.summary || null);
                 })
                 .catch(() => {
                     if (!cancelled) {
                         setTezPlanPerFte(null);
+                        setTezNormHoursFte(null);
                         setTezPlanSummary(null);
                     }
                 });
@@ -6987,6 +6994,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (String(op.calculation_model_code || op.calculationModelCode || '').trim() === 'tez_op') {
                 const planRes = calculateTezOpMonthlyPlan({
                 planPerFte: tezPlanPerFte,
+                normHoursFte: tezNormHoursFte,
                 rate: op.rate,
                 normHours: norm,
                 factHours: displayedTotal,
@@ -7069,7 +7077,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumTezSuccesses,
             hasTezPlanRows
             };
-        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap, tezPlanPerFte, month, tezSuccessMap]);
+        }, [filteredOperators, trainingsMap, technicalIssuesMap, offlineActivitiesMap, tezPlanPerFte, tezNormHoursFte, month, tezSuccessMap]);
 
         // Red → amber → green gradient by percentage (0..100)
         function efficiencyGradient(pct) {
@@ -7966,6 +7974,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             technicalIssuesMap,
                             offlineActivitiesMap,
                             tezSuccessMap,
+                            tezPlanSummary,
                             isChatModel,
                             isTezOpContext,
                             scales: {
@@ -7991,6 +8000,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 if (String(op?.calculation_model_code || op?.calculationModelCode || '').trim() !== 'tez_op') return null;
                                 const result = calculateTezOpMonthlyPlan({
                                     planPerFte: tezPlanPerFte,
+                                    normHoursFte: tezNormHoursFte,
                                     rate: op.rate,
                                     normHours: totals.norm,
                                     factHours: totals.displayedTotal,
@@ -8478,6 +8488,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             departmentId={tezOpDeptId}
                             month={month}
                             canEdit={true}
+                            refreshKey={tezSuccessReloadKey + tezPlanReloadKey}
                             onSaved={() => setTezPlanReloadKey((k) => k + 1)}
                         />
                     </div>
@@ -9609,42 +9620,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             )}
 
-            {/* Общий план отдела ОП: считается на бэке (сумма ставок работавших в
-                месяце × план на 1 FTE × 0,8) и приходит вместе с планом на 1 FTE. */}
+            {/* Общий план отдела ОП: фиксированный FTE и фактические часы. */}
             {selectedTab === 'tez_successes' && tezPlanSummary && (
-            <div className="mx-5 mb-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl bg-slate-50 px-4 py-3">
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
-                    <FaIcon className="fas fa-bullseye text-slate-400" aria-hidden="true" />
-                    Общий план отдела
-                    <InfoHint side="right">
-                        Сумма ставок операторов ОП, работавших в этом месяце
-                        ({formatRu(tezPlanSummary.fte_total, 2)} FTE, {tezPlanSummary.operators_count} чел.)
-                        × план на 1 FTE ({formatRu(tezPlanSummary.plan_per_fte, 1)})
-                        × {formatRu(tezPlanSummary.coefficient, 2)}.
-                        Приём или уход сотрудника внутри месяца ставку не дробит,
-                        и увольнение план не уменьшает: успешки ушедшего идут в факт.
-                    </InfoHint>
-                </div>
-                <div>
-                    <div className="text-[11px] uppercase tracking-wide text-slate-500">План</div>
-                    <div className="text-xl font-bold tabular-nums text-slate-800">
-                        {tezPlanSummary.plan_total > 0 ? formatRu(tezPlanSummary.plan_total, 1) : '—'}
-                    </div>
-                </div>
-                <div>
-                    <div className="text-[11px] uppercase tracking-wide text-slate-500">Успешки</div>
-                    <div className="text-xl font-bold tabular-nums text-emerald-700">{tezPlanSummary.successes_total}</div>
-                </div>
-                <div>
-                    <div className="text-[11px] uppercase tracking-wide text-slate-500">Закрытие</div>
-                    <div className={`text-xl font-bold tabular-nums ${planClosureClass(tezPlanSummary.closure_pct)}`}>
-                        {tezPlanSummary.closure_pct == null ? '—' : `${formatRu(tezPlanSummary.closure_pct, 1)}%`}
-                    </div>
-                </div>
-                {!(tezPlanSummary.plan_total > 0) && (
-                    <div className="text-xs text-amber-700">План на 1 FTE за этот месяц не задан.</div>
-                )}
-            </div>
+                <div className="mx-5 mb-4"><TezDepartmentPlanSummary summary={tezPlanSummary} /></div>
             )}
 
             {/* Table */}
@@ -9946,6 +9924,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {String(op.calculation_model_code || op.calculationModelCode || '').trim() === 'tez_op' ? (
                                     <TezOpPlanCell
                                         planPerFte={tezPlanPerFte}
+                                        normHoursFte={tezNormHoursFte}
                                         rate={op.rate}
                                         normHours={norm}
                                         factHours={displayedTotal}
@@ -10025,6 +10004,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     const total = Object.values(dayMap).reduce((a, b) => a + (Number(b) || 0), 0);
                                     const planRes = calculateTezOpMonthlyPlan({
                                         planPerFte: tezPlanPerFte,
+                                        normHoursFte: tezNormHoursFte,
                                         rate: op.rate,
                                         normHours: norm,
                                         factHours: displayedTotal,
@@ -43014,16 +42994,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [isTezSalaryDept, calculatorType, ownCalculationModelCode]);
             // Общий (на 1 FTE) план месяца отдела для прероллинга калькулятора ОП TEZ.
             const [tezPlanPrefill, setTezPlanPrefill] = useState(null);
+            const tezCalculatorMonth = tezCalculatorPrefill?.month || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Almaty' }).slice(0, 7);
             const salaryDepartmentId = user?.department_id ?? user?.departmentId ?? user?.headed_department_id ?? user?.headedDepartmentId ?? null;
             useEffect(() => {
+                if (view !== 'salary') return;
                 if (!isTezSalaryDept || tezSalaryModel !== 'tez_op' || !user?.id || salaryDepartmentId == null) {
                     setTezPlanPrefill(null);
                     return;
                 }
                 let cancelled = false;
-                const now = new Date();
+                const [planYear, planMonth] = tezCalculatorMonth.split('-').map(Number);
+                setTezPlanPrefill(null);
                 axios.get(`${API_BASE_URL}/api/department_plan`, {
-                    params: { department_id: salaryDepartmentId, year: now.getFullYear(), month: now.getMonth() + 1 },
+                    params: { department_id: salaryDepartmentId, year: planYear, month: planMonth },
                     headers: { 'X-User-Id': user.id },
                 })
                     .then((resp) => {
@@ -43033,7 +43016,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     })
                     .catch(() => { if (!cancelled) setTezPlanPrefill(null); });
                 return () => { cancelled = true; };
-            }, [isTezSalaryDept, tezSalaryModel, user?.id, salaryDepartmentId]);
+            }, [isTezSalaryDept, tezSalaryModel, user?.id, salaryDepartmentId, tezCalculatorMonth, view]);
             const appViewAnalyticsKeyRef = useRef('');
             const [tableUrl, setTableUrl] = useState(''); // URL таблицы
             const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
@@ -50544,6 +50527,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const profilePlanResult = profileIsTezOp
                   ? calculateTezOpMonthlyPlan({
                       planPerFte: hoursOp?.tez_plan_per_fte,
+                      normHoursFte: hoursOp?.tez_norm_hours_fte,
                       rate: hoursOp?.rate,
                       normHours,
                       factHours: totalHours,
@@ -58416,6 +58400,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const tezPlanResult = isTezOpModel
                                                 ? calculateTezOpMonthlyPlan({
                                                     planPerFte: op.tez_plan_per_fte,
+                                                    normHoursFte: op.tez_norm_hours_fte,
                                                     rate: op.rate,
                                                     normHours: norm,
                                                     factHours: regular,
@@ -58695,6 +58680,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     // Калькулятор TEZ: подставляем часы, норму и (для ОП) план с фактом успешек.
                                                     setTezCalculatorPrefill({
                                                         model: isTezOpModel ? 'tez_op' : 'tez_line',
+                                                        month: selectedMonth,
+                                                        normHoursFte: op.tez_norm_hours_fte,
                                                         hoursNorm: safeNum(norm).toFixed(2),
                                                         hoursWorked: safeNum(regular).toFixed(2),
                                                         quality: hasSalaryQuality ? salaryQuality.toFixed(2) : '',
@@ -60418,8 +60405,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ) : activeSalaryDeptCode === 'tez' ? (
                                                     <Suspense fallback={null}>
                                                         <SalaryCalculatorTez
+                                                            key={`${tezSalaryModel}:${tezCalculatorMonth}`}
                                                             model={tezSalaryModel}
                                                             planPrefill={tezPlanPrefill}
+                                                            month={tezCalculatorMonth}
+                                                            hireDate={user?.hire_date || profileData?.hire_date}
                                                             hoursPrefill={tezCalculatorPrefill}
                                                             hoursPrefillNonce={tezCalculatorPrefillNonce}
                                                         />

@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import TezDepartmentPlanSummary from '../salary/TezDepartmentPlanSummary';
 import { Check, FileSpreadsheet, Loader2, Lock, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from 'lucide-react';
 import { APPLE_FONT, IosBadge, IosModal, IosSegmented, iosCard } from '../ui/ios';
 import {
@@ -674,6 +675,9 @@ export const HoursAccountingPhone = ({
       />
 
       <HoursPhoneTotals totals={sectionTotals} rowsCount={rows.length} />
+      {metrics.selectedTab === 'tez_successes' && data.tezPlanSummary && (
+        <TezDepartmentPlanSummary summary={data.tezPlanSummary} />
+      )}
 
       <AuctionPhoneGroup label="Отбор">
         <HoursPhoneFilterRow

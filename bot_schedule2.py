@@ -17844,6 +17844,7 @@ def get_department_plan():
     Читать может любой пользователь СВОЕГО отдела; глобальный админ — любой отдел."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
+    from tez.department_plan import default_norm_hours
     try:
         department_id = request.args.get('department_id')
         year = request.args.get('year')
@@ -17856,7 +17857,7 @@ def get_department_plan():
             month_i = int(month)
         except Exception:
             return jsonify({"error": "department_id, year, month must be integers"}), 400
-        if month_i < 1 or month_i > 12:
+        if month_i < 1 or month_i > 12 or not 1 <= year_i <= 9999:
             return jsonify({"error": "month must be 1..12"}), 400
 
         requester_id, requester, auth_error = _get_authenticated_requester()
@@ -17877,6 +17878,7 @@ def get_department_plan():
                 'year': year_i,
                 'month': month_i,
                 'plan_per_fte': 0.0,
+                'norm_hours_fte': default_norm_hours(year_i, month_i),
                 'updated_by': None,
                 'updated_at': None,
             }
@@ -17885,7 +17887,8 @@ def get_department_plan():
         # Для отделов без групп ОП TEZ метод вернёт None — поле останется пустым.
         try:
             summary = db.get_tez_op_department_plan_summary(
-                dept_i, year_i, month_i, plan_per_fte=plan.get('plan_per_fte')
+                dept_i, year_i, month_i, plan_per_fte=plan.get('plan_per_fte'),
+                norm_hours_fte=plan.get('norm_hours_fte')
             )
         except Exception:
             logging.exception("get_department_plan: сводка общего плана не посчиталась")
@@ -17914,14 +17917,17 @@ def save_department_plan():
             month_i = int(month)
         except Exception:
             return jsonify({"error": "department_id, year, month must be integers"}), 400
-        if month_i < 1 or month_i > 12:
+        if month_i < 1 or month_i > 12 or not 1 <= year_i <= 9999:
             return jsonify({"error": "month must be 1..12"}), 400
         try:
             plan_per_fte = float(data.get("plan_per_fte"))
-        except Exception:
-            plan_per_fte = 0.0
-        if plan_per_fte < 0:
-            plan_per_fte = 0.0
+            norm_hours_fte = float(data['norm_hours_fte']) if 'norm_hours_fte' in data else None
+            if not math.isfinite(plan_per_fte) or not 0 <= plan_per_fte <= 9999999999.99:
+                raise ValueError()
+            if norm_hours_fte is not None and (not math.isfinite(norm_hours_fte) or not 0.01 <= norm_hours_fte <= 744):
+                raise ValueError()
+        except (TypeError, ValueError, OverflowError):
+            return jsonify({"error": "Укажите план ≥ 0 и норму часов на 1 FTE больше 0 и не больше 744"}), 400
 
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -17940,7 +17946,7 @@ def save_department_plan():
             if scope is None or int(scope) != dept_i:
                 return jsonify({"error": "Forbidden for this department"}), 403
 
-        plan = db.upsert_department_monthly_plan(dept_i, year_i, month_i, plan_per_fte, updated_by=requester_id)
+        plan = db.upsert_department_monthly_plan(dept_i, year_i, month_i, plan_per_fte, updated_by=requester_id, norm_hours_fte=norm_hours_fte)
         return jsonify({"status": "success", "plan": plan}), 200
     except Exception:
         logging.exception("save_department_plan error")
@@ -67800,6 +67806,15 @@ def work_schedule_change_report_preview():
         return jsonify({"error": "Внутренняя ошибка"}), 500
 
 
+def freeze_tez_department_plans_job():
+    """Idempotent month-start snapshot; also catches up after server downtime."""
+    from tez.department_plan import freeze_current_month
+    try:
+        freeze_current_month(db)
+    except Exception:
+        logging.exception("TEZ: не удалось зафиксировать FTE на начало месяца")
+
+
 def sync_schedule_statuses_to_user_statuses_job():
     """Background job: sync users.status with active schedule status periods."""
     try:
@@ -69114,6 +69129,13 @@ if __name__ == '__main__':
             logging.exception(f"Error running reg_contest_sync_job: {e}")
 
     scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        freeze_tez_department_plans_job,
+        CronTrigger(hour=0, minute=0, timezone=ZoneInfo('Asia/Almaty')),
+        id='tez_department_month_start', misfire_grace_time=86400,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')),
+    )
     scheduler.add_job(
         generate_weekly_report, 
         CronTrigger(day_of_week='mon', hour=9, minute=0),

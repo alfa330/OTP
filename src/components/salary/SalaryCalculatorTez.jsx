@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import FaIcon from '../common/FaIcon';
 import SalaryCalculationResult from './SalaryCalculationResult';
-import { calculateTezLineSalary, calculateTezOpSalary, calculateTezOpMonthlyPlan, TEZ_NORM_HOURS } from '../../utils/salaryFormula';
+import { calculateTezLineSalary, calculateTezOpSalary, calculateTezOpMonthlyPlan, TEZ_NORM_HOURS, opFteNormHoursForMonth } from '../../utils/salaryFormula';
 
 const Field = ({ label, icon, iconColor, children }) => (
   <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-    <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+    <div className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
       {icon && <FaIcon className={`fas ${icon} ${iconColor || 'text-blue-500'}`} />}
       {label}
-    </label>
+    </div>
     {children}
   </div>
 );
@@ -18,6 +18,7 @@ const numberInput = (value, onChange, extra = {}) => (
     type="number"
     value={value}
     onChange={(e) => onChange(e.target.value)}
+    aria-label={extra['aria-label']}
     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
     {...extra}
   />
@@ -27,19 +28,20 @@ const numberInput = (value, onChange, extra = {}) => (
  * Калькулятор зарплаты для направлений отдела TEZ.
  * model: 'tez_line' (Линия/тех поддержка) | 'tez_op' (ОП).
  * Формулы — src/utils/salaryFormula.js (выведены из таблиц расчёта владельца).
- * planPrefill (для ОП): { plan_target, plan_fact } из /api/operator_plan, если есть.
+ * planPrefill (для ОП): { plan_per_fte, norm_hours_fte, year, month } из /api/department_plan.
  * hoursPrefill: часы/норма/план/факт, перенесённые из раздела «Мои часы»
  * (применяется по смене hoursPrefillNonce, чтобы повторный переход перезаполнял поля).
  */
-const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPrefill = null, hoursPrefillNonce = 0 }) => {
+const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPrefill = null, hoursPrefillNonce = 0, month = '', hireDate = null }) => {
   const isOp = model === 'tez_op';
   const [hoursNorm, setHoursNorm] = useState(String(TEZ_NORM_HOURS));
   const [hoursWorked, setHoursWorked] = useState('');
   const [quality, setQuality] = useState('');
   const [experienceMonths, setExperienceMonths] = useState('');
   const [planPerFte, setPlanPerFte] = useState('');
+  const [normHoursFte, setNormHoursFte] = useState(String(opFteNormHoursForMonth(month)));
+  const [isNewbie, setIsNewbie] = useState(null);
   const [planFact, setPlanFact] = useState('');
-  const [isNewbie, setIsNewbie] = useState(false);
   const [fines, setFines] = useState('');
   const [withholding, setWithholding] = useState('');
   const [bonuses, setBonuses] = useState('');
@@ -47,10 +49,12 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPref
   // Подтягиваем общий (на 1 FTE) план месяца, внесённый СВ/главой (только для ОП).
   useEffect(() => {
     if (!isOp || !planPrefill) return;
+    if (month && planPrefill.year && `${planPrefill.year}-${String(planPrefill.month).padStart(2, '0')}` !== month) return;
+    setNormHoursFte(String(planPrefill.norm_hours_fte ?? opFteNormHoursForMonth(month)));
     if (planPrefill.plan_per_fte !== undefined && planPrefill.plan_per_fte !== null) {
       setPlanPerFte(String(planPrefill.plan_per_fte));
     }
-  }, [isOp, planPrefill]);
+  }, [isOp, planPrefill, month]);
 
   // Переход из «Моих часов»: подставляем реальные часы месяца, норму и — для ОП —
   // план с фактом успешек, чтобы оператор видел ровно свой расчёт.
@@ -62,6 +66,7 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPref
     if (hoursPrefill.fines !== undefined) setFines(String(hoursPrefill.fines ?? ''));
     if (hoursPrefill.bonuses !== undefined) setBonuses(String(hoursPrefill.bonuses ?? ''));
     if (isOp) {
+      setNormHoursFte(String(hoursPrefill.normHoursFte ?? opFteNormHoursForMonth(hoursPrefill.month || month)));
       if (hoursPrefill.planPerFte !== undefined) setPlanPerFte(String(hoursPrefill.planPerFte ?? ''));
       if (hoursPrefill.planFact !== undefined) setPlanFact(String(hoursPrefill.planFact ?? ''));
       setIsNewbie(Boolean(hoursPrefill.newbie));
@@ -72,18 +77,10 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPref
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hoursPrefillNonce]);
 
-  // Индивидуальный план по правилам владельца: ставка / переработка / новичок ×0,8
-  // (см. calculateTezOpMonthlyPlan). Ставка выводится из нормы (норма / 176).
-  const planResult = useMemo(() => {
-    const norm = parseFloat(hoursNorm) || TEZ_NORM_HOURS;
-    return calculateTezOpMonthlyPlan({
-      planPerFte,
-      rate: norm / TEZ_NORM_HOURS,
-      normHours: norm,
-      factHours: hoursWorked,
-      newbie: isNewbie,
-    });
-  }, [planPerFte, hoursNorm, hoursWorked, isNewbie]);
+  const planResult = useMemo(() => calculateTezOpMonthlyPlan({
+    planPerFte, normHoursFte, normHours: hoursNorm, factHours: hoursWorked,
+    newbie: isNewbie, month, hireDate,
+  }), [planPerFte, normHoursFte, hoursNorm, hoursWorked, isNewbie, month, hireDate]);
   const individualPlan = planResult.plan || 0;
 
   const result = useMemo(() => {
@@ -104,9 +101,10 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPref
     setHoursWorked('');
     setQuality('');
     setExperienceMonths('');
-    setPlanPerFte('');
+    setPlanPerFte(String(planPrefill?.plan_per_fte ?? hoursPrefill?.planPerFte ?? ''));
+    setNormHoursFte(String(planPrefill?.norm_hours_fte ?? hoursPrefill?.normHoursFte ?? opFteNormHoursForMonth(month)));
     setPlanFact('');
-    setIsNewbie(false);
+    setIsNewbie(hoursPrefill?.newbie ?? null);
     setFines('');
     setWithholding('');
     setBonuses('');
@@ -121,10 +119,10 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPref
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
         <Field label="Норма часов:" icon="fa-bullseye" iconColor="text-purple-500">
-          {numberInput(hoursNorm, setHoursNorm, { min: 0, max: 744, step: '0.01' })}
+          {numberInput(hoursNorm, setHoursNorm, { min: 0, max: 744, step: '0.01', 'aria-label': 'Норма часов сотрудника' })}
         </Field>
         <Field label="Отработанные часы:" icon="fa-briefcase" iconColor="text-indigo-500">
-          {numberInput(hoursWorked, setHoursWorked, { min: 0, max: 744, step: '0.01' })}
+          {numberInput(hoursWorked, setHoursWorked, { min: 0, max: 744, step: '0.01', 'aria-label': 'Отработанные часы' })}
         </Field>
 
         {!isOp && (
@@ -141,25 +139,28 @@ const SalaryCalculatorTez = ({ model = 'tez_line', planPrefill = null, hoursPref
         {isOp && (
           <>
             <Field label="План успешек (на 1 FTE):" icon="fa-bullseye" iconColor="text-rose-500">
-              {numberInput(planPerFte, setPlanPerFte, { min: 0, step: '0.01' })}
+              {numberInput(planPerFte, setPlanPerFte, { min: 0, step: '0.01', 'aria-label': 'План продаж на 1 FTE' })}
+            </Field>
+            <Field label="Норма часов на 1 FTE:" icon="fa-clock" iconColor="text-slate-500">
+              {numberInput(normHoursFte, setNormHoursFte, { min: 0.01, max: 744, step: '0.01', 'aria-label': 'Норма часов на 1 FTE' })}
               <label className="mt-2 flex items-center gap-2 text-xs text-gray-600">
                 <input
                   type="checkbox"
-                  checked={isNewbie}
+                  checked={planResult.isNewbie}
                   onChange={(e) => setIsNewbie(e.target.checked)}
                   className="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
                 />
                 Новичок (план ×0,8)
               </label>
               <div className="mt-2 text-xs text-gray-500">
-                Индивидуальный план: <span className="font-medium text-gray-700">{individualPlan.toFixed(1)}</span>
+                Индивидуальный план: <span className="font-medium text-gray-700">{planResult.plan == null ? '—' : individualPlan.toFixed(1)}</span>
                 {planResult.caseCode !== 'no_plan' && (
                   <span className="ml-1 text-gray-400">— {planResult.caseLabel.toLowerCase()}</span>
                 )}
               </div>
             </Field>
             <Field label="Факт успешек:" icon="fa-check-circle" iconColor="text-green-500">
-              {numberInput(planFact, setPlanFact, { min: 0, step: '0.01' })}
+              {numberInput(planFact, setPlanFact, { min: 0, step: '0.01', 'aria-label': 'Факт успешек' })}
             </Field>
           </>
         )}

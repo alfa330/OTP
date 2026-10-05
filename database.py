@@ -522,10 +522,6 @@ CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
 CALCULATION_MODEL_TEZ_LINE = 'tez_line'
 CALCULATION_MODEL_TEZ_OP = 'tez_op'
 CALCULATION_MODEL_TEZ_CODES = {CALCULATION_MODEL_TEZ_LINE, CALCULATION_MODEL_TEZ_OP}
-# Коэффициент общего плана отдела ОП TEZ: сумма ставок × план на 1 FTE × 0,8.
-# Владелец задал скидку на отдел целиком, индивидуальные планы её не используют
-# (там свой ×0,8 только для новичков) — см. get_tez_op_department_plan_summary.
-TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT = 0.8
 # Модели отдела продаж (ОП): по одной модели на направление отдела
 # («Верификатор», «Яндекс Регистрация», «Основа ОП», «Поток»). Пока в них
 # только ручной учёт отработанных часов и штрафы (опоздания фиксируются
@@ -2685,7 +2681,7 @@ class Database:
             """)
             # Общий (одинаковый для всех) месячный план направления/отдела TEZ ОП:
             # «план успешек на 1 FTE». Вносит СВ/глава в учёте часов; индивидуальный
-            # план = plan_per_fte × (норма часов / 176).
+            # план = plan_per_fte / norm_hours_fte × фактически учтённые часы.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS department_monthly_plans (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2697,6 +2693,19 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(department_id, year, month)
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE department_monthly_plans
+                ADD COLUMN IF NOT EXISTS norm_hours_fte NUMERIC(8,2)
+                    CHECK (norm_hours_fte > 0 AND norm_hours_fte <= 744);
+                CREATE TABLE IF NOT EXISTS tez_department_plan_snapshots (
+                    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                    month_start DATE NOT NULL,
+                    fte_total NUMERIC(12,4) NOT NULL CHECK (fte_total >= 0),
+                    operators_count INTEGER NOT NULL CHECK (operators_count >= 0),
+                    captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (department_id, month_start)
                 );
             """)
             cursor.execute("""
@@ -21650,10 +21659,11 @@ class Database:
 
     def get_department_monthly_plan(self, department_id, year, month):
         """Общий месячный план направления/отдела (план успешек на 1 FTE)."""
+        from tez.department_plan import default_norm_hours
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT department_id, year, month, plan_per_fte, updated_by, updated_at
+                SELECT department_id, year, month, plan_per_fte, updated_by, updated_at, norm_hours_fte
                 FROM department_monthly_plans
                 WHERE department_id = %s AND year = %s AND month = %s
                 """,
@@ -21667,28 +21677,32 @@ class Database:
             'year': int(row[1]),
             'month': int(row[2]),
             'plan_per_fte': float(row[3] or 0),
+            'norm_hours_fte': float(row[6]) if row[6] is not None else default_norm_hours(year, month),
             'updated_by': int(row[4]) if row[4] is not None else None,
             'updated_at': row[5].isoformat() if hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),
         }
 
-    def upsert_department_monthly_plan(self, department_id, year, month, plan_per_fte, updated_by=None):
+    def upsert_department_monthly_plan(self, department_id, year, month, plan_per_fte, updated_by=None, norm_hours_fte=None):
         """Создать/обновить общий месячный план отдела (upsert по department_id+year+month)."""
+        from tez.department_plan import default_norm_hours
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO department_monthly_plans
-                    (department_id, year, month, plan_per_fte, updated_by, updated_at)
-                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    (department_id, year, month, plan_per_fte, updated_by, updated_at, norm_hours_fte)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s)
                 ON CONFLICT (department_id, year, month) DO UPDATE SET
                     plan_per_fte = EXCLUDED.plan_per_fte,
+                    norm_hours_fte = COALESCE(EXCLUDED.norm_hours_fte, department_monthly_plans.norm_hours_fte),
                     updated_by = EXCLUDED.updated_by,
                     updated_at = CURRENT_TIMESTAMP
-                RETURNING department_id, year, month, plan_per_fte, updated_by, updated_at
+                RETURNING department_id, year, month, plan_per_fte, updated_by, updated_at, norm_hours_fte
                 """,
                 (
                     int(department_id), int(year), int(month),
                     float(plan_per_fte or 0),
-                    int(updated_by) if updated_by is not None else None
+                    int(updated_by) if updated_by is not None else None,
+                    float(norm_hours_fte) if norm_hours_fte is not None else None
                 )
             )
             row = cursor.fetchone()
@@ -21699,108 +21713,14 @@ class Database:
             'year': int(row[1]),
             'month': int(row[2]),
             'plan_per_fte': float(row[3] or 0),
+            'norm_hours_fte': float(row[6]) if row[6] is not None else default_norm_hours(year, month),
             'updated_by': int(row[4]) if row[4] is not None else None,
             'updated_at': row[5].isoformat() if hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),
         }
 
-    def get_tez_op_department_plan_summary(self, department_id, year, month, plan_per_fte=None):
-        """Общий план отдела ОП TEZ на месяц и процент его закрытия.
-
-        Правило владельца (2026-08-05):
-            план отдела = сумма ставок операторов ОП × план на 1 FTE × 0,8.
-        Пропорций тут нет намеренно: приняли человека 20-го или он ушёл 3-го —
-        ставка всё равно идёт в сумму целиком (в отличие от индивидуального плана,
-        который пересчитывается по новичкам/увольнениям).
-
-        Состав берём по членству в группах отдела с моделью tez_op, пересекающему
-        месяц. **Увольнение внутри месяца план НЕ уменьшает** (владелец, 2026-08-05:
-        «какой план был в начале месяца, такой и остаётся»): человек отработал часть
-        месяца, его успешки идут в факт — значит и ставка обязана остаться в плане,
-        иначе процент закрытия завышается на чужой работе.
-
-        Уволенного всё же приходится отличать от «числится вечно»: даты увольнения
-        в схеме нет, а членство в группе после ухода часто остаётся открытым, и его
-        ставка иначе висела бы в плане всех будущих месяцев. Поэтому для уволенных
-        требуем след работы именно в этом месяце — смена в учёте часов или успешка.
-
-        Факт — все успешки месяца (месяц берётся по дате поездки), то же число,
-        что показывает воронка базы лидов.
-
-        Возвращает None, если в отделе нет ни одной группы ОП TEZ.
-        """
-        dept_i, year_i, month_i = int(department_id), int(year), int(month)
-        month_start = date(year_i, month_i, 1)
-        month_end = date(year_i, month_i, calendar.monthrange(year_i, month_i)[1])
-        with self._get_cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT COUNT(*) FROM groups
-                WHERE department_id = %s
-                  AND LOWER(COALESCE(calculation_model_code, '')) = %s
-                """,
-                (dept_i, CALCULATION_MODEL_TEZ_OP),
-            )
-            if int((cursor.fetchone() or (0,))[0] or 0) <= 0:
-                return None
-
-            # DISTINCT ON: у оператора может быть несколько интервалов членства в
-            # месяце (перевод между группами ОП) — ставка должна попасть в сумму раз.
-            cursor.execute(
-                """
-                SELECT COALESCE(SUM(rate), 0), COUNT(*)
-                FROM (
-                    SELECT DISTINCT ON (u.id)
-                           u.id, COALESCE(op.rate, u.rate, 0) AS rate
-                    FROM group_operator_memberships gom
-                    JOIN groups g ON g.id = gom.group_id
-                    JOIN users u ON u.id = gom.operator_id
-                    LEFT JOIN operator_profiles op ON op.user_id = u.id
-                    WHERE g.department_id = %s
-                      AND LOWER(COALESCE(g.calculation_model_code, '')) = %s
-                      AND gom.start_date <= %s
-                      AND (gom.end_date IS NULL OR gom.end_date >= %s)
-                      AND (
-                          LOWER(COALESCE(u.status, '')) NOT IN ('fired', 'dismissal')
-                          OR EXISTS (
-                              SELECT 1 FROM daily_hours dh
-                              WHERE dh.operator_id = u.id
-                                AND dh.day BETWEEN %s AND %s
-                          )
-                          OR EXISTS (
-                              SELECT 1 FROM tez_lead_successes s
-                              WHERE s.operator_id = u.id
-                                AND s.year = %s AND s.month = %s
-                          )
-                      )
-                    ORDER BY u.id
-                ) staff
-                """,
-                (dept_i, CALCULATION_MODEL_TEZ_OP, month_end, month_start,
-                 month_start, month_end, year_i, month_i),
-            )
-            staff_row = cursor.fetchone() or (0, 0)
-
-            cursor.execute(
-                "SELECT COUNT(*) FROM tez_lead_successes WHERE year = %s AND month = %s",
-                (year_i, month_i),
-            )
-            successes = int((cursor.fetchone() or (0,))[0] or 0)
-
-        if plan_per_fte is None:
-            plan = self.get_department_monthly_plan(dept_i, year_i, month_i)
-            plan_per_fte = (plan or {}).get('plan_per_fte') or 0
-
-        fte_total = round(float(staff_row[0] or 0), 2)
-        plan_total = round(fte_total * float(plan_per_fte or 0) * TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT, 2)
-        return {
-            'fte_total': fte_total,
-            'operators_count': int(staff_row[1] or 0),
-            'plan_per_fte': float(plan_per_fte or 0),
-            'coefficient': TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT,
-            'plan_total': plan_total,
-            'successes_total': successes,
-            'closure_pct': round(successes / plan_total * 100, 1) if plan_total > 0 else None,
-        }
+    def get_tez_op_department_plan_summary(self, department_id, year, month, plan_per_fte=None, norm_hours_fte=None):
+        from tez.department_plan import summary
+        return summary(self, department_id, year, month, plan_per_fte, norm_hours_fte)
 
     # ─────────────────────── Успешки TEZ ОП: база лидов ───────────────────────
 
@@ -26751,6 +26671,7 @@ class Database:
         tez_successes_by_day = {}
         total_tez_successes = 0
         tez_plan_per_fte = None
+        tez_norm_hours_fte = None
         if effective_calculation_model_code == CALCULATION_MODEL_TEZ_OP:
             total_calls = sum(
                 int(day_data.get("calls") or 0)
@@ -26782,6 +26703,7 @@ class Database:
                 plan_row = self.get_department_monthly_plan(int(department_id), year, mon)
                 if plan_row and plan_row.get('plan_per_fte') is not None:
                     tez_plan_per_fte = float(plan_row['plan_per_fte'])
+                    tez_norm_hours_fte = plan_row['norm_hours_fte']
 
         accounted_hours = (
             float(regular_hours or 0.0)
@@ -26814,6 +26736,7 @@ class Database:
             "offline_activity_hours": round(float(offline_activity_hours), 2),
             "tez_successes_by_day": tez_successes_by_day,
             "tez_plan_per_fte": tez_plan_per_fte,
+            "tez_norm_hours_fte": tez_norm_hours_fte,
             "aggregates": {
                 "regular_hours": float(regular_hours),
                 "total_break_time": float(total_break_time),
