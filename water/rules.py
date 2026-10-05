@@ -277,11 +277,19 @@ def stock_status(stock, low, buy):
 # учёт» показывает офисы, и по нему же сервер отказывает добавить другой.
 PROGRAM_CITIES = ('Алматы', 'Астана')
 EXCLUDED_OFFICE_MARKS = ('wolt',)
+# «Убрать из селектора Астана офис для подключения Бизнес» (05.10.2026) — один
+# офис справочника вики: 44, Астана, «Офис для подключения тарифа «Бизнес»»,
+# проспект Сарыарка 31. По id, а не по названию: офис Алматы называется так же
+# и учёт ведёт, а слово «бизнес» в названии другого офиса прятать его не должно.
+# В Астане по тому же адресу в справочнике остаётся «Офис Астана».
+EXCLUDED_OFFICE_IDS = (44,)
 
 
 def is_program_office(office):
     """Можно ли завести офис из справочника вики в учёт воды."""
     office = office or {}
+    if office.get('id') in EXCLUDED_OFFICE_IDS:
+        return False
     city = str(office.get('city') or '').strip().lower()
     name = str(office.get('name') or '').lower()
     if city not in {item.lower() for item in PROGRAM_CITIES}:

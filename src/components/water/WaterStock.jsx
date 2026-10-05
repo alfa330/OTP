@@ -258,7 +258,8 @@ const OfficeSheet = ({ open, office, onClose, canManage, apiBaseUrl, headers, se
 
 /* ── Добавить офис в учёт ───────────────────────────────────────────────── */
 /* Справочник приходит с сервера уже отобранным: только офисы Алматы и Астаны,
-   без офисов Wolt (water/rules.py: is_program_office), и без тех, что в учёте. */
+   без офисов Wolt и без офиса «Бизнес» в Астане (water/rules.py:
+   is_program_office), и без тех, что в учёте. */
 
 const AddOffice = ({ open, onClose, directory, apiBaseUrl, headers, onAdded, showToast }) => {
     const [officeId, setOfficeId] = useState(null);

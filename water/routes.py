@@ -220,8 +220,8 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 if not wiki_office:
                     return _bad('Офиса нет в справочнике фронт-офисов', 'WATER_OFFICE_UNKNOWN', 404)
                 if not rules.is_program_office(wiki_office):
-                    return _bad('Учёт воды ведётся только в офисах Алматы и Астаны, '
-                                'кроме офисов Wolt', 'WATER_OFFICE_OUTSIDE_PROGRAM')
+                    return _bad('Учёт воды ведётся только в офисах Алматы и Астаны, кроме офисов '
+                                'Wolt и офиса «Бизнес» в Астане', 'WATER_OFFICE_OUTSIDE_PROGRAM')
                 if office_id in queries.taken_office_ids(cursor):
                     return _bad('Этот офис уже в учёте', 'WATER_OFFICE_TAKEN', 409)
                 office = queries.add_office(

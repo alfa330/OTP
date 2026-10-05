@@ -284,6 +284,23 @@ class ProgramOfficeTests(unittest.TestCase):
         for name in ('Офис для подключения тарифа «Wolt', 'WOLT', 'Офис wolt'):
             self.assertFalse(rules.is_program_office({'city': 'Астана', 'name': name}), name)
 
+    def test_astana_business_office_is_not(self):
+        """«Убрать из селектора Астана офис для подключения Бизнес» (05.10.2026):
+        один офис, по id справочника вики, — как бы его ни переименовали."""
+        name = 'Офис для подключения тарифа «Бизнес»'
+        self.assertEqual(rules.EXCLUDED_OFFICE_IDS, (44,))
+        for renamed in (name, 'Офис Астана', 'Business', ''):
+            self.assertFalse(rules.is_program_office({'id': 44, 'city': 'Астана', 'name': renamed}), renamed)
+
+    def test_only_that_office_is_removed(self):
+        """Офис Алматы с тем же названием, «Офис Астана» по тому же адресу и
+        офис Астаны со словом «бизнес» в названии в учёт заводятся."""
+        name = 'Офис для подключения тарифа «Бизнес»'
+        for office_id, city, office_name in ((43, 'Алматы', name), (49, 'Астана', 'Офис Астана'),
+                                             (90, 'Астана', 'Офис Астана №2 (Бизнес-центр «Москва»)')):
+            self.assertTrue(rules.is_program_office({'id': office_id, 'city': city, 'name': office_name}),
+                            (office_id, city, office_name))
+
     def test_other_cities_are_not(self):
         for city in ('Шымкент', 'Караганда', '', None):
             self.assertFalse(rules.is_program_office({'city': city, 'name': 'Офис'}), city)
