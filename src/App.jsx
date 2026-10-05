@@ -2673,11 +2673,11 @@ const canAccessDriverChatsSectionForUser = (userLike) => {
    cdr/access.py. */
 const TOUCHES_SECTION_DEPARTMENT_CODE = 'op';
 
-/* Поимённо — сверх роли и отдела, по решению владельца: 471 и 472, сотрудники
-   «Маркетинга» (02.10.2026), и 415, глава «Маркетинга» (05.10.2026) — человеку,
-   а не должности. ФИО в публичный репозиторий не пишем. Зеркало
-   EXTRA_ACCESS_USER_IDS в cdr/access.py — тест сверяет списки. */
-const TOUCHES_EXTRA_ACCESS_USER_IDS = new Set([415, 471, 472]);
+/* Поимённо — сверх роли и отдела, по решению владельца: 471, 472 (02.10.2026)
+   и 474 (05.10.2026), сотрудники «Маркетинга», и 415, глава «Маркетинга»
+   (05.10.2026) — человеку, а не должности. ФИО в публичный репозиторий не пишем.
+   Зеркало EXTRA_ACCESS_USER_IDS в cdr/access.py — тест сверяет списки. */
+const TOUCHES_EXTRA_ACCESS_USER_IDS = new Set([415, 471, 472, 474]);
 
 const isTouchesSectionDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)

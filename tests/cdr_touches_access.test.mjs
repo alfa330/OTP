@@ -10,9 +10,10 @@ import {
  * Кому виден пункт «Касания» (canAccessTouchesSectionForUser в src/App.jsx).
  *
  * С 02.10.2026 сверх ролей есть поимённый допуск: двое из «Маркетинга», id 471
- * и 472, с 05.10.2026 — ещё и глава «Маркетинга», id 415. Их должность и отдел
- * предикат по ролям не пропускает (у главы роль admin, но назначение главой её
- * заменяет), поэтому строка поимённого списка обязана стоять ДО ролевых отсечек
+ * и 472, с 05.10.2026 — ещё один сотрудник отдела, id 474, и глава
+ * «Маркетинга», id 415. Их должность и отдел предикат по ролям не пропускает
+ * (у главы роль admin, но назначение главой её заменяет), поэтому строка
+ * поимённого списка обязана стоять ДО ролевых отсечек
  * — поставленная после `if (!isSupervisorRole(role)) return false;`, она не
  * сработала бы никогда, а текстовая проверка списка этого не заметила бы.
  * Поэтому гоняем настоящий предикат таблицей людей. Объявления достаём из
@@ -62,6 +63,7 @@ const PEOPLE = [
     // [кто, пользователь, виден ли пункт]
     ['поимённо: 471', { id: 471, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, true],
     ['поимённо: 472', { id: 472, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, true],
+    ['поимённо: 474', { id: 474, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, true],
     ['поимённо, id строкой', { id: '472', role: 'marketing_manager', department_code: 'marketing' }, true],
     ['поимённо: 415, глава «Маркетинга»', {
         id: 415, role: 'admin', department_id: MARKETING, department_code: 'marketing',
@@ -69,7 +71,7 @@ const PEOPLE = [
     }, true],
     // Остальной «Маркетинг» допуска не получил. Главе раздел выдан как человеку,
     // а не как главе: тот же профиль с другим id пункта не видит.
-    ['другой маркетолог', { id: 474, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, false],
+    ['другой маркетолог', { id: 475, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, false],
     ['другой глава «Маркетинга»', {
         id: 999, role: 'admin', department_id: MARKETING, department_code: 'marketing',
         headed_department_id: MARKETING, headed_department_codes: ['marketing'],

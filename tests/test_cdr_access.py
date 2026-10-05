@@ -115,13 +115,13 @@ class CapabilitiesTests(unittest.TestCase):
 
 
 class NamedGrantTests(unittest.TestCase):
-    """Поимённый допуск: двое из «Маркетинга», id 471 и 472 (02.10.2026), и
-    глава «Маркетинга», id 415 (05.10.2026).
+    """Поимённый допуск: трое из «Маркетинга» — id 471 и 472 (02.10.2026) и 474
+    (05.10.2026) — и глава «Маркетинга», id 415 (05.10.2026).
 
-    Должность двоих (marketing_manager) раздел не знает и сводит к оператору;
-    у главы роль admin, но назначение главой её заменяет. Отдел у всех троих не
-    ОП — по роли и отделу им закрыто. Опасны оба промаха: поимённым не открылось
-    и открылось всему «Маркетингу» либо должности главы, а не человеку.
+    Должность рядовых (marketing_manager) раздел не знает и сводит к оператору;
+    у главы роль admin, но назначение главой её заменяет. Отдел у всех не ОП —
+    по роли и отделу им закрыто. Опасны оба промаха: поимённым не открылось и
+    открылось всему «Маркетингу» либо должности главы, а не человеку.
     """
 
     # Профиль каждого: роль — как в users.role (сервер её нормализует), отдел и
@@ -129,6 +129,7 @@ class NamedGrantTests(unittest.TestCase):
     GRANTED = {
         471: dict(role='marketing_manager', department_code='marketing'),
         472: dict(role='marketing_manager', department_code='marketing'),
+        474: dict(role='marketing_manager', department_code='marketing'),
         415: dict(role='admin', department_code='marketing', headed_ids=[1041],
                   headed_codes=['marketing']),
     }
@@ -158,8 +159,9 @@ class NamedGrantTests(unittest.TestCase):
                 self.assertFalse(access.can_sync(ctx(user_id=999, **profile)))
 
     def test_the_rest_of_marketing_stays_out(self):
+        """Должность и отдел сами раздел не открывают — только строка списка."""
         self.assertFalse(access.can_open_section(
-            ctx(role='marketing_manager', department_code='marketing', user_id=474)))
+            ctx(role='marketing_manager', department_code='marketing', user_id=475)))
 
     def test_named_head_gets_no_global_admin_rights(self):
         """Строка списка открывает раздел, а глобальным админом главу не делает."""
