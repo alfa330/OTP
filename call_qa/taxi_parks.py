@@ -73,14 +73,19 @@ def oktell_parks_sql(conn_ids):
     if not ids:
         return None
     literals = ", ".join(f"'{value}'" for value in ids)
+    # Общий JOIN читает историю один раз на пакет. Коррелированный TOP 1
+    # через OUTER APPLY сканировал её заново для каждого звонка: 50 строк
+    # занимали больше 30 секунд и в UI превращались в неизвестные парки.
     return (
-        "SELECT LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, p.taxi_park "
+        "SELECT conn_id, taxi_park FROM ("
+        "SELECT LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
+        "NULLIF(LTRIM(RTRIM(t.taxi_park)), '') AS taxi_park, "
+        "ROW_NUMBER() OVER (PARTITION BY s.Id ORDER BY t.dt_insert DESC, t.Id DESC) AS rn "
         "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        "OUTER APPLY (SELECT TOP 1 t.taxi_park FROM oktell.dbo.Call_Systems_hst t "
-        "WHERE t.chainid = CONVERT(varchar(36), s.IdChain) "
+        "LEFT JOIN oktell.dbo.Call_Systems_hst t "
+        "ON t.chainid = CONVERT(varchar(36), s.IdChain) "
         "AND NULLIF(LTRIM(RTRIM(t.taxi_park)), '') IS NOT NULL "
-        "ORDER BY t.dt_insert DESC, t.Id DESC) p "
-        f"WHERE s.Id IN ({literals})"
+        f"WHERE s.Id IN ({literals})) q WHERE rn = 1"
     )
 
 
