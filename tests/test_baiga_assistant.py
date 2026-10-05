@@ -908,6 +908,28 @@ class WeekAnswerTests(unittest.TestCase):
         self.assertIn('— последний загруженный.', found[1]['text'])
         self.assertIn('1 место', found[1]['text'])
 
+    def test_finished_week_without_a_list_is_not_called_unfinished(self):
+        """Прод 05.10.2026: последний список — за 21–27.09, спросили «на прошлой
+        неделе» (28.09–04.10). Она уже прошла, и «список загружают, когда неделя
+        прошла» читалось бы так, будто ещё идёт."""
+        for question in ('ВУ ZZ123456 какое место на прошлой неделе', 'ВУ ZZ123456 какое место 30.09'):
+            found = fragments(question, weeks=[W39])
+            self.assertEqual(found[0]['text'], (
+                'Списка Байги за неделю 28.09.2026 – 04.10.2026 в разделе пока нет: эта неделя уже '
+                'прошла, но её список ещё не загружен. Последний загруженный список — за неделю '
+                '21.09.2026 – 27.09.2026 (неделя № 39).'), question)
+            self.assertIn('(неделя № 39) — последний загруженный.', found[1]['text'], question)
+            self.assertIn('3 место', found[1]['text'], question)
+        # Последний день недели — она ещё идёт.
+        sunday = assistant.analyze('ВУ ZZ123456 какое место на этой неделе', today=date(2026, 10, 11))
+        lists = Lists()
+        text = assistant.build_rows(sunday, [], weeks=list(WEEKS), find=lists.find, load=lists.load)[0]['text']
+        self.assertIn('в разделе пока нет: список загружают, когда неделя прошла.', text)
+        # «Сегодня» — то же, по которому разобран вопрос, а не часы сервера.
+        later = assistant.analyze('ВУ ZZ123456 какое место на позапрошлой неделе', today=date(2099, 1, 19))
+        text = assistant.build_rows(later, [], weeks=list(WEEKS), find=lists.find, load=lists.load)[0]['text']
+        self.assertIn('в разделе пока нет: эта неделя уже прошла, но её список ещё не загружен.', text)
+
     def test_missing_week_is_not_replaced_by_another(self):
         found = fragments('ВУ ZZ123456 какое место за неделю 07.09.2026')
         self.assertEqual(texts(found), [

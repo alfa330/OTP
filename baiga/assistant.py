@@ -546,6 +546,7 @@ def analyze(text, *, today):
         'licenses': licenses,
         'drivers': drivers,
         'tokens': tokens,
+        'today': today,
         # Число, оставшееся после дат, недель и номеров: «за 3 место» — признак
         # вопроса об условиях акции, а не о водителе.
         'numbers': bool(_FREE_NUMBER.search(rest)),
@@ -1102,12 +1103,18 @@ def _ref_key(row):
     return str(row.get('license_key') or '').strip() or str(row.get('driver_key') or '').strip() or None
 
 
-def _weeks_note(resolution, weeks):
+def _weeks_note(resolution, weeks, today):
     """Фрагмент о самой неделе — когда спрошенной в разделе нет."""
     asked, latest = resolution['asked'], weeks[0]
     if resolution['status'] == 'not_yet':
-        return ('Списка Байги за %s в разделе пока нет: список загружают, когда неделя прошла. '
-                'Последний загруженный список — за %s.' % (_asked_text(asked), _week_text(latest)))
+        # Неделя ещё идёт — её списка и быть не может; уже прошла — его не успели
+        # загрузить. «Загружают, когда неделя прошла» про прошедшую неделю читалось
+        # бы так, будто она не кончилась (прод 05.10.2026: спросили «на прошлой
+        # неделе», а последний список — за позапрошлую).
+        reason = ('эта неделя уже прошла, но её список ещё не загружен' if asked['end'] < today
+                  else 'список загружают, когда неделя прошла')
+        return ('Списка Байги за %s в разделе пока нет: %s. '
+                'Последний загруженный список — за %s.' % (_asked_text(asked), reason, _week_text(latest)))
     if resolution['status'] == 'missing':
         listed = '; '.join(_period(week['period_start'], week['period_end'])
                            for week in weeks[:WEEKS_LISTED])
@@ -1257,7 +1264,7 @@ def build_rows(own, priors, *, weeks, find, load):
     subject = state['subject']
     resolution = resolve_week(state['week'], weeks)
     fragments = []
-    note = _weeks_note(resolution, weeks)
+    note = _weeks_note(resolution, weeks, own['today'])
     if note:
         fragments.append(_fragment(0, heading='Недели', text=note, week=resolution['target']))
     if resolution['target'] is None:
