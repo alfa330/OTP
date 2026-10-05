@@ -10,12 +10,14 @@ import {
  * Кому виден пункт «Касания» (canAccessTouchesSectionForUser в src/App.jsx).
  *
  * С 02.10.2026 сверх ролей есть поимённый допуск: двое из «Маркетинга», id 471
- * и 472. Их должность и отдел предикат по ролям не пропускает, поэтому строка
- * поимённого списка обязана стоять ДО ролевых отсечек — поставленная после
- * `if (!isSupervisorRole(role)) return false;`, она не сработала бы никогда, а
- * текстовая проверка списка этого не заметила бы. Поэтому гоняем настоящий
- * предикат таблицей людей. Объявления достаём из src/App.jsx: файл монолитный и
- * не импортируется, а копия предиката в тесте проверяла бы копию.
+ * и 472, с 05.10.2026 — ещё и глава «Маркетинга», id 415. Их должность и отдел
+ * предикат по ролям не пропускает (у главы роль admin, но назначение главой её
+ * заменяет), поэтому строка поимённого списка обязана стоять ДО ролевых отсечек
+ * — поставленная после `if (!isSupervisorRole(role)) return false;`, она не
+ * сработала бы никогда, а текстовая проверка списка этого не заметила бы.
+ * Поэтому гоняем настоящий предикат таблицей людей. Объявления достаём из
+ * src/App.jsx: файл монолитный и не импортируется, а копия предиката в тесте
+ * проверяла бы копию.
  * Серверную границу (cdr/access.py) и совпадение списков проверяет
  * tests/test_cdr_access.py.
  */
@@ -61,10 +63,16 @@ const PEOPLE = [
     ['поимённо: 471', { id: 471, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, true],
     ['поимённо: 472', { id: 472, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, true],
     ['поимённо, id строкой', { id: '472', role: 'marketing_manager', department_code: 'marketing' }, true],
-    // Остальной «Маркетинг» допуска не получил — ни рядовые, ни глава.
+    ['поимённо: 415, глава «Маркетинга»', {
+        id: 415, role: 'admin', department_id: MARKETING, department_code: 'marketing',
+        headed_department_id: MARKETING, headed_department_codes: ['marketing'],
+    }, true],
+    // Остальной «Маркетинг» допуска не получил. Главе раздел выдан как человеку,
+    // а не как главе: тот же профиль с другим id пункта не видит.
     ['другой маркетолог', { id: 474, role: 'marketing_manager', department_id: MARKETING, department_code: 'marketing' }, false],
-    ['глава «Маркетинга»', {
-        id: 415, role: 'admin', headed_department_id: MARKETING, headed_department_codes: ['marketing'],
+    ['другой глава «Маркетинга»', {
+        id: 999, role: 'admin', department_id: MARKETING, department_code: 'marketing',
+        headed_department_id: MARKETING, headed_department_codes: ['marketing'],
     }, false],
     // Прежний периметр — без изменений.
     ['супер-админ', { id: 1, role: 'super_admin' }, true],
@@ -83,4 +91,28 @@ test('пункт «Касания»: поимённые сверх ролей, �
     for (const [who, user, expected] of PEOPLE) {
         assert.equal(canAccessTouchesSectionForUser(user), expected, who);
     }
+});
+
+/* Предикат — полдела: флаг ещё должен дойти до пункта меню, ссылки, гарда раздела
+   и экрана, и в каждом месте его легко подменить соседним. Рядом стоит флаг
+   «Воронки ОП» — та же аудитория, но без поимённых: подмена закрыла бы раздел
+   только им, а главу и СВ отдела продаж пускают оба предиката, и никто бы не
+   заметил. Пробелы между строками — \s*: на Windows файл лежит в CRLF. */
+test('флаг «Касаний» стоит на пункте меню, ссылке, гарде раздела и экране', () => {
+    const wired = [
+        ['флаг считает свой предикат',
+            /const canAccessTouchesSection = canAccessTouchesSectionForUser\(user\);/],
+        ['пункт меню',
+            /\{canAccessTouchesSection && \(\s*<SidebarDeptScope section="touches"/],
+        ['раздел по ссылке ?view=touches',
+            /\(requestedViewFromUrl !== 'touches' \|\| canAccessTouchesSection\) &&/],
+        ['гард раздела по отделу',
+            /if \(view === 'touches' && canAccessTouchesSection\) return;/],
+        ['экран раздела',
+            /\{view === "touches" && canAccessTouchesSection && \(\s*<Suspense[\s\S]{0,300}?<TouchesView/],
+    ];
+    for (const [what, pattern] of wired) assert.match(source, pattern, what);
+    // Второй пункт или второй экран мимо флага первая проверка не увидела бы.
+    assert.equal(source.split('<SidebarDeptScope section="touches"').length - 1, 1, 'пункт меню один');
+    assert.equal(source.split('<TouchesView').length - 1, 1, 'экран раздела один');
 });

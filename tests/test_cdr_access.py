@@ -13,13 +13,14 @@
 экран и другое право, а не ослабление этого.
 
 Модуль `cdr.access` чистый — ни базы, ни Flask, поэтому импортируется напрямую.
+`cdr.queries` соединений тоже не открывает: его функции берут готовый курсор.
 """
 
 import re
 import unittest
 from pathlib import Path
 
-from cdr import access
+from cdr import access, queries
 
 APP_JSX = Path(__file__).resolve().parents[1] / 'src' / 'App.jsx'
 
@@ -114,24 +115,31 @@ class CapabilitiesTests(unittest.TestCase):
 
 
 class NamedGrantTests(unittest.TestCase):
-    """Поимённый допуск (02.10.2026): двое из «Маркетинга», id 471 и 472.
+    """Поимённый допуск: двое из «Маркетинга», id 471 и 472 (02.10.2026), и
+    глава «Маркетинга», id 415 (05.10.2026).
 
-    Их должность (marketing_manager) раздел не знает и сводит к оператору, а
-    отдел у них не ОП, — по роли и отделу им закрыто. Опасны оба промаха:
-    поимённым не открылось и открылось всему «Маркетингу» (там ещё четверо и
-    глава отдела).
+    Должность двоих (marketing_manager) раздел не знает и сводит к оператору;
+    у главы роль admin, но назначение главой её заменяет. Отдел у всех троих не
+    ОП — по роли и отделу им закрыто. Опасны оба промаха: поимённым не открылось
+    и открылось всему «Маркетингу» либо должности главы, а не человеку.
     """
 
-    GRANTED = (471, 472)
+    # Профиль каждого: роль — как в users.role (сервер её нормализует), отдел и
+    # главенство — как в контексте queries.load_access_context.
+    GRANTED = {
+        471: dict(role='marketing_manager', department_code='marketing'),
+        472: dict(role='marketing_manager', department_code='marketing'),
+        415: dict(role='admin', department_code='marketing', headed_ids=[1041],
+                  headed_codes=['marketing']),
+    }
 
     def test_grant_lists_exactly_the_people_named_by_the_owner(self):
         self.assertEqual(access.EXTRA_ACCESS_USER_IDS, frozenset(self.GRANTED))
 
     def test_named_people_get_the_whole_section(self):
-        for user_id in self.GRANTED:
+        for user_id, profile in self.GRANTED.items():
             with self.subTest(user_id=user_id):
-                who = ctx(role='marketing_manager', department_code='marketing',
-                          user_id=user_id)
+                who = ctx(user_id=user_id, **profile)
                 self.assertTrue(access.can_open_section(who))
                 self.assertTrue(access.can_sync(who))
                 caps = access.capabilities(who)
@@ -140,13 +148,26 @@ class NamedGrantTests(unittest.TestCase):
                 # Поимённый — не глобальный админ: эта ветка ему ничего не добавляет.
                 self.assertFalse(caps['is_global_admin'])
 
+    def test_it_is_the_list_that_opens_the_section(self):
+        """Тот же человек с чужим id закрыт: допуск держится на списке, а не на
+        роли, отделе или должности. Для главы это ещё и «человеку, а не месту» —
+        сменится глава «Маркетинга», новому раздел сам не откроется."""
+        for user_id, profile in self.GRANTED.items():
+            with self.subTest(user_id=user_id):
+                self.assertFalse(access.can_open_section(ctx(user_id=999, **profile)))
+                self.assertFalse(access.can_sync(ctx(user_id=999, **profile)))
+
     def test_the_rest_of_marketing_stays_out(self):
         self.assertFalse(access.can_open_section(
             ctx(role='marketing_manager', department_code='marketing', user_id=474)))
-        # Глава «Маркетинга» с ролью admin: назначение главой заменяет роль.
-        self.assertFalse(access.can_open_section(
-            ctx(role='admin', department_code='marketing', headed_ids=[1041],
-                headed_codes=['marketing'], user_id=415)))
+
+    def test_named_head_gets_no_global_admin_rights(self):
+        """Строка списка открывает раздел, а глобальным админом главу не делает."""
+        head = ctx(user_id=415, **self.GRANTED[415])
+        self.assertFalse(access.is_global_admin(head))
+        self.assertTrue(access.is_department_head(head))
+        # Его отдел разделу по-прежнему чужой: главенство само ничего не открывает.
+        self.assertFalse(access.belongs_to_sales(head))
 
     def test_missing_or_broken_id_is_closed_not_crashing(self):
         for user_id in (None, '', 'abc'):
@@ -154,6 +175,54 @@ class NamedGrantTests(unittest.TestCase):
                 self.assertFalse(access.can_open_section(
                     ctx(role='marketing_manager', department_code='marketing',
                         user_id=user_id)))
+
+
+class _OneRowCursor:
+    """Курсор-двойник: отдаёт одну строку — ту, что вернул бы запрос контекста."""
+
+    def __init__(self, row):
+        self.row = row
+        self.params = None
+
+    def execute(self, _sql, params=None):
+        self.params = params
+
+    def fetchone(self):
+        return self.row
+
+
+class AccessContextTests(unittest.TestCase):
+    """Поимённый допуск держится на ОДНОМ поле контекста — user_id. Потеряй его
+    настоящий queries.load_access_context, раздел молча закрылся бы всем
+    поимённым (пункт в меню есть, сервер отвечает 403), а глава и СВ отдела
+    продаж ничего бы не заметили: их пускают роль и отдел."""
+
+    # Строка, как её отдаёт запрос: имя, роль, отдел, код отдела, главенство.
+    ROWS = {
+        415: ('Кто-то', 'admin', 1041, 'marketing', [1041], ['marketing']),
+        471: ('Кто-то', 'marketing_manager', 1041, 'marketing', [], []),
+    }
+
+    def test_real_context_carries_the_id_the_grant_needs(self):
+        for user_id, row in self.ROWS.items():
+            with self.subTest(user_id=user_id):
+                cursor = _OneRowCursor(row)
+                # id приходит из сессии и строкой тоже — в контексте обязано быть число.
+                context = queries.load_access_context(cursor, str(user_id))
+                self.assertEqual(cursor.params, {'user_id': user_id})
+                self.assertEqual(context['user_id'], user_id)
+                self.assertTrue(access.can_open_section(context))
+                self.assertTrue(access.can_sync(context))
+
+    def test_same_row_under_another_id_stays_closed(self):
+        for user_id, row in self.ROWS.items():
+            with self.subTest(user_id=user_id):
+                context = queries.load_access_context(_OneRowCursor(row), 999)
+                self.assertFalse(access.can_open_section(context))
+
+    def test_unknown_user_gives_no_context(self):
+        self.assertIsNone(queries.load_access_context(
+            _OneRowCursor((None, None, None, None, [], [])), 415))
 
 
 class FrontendMirrorTests(unittest.TestCase):

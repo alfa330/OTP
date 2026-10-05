@@ -2660,7 +2660,8 @@ const canAccessDriverChatsSectionForUser = (userLike) => {
 /* «Касания» — звонки отдела продаж из CDR АТС. Круг у́же, чем у «Посылок»: АТС
    обслуживает только продажи (проверено — из 98 внутренних номеров 55 совпали с
    ОП-номерами базы, а «СЗоВ-номера» станция держит за сотрудниками ОП), поэтому
-   раздел видят глобальные админы, глава отдела продаж и супервайзеры ОП.
+   раздел видят глобальные админы, глава отдела продаж и супервайзеры ОП, а
+   сверх роли и отдела — поимённые (список ниже).
 
    Оператору не показываем: выгрузка — это телефоны клиентов за период целиком,
    инструмент разбора работы отдела, а не личный кабинет. Тренеру — тоже нет:
@@ -2671,10 +2672,11 @@ const canAccessDriverChatsSectionForUser = (userLike) => {
    cdr/access.py. */
 const TOUCHES_SECTION_DEPARTMENT_CODE = 'op';
 
-/* Поимённо — сверх роли и отдела, по решению владельца 02.10.2026: 471 и 472,
-   сотрудники «Маркетинга» (ФИО в публичный репозиторий не пишем). Зеркало
+/* Поимённо — сверх роли и отдела, по решению владельца: 471 и 472, сотрудники
+   «Маркетинга» (02.10.2026), и 415, глава «Маркетинга» (05.10.2026) — человеку,
+   а не должности. ФИО в публичный репозиторий не пишем. Зеркало
    EXTRA_ACCESS_USER_IDS в cdr/access.py — тест сверяет списки. */
-const TOUCHES_EXTRA_ACCESS_USER_IDS = new Set([471, 472]);
+const TOUCHES_EXTRA_ACCESS_USER_IDS = new Set([415, 471, 472]);
 
 const isTouchesSectionDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
@@ -42530,7 +42532,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
             const canAccessOlxAdsSection = canAccessOlxAdsForUser(user);
-            // «Касания»: глобальные админы, глава отдела продаж, СВ ОП и двое поимённо.
+            // «Касания»: глобальные админы, глава отдела продаж, СВ ОП и поимённые.
             const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
             // «Воронка ОП»: та же аудитория, что у «Касаний», кроме поимённых.
             const canAccessOpFunnelSection = canAccessOpFunnelSectionForUser(user);
@@ -54425,7 +54427,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         Пункт объявлен ОДИН раз здесь, в общей части
                                         меню, как «Вики», «Обращения» и «Посылки»:
                                         аудитория разнородная (глобальные админы, глава
-                                        ОП, СВ ОП, двое поимённо), и по ролевым ветвям
+                                        ОП, СВ ОП, поимённые), и по ролевым ветвям
                                         его легко забыть в одной — так уже было с
                                         «Ботом опозданий».
                                         Кто что может внутри, считает бэкенд. */}
