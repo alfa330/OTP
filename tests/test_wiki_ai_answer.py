@@ -176,6 +176,14 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual('Обратитесь к руководителю отдела.', body)
         self.assertEqual([1], cited)
 
+    def test_marker_in_kazakh_spelling_is_stripped_too(self):
+        """Замер 05.10.2026 на Vertex: казахский ответ закончился строкой
+        «ІСТОЧНИКИ: [1] [2]» — с казахской «І». Маркер уехал оператору в текст, а
+        названные моделью фрагменты потерялись."""
+        body, cited = ai_answer.split_sources('Сыйлық жоқ.\n\nІСТОЧНИКИ: [1] [2]')
+        self.assertEqual('Сыйлық жоқ.', body)
+        self.assertEqual([1, 2], cited)
+
     def test_excerpt_comes_from_chunk_not_from_model(self):
         text = ('Город: Астана; Адрес: Проспект Сарыарка, 31\n'
                 'Город: Алматы; Адрес: Жамбыла, 172')
@@ -1013,6 +1021,59 @@ class StaleContextTest(unittest.TestCase):
         """Послабление для дат не должно открыть дверь выдумке."""
         self.assertEqual(['99 999'], ai_answer.ungrounded_numbers(
             'Бонус 99 999 тг.', [self.live()], on_date=self.TODAY))
+
+
+class DateRangeGroundingTests(unittest.TestCase):
+    """answer._dates_grounded: диапазон дат сверяется по краям и календарно."""
+
+    KNOWN = [datetime.date(2026, 9, 21), datetime.date(2026, 9, 27)]
+
+    def test_edges_must_be_real_dates_of_the_sources(self):
+        for token in ('21.09-27.09.2026', '21-27.09.2026', '21.09 - 27.09', '21.09.26',
+                      '21.09.2026-27.09.2026', '27/09/2026'):
+            self.assertTrue(ai_answer._dates_grounded(token, self.KNOWN), token)
+        for token in ('21.09-28.09.2026', '21.10-27.10', '21.09.2025', '22.09.26',
+                      '705-08-80', '2025-2026', '345 000', '09:00-19:00', '21.09-',
+                      '27.09-21.09.2026'):                      # края не по порядку
+            self.assertFalse(ai_answer._dates_grounded(token, self.KNOWN), token)
+
+    def test_days_without_a_month_need_the_month_named_next_to_them(self):
+        """«21-27» — дни недели, только когда месяц назван следом. Голые «15-30» —
+        поездки, проценты или дни ожидания, и случайные даты источников их не
+        заверяют: эта проверка стережёт все статьи вики."""
+        for following in (' сентября — 3 место', ' сентября', '\nсентября'):
+            self.assertTrue(ai_answer._dates_grounded('21-27', self.KNOWN, following), following)
+        for following in ('', ' места', ' поездок', ' октября', ' 2026'):
+            self.assertFalse(ai_answer._dates_grounded('21-27', self.KNOWN, following), following)
+        self.assertFalse(ai_answer._dates_grounded('14-20', self.KNOWN, ' сентября'))
+        # Одно число месяцем следом не становится датой диапазона.
+        self.assertFalse(ai_answer._dates_grounded('21', self.KNOWN, ' сентября'))
+
+    def test_month_is_named_by_the_same_stems_as_dates(self):
+        self.assertEqual([currency.month_of(word) for word in
+                          ('сентября', 'Сентябрь', 'мая', 'май', 'декабре')], [9, 9, 5, 5, 12])
+        for word in ('места', 'марка', 'недели', '', None):
+            self.assertIsNone(currency.month_of(word), word)
+
+    def test_phone_and_plain_numbers_are_checked_as_before(self):
+        chunk = {'text': 'Номер офиса: +7 700 000 01 10. Срок аренды 14 дней, залог 5000 тенге.'}
+        self.assertEqual(ai_answer.ungrounded_numbers('Звоните +77000000110', [chunk], on_date=datetime.date(2026, 10, 5)), [])
+        self.assertTrue(ai_answer.ungrounded_numbers('Звоните 700 000-01-11', [chunk], on_date=datetime.date(2026, 10, 5)))
+        self.assertTrue(ai_answer.ungrounded_numbers('Залог 2025-2026 тенге', [chunk], on_date=datetime.date(2026, 10, 5)))
+
+    def test_numbers_glued_by_punctuation_are_checked_one_by_one(self):
+        """Регулярное выражение чисел склеивает соседей через «, » и «: » в одно:
+        «04.10.2026: 12» в источнике не найти, хотя и дата, и место в нём есть.
+        Замер 05.10.2026 — на этом верный ответ уходил в отказ."""
+        chunk = {'text': 'Акция действует с 28.09.2026 по 04.10.2026. Бонус 12 000 тенге, поездок 150.'}
+        today = datetime.date(2026, 10, 5)
+        for answer in ('Срок — по 04.10.2026: 150 поездок.', 'С 28.09.2026, 150 поездок, бонус 12 000.',
+                       'По 04.10.2026:\n\n1. Поездок: 150\n2. Бонус: 12 000'):
+            self.assertEqual(ai_answer.ungrounded_numbers(answer, [chunk], on_date=today), [], answer)
+        # Выдуманное число в склейке выдумкой и остаётся — целиком, как написано.
+        self.assertEqual(ai_answer.ungrounded_numbers('По 04.10.2026: 170 поездок.', [chunk], on_date=today),
+                         ['04.10.2026: 170'])
+        self.assertTrue(ai_answer.ungrounded_numbers('С 29.09.2026, 150 поездок.', [chunk], on_date=today))
 
 
 if __name__ == '__main__':

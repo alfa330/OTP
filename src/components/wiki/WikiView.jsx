@@ -25,6 +25,7 @@ import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
 import { directoryTab } from './searchDirectory';
+import { sourceDoor } from '../assistant/sourceTarget';
 import WikiSpaceModal from './WikiSpaceModal';
 import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
@@ -169,7 +170,8 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
                                    initialArticleSlug, onInitialArticleConsumed,
                                    bellFocus = null, onBellFocusConsumed,
-                                   directoryFocus = null, onDirectoryFocusConsumed }) {
+                                   directoryFocus = null, onDirectoryFocusConsumed,
+                                   onOpenBaiga = null }) {
     const headers = useMemo(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -1181,6 +1183,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             openChatRequest={assistantChat}
                             onOpenChatRequestConsumed={() => setAssistantChat(null)}
                             onOpenArticle={(slug, highlight, source) => {
+                                // Источник «Списки Байги» ведёт в свой раздел портала.
+                                if (sourceDoor(source) === 'baiga') { onOpenBaiga?.(source); return; }
                                 // Источник-справочник ведёт во вкладку, а не в статью.
                                 if (!slug && source?.tab) { openDirectory(source); return; }
                                 setTab('library');

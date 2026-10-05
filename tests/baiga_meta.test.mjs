@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 
 import {
     ALL_SHEETS, DEFAULT_PAGE_SIZE, EMPTY_FILTERS, PRIZE_ANY, applyStateToUrl, fileNameFromDisposition, filterChips,
-    filtersPayload, fmtStamp, formatInt, formatMoney, groupRows, isAllSheets, isGrouped, isSearching, nextSort,
+    filtersPayload, fmtStamp, focusFilters, formatInt, formatMoney, groupRows, isAllSheets, isGrouped, isSearching,
+    nextSort,
     panelFilterCount, parseWhole, periodLabel, rangeErrors, readStateFromSearch, shortId, splitTokens,
     stripBaigaParams, weekLabel, weekShort,
 } from '../src/components/baiga/baigaMeta.js';
@@ -148,6 +149,26 @@ test('уход из раздела снимает все метки раздел
     assert.equal(url.search, '?view=tasks&task_id=3');
     assert.equal(stripBaigaParams(url), false);
     assert.equal(stripBaigaParams(null), false);
+});
+
+test('источник помощника открывает неделю и водителя, прочие фильтры сняты', () => {
+    const weeks = [{ id: 3, period_start: '2026-09-28' }, { id: 2, period_start: '2026-09-21' }];
+    const focus = { weekId: 2, query: ' ZZ123456 ', nonce: 1 };
+    assert.deepEqual(focusFilters(focus, weeks, 'Астана'),
+        { ...EMPTY_FILTERS, zachet: 'Астана', period: '2026-09-21', q: 'ZZ123456' });
+    // Поиск идёт по всей книге — и в адрес не пишется: это номер ВУ.
+    assert.equal(isSearching(focusFilters(focus, weeks, 'Астана')), true);
+    const url = new URL('https://example.com/OTP?view=baiga');
+    applyStateToUrl(url, { filters: focusFilters(focus, weeks, ''), sort: { sort: 'week', dir: 'desc' },
+        size: DEFAULT_PAGE_SIZE });
+    assert.equal(url.search, '?view=baiga&bg_period=2026-09-21');
+    // Неделю заменили или удалили (id больше нет) — ищем по всем неделям.
+    assert.equal(focusFilters({ weekId: 99, query: 'ZZ123456' }, weeks, '').period, '');
+    assert.equal(focusFilters({ weekId: null, query: 'ZZ123456' }, weeks, '').period, '');
+    // Фрагмент «Недели» водителя не несёт — открывается сама неделя.
+    assert.deepEqual(focusFilters({ weekId: 3, query: '' }, weeks, ALL_SHEETS),
+        { ...EMPTY_FILTERS, zachet: ALL_SHEETS, period: '2026-09-28' });
+    assert.deepEqual(focusFilters(null, null, undefined), { ...EMPTY_FILTERS });
 });
 
 test('имя файла берётся из ответа сервера', () => {

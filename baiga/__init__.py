@@ -25,6 +25,8 @@ QR-замком, как «Посылки».
     queries.py  SQL поверх готового курсора
     report.py   выгрузка выборки в xlsx
     routes.py   Blueprint /api/baiga — только разбор запроса и коды ответов
+    assistant.py  строки водителя к вопросу ИИ-помощника вики — тем же, кому
+                  открыт раздел (решение владельца 05.10.2026)
 """
 
-__all__ = ['schema', 'access', 'parse', 'filters', 'queries', 'report']
+__all__ = ['schema', 'access', 'parse', 'filters', 'queries', 'report', 'assistant']

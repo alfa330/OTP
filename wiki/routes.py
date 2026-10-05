@@ -368,7 +368,7 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     routes_cities.register(bp, wiki_route, db, _ip)
 
     from . import routes_ai
-    routes_ai.register(bp, wiki_route, db, _ip)
+    routes_ai.register(bp, wiki_route, db, _ip, sensitive_access_granted)
 
     # Вопросы операторов — после помощника (вопрос рождается его отказом) и с
     # помощниками routes_edit: ответ, записанный в статью, обязан проверять

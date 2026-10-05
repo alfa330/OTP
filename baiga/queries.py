@@ -147,6 +147,71 @@ def export_rows(cursor, where_sql, params, order_sql, limit):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ИИ-помощник (baiga/assistant.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Город, парк и зачёт — чтобы слово вопроса «из Алматы», «из парка „Глобал“»
+# не считалось посторонним (assistant.identify).
+ASSISTANT_CANDIDATE_FIELDS = ('driver_key', 'driver_name', 'license', 'license_key',
+                              'city', 'park', 'zachet')
+# Поля экрана и ключи, по которым строки собираются в одного человека.
+ASSISTANT_ROW_FIELDS = ROW_FIELDS + ('upload_id', 'license_key', 'driver_key')
+
+
+def _assistant_keys(driver_keys, license_keys):
+    """Условие «этот водитель»: по ID и по номеру ВУ. Пустой номер ВУ ничего не
+    находит — иначе нашлись бы все строки без номера (та же ловушка, что у
+    вставленного списка в filters.where)."""
+    clauses, params = [], {}
+    if driver_keys:
+        clauses.append('r.driver_key = ANY(%(drivers)s)')
+        params['drivers'] = list(driver_keys)
+    if license_keys:
+        clauses.append("(r.license_key <> '' AND r.license_key = ANY(%(licenses)s))")
+        params['licenses'] = list(license_keys)
+    return clauses, params
+
+
+def assistant_candidates(cursor, *, driver_keys=(), license_keys=(), name_regex=None, limit=300):
+    """Водители, подходящие под ключи вопроса помощнику, — по одному на ID, из
+    самой свежей недели, где он есть. Ищет по ВСЕМ неделям: водитель, которого
+    нет в спрошенной неделе, всё равно должен узнаваться.
+
+    name_regex — регулярное выражение по search_text (assistant.names_regex):
+    «фамилия — одна из названных». Едет значением параметра, как и всё
+    остальное: в текст запроса пользовательское слово не попадает.
+    """
+    clauses, params = _assistant_keys(driver_keys, license_keys)
+    if name_regex:
+        params['names'] = name_regex
+        clauses.append('r.search_text ~ %(names)s')
+    if not clauses:
+        return []
+    cursor.execute(
+        "SELECT DISTINCT ON (r.driver_key) %s FROM baiga_rows r WHERE %s "
+        "ORDER BY r.driver_key, r.period_start DESC, r.id DESC LIMIT %%(limit)s"
+        % (', '.join('r.%s' % name for name in ASSISTANT_CANDIDATE_FIELDS), ' OR '.join(clauses)),
+        dict(params, limit=int(limit)),
+    )
+    return _rows(cursor, ASSISTANT_CANDIDATE_FIELDS)
+
+
+def assistant_rows(cursor, *, driver_keys=(), license_keys=(), limit=2000):
+    """Строки названных водителей по всем неделям, свежие сверху. Водителей —
+    единицы (assistant.MAX_PEOPLE), поэтому строк здесь «люди × недели»."""
+    clauses, params = _assistant_keys(driver_keys, license_keys)
+    if not clauses:
+        return []
+    cursor.execute(
+        "SELECT %s, r.upload_id, r.license_key, r.driver_key FROM baiga_rows r WHERE %s "
+        "ORDER BY r.period_start DESC, r.sheet_order, r.position, r.id LIMIT %%(limit)s"
+        % (_ROW_COLUMNS, ' OR '.join(clauses)),
+        dict(params, limit=int(limit)),
+    )
+    return _rows(cursor, ASSISTANT_ROW_FIELDS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Загрузка недели
 # ─────────────────────────────────────────────────────────────────────────────
 

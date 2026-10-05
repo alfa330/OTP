@@ -1,8 +1,9 @@
 import React, { useLayoutEffect, useRef } from 'react';
-import { AlertCircle, FileText, Loader2, MapPin, Percent, Quote, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { AlertCircle, FileText, Loader2, MapPin, Percent, Quote, Send, ThumbsDown, ThumbsUp, Trophy } from 'lucide-react';
 import { iosBtnGhost, IosBadge } from '../ui/ios';
 import { ChatBubble, useThreadScroll } from '../ui/chat';
 import { threadScrollIntent } from './threadScroll';
+import { canEscalateMessage, sourceDisabled } from './sourceTarget';
 import Markdown from '../ui/markdown';
 
 /* Лента ответов помощника — общая для вкладки в вике и для мини-чата шарика.
@@ -87,8 +88,10 @@ export const STALE_CAVEATS = [
 ];
 
 /* Источник-справочник (wiki/directory.py) ведёт не в статью, а во вкладку
-   «Офисы» или «Города» на этой записи: статьи у него нет, есть вкладка. */
-const SOURCE_ICONS = { offices: MapPin, cities: Percent };
+   «Офисы» или «Города» на этой записи: статьи у него нет, есть вкладка.
+   Источник «Списки Байги» (baiga/assistant.py) — в раздел портала, на неделю
+   и водителя из ответа. */
+const SOURCE_ICONS = { offices: MapPin, cities: Percent, baiga: Trophy };
 
 /** Чип источника: название статьи (или вкладки справочника), раздел и цитата под ним. */
 export const SourceChip = ({ source, onOpen }) => {
@@ -100,7 +103,7 @@ export const SourceChip = ({ source, onOpen }) => {
     return (
         <button
             type="button"
-            disabled={unavailable || !(source.slug || source.tab)}
+            disabled={sourceDisabled(source)}
             onClick={() => onOpen(source)}
             className={`group w-full rounded-xl px-2.5 py-2 text-left transition ${
                 unavailable
@@ -244,8 +247,7 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, onEscalat
        дают только тем, кому передача положена (onEscalate приходит, когда сервер
        сказал can_escalate), и только пока вопрос не передан: у переданного под
        пузырём уже стоит строка о передаче. */
-    const canEscalate = !!onEscalate && !message.escalation
-        && ESCALATABLE_KINDS.includes(message.kind);
+    const canEscalate = !!onEscalate && canEscalateMessage(message, ESCALATABLE_KINDS);
     // Ширина обвязки идёт за пузырём: в узкой колонке источники, прижатые к
     // 78 %, отрывались бы от ответа, к которому относятся.
     const width = compact ? 'max-w-full' : 'max-w-[78%]';

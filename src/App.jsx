@@ -57,6 +57,7 @@ import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip
 import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/schedule/shiftHistoryFormat';
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import AssistantOrb from './components/assistant/AssistantOrb';
+import { baigaFocusOf, sourceDoor } from './components/assistant/sourceTarget';
 import IcoreMark from './components/common/IcoreMark';
 import InstallAppPrompt from './components/common/InstallAppPrompt';
 import InstallAppMenuItem from './components/common/InstallAppMenuItem';
@@ -42744,6 +42745,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                повторный щелчок по тому же чипу сработал снова. */
             const [wikiDirectoryFocus, setWikiDirectoryFocus] = useState(null);
             const clearWikiDirectoryFocus = useCallback(() => setWikiDirectoryFocus(null), []);
+            /* Источник «Списки Байги» под ответом помощника (baiga/assistant.py):
+               раздел открывается на неделе и водителе из ответа. Одноразово, как
+               справочник выше, и в памяти, а не в адресе: номер ВУ — персональные
+               данные, в адрес раздел поиск не пишет (baigaMeta.js). */
+            const [baigaFocus, setBaigaFocus] = useState(null);
+            const clearBaigaFocus = useCallback(() => setBaigaFocus(null), []);
             /* Чат Wazzup, который надо открыть сразу при входе в «Чаты
                Верификаторов» — приходит ссылкой из переписки. Гасится так же,
                как слаг статьи: иначе следующий обычный вход в раздел снова
@@ -44729,6 +44736,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setView(nextView);
                 setMobileMenuOpen(false);
             }, []);
+
+            /* Чип «Списки Байги» под ответом помощника — и из шарика, и из вкладки
+               вики. Кому раздел закрыт, такого источника сервер не отдаёт. */
+            const openBaigaSource = useCallback((source) => {
+                setBaigaFocus({ ...baigaFocusOf(source), nonce: Date.now() });
+                navigateToView('baiga');
+            }, [navigateToView]);
+            /* Раздел гасит просьбу, когда исполнил её. Не исполнил (человек ушёл,
+               пока раздел грузился; раздел не открылся) — она не должна дожидаться
+               следующего входа и затирать фильтры из адреса. */
+            useEffect(() => {
+                if (view !== 'baiga') setBaigaFocus(null);
+            }, [view]);
 
             /* ПЕРЕБРОС — НЕ ПЕРЕХОД. Раздел меняет не человек, а гейт: вход
                открывает раздел по умолчанию роли, стражи уводят из закрытого
@@ -55484,6 +55504,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                    focus={baigaFocus}
+                                    onFocusConsumed={clearBaigaFocus}
                                 />
                             </Suspense>
                         ))}
@@ -55615,6 +55637,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     onBellFocusConsumed={clearWikiBellFocus}
                                     directoryFocus={wikiDirectoryFocus}
                                     onDirectoryFocusConsumed={clearWikiDirectoryFocus}
+                                    onOpenBaiga={openBaigaSource}
                                 />
                             </Suspense>
                         ))}
@@ -62096,6 +62119,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             navigateToView('wiki');
                         }}
                         onOpenWikiTarget={(target) => {
+                            // «Списки Байги» — свой раздел портала, а не вкладка вики.
+                            if (sourceDoor(target) === 'baiga') { openBaigaSource(target); return; }
                             setWikiDirectoryFocus({ ...target, nonce: Date.now() });
                             navigateToView('wiki');
                         }}

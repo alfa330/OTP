@@ -63,7 +63,10 @@ _WORD = re.compile(r'[^\W\d_]{3,}', re.UNICODE)
 # закончил отказ фразой «…обращаться к руководителю отдела. ИСТОЧНИКИ: [1]» — на
 # одной строке с текстом. Привязка к началу строки такое не ловила, и служебный
 # маркер уезжал оператору в ответ.
-_SOURCES_HEADER = re.compile(r'\s*ИСТОЧНИКИ\s*:?', re.I)
+# Первая буква — и казахская «І»: отвечая по-казахски, модель переписывает и
+# маркер («ІСТОЧНИКИ: [1] [2]», замер на Vertex 05.10.2026) — он уезжал в текст
+# ответа, а названные ею фрагменты терялись.
+_SOURCES_HEADER = re.compile(r'\s*[ИІ]СТОЧНИКИ\s*:?', re.I)
 _FRAGMENT_REF = re.compile(r'\[(\d+)\]')
 # Числа от двух знаков: одиночные цифры — это почти всегда нумерация списка.
 _NUMBER = re.compile(r'\d[\d\s.,:/-]*\d')
@@ -143,6 +146,49 @@ SYSTEM_PROMPT = """Ты — справочный помощник корпора
 Только номера — цитату подберёт программа сама. Указывай лишь те фрагменты,
 факты из которых действительно попали в ответ.
 Если ответа нет или ты задаёшь уточняющий вопрос — строку ИСТОЧНИКИ не пиши."""
+
+# Правило для фрагментов раздела «Списки Байги» (baiga/assistant.py). В общий
+# промпт оно НЕ вшито и приходит модели только вместе с такими фрагментами: без
+# них это правило ни о чём, а слово «Байга» в промпте на каждый вопрос тянуло бы
+# ответы про УСЛОВИЯ акции (они в статьях) к спискам, которых модели не дали.
+#
+# Что здесь от кода, а не от вкуса. Неделю называет код (она стоит в каждом
+# фрагменте), модель обязана её повторить: «12 место» без недели — это обещание
+# водителю про неизвестно какую неделю. «Водителя в списке нет» — ответ, и
+# отказной фразой его подменять нельзя: отказ у оператора уходит супервайзеру
+# (wiki/questions.py), хотя спрашивать тут не о чем.
+BAIGA_RULE = """11. СПИСКИ БАЙГИ. Фрагменты с подписью «Раздел «Списки Байги»» — живые строки
+   раздела портала: итог недели акции «Байга» по водителю — зачёт, место, сумма
+   за неделю, поездки, приз. Это факты о водителе, а не условия акции.
+   * «Сколько заработал» — это «сумма за неделю»; «какое место» — место в
+     зачёте; «какой приз» — приз из строки. «Приза нет» — тоже ответ.
+   * ВСЕГДА называй неделю (её даты), к которой относятся цифры. Спросили про
+     одну неделю, а список есть только за другую — скажи это первой фразой и
+     дай то, что есть, с датами недели.
+   * Во фрагменте — итог ОДНОЙ недели, даже когда в разделе их несколько.
+     Спросили сразу про несколько недель или просят сравнить — ответь по той,
+     что есть, и добавь: про другую неделю можно спросить отдельным сообщением.
+     Не пиши, что данных за неё нет или что они появятся позже.
+   * Фрагмент говорит, что водителя в списке нет, — так и ответь: это ответ на
+     вопрос, а не отказ. Фразу «в доступных вам статьях этого нет» здесь не
+     пиши.
+   * Водителей во фрагментах несколько — назови каждого с номером ВУ; цифры
+     разных водителей не складывай. Если по вопросу понятно, кто из них нужен
+     (имя, инициалы, город), — отвечай про него, остальных назови одной
+     строкой.
+   * ФИО, номер ВУ и название зачёта переноси буква в букву, как в списке;
+     слово «зачёт» не переводи."""
+
+_FORMAT_HEADER = '\n\nФОРМАТ ОТВЕТА'
+
+
+def system_prompt(chunks):
+    """Системный промпт под эти фрагменты: общий, плюс правило раздела, если
+    его строки среди них есть."""
+    if any(chunk.get('source_kind') == 'baiga' for chunk in chunks):
+        head, tail = SYSTEM_PROMPT.split(_FORMAT_HEADER, 1)
+        return head + '\n' + BAIGA_RULE + _FORMAT_HEADER + tail
+    return SYSTEM_PROMPT
 
 
 _KZ_LETTERS = set('әғқңөұүһі')
@@ -469,7 +515,12 @@ def build_user_prompt(question, chunks, on_date=None):
         heading = chunk.get('heading_path') or ''
         title = chunk.get('title') or ''
         note = chunk.get('stale_note') or ''
-        if chunk.get('directory_hit'):
+        if chunk.get('source_kind') == 'baiga':
+            # Строки раздела «Списки Байги»: на эту подпись опирается BAIGA_RULE.
+            label = f'Раздел «{title}»'
+            if heading:
+                label += f', запись «{heading}»'
+        elif chunk.get('directory_hit'):
             # Своя подпись у справочника: правило 10 системного промпта
             # опирается на неё, когда статья и вкладка расходятся.
             label = f'Справочник «{title}»'
@@ -555,6 +606,61 @@ def _digits(text):
 
 _URL_IN_TEXT = re.compile(r'(?:https?://|mailto:)\S+', re.I)
 
+_DATE_EDGE = re.compile(r'^(\d{1,2})(?:[./](\d{1,2})(?:[./](\d{4}|\d{2}))?)?$')
+
+
+def _dates_grounded(token, known, following=''):
+    """Дата или диапазон дат из ответа, каждый край которого есть в источниках.
+
+    Неделю «21.09.2026 – 27.09.2026» модель пишет как угодно: «21.09-27.09.2026»,
+    «21-27.09.2026», «21-27 сентября», «21.09.26». Через дефис это ОДНО число
+    для посимвольной сверки — «210927092026», — и в источнике, где обе даты
+    записаны полностью, таких цифр подряд нет: верный ответ про неделю Байги
+    уходил бы в отказ. Поэтому диапазон сверяется по краям и КАЛЕНДАРНО: каждый
+    край обязан быть датой из источников, и идти они обязаны по порядку.
+
+    Послабление узкое намеренно — эта проверка единственная машинная защита от
+    выдумки, и стережёт она все статьи вики, а не одну Байгу:
+      * край — только дата: не «705» из телефона «705-08-80» и не «2025» из
+        «2025-2026»;
+      * край без месяца («21-27») считается днём лишь тогда, когда месяц назван
+        рядом — у последнего края («21-27.09») или словом следом («21-27
+        сентября», following). Голое «15-30» — это поездки, проценты или дни
+        ожидания, и днями месяца случайных дат оно не заверяется;
+      * совпасть край обязан с настоящей датой, а не с подстрокой цифр:
+        «21.09-28.09» при неделе 21–27.09 остаётся выдумкой, как и перевёрнутое
+        «27.09-21.09».
+    """
+    edges = []
+    for part in token.strip().split('-'):
+        match = _DATE_EDGE.match(part.strip())
+        if not match:
+            return False
+        day, month, year = match.groups()
+        edges.append((int(day), int(month) if month else None,
+                      int(year) + (2000 if len(year) == 2 else 0) if year else None))
+    month = edges[-1][1]
+    if month is None:
+        named = _MONTH_FOLLOWS.match(following or '')
+        month = currency.month_of(named.group(1)) if named and len(edges) > 1 else None
+        if month is None:
+            return False
+    found = []
+    for day, own_month, year in edges:
+        hit = next((value for value in known
+                    if (value.day, value.month) == (day, own_month or month)
+                    and (year is None or value.year == year)), None)
+        if hit is None:
+            return False
+        found.append(hit)
+    return all(earlier <= later for earlier, later in zip(found, found[1:]))
+
+
+# Соседние числа через запятую, двоеточие, точку с запятой или с новой строки —
+# разные числа, а не одно: «…04.10.2026: 12 место», «неделя № 40, 28.09.2026».
+_NUMBER_BREAK = re.compile(r'[,;:]\s+|\s*\n\s*')
+_MONTH_FOLLOWS = re.compile(r'\s*([^\W\d_]+)', re.UNICODE)
+
 
 def ungrounded_numbers(answer, chunks, question='', on_date=None):
     """Числа из ответа, которых нет ни в одном переданном фрагменте.
@@ -596,26 +702,79 @@ def ungrounded_numbers(answer, chunks, question='', on_date=None):
                            for value in currency.all_dates(source_text)]
                         + [currency.compact(on_date or currency.today())])
     asked = _digits(question)
-    bad = []
-    for token in _NUMBER.findall(str(answer or '')):
+    known_dates = (currency.all_dates(source_text) + currency.all_dates(question)
+                   + [on_date or currency.today()])
+
+    def grounded(token, following):
         digits = _digits(token)
-        if len(digits) < 3:
+        return (len(digits) < 3 or digits in haystack or digits in asked
+                or _dates_grounded(token, known_dates, following))
+
+    answer = str(answer or '')
+    bad = []
+    for match in _NUMBER.finditer(answer):
+        token, following = match.group(0), answer[match.end():match.end() + 24]
+        if grounded(token, following):
             continue
-        if digits in haystack or digits in asked:
+        # _NUMBER склеивает числа, стоящие через «, » и «: », в один токен, и
+        # склейку «04.10.2026: 12» в источнике не найти — хотя и дата, и место в
+        # нём есть. Замер 05.10.2026: на этом верный ответ про неделю Байги
+        # («…за неделю 28.09.2026 – 04.10.2026: 12 место…») уходил в отказ.
+        # Числа через запятую — разные числа, и сверяются они по одному.
+        parts = [part.strip() for part in _NUMBER_BREAK.split(token) if part.strip()]
+        if len(parts) > 1 and all(grounded(part, following if position == len(parts) - 1 else '')
+                                  for position, part in enumerate(parts)):
             continue
         if token.strip() not in bad:
             bad.append(token.strip())
     return bad
 
 
-def _support_score(chunk, answer):
-    """Насколько текст куска подтверждает ответ. Числа весят больше слов."""
-    text = chunk.get('text') or ''
+def _evidence(chunk):
+    """Текст, которым кусок ПОДТВЕРЖДАЕТ ответ: по нему считается опора
+    источника и выбирается цитата. У статьи и справочника это весь текст.
+
+    У фрагмента «Списков Байги» (baiga/assistant.py) — только строка водителя:
+    первая строка там — неделя, одна на всех водителей ответа, и по её датам
+    источником становился однофамилец, о котором в ответе ни слова, с цитатой
+    «Список Байги за неделю…» (замер на обеих моделях цепочки 05.10.2026).
+    Модели при этом уходит текст целиком — неделю она обязана видеть.
+    """
+    return chunk.get('evidence') or chunk.get('text') or ''
+
+
+# Слова, по которым ответ с «нет» узнаётся как ответ о списках, а не отказ.
+_ABOUT_LISTS = re.compile(r'списк|байг|бәйге|тізім|тизим', re.I)
+
+
+def _own_words(text, lists):
+    """Ответ без слов, перенесённых из строк «Списков Байги», — для определения
+    языка. ФИО, зачёт, город и парк модель обязана переносить буква в букву
+    (BAIGA_RULE), а они казахские: «Жүсіпов А. Б. — 1 место, Әбілов Н. — 2 место»
+    — русский ответ, но по двум словам с казахскими буквами он читался казахским,
+    и модель звали второй раз с указанием «исправь язык» — то есть переписать
+    фамилии."""
+    if not lists:
+        return text
+    quoted = set()
+    for chunk in lists:
+        quoted.update(_ANY_WORD.findall(str(chunk.get('text') or '').lower()))
+    return ' '.join(word for word in _ANY_WORD.findall(str(text or '').lower())
+                    if word not in quoted) + ' '
+
+
+def _shared_numbers(chunk, answer):
+    """Числа ответа (от двух знаков), которые стоят в тексте-опоре куска."""
     answer_numbers = {_digits(token) for token in _NUMBER.findall(str(answer or ''))
                       if len(_digits(token)) >= 2}
-    text_numbers = {_digits(token) for token in _NUMBER.findall(text)}
-    return (5.0 * len(answer_numbers & text_numbers)
-            + len(_content_words(answer) & _content_words(text)))
+    text_numbers = {_digits(token) for token in _NUMBER.findall(_evidence(chunk))}
+    return answer_numbers & text_numbers
+
+
+def _support_score(chunk, answer):
+    """Насколько текст куска подтверждает ответ. Числа весят больше слов."""
+    return (5.0 * len(_shared_numbers(chunk, answer))
+            + len(_content_words(answer) & _content_words(_evidence(chunk))))
 
 
 def build_sources(cited, chunks, answer):
@@ -641,14 +800,30 @@ def build_sources(cited, chunks, answer):
     хуже отсутствующего: его перестают читать, и вместе с ним перестают читать
     настоящее — ровно тот довод, по которому из ungrounded_numbers вырезали
     цифры адресов.
+
+    СТРОКА «СПИСКОВ БАЙГИ» — второе исключение, и того же рода: неназванную
+    моделью строку сервер подшивает только по числу, которое есть у неё одной, —
+    номеру ВУ или сумме за неделю (от пяти знаков). Однофамильцы приходят модели
+    рядом, а короткие числа у них из одного набора — приз «5000 тенге», место,
+    номер недели: на замере 05.10.2026 чужая строка подшилась к ответу про
+    другого водителя, потому что его неделя № 40 совпала с её 40-м местом. Общих
+    слов у строк однофамильцев тоже хватает («место», «сумма», сама фамилия).
     """
+    def offered(index, chunk):
+        """Вправе ли сервер подшить кусок, которого модель не назвала."""
+        if chunk.get('stale'):
+            return False
+        if chunk.get('source_kind') == 'baiga':
+            return any(len(number) >= 5 for number in _shared_numbers(chunk, answer))
+        return True
+
     ranked = sorted(
         ((_support_score(chunk, answer) + (2.0 if index in cited else 0.0), index)
          for index, chunk in enumerate(chunks, start=1)),
         key=lambda item: (-item[0], item[1]))
     used = [index for score, index in ranked
             if score >= SUPPORT_FLOOR
-            and (index in cited or not chunks[index - 1].get('stale'))][:3]
+            and (index in cited or offered(index, chunks[index - 1]))][:3]
     if not used and cited:
         used = [number for number in cited if 1 <= number <= len(chunks)][:1]
 
@@ -657,7 +832,7 @@ def build_sources(cited, chunks, answer):
         chunk = chunks[number - 1]
         sources.append({
             'number': number,
-            'quote': pick_excerpt(chunk.get('text'), answer),
+            'quote': pick_excerpt(_evidence(chunk), answer),
             'ok': True,          # цитата извлечена программой — дословна всегда
             'attributed': number not in cited,
             'chunk_id': chunk['chunk_id'],
@@ -680,6 +855,8 @@ def build_sources(cited, chunks, answer):
             'tab': chunk.get('tab'),
             'ref_id': chunk.get('ref_id'),
             'ref_city': chunk.get('ref_city'),
+            # «Списки Байги»: неделя — в ref_id, водитель — здесь (номер ВУ).
+            'ref_key': chunk.get('ref_key'),
             'space_id': chunk.get('space_id'),
         })
     return sources
@@ -791,27 +968,45 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True,
     # всей паузы перед ответом.
     prompt = (build_user_prompt(question, usable, on_date)
               + '\n\n' + _LANGUAGE_DIRECTIVE[wanted])
-    text, meta = generate_fn(SYSTEM_PROMPT, prompt, history=history)
+    system = system_prompt(usable)
+    lists = [chunk for chunk in usable if chunk.get('source_kind') == 'baiga']
+    text, meta = generate_fn(system, prompt, history=history)
     # Повтор остаётся страховкой: указание модель иногда всё равно игнорирует.
     # Если и он не помог — ответ отдаём как есть, потому что неудобно читать
     # хуже, чем неверно по сути, но не настолько, чтобы молчать.
-    if wanted != detect_language(text):
+    if wanted != detect_language(_own_words(text, lists)):
         try:
             text, meta = generate_fn(
-                SYSTEM_PROMPT,
+                system,
                 prompt + ' Предыдущая попытка была на другом языке — исправь.',
                 history=history)
         except Exception:
             pass
     body, cited = split_sources(text)
 
-    if is_refusal(body) or not body:
+    # «Водителя в списке Байги нет», «списка за эту неделю ещё нет» — содержание
+    # ответа, а не отказ: фрагмент раздела ровно это и сообщает. Без оговорки
+    # фраза со словом «доступных» и без числа читалась как отказ — терялся чип
+    # раздела, а вопрос уходил супервайзеру, которому ответить на него нечем.
+    refused = not body or (is_refusal(body) and not (lists and _ABOUT_LISTS.search(body)))
+    if refused:
         # Отказ идёт без источников: список статей под фразой «этого нет» читается
         # как противоречие и подрывает доверие к самой фразе.
         return {'kind': 'no_answer', 'text': body or NO_ANSWER_TEXT,
                 'sources': [], 'notes': [], 'meta': meta}
 
     invented = ungrounded_numbers(body, usable, question, on_date)
+    if invented and lists:
+        # Строку водителя нашёл КОД, и она верна независимо от того, как модель
+        # её пересказала. Придержать ответ здесь значило бы сказать «в статьях
+        # этого нет» про данные, которые лежат в соседнем разделе: вместо
+        # пересказа отдаём сами строки раздела — дословно.
+        text = '\n\n'.join(chunk['text'] for chunk in lists)
+        numbers = [index for index, chunk in enumerate(usable, start=1) if chunk in lists]
+        return {'kind': 'answer', 'text': text,
+                'sources': build_sources(numbers, usable, text), 'notes': [],
+                'meta': dict(meta, fallback='строки раздела вместо пересказа',
+                             ungrounded=invented, raw_preview=body[:300])}
     if invented:
         # Единственное, из-за чего ответ теперь придерживается: числа, которых нет
         # ни в одном переданном фрагменте. Прежнее правило («нет подтверждённых

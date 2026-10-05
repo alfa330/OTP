@@ -649,11 +649,19 @@ class AnswerPipelineTest(unittest.TestCase):
 
 class HistoryAccessTest(unittest.TestCase):
     def test_directory_source_shown_only_while_tab_is_open(self):
+        # Строки — по именам колонок запроса: их порядок знает только store.
+        message = dict.fromkeys(ai_store._MESSAGE_FIELDS)
+        message.update(id=1, seq=1, role='assistant', kind='answer', text='текст')
+        source = dict.fromkeys(ai_store.SOURCE_ROW)
+        source.update(message_id=1, ord=0, title='Офисы', slug='',
+                      heading_path='Шымкент › Офис Шымкент', quote='проспект Республики 17',
+                      quote_ok=True, requires_ack=False, attributed=False, stale=False,
+                      stale_note='', stale_kind='', source_kind='office', tab='offices',
+                      ref_id=8, ref_city='Шымкент', space_id=11)
         cursor = MagicMock()
         cursor.fetchall.side_effect = [
-            [(1, 1, 'assistant', 'answer', 'текст', None, None, None, None, None)],
-            [(1, 0, None, 'Офисы', '', 'Шымкент › Офис Шымкент', 'проспект Республики 17',
-              True, False, False, None, False, '', '', 'office', 'offices', 8, 'Шымкент', 11)],
+            [tuple(message[name] for name in ai_store._MESSAGE_FIELDS)],
+            [tuple(source[name] for name in ai_store.SOURCE_ROW)],
         ] * 2
         shown = ai_store.chat_messages(cursor, 5, visible_article_ids={1},
                                        directory_access={11: {'offices': True, 'cities': True}})

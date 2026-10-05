@@ -16,7 +16,7 @@ import {
 } from './baigaUi';
 import {
     ALL_SHEETS, COLUMN_LABELS, EMPTY_FILTERS, PAGE_SIZES, PRIZE_ANY, PRIZE_NONE, RANGE_FIELDS, SEARCH_DEBOUNCE_MS,
-    fileNameFromDisposition, filterChips, filtersPayload, formatInt, formatMoney, groupRows, hasAnyFilter,
+    fileNameFromDisposition, filterChips, filtersPayload, focusFilters, formatInt, formatMoney, groupRows, hasAnyFilter,
     isAllSheets, isGrouped, isSearching, nextSort, panelFilterCount, periodLabel, plural, rangeErrors,
     readStateFromSearch, shortId, splitTokens, weekLabel, weekShort, writeStateToAddressBar,
 } from './baigaMeta';
@@ -213,7 +213,7 @@ const typedKeyOf = (payload) => JSON.stringify([
     ...RANGE_FIELDS.flatMap(({ key }) => [payload[`${key}_min`] ?? '', payload[`${key}_max`] ?? '']),
 ]);
 
-const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focus = null, onFocusConsumed }) => {
     const headers = useCallback(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -332,6 +332,18 @@ const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             pickSheet(sheets[0]);
         }
     }, [sheets, pickSheet]);
+
+    /* Просьба помощника — источник «Списки Байги» под его ответом: открыть
+       неделю из ответа и найти водителя. Ждёт экран (без него неизвестны
+       загруженные недели) и исполняется один раз. Номер ВУ ложится в строку
+       поиска, а не в адрес: в адрес поиск не пишется вовсе (baigaMeta.js). */
+    useEffect(() => {
+        if (!focus || !screen) return;
+        updateFilters(focusFilters(focus, weeks, filtersRef.current.zachet));
+        setTab('search');
+        setDriver(null);
+        onFocusConsumed?.();
+    }, [focus, screen, weeks, updateFilters, onFocusConsumed]);
 
     /* ── Поиск ─────────────────────────────────────────────────────────── */
 

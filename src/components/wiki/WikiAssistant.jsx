@@ -144,6 +144,7 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                 elapsed_ms: data.elapsed ? Math.round(data.elapsed * 1000) : null,
                 degraded_search: data.degraded_search,
                 escalation: data.escalation || null,
+                gated_by: data.gated_by || null,
                 created_at: new Date().toISOString(),
             }]);
             loadChats();

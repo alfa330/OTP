@@ -211,6 +211,14 @@ def compact(value):
     return value.strftime('%d%m%Y')
 
 
+def month_of(word):
+    """Номер месяца по слову («сентября» → 9) или None. Тем же списком корней,
+    что и разбор дат: расходиться им негде."""
+    text = str(word or '').lower()
+    return next((number for number, stem in enumerate(_MONTHS, start=1)
+                 if re.match(stem, text)), None)
+
+
 def deadlines(text):
     """Все даты окончания, найденные в тексте. Список объектов date.
 
@@ -283,6 +291,13 @@ def chunk_currency(chunk, on_date=None):
     Собирается здесь, а не в двух местах: разойдись формулировки, оператор
     увидел бы в ответе одно, а в источниках другое.
     """
+    if chunk.get('source_kind') == 'baiga':
+        # Строка раздела «Списки Байги» (baiga/assistant.py) — итог ПРОШЕДШЕЙ
+        # недели акции: срока действия у неё нет, а дата в прошлом — её суть, а
+        # не признак несвежести. В подпись и текст попадают слова из загруженного
+        # файла (зачёт, приз, парк), и «Архив Алматы» или «сертификат до
+        # 31.12.2025» подписали бы итог недели «сведения уже не действуют».
+        return {'stale': False, 'kind': None, 'deadline': None, 'note': ''}
     marker = None
     if chunk.get('historical'):
         marker = 'помечена архивной'

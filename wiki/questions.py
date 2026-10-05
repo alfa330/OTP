@@ -187,7 +187,9 @@ def escalate_by_asker(cursor, *, asker_id, department_id, space_id, message_id):
     """«Отправить супервайзеру»: оператора не устроил ответ помощника.
 
     Возвращает (передача, отказ). Отказ — 'not_found' (реплики нет, разговор
-    чужой или удалён) или 'not_answer' (это не ответ помощника). Повторное нажатие
+    чужой или удалён), 'not_answer' (это не ответ помощника) или 'gated' (ответ
+    собран по разделу за своим доступом — «Списки Байги»: в нём ФИО, номер ВУ и
+    доход водителя, а очередь читают и те, кому раздел закрыт). Повторное нажатие
     по той же реплике отдаёт уже созданную передачу: второй вопрос с тем же текстом
     в очереди отдела был бы дублем.
 
@@ -198,7 +200,7 @@ def escalate_by_asker(cursor, *, asker_id, department_id, space_id, message_id):
     """
     cursor.execute(
         """
-        SELECT m.chat_id, m.seq, m.role, m.kind, c.space_id
+        SELECT m.chat_id, m.seq, m.role, m.kind, c.space_id, m.gated_by
           FROM wiki_ai_messages m
           JOIN wiki_ai_chats c ON c.id = m.chat_id
          WHERE m.id = %(message)s AND c.user_id = %(asker)s AND c.deleted_at IS NULL
@@ -208,9 +210,11 @@ def escalate_by_asker(cursor, *, asker_id, department_id, space_id, message_id):
     row = cursor.fetchone()
     if not row:
         return None, 'not_found'
-    chat_id, seq, role, kind, chat_space_id = row
+    chat_id, seq, role, kind, chat_space_id, gated_by = row
     if role != 'assistant' or kind not in ASKER_ESCALATION_KINDS:
         return None, 'not_answer'
+    if gated_by:
+        return None, 'gated'
     cursor.execute(
         'SELECT id, status FROM wiki_operator_questions WHERE refusal_message_id = %s '
         'ORDER BY id LIMIT 1',

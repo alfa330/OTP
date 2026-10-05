@@ -39,12 +39,14 @@ _NEXT_SEQ = """
 SELECT coalesce(max(seq), 0) + 1 FROM wiki_ai_messages WHERE chat_id = %(chat_id)s
 """
 
+# gated_by — раздел, со строками которого собран ответ («Списки Байги»): такой
+# ответ за пределы разговора автора не передаётся (wiki/questions.py).
 _INSERT_MESSAGE = """
 INSERT INTO wiki_ai_messages
        (chat_id, seq, role, kind, text, provider, model, elapsed_ms,
-        input_tokens, output_tokens)
+        input_tokens, output_tokens, gated_by)
 VALUES (%(chat_id)s, %(seq)s, %(role)s, %(kind)s, %(text)s, %(provider)s,
-        %(model)s, %(elapsed_ms)s, %(input_tokens)s, %(output_tokens)s)
+        %(model)s, %(elapsed_ms)s, %(input_tokens)s, %(output_tokens)s, %(gated_by)s)
 RETURNING id, created_at
 """
 
@@ -57,18 +59,22 @@ RETURNING id, created_at
 # Источник-справочник (запись вкладки «Офисы»/«Города», wiki/directory.py)
 # статьи не имеет: article_id NULL, вместо него — вкладка, запись и
 # пространство. chunk_id у него вымышленный (отрицательный) и не хранится.
-_INSERT_SOURCE = """
-INSERT INTO wiki_ai_message_sources
-       (message_id, ord, article_id, chunk_id, chunk_text_hash, title, slug,
-        heading_path, quote, quote_ok, requires_ack, attributed,
-        stale, stale_note, stale_kind,
-        source_kind, tab, ref_id, ref_city, space_id)
-VALUES (%(message_id)s, %(ord)s, %(article_id)s, %(chunk_id)s,
-        %(chunk_text_hash)s, %(title)s, %(slug)s, %(heading_path)s, %(quote)s,
-        %(quote_ok)s, %(requires_ack)s, %(attributed)s,
-        %(stale)s, %(stale_note)s, %(stale_kind)s,
-        %(source_kind)s, %(tab)s, %(ref_id)s, %(ref_city)s, %(space_id)s)
-"""
+#
+# Источник «Списки Байги» (baiga/assistant.py) — того же рода: статьи нет,
+# вкладка 'baiga', неделя в ref_id, водитель в ref_key, пространства нет.
+#
+# Колонки вставки и чтения названы ОДИН раз, и оба запроса собираются из этих
+# списков: колонку нельзя добавить в перечень и забыть в значениях, а чтение идёт
+# по именам, а не по номерам позиций (номер ВУ, записанный в «город записи»,
+# заметили бы только на проде).
+_INSERT_FIELDS = (
+    'message_id', 'ord', 'article_id', 'chunk_id', 'chunk_text_hash', 'title', 'slug',
+    'heading_path', 'quote', 'quote_ok', 'requires_ack', 'attributed',
+    'stale', 'stale_note', 'stale_kind',
+    'source_kind', 'tab', 'ref_id', 'ref_city', 'ref_key', 'space_id',
+)
+_INSERT_SOURCE = 'INSERT INTO wiki_ai_message_sources (%s) VALUES (%s)' % (
+    ', '.join(_INSERT_FIELDS), ', '.join('%%(%s)s' % name for name in _INSERT_FIELDS))
 
 _TOUCH_CHAT = """
 UPDATE wiki_ai_chats
@@ -79,28 +85,33 @@ UPDATE wiki_ai_chats
  WHERE id = %(chat_id)s AND user_id = %(user_id)s
 """
 
+_MESSAGE_FIELDS = ('id', 'seq', 'role', 'kind', 'text', 'provider', 'model', 'elapsed_ms',
+                   'feedback', 'created_at', 'gated_by')
 _MESSAGES = """
-SELECT id, seq, role, kind, text, provider, model, elapsed_ms, feedback, created_at
+SELECT %s
   FROM wiki_ai_messages
- WHERE chat_id = %(chat_id)s
+ WHERE chat_id = %%(chat_id)s
  ORDER BY seq
-"""
+""" % ', '.join(_MESSAGE_FIELDS)
 
 # Доступность источника — джойном на периметр, переданный списком id. Так пометка
 # «статья недоступна» появляется сразу после отзыва доступа, без переиндексации.
 # У источника-справочника статьи нет (NULL даёт здесь NULL) — его доступность
 # решает chat_messages по пространству и тумблеру вкладки на сейчас.
+_SOURCE_FIELDS = ('message_id', 'ord', 'article_id', 'title', 'slug', 'heading_path',
+                  'quote', 'quote_ok', 'requires_ack', 'attributed',
+                  'stale', 'stale_note', 'stale_kind',
+                  'source_kind', 'tab', 'ref_id', 'ref_city', 'ref_key', 'space_id')
+# Последней колонкой — «статья в периметре сейчас» (visible).
+SOURCE_ROW = _SOURCE_FIELDS + ('visible',)
 _SOURCES = """
-SELECT s.message_id, s.ord, s.article_id, s.title, s.slug, s.heading_path,
-       s.quote, s.quote_ok, s.requires_ack, s.attributed,
-       (s.article_id = ANY(%(visible)s)) AS available,
-       s.stale, s.stale_note, s.stale_kind,
-       s.source_kind, s.tab, s.ref_id, s.ref_city, s.space_id
+SELECT %s,
+       (s.article_id = ANY(%%(visible)s)) AS visible
   FROM wiki_ai_message_sources s
   JOIN wiki_ai_messages m ON m.id = s.message_id
- WHERE m.chat_id = %(chat_id)s
+ WHERE m.chat_id = %%(chat_id)s
  ORDER BY s.message_id, s.ord
-"""
+""" % ', '.join('s.%s' % name for name in _SOURCE_FIELDS)
 
 _RENAME = """
 UPDATE wiki_ai_chats SET title = %(title)s,
@@ -151,6 +162,25 @@ def recent_turns(cursor, chat_id, *, limit=6):
     return [{'role': row[0], 'kind': row[1], 'text': row[2]} for row in rows]
 
 
+_RECENT_QUESTIONS = """
+SELECT text FROM wiki_ai_messages
+ WHERE chat_id = %(chat_id)s AND role = 'user'
+ ORDER BY seq DESC
+ LIMIT %(limit)s
+"""
+
+
+def recent_questions(cursor, chat_id, *, limit):
+    """Последние вопросы человека в этом разговоре, от старого к новому.
+
+    Нужны «Спискам Байги» (baiga/assistant.py): о каком водителе и о какой
+    неделе разговор, раздел выводит из самих вопросов, и трёх реплик, которые
+    получает модель (recent_turns), на это не хватает.
+    """
+    cursor.execute(_RECENT_QUESTIONS, {'chat_id': chat_id, 'limit': max(int(limit), 0)})
+    return [row[0] or '' for row in reversed(cursor.fetchall())]
+
+
 def _title_from(question, limit=60):
     text = ' '.join(str(question or '').split())
     return text[:limit] if text else 'Новый вопрос'
@@ -182,13 +212,14 @@ def owned_chat(cursor, user_id, chat_id):
 
 def append_message(cursor, chat_id, *, role, text, kind='answer', provider=None,
                    model=None, elapsed_ms=None, input_tokens=None,
-                   output_tokens=None, sources=()):
+                   output_tokens=None, sources=(), gated_by=None):
     cursor.execute(_NEXT_SEQ, {'chat_id': chat_id})
     seq = cursor.fetchone()[0]
     cursor.execute(_INSERT_MESSAGE, {
         'chat_id': chat_id, 'seq': seq, 'role': role, 'kind': kind, 'text': text,
         'provider': provider, 'model': model, 'elapsed_ms': elapsed_ms,
-        'input_tokens': input_tokens, 'output_tokens': output_tokens})
+        'input_tokens': input_tokens, 'output_tokens': output_tokens,
+        'gated_by': (gated_by or None) and str(gated_by)[:16]})
     message_id, created_at = cursor.fetchone()
 
     for position, source in enumerate(sources):
@@ -203,6 +234,7 @@ def append_message(cursor, chat_id, *, role, text, kind='answer', provider=None,
             'tab': (source.get('tab') or None) and str(source['tab'])[:16],
             'ref_id': source.get('ref_id'),
             'ref_city': (source.get('ref_city') or None) and str(source['ref_city'])[:120],
+            'ref_key': (source.get('ref_key') or None) and str(source['ref_key'])[:64],
             'space_id': source.get('space_id'),
             'title': (source.get('title') or '')[:255],
             'slug': (source.get('slug') or '')[:255],
@@ -232,46 +264,67 @@ def _directory_available(kind, tab, space_id, directory_access):
     return bool(kind != 'article' and feature and access.get(feature))
 
 
-def chat_messages(cursor, chat_id, *, visible_article_ids=(), directory_access=None):
+def chat_messages(cursor, chat_id, *, visible_article_ids=(), directory_access=None,
+                  baiga_access=None):
+    """baiga_access — () -> bool: открыты ли человеку «Списки Байги» сейчас.
+    Спрашивается один раз и только когда такой источник в чате есть."""
+    baiga_open = []
+
+    def baiga_available():
+        if not baiga_open:
+            baiga_open.append(bool(baiga_access and baiga_access()))
+        return baiga_open[0]
+
     cursor.execute(_MESSAGES, {'chat_id': chat_id})
-    messages = [{'id': row[0], 'seq': row[1], 'role': row[2], 'kind': row[3],
-                 'text': row[4], 'provider': row[5], 'model': row[6],
-                 'elapsed_ms': row[7], 'feedback': row[8],
-                 'created_at': row[9].isoformat() if row[9] else None,
-                 'sources': []}
-                for row in cursor.fetchall()]
+    messages = []
+    for row in cursor.fetchall():
+        message = dict(zip(_MESSAGE_FIELDS, row))
+        message['created_at'] = message['created_at'].isoformat() if message['created_at'] else None
+        message['sources'] = []
+        messages.append(message)
     by_id = {message['id']: message for message in messages}
 
     cursor.execute(_SOURCES, {'chat_id': chat_id,
                               'visible': sorted(visible_article_ids) or [-1]})
     for row in cursor.fetchall():
-        message = by_id.get(row[0])
+        source = dict(zip(SOURCE_ROW, row))
+        message = by_id.get(source['message_id'])
         if message is None:
             continue
-        kind, tab, ref_id, ref_city, space_id = row[14] or 'article', row[15], row[16], row[17], row[18]
+        kind = source['source_kind'] or 'article'
         if kind == 'article':
-            available = bool(row[10])
+            available = bool(source['visible'])
             closed_title = 'Статья недоступна'
+        elif kind == 'baiga':
+            # В цитате ФИО и номер ВУ водителя: без раздела и без QR её нет.
+            available = baiga_available()
+            closed_title = 'Раздел недоступен'
         else:
-            available = _directory_available(kind, tab, space_id, directory_access)
+            available = _directory_available(kind, source['tab'], source['space_id'],
+                                             directory_access)
             closed_title = 'Справочник недоступен'
+
+        def shown(name, closed=None):
+            return source[name] if available else closed
+
         message['sources'].append({
-            'ord': row[1], 'article_id': row[2],
-            'title': row[3] if available else closed_title,
-            'slug': row[4] if available else None,
-            'heading_path': row[5] if available else '',
+            'ord': source['ord'], 'article_id': source['article_id'],
+            'title': shown('title', closed_title),
+            'slug': shown('slug'),
+            'heading_path': shown('heading_path', ''),
             # Цитата закрытой статьи не отдаётся: доступ мог быть отозван после
             # ответа, и снимок не должен становиться лазейкой.
-            'quote': row[6] if available else '',
-            'quote_ok': bool(row[7]), 'requires_ack': bool(row[8]),
-            'attributed': bool(row[9]), 'available': available,
-            'stale': bool(row[11]), 'stale_note': row[12] or '',
-            'stale_kind': row[13] or '',
+            'quote': shown('quote', ''),
+            'quote_ok': bool(source['quote_ok']), 'requires_ack': bool(source['requires_ack']),
+            'attributed': bool(source['attributed']), 'available': available,
+            'stale': bool(source['stale']), 'stale_note': source['stale_note'] or '',
+            'stale_kind': source['stale_kind'] or '',
             'source_kind': kind,
-            'tab': tab if available else None,
-            'ref_id': ref_id if available else None,
-            'ref_city': ref_city if available else None,
-            'space_id': space_id if available else None})
+            'tab': shown('tab'),
+            'ref_id': shown('ref_id'),
+            'ref_city': shown('ref_city'),
+            'ref_key': shown('ref_key'),
+            'space_id': shown('space_id')})
     return messages
 
 

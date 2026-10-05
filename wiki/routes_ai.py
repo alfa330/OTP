@@ -28,6 +28,8 @@ from datetime import date
 
 from flask import jsonify, request
 
+from baiga import assistant as baiga_assistant
+
 from . import directory as wiki_directory
 from . import perimeter as wiki_perimeter
 from . import queries
@@ -115,6 +117,53 @@ def directory_rows(cursor, ctx, question, space_id, search_query=None):
     return rows
 
 
+def baiga_rows(cursor, ctx, question, space_id, prior, sensitive_access_granted):
+    """Строки «Списков Байги» к вопросу (baiga/assistant.py) — или [].
+
+    Кому и где они положены, решает сам раздел: его два гейта (раздел открыт,
+    сессия подтверждена QR) и пространство не «Тез КЦ». Сюда передаётся только
+    ключ подтверждения сессии — тот же, которым закрыта вика.
+
+    prior — прошлые вопросы человека в этом разговоре, от старого к новому
+    (store.recent_questions): разделу они нужны по одному и по порядку («а приз
+    какой?» — про водителя прошлого вопроса), а не склейкой двух последних,
+    которой довольствуется поиск по статьям (answer.enrich_query).
+
+    Под савпоинтом, как справочник: списки — приставка к ответу, и их сбой не
+    должен отнимать у оператора ответ по статьям. RELEASE — внутри try: ключ QR
+    глотает ошибку своего запроса (bot_schedule2._is_sensitive_access_unlocked),
+    и транзакция бывает оборвана, хотя исключения нет, — тогда падает уже сам
+    RELEASE, и откат к савпоинту её возвращает.
+    """
+    cursor.execute('SAVEPOINT wiki_ai_baiga')
+    try:
+        rows = baiga_assistant.ai_rows(
+            cursor, user_id=ctx['user_id'], question=question, space_id=space_id,
+            prior=list(prior or ()), sensitive_access_granted=sensitive_access_granted)
+        cursor.execute('RELEASE SAVEPOINT wiki_ai_baiga')
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_baiga')
+        logging.exception('Помощник: «Списки Байги» не ответили')
+        return []
+    return rows
+
+
+def baiga_access_now(cursor, ctx, sensitive_access_granted):
+    """Открыты ли человеку «Списки Байги» СЕЙЧАС — для источников в истории
+    (wiki/ai/store.py): цитата со строкой водителя показывается, только пока
+    раздел открыт и сессия подтверждена. Сбой проверки — «закрыто»."""
+    cursor.execute('SAVEPOINT wiki_ai_baiga_access')
+    try:
+        opened = baiga_assistant.reader_context(
+            cursor, ctx['user_id'], sensitive_access_granted=sensitive_access_granted) is not None
+        cursor.execute('RELEASE SAVEPOINT wiki_ai_baiga_access')
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_baiga_access')
+        logging.exception('Помощник: доступ к «Спискам Байги» не проверен')
+        return False
+    return opened
+
+
 def effective_space(cursor, ctx, requested):
     """Пространство, по которому помощник будет отвечать НА САМОМ ДЕЛЕ.
 
@@ -146,7 +195,11 @@ def effective_space(cursor, ctx, requested):
     return spaces[0]['id']
 
 
-def register(bp, wiki_route, db, log_ip):
+def register(bp, wiki_route, db, log_ip, sensitive_access_granted):
+    """sensitive_access_granted — (user_id, cursor=...) -> bool, ключ QR-подтверждения
+    сессии (wiki/routes.py). Без значения по умолчанию: «Списки Байги» помощник
+    читает только за этим ключом, и забытая зависимость обязана уронить сборку
+    блюпринта на старте, а не открыть строки водителей без подтверждения."""
     @wiki_route('/ai/status')
     def wiki_ai_status(cursor, ctx):
         """Готов ли помощник и что он знает про этого человека.
@@ -245,14 +298,17 @@ def register(bp, wiki_route, db, log_ip):
         found = ai_retrieve.search_hybrid(
             cursor, article_ids=article_ids, query=query,
             query_vector=query_vector, limit=limit, per_article=per_article)
-        # Ровно то, что получит /ask: записи справочника впереди статей.
+        # Ровно то, что получит /ask: строки «Списков Байги» и записи
+        # справочника впереди статей.
+        baiga = baiga_rows(cursor, ctx, query, space_id, (), sensitive_access_granted)
         directory = directory_rows(cursor, ctx, query, space_id)
-        rows = directory + found['rows']
+        rows = baiga + directory + found['rows']
 
         return jsonify({
             'query': query,
             'perimeter_articles': len(article_ids),
-            'branches': {**found['branches'], 'directory': len(directory)},
+            'branches': {**found['branches'], 'directory': len(directory),
+                         'baiga': len(baiga)},
             'degraded': found['degraded'],
             'vector_error': vector_error,
             # Поля берутся только те, что реально возвращает fuse(). Раньше здесь
@@ -317,7 +373,10 @@ def register(bp, wiki_route, db, log_ip):
         messages = ai_store.chat_messages(
             cursor, chat_id, visible_article_ids=scope['article_ids'],
             # Источник-справочник — по доступу к вкладке СЕЙЧАС, как и статья.
-            directory_access=wiki_directory.access_map(cursor, ctx))
+            directory_access=wiki_directory.access_map(cursor, ctx),
+            # Источник «Списки Байги» — по доступу к разделу СЕЙЧАС. Функцией:
+            # проверка стоит запроса, а таких источников в большинстве чатов нет.
+            baiga_access=lambda: baiga_access_now(cursor, ctx, sensitive_access_granted))
         # Вопросы, переданные супервайзеру (wiki/questions.py): отказ получает
         # состояние передачи, ответ — имя супервайзера. Открыл разговор — значит
         # увидел ответ, и уведомление о нём гаснет.
@@ -384,11 +443,23 @@ def register(bp, wiki_route, db, log_ip):
         found = ai_retrieve.search_hybrid(
             cursor, article_ids=scope['article_ids'], query=search_query,
             query_vector=query_vector, limit=8, per_article=3)
+        # Итоги недели Байги по названному водителю — из раздела «Списки Байги»,
+        # тем, кому он открыт (baiga/assistant.py). Первыми: на вопрос о месте и
+        # призе водителя отвечают они, а статьи об условиях акции — фон.
+        #
         # Адреса офисов и комиссии Яндекса — из вкладок «Офисы» и «Города»,
         # живыми данными на сегодня (wiki/directory.py). Впереди статей: при
         # равной опоре источником становится справочник, а в промпте у него своя
         # подпись и правило «при расхождении верен справочник».
-        rows = directory_rows(cursor, ctx, question, space_id, search_query) + found['rows']
+        lists = baiga_rows(
+            cursor, ctx, question, space_id,
+            # Разговор о водителе длиннее трёх реплик, которые помнит модель:
+            # «какое место» → «сколько заработал» → «а на прошлой неделе» → «какой
+            # приз». Вопросы берутся ДО записи нового — как и история выше.
+            ai_store.recent_questions(cursor, chat_id, limit=baiga_assistant.PRIOR_TURNS),
+            sensitive_access_granted)
+        rows = (lists + directory_rows(cursor, ctx, question, space_id, search_query)
+                + found['rows'])
 
         asked = ai_store.append_message(cursor, chat_id, role='user', kind='question',
                                         text=question)
@@ -411,6 +482,13 @@ def register(bp, wiki_route, db, log_ip):
 
         meta = result.get('meta') or {}
         usage = meta.get('usage') or {}
+        # Ответ, собранный со строками «Списков Байги», живёт за гейтами раздела:
+        # в нём ФИО, номер ВУ и доход водителя. В разговоре автора он остаётся, а
+        # за его пределы — в очередь «Вопросы операторов», которую читают и те,
+        # кому раздел закрыт (админ, не возглавляющий отдел, администратор вики), —
+        # не уходит ни сам, ни по кнопке (wiki/questions.py). Отказ строк не
+        # содержит и передаётся как обычно: это настоящий пробел в базе знаний.
+        gated_by = baiga_assistant.SOURCE_KIND if (lists and result['kind'] == 'answer') else None
         stored = ai_store.append_message(
             cursor, chat_id, role='assistant', kind=result['kind'],
             text=result['text'], provider=meta.get('provider'),
@@ -418,7 +496,7 @@ def register(bp, wiki_route, db, log_ip):
             elapsed_ms=int((meta.get('elapsed') or 0) * 1000) or None,
             input_tokens=usage.get('prompt_tokens'),
             output_tokens=usage.get('completion_tokens'),
-            sources=result.get('sources') or ())
+            sources=result.get('sources') or (), gated_by=gated_by)
         ai_store.touch_chat(cursor, ctx['user_id'], chat_id,
                             first_question=question)
 
@@ -427,7 +505,8 @@ def register(bp, wiki_route, db, log_ip):
         # савпоинтом: передача — продолжение ответа, а не его условие, и
         # сломавшаяся очередь не должна отнимать у оператора сам ответ.
         escalation = None
-        if (wiki_questions.should_escalate(ctx['otp_role'], result['kind'], result['text'])
+        if (not gated_by
+                and wiki_questions.should_escalate(ctx['otp_role'], result['kind'], result['text'])
                 and wiki_questions.table_ready(cursor)):
             cursor.execute('SAVEPOINT wiki_question_escalate')
             try:
@@ -448,6 +527,8 @@ def register(bp, wiki_route, db, log_ip):
             # Передан ли отказ супервайзеру. Витрина рисует по нему строку под
             # пузырём и начинает ждать ответа (assistant/useSupervisorReply.js).
             'escalation': escalation,
+            # Ответ за гейтами раздела супервайзеру не передают — кнопки под ним нет.
+            'gated_by': gated_by,
             'text': result['text'],
             'notes': result.get('notes') or [],
             'sources': [{
@@ -475,6 +556,9 @@ def register(bp, wiki_route, db, log_ip):
                 'tab': source.get('tab'),
                 'ref_id': source.get('ref_id'),
                 'ref_city': source.get('ref_city'),
+                # «Списки Байги»: чип открывает раздел на неделе (ref_id) и
+                # водителе (ref_key — номер ВУ).
+                'ref_key': source.get('ref_key'),
                 'space_id': source.get('space_id'),
             } for position, source in enumerate(result.get('sources') or [])],
             'provider': meta.get('provider'),
@@ -516,6 +600,10 @@ def register(bp, wiki_route, db, log_ip):
             space_id=effective_space(cursor, ctx, _space_id()), message_id=message_id)
         if refusal == 'not_found':
             return jsonify({'error': 'реплика не найдена'}), 404
+        if refusal == 'gated':
+            return jsonify({'error': 'Этот ответ собран по разделу «Списки Байги» — супервайзеру '
+                                     'он не передаётся. Проверьте водителя в самом разделе',
+                            'code': 'WIKI_ESCALATE_GATED'}), 409
         if refusal:
             return jsonify({'error': 'Супервайзеру передаётся ответ помощника',
                             'code': 'WIKI_ESCALATE_NOT_ANSWER'}), 409

@@ -623,8 +623,13 @@ class AskerEscalationTests(unittest.TestCase):
                       _read('src', 'components', 'assistant', 'useAssistantChat.js'))
         self.assertIn('onEscalate={status?.can_escalate ? escalate : null}',
                       _read('src', 'components', 'wiki', 'WikiAssistant.jsx'))
+        # Когда кнопка есть под самой репликой, решает чистая функция
+        # (tests/assistant_source_target.test.mjs): вопрос ещё не передан, и ответ
+        # не собран по разделу за своим доступом.
         thread = _jsx_code_only(_read('src', 'components', 'assistant', 'assistantThread.jsx'))
-        self.assertIn('!!onEscalate && !message.escalation', thread)
+        self.assertIn('!!onEscalate && canEscalateMessage(message, ESCALATABLE_KINDS)', thread)
+        self.assertIn('!message?.escalation',
+                      _read('src', 'components', 'assistant', 'sourceTarget.js'))
 
     def test_supervisor_sees_what_the_assistant_answered(self):
         source = _read('wiki', 'questions.py')

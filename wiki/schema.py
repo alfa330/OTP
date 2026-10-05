@@ -1621,6 +1621,16 @@ _AI_STATEMENTS = [
     "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS ref_id INTEGER;",
     "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS ref_city VARCHAR(120);",
     "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS space_id INTEGER;",
+    # ОТВЕТ ЗА ГЕЙТАМИ РАЗДЕЛА (05.10.2026). Ответ, собранный со строками
+    # «Списков Байги», несёт ФИО, номер ВУ и доход водителя: за пределы разговора
+    # автора — в очередь «Вопросы операторов» — он не передаётся. Пометку ставит
+    # /ask, читает wiki/questions.escalate_by_asker; NULL — обычный ответ вики.
+    "ALTER TABLE wiki_ai_messages ADD COLUMN IF NOT EXISTS gated_by VARCHAR(16);",
+    # «СПИСКИ БАЙГИ» КАК ИСТОЧНИК (05.10.2026, baiga/assistant.py). Тот же вид
+    # источника без статьи: неделя лежит в ref_id (id загрузки), а водитель —
+    # здесь, его номером ВУ: по ним чип под ответом открывает раздел на строке.
+    # Строкой, а не id строки: неделю заменяют, и id её строк меняются.
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS ref_key VARCHAR(64);",
     # Пространство, в котором задавали вопрос. Ответу оно не нужно — периметр
     # уже сужен на входе, — но нужно ОТЧЁТУ: «о чём спрашивают, а в вике нет»
     # адресуется владельцу конкретной базы знаний, и вопрос из «Тез» в отчёте
