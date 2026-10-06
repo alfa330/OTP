@@ -66216,6 +66216,39 @@ except Exception:
 # статьи под обязательное ознакомление. Пять запросов означали пять соединений
 # из общего пула, того самого, что держит SSE аукциона смен.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Личный набор разделов: человеку портал показывает только перечисленное
+# (решение владельца 06.10.2026). Сам набор и его смысл — в
+# src/utils/departmentViews.js (PERSONAL_VIEW_ALLOWLIST, personalViewsOf); здесь
+# зеркало ради колокола: он не зовёт человека в разделы, которых в меню нет.
+# Ключ — users.id, ФИО в публичный репозиторий не кладём. Тест сверяет оба места.
+PERSONAL_VIEW_ALLOWLIST = {
+    540: ('baiga',),
+}
+PERSONAL_VIEW_BASE_ROLES = ('operator', 'trainee')
+
+
+def _personal_views_for(requester_id, role):
+    """Личный набор разделов человека или None.
+
+    Набор — для рядового сотрудника, не возглавляющего отдел; на супервайзера,
+    тренера, админа и главу он не действует. То же правило, что во фронте
+    (personalViewsOf), — иначе колокол молчал бы у того, у кого меню полное.
+    """
+    try:
+        views = PERSONAL_VIEW_ALLOWLIST.get(int(requester_id))
+    except (TypeError, ValueError):
+        return None
+    if not views:
+        return None
+    role = _normalize_user_role(role)
+    if role not in PERSONAL_VIEW_BASE_ROLES and role not in BACK_OFFICE_EMPLOYEE_ROLES:
+        return None
+    if _headed_department_id(requester_id) is not None:
+        return None
+    return views
+
+
 def _notifications_viewer_context(requester_id, requester):
     """Единый портрет зрителя для всех источников уведомлений.
 
@@ -66255,6 +66288,15 @@ def _notifications_viewer_context(requester_id, requester):
     checkpoints_scope = dict(_checkpoint_scope_for_requester(requester_id, requester))
     checkpoints_scope['is_manager'] = bool(_can_manage_checkpoints(requester_id, requester))
 
+    hidden_sources = () if can_see_tasks else ('tasks',)
+    # Личный набор разделов: источники, которые зовут только в скрытые разделы,
+    # молчат — иначе бейдж висел бы над уведомлением, которое некуда открыть.
+    personal_views = _personal_views_for(requester_id, role)
+    if personal_views is not None:
+        from notifications.sources import sources_outside_views
+        hidden_sources = tuple(dict.fromkeys(
+            hidden_sources + sources_outside_views(personal_views)))
+
     return {
         'user_id': int(requester_id),
         'role': role,
@@ -66267,7 +66309,7 @@ def _notifications_viewer_context(requester_id, requester):
         # Заявки на изменение смены. Источник двусторонний: руководителю —
         # очередь его периметра, оператору — решения по его собственным заявкам.
         'shift_requests': _shift_change_scope_for_requester(requester_id, requester),
-        'hidden_sources': () if can_see_tasks else ('tasks',),
+        'hidden_sources': hidden_sources,
     }
 
 

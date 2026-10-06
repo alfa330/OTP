@@ -1064,8 +1064,10 @@ class FrontendWiringTests(unittest.TestCase):
 
     def test_screen_is_rendered_behind_the_predicate(self):
         self.assertIn("{view === 'library' && canAccessLibrarySection && (", self.app)
-        # Пока раздел только у супер-админа и тренера — по роли, не по отделу.
-        self.assertIn('const canAccessLibrarySection = canAccessLibrarySectionForUser(user);', self.app)
+        # По роли, не по отделу. Единственное, что раздел прячет поверх роли, —
+        # личный набор разделов человека (tests/test_personal_view_allowlist.py).
+        self.assertIn("const canAccessLibrarySection = canAccessLibrarySectionForUser(user)\n"
+                      "                && personalViewsAllow(user, 'library');", self.app)
         self.assertIn("import('./components/library/LibraryView')", self.app)
 
     def test_trainer_is_not_thrown_out_of_the_section(self):

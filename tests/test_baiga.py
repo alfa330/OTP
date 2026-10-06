@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover
 from openpyxl import Workbook, load_workbook  # noqa: E402
 
 from baiga import access, filters, parse, queries, report, routes, schema  # noqa: E402
+from parcels import access as parcels_access  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 META_JS = ROOT / 'src' / 'components' / 'baiga' / 'baigaMeta.js'
@@ -114,6 +115,9 @@ def standard_book():
 FULL = {'can_open': True, 'can_export': True, 'can_manage': True}
 READ = {'can_open': True, 'can_export': False, 'can_manage': False}
 CLOSED = {'can_open': False, 'can_export': False, 'can_manage': False}
+
+# Аналитик из именного списка (решение владельца 06.10.2026) — только id.
+ANALYST_ID = 540
 
 # Сетка для сверок «все сочетания»: роли портала, отделы раздела и чужие,
 # главенство — своё, чужое и двойное.
@@ -219,10 +223,51 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(self.caps(role='admin', department_code=None, headed_codes=(' Marketing ',)), FULL)
 
     def test_analyst_by_id_manages(self):
-        self.assertEqual(access.ANALYST_USER_IDS, frozenset())
         with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
             self.assertEqual(self.caps(department_code='tez', user_id=77), FULL)
             self.assertEqual(self.caps(department_code='tez', user_id=78), CLOSED)
+
+    def test_named_analyst_has_the_whole_section_without_qr(self):
+        """Решение владельца 06.10.2026 про сотрудника отдела аналитики:
+        «без qr, полный доступ к разделу». Числится он оператором, и общий
+        замок спросил бы у него код."""
+        self.assertEqual(access.ANALYST_USER_IDS, frozenset({ANALYST_ID}))
+        analyst = person(role='operator', department_code='analytik', user_id=ANALYST_ID)
+        self.assertEqual(access.capabilities(analyst), FULL)
+        self.assertFalse(access.requires_sensitive_qr(analyst))
+        # Выдано человеку, а не отделу: сосед по отделу и его глава раздела не видят.
+        for kwargs in ({'user_id': ANALYST_ID + 1}, {'role': 'trainee', 'user_id': ANALYST_ID + 1},
+                       {'role': 'admin', 'headed_codes': ('analytik',), 'user_id': 229}):
+            self.assertEqual(self.caps(department_code='analytik', **kwargs), CLOSED, kwargs)
+
+    def test_analyst_is_never_asked_for_qr_whatever_the_role_and_department(self):
+        """Замок снят с человека из списка, а не с его должности: на любом
+        сочетании роли, отдела и главенства он входит без кода и ведёт раздел,
+        а тот же профиль с чужим id живёт по общему правилу."""
+        with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
+            asked_without_the_list = 0
+            for role, code, heads in grid():
+                named = person(role=role, department_code=code, headed_codes=heads, user_id=77)
+                self.assertEqual(access.capabilities(named), FULL, (role, code, heads))
+                self.assertFalse(access.requires_sensitive_qr(named), (role, code, heads))
+                other = person(role=role, department_code=code, headed_codes=heads, user_id=78)
+                self.assertEqual(access.requires_sensitive_qr(other), parcels_access.requires_sensitive_qr(other),
+                                 (role, code, heads))
+                asked_without_the_list += access.requires_sensitive_qr(other)
+            # Сетка не вырождена: среди профилей есть те, кого замок спрашивает.
+            self.assertGreater(asked_without_the_list, 10)
+
+    def test_analyst_id_is_read_as_a_number(self):
+        with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
+            for user_id, named in (('77', True), (77.0, True), (None, False), ('', False), ('77a', False)):
+                ctx = dict(person(department_code='tez'), user_id=user_id)
+                self.assertEqual(access.can_manage(ctx), named, repr(user_id))
+                self.assertEqual(access.requires_sensitive_qr(ctx), not named, repr(user_id))
+
+    def test_switch_closes_the_analyst_too(self):
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            analyst = person(role='operator', department_code='analytik', user_id=ANALYST_ID)
+            self.assertEqual(access.capabilities(analyst), CLOSED)
 
     def test_nobody_but_the_named_circle_enters_without_qr(self):
         """Главное свойство раздела: мимо QR-замка входят только супер-админ,
@@ -1036,6 +1081,36 @@ class GateTests(_Base):
         self.assertEqual(len(self.client.get('/api/baiga/journal').get_json()['uploads']), 1)
         self.assertEqual(self.client.delete('/api/baiga/uploads/1').status_code, 200)
 
+    def test_named_analyst_does_everything_and_the_qr_key_is_not_even_asked(self):
+        """Аналитик — оператор по должности, но раздел выдан ему целиком и без
+        замка. Проверка QR здесь сломана намеренно: тронь её гейт — ручки
+        ответили бы 500, а не данными (ровно так падает рядовой в
+        test_broken_qr_check_fails_closed)."""
+        self.viewer = person(role='operator', department_code='analytik', user_id=ANALYST_ID)
+        self.qr_granted = False
+        self.qr_error = RuntimeError('QR у аналитика не спрашивают')
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], FULL)
+        self.assertEqual(self.client.post('/api/baiga/rows', json={}).status_code, 200)
+        self.assertEqual(self.upload(path='/api/baiga/uploads/preview').status_code, 200)
+        self.assertEqual(self.upload().status_code, 201)
+        for row in self.store.rows:
+            row['period_start'] = date(2026, 9, 21)
+        self.assertEqual(self.client.post('/api/baiga/export', json={}).status_code, 200)
+        self.assertEqual(self.client.get('/api/baiga/uploads/1/file').status_code, 200)
+        self.assertEqual(len(self.client.get('/api/baiga/journal').get_json()['uploads']), 1)
+        self.assertEqual(self.upload(replace=True).status_code, 201)
+        self.assertEqual(self.client.delete('/api/baiga/uploads/2').status_code, 200)
+        # В журнале выгрузок — он сам, а не безымянная запись.
+        self.assertEqual({entry['actor']['user_id'] for entry in self.store.exports}, {ANALYST_ID})
+
+    def test_analysts_neighbour_in_the_department_stays_out(self):
+        """Допуск именной: коллега по отделу аналитики с подтверждённым QR
+        получает «раздел закрыт» на каждой ручке."""
+        self.viewer = person(role='operator', department_code='analytik', user_id=ANALYST_ID + 1)
+        self.qr_granted = True
+        self.assertEqual(set(self.codes(self.every_route())), {(403, 'BAIGA_SECTION_CLOSED')})
+        self.assertEqual(self.writes(), [])
+
 
 class ScreenAndSearchTests(_Base):
 
@@ -1226,13 +1301,19 @@ class WiringTests(unittest.TestCase):
         # Условие целиком и порядок веток: с подстрокой проходила и инверсия
         # замка («!sensitiveSectionsLocked ?»), при которой раздел не открылся бы
         # ни у кого из круга.
-        start = '{view === "baiga" && canAccessBaigaSection && (sensitiveSectionsLocked ? ('
+        start = '{view === "baiga" && canAccessBaigaSection && (baigaLocked ? ('
         self.assertEqual(self.app.count(start), 1)
+        self.assertEqual(self.app.count('{view === "baiga" && '), 1)
         block = self.app.split(start)[1].split('</Suspense>')[0]
         gate, otherwise, section = (block.index('<SensitiveSectionGate'), block.index(') : ('),
                                     block.index('<BaigaView'))
         self.assertLess(gate, otherwise)
         self.assertLess(otherwise, section)
+        # Замок у раздела свой: общий спросил бы код и у аналитика из списка.
+        self.assertIn('const baigaLocked = baigaQrRequiredFor(user) && !sensitiveAccess.granted;', self.app)
+        self.assertIn('const baigaChecking = baigaLocked && !sensitiveAccess.checked;', self.app)
+        self.assertIn('checking={baigaChecking}', block[:otherwise])
+        self.assertNotIn('sensitiveSections', block[:section])
         # Доступ к экрану считает предикат раздела, а не роль напрямую.
         self.assertIn('const canAccessBaigaSection = canAccessBaigaSectionForUser(user);', self.app)
 
@@ -1256,11 +1337,12 @@ class WiringTests(unittest.TestCase):
                       '[BAIGA_MANAGE_DEPARTMENT_CODE, ...BAIGA_READ_DEPARTMENT_CODES];', self.app)
         self.assertEqual(access.SECTION_DEPARTMENT_CODES, ('marketing', 'op', 'szov'))
 
-    def _front_answers(self, users, analysts=None):
+    def _front_answers(self, users, analysts=None, predicate='canAccessBaigaSectionForUser', pilot=None):
         """Настоящий предикат из App.jsx, выполненный node, — поведение, а не текст.
 
-        analysts — подставить свой список аналитиков: боевой пуст, и строка про
-        него иначе не исполнялась бы ни разу."""
+        analysts — подставить свой список аналитиков вместо боевого.
+        predicate — что спросить: пункт меню или замок раздела.
+        pilot — подставить своё значение выключателя «только супер-админ»."""
         node = shutil.which('node')
         if not node:
             self.skipTest('node недоступен')
@@ -1271,10 +1353,16 @@ class WiringTests(unittest.TestCase):
         start = app.index('const SENSITIVE_QR_GATED_ROLES = ')
         qr_lock = app[start:app.index('\n);\n', app.index('const sensitiveSectionQrRequiredFor = ')) + 3]
         start = app.index('const BAIGA_MANAGE_DEPARTMENT_CODE = ')
-        section = app[start:app.index('\n};\n', app.index('const canAccessBaigaSectionForUser = ')) + 3]
+        section = app[start:app.index('\n);\n', app.index('const baigaQrRequiredFor = ')) + 3]
+        self.assertIn('const canAccessBaigaSectionForUser = ', section)
         if analysts is not None:
             section, replaced = re.subn(r'const BAIGA_ANALYST_USER_IDS = new Set\(\[[^\]]*\]\);',
                                         'const BAIGA_ANALYST_USER_IDS = new Set(%s);' % json.dumps(list(analysts)),
+                                        section)
+            self.assertEqual(replaced, 1)
+        if pilot is not None:
+            section, replaced = re.subn(r'const BAIGA_PILOT_SUPER_ADMIN_ONLY = (?:true|false);',
+                                        'const BAIGA_PILOT_SUPER_ADMIN_ONLY = %s;' % str(bool(pilot)).lower(),
                                         section)
             self.assertEqual(replaced, 1)
         script = '\n'.join((
@@ -1282,7 +1370,7 @@ class WiringTests(unittest.TestCase):
             % (ROOT / 'src' / 'utils' / 'roles.js').as_uri(),
             normalize, head_codes, qr_lock, section,
             'const users = %s;' % json.dumps(users),
-            'process.stdout.write(JSON.stringify(users.map((u) => canAccessBaigaSectionForUser(u))));',
+            'process.stdout.write(JSON.stringify(users.map((u) => %s(u))));' % predicate,
         ))
         out = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, check=True)
         answers = json.loads(out.stdout.decode('utf-8'))
@@ -1324,6 +1412,62 @@ class WiringTests(unittest.TestCase):
         with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
             self.assertEqual([access.can_open_section(person(department_code='tez', user_id=user_id))
                               for user_id in (77, 78)], [True, False])
+
+    def test_named_analyst_sees_the_menu_item_and_no_lock(self):
+        """Боевой список, без подстановок: сотрудник отдела аналитики видит
+        пункт и входит без замка, его сосед по отделу — нет."""
+        users = [self._front_user('operator', 'analytik', (), user_id=user_id)
+                 for user_id in (ANALYST_ID, ANALYST_ID + 1)]
+        self.assertEqual(self._front_answers(users), [True, False])
+        self.assertEqual(self._front_answers(users, predicate='baigaQrRequiredFor'), [False, True])
+        # Id в профиле бывает и строкой — пункт и замок от этого не меняются.
+        as_text = [dict(users[0], id=str(ANALYST_ID))]
+        self.assertEqual(self._front_answers(as_text), [True])
+        self.assertEqual(self._front_answers(as_text, predicate='baigaQrRequiredFor'), [False])
+
+    def test_switch_closes_the_analyst_on_the_screen_like_on_the_server(self):
+        """Выключатель «только супер-админ» стоит раньше списка аналитиков на
+        обеих сторонах: включили — пункта меню нет и у аналитика, а сервер
+        отвечает ему «раздел закрыт». Разойдись порядок — человек видел бы
+        пункт, за которым каждая ручка отвечает отказом."""
+        users = [self._front_user('operator', 'analytik', (), user_id=ANALYST_ID),
+                 self._front_user('super_admin', None, ()),
+                 self._front_user('admin', 'marketing', ('marketing',)),
+                 self._front_user('operator', 'op', ())]
+        self.assertEqual(self._front_answers(users, pilot=True), [False, True, False, False])
+        self.assertEqual(self._front_answers(users, pilot=False), [True, True, True, True])
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.assertEqual(
+                [access.can_open_section(person(role='operator', department_code='analytik', user_id=ANALYST_ID)),
+                 access.can_open_section(person(role='super_admin', department_code=None)),
+                 access.can_open_section(person(role='admin', department_code='marketing', headed_codes=('marketing',))),
+                 access.can_open_section(person(department_code='op'))],
+                [False, True, False, False])
+
+    def test_lock_on_the_screen_answers_like_the_server(self):
+        """Замок экрана и замок сервера обязаны совпадать у каждого, кому раздел
+        открыт: иначе экран рисует раздел, а ручки отвечают «нужен QR», — или
+        человек видит замок там, где сервер пускает. Сверяем на всех сочетаниях
+        роли, отдела и главенства — для человека из списка и для чужого id."""
+        compared = asked = 0
+        # По одному id за запуск node: сетка на оба id разом не влезает в
+        # предел длины одного аргумента командной строки (Linux, 128 КиБ).
+        for user_id in (77, 78):
+            users = [self._front_user(role, code, heads, user_id=user_id) for role, code, heads in grid()]
+            opened = self._front_answers(users, analysts=(77,))
+            locked = self._front_answers(users, analysts=(77,), predicate='baigaQrRequiredFor')
+            with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
+                for (role, code, heads), is_open, is_locked in zip(grid(), opened, locked):
+                    ctx = person(role=role, department_code=code, headed_codes=heads, user_id=user_id)
+                    self.assertEqual(is_open, access.can_open_section(ctx), (role, code, heads, user_id))
+                    if not is_open:
+                        continue
+                    self.assertEqual(is_locked, access.requires_sensitive_qr(ctx), (role, code, heads, user_id))
+                    compared += 1
+                    asked += is_locked
+        # Сетка не вырождена: есть и те, кого замок спрашивает, и те, кого нет.
+        self.assertGreater(asked, 5)
+        self.assertGreater(compared - asked, 400)
 
     def test_menu_never_leads_past_the_qr_lock(self):
         """Должность, которой портал QR не выдаёт (кадровик), пункта не видит:

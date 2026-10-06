@@ -115,7 +115,7 @@ import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting, personalViewsAllow } from './utils/departmentViews';
 // Отдельной строкой: общий импорт выше тесты держат дословно.
 import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
 import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
@@ -607,7 +607,7 @@ const MOBILE_TAB_SECTIONS = [
     { view: 'wiki', label: 'Вики', icon: 'fas fa-book', allowed: (access) => access.wiki },
     { view: 'tasks', label: 'Задачи', icon: 'fas fa-tasks', allowed: (access) => access.tasks, badge: 'tasks' },
     { view: 'lms', label: 'Курсы', icon: 'fas fa-graduation-cap', allowed: (access) => access.lms },
-    { view: 'events', label: 'Ивенты', icon: 'fas fa-calendar-days', allowed: () => true, badge: 'events' },
+    { view: 'events', label: 'Ивенты', icon: 'fas fa-calendar-days', allowed: (access) => access.events, badge: 'events' },
     { view: 'work_schedules', label: 'Графики', icon: 'fas fa-calendar-alt', allowed: (access) => access.workSchedules },
     { view: 'surveys', label: 'Опросы', icon: 'fas fa-clipboard-check', allowed: (access) => access.surveys, badge: 'surveys' },
     { view: 'group_late_bot', label: 'Отметки', icon: 'fas fa-user-clock', allowed: (access) => access.groupLate },
@@ -2511,6 +2511,7 @@ const canAccessThermoboxesSectionForUser = (userLike) => {
      супер-админ и глава «Маркетинга» — всё: загрузка недель, выгрузка, журнал;
      главы и супервайзеры ОП и СЗоВ — ищут и смотрят;
      операторы ОП и СЗоВ и сотрудники «Маркетинга» — ищут и смотрят после QR.
+   С 06.10.2026 — аналитик из именного списка: всё и без QR.
    Остальным закрыт: тренеру, стажёру, админу вне списка, прочим отделам.
 
    Здесь решается только «показывать ли пункт меню»; кто выгружает и грузит,
@@ -2523,7 +2524,7 @@ const BAIGA_SECTION_DEPARTMENT_CODES = [BAIGA_MANAGE_DEPARTMENT_CODE, ...BAIGA_R
 
 /* Аналитики поимённо — только id, ФИО в публичный репозиторий не кладём.
    Зеркало baiga/access.py: ANALYST_USER_IDS — тест сверяет списки. */
-const BAIGA_ANALYST_USER_IDS = new Set([]);
+const BAIGA_ANALYST_USER_IDS = new Set([540]);
 
 /* Выключатель: пока флаг стоит, пункт меню и экран есть только у супер-админа
    (так раздел выкладывался 02.10.2026). Сервер закрыт тем же флагом
@@ -2545,6 +2546,14 @@ const canAccessBaigaSectionForUser = (userLike) => {
     // (стажёр, тренер, админ вне списка), тому раздел закрыт.
     return sensitiveSectionQrRequiredFor(userLike) && BAIGA_SECTION_DEPARTMENT_CODES.includes(own);
 };
+
+/* Замок раздела: кого «Списки Байги» спрашивают о QR. Те же, что у остальных
+   закрытых разделов, кроме аналитика из именного списка — раздел выдан ему
+   целиком, а числится он оператором, и общий замок запер бы от него то, что он
+   ведёт. Двойник — baiga/access.py: requires_sensitive_qr; тест гоняет оба. */
+const baigaQrRequiredFor = (userLike) => (
+    !BAIGA_ANALYST_USER_IDS.has(Number(userLike?.id)) && sensitiveSectionQrRequiredFor(userLike)
+);
 
 /* «Библиотека» (#282). Раздел видят те, кто его ведёт (загружает книги, правит
    их отделы и жанры, видит архив и мониторинг), и читатели.
@@ -42527,7 +42536,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // «Библиотека» (#282): ведут СВ и выше и тренер, читают все остальные
             // сотрудники (canAccessLibrarySectionForUser). Сервер закрыт тем же
             // правилом (library/routes.py: can_manage, can_read).
-            const canAccessLibrarySection = canAccessLibrarySectionForUser(user);
+            // Личный набор разделов её прячет: роль раздел даёт, набор — нет.
+            const canAccessLibrarySection = canAccessLibrarySectionForUser(user)
+                && personalViewsAllow(user, 'library');
             const canAccessSignLinksSection = canAccessSignLinksSectionForUser(user);
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
@@ -42593,7 +42604,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessPaymentsSection = canAccessPaymentsForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
-            const wikiSectionEnabled = wikiEnabledFor(user);
+            // Личный набор разделов прячет его так же, как «Библиотеку».
+            const wikiSectionEnabled = wikiEnabledFor(user) && personalViewsAllow(user, 'wiki');
+            // «Ивенты» открыты всем, кроме человека с личным набором без них.
+            const eventsSectionShown = departmentAllowsView(user, 'events');
             // Профиль сотрудника бэк-офиса: ни оценок, ни часов, ни направления,
             // ни супервайзера, ни ставки у него нет — показывать пустые плитки и
             // кнопки в разделы, которых ему не выдали, незачем. Остаётся кадровое:
@@ -42688,6 +42702,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         || (isDepartmentManager && !isAdminLikeRole && departmentAllowsView(user, 'qr_access')),
                     wiki: wikiSectionEnabled,
                     lms: canAccessLmsSection && departmentAllowsView(user, 'lms'),
+                    events: eventsSectionShown,
                     groupLate: canAccessGroupLateBotSection,
                     tasks: isAdminLikeRole
                         || (isDepartmentManager && !isAdminLikeRole && departmentAllowsView(user, 'tasks'))
@@ -42704,7 +42719,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     surveys: pendingSurveysBadgeCount,
                 },
             ), [
-                user, wikiSectionEnabled, canAccessLmsSection, canAccessGroupLateBotSection,
+                user, wikiSectionEnabled, eventsSectionShown, canAccessLmsSection, canAccessGroupLateBotSection,
                 isAdminLikeRole, isDepartmentManager, isPlainTrainer, currentUserRole,
                 isScopedDepartmentHead, eventsUnreadCount, tasksActionRequiredCount,
                 pendingSurveysBadgeCount,
@@ -43139,6 +43154,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // У «Чатов водителей» круг шире на стажёра — свой замок, тот же ключ.
             const driverChatsLocked = driverChatsQrRequiredFor(user) && !sensitiveAccess.granted;
             const driverChatsChecking = driverChatsLocked && !sensitiveAccess.checked;
+            // У «Списков Байги» круг уже на аналитика — свой замок, тот же ключ.
+            const baigaLocked = baigaQrRequiredFor(user) && !sensitiveAccess.granted;
+            const baigaChecking = baigaLocked && !sensitiveAccess.checked;
             const callEvaluationFrameRef = useRef(null);
             const callEvaluationActivatedRef = useRef(false);
             // Images and state for dev letter modal
@@ -46305,11 +46323,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // раздел закрыт, а allowlist'а у СЗоВ нет — гард отдела их не
                 // уведёт, и ссылка ?view=baiga оставляла бы пустой экран.
                 if (view === 'baiga' && !canAccessBaigaSection) {
-                    if (isAdminLikeRole) redirectToView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
-                    else if (isPlainTrainer) redirectToView('surveys');
-                    else redirectToView('hours');
+                    // Кроме человека, которому сюда велит идти его же набор
+                    // разделов: гард «Этап 10» вернул бы его обратно, и два
+                    // переброса гоняли бы раздел без остановки. Он остаётся на
+                    // пустом экране, как сотрудник ООЗ без допуска к «Рассылкам».
+                    const sentHereByViewMap = departmentRestrictsViews(user) && departmentAllowsView(user, 'baiga');
+                    if (!sentHereByViewMap) {
+                        if (isAdminLikeRole) redirectToView('sv_list');
+                        else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                        else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                        else if (isPlainTrainer) redirectToView('surveys');
+                        else redirectToView('hours');
+                    }
                 }
             }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessFourYouSection]);
 
@@ -54768,10 +54793,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
 
                                     {/* Нижний блок — то, что открывают от случая к случаю: общая лента
-                                        компании и личное. Черта безусловная: «Ивенты»
-                                        открыты всем ролям, поэтому блок не бывает пустым. */}
-                                    {renderSidebarDividerInner()}
-                                    {renderEventsSidebarItemInner()}
+                                        компании и личное. «Ивенты» открыты всем ролям; пуст блок
+                                        только у человека с личным набором разделов, где их нет
+                                        (personalViewsOf), — у него нет и черты. */}
+                                    {renderDividerIfInner(eventsSectionShown, canAccessDevLetterSection)}
+                                    {eventsSectionShown && renderEventsSidebarItemInner()}
 
                                     {canAccessDevLetterSection && (
                                         <li>
@@ -54975,6 +55001,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessThermoboxesSection,
                 canAccessBaigaSection,
                 canAccessLibrarySection,
+                eventsSectionShown,
                 canAccessSignLinksSection,
                 canAccessTouchesSection,
                 canAccessOpFunnelSection,
@@ -55489,12 +55516,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </Suspense>
                         )}
                         {/* «Списки Байги» — за QR-замком, как «Посылки»: в строках ФИО и
-                            номер ВУ водителя. Сервер держит тот же гейт (baiga/access.py). */}
-                        {view === "baiga" && canAccessBaigaSection && (sensitiveSectionsLocked ? (
+                            номер ВУ водителя. Замок свой (baigaLocked): аналитика из
+                            именного списка он не спрашивает. Сервер держит тот же гейт
+                            (baiga/access.py). */}
+                        {view === "baiga" && canAccessBaigaSection && (baigaLocked ? (
                             <SensitiveSectionGate
                                 sectionTitle="Списки Байги"
                                 description="В списках ФИО и номера ВУ водителей. Раздел открывается после подтверждения доступа старшим."
-                                checking={sensitiveSectionsChecking}
+                                checking={baigaChecking}
                                 onRequestQr={requestSensitiveQrAccess}
                             />
                         ) : (

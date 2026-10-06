@@ -284,6 +284,19 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(self.reads(person('sv', 'op'), True)[1], [])
         self.assertEqual(self.reads(person('operator', 'tez'), True)[1], [])
 
+    def test_named_analyst_reads_without_qr_like_in_the_section(self):
+        """Аналитику из именного списка раздел открыт без замка (решение
+        владельца 06.10.2026) — и помощник читает ему списки так же, не
+        спрашивая QR. Сосед по отделу с тем же профилем не читает вовсе."""
+        analyst = person('operator', 'analytik', user_id=min(access.ANALYST_USER_IDS))
+        for qr in (False, True):
+            opened, asked, _cursor = self.reads(analyst, qr)
+            self.assertTrue(opened, qr)
+            self.assertEqual(asked, [], qr)
+        neighbour = person('operator', 'analytik', user_id=max(access.ANALYST_USER_IDS) + 1)
+        for qr in (False, True):
+            self.assertFalse(self.reads(neighbour, qr)[0], qr)
+
     def test_unknown_person_reads_nothing(self):
         self.assertFalse(self.reads(None, True)[0])
 

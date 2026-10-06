@@ -65,21 +65,24 @@ const { pickMobileTabs, MOBILE_TAB_SECTIONS, MOBILE_TAB_LIMIT } = new Function(
    сотрудника («Мои часы», «Мои смены», «Аукцион смен», «Мои оценки»). У админа
    их нет вовсе: в его меню стоят «Учет часов» и «Графики работы» — это другие
    разделы. У оператора линии есть все четыре: его отдел (СЗоВ) карты разделов
-   не ведёт, и departmentAllowsView пропускает любой ключ. */
+   не ведёт, и departmentAllowsView пропускает любой ключ.
+
+   events — «Ивенты»: открыты всем трём, закрыты только человеку с личным
+   набором разделов (tests/personal_view_allowlist.test.mjs). */
 const ADMIN = {
-    wiki: true, lms: true, groupLate: true, tasks: true, workSchedules: true, surveys: true,
+    wiki: true, lms: true, events: true, groupLate: true, tasks: true, workSchedules: true, surveys: true,
     myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
     qrAccess: true,
 };
 const LINE_OPERATOR = {
-    wiki: true, lms: true, groupLate: false, tasks: false, workSchedules: true, surveys: true,
+    wiki: true, lms: true, events: true, groupLate: false, tasks: false, workSchedules: true, surveys: true,
     myHours: true, myShifts: true, myShiftAuction: true, myEvaluations: true,
     qrAccess: false,
 };
 /* Бэк-офис: отдел с картой разделов, и личных разделов линии в ней нет —
    часы этих людей ведут не по сменам. */
 const BACK_OFFICE = {
-    wiki: true, lms: false, groupLate: false, tasks: true, workSchedules: false, surveys: true,
+    wiki: true, lms: false, events: true, groupLate: false, tasks: true, workSchedules: false, surveys: true,
     myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
     qrAccess: false,
 };

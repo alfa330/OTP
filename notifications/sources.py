@@ -37,6 +37,54 @@ SOURCES = ('wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests
            'crm', 'complaints', 'training_plans', 'lms', 'surveys', 'events', 'four_you',
            'birthdays')
 
+# В какие разделы ведут строки источника — все значения поля 'view' его
+# элементов. None — строка никуда не ведёт: день рождения и свой назначенный
+# тренинг читают в самом колоколе.
+#
+# Нужно одному правилу — личному набору разделов (sources_outside_views): у
+# человека, которому портал показывает один раздел, колокол не должен звать в
+# остальные. Тест сверяет карту с тем, что источники пишут в 'view' на деле.
+SOURCE_VIEWS = {
+    'wiki_ack': ('wiki',),
+    'tasks': ('tasks',),
+    'wiki_questions': ('wiki',),
+    'checkpoints': ('evaluation', 'call_evaluation'),
+    'shift_requests': ('work_schedules',),
+    'crm': ('crm_tickets',),
+    'complaints': ('complaints',),
+    'training_plans': ('complaints', None),
+    'lms': ('lms',),
+    'surveys': ('surveys',),
+    'events': ('events',),
+    'four_you': ('four_you',),
+    'birthdays': (None,),
+}
+
+# Разделы со своим кругом доступа: личный набор их в меню не прячет (гард
+# «Этап 10» в App.jsx пропускает их своим предикатом раньше набора), поэтому и
+# колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints'})
+
+
+def sources_outside_views(allowed_views):
+    """Источники, ВСЕ строки которых ведут в разделы, скрытые личным набором.
+
+    Набор прячет раздел, если его нет в allowed_views и у раздела нет своего
+    круга доступа (OWN_CIRCLE_VIEWS). Остаётся источник, который ведёт хоть в
+    один нескрытый раздел, и источник, у которого есть строки без перехода: они
+    никуда не зовут. Незнакомый источник тоже остаётся: забытая строка карты
+    должна стоить лишнего уведомления, а не пропавшего.
+    """
+    shown = set(allowed_views or ()) | OWN_CIRCLE_VIEWS
+    hidden = []
+    for name in SOURCES:
+        views = SOURCE_VIEWS.get(name)
+        if not views or None in views:
+            continue
+        if not shown.intersection(views):
+            hidden.append(name)
+    return tuple(hidden)
+
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
 # считает ВСЁ, и без догрузки бейдж «6» висел бы над пятью карточками.

@@ -209,6 +209,70 @@ export const departmentCodeOf = (user) => {
     return code ? String(code).toLowerCase() : null;
 };
 
+/* Личный набор разделов: человеку показываем ТОЛЬКО перечисленное (решение
+   владельца 06.10.2026: «чтобы у этого сотрудника отображался только раздел
+   байга»). Ключ — users.id; ФИО в публичный репозиторий не кладём.
+
+   Набор СТРОЖЕ карты отдела. Карта оставляет человеку общие разделы
+   («Ивенты»), «Библиотеку» по роли и «Вики» по тумблеру отдела — здесь нет и
+   их: «только» значит только. Поэтому departmentAllowsView спрашивает набор
+   раньше UNIVERSAL_VIEWS, а «Вики» и «Библиотеку», которых карта не ведёт,
+   App.jsx сверяет с набором сам (personalViewsAllow).
+
+   Доступа набор НЕ выдаёт — он только прячет то, что человеку досталось бы
+   по должности: разделы карты отдела, общие «Ивенты», «Библиотеку» и «Вики».
+   «Списки Байги» открывает именной список раздела (BAIGA_ANALYST_USER_IDS в
+   App.jsx, baiga/access.py); человек из набора, которого там нет, увидит
+   пустой портал.
+
+   Разделы со СВОИМ кругом доступа набор не прячет — ни выданные поимённо
+   («Рассылки», «Касания»), ни выданные отделу своим предикатом («Обращения»,
+   «Посылки», «Учёт воды» у СЗоВ). У сотрудника отдела аналитики таких нет.
+   Переводят человека из набора в отдел, где они есть, — набор пересмотреть:
+   либо снять, либо сказать владельцу, что «только» перестало быть правдой.
+
+   Набор — для РЯДОВОГО сотрудника (оператор, стажёр, должности бэк-офиса), не
+   возглавляющего отдел: это его ветка меню и его гарды в App.jsx. Сменили
+   человеку роль на супервайзера, тренера или админа, назначили главой отдела —
+   набор перестаёт действовать, и меню становится меню новой роли. Иначе
+   нельзя: у главы «Учет сотрудников» стоит в меню безусловно, а тренерский
+   гард уводил бы человека из раздела набора в «Опросы», гард отдела — обратно,
+   и они гоняли бы раздел друг другу без остановки. Заодно строка, забытая
+   здесь после повышения, не запрёт админа в одном разделе.
+
+   Зеркало — PERSONAL_VIEW_ALLOWLIST и _personal_views_for в bot_schedule2.py:
+   колокол не зовёт человека в разделы, которых у него нет. Тест сверяет оба
+   места. */
+const PERSONAL_VIEW_ALLOWLIST = {
+    540: ['baiga'],
+};
+
+// Рядовой — как в ветке рядового сотрудника сайдбара (RANK_AND_FILE_ROLES в
+// App.jsx) и при том же условии «не глава отдела»; тест сверяет оба списка.
+const PERSONAL_VIEW_BASE_ROLES = ['operator', 'trainee'];
+
+const personalViewsApplyTo = (user) => {
+    if (isDepartmentHead(user)) return false;
+    const role = normalizeRole(user?.role);
+    return PERSONAL_VIEW_BASE_ROLES.includes(role) || isBackOfficeEmployeeRole(role);
+};
+
+// Личный набор разделов пользователя либо null (личного набора нет).
+export const personalViewsOf = (user) => {
+    if (!personalViewsApplyTo(user)) return null;
+    // Number(): id в профиле бывает строкой, а имя из прототипа («constructor»)
+    // превращается в NaN и ключом карты не становится.
+    const allow = PERSONAL_VIEW_ALLOWLIST[Number(user?.id)];
+    // Пустой набор — не «спрятать всё», а ошибка записи: набора нет.
+    return Array.isArray(allow) && allow.length ? allow : null;
+};
+
+// Не скрыт ли раздел личным набором. Нет набора — не скрыт ничем.
+export const personalViewsAllow = (user, viewKey) => {
+    const allow = personalViewsOf(user);
+    return !allow || allow.includes(viewKey);
+};
+
 // Отделы, у СВ которых часы считаются по отметкам Clockster, а РОП ведёт их
 // график и перерыв (задача #352). Зеркало SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
 // в supervisor_hours.py — меняются вместе.
@@ -494,6 +558,9 @@ const allowlistFor = (user) => {
     // Глобальные админы — без ограничений по отделу; главы отделов идут по head-набору.
     if (normalizeRole(user?.role) === 'super_admin') return null;
     if (isAdminLikeRole(user?.role) && !isDepartmentHead(user)) return null;
+    // Личный набор заменяет карту отдела целиком, а не пересекается с ней.
+    const personal = personalViewsOf(user);
+    if (personal) return personal;
     const code = departmentCodeOf(user);
     const deptCfg = code ? DEPARTMENT_VIEW_ALLOWLIST[code] : null;
     if (!deptCfg) return null;
@@ -506,6 +573,9 @@ export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(use
 
 // Разрешён ли раздел viewKey пользователю с учётом его отдела и роли.
 export const departmentAllowsView = (user, viewKey) => {
+    // Личный набор — раньше общих разделов: в нём нет и «Ивентов».
+    const personal = personalViewsOf(user);
+    if (personal) return personal.includes(viewKey);
     if (UNIVERSAL_VIEWS.has(viewKey)) return true;
     const allow = allowlistFor(user);
     if (!allow) return true; // нет ограничений
