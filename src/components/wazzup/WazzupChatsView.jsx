@@ -15,6 +15,9 @@ import {
     normalizeWazzupAccount, WAZZUP_DEFAULT_ACCOUNT,
 } from './chatLink';
 import { lateDeliveryNote, localDayKey } from './messageTime';
+import useChatPilot from './useChatPilot';
+import ChatPilotComposer from './ChatPilotComposer';
+import { mergePilotMessages, pilotChatKey } from './chatPilot';
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
@@ -57,7 +60,7 @@ const MEDIA_ICONS = {
     document: FileText, geo: MapPin, vcard: Contact2, missing_call: PhoneMissed,
 };
 
-const STATUS_LABELS = { sent: 'Отправлено', delivered: 'Доставлено', read: 'Прочитано', error: 'Ошибка' };
+const STATUS_LABELS = { pending: 'Принято Wazzup', sent: 'Отправлено', delivered: 'Доставлено', read: 'Прочитано', error: 'Ошибка' };
 
 const fmtTime = (iso) => {
     if (!iso) return '';
@@ -805,7 +808,7 @@ export default function WazzupChatsView(props) {
     /* initialChat — цель перехода по ссылке (chatLink.js): либо пара
        «канал/чат», либо один номер телефона. Гасим её через
        onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
-    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed, user } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [mainTab, setMainTab] = useState('chats');
 
@@ -855,6 +858,9 @@ export default function WazzupChatsView(props) {
     const threadRequest = useRef({ id: 0, controller: null });
     const threadBox = useRef(null);
     const searchDebounce = useRef(null);
+    const pilotView = useRef({});
+    pilotView.current = { key: pilotChatKey(account, selected), thread, selected, account, mainTab };
+    const pilotRefresh = useRef({ id: 0, controller: null });
 
     const channelName = useMemo(() => {
         const map = {};
@@ -879,53 +885,72 @@ export default function WazzupChatsView(props) {
        и переход по ссылке на нём закрывал бы уже открытую переписку и вешал
        ложную плашку «чат не найден» — достаточно было соседнему запросу
        отменить наш или токену истечь. */
-    const loadChats = ({ reset = true, channel = channelId, q = appliedSearch } = {}) => {
+    const loadChats = ({ reset = true, channel = channelId, q = appliedSearch, silent = false } = {}) => {
+        if (silent && chatsRequest.current.loading) return Promise.resolve(false);
         chatsRequest.current.controller?.abort();
         const controller = new AbortController();
         const requestId = chatsRequest.current.id + 1;
-        chatsRequest.current = { id: requestId, controller };
+        chatsRequest.current = { id: requestId, controller, loading: true };
         const offset = reset ? 0 : (chats?.length || 0);
-        if (reset) { setChats(null); setChatsError(null); }
+        const requestAccount = accountRef.current;
+        if (reset && !silent) { setChats(null); setChatsError(null); }
         return axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
             headers: headers(), signal: controller.signal,
-            params: { channel_id: channel || undefined, q: q || undefined, limit: PAGE_SIZE, offset,
+            params: { channel_id: channel || undefined, q: q || undefined,
+                      limit: silent ? Math.min(100, Math.max(PAGE_SIZE, chats?.length || 0)) : PAGE_SIZE, offset,
                       account: accountRef.current },
         }).then((r) => {
-            if (requestId !== chatsRequest.current.id) return null;
+            if (requestId !== chatsRequest.current.id || requestAccount !== accountRef.current) return null;
             setChatsTotal(r.data.total || 0);
-            setChats((prev) => reset ? (r.data.items || []) : [...(prev || []), ...(r.data.items || [])]);
+            setChatsError(null);
+            if (silent) setSelected((prev) => prev && (
+                (r.data.items || []).find((chat) => chat.channelId === prev.channelId && chat.chatId === prev.chatId) || prev
+            ));
+            setChats((prev) => {
+                if (!silent) return reset ? (r.data.items || []) : [...(prev || []), ...(r.data.items || [])];
+                const byId = new Map((prev || []).map((chat) => [pilotChatKey(accountRef.current, chat), chat]));
+                (r.data.items || []).forEach((chat) => byId.set(pilotChatKey(accountRef.current, chat), chat));
+                return [...byId.values()].sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
+            });
             return r.data.items || [];
         }).catch((e) => {
             if (axios.isCancel?.(e) || e.name === 'CanceledError') return null;
             if (requestId !== chatsRequest.current.id) return null;
             setChats((prev) => prev || []);
             setChatsError('Не удалось загрузить чаты');
+            if (silent) throw e;
             return null;
+        }).finally(() => {
+            if (requestId === chatsRequest.current.id) chatsRequest.current.loading = false;
         });
     };
 
     const loadThread = (chat, { before = null } = {}) => {
+        pilotRefresh.current.controller?.abort();
+        pilotRefresh.current.id += 1;
         threadRequest.current.controller?.abort();
         const controller = new AbortController();
         const requestId = threadRequest.current.id + 1;
+        const requestAccount = accountRef.current;
         threadRequest.current = { id: requestId, controller };
-        if (!before) setThread(null); else setThreadLoadingMore(true);
+        if (!before) { setThread(null); setThreadLoadingMore(false); } else setThreadLoadingMore(true);
         axios.get(`${apiBaseUrl}/api/wazzup/chat-messages`, {
             headers: headers(), signal: controller.signal,
             params: { channel_id: chat.channelId, chat_id: chat.chatId,
                       before: before || undefined, limit: THREAD_PAGE,
                       account: accountRef.current },
         }).then((r) => {
-            if (requestId !== threadRequest.current.id) return;
+            if (requestId !== threadRequest.current.id || requestAccount !== accountRef.current) return;
             setThreadHasMore(Boolean(r.data.hasMore));
             setThreadLoadingMore(false);
             if (before) {
                 const box = threadBox.current;
                 const prevHeight = box ? box.scrollHeight : 0;
-                setThread((prev) => [...(r.data.items || []), ...(prev || [])]);
+                const prevTop = box ? box.scrollTop : 0;
+                setThread((prev) => mergePilotMessages(prev, r.data.items || []));
                 // сохранить позицию скролла при подгрузке вверх
                 requestAnimationFrame(() => {
-                    if (box) box.scrollTop = box.scrollHeight - prevHeight;
+                    if (box) box.scrollTop = prevTop + box.scrollHeight - prevHeight;
                 });
             } else {
                 setThread(r.data.items || []);
@@ -941,6 +966,47 @@ export default function WazzupChatsView(props) {
             showToast?.('Не удалось загрузить переписку', 'error');
         });
     };
+
+    const refreshPilotThread = async () => {
+        const snapshot = pilotView.current;
+        if (snapshot.account !== 'op' || !snapshot.selected || snapshot.mainTab !== 'chats') return;
+        if (snapshot.thread === null || threadLoadingMore) return false;
+        pilotRefresh.current.controller?.abort();
+        const controller = new AbortController();
+        const id = pilotRefresh.current.id + 1;
+        pilotRefresh.current = { id, controller };
+        try {
+            const { data } = await axios.post(`${apiBaseUrl}/api/wazzup/pilot/refresh`, {
+                account: 'op', channelId: snapshot.selected.channelId, chatId: snapshot.selected.chatId,
+                messageIds: snapshot.thread.slice(-2000).map((message) => message.messageId),
+            }, { headers: headers(), signal: controller.signal });
+            if (id !== pilotRefresh.current.id || snapshot.key !== pilotView.current.key) return;
+            const box = threadBox.current;
+            const atBottom = box && box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+            setThread((prev) => data.reset ? data.items : mergePilotMessages(prev, data.items));
+            if (data.reset) setThreadHasMore(Boolean(data.hasMore));
+            if (atBottom) requestAnimationFrame(() => {
+                if (box && snapshot.key === pilotView.current.key) box.scrollTop = box.scrollHeight;
+            });
+        } catch (error) {
+            if (!controller.signal.aborted) throw error;
+        }
+    };
+    const pilot = useChatPilot({ apiBaseUrl, user, account, active: mainTab === 'chats', headers,
+        selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }) });
+    const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
+    const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
+        && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+        && selectedChannel?.state === 'active' && ['whatsapp', 'wapi'].includes(selectedChannel?.transport);
+    useEffect(() => {
+        if (pilot.enabled && selected && thread !== null) refreshPilotThread().catch(() => {});
+        return () => {
+            pilotRefresh.current.controller?.abort();
+            pilotRefresh.current.id += 1;
+        };
+        // Reconcile after initial history loads as well as after changing the chat.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pilot.enabled, pilotChatKey(account, selected), thread === null, threadLoadingMore]);
 
     useEffect(() => { loadAccounts(); loadChannels(); loadChats(); /* eslint-disable-next-line */ }, [apiBaseUrl]);
 
@@ -964,6 +1030,8 @@ export default function WazzupChatsView(props) {
     };
 
     const pickChannel = (cid) => {
+        threadRequest.current.controller?.abort();
+        threadRequest.current.id += 1;
         setChannelId(cid);
         setSelected(null); setThread(null);
         setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
@@ -1172,6 +1240,13 @@ export default function WazzupChatsView(props) {
                     <p className="text-xs text-slate-500">
                         Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
                     </p>
+                    {pilot.enabled && mainTab === 'chats' && (
+                        <p role="status" className={`mt-1 text-xs ${pilot.connection === 'live' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                            Пилот alfa330 · {({ live: 'Живые обновления подключены', connecting: 'Подключение…',
+                                reconnecting: 'Восстанавливаем связь…', paused: 'Обновления на паузе',
+                                unavailable: 'Живые обновления недоступны — нажмите «Обновить»' })[pilot.connection]}
+                        </p>
+                    )}
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                     {/* Аккаунт Wazzup: «Верификаторы» и «Поток» — два разных аккаунта
@@ -1441,6 +1516,14 @@ export default function WazzupChatsView(props) {
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
                                 )}
                             </div>
+                            {pilotCanSend && (
+                                <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
+                                    apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
+                                    onSent={() => {
+                                        refreshPilotThread().catch(() => showToast?.('Обновите переписку для проверки отправки', 'error'));
+                                        loadChats({ silent: true }).catch(() => {});
+                                    }} />
+                            )}
                         </>
                     )}
                 </div>

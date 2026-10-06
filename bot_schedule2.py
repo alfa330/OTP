@@ -8521,7 +8521,7 @@ def wazzup_webhook(token):
         # (wazzup/delivery.py).
         stored = db.store_wazzup_messages(payload.get('messages'), account=account,
                                           received_at=datetime.now(timezone.utc))
-        updated = db.update_wazzup_statuses(payload.get('statuses'))
+        updated = db.update_wazzup_statuses(payload.get('statuses'), account=account)
     except Exception:
         logging.exception("wazzup webhook: ошибка записи")
         return jsonify({"error": "internal"}), 500
@@ -8692,7 +8692,10 @@ def api_wazzup_chat_messages():
         with db._get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT message_id, dt, is_echo, type, text, content_uri,
-                       author_name, author_id, status, is_edited, is_deleted, wazzup_dt
+                       COALESCE((SELECT o.author_name FROM wazzup_pilot_outbox o
+                           WHERE o.account=wazzup_messages.account
+                             AND o.message_id=wazzup_messages.message_id), author_name),
+                       author_id, status, is_edited, is_deleted, wazzup_dt
                   FROM wazzup_messages WHERE {' AND '.join(where)}
                  ORDER BY dt DESC, message_id DESC LIMIT %s""", params + [limit + 1])
             rows = cursor.fetchall()
@@ -8718,6 +8721,14 @@ from wazzup.names import normalize_name as _wazzup_normalize_name  # noqa: E402
 from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
 from wazzup import accounts as wazzup_accounts  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
+from wazzup.pilot import build_pilot_blueprint  # noqa: E402
+
+app.register_blueprint(build_pilot_blueprint(
+    db=db, require_api_key=require_api_key, guard=_verifier_chats_guard,
+    channels=_wazzup_channels_from_api,
+    preflight=_build_cors_preflight_response,
+    listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
+))
 
 
 def _wazzup_account_arg():

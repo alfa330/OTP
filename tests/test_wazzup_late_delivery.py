@@ -120,6 +120,8 @@ class _Cursor:
         if sql.startswith("UPDATE wazzup_messages m"):
             self.rowcount = (self.update_rowcount if self.update_rowcount is not None
                              else len(params[0]))
+        elif sql.startswith("INSERT INTO wazzup_messages"):
+            self.rowcount = 1
 
     def fetchall(self):
         return list(self._rows)
@@ -547,7 +549,9 @@ class StoreMessagesTests(unittest.TestCase):
                 dt, wazzup_dt, cursor = self._store(message, received_at)
                 self.assertEqual(dt, message["dateTime"])
                 self.assertIsNone(wazzup_dt)
-                self.assertEqual(cursor.sql("SELECT"), [], "выборки нужны только опоздавшим")
+                lookups = [(sql, params) for sql, params in cursor.sql("SELECT")
+                           if not sql.startswith("SELECT pg_advisory_xact_lock")]
+                self.assertEqual(lookups, [], "выборки нужны только опоздавшим")
 
     def test_backlog_is_checked_once_per_webhook(self):
         cursor = _Cursor(answers={HISTORY_MARK: [], RECENT_MARK: []})
@@ -743,7 +747,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("db.store_wazzup_messages(batch, account=account)", potok)
 
     def test_thread_api_returns_wazzup_time(self):
-        self.assertIn("author_name, author_id, status, is_edited, is_deleted, wazzup_dt", API_SOURCE)
+        self.assertTrue("author_id, status, is_edited, is_deleted, wazzup_dt" in API_SOURCE)
         self.assertIn("'wazzupDt': r[11].isoformat() if r[11] else None", API_SOURCE)
 
     def test_thread_view_uses_local_day_and_late_note(self):

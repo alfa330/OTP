@@ -80,7 +80,7 @@ def _database_with_cursor(cursor):
 
 class WazzupEpisodeRetentionTests(unittest.TestCase):
     def test_cleanup_deletes_old_unprotected_episodes_with_same_horizon(self):
-        cursor = _FakeCursor([3, 7, 2, 11])
+        cursor = _FakeCursor([3, 1, 4, 7, 2, 11])
         result = _database_with_cursor(cursor).cleanup_wazzup_messages(
             retention_days=30
         )
@@ -96,7 +96,7 @@ class WazzupEpisodeRetentionTests(unittest.TestCase):
         )
         self.assertEqual(
             [params for sql, params in cursor.executions if sql.startswith("DELETE")],
-            [(30,), (30,), (30,)],
+            [None, (30,), (30,), (30,)],
         )
         episode_sql = cursor.executions[-1][0]
         self.assertIn("DELETE FROM wazzup_episodes e", episode_sql)
@@ -106,7 +106,7 @@ class WazzupEpisodeRetentionTests(unittest.TestCase):
         self.assertIn("e.journal_evaluated_at IS NULL", episode_sql)
 
     def test_successful_and_legacy_ai_results_protect_episode(self):
-        cursor = _FakeCursor([0, 0, 0, 0])
+        cursor = _FakeCursor([0, 0, 0, 0, 0, 0])
         _database_with_cursor(cursor).cleanup_wazzup_messages()
         episode_sql = cursor.executions[-1][0]
 
@@ -137,7 +137,7 @@ class WazzupEpisodeRetentionTests(unittest.TestCase):
         self.assertIn("e.started_at = evaluated.episode_start", marker_sql)
 
     def test_live_draft_temporarily_protects_episode_but_is_not_marked(self):
-        cursor = _FakeCursor([0, 0, 0, 0])
+        cursor = _FakeCursor([0, 0, 0, 0, 0, 0])
         _database_with_cursor(cursor).cleanup_wazzup_messages()
 
         marker_sql = cursor.executions[0][0]

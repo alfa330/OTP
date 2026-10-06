@@ -3012,6 +3012,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_wazzup_chats_account_last
                 ON wazzup_chats(account, last_message_at DESC);
             """)
+            # Пилот обработки чатов и ранние статусы доставки Wazzup.
+            from wazzup.pilot_schema import init_schema as init_wazzup_pilot_schema
+            init_wazzup_pilot_schema(cursor)
+
             # Эпизоды Wazzup: чат нарезан по паузе неактивности (порог откалиброван
             # по данным: «долина» 4–11 ч, см. build_wazzup_episodes). Единица ИИ-оценки.
             # Транскрипт фиксируется на момент сборки — оценка воспроизводима, даже
@@ -24376,6 +24380,13 @@ class Database:
         backlog = None   # задержка доставки вебхуков — одна на весь вызов
         latest = {}      # (канал, чат) → самое позднее время, записанное в этом вызове
         with self._get_cursor() as cursor:
+            # Acquire the receipt locks in a common order without reordering
+            # message processing (its order matters for late-delivery times).
+            message_ids = sorted({str(m['messageId']) for m in messages
+                                  if isinstance(m, dict) and m.get('messageId')})
+            if message_ids:
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext('wazzup-status'), hashtext(message_id)) "
+                               "FROM unnest(%s::text[]) AS ids(message_id)", (message_ids,))
             for m in messages:
                 if not isinstance(m, dict):
                     continue
@@ -24420,11 +24431,12 @@ class Database:
                         -- известный текст, факт удаления фиксирует is_deleted
                         text = COALESCE(EXCLUDED.text, wazzup_messages.text),
                         content_uri = COALESCE(EXCLUDED.content_uri, wazzup_messages.content_uri),
-                        status = COALESCE(EXCLUDED.status, wazzup_messages.status),
+                        status = wazzup_merge_delivery(wazzup_messages.status, EXCLUDED.status),
                         author_name = COALESCE(EXCLUDED.author_name, wazzup_messages.author_name),
                         author_id = COALESCE(EXCLUDED.author_id, wazzup_messages.author_id),
                         is_edited = EXCLUDED.is_edited,
                         is_deleted = EXCLUDED.is_deleted
+                    WHERE wazzup_messages.account = EXCLUDED.account
                 """, (
                     str(message_id), str(channel_id), m.get('chatType'), str(chat_id),
                     stored_dt, is_echo, m.get('type'), m.get('text'),
@@ -24433,6 +24445,10 @@ class Database:
                     m.get('sentFromApp'), bool(m.get('isEdited')), bool(m.get('isDeleted')),
                     account, wazzup_dt,
                 ))
+                if cursor.rowcount == 0:
+                    # Message IDs are globally unique, but never allow a wrong
+                    # account to overwrite an existing message on collision.
+                    continue
                 processed += 1
                 affected[(str(channel_id), str(chat_id))] = (m.get('chatType'), contact)
             for (channel_id, chat_id), (chat_type, contact) in affected.items():
@@ -24549,24 +24565,38 @@ class Database:
                   FROM wazzup_chats GROUP BY account""")
             return {r[0]: {'chats': r[1], 'last_message_at': r[2]} for r in cursor.fetchall()}
 
-    def update_wazzup_statuses(self, statuses):
+    def update_wazzup_statuses(self, statuses, account='op'):
         """Обновляет статусы доставки (sent/delivered/read/error) сообщений.
-        Статусы сообщений, которых у нас нет (например, отправленных до
-        включения сбора), молча пропускаются. Возвращает число обновлённых."""
+        Ранние статусы сохраняются до прихода сообщения. Повторная доставка
+        и нарушение порядка не откатывают delivered/read. Возвращает число обновлений."""
         if not isinstance(statuses, list) or not statuses:
             return 0
         updated = 0
         with self._get_cursor() as cursor:
-            for s in statuses:
+            for s in sorted((s for s in statuses if isinstance(s, dict)),
+                            key=lambda s: str(s.get('messageId', ''))):
                 if not isinstance(s, dict):
                     continue
                 message_id = s.get('messageId')
                 status = s.get('status')
-                if not message_id or not status:
+                if not message_id or status not in ('sent', 'delivered', 'read', 'error'):
                     continue
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext('wazzup-status'), hashtext(%s))",
+                               (str(message_id),))
+                cursor.execute("""
+                    INSERT INTO wazzup_status_receipts(account, message_id, status)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT(account, message_id) DO UPDATE SET
+                        status=wazzup_merge_delivery(wazzup_status_receipts.status, EXCLUDED.status),
+                        updated_at=now()
+                    RETURNING status
+                """, (account, str(message_id), str(status)))
+                merged = cursor.fetchone()[0]
                 cursor.execute(
-                    "UPDATE wazzup_messages SET status = %s WHERE message_id = %s",
-                    (str(status), str(message_id)))
+                    "UPDATE wazzup_messages SET status = wazzup_merge_delivery(status, %s) "
+                    "WHERE message_id = %s AND account = %s "
+                    "AND status IS DISTINCT FROM wazzup_merge_delivery(status, %s)",
+                    (merged, str(message_id), account, merged))
                 updated += cursor.rowcount
         return updated
 
@@ -24611,6 +24641,11 @@ class Database:
         with self._get_cursor() as cursor:
             marked_journal_episodes = self._mark_journal_evaluated_wazzup_episodes_tx(
                 cursor)
+            cursor.execute("DELETE FROM wazzup_status_receipts WHERE updated_at < now() - interval '2 days'")
+            # Idempotency tombstones survive archive pruning; discard only the
+            # duplicated text, never a request ID which could otherwise resend.
+            cursor.execute("UPDATE wazzup_pilot_outbox SET text='' WHERE text<>'' "
+                           "AND created_at < now() - make_interval(days => %s)", (days,))
             cursor.execute(
                 "DELETE FROM wazzup_messages WHERE dt < now() - make_interval(days => %s)",
                 (days,))
