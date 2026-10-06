@@ -44,8 +44,16 @@ const SALES_HEAD_VIEWS = [
 ];
 
 // Фронт офисы: менеджеры ведут только учёт сотрудников, свои группы и графики
-// работы; сотрудники видят только свой профиль и «Мои смены» (без смен коллег).
-const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];
+// работы; сотрудники видят свой профиль, «Мои смены» (без смен коллег) и
+// «Опросы», стажёры — без «Опросов».
+const FRONT_OFFICE_TRAINEE_VIEWS = ['profile', 'work_schedules'];
+// «Опросы» у сотрудника — с 06.10.2026, вместе с разделом у главы (см. ниже):
+// назначенный опрос проходят только в самом разделе, колокол ведёт туда же, и
+// без этой строки опрос висел бы у человека непройденным без единого входа.
+// Стажёру раздел не выдан: сервер стажёра в «Опросы» не пускает
+// (_surveys_route_guard), а назначить ему опрос руководитель не может — пункт
+// меню открывал бы отказ.
+const FRONT_OFFICE_OPERATOR_VIEWS = [...FRONT_OFFICE_TRAINEE_VIEWS, 'surveys'];
 const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedules'];
 // «Задачи» выданы только главе отдела: у СВ фронт-офисов набор разделов прежний
 // (в tez/op раздел есть у обеих ролей, здесь — по запросу владельца только глава).
@@ -53,7 +61,11 @@ const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedule
 // «Вики» (офисы, парки) только по подтверждению, а супервайзеров в отделе нет
 // вовсе — подтверждает глава. Без строки в allowlist пункта меню у него не
 // появится, и подтвердить доступ станет физически некому.
-const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access'];
+// «Опросы» — тоже только главе (решение владельца 06.10.2026: руководитель
+// фронт-офисов сам назначает опросы своим сотрудникам). Права эта строка не
+// выдаёт: сервер главу любого отдела пускает в раздел супервайзером в границах
+// его отдела (_surveys_route_guard в bot_schedule2.py) — закрыт был пункт меню.
+const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access', 'surveys'];
 
 // Бэк-офис (Бухгалтерия, HR): отделы без телефонии, направлений, графиков и
 // оценок. Им оставлены только «Учёт сотрудников» и «Вики».
@@ -167,7 +179,7 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
     },
     front_office: {
         operator: FRONT_OFFICE_OPERATOR_VIEWS,
-        trainee: FRONT_OFFICE_OPERATOR_VIEWS,
+        trainee: FRONT_OFFICE_TRAINEE_VIEWS,
         head: FRONT_OFFICE_HEAD_VIEWS,
         sv: FRONT_OFFICE_MANAGER_VIEWS,
     },

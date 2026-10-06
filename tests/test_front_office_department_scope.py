@@ -1,5 +1,6 @@
 import ast
 import textwrap
+import types
 import unittest
 from pathlib import Path
 from tests import source_cache
@@ -30,32 +31,36 @@ def _function_source(path, function_name):
 
 class FrontOfficeViewAllowlistTests(unittest.TestCase):
     """Отдел «Фронт офисы» (front_office): менеджеры — только учёт сотрудников
-    и графики работы; сотрудники — только профиль и «Мои смены»."""
+    и графики работы; сотрудники — профиль, «Мои смены» и «Опросы»."""
 
     def test_front_office_allowlist_entry(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
 
-        self.assertIn("const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];", source)
+        self.assertIn("const FRONT_OFFICE_TRAINEE_VIEWS = ['profile', 'work_schedules'];", source)
+        self.assertIn(
+            "const FRONT_OFFICE_OPERATOR_VIEWS = [...FRONT_OFFICE_TRAINEE_VIEWS, 'surveys'];", source
+        )
         self.assertIn("const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedules'];", source)
         self.assertIn("front_office: {", source)
 
         entry = source.split("front_office: {", 1)[1].split("},", 1)[0]
         self.assertIn("operator: FRONT_OFFICE_OPERATOR_VIEWS", entry)
-        self.assertIn("trainee: FRONT_OFFICE_OPERATOR_VIEWS", entry)
+        self.assertIn("trainee: FRONT_OFFICE_TRAINEE_VIEWS", entry)
         self.assertIn("head: FRONT_OFFICE_HEAD_VIEWS", entry)
         self.assertIn("sv: FRONT_OFFICE_MANAGER_VIEWS", entry)
 
-    def test_tasks_and_qr_access_are_open_to_the_head_only(self):
+    def test_tasks_qr_access_and_surveys_are_open_to_the_head_only(self):
         # Пункт «Задачи» в ветке главы гейтится departmentAllowsView(user, 'tasks'),
         # поэтому раздел выдаётся не предикатом, а строкой в allowlist отдела.
         # «QR доступ» приехал туда же 20.08.2026: сотрудники фронт-офиса
         # открывают «Вики» только по подтверждению, а супервайзеров в отделе нет —
         # подтверждает глава, и без строки в allowlist пункта меню у него не будет.
+        # «Опросы» — 06.10.2026: глава назначает опросы своим сотрудникам.
         source = _read(DEPARTMENT_VIEWS_PATH)
 
         self.assertIn(
             "const FRONT_OFFICE_HEAD_VIEWS = "
-            "[...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access'];", source
+            "[...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access', 'surveys'];", source
         )
         # У СВ набор прежний: разделы главы не должны приехать вместе с ним.
         manager_line = next(
@@ -64,10 +69,15 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         )
         self.assertNotIn("'tasks'", manager_line)
         self.assertNotIn("'qr_access'", manager_line)
+        self.assertNotIn("'surveys'", manager_line)
 
         app = _read(APP_PATH)
         self.assertIn("{departmentAllowsView(user, 'tasks') && (", app)
         self.assertIn("{departmentAllowsView(user, 'qr_access') && (", app)
+        # Оба пункта «Опросы» — у руководителя отдела и у рядового — стоят под
+        # картой разделов: строка в allowlist и есть то, что их показывает.
+        self.assertEqual(app.count("{departmentAllowsView(user, 'surveys') && ("), 2)
+
 
     def test_colleague_schedule_hiding_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
@@ -87,6 +97,167 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         )
         self.assertIn("export const departmentUsesSimpleEmployeeAccounting = (user) =>", source)
         self.assertIn("SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code)", source)
+
+
+
+FRONT_OFFICE_ID = 909
+SZOV_ID = 1
+HEAD_ID = 10
+STAFF_ID = 11
+
+# Гард раздела «Опросы» и всё, чем он решает, — живое, из bot_schedule2.py.
+SURVEYS_GUARD_NAMES = {
+    '_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role', '_has_any_role',
+    '_is_admin_role', '_is_super_admin_role', '_is_global_admin_requester',
+    'MARKETING_OBSERVER_ROLE', '_normalize_surveys_role',
+    '_headed_department_id', '_department_scope_id_for_requester', '_surveys_route_guard',
+}
+# Ручки раздела и методы базы, которым они обязаны передать границу отдела.
+SURVEY_ROUTES = (
+    'handle_surveys', 'survey_pending_count', 'get_survey_detail', 'delete_survey',
+    'export_survey_statistics_excel',
+)
+SCOPED_SURVEY_DB_CALLS = {
+    'get_surveys_page', 'get_survey_assignable_groups', 'get_visible_operator_ids_for_requester',
+    'get_surveys_for_management', 'count_pending_surveys', 'get_survey_detail_for_requester',
+}
+SURVEY_BOUNDARY = "getattr(g, 'survey_scope_department_id', None)"
+
+
+class _SurveysDB:
+    """Ровно те два вопроса к базе, которые задаёт гард: чей отдел и свой отдел."""
+
+    def __init__(self, headed=None, department=None):
+        self._headed = headed or {}
+        self._department = department or {}
+
+    def headed_department_id_for_user(self, user_id):
+        return self._headed.get(user_id)
+
+    def get_user_department_id(self, user_id):
+        return self._department.get(user_id)
+
+
+def _bot_function_node(name):
+    return next(
+        node for node in source_cache.parse(_read(BOT_PATH)).body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+class FrontOfficeSurveysBackendTests(unittest.TestCase):
+    """Строка в allowlist открывает главе фронт-офисов только пункт меню. Право
+    вести опросы и его граница живут на сервере: глава отдела входит в раздел
+    супервайзером, а круг сотрудников и опросов режется возглавляемым отделом.
+
+    Гард исполняется настоящий (импортировать монолит нельзя — он на старте
+    поднимает пул к базе; функции достаём через ast, как test_bot_help_command).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        body = []
+        for node in source_cache.parse(_read(BOT_PATH)).body:
+            if isinstance(node, ast.FunctionDef) and node.name in SURVEYS_GUARD_NAMES:
+                body.append(node)
+            elif isinstance(node, ast.Assign):
+                if {t.id for t in node.targets if isinstance(t, ast.Name)} & SURVEYS_GUARD_NAMES:
+                    body.append(node)
+        module = ast.Module(body=body, type_ignores=[])
+        ast.fix_missing_locations(module)
+        cls._code = compile(module, "<surveys-guard>", "exec")
+
+    def _guard(self, user_id, role, headed=None, department=None):
+        """(роль в разделе, граница отдела, код отказа) для одного запроса."""
+        requester = (user_id, 'login', 'Имя', role)
+        ns = {
+            'db': _SurveysDB(headed=headed, department=department),
+            'g': types.SimpleNamespace(),
+            'jsonify': lambda payload: payload,
+            '_resolve_requester': lambda: (user_id, requester, None),
+        }
+        exec(self._code, ns)
+        missing = sorted(name for name in SURVEYS_GUARD_NAMES if name not in ns)
+        self.assertEqual(missing, [], "не найдено в bot_schedule2.py")
+        _, _, section_role, _, status = ns['_surveys_route_guard']()
+        return section_role, getattr(ns['g'], 'survey_scope_department_id', 'не выставлена'), status
+
+    def test_head_runs_surveys_as_supervisor_of_the_headed_department(self):
+        # Базовая роль главы и его собственный отдел в карточке границу не
+        # меняют: решает назначение главой.
+        for base_role in ('admin', 'sv', 'trainer', 'operator', 'trainee'):
+            for own_department in (FRONT_OFFICE_ID, None, SZOV_ID):
+                with self.subTest(base_role=base_role, own_department=own_department):
+                    self.assertEqual(
+                        self._guard(HEAD_ID, base_role, headed={HEAD_ID: FRONT_OFFICE_ID},
+                                    department={HEAD_ID: own_department}),
+                        ('sv', FRONT_OFFICE_ID, None),
+                    )
+
+    def test_admins_without_headship_keep_the_whole_company(self):
+        self.assertEqual(self._guard(HEAD_ID, 'admin', department={HEAD_ID: FRONT_OFFICE_ID}),
+                         ('admin', None, None))
+        self.assertEqual(self._guard(HEAD_ID, 'super_admin', headed={HEAD_ID: FRONT_OFFICE_ID}),
+                         ('super_admin', None, None))
+
+    def test_front_office_staff_and_supervisor_stay_inside_the_department(self):
+        department = {STAFF_ID: FRONT_OFFICE_ID}
+        self.assertEqual(self._guard(STAFF_ID, 'operator', department=department),
+                         ('operator', FRONT_OFFICE_ID, None))
+        self.assertEqual(self._guard(STAFF_ID, 'sv', department=department),
+                         ('sv', FRONT_OFFICE_ID, None))
+
+    def test_trainee_is_refused_so_the_view_map_gives_him_no_menu_item(self):
+        # Стажёра сервер в «Опросы» не пускает — поэтому раздела нет и в его
+        # наборе FRONT_OFFICE_TRAINEE_VIEWS: пункт меню открывал бы отказ.
+        for role in ('trainee', 'hr_manager', 'accounting_manager'):
+            with self.subTest(role=role):
+                section_role, boundary, status = self._guard(
+                    STAFF_ID, role, department={STAFF_ID: FRONT_OFFICE_ID})
+                self.assertEqual((section_role, status), (None, 403))
+                self.assertEqual(boundary, 'не выставлена')
+
+    def test_every_survey_route_hands_the_boundary_to_the_data_layer(self):
+        # Граница, которую гард положил в g, ничего не стоит, пока ручка не
+        # отдала её базе: забытый аргумент показал бы главе опросы всей компании.
+        seen = set()
+        for route in SURVEY_ROUTES:
+            node = _bot_function_node(route)
+            assigned = {}
+            for statement in ast.walk(node):
+                if isinstance(statement, ast.Assign):
+                    for target in statement.targets:
+                        if isinstance(target, ast.Name):
+                            assigned.setdefault(target.id, set()).add(ast.unparse(statement.value))
+            carriers = {name for name, values in assigned.items() if values == {SURVEY_BOUNDARY}}
+            for call in ast.walk(node):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Name) and call.func.value.id == 'db'
+                        and call.func.attr in SCOPED_SURVEY_DB_CALLS):
+                    continue
+                where = f"{route}: db.{call.func.attr}"
+                keyword = next((k for k in call.keywords if k.arg == 'scope_department_id'), None)
+                self.assertIsNotNone(keyword, where)
+                value = ast.unparse(keyword.value)
+                self.assertTrue(value == SURVEY_BOUNDARY or value in carriers, f"{where}: {value}")
+                seen.add(call.func.attr)
+        self.assertEqual(seen, SCOPED_SURVEY_DB_CALLS)
+
+    def test_supervisor_assigns_only_people_inside_the_boundary(self):
+        # Создание и правка: у роли 'sv' (в ней и приходит глава отдела) состав
+        # режется до видимых ей сотрудников — чужого человека назначить нельзя.
+        for route in ('handle_surveys', 'delete_survey'):
+            filters = [
+                statement for statement in ast.walk(_bot_function_node(route))
+                if isinstance(statement, ast.If) and ast.unparse(statement.test) == "requester_role == 'sv'"
+            ]
+            self.assertEqual(len(filters), 1, route)
+            body = '\n'.join(ast.unparse(statement) for statement in filters[0].body)
+            self.assertIn('db.get_visible_operator_ids_for_requester(', body, route)
+            self.assertIn(
+                'operator_ids = [op_id for op_id in operator_ids if op_id in visible_operator_ids]',
+                body, route,
+            )
 
 
 class FrontOfficeHeadSidebarTests(unittest.TestCase):
