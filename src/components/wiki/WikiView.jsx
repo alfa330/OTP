@@ -3,7 +3,7 @@ import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
     AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
-    Layers, Link2, Map as MapIcon, MapPin,
+    Layers, Map as MapIcon, MapPin,
     Network,
     Building2, LineChart, Loader2, Megaphone, Plus, RefreshCw,
     MessageCircleQuestion, ScrollText, ShieldCheck, Sparkles, Users,
@@ -43,8 +43,7 @@ import { CLASSIFIER_SLUG } from './WikiArticle';
 import { readArticleSlugFromSearch } from './articleLink';
 import { getScrollContainer, scrollPortalTo } from './scrollContainer';
 import {
-    buildWikiTabLink, readWikiSpaceFromSearch, readWikiTabFromSearch, syncWikiTabLink,
-    WIKI_DEFAULT_TAB,
+    readWikiSpaceFromSearch, readWikiTabFromSearch, syncWikiTabLink, WIKI_DEFAULT_TAB,
 } from './tabLink';
 import { CAPABILITY_LABELS } from './sectionGrants';
 import './wiki-theme.css';
@@ -610,8 +609,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     }, [requestedTab, tabs, loading]);
 
     /* ОТКРЫТАЯ ВКЛАДКА В АДРЕСНОЙ СТРОКЕ. Пишем её на каждое переключение: в
-       приложении на телефоне адресной строки не видно вовсе, но перезагрузка,
-       возврат по истории и кнопка «Ссылка» берут адрес именно отсюда.
+       приложении на телефоне адресной строки не видно вовсе, но перезагрузка и
+       возврат по истории берут адрес именно отсюда, а на компьютере его
+       копируют прямо из строки. Отдельной кнопки «Ссылка» в шапке больше нет
+       (решение владельца 06.10.2026: «они вообще не нужны»).
 
        Пока просьба из ссылки не выполнена, адрес не трогаем: иначе первый же
        рендер (tab ещё 'library') стёр бы метку, ради которой человек и перешёл
@@ -754,37 +755,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         scrollPortalTo(0);
     }, [tabs]);
 
-    /* ССЫЛКА НА ОТКРЫТУЮ ВКЛАДКУ. Кладём в буфер, а не показываем адрес: в
-       приложении на телефоне адресной строки нет вовсе, а именно оттуда ссылку
-       и отправляют в переписку. Запасной путь через execCommand нужен не для
-       красоты — clipboard.writeText живёт только в защищённом контексте, и в
-       старом вебвью кнопка иначе молча ничего не делала бы (тот же приём, что
-       у ссылки на статью — WikiArticle.copyLink). */
-    const copyTabLink = () => {
-        const link = buildWikiTabLink(tab, spaces.length > 1 ? activeSpace?.id : null);
-        if (!link) { showToast?.('Не удалось собрать ссылку', 'error'); return; }
-        // Подписываем ссылку ВКЛАДКОЙ: «скопировано» без имени не отвечает на
-        // вопрос «что именно я сейчас отправлю».
-        const label = tabs.find((t) => t.key === tab)?.label || 'раздел';
-        const ok = () => showToast?.(`Ссылка на «${label}» скопирована`, 'success');
-        const fallback = () => {
-            const field = document.createElement('textarea');
-            field.value = link;
-            field.setAttribute('readonly', '');
-            field.style.position = 'fixed';
-            field.style.opacity = '0';
-            document.body.appendChild(field);
-            field.select();
-            let copied = false;
-            try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
-            document.body.removeChild(field);
-            if (copied) ok();
-            else showToast?.('Не удалось скопировать — адрес вкладки есть в адресной строке', 'error');
-        };
-        if (!navigator.clipboard?.writeText) { fallback(); return; }
-        navigator.clipboard.writeText(link).then(ok).catch(fallback);
-    };
-
     /* Заголовок раздела работает как логотип сайта: возвращает на главную вики
        из статьи, из выбранного раздела и с любой вкладки. Прокрутку сбрасываем
        сами — скроллится .main-content портала, а не окно (scrollContainer.js). */
@@ -884,20 +854,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             onOpenOffice={canOpenOffices ? openDirectory : null}
                             onOpenCity={canOpenCities ? openDirectory : null}
                         />
-
-                        {/* Ссылка на вкладку — рядом с «Обновить», одной кнопкой на
-                            весь раздел: адрес есть у каждой вкладки, и второй такой
-                            кнопки внутри вкладок быть не должно. Подпись скрыта на
-                            телефоне слоем оболочки (кнопки шапки там круглые). */}
-                        <button
-                            type="button"
-                            onClick={copyTabLink}
-                            className={iosBtnSecondary}
-                            title="Скопировать ссылку на эту вкладку"
-                            aria-label="Скопировать ссылку на эту вкладку"
-                        >
-                            <Link2 size={15} /> Ссылка
-                        </button>
 
                         <button type="button" onClick={refresh} className={iosBtnSecondary}>
                             <RefreshCw size={15} /> Обновить

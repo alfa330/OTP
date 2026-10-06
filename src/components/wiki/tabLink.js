@@ -31,7 +31,7 @@ export const WIKI_SPACE_QUERY_PARAM = 'space';
  * они дали бы ссылку, которая молча открывает главную.
  *
  * Главная («library») здесь есть намеренно, хотя в адрес не пишется (см.
- * buildWikiTabLink): её присылают явной ссылкой из чужих ссылок-обрезков, и
+ * applyWikiMarks): её присылают явной ссылкой из чужих ссылок-обрезков, и
  * принять такой адрес раздел обязан.
  */
 export const WIKI_TAB_KEYS = [
@@ -59,8 +59,8 @@ const applyWikiMarks = (url, tab, spaceId) => {
     url.searchParams.set(APP_VIEW_QUERY_PARAM, WIKI_VIEW);
     const key = normalizeWikiTab(tab);
     /* Главная метки не получает: '?view=wiki' и так открывает витрину, а
-       '&tab=library' в каждой скопированной ссылке — лишние буквы, за которыми
-       нет ни одного решения. */
+       '&tab=library' в каждом адресе — лишние буквы, за которыми нет ни одного
+       решения. */
     if (key && key !== WIKI_DEFAULT_TAB) url.searchParams.set(WIKI_TAB_QUERY_PARAM, key);
     else url.searchParams.delete(WIKI_TAB_QUERY_PARAM);
     const space = normalizeWikiSpaceId(spaceId);
@@ -69,27 +69,12 @@ const applyWikiMarks = (url, tab, spaceId) => {
     return url;
 };
 
-/** Ссылка на вкладку, которую можно скопировать и отправить. '' — не собралась.
- *
- * Метку СТАТЬИ снимаем: ссылку на вкладку копируют из шапки раздела, и открытая
- * в этот момент статья к обещанию «вот раздел Офисы» отношения не имеет — с ней
- * получатель попал бы в чужой текст. Ссылка на саму статью собирается отдельно
- * (articleLink.js) и своей кнопкой.
- */
-export const buildWikiTabLink = (tab, spaceId = null) => {
-    if (typeof window === 'undefined') return '';
-    try {
-        const url = new URL(window.location.href);
-        // Метки перезагрузки в ссылку не переносим — см. utils/urlHygiene.js.
-        stripTechnicalQueryParams(url);
-        url.searchParams.delete('article');
-        return applyWikiMarks(url, tab, spaceId).toString();
-    } catch (error) {
-        return '';
-    }
-};
-
 /** Открытая вкладка в адресной строке.
+ *
+ * Это и есть адрес вкладки: его копируют из строки браузера и по нему же
+ * перезагрузка возвращает человека туда, где он был. Отдельной кнопки «Ссылка»
+ * в шапке раздела нет с 06.10.2026 (решение владельца: «они вообще не нужны»),
+ * вместе с ней ушла и функция, собиравшая ссылку для буфера обмена.
  *
  * replaceState, а не pushState: вкладки — не история браузера, и «назад» должно
  * уводить туда, откуда человек пришёл в портал, а не отматывать вкладки по

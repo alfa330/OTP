@@ -10,7 +10,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { sectionAncestors } from './sectionPicker';
-import { grantableCheck, presetIsGrantable } from './sectionGrants';
+import { PERMISSIONS, PRESETS, grantableCheck, presetIsGrantable } from './sectionGrants';
 import { buildRecipients, grantedKeys, peopleLabel, SUBJECT_KIND_LABEL }
     from './accessRecipients';
 import useStableCallback from './useStableCallback';
@@ -141,40 +141,6 @@ const ruleMatchesRow = (rule, row) => (
    получает отказ на заполненном экране — ровно тот молчаливый отказ с
    обратной стороны стола, от которого этот экран лечили уже трижды. */
 const MAX_SUBJECTS = 50;
-
-const PERMISSIONS = [
-    { key: 'can_read', label: 'Читать', note: 'видит раздел и его статьи' },
-    { key: 'can_create', label: 'Создавать', note: 'заводит новые статьи' },
-    { key: 'can_edit', label: 'Править', note: 'меняет текст существующих' },
-    { key: 'can_publish', label: 'Публиковать', note: 'выпускает черновик' },
-    { key: 'can_approve', label: 'Согласовывать', note: 'подтверждает чужую правку' },
-    { key: 'can_delete', label: 'Удалять', note: 'убирает статьи', danger: true },
-];
-
-/* Готовые наборы прав — то, что выбирают в 9 случаях из 10. Тонкая настройка
-   остаётся рядом, но НИЖЕ и свёрнутая: пока шесть тумблеров лежали прямо под
-   сегментами, пресеты не экономили ничего — человек всё равно видел десять
-   органов управления одним и тем же.
-
-   `summary` — как набор называется одним словом в строке списка, `note` — чем
-   он отличается от соседнего. Без них строка перечисляла все выданные права
-   пилюлями: у полного доступа их семь, они переносились в три ряда, и список
-   должностей превращался в рваную лестницу. */
-const PRESETS = [
-    { key: 'none', label: 'Нет', summary: 'Нет доступа',
-      note: 'Раздела не видно в дереве, статьи не открываются.',
-      permissions: {} },
-    { key: 'read', label: 'Чтение', summary: 'Чтение',
-      note: 'Видит раздел и читает его статьи. Менять ничего не может.',
-      permissions: { can_read: true } },
-    { key: 'write', label: 'Правка', summary: 'Правка',
-      note: 'Читает, заводит новые статьи и меняет текст существующих.',
-      permissions: { can_read: true, can_create: true, can_edit: true } },
-    { key: 'full', label: 'Полный', summary: 'Полный доступ',
-      note: 'Все шесть прав: вместе с публикацией, согласованием и удалением.',
-      permissions: { can_read: true, can_create: true, can_edit: true,
-                     can_publish: true, can_approve: true, can_delete: true } },
-];
 
 /* Пятый сегмент — не выбор, а ЧЕСТНАЯ подпись набора, собранного руками.
    Пока его не было, ручная правка тумблера гасила подсветку у всех четырёх

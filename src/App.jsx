@@ -2962,8 +2962,8 @@ const readComplaintIdFromUrl = (locationLike = null) => {
     }
 };
 
-/* Статья вики, открытая прямой ссылкой: её копируют кнопкой «Ссылка» на самой
-   статье и вставляют в переписку. Разбор слага живёт в
+/* Статья вики, открытая прямой ссылкой: адрес открытой статьи копируют из
+   адресной строки и вставляют в переписку. Разбор слага живёт в
    components/wiki/articleLink.js — там же его собирают. */
 const readWikiArticleSlugFromUrl = (locationLike = null) => {
     if (typeof window === 'undefined' && !locationLike) return '';

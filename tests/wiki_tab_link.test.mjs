@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  buildWikiTabLink,
   normalizeWikiSpaceId,
   normalizeWikiTab,
   readWikiSpaceFromSearch,
@@ -34,72 +33,55 @@ const useLocation = (href) => {
   replaced.length = 0;
 };
 
-test('ссылка на вкладку строится поверх текущего адреса портала', () => {
+/* Адрес вкладки пишет ОДНА функция — синхронизация адресной строки. Кнопку
+   «Ссылка» в шапке раздела владелец убрал 06.10.2026 («они вообще не нужны»),
+   и функция, собиравшая ссылку для буфера, ушла вместе с ней; правила самого
+   адреса остались те же и проверяются на том, что осталось. */
+const synced = (tab, spaceId) => {
+  syncWikiTabLink(tab, spaceId);
+  return replaced.at(-1).next;
+};
+
+test('адрес вкладки строится поверх текущего адреса портала', () => {
   useLocation(PORTAL);
-  assert.equal(
-    buildWikiTabLink('offices'),
-    'https://alfa330.github.io/OTP?view=wiki&tab=offices'
-  );
+  assert.equal(synced('offices'), '/OTP?view=wiki&tab=offices');
 });
 
-test('ссылку строим и из другого раздела портала: view переписывается на вики', () => {
+test('чужие метки адреса переживают, view переписывается на вики', () => {
   useLocation('https://alfa330.github.io/OTP?view=tasks&task_id=166');
-  assert.equal(
-    buildWikiTabLink('parks'),
-    'https://alfa330.github.io/OTP?view=wiki&task_id=166&tab=parks'
-  );
+  assert.equal(synced('parks'), '/OTP?view=wiki&task_id=166&tab=parks');
 });
 
-test('метки перезагрузки в ссылку не уезжают', () => {
+test('метки перезагрузки в адрес вкладки не уезжают', () => {
   useLocation(`${PORTAL}&v=1786951163258&auth_reload=1786533936834`);
-  assert.equal(
-    buildWikiTabLink('audit'),
-    'https://alfa330.github.io/OTP?view=wiki&tab=audit'
-  );
+  assert.equal(synced('audit'), '/OTP?view=wiki&tab=audit');
 });
 
-/* Ссылку на вкладку копируют из шапки раздела, и открытая в этот момент статья
-   к обещанию «вот раздел Офисы» отношения не имеет: с ней получатель попал бы
-   в чужой текст вместо вкладки. */
-test('открытая статья в ссылку на вкладку не уезжает', () => {
-  useLocation('https://alfa330.github.io/OTP?view=wiki&article=tarify-2026');
-  assert.equal(
-    buildWikiTabLink('offices'),
-    'https://alfa330.github.io/OTP?view=wiki&tab=offices'
-  );
-});
-
-/* Главная — вкладка по умолчанию: '?view=wiki' и так открывает витрину, и
-   '&tab=library' был бы лишними буквами в каждой скопированной ссылке. */
-test('у главной метки вкладки нет — адрес остаётся коротким', () => {
-  useLocation(`${PORTAL}&tab=offices`);
-  assert.equal(buildWikiTabLink('library'), 'https://alfa330.github.io/OTP?view=wiki');
-});
-
-test('чужой ключ ссылки не подделывает: метка просто не ставится', () => {
-  useLocation(`${PORTAL}&tab=offices`);
+test('чужой ключ адрес не подделывает: метка просто не ставится', () => {
   for (const bad of ['', null, 'admin', '../secret', 'offices2']) {
-    assert.equal(buildWikiTabLink(bad), 'https://alfa330.github.io/OTP?view=wiki');
+    useLocation(`${PORTAL}&tab=offices`);
+    assert.equal(synced(bad), '/OTP?view=wiki');
   }
 });
 
-/* Пространство в ссылке — не украшение: вкладки показываются по тумблерам
-   пространства, а выбрано у каждого своё. Без метки ссылка на «Офисы»
-   Таксопарков открыла бы офисы той вики, в которой получатель был в прошлый
+/* Пространство в адресе — не украшение: вкладки показываются по тумблерам
+   пространства, а выбрано у каждого своё. Без метки адрес «Офисов»
+   Таксопарков открыл бы офисы той вики, в которой получатель был в прошлый
    раз, — или вкладку, которой там нет вовсе. */
-test('пространство уезжает в ссылку и читается обратно', () => {
+test('пространство уезжает в адрес и читается обратно', () => {
   useLocation(PORTAL);
-  const link = buildWikiTabLink('offices', 3);
-  assert.equal(link, 'https://alfa330.github.io/OTP?view=wiki&tab=offices&space=3');
-  assert.equal(readWikiTabFromSearch(new URL(link).search), 'offices');
-  assert.equal(readWikiSpaceFromSearch(new URL(link).search), 3);
+  const next = synced('offices', 3);
+  assert.equal(next, '/OTP?view=wiki&tab=offices&space=3');
+  const search = next.slice(next.indexOf('?'));
+  assert.equal(readWikiTabFromSearch(search), 'offices');
+  assert.equal(readWikiSpaceFromSearch(search), 3);
 });
 
 test('без пространства метки нет, битое — та же пустота', () => {
-  useLocation(PORTAL);
-  assert.equal(buildWikiTabLink('offices', null), 'https://alfa330.github.io/OTP?view=wiki&tab=offices');
-  assert.equal(buildWikiTabLink('offices', 0), 'https://alfa330.github.io/OTP?view=wiki&tab=offices');
-  assert.equal(buildWikiTabLink('offices', '2; drop'), 'https://alfa330.github.io/OTP?view=wiki&tab=offices');
+  for (const space of [null, 0, '2; drop']) {
+    useLocation(`${PORTAL}&space=7`);
+    assert.equal(synced('offices', space), '/OTP?view=wiki&tab=offices');
+  }
 });
 
 test('открытая вкладка попадает в адресную строку, главная — убирает метку', () => {

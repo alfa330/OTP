@@ -2,8 +2,8 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, History, Link2,
-    List, Loader2, Maximize2, Megaphone, Minimize2, Pencil, Star, User,
+    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, FolderTree, History,
+    KeyRound, List, Loader2, Maximize2, Megaphone, Minimize2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 // fmtDeadline под своим именем: в файле уже есть свой fmtDate — «5 сентября
@@ -22,6 +22,7 @@ import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import useCopyGuard from './useCopyGuard';
 import useStableCallback from './useStableCallback';
 import WikiAckPanel from './WikiAckPanel';
+import WikiArticleAccess from './WikiArticleAccess';
 import WikiHistory from './WikiHistory';
 // Оформительские блоки статьи. Импорт стоит здесь, а не в WikiView: витрина и
 // редактор — разные чанки, и стили должны приехать с тем из них, который
@@ -276,6 +277,8 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     const [archiving, setArchiving] = useState(false);
     const [newsBusy, setNewsBusy] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
+    // Справка о статье: где она лежит и — супер-админу — кому открыта.
+    const [accessOpen, setAccessOpen] = useState(false);
     /* Счётчик перезагрузки статьи. Нужен откату: после восстановления редакции
        в базе лежит другой текст, а на экране остался прежний — и человек видит,
        что «ничего не произошло». Отдельное состояние, а не перечитывание по
@@ -293,10 +296,20 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     const [immersive, setImmersive] = useState(false);
 
     /* Esc выходит из режима, а прокрутка страницы под ним замирает: иначе на
-       широкой статье получаются две полосы прокрутки, и человек тянет не ту. */
+       широкой статье получаются две полосы прокрутки, и человек тянет не ту.
+
+       Пока поверх статьи открыто окно («Расположение и доступ», «История»), Esc
+       режим не трогает: человек жмёт его, чтобы убрать окно, а статья под
+       затемнением молча сворачивалась бы — после «Готово» он оказался бы на
+       другой раскладке страницы. Состояние окон читаем через ref, чтобы
+       слушатель и замок прокрутки не переставлялись при каждом их открытии. */
+    const modalOpenRef = useRef(false);
+    modalOpenRef.current = historyOpen || accessOpen;
     useEffect(() => {
         if (!immersive) return undefined;
-        const onKey = (event) => { if (event.key === 'Escape') setImmersive(false); };
+        const onKey = (event) => {
+            if (event.key === 'Escape' && !modalOpenRef.current) setImmersive(false);
+        };
         const previous = document.body.style.overflow;
         document.body.style.overflow = 'hidden';
         window.addEventListener('keydown', onKey);
@@ -305,32 +318,6 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             window.removeEventListener('keydown', onKey);
         };
     }, [immersive]);
-
-    /* Ссылка на статью. Кладём в буфер: адресную строку человек не открывает,
-       а ссылку надо отправить в переписке. Запасной путь через execCommand
-       нужен не для красоты — clipboard.writeText есть только в защищённом
-       контексте, и в старом вебвью кнопка иначе молча ничего не делала бы. */
-    const copyLink = () => {
-        const link = buildArticleLink(article?.slug || slug);
-        if (!link) { showToast?.('Не удалось собрать ссылку на статью', 'error'); return; }
-        const ok = () => showToast?.('Ссылка на статью скопирована', 'success');
-        const fallback = () => {
-            const field = document.createElement('textarea');
-            field.value = link;
-            field.setAttribute('readonly', '');
-            field.style.position = 'fixed';
-            field.style.opacity = '0';
-            document.body.appendChild(field);
-            field.select();
-            let copied = false;
-            try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
-            document.body.removeChild(field);
-            if (copied) ok();
-            else showToast?.('Не удалось скопировать — адрес статьи есть в адресной строке', 'error');
-        };
-        if (!navigator.clipboard?.writeText) { fallback(); return; }
-        navigator.clipboard.writeText(link).then(ok).catch(fallback);
-    };
 
     /* Уход по сети статей. Наверх идёт не только цель, но и ЗАГОЛОВОК текущей
        статьи: витрина держит цепочку по слагам и подписать кнопку возврата
@@ -749,6 +736,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
 
     // Подпись типа документа: null у обычной статьи — бейджа тогда нет вовсе.
     const typeMeta = typeBadge(article?.article_type);
+    /* Справку о статье открывает тот, кто вправе её править, и супер-админ —
+       ему сервер отдаёт ещё и список «кому открыта» (can_view_readers). */
+    const seesPlaces = !!(article?.permissions?.can_edit || article?.can_view_readers);
 
     return (
         <div
@@ -777,8 +767,11 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     вообще, даже администратору. Право берём из ответа сервера
                     (permissions.can_edit), а не из роли: у статьи есть свои
                     правила доступа, и роль их не описывает. */}
-                {/* Перенос обязателен: кнопок в строке четыре, и на телефоне они
-                    иначе уезжают за правый край экрана — «Править» не достать. */}
+                {/* Перенос обязателен: кнопок в строке несколько, и на телефоне они
+                    иначе уезжают за правый край экрана — «Править» не достать.
+                    Кнопки «Ссылка» здесь больше нет (решение владельца
+                    06.10.2026: «они вообще не нужны»); адрес статьи при этом
+                    по-прежнему живёт в адресной строке (articleLink.js). */}
                 <div className="flex flex-wrap items-center justify-end gap-2 wiki-m-actions">
                     {/* Удаление МЯГКОЕ: статья уходит в архив, потому что жёсткое
                         снесло бы каскадом версии, просмотры, назначения на
@@ -797,14 +790,6 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             В архив
                         </button>
                     )}
-                    <button
-                        type="button"
-                        className={iosBtnSecondary}
-                        title="Скопировать ссылку на статью"
-                        onClick={copyLink}
-                    >
-                        <Link2 size={14} /> Ссылка
-                    </button>
                     <button
                         type="button"
                         className={iosBtnSecondary}
@@ -829,6 +814,28 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             onClick={() => setHistoryOpen(true)}
                         >
                             <History size={14} /> История
+                        </button>
+                    )}
+                    {/* Справка о статье (решение владельца 06.10.2026): где
+                        она лежит — тому, кто вправе её править, а кому открыта
+                        — только супер-админу. Оба признака приходят с сервера
+                        (can_edit — тот же, что у «Править»), и дверь
+                        /articles/<id>/access проверяет их же: кнопка не
+                        появится у того, кому сервер ответит отказом, и не
+                        пообещает список тому, кому он не придёт. Рядом с
+                        «Историей»: обе — справки о статье, а не действия с ней. */}
+                    {seesPlaces && (
+                        <button
+                            type="button"
+                            className={iosBtnSecondary}
+                            title={article.can_view_readers
+                                ? 'Где лежит статья и кому она открыта'
+                                : 'Где лежит статья'}
+                            onClick={() => setAccessOpen(true)}
+                        >
+                            {article.can_view_readers
+                                ? <><KeyRound size={14} /> Доступ</>
+                                : <><FolderTree size={14} /> Расположение</>}
                         </button>
                     )}
                     {/* Новостью — только ВЫШЕДШАЯ статья: новость о черновике
@@ -869,6 +876,18 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 onRestored={() => setReloadKey((value) => value + 1)}
                 showToast={showToast}
             />
+
+            {/* Окно смонтировано, только пока право есть: у читателя нет ни
+                кнопки, ни запроса за данными, которые ему не отдадут. */}
+            {seesPlaces && (
+                <WikiArticleAccess
+                    base={base}
+                    headers={headers}
+                    article={article}
+                    open={accessOpen}
+                    onClose={() => setAccessOpen(false)}
+                />
+            )}
 
             {/* Панель ознакомления идёт ПЕРЕД статьёй: требование надо видеть
                 до чтения, а не найти под текстом. */}

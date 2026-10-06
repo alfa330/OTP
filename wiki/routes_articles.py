@@ -11,6 +11,7 @@ import logging
 from flask import jsonify, redirect, request
 
 from . import access as wiki_access
+from . import article_access as wiki_article_access
 from . import articles as wiki_articles
 from . import directory as wiki_directory
 from . import file_urls as wiki_file_urls
@@ -440,6 +441,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
             cursor, article.get('content'), article['id'], visible)
         article['is_favorite'] = wiki_articles.is_favorite(
             cursor, ctx['user_id'], article['id'])
+        # Получит ли человек список «кому открыта статья» (только супер-админ).
+        # Признак считает сервер и отдаёт готовым: по нему страница называет
+        # кнопку справки — «Доступ» или «Расположение», — а вторая формула во
+        # фронте однажды разошлась бы с дверью /articles/<id>/access.
+        article['can_view_readers'] = wiki_article_access.sees_readers(ctx)
         article['file_urls'] = _display_urls(cursor, ctx, article, visible)
         return jsonify(article)
 
@@ -454,6 +460,50 @@ def register(bp, wiki_route, db, log_ip, gcs):
         # Возвращаем состояние, а не голое «ok»: интерфейс рисует звезду по
         # ответу сервера, и договариваться о нём догадками не должен.
         return jsonify({"status": "ok", "is_favorite": favorite})
+
+    # ── Где лежит статья и кому она открыта ──────────────────────────────
+    #
+    # Дверь ТОЛЬКО НА ЧТЕНИЕ, и отвечает она на два вопроса разным людям
+    # (решение владельца 06.10.2026: «кому открыт — у суперадмина, а где
+    # находится сама статья — редакторам и выше»):
+    #
+    #   * где лежит — тому, кто вправе статью править. Гейт — то же эффективное
+    #     право can_edit, по которому на странице стоит кнопка «Править» и по
+    #     которому сервер принимает правку: считается одной функцией, чтобы
+    #     кнопка не появлялась у того, кому эта дверь ответит отказом;
+    #   * кому открыта (поимённый список) — только супер-админу. Он же входит и
+    #     без права правки: роль вики, назначенная руками, способности у него
+    #     отнять может, а «выше редактора» он остаётся.
+    #
+    # Лестница выдачи (GRANT_CEILING) сюда не относится: она про то, кто доступ
+    # РАЗДАЁТ. Узнать, где лежит его текст, вправе и тот, кому раздавать не по
+    # чину, — например тренер или автор статьи.
+    @wiki_route('/articles/<int:article_id>/access')
+    def wiki_article_access_view(cursor, ctx, article_id):
+        subjects, sections, visible = _perimeter(cursor, ctx)
+        # 404, а не 403: как и у самой статьи, «нет доступа» раскрыло бы, что
+        # статья с таким номером существует.
+        if article_id not in visible:
+            return jsonify({"error": "Статья не найдена"}), 404
+        # Карточкой из списка, без тела: справке оно не нужно, а у больших
+        # статей это сотни килобайт на каждое открытие окна.
+        rows = wiki_articles.list_articles(cursor, [article_id], limit=1)
+        if not rows:
+            return jsonify({"error": "Статья не найдена"}), 404
+        article = rows[0]
+
+        with_people = wiki_article_access.sees_readers(ctx)
+        if not with_people:
+            permissions = wiki_articles.effective_permissions(
+                cursor, ctx, article, subjects, sections, queries.section_rules_for_user)
+            if not permissions.get('can_edit'):
+                return jsonify({
+                    "error": "Расположение статьи видит тот, кто вправе её править",
+                    "code": "WIKI_FORBIDDEN",
+                }), 403
+
+        return jsonify(wiki_article_access.describe(
+            cursor, ctx, article, sections, with_people=with_people))
 
     def _display_urls(cursor, ctx, article, visible):
         """{id файла: подписанный адрес} для картинок ТЕЛА статьи.

@@ -10,6 +10,11 @@
 он не видит, — СВЯЗЬ между модулем ссылки, разделом и порталом. Каждое из этих
 мест ломается молча: ссылка открывается, раздел грузится, ошибки нет, а вкладка
 не та.
+
+КНОПОК «ССЫЛКА» БОЛЬШЕ НЕТ (владелец, 06.10.2026: «обе кнопки ссылка убрать, они
+вообще не нужны») — ни в шапке раздела, ни на странице статьи. Сам адрес при
+этом остался: вкладка и открытая статья по-прежнему пишутся в адресную строку и
+читаются из неё, на этом стоят переходы из колокола и ссылки в тексте статей.
 """
 
 import re
@@ -20,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WIKI = ROOT / 'src' / 'components' / 'wiki'
 LINK = (WIKI / 'tabLink.js').read_text(encoding='utf-8')
 VIEW = (WIKI / 'WikiView.jsx').read_text(encoding='utf-8')
+ARTICLE = (WIKI / 'WikiArticle.jsx').read_text(encoding='utf-8')
+LIBRARY = (WIKI / 'WikiLibrary.jsx').read_text(encoding='utf-8')
 APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
 
 
@@ -93,7 +100,8 @@ class SectionTests(unittest.TestCase):
     def test_space_goes_into_the_link_only_when_there_are_several(self):
         """Метка пространства нужна там, где вик несколько: вкладки показываются
         по тумблерам пространства, и у одной вики это был бы шум в каждой ссылке."""
-        self.assertEqual(VIEW.count('spaces.length > 1 ? activeSpace?.id : null'), 2)
+        self.assertIn('syncWikiTabLink(tab, spaces.length > 1 ? activeSpace?.id : null)',
+                      VIEW)
 
     def test_link_from_the_address_beats_the_saved_space(self):
         """Присланная ссылка сильнее localStorage: иначе «Офисы» Таксопарков
@@ -104,13 +112,74 @@ class SectionTests(unittest.TestCase):
         self.assertLess(chunk.index('readWikiSpaceFromSearch'),
                         chunk.index("localStorage.getItem('wiki:space')"))
 
-    def test_header_has_the_copy_button(self):
-        """Кнопка «Ссылка» в шапке — единственный способ достать адрес в
-        приложении на телефоне: адресной строки там не видно вовсе."""
-        self.assertIn('buildWikiTabLink(tab', VIEW)
-        self.assertIn('Скопировать ссылку на эту вкладку', VIEW)
-        # Запасной путь: clipboard.writeText живёт только в защищённом контексте.
-        self.assertIn("document.execCommand('copy')", VIEW)
+    def test_address_is_still_written_on_every_switch(self):
+        """Кнопку убрали, адрес — нет: по нему перезагрузка возвращает на
+        вкладку, и его же копируют из адресной строки. Сторожится весь эффект
+        вместе с зависимостями: с пустым их списком адрес писался бы один раз,
+        при входе, и на второй же вкладке начинал врать."""
+        code = ' '.join(_code(VIEW).split())
+        self.assertIn(
+            'useEffect(() => { if (requestedTab) return; '
+            'syncWikiTabLink(tab, spaces.length > 1 ? activeSpace?.id : null); '
+            '}, [tab, requestedTab, spaces.length, activeSpace]);', code)
+
+    def test_open_article_is_still_written_to_the_address(self):
+        """После снятия кнопки «Ссылка» адресная строка — единственное место,
+        откуда берут ссылку на статью. Метка снимается при закрытии статьи:
+        иначе адрес показывал бы то, чего на экране уже нет."""
+        code = ' '.join(_code(LIBRARY).split())
+        self.assertIn(
+            'useEffect(() => { syncArticleDeepLink(openSlug); '
+            'return () => syncArticleDeepLink(null); }, [openSlug]);', code)
+
+
+def _code(source):
+    """Исходник без комментариев: объяснение, ПОЧЕМУ кнопки нет, само называет
+    её по имени, и проверка «слова нет в файле» ловила бы этот рассказ."""
+    source = re.sub(r'/\*.*?\*/', '', source, flags=re.S)
+    return re.sub(r'(?m)^\s*//[^\n]*$', '', source)
+
+
+class NoCopyButtonsTests(unittest.TestCase):
+    """Обе кнопки «Ссылка» убраны и не должны вернуться молча.
+
+    Решение владельца 06.10.2026. Кнопки появились по его же просьбам (27.08 —
+    у статьи, 16.09 — у вкладок) и занимали место в шапке и в панели статьи
+    рядом с действиями, которыми пользуются каждый день.
+    """
+
+    def test_header_has_no_copy_button(self):
+        code = _code(VIEW)
+        self.assertNotIn('Скопировать ссылку', code)
+        self.assertNotIn('copyTabLink', code)
+        self.assertNotRegex(code, r'>\s*Ссылка\s*<')
+
+    def test_article_has_no_copy_button(self):
+        code = _code(ARTICLE)
+        self.assertNotIn('Скопировать ссылку', code)
+        self.assertNotIn('copyLink', code)
+        self.assertNotRegex(code, r'>\s*Ссылка\s*<')
+
+    def test_nothing_puts_a_link_into_the_clipboard(self):
+        """Имя кнопки можно сменить, действие — нет: сторожим саму запись в
+        буфер обмена. Значок сам по себе ничего не копирует, и запрещать его
+        незачем."""
+        for name, source in (('WikiView.jsx', VIEW), ('WikiArticle.jsx', ARTICLE)):
+            code = _code(source)
+            self.assertNotIn('navigator.clipboard', code, name)
+            self.assertNotIn('execCommand', code, name)
+
+    def test_link_module_has_no_dead_builder(self):
+        """Собирать ссылку «в буфер» больше некому — функция без вызовов
+        осталась бы обещанием кнопки, которой нет."""
+        self.assertNotIn('buildWikiTabLink', LINK)
+        self.assertNotIn('buildWikiTabLink', VIEW)
+
+    def test_article_links_inside_the_text_still_work(self):
+        """Убрана кнопка, а не адрес статьи: блок «Связанные материалы» и
+        ссылки в тексте открывают статью по тому же адресу."""
+        self.assertIn('href={buildArticleLink(row.slug)}', ARTICLE)
+        self.assertIn('readArticleSlugFromHref', ARTICLE)
 
 
 class PortalTests(unittest.TestCase):

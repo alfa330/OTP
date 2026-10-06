@@ -509,7 +509,8 @@ class CopyGuardSourceTest(unittest.TestCase):
             self.assertTrue(call.strip().endswith('true'), call)
 
     def test_input_fields_are_let_through(self):
-        """Кнопка «Ссылка» копирует адрес через временный <textarea>."""
+        """Без этого запрет на статью ломал бы копирование из поля поиска в
+        шапке и из полей калькулятора статьи-справочника."""
         self.assertIn('TEXTAREA', self.code)
         self.assertIn('isContentEditable', self.code)
 

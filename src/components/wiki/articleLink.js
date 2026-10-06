@@ -61,7 +61,7 @@ export const buildRelativeArticleLink = (slug) => {
     return `?${APP_VIEW_QUERY_PARAM}=${WIKI_VIEW}&${WIKI_ARTICLE_QUERY_PARAM}=${normalized}`;
 };
 
-/** Ссылка на статью, которую можно скопировать и отправить. '' — если слаг битый. */
+/** Полный адрес статьи — тот же, что стоит в адресной строке. '' — если слаг битый. */
 export const buildArticleLink = (slug) => {
     if (typeof window === 'undefined') return '';
     const normalized = normalizeArticleSlug(slug);

@@ -579,12 +579,17 @@ _RULE_KEYS = ('id', 'section_id', 'section_name', 'subject_type', 'subject_id',
               'min_role_level', 'job_title', 'subject_label')
 
 
-def list_section_rules(cursor, section_id=None):
+def list_section_rules(cursor, section_id=None, section_ids=None):
     """Правила с человекочитаемой подписью субъекта.
 
     Подпись собирается прямо в SQL: иначе экран управления доступом делал бы
     запрос на каждое правило и повторил бы N+1 из оригинала, где матрица
     доступа стоила двух запросов на каждую должность.
+
+    section_ids — правила НЕСКОЛЬКИХ разделов одним запросом. Нужен справке «кому
+    открыта статья» (wiki/article_access.py): раздел открывают и правила разделов
+    над ним, и спрашивать их по одному значило бы запрос на каждый уровень
+    дерева. Пустой список — это «ни одного раздела», а не «все правила».
     """
     cursor.execute(
         """
@@ -604,9 +609,11 @@ def list_section_rules(cursor, section_id=None):
           FROM wiki_section_access_rules r
           JOIN wiki_sections s ON s.id = r.section_id
          WHERE (%(section)s::int IS NULL OR r.section_id = %(section)s::int)
+           AND (%(sections)s::int[] IS NULL OR r.section_id = ANY(%(sections)s::int[]))
          ORDER BY r.section_id, r.subject_type, r.id
         """,
-        {'section': section_id},
+        {'section': section_id,
+         'sections': None if section_ids is None else [int(x) for x in section_ids]},
     )
     return [dict(zip(_RULE_KEYS, row)) for row in cursor.fetchall()]
 
