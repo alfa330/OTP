@@ -22517,6 +22517,14 @@ def add_user():
         line_fields_hidden = _department_hides_operator_line_fields(department_id)
         # У ООЗ группа есть, а направления нет — только его и снимаем.
         direction_hidden = line_fields_hidden or _department_hides_employee_direction(department_id)
+        # У отдела аналитики направление необязательно: не выбрали — у сотрудника
+        # его не будет; выбрали — проверяется и сохраняется как у любого оператора.
+        # Отдел спрашиваем, только когда направления в запросе нет: остальным
+        # лишний поход в базу не нужен.
+        direction_skipped = direction_hidden or (
+            not data.get('direction_id')
+            and _department_has_optional_employee_direction(department_id)
+        )
 
         # Роль бэк-офиса действительна только в СВОЁМ отделе. Иначе это дыра
         # в правах, а не опечатка: такой роли нет в конфиге чужого отдела
@@ -22548,12 +22556,12 @@ def add_user():
                     supervisor_id = int(supervisor_raw)
                 except (TypeError, ValueError):
                     return jsonify({"error": "Invalid supervisor_id"}), 400
-            if role == 'operator' and not direction_hidden and not data.get('direction_id'):
+            if role == 'operator' and not direction_skipped and not data.get('direction_id'):
                 return jsonify({"error": "Missing required field: direction_id"}), 400
             if role == 'operator' and not data.get('rate'):
                 return jsonify({"error": "Missing required field: rate"}), 400
             if role == 'operator':
-                if direction_hidden:
+                if direction_skipped:
                     direction_id = None
                 else:
                     try:
@@ -22593,7 +22601,7 @@ def add_user():
                 supervisor_id = requester_id
             # Направление берём выбранное в модалке (оно ограничено отделом СВ);
             # если не выбрано — наследуем направление самого СВ.
-            if role == 'operator' and not direction_id and not direction_hidden:
+            if role == 'operator' and not direction_id and not direction_skipped:
                 requester_direction_name = str(requester[4] or '').strip()
                 if requester_direction_name:
                     requester_direction_id = next(
@@ -29878,6 +29886,14 @@ OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'market
 # Зеркалит EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
 EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department'})
 
+# Отделы, где направление оператору выбирать необязательно. Отдел аналитики —
+# решение владельца 06.10.2026 («именно у отдела аналитики»): направлений у
+# отдела нет ни одного (прод, 06.10.2026), и обязательный direction_id не давал
+# завести в нём никого. В отличие от набора выше, поле в карточке остаётся и
+# присланное направление сохраняется как обычно — снята только обязательность.
+# Зеркалит EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS в src/utils/departmentViews.js.
+EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik'})
+
 # Рядовой сотрудник отдела без линии заводится не оператором: 'operator' в этой
 # системе означает человека на линии — с направлением, группой, часами и
 # оценками. «Маркетинг» добавлен по решению владельца (04.09.2026) — отдел
@@ -29938,6 +29954,19 @@ def _department_hides_employee_direction(department_id):
     except Exception:
         return False
     return str(department.get('code') or '').strip().lower() in EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES
+
+
+def _department_has_optional_employee_direction(department_id):
+    """Отдел, где оператору направление выбирают по желанию (см.
+    EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES). Неизвестный отдел проверку не
+    снимает — как и у _department_hides_employee_direction."""
+    if department_id is None:
+        return False
+    try:
+        department = db.get_department_by_id(int(department_id)) or {}
+    except Exception:
+        return False
+    return str(department.get('code') or '').strip().lower() in EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES
 
 
 def _is_sip_settings_department_head(requester_id):

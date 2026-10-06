@@ -184,7 +184,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
         self.assertIn(
             # showDirectionField выводится из showOperatorLineFields (см. выше),
             # поэтому бэк-офис по-прежнему не обязан выбирать направление.
-            "if (isOperatorUser && showDirectionField && !editedUser.direction_id) {",
+            "if (isOperatorUser && showDirectionField && !directionMayStayEmpty && !editedUser.direction_id) {",
             modal,
         )
 
@@ -578,16 +578,29 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
             "direction_hidden = line_fields_hidden or _department_hides_employee_direction(department_id)",
             endpoint,
         )
+        # direction_skipped = direction_hidden ИЛИ необязательное направление не
+        # выбрали (отдел аналитики, 06.10.2026): первое слагаемое — прежнее
+        # условие целиком, бэк-офис и ООЗ не потеряны. Сам отдел аналитики
+        # проверяет tests/test_analytics_department_direction.py.
         self.assertIn(
-            "if role == 'operator' and not direction_hidden and not data.get('direction_id'):",
+            "direction_skipped = direction_hidden or (\n"
+            "            not data.get('direction_id')\n"
+            "            and _department_has_optional_employee_direction(department_id)\n"
+            "        )",
             endpoint,
         )
-        self.assertIn("                if direction_hidden:\n                    direction_id = None", endpoint)
+        self.assertIn(
+            "if role == 'operator' and not direction_skipped and not data.get('direction_id'):",
+            endpoint,
+        )
+        self.assertIn("                if direction_skipped:\n                    direction_id = None", endpoint)
         # Фолбэк «СВ наследует своё направление» бэк-офису тоже не нужен.
         self.assertIn(
-            "if role == 'operator' and not direction_id and not direction_hidden:",
+            "if role == 'operator' and not direction_id and not direction_skipped:",
             endpoint,
         )
+        # Три перехода читают один и тот же признак: прежнего имени в них нет.
+        self.assertEqual(2, endpoint.count("direction_hidden"))
         # Старое условие не должно остаться нигде: иначе один из трёх
         # переходов снова требовал бы направление у ООЗ.
         self.assertNotIn("not line_fields_hidden", endpoint)

@@ -4,7 +4,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
@@ -361,6 +361,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // ID таксипро — нет (см. EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS). Направление
     // гасит и свою обязательность в handleSave: у отдела нет ни одного.
     const showDirectionField = showOperatorLineFields && !departmentCodeHidesEmployeeDirection(effectiveDeptCode);
+    // Отдел аналитики: поле «Направление» есть, но выбирать его необязательно — у
+    // отдела нет ни одного (см. EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS). Пустым
+    // оно может остаться при создании и у сотрудника, у которого направления и
+    // так нет. Записанное направление стереть нельзя, как и в других отделах:
+    // пустое значение карточка на сервер не отправляет, и проверка не должна
+    // обещать того, чего сохранение не сделает.
+    const directionMayStayEmpty = departmentCodeHasOptionalEmployeeDirection(effectiveDeptCode)
+        && !userToEdit?.direction_id;
+    const emptyDirectionLabel = directionMayStayEmpty ? 'Без направления' : 'Выберите направление';
     const showSipField = showOperatorLineFields && !departmentCodeHidesEmployeeSipInput(effectiveDeptCode);
     const showInternshipField = !departmentCodeHidesEmployeeInternship(effectiveDeptCode);
     const showTaxiproIdField = !departmentCodeHidesEmployeeTaxiproId(effectiveDeptCode);
@@ -852,7 +861,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isOperatorUser && showDirectionField && !editedUser.direction_id) {
+        if (isOperatorUser && showDirectionField && !directionMayStayEmpty && !editedUser.direction_id) {
         setModalError("Направление обязательно.");
         return;
         }
@@ -1875,9 +1884,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.direction_id || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, direction_id: v, direction_picked_by_hand: true })}
                         disabled={fieldsLocked}
-                        placeholder="Выберите направление"
+                        placeholder={emptyDirectionLabel}
                         options={[
-                            { value: "", label: "Выберите направление" },
+                            { value: "", label: emptyDirectionLabel },
                             ...directionsForSelectedDept(effectiveDeptId).map((dir) => ({ value: dir.id, label: dir.name })),
                         ]}
                         />
@@ -2619,7 +2628,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={fieldsLocked}
                                 >
-                                <option value="">Выберите направление</option>
+                                <option value="">{emptyDirectionLabel}</option>
                                 {/* Только направления отдела сотрудника — как в форме создания.
                                     Глава нескольких отделов получает их списком по всем своим
                                     отделам, а чужое направление сервер отклонит уже после

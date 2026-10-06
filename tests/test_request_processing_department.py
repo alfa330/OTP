@@ -153,7 +153,7 @@ class RequestProcessingCardTests(unittest.TestCase):
 
     def test_direction_is_not_required_where_it_is_hidden(self):
         modal = _read(MODAL_PATH)
-        self.assertIn("if (isOperatorUser && showDirectionField && !editedUser.direction_id) {", modal)
+        self.assertIn("if (isOperatorUser && showDirectionField && !directionMayStayEmpty && !editedUser.direction_id) {", modal)
         # Группа остаётся обязательной — ради неё владелец и заводит группу ООЗ.
         self.assertIn(
             "if (isCreateMode && isOperatorUser && showOperatorLineFields && !editedUser.group_id) {",

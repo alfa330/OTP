@@ -417,6 +417,18 @@ const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_depar
 const EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
 const EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
 
+/* Отделы, где направление сотруднику выбирать необязательно (решение владельца
+   06.10.2026: «именно у отдела аналитики»). У отдела нет ни одного направления
+   (прод, 06.10.2026), а форма и сервер требовали выбрать его у каждого
+   оператора — завести аналитика было нельзя вовсе.
+
+   Это не EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS: там поля в карточке нет, и
+   присланное направление сервер отбрасывает. Здесь поле остаётся — отделу могут
+   завести направления позже, — и выбранное сохраняется как у любого оператора;
+   снята только обязательность.
+   Зеркало — EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES в bot_schedule2.py. */
+const EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS = new Set(['analytik']);
+
 const departmentCodeIn = (set) => (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
     return Boolean(normalized && set.has(normalized));
@@ -426,6 +438,7 @@ export const departmentCodeHidesEmployeeDirection = departmentCodeIn(EMPLOYEE_DI
 export const departmentCodeHidesEmployeeSipInput = departmentCodeIn(EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS);
 export const departmentCodeHidesEmployeeInternship = departmentCodeIn(EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS);
 export const departmentCodeHidesEmployeeTaxiproId = departmentCodeIn(EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS);
+export const departmentCodeHasOptionalEmployeeDirection = departmentCodeIn(EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENTS);
 
 export const departmentHidesEmployeeDirection = (user) => departmentCodeHidesEmployeeDirection(departmentCodeOf(user));
 export const departmentHidesEmployeeInternship = (user) => departmentCodeHidesEmployeeInternship(departmentCodeOf(user));

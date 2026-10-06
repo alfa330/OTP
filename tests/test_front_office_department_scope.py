@@ -291,7 +291,8 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         modal = _read(MODAL_PATH)
 
         self.assertIn(
-            "import { departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship,"
+            "import { departmentCodeHasOptionalEmployeeDirection,"
+            " departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship,"
             " departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
             " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
