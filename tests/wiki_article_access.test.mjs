@@ -650,6 +650,10 @@ test('окно открыто — называет статью и ждёт от
   const plain = opened({ id: 500, title: TITLE });
   assert.match(text(plain), / Расположение /);
   assert.doesNotMatch(plain, /Расположение и доступ/);
+  // Под две колонки окно шире; одному дереву хватает прежней ширины.
+  assert.match(html, /max-w-5xl/);
+  assert.match(plain, /max-w-xl/);
+  assert.doesNotMatch(plain, /max-w-5xl/);
 });
 
 const body = (state) => renderToStaticMarkup(React.createElement(ArticleAccessBody, {
@@ -762,6 +766,23 @@ test('никого не нашлось — так и сказано, поле п
   assert.match(text(html), /Никого не нашлось\./);
   assert.match(html, /placeholder="Имя, должность или отдел"/);
   assert.deepEqual(shownNames(html), []);
+});
+
+test('список людей слева, дерево справа; на узком экране дерево сверху', () => {
+  /* Решение владельца 06.10.2026: «слева список людей, кому открыт доступ, с
+     пагинацией, и справа дерево, где находится статья». В разметке дерево
+     стоит первым — так колонки встают на телефоне, — а вправо его уводит
+     порядок колонок. */
+  const html = view({ ...DATA, article: { ...DATA.article, status: 'draft' } });
+  assert.match(html, /class="grid gap-5 lg:grid-cols-\[minmax\(0,1fr\)_minmax\(0,380px\)\] lg:items-start"/);
+  const tree = html.indexOf('lg:order-2');
+  const list = html.indexOf('lg:order-1');
+  assert.ok(tree > 0 && list > tree, 'дерево в разметке раньше списка');
+  assert.ok(html.indexOf('Таксопарки') < list && html.indexOf('Абдрахманов Ерлан') > list);
+  // Оговорка о невышедшей статье — про читателей, и стоит она в их колонке.
+  assert.ok(html.indexOf('не опубликована') > html.indexOf('Кому откроется статья'));
+  // У одного дерева колонок нет.
+  assert.doesNotMatch(view({ ...DATA, people: null }), /lg:grid-cols|lg:order-/);
 });
 
 test('без списка людей окно — одно дерево', () => {

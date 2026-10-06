@@ -34,6 +34,11 @@ import { spaceIcon } from './spaceIdentity';
  * зовётся «Расположение»; супер-админу сервер присылает ещё и список людей
  * (people в ответе), и окно становится «Расположением и доступом».
  *
+ * У супер-админа окно широкое, в две колонки: «слева список людей, кому открыт
+ * доступ, с пагинацией, и справа дерево, где находится статья» (его же слова).
+ * На узком экране колонки встают друг под другом, дерево — первым: оно в три
+ * строки, а список в десять, и под списком до дерева пришлось бы листать.
+ *
  * ── Только чтение ────────────────────────────────────────────────────────
  * Ни одного органа управления, и это не недоделка: выдача доступа живёт в
  * «Структуре» со своей лестницей (кто кому по чину, чей отдел, высота раздела).
@@ -100,9 +105,11 @@ const TreeRow = ({ row, articleTitle }) => {
        край. */
     return (
         <div style={style} className={`pr-2 ${rowIndent}`}>
-            <div className="-ml-2 flex items-center gap-2 rounded-lg bg-indigo-50 py-1.5 pl-2 pr-2.5">
-                <FileText size={15} className="shrink-0 text-indigo-600" />
-                <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-indigo-700">
+            <div className="-ml-2 flex items-start gap-2 rounded-lg bg-indigo-50 py-1.5 pl-2 pr-2.5">
+                <FileText size={15} className="mt-0.5 shrink-0 text-indigo-600" />
+                {/* До двух строк, а не одна с многоточием: в колонке рядом со
+                    списком длинное название обрывалось на полуслове. */}
+                <span className="line-clamp-2 min-w-0 flex-1 break-words text-[13px] font-medium leading-snug text-indigo-700">
                     {articleTitle || 'Эта статья'}
                 </span>
             </div>
@@ -150,9 +157,13 @@ const EmptyCard = ({ children }) => (
 /* Заголовок блока с подсказкой. «i» стоит у ПРАВОГО края строки и раскрывается
    влево. Сразу за заголовком, с пузырьком вправо, она на телефоне оказывалась у
    края экрана: из 256 px пузырька тело окна срезало две трети. От правого края
-   пузырьку хватает ширины и на 320 px. */
-const GroupHead = ({ children, hint, hintLabel }) => (
-    <div className="flex items-center justify-between gap-2 pr-1">
+   пузырьку хватает ширины и на 320 px.
+
+   Высота строки задана явно: в окне супер-админа два таких заголовка стоят
+   рядом, над списком и над деревом, и без неё тот, что с «i», оказывался выше
+   соседа — карточки под ними начинались вразнобой. */
+const GroupHead = ({ children, hint = null, hintLabel = null }) => (
+    <div className="flex min-h-6 items-center justify-between gap-2 pr-1">
         <span className={`${iosGroupLabel} min-w-0`}>{children}</span>
         {hint && (
             <span className="shrink-0">
@@ -170,6 +181,7 @@ const Readers = ({ source, status, byListOnly, defaultQuery, defaultPage }) => {
     const [page, setPage] = useState(defaultPage);
     const found = useMemo(() => searchPeople(people, query), [people, query]);
     const shown = paginate(found, page, PAGE_SIZE);
+    const notice = statusNotice(status);
 
     return (
         <section className="space-y-1.5">
@@ -181,6 +193,9 @@ const Readers = ({ source, status, byListOnly, defaultQuery, defaultPage }) => {
                     </span>
                 )}
             </GroupHead>
+            {/* Оговорка о невышедшей статье — про тех, кто её видит сейчас,
+                поэтому стоит в списке, а не над окном. */}
+            {notice && <Notice icon={EyeOff}>{notice}</Notice>}
             {/* «Не открывает», а не «не действует»: в строгом режиме
                 правило раздела по-прежнему добавляет прав тому, кто в
                 списке, — закрыто им только чтение. */}
@@ -244,49 +259,50 @@ export function ArticleAccessView({ data, articleTitle, defaultQuery = '', defau
        положен, и окно состоит из одного дерева. */
     const withReaders = Array.isArray(data?.people);
 
-    const status = data?.article?.status;
-    const notice = statusNotice(status);
     const hidden = Number(data?.hidden_places) || 0;
 
+    const treeSection = (
+        <section className="space-y-1.5">
+            {/* Над единственным блоком подпись повторяла бы заголовок окна. */}
+            {withReaders && <GroupHead>Где лежит</GroupHead>}
+            {tree.length > 0 ? (
+                <div className={`${iosCard} overflow-hidden py-1.5`}>
+                    {tree.map((row) => (
+                        <TreeRow key={row.key} row={row} articleTitle={articleTitle} />
+                    ))}
+                </div>
+            ) : (
+                <EmptyCard>
+                    {hidden > 0
+                        ? 'Разделы этой статьи вам не видны.'
+                        : 'Статья не привязана ни к одному разделу.'}
+                </EmptyCard>
+            )}
+            {tree.length > 0 && hidden > 0 && (
+                <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                    {hiddenPlacesLabel(hidden, withReaders)}
+                </p>
+            )}
+        </section>
+    );
+    if (!withReaders) return treeSection;
+
+    /* Две колонки с ширины окна, на которой списку остаётся его прежняя
+       ширина. Дерево в разметке стоит первым (на узком экране оно сверху) и
+       уезжает вправо порядком колонок; при длинном списке оно держится у
+       верхнего края, чтобы место статьи оставалось на виду. */
     return (
-        <div className="space-y-5">
-            {/* ── Где лежит ───────────────────────────────────────────── */}
-            <section className="space-y-1.5">
-                {/* Над единственным блоком подпись повторяла бы заголовок окна. */}
-                {withReaders && <div className={iosGroupLabel}>Где лежит</div>}
-                {tree.length > 0 ? (
-                    <div className={`${iosCard} overflow-hidden py-1.5`}>
-                        {tree.map((row) => (
-                            <TreeRow key={row.key} row={row} articleTitle={articleTitle} />
-                        ))}
-                    </div>
-                ) : (
-                    <EmptyCard>
-                        {hidden > 0
-                            ? 'Разделы этой статьи вам не видны.'
-                            : 'Статья не привязана ни к одному разделу.'}
-                    </EmptyCard>
-                )}
-                {tree.length > 0 && hidden > 0 && (
-                    <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                        {hiddenPlacesLabel(hidden, withReaders)}
-                    </p>
-                )}
-            </section>
-
-            {/* Оговорка о невышедшей статье — про тех, кто её видит: без списка
-                людей ей не к чему относиться. */}
-            {withReaders && notice && <Notice icon={EyeOff}>{notice}</Notice>}
-
-            {withReaders && (
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)] lg:items-start">
+            <div className="lg:sticky lg:top-0 lg:order-2">{treeSection}</div>
+            <div className="min-w-0 lg:order-1">
                 <Readers
                     source={data.people}
-                    status={status}
+                    status={data?.article?.status}
                     byListOnly={!!data?.article?.by_list_only}
                     defaultQuery={defaultQuery}
                     defaultPage={defaultPage}
                 />
-            )}
+            </div>
         </div>
     );
 }
@@ -360,7 +376,7 @@ export default function WikiArticleAccess({ base, headers, article, open, onClos
             onClose={onClose}
             title={article?.can_view_readers ? 'Расположение и доступ' : 'Расположение'}
             subtitle={article?.title}
-            maxWidth="max-w-xl"
+            maxWidth={article?.can_view_readers ? 'max-w-5xl' : 'max-w-xl'}
             footer={(
                 <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
             )}
