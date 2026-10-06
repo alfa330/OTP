@@ -5,12 +5,12 @@ import { splitPilotEvents, pilotChatKey } from './chatPilot';
 // One stream per visible chat screen. DB queries run only after changes, with
 // bursts coalesced and at most one refresh in flight for each pane.
 export default function useChatPilot({ apiBaseUrl, user, account, active, headers,
-    selected, refreshThread, refreshList }) {
+    selected, refreshThread, refreshList, onChanges, refreshUnread }) {
     const [capability, setCapability] = useState(null);
     const [connection, setConnection] = useState('connecting');
     const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
     const latest = useRef({});
-    latest.current = { headers, selected, refreshThread, refreshList };
+    latest.current = { headers, selected, refreshThread, refreshList, onChanges, refreshUnread };
     const eligible = String(user?.login || '').trim().toLowerCase() === 'alfa330' && account === 'op';
     useEffect(() => {
         const change = () => setVisible(!document.hidden);
@@ -39,6 +39,7 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
         const lanes = {
             thread: { dirty: false, running: false, timer: null, delay: 350 },
             list: { dirty: false, running: false, timer: null, delay: 1000 },
+            unread: { dirty: false, running: false, timer: null, delay: 200 },
         };
         const enqueue = (name) => {
             const lane = lanes[name];
@@ -50,7 +51,7 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                 lane.dirty = false;
                 lane.running = true;
                 try {
-                    const result = await latest.current[name === 'thread' ? 'refreshThread' : 'refreshList']();
+                    const result = await latest.current[{ thread: 'refreshThread', list: 'refreshList', unread: 'refreshUnread' }[name]]?.();
                     if (result === false) lane.dirty = true; // History/page request still in flight.
                 } catch (error) {
                     if (stopped) return;
@@ -71,7 +72,7 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                 }
             }, lane.delay);
         };
-        const reconcile = () => { enqueue('thread'); enqueue('list'); };
+        const reconcile = () => { enqueue('thread'); enqueue('list'); enqueue('unread'); };
         const connect = async () => {
             if (stopped) return;
             controller = new AbortController();
@@ -118,9 +119,10 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                                 reconcile();
                             } else if (frame.event === 'change') {
                                 setConnection('live');
-                                if (payload.changes?.some((event) => event.affectsList !== false)) enqueue('list');
+                                const fallback = latest.current.onChanges?.(payload.changes || []);
+                                if (fallback ? fallback.list : payload.changes?.some((event) => event.affectsList !== false)) enqueue('list');
                                 const key = pilotChatKey('op', latest.current.selected);
-                                if (payload.changes?.some((event) => pilotChatKey('op', event) === key)) {
+                                if (fallback ? fallback.thread : payload.changes?.some((event) => pilotChatKey('op', event) === key)) {
                                     enqueue('thread');
                                 }
                             }

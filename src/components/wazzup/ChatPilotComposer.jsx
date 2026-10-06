@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { AlertCircle, Check, Loader2, RefreshCw, Send } from 'lucide-react';
 import { classifyPilotSendFailure, pilotChatKey, pilotDraftStorageKey } from './chatPilot.js';
+import ChatComposerTools from './ChatComposerTools';
 
 const readDraft = (key) => {
     try {
@@ -9,27 +10,27 @@ const readDraft = (key) => {
         if (!saved || typeof saved.text !== 'string') return { text: '', pending: null };
         const pending = saved.pending?.clientMessageId && typeof saved.pending?.text === 'string'
             ? saved.pending : null;
-        return { text: pending ? pending.text : saved.text, pending };
+        return { text: pending ? pending.text : saved.text, pending, preview: typeof saved.preview === 'string' ? saved.preview : '' };
     } catch {
         return { text: '', pending: null };
     }
 };
 
-const writeDraft = (key, text, pending) => {
+const writeDraft = (key, text, pending, preview = '') => {
     try {
-        if (text || pending) sessionStorage.setItem(key, JSON.stringify({ text, pending }));
+        if (text || pending) sessionStorage.setItem(key, JSON.stringify({ text, pending, preview }));
         else sessionStorage.removeItem(key);
     } catch { /* Private browsing can disable storage; the mounted draft still works. */ }
 };
 
-const settleDraft = (key, payload, text, pending) => {
+const settleDraft = (key, payload, text, pending, preview = '') => {
     try {
         const current = JSON.parse(sessionStorage.getItem(key) || 'null');
         // An earlier mounted composer may finish after its replacement already
         // checked the send and started a new draft. Do not erase that new text.
         if (current?.pending?.clientMessageId !== payload.clientMessageId) return;
     } catch { /* Fall through when browser storage is unavailable. */ }
-    writeDraft(key, text, pending);
+    writeDraft(key, text, pending, preview);
 };
 
 const newMessageId = () => {
@@ -45,6 +46,9 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
     const storageKey = pilotDraftStorageKey(chat);
     const [saved] = useState(() => readDraft(storageKey));
     const [text, setText] = useState(saved.text);
+    const [preview, setPreview] = useState(saved.preview || '');
+    const textareaRef = useRef(null);
+    const selectionRef = useRef({ start: saved.text.length, end: saved.text.length });
     const [state, setState] = useState(saved.pending ? 'unknown' : 'idle');
     const [error, setError] = useState(saved.pending
         ? 'Предыдущая отправка ещё не подтверждена. Проверьте её результат.' : '');
@@ -66,6 +70,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
     const updateText = (value) => {
         if (busyRef.current || pendingRef.current) return;
         setText(value);
+        setPreview('');
         setError('');
         setState('idle');
         writeDraft(storageKey, value, null);
@@ -97,7 +102,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
         }
         pendingRef.current = payload;
         busyRef.current = true;
-        writeDraft(storageKey, payload.text, payload);
+        writeDraft(storageKey, payload.text, payload, preview);
         setState('sending');
         setError('');
         setCheckedConversation(false);
@@ -115,6 +120,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
             settleDraft(storageKey, payload, '', null);
             if (!mountedRef.current) return;
             setText('');
+            setPreview('');
             setState('sent');
             setError('');
             // Refresh failures must not mislabel a successful send as unknown.
@@ -125,7 +131,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
             // nothing about whether that original message reached Wazzup.
             if (checkingPrevious && sendError.response?.data?.state !== 'failed') failure.state = 'unknown';
             if (failure.state === 'failed') pendingRef.current = null;
-            settleDraft(storageKey, payload, payload.text, pendingRef.current);
+            settleDraft(storageKey, payload, payload.text, pendingRef.current, preview);
             if (!mountedRef.current) return;
             setState(failure.state);
             setError(failure.message);
@@ -140,13 +146,36 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
             <label htmlFor="wazzup-pilot-message" className="mb-1.5 block text-[12px] font-semibold text-slate-600">
                 Ответ в WhatsApp
             </label>
-            <textarea id="wazzup-pilot-message" rows={3} value={text} readOnly={locked}
+            <ChatComposerTools apiBaseUrl={apiBaseUrl} headers={headers} channelId={chat.channelId}
+                locked={locked} slash={!preview && /^\/[^\n]*$/.test(text) ? text.slice(1) : null}
+                onChoose={({ text: next, preview: nextPreview }) => {
+                    if (busyRef.current || pendingRef.current) return;
+                    setText(next); setPreview(nextPreview); setError(''); setState('idle');
+                    writeDraft(storageKey, next, null, nextPreview);
+                    selectionRef.current = { start: next.length, end: next.length };
+                    textareaRef.current?.focus();
+                }}
+                onEmoji={(emoji) => {
+                    if (preview || locked) return;
+                    const { start, end } = selectionRef.current;
+                    const next = text.slice(0, start) + emoji + text.slice(end);
+                    updateText(next);
+                    const position = start + emoji.length;
+                    selectionRef.current = { start: position, end: position };
+                    requestAnimationFrame(() => { textareaRef.current?.focus(); textareaRef.current?.setSelectionRange(position, position); });
+                }} />
+            {preview && <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+                <span>Одобренный шаблон Wazzup</span>
+                <button type="button" disabled={locked} onClick={() => updateText('')} className="text-blue-600">Убрать шаблон</button>
+            </div>}
+            <textarea ref={textareaRef} id="wazzup-pilot-message" rows={3} value={preview || text} readOnly={locked || Boolean(preview)}
                       onChange={(event) => updateText(event.target.value)}
+                      onSelect={(event) => { selectionRef.current = { start: event.target.selectionStart, end: event.target.selectionEnd }; }}
                       onKeyDown={(event) => {
                           if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)
                               && !event.nativeEvent.isComposing) submit(event);
                       }}
-                      placeholder="Напишите сообщение…"
+                      placeholder="Напишите сообщение или / для выбора шаблона…"
                       aria-describedby="wazzup-pilot-message-help"
                       aria-invalid={tooLong || undefined}
                       className="block max-h-40 min-h-20 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] text-slate-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 read-only:opacity-70" />
@@ -168,7 +197,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, maxLength = 4096 })
                                 if (!checkedConversation || busyRef.current) return;
                                 pendingRef.current = null;
                                 writeDraft(storageKey, '', null);
-                                setText(''); setError(''); setState('idle');
+                                setText(''); setPreview(''); setError(''); setState('idle');
                                 setCheckedConversation(false);
                             }}
                             className="mt-2 font-semibold text-blue-700 hover:underline disabled:opacity-50">

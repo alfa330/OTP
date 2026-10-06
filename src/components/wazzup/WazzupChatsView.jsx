@@ -16,6 +16,7 @@ import {
 } from './chatLink';
 import { lateDeliveryNote, localDayKey } from './messageTime';
 import useChatPilot from './useChatPilot';
+import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
 import { mergePilotMessages, pilotChatKey } from './chatPilot';
 
@@ -201,7 +202,7 @@ function MediaContent({ msg, light }) {
 }
 
 /* Пузырь в стиле iMessage: исходящие — синие справа, входящие — белые слева. */
-function MessageBubble({ msg }) {
+const MessageBubble = React.memo(function MessageBubble({ msg }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
@@ -242,7 +243,7 @@ function MessageBubble({ msg }) {
             </div>
         </div>
     );
-}
+});
 
 const SegButton = ({ active, onClick, icon: Icon, children }) => (
     <button onClick={onClick}
@@ -861,6 +862,12 @@ export default function WazzupChatsView(props) {
     const pilotView = useRef({});
     pilotView.current = { key: pilotChatKey(account, selected), thread, selected, account, mainTab };
     const pilotRefresh = useRef({ id: 0, controller: null });
+    const liveChatSummaries = useRef({ seq: 0, items: new Map() });
+    const [unreadOnly, setUnreadOnly] = useState(false);
+    const unread = useSharedChatUnread({
+        enabled: account === 'op' && String(user?.login || '').toLowerCase() === 'alfa330',
+        active: mainTab === 'chats', selected, thread, box: threadBox, apiBaseUrl, headers,
+    });
 
     const channelName = useMemo(() => {
         const map = {};
@@ -893,6 +900,7 @@ export default function WazzupChatsView(props) {
         chatsRequest.current = { id: requestId, controller, loading: true };
         const offset = reset ? 0 : (chats?.length || 0);
         const requestAccount = accountRef.current;
+        const liveSeq = liveChatSummaries.current.seq;
         if (reset && !silent) { setChats(null); setChatsError(null); }
         return axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
             headers: headers(), signal: controller.signal,
@@ -901,13 +909,23 @@ export default function WazzupChatsView(props) {
                       account: accountRef.current },
         }).then((r) => {
             if (requestId !== chatsRequest.current.id || requestAccount !== accountRef.current) return null;
+            const responseItems = new Map((r.data.items || []).map((chat) => [pilotChatKey(requestAccount, chat), chat]));
+            if (requestAccount === 'op') for (const [key, event] of liveChatSummaries.current.items) {
+                if (event.seq <= liveSeq) continue;
+                const chat = event.chat;
+                const query = q.trim().toLowerCase();
+                if ((!channel || chat.channelId === channel) && (!query || [chat.contactName, chat.contactPhone, chat.chatId]
+                    .some((value) => String(value || '').toLowerCase().includes(query)))) responseItems.set(key, chat);
+                else responseItems.delete(key);
+            }
+            r.data.items = [...responseItems.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
             setChatsTotal(r.data.total || 0);
             setChatsError(null);
             if (silent) setSelected((prev) => prev && (
                 (r.data.items || []).find((chat) => chat.channelId === prev.channelId && chat.chatId === prev.chatId) || prev
             ));
             setChats((prev) => {
-                if (!silent) return reset ? (r.data.items || []) : [...(prev || []), ...(r.data.items || [])];
+                if (!silent && reset) return r.data.items || [];
                 const byId = new Map((prev || []).map((chat) => [pilotChatKey(accountRef.current, chat), chat]));
                 (r.data.items || []).forEach((chat) => byId.set(pilotChatKey(accountRef.current, chat), chat));
                 return [...byId.values()].sort((a, b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
@@ -992,8 +1010,63 @@ export default function WazzupChatsView(props) {
             if (!controller.signal.aborted) throw error;
         }
     };
+    const applyPilotChanges = (changes) => {
+        unread.apply(changes);
+        const snapshot = pilotView.current;
+        const relevant = changes.filter((event) => event.kind !== 'unread');
+        const current = relevant.filter((event) => pilotChatKey('op', event) === snapshot.key);
+        const box = threadBox.current;
+        const atBottom = box && box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+        if (snapshot.thread !== null && current.length) {
+            setThread((prev) => {
+                const known = new Set((prev || []).map((message) => message.messageId));
+                const incoming = current.flatMap((event) => event.message ? [event.message]
+                    : event.statusOnly && known.has(event.messageId) ? [{ messageId: event.messageId, status: event.status }] : []);
+                return incoming.length ? mergePilotMessages(prev, incoming) : prev;
+            });
+            if (atBottom && current.some((event) => event.message)) requestAnimationFrame(() => {
+                if (snapshot.key === pilotView.current.key && box) box.scrollTop = box.scrollHeight;
+            });
+        }
+        const summaries = relevant.filter((event) => event.chat && event.affectsList !== false).map((event) => event.chat);
+        if (summaries.length) {
+            for (const chat of summaries) {
+                const cache = liveChatSummaries.current;
+                const key = pilotChatKey('op', chat);
+                cache.items.delete(key);
+                cache.items.set(key, { chat, seq: ++cache.seq });
+                if (cache.items.size > 1000) cache.items.delete(cache.items.keys().next().value);
+            }
+            setSelected((prev) => summaries.find((chat) => pilotChatKey('op', chat) === pilotChatKey('op', prev)) || prev);
+            setChats((prev) => {
+                if (!prev) return prev;
+                const byId = new Map(prev.map((chat) => [pilotChatKey('op', chat), chat]));
+                for (const chat of summaries) {
+                    const q = appliedSearch.trim().toLowerCase();
+                    const matches = (!channelId || chat.channelId === channelId)
+                        && (!q || [chat.contactName, chat.contactPhone, chat.chatId].some((s) => String(s || '').toLowerCase().includes(q)));
+                    if (matches) byId.set(pilotChatKey('op', chat), chat);
+                    else byId.delete(pilotChatKey('op', chat));
+                }
+                return [...byId.values()].sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0));
+            });
+        }
+        return {
+            thread: current.some((event) => !event.statusOnly && (!event.message || snapshot.thread === null)),
+            list: relevant.some((event) => event.affectsList !== false && !event.chat),
+        };
+    };
     const pilot = useChatPilot({ apiBaseUrl, user, account, active: mainTab === 'chats', headers,
-        selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }) });
+        selected, refreshThread: refreshPilotThread, refreshList: () => loadChats({ silent: true }),
+        onChanges: applyPilotChanges, refreshUnread: unread.refresh });
+    const loadedChatsByKey = useMemo(() => new Map((chats || []).map((chat) => [pilotChatKey('op', chat), chat])), [chats]);
+    const visibleChats = unreadOnly && pilot.enabled
+        ? Object.values(unread.items).filter((item) => item.unreadCount > 0)
+            .map((item) => loadedChatsByKey.get(pilotChatKey('op', item)) || item.chat)
+            .filter((chat) => chat && (!channelId || chat.channelId === channelId)
+                && (!appliedSearch || [chat.contactName, chat.contactPhone, chat.chatId].some((v) => String(v || '').toLowerCase().includes(appliedSearch.toLowerCase()))))
+            .sort((a,b) => new Date(b.lastMessageAt || 0) - new Date(a.lastMessageAt || 0))
+        : chats;
     const selectedChannel = (channels || []).find((channel) => channel.channelId === selected?.channelId);
     const pilotCanSend = pilot.enabled && pilot.capability?.canSend && selected?.chatType === 'whatsapp'
         && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
@@ -1018,6 +1091,7 @@ export default function WazzupChatsView(props) {
         if (key === accountRef.current) return;
         accountRef.current = key;
         setAccount(key);
+        setUnreadOnly(false);
         chatsRequest.current.controller?.abort();
         threadRequest.current.controller?.abort();
         setChannelId(''); setSearch(''); setAppliedSearch('');
@@ -1335,6 +1409,15 @@ export default function WazzupChatsView(props) {
                                    placeholder="Имя или телефон…"
                                    className={`${iosInput} py-2 pl-9 text-[13px]`} />
                         </div>
+                        {pilot.enabled && <div className="mt-2 flex items-center gap-2 text-xs">
+                            <button type="button" onClick={() => setUnreadOnly(!unreadOnly)}
+                                aria-pressed={unreadOnly} title="Общие для всей команды. Учитываются новые входящие после включения счётчика."
+                                className={`rounded-full px-3 py-1.5 ${unreadOnly ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}>
+                                Непрочитанные · {unread.total}
+                            </button>
+                            {unread.error && <button type="button" onClick={() => unread.refresh().catch(() => {})}
+                                className="text-amber-700" title={unread.error}>Обновить счётчик</button>}
+                        </div>}
                     </div>
                     <div className="flex-1 overflow-y-auto py-1">
                         {chats === null && (
@@ -1347,17 +1430,17 @@ export default function WazzupChatsView(props) {
                                 <AlertCircle size={15} /> {chatsError}
                             </div>
                         )}
-                        {chats !== null && chats.length === 0 && !chatsError && (
+                        {visibleChats !== null && visibleChats.length === 0 && !chatsError && (
                             <div className="px-4 py-8 text-center text-sm text-slate-400">
                                 {/* «База пуста» и «фильтр ничего не нашёл» — разные вещи.
                                     Раньше в эту строку попадали только руками через
                                     поиск, а с переходом по ссылке это штатный экран. */}
-                                {appliedSearch || channelId
+                                {unreadOnly ? 'Нет непрочитанных сообщений' : appliedSearch || channelId
                                     ? 'Ничего не нашлось по этому фильтру'
                                     : 'Чатов пока нет — сбор идёт с 17.07.2026'}
                             </div>
                         )}
-                        {(chats || []).map((chat) => {
+                        {(visibleChats || []).map((chat) => {
                             const isSel = selected && selected.chatId === chat.chatId && selected.channelId === chat.channelId;
                             return (
                                 <button key={`${chat.channelId}:${chat.chatId}`} onClick={() => openChat(chat)}
@@ -1375,6 +1458,10 @@ export default function WazzupChatsView(props) {
                                             <div className="flex items-center gap-1 text-[12px] text-slate-500">
                                                 {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
                                                 <span className="truncate">{previewText(chat.lastMessageText)}</span>
+                                                {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
+                                                    <span className="ml-auto rounded-full bg-emerald-600 px-1.5 text-[11px] font-semibold text-white">
+                                                        {unread.items[pilotChatKey('op', chat)].unreadCount}
+                                                    </span>}
                                             </div>
                                             {!channelId && (
                                                 <div className="truncate text-[10px] text-slate-400">
@@ -1386,7 +1473,7 @@ export default function WazzupChatsView(props) {
                                 </button>
                             );
                         })}
-                        {chats !== null && chats.length < chatsTotal && (
+                        {!unreadOnly && chats !== null && chats.length < chatsTotal && (
                             <button onClick={() => loadChats({ reset: false })}
                                     className="block w-full py-2.5 text-center text-[12px] font-semibold text-blue-600 hover:bg-slate-50">
                                 Показать ещё ({chats.length} из {chatsTotal})
@@ -1460,6 +1547,12 @@ export default function WazzupChatsView(props) {
                                     </div>
                                 </div>
                                 <div className="flex shrink-0 items-center gap-2">
+                                    {pilot.enabled && unread.items[pilotChatKey('op', selected)]?.unreadCount > 0 &&
+                                        <button type="button" onClick={() => unread.markRead(selected)}
+                                            title="Отметить прочитанным для всей команды, включая сообщения вне доступной истории"
+                                            className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
+                                            Прочитано
+                                        </button>}
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
                                         конкретной неправдой — ссылка открывает переписку

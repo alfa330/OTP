@@ -99,6 +99,30 @@ test('pilot opens no realtime or capability request for other users/accounts', a
     }
 });
 
+test('hydrated/status changes apply directly without any pane HTTP refresh; metadata fallback still repairs', async () => {
+    const applied = [];
+    const h = harness({ onChanges: (changes) => {
+        applied.push(...changes);
+        return { list: changes.some((e) => e.affectsList && !e.chat),
+            thread: changes.some((e) => !e.statusOnly && !e.message) };
+    } });
+    await h.flush();
+    await h.emit('connected', { ready: true });
+    await h.tick(1000);
+    const baseline = { ...h.calls };
+    await h.emit('change', { changes: [{ channelId: 'c', chatId: 'one', messageId: 'm1', statusOnly: true, affectsList: false, status: 'read' }] });
+    await h.emit('change', { changes: [{ channelId: 'c', chatId: 'one', messageId: 'm2', affectsList: true,
+        message: { messageId: 'm2', text: 'incoming' }, chat: { channelId: 'c', chatId: 'one' } }] });
+    await h.tick(1500);
+    assert.equal(applied.length, 2);
+    assert.deepEqual(h.calls, baseline);
+    await h.emit('change', { changes: [{ channelId: 'c', chatId: 'one', messageId: 'm3', affectsList: true }] });
+    await h.tick(1000);
+    assert.equal(h.calls.thread, baseline.thread + 1);
+    assert.equal(h.calls.list, baseline.list + 1);
+    await h.close();
+});
+
 test('status refresh only targets selected chat; bursts coalesce and preserve list invalidation', async () => {
     const h = harness(); await h.flush(); await h.emit('connected', { ready: true }); await h.tick(1000);
     assert.equal(h.calls.thread, 1); assert.equal(h.calls.list, 1);

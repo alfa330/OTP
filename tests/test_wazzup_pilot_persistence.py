@@ -235,8 +235,12 @@ def test_notifications_are_transactional_private_and_only_for_changes_in_op(pg):
     assert len(events) == 1
     assert events[0]['account'] == 'op'
     assert events[0]['messageId'] == 'm1'
-    assert set(events[0]) == {'account', 'channelId', 'chatId', 'messageId', 'status', 'emittedAt', 'affectsList'}
+    assert set(events[0]) == {'account', 'channelId', 'chatId', 'messageId', 'status', 'emittedAt',
+                              'affectsList', 'statusOnly', 'isEcho', 'createdAt'}
     assert events[0]['affectsList'] is True
+    assert events[0]['statusOnly'] is False
+    assert events[0]['isEcho'] is True
+    assert events[0]['createdAt']
     db.store_wazzup_messages([message()])
     db.update_wazzup_statuses([{'messageId': 'm1', 'status': 'sent'}])
     db.store_wazzup_messages([message('potok1')], account='potok')
@@ -247,6 +251,7 @@ def test_notifications_are_transactional_private_and_only_for_changes_in_op(pg):
     events = drain()
     assert len(events) == 1 and events[0]['status'] == 'read'
     assert events[0]['affectsList'] is False
+    assert events[0]['statusOnly'] is True
     db.store_wazzup_messages([message('rolled-back')])
     conn.rollback()
     assert drain() == []

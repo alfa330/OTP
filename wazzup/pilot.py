@@ -61,6 +61,12 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return None, (jsonify(error='Пилот доступен только alfa330'), 403)
         return user, None
 
+    from .unread import register_unread_routes
+    register_unread_routes(bp, actor, require_api_key, preflight, db, EXCLUDED_CHANNELS)
+    from .templates import register_template_routes, validate_template_message, render_template_preview
+    register_template_routes(bp, actor, require_api_key, preflight, db,
+                             excluded_channels=EXCLUDED_CHANNELS)
+
     @bp.route('', methods=['GET', 'OPTIONS'])
     @require_api_key
     def capabilities():
@@ -200,6 +206,10 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         channel = next((c for c in channels('op') if c.get('channelId') == cid), None)
         if not channel or channel.get('state') != 'active' or channel.get('transport') not in ('whatsapp', 'wapi'):
             return jsonify(error='Отправка доступна только в активных WhatsApp-каналах'), 400
+        template_error = validate_template_message('op', cid, text, excluded_channels=EXCLUDED_CHANNELS)
+        if template_error:
+            return jsonify(error=template_error), 400
+        display_text = render_template_preview('op', cid, text)
         with db._get_cursor() as cur:
             cur.execute("SELECT chat_type FROM wazzup_chats WHERE account='op' AND channel_id=%s AND chat_id=%s",
                         (cid, chat))
@@ -236,7 +246,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
                     state = 'failed'
                 explanation = 'Wazzup отклонил отправку (' + code[:100] + ').'
                 if '24' in code or 'WINDOW' in code.upper() or 'TEMPLATE' in code.upper():
-                    explanation = 'Возможно, закрыто 24-часовое окно WABA. Отправьте шаблон через Wazzup.'
+                    explanation = 'Возможно, закрыто 24-часовое окно WABA. Выберите одобренный шаблон Wazzup через / или +.'
         except requests.RequestException:
             pass
         if state == 'unknown':
@@ -258,7 +268,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             if not exists:
                 db.store_wazzup_messages([{'messageId': message_id, 'channelId': cid,
                     'chatId': chat, 'chatType': 'whatsapp', 'dateTime': datetime.now(timezone.utc).isoformat(),
-                    'isEcho': True, 'type': 'text', 'text': text, 'status': 'pending'}], account='op')
+                    'isEcho': True, 'type': 'text', 'text': display_text, 'status': 'pending'}], account='op')
         except Exception:
             # Acceptance is durable in the outbox; echo will repair the archive.
             logging.exception('Wazzup pilot accepted message awaits webhook persistence')

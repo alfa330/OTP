@@ -102,6 +102,7 @@
     "@tiptap/starter-kit": "^3.29.2",
     "axios": "^1.7.7",
     "dompurify": "^3.3.3",
+    "emoji-picker-react": "4.22.3",
     "framer-motion": "^12.38.0",
     "jsqr": "^1.4.0",
     "jszip": "^3.10.2",

@@ -8,6 +8,7 @@ import {
     classifyPilotSendFailure, GLOBAL_CHANNEL_IDS, mergePilotMessages,
     pilotChatKey, pilotDraftStorageKey, splitPilotEvents,
 } from '../src/components/wazzup/chatPilot.js';
+import { prepareTemplate } from '../src/components/wazzup/chatTemplates.js';
 
 const require = createRequire(import.meta.url);
 const React = require('react');
@@ -118,6 +119,8 @@ await build({
                export const useState=(...args)=>h().useState(...args);
                export const useRef=(...args)=>h().useRef(...args);
                export const useEffect=(...args)=>h().useEffect(...args);
+               export const lazy=()=>function LazyFixture(){return null;};
+               export const Suspense=({children})=>children;
                export default {createElement:(...args)=>h().createElement(...args)};`
             : 'export default {post:(...args)=>globalThis.__wazzupPilotHarness.post(...args)};',
             loader: 'js',
@@ -126,9 +129,8 @@ await build({
 });
 const { default: InteractiveComposer } = await import(pathToFileURL(interactiveOutput));
 
-const createHarness = (post) => {
+const createHarness = (post, { storage = new Map() } = {}) => {
     const slots = [];
-    const storage = new Map();
     let index = 0;
     let effects = [];
     const harness = {
@@ -218,6 +220,89 @@ test('double click sends once; uncertain retry uses exactly the original payload
         if (previousStorage === undefined) delete globalThis.sessionStorage;
         else globalThis.sessionStorage = previousStorage;
     }
+});
+
+test('approved template keeps readable preview but sends Wazzup code, including uncertain remount retry', async () => {
+    const previousStorage = globalThis.sessionStorage;
+    const attempts = [];
+    const post = async (url, body) => {
+        attempts.push({ url, body });
+        throw { code: 'ECONNABORTED' };
+    };
+    const template = { source: 'wazzup', supported: true, templateCode: '[[welcome]][[bodyVar1]]',
+        text: 'Здравствуйте, {{1}}!', variables: ['bodyVar1'] };
+    const prepared = prepareTemplate(template, { bodyVar1: 'Алия' });
+    const first = createHarness(post);
+    try {
+        let form = first.render();
+        findElement(form, (el) => typeof el.props?.onChoose === 'function').props.onChoose(prepared);
+        form = first.render();
+        const field = findElement(form, (el) => el.type === 'textarea');
+        assert.equal(field.props.value, 'Здравствуйте, Алия!');
+        assert.equal(field.props.readOnly, true);
+        await form.props.onSubmit();
+        assert.equal(attempts.length, 1);
+        assert.equal(attempts[0].body.text, '[[welcome]][[Алия]]');
+        const saved = JSON.parse(first.storage.get(pilotDraftStorageKey(chat)));
+        assert.equal(saved.preview, 'Здравствуйте, Алия!');
+        assert.equal(saved.pending.text, '[[welcome]][[Алия]]');
+        const remount = createHarness(post, { storage: first.storage });
+        form = remount.render();
+        assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Здравствуйте, Алия!');
+        assert.equal(findElement(form, (el) => typeof el.props?.onChoose === 'function').props.locked, true);
+        await form.props.onSubmit();
+        assert.equal(attempts.length, 2);
+        assert.deepEqual(attempts[1].body, attempts[0].body);
+        assert.equal(JSON.parse(first.storage.get(pilotDraftStorageKey(chat))).pending.clientMessageId,
+            attempts[0].body.clientMessageId);
+    } finally {
+        delete globalThis.__wazzupPilotHarness;
+        if (previousStorage === undefined) delete globalThis.sessionStorage;
+        else globalThis.sessionStorage = previousStorage;
+    }
+});
+
+test('emoji replaces the selected text and uses UTF-16 cursor position without altering approved templates', () => {
+    const previousStorage = globalThis.sessionStorage;
+    const previousFrame = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (callback) => callback();
+    const h = createHarness(() => { throw new Error('Choosing emoji must not send a message'); });
+    try {
+        let form = h.render();
+        findElement(form, (el) => el.type === 'textarea').props.onChange({ target: { value: 'Привет, NAME!' } });
+        form = h.render();
+        findElement(form, (el) => el.type === 'textarea').props.onSelect({ target: { selectionStart: 8, selectionEnd: 12 } });
+        findElement(form, (el) => typeof el.props?.onEmoji === 'function').props.onEmoji('👋🏽');
+        form = h.render();
+        assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Привет, 👋🏽!');
+        findElement(form, (el) => typeof el.props?.onEmoji === 'function').props.onEmoji('🙂');
+        form = h.render();
+        assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Привет, 👋🏽🙂!');
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Привет, 👋🏽🙂!');
+        findElement(form, (el) => typeof el.props?.onChoose === 'function').props.onChoose({ text: '[[code]]', preview: 'Одобренный текст' });
+        form = h.render();
+        findElement(form, (el) => typeof el.props?.onEmoji === 'function').props.onEmoji('🙂');
+        form = h.render();
+        assert.equal(findElement(form, (el) => el.type === 'textarea').props.value, 'Одобренный текст');
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, '[[code]]');
+    } finally {
+        delete globalThis.__wazzupPilotHarness;
+        if (previousStorage === undefined) delete globalThis.sessionStorage;
+        else globalThis.sessionStorage = previousStorage;
+        if (previousFrame === undefined) delete globalThis.requestAnimationFrame;
+        else globalThis.requestAnimationFrame = previousFrame;
+    }
+});
+
+test('local templates are editable text; unsupported or incomplete Wazzup templates cannot be prepared', () => {
+    assert.deepEqual(prepareTemplate({ source: 'icore', text: 'Обычный ответ 🙂' }), { text: 'Обычный ответ 🙂', preview: '' });
+    assert.throws(() => prepareTemplate({ source: 'wazzup', supported: false, unsupportedReason: 'Media unsupported' }), /Media unsupported/);
+    const item = { source: 'wazzup', supported: true, templateCode: '[[code]][[bodyVar1]]',
+        variables: ['bodyVar1'], text: 'Здравствуйте, {{1}}!' };
+    for (const value of ['', '   ', '[[injected]]', 'line\nbreak']) {
+        assert.throws(() => prepareTemplate(item, { bodyVar1: value }));
+    }
+    assert.deepEqual(prepareTemplate(item, { bodyVar1: '  Алия  ' }), { text: '[[code]][[Алия]]', preview: 'Здравствуйте, Алия!' });
 });
 
 test('only explicit conversation check clears uncertain send; reset does not send a message', async () => {
