@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import FaIcon from './FaIcon';
+import { clickClosesHint, hoverOpensHint } from './infoHintPress';
 
 /**
  * «i» в кружке: прячет пояснение, чтобы оно не занимало место постоянно.
@@ -18,6 +19,14 @@ import FaIcon from './FaIcon';
  *    обрезало, а раскрытие раздвигало границы окна. С fixed-координатами от
  *    getBoundingClientRect он не влияет на разметку вообще: ничего не двигается
  *    и ничего не обрезается.
+ *
+ * 3. НА ТЕЛЕФОНЕ ОТКРЫВАЕТСЯ С ПЕРВОГО КАСАНИЯ. Одно касание — это цепочка
+ *    «наведение (его достраивает браузер) → фокус → клик». Пока подсказка
+ *    открывалась и от наведения, и от фокуса, клик следом её закрывал: «i»
+ *    срабатывал только со второго раза. Поэтому наведение слушаем у одной мыши,
+ *    а клик закрывает лишь то, что было открыто ещё до нажатия (правила — в
+ *    infoHintPress.js). Касание мимо подсказку закрывает само: Safari на iPhone
+ *    кнопку по касанию не фокусирует, и blur там не приходит.
  *
  * Координаты живут ровно пока поповер открыт: при скролле и ресайзе они
  * устаревают, поэтому там подсказка закрывается, а не уезжает от своей кнопки.
@@ -40,7 +49,10 @@ const CLOSE_DELAY_MS = 120;
 const InfoHint = ({ title = '', text = '', children, side = 'right', className = '' }) => {
   const [pos, setPos] = useState(null);
   const btnRef = useRef(null);
+  const popRef = useRef(null);
   const closeTimer = useRef(null);
+  // Открыта ли была подсказка в момент нажатия указателем; null — нажатия не было.
+  const openOnPress = useRef(null);
   const popId = useId();
   const open = pos !== null;
 
@@ -78,15 +90,21 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (event) => { if (event.key === 'Escape') close(); };
+    const onPressOutside = (event) => {
+      if (btnRef.current?.contains(event.target) || popRef.current?.contains(event.target)) return;
+      close();
+    };
     // capture: подсказка должна закрыться при скролле ЛЮБОГО контейнера,
     // а не только окна — внутри модалки скроллится её тело.
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
     document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onPressOutside, true);
     return () => {
       window.removeEventListener('scroll', close, true);
       window.removeEventListener('resize', close);
       document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onPressOutside, true);
     };
   }, [open, close]);
 
@@ -95,7 +113,6 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
   /* Ширину пузырь берёт по содержимому, а знаем мы её только после отрисовки.
      Поэтому позиция уточняется один раз: прижать к правому краю кнопки и не
      дать вылезти за экран можно только по фактическому размеру. */
-  const popRef = useRef(null);
   useLayoutEffect(() => {
     if (!pos || pos.measured) return;
     const pop = popRef.current;
@@ -119,14 +136,17 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
         aria-label="Подробнее"
         aria-expanded={open}
         aria-controls={popId}
-        onMouseEnter={place}
-        onMouseLeave={closeSoon}
+        onPointerEnter={(event) => { if (hoverOpensHint(event.pointerType)) place(); }}
+        onPointerLeave={(event) => { if (hoverOpensHint(event.pointerType)) closeSoon(); }}
+        onPointerDown={() => { openOnPress.current = open; }}
         onFocus={place}
-        onBlur={close}
+        onBlur={() => { openOnPress.current = null; close(); }}
         onClick={(event) => {
           // Клик — для тач-устройств и клавиатуры: там наведения нет.
           event.preventDefault();
-          if (open) close(); else place();
+          const closes = clickClosesHint({ openOnPress: openOnPress.current, open });
+          openOnPress.current = null;
+          if (closes) close(); else place();
         }}
         className={`inline-flex h-5 w-5 items-center justify-center rounded-full border text-[11px] transition ${
           open
