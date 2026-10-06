@@ -105,7 +105,7 @@ export default function useChatPilot({ apiBaseUrl, user, account, active, header
                 try {
                     while (!stopped) {
                         const { done, value } = await reader.read();
-                        if (done) break;
+                        if (done || stopped) break;
                         lastByteAt = Date.now();
                         const parsed = splitPilotEvents(buffer + decoder.decode(value, { stream: true }));
                         buffer = parsed.buffer;

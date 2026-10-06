@@ -1011,6 +1011,7 @@ export default function WazzupChatsView(props) {
         }
     };
     const applyPilotChanges = (changes) => {
+        if (accountRef.current !== 'op') return { thread: false, list: false };
         unread.apply(changes);
         const snapshot = pilotView.current;
         const relevant = changes.filter((event) => event.kind !== 'unread');

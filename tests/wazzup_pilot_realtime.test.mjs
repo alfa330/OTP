@@ -123,6 +123,17 @@ test('hydrated/status changes apply directly without any pane HTTP refresh; meta
     await h.close();
 });
 
+test('a buffered frame from a closing stream cannot update the next account view', async () => {
+    const applied = [];
+    const h = harness({ onChanges: (changes) => { applied.push(...changes); return { thread: false, list: false }; } });
+    await h.flush();
+    h.streams.at(-1).emit('event: change\ndata: {"changes":[{"messageId":"old-account-message"}]}\n\n');
+    h.options.account = 'potok';
+    await h.visible(false);
+    assert.equal(applied.length, 0);
+    await h.close();
+});
+
 test('status refresh only targets selected chat; bursts coalesce and preserve list invalidation', async () => {
     const h = harness(); await h.flush(); await h.emit('connected', { ready: true }); await h.tick(1000);
     assert.equal(h.calls.thread, 1); assert.equal(h.calls.list, 1);
