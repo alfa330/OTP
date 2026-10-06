@@ -18,9 +18,10 @@ from wazzup.realtime import EventBroker
 CHANNEL = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 
 
-def user(login='alfa330', active=True):
-    result = [None] * 11
+def user(login='alfa330', active=True, status='working'):
+    result = [None] * 20
     result[0], result[2], result[7], result[10] = 42, 'Pilot Tester', login, active
+    result[11] = status
     return result
 
 
@@ -164,7 +165,7 @@ class PilotRoutesTests(unittest.TestCase):
                          text='Local fixture only', clientMessageId=str(uuid.uuid4()))
 
     def test_only_active_alfa330_can_send_or_stream(self):
-        for actor in (user('someone-else'), user(active=False)):
+        for actor in (user('someone-else'), user(status='fired'), user(status='dismissal')):
             app, db, broker, transport = fixture(db=MemoryDatabase(actor))
             with app.test_client() as client:
                 for method, path in (('post', '/send'), ('get', '/stream'), ('post', '/refresh')):
@@ -176,6 +177,12 @@ class PilotRoutesTests(unittest.TestCase):
             self.assertFalse(db.statements)
             transport.post.assert_not_called()
             self.assertEqual(0, broker.streams)
+
+    def test_admin_off_operator_shift_can_use_pilot(self):
+        self.db.actor = user(active=False)
+        self.assertTrue(self.client.get('/api/wazzup/pilot').get_json()['enabled'])
+        self.assertEqual(201, self.client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        self.transport.post.assert_called_once()
 
     def test_existing_section_guard_is_required_even_for_alfa330(self):
         app, db, _, transport = fixture(guard_denied=True)

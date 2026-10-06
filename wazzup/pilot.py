@@ -23,8 +23,11 @@ STREAM_LIMIT = 8
 
 
 def eligible_user(user):
-    return bool(user and len(user) > 10 and user[10]
-                and str(user[7] or '').strip().lower() == 'alfa330')
+    # is_active (index 10) is the operator's on-shift flag, not account access.
+    # Match the session principal guard; an admin need not be on an operator shift.
+    return bool(user and len(user) > 11
+                and str(user[7] or '').strip().lower() == 'alfa330'
+                and str(user[11] or '').strip().lower() not in ('fired', 'dismissal'))
 
 
 def message_item(row):

@@ -29,8 +29,9 @@ from wazzup.realtime import EventBroker  # noqa: E402
 
 class FakeDatabase:
     def get_user(self, **_):
-        actor = [None] * 11
+        actor = [None] * 20
         actor[0], actor[2], actor[7], actor[10] = 42, 'Synthetic operator', 'alfa330', True
+        actor[11] = 'working'
         return actor
 
 
