@@ -39,8 +39,17 @@ import Orb from './Orb.jsx';
 
 const PANEL_TITLE = 'Помощник';
 
+/* Панель растягивают за край (AssistantOrb.jsx), а три её экрана набраны под
+   стандартную колонку: замок, пустой чат с подсказками и подтверждение
+   удаления. Растянутые вместе с панелью, они превращаются в строку текста во
+   всю ширину монитора и кнопки по 1300 пикселей. Поэтому колонку они держат
+   свою — 384 пикселя, по центру; в стандартной панели это ровно прежний вид.
+   (У подтверждения удаления предел 336: поля ему даёт вуаль вокруг.)
+   Ленту и историю это не касается: им ширина как раз и нужна. */
+const NARROW_COLUMN = 'mx-auto w-full max-w-[384px]';
+
 const LockScreen = ({ checking, onRequestQr }) => (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2.5 px-7 text-center">
+    <div className={`${NARROW_COLUMN} flex flex-1 flex-col items-center justify-center gap-2.5 px-7 text-center`}>
         {checking ? (
             <>
                 <Loader2 size={20} className="animate-spin text-slate-300" />
@@ -299,7 +308,7 @@ export default function AssistantPanel({
                         className="flex flex-1 flex-col gap-2 overflow-y-auto bg-slate-50/50 py-3"
                     >
                         {empty && (
-                            <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                            <div className={`${NARROW_COLUMN} flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center`}>
                                 <Orb variant="hero" />
                                 <div className="mt-1 text-[13.5px] font-semibold text-slate-900">
                                     Спросите про что угодно из базы знаний
@@ -376,7 +385,7 @@ export default function AssistantPanel({
                 списке истории и выглядит несоразмерно поводу. */}
             {pendingDelete && (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 px-6 backdrop-blur-sm">
-                    <div className="w-full rounded-2xl bg-white p-4 text-center shadow-lg ring-1 ring-slate-200">
+                    <div className="w-full max-w-[336px] rounded-2xl bg-white p-4 text-center shadow-lg ring-1 ring-slate-200">
                         <div className="text-[13px] font-semibold text-slate-900">
                             Удалить разговор?
                         </div>

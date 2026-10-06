@@ -31,6 +31,13 @@ export const DOCK_HIDDEN = ORB_SIZE / 2;
 export const DEFAULT_BOTTOM_OFFSET = 96;
 export const DEFAULT_RIGHT_OFFSET = 18;
 
+/* Размер мини-чата — и стандартный, и НАИМЕНЬШИЙ. Панель можно растянуть за
+   край (resizePanelRect), но не сжать: колонку у́же 384 пикселей не переживают
+   ни шапка с пятью кнопками, ни таблицы в ответах (см. panelAnchor о телефоне),
+   а просили окно увеличивать. Заодно у человека всегда есть дорога назад:
+   сжал до упора — и панель снова стандартная, отдельной кнопки сброса не нужно. */
+export const PANEL_SIZE = { width: 384, height: 520 };
+
 /* Навигация телефона: бар разделов у одной из граней экрана и колокол в правом
    верхнем углу. Шарик, севший на них, отнимает у человека вход в разделы и в
    уведомления, поэтому занятые полосы для него закрыты — раньше ровно так же
@@ -158,7 +165,11 @@ export const overlapsNavigation = (position, viewport, nav) => (
  */
 export const panelAnchor = (position, viewport, panel) => {
     const gap = 12;
-    const fullscreen = viewport.width < panel.width + 2 * EDGE_MARGIN + gap;
+    /* Телефон узнаём по СТАНДАРТНОЙ ширине, а не по желаемой: панель, которую
+       растянули до 900 пикселей, на окне в 920 — всё ещё компьютер, ей просто
+       тесно. Сравнение с желаемой шириной развернуло бы её на всё окно и
+       отняло ручки краёв — то есть человек не смог бы сжать её обратно. */
+    const fullscreen = viewport.width < PANEL_SIZE.width + 2 * EDGE_MARGIN + gap;
 
     if (fullscreen) {
         const width = Math.max(240, viewport.width - 2 * EDGE_MARGIN);
@@ -173,15 +184,21 @@ export const panelAnchor = (position, viewport, panel) => {
         };
     }
 
+    /* Желаемый размер человек выставил на том окне, где тянул панель, и
+       хранится он как есть. На окне поменьше панель занимает его целиком за
+       вычетом отступов, не больше — а на прежнем мониторе вернётся к своему. */
+    const width = Math.min(panel.width, viewport.width - 2 * EDGE_MARGIN);
+    const height = Math.min(panel.height, viewport.height - 2 * EDGE_MARGIN);
+
     const orbCenterX = position.x + ORB_SIZE / 2;
     const toLeft = orbCenterX > viewport.width / 2;
     const rawLeft = toLeft
-        ? position.x + ORB_SIZE - panel.width
+        ? position.x + ORB_SIZE - width
         : position.x;
-    const rawTop = position.y - panel.height - gap;
+    const rawTop = position.y - height - gap;
 
-    const maxLeft = viewport.width - panel.width - EDGE_MARGIN;
-    const maxTop = viewport.height - panel.height - EDGE_MARGIN;
+    const maxLeft = viewport.width - width - EDGE_MARGIN;
+    const maxTop = viewport.height - height - EDGE_MARGIN;
     /* Панель выше окна не бывает: если она не влезает над шариком, её опускают
        вниз, а не обрезают. Обрезанный композер — это чат, в который нельзя
        написать. */
@@ -192,11 +209,98 @@ export const panelAnchor = (position, viewport, panel) => {
     return {
         left: clamp(rawLeft, EDGE_MARGIN, Math.max(EDGE_MARGIN, maxLeft)),
         top,
-        width: panel.width,
-        height: Math.min(panel.height, viewport.height - 2 * EDGE_MARGIN),
+        width,
+        height,
         origin: `${rawTop < EDGE_MARGIN ? 'top' : 'bottom'}-${toLeft ? 'right' : 'left'}`,
         fullscreen: false,
     };
+};
+
+/**
+ * Желаемый размер панели из хранилища.
+ *
+ * Запись могла остаться битой или от версии, где размера ещё не было: мусор и
+ * всё, что меньше стандартного, дают стандартный. Сверху не режем — потолок
+ * зависит от окна, и ставит его panelAnchor на каждом открытии.
+ */
+export const normalizePanelSize = (size) => ({
+    width: isFiniteNumber(size?.width)
+        ? Math.max(PANEL_SIZE.width, Math.round(size.width))
+        : PANEL_SIZE.width,
+    height: isFiniteNumber(size?.height)
+        ? Math.max(PANEL_SIZE.height, Math.round(size.height))
+        : PANEL_SIZE.height,
+});
+
+/**
+ * Рамка панели, пока её тянут за край или угол.
+ *
+ * Правило то же, что у окна в macOS: тянутый край идёт за указателем,
+ * противоположный стоит на месте. Поэтому считаем от рамки, с которой жест
+ * НАЧАЛСЯ, и полного смещения указателя, а не от прошлого кадра: накопленная
+ * по кадрам ошибка округления уводила бы «стоящий» край по пикселю.
+ *
+ * edge — какие края взяты: { x: 'left' | 'right', y: 'top' | 'bottom' }, у
+ * стороны по одной оси второй оси нет вовсе.
+ *
+ * Считается РАЗМЕР, а край выводится из него. Смещение указателя округляется
+ * до целого, и размер остаётся целым, даже когда сама рамка стоит на дробном
+ * месте: при масштабе страницы 110 % шарик, а с ним и панель, встают на
+ * половинки пикселя. Округляй мы край, нажатие без движения уже сдвигало бы
+ * его на долю пикселя и записывало размер вида 384.4.
+ *
+ * Границы две. Наружу — отступ от края окна, как у самой панели. Внутрь —
+ * стандартный размер; на окне, где панель УЖЕ ниже стандартной (её ужал
+ * panelAnchor), нижней границей служит её нынешний размер — иначе первое же
+ * движение дёрнуло бы край к недостижимым 520 пикселям. По той же причине
+ * рамке, которая уже стоит за отступом, потолком служит она сама.
+ */
+export const resizePanelRect = (start, edge, delta, viewport) => {
+    const right = start.left + start.width;
+    const bottom = start.top + start.height;
+    /* Сторона, которую тянут: size — её нынешний размер, grow — на сколько
+       просит вырасти указатель, room — сколько места до отступа от края. */
+    const side = (size, standard, grow, room) => clamp(
+        size + Math.round(grow), Math.min(standard, size), Math.max(size, Math.floor(room)));
+
+    let { left, top, width, height } = start;
+    if (edge?.x === 'left') {
+        width = side(start.width, PANEL_SIZE.width, -delta.x, right - EDGE_MARGIN);
+    } else if (edge?.x === 'right') {
+        width = side(start.width, PANEL_SIZE.width, delta.x,
+                     viewport.width - EDGE_MARGIN - start.left);
+    }
+    if (edge?.y === 'top') {
+        height = side(start.height, PANEL_SIZE.height, -delta.y, bottom - EDGE_MARGIN);
+    } else if (edge?.y === 'bottom') {
+        height = side(start.height, PANEL_SIZE.height, delta.y,
+                      viewport.height - EDGE_MARGIN - start.top);
+    }
+    // Левый и верхний край пересчитываем, только если размер изменился: иначе
+    // (left + width) - width возвращал бы то же место с ошибкой в 13-м знаке.
+    if (edge?.x === 'left' && width !== start.width) left = right - width;
+    if (edge?.y === 'top' && height !== start.height) top = bottom - height;
+
+    return { left, top, width, height };
+};
+
+/**
+ * Желаемый размер панели после жеста.
+ *
+ * Запоминается только та сторона, которую жест действительно ИЗМЕНИЛ. Вторая
+ * могла быть ужата окном: желаемые 900 пикселей высоты на ноутбуке показаны
+ * как 696, и запись «как на экране» молча стёрла бы выбор, сделанный на
+ * мониторе, — от того, что человек потянул другой край или упёрся в отступ.
+ *
+ * prev возвращается тем же объектом, если не изменилось ничего: по нему
+ * компонент понимает, что запоминать нечего.
+ */
+export const settledPanelSize = (prev, start, rect) => {
+    if (rect.width === start.width && rect.height === start.height) return prev;
+    return normalizePanelSize({
+        width: rect.width !== start.width ? rect.width : prev.width,
+        height: rect.height !== start.height ? rect.height : prev.height,
+    });
 };
 
 /* Порог «нажали или потащили» — общий для всех плавающих элементов портала

@@ -1,10 +1,13 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+    Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import Orb from './Orb.jsx';
 import useAssistantChat from './useAssistantChat';
 import {
-    clampPosition, defaultPosition, movedEnough, panelAnchor, resolveDock, undock,
+    PANEL_SIZE, clampPosition, defaultPosition, movedEnough, normalizePanelSize, panelAnchor,
+    resizePanelRect, resolveDock, settledPanelSize, undock,
 } from './orbPosition';
 import {
     canOpenPipWindow, cloneDocumentStyles, mirrorDocumentChrome, pipWindowTaken,
@@ -55,10 +58,32 @@ const AssistantPanel = lazy(() => import('./AssistantPanel.jsx'));
  * а чат открывает меньшинство. Мини-чат тянет за собой markdown, DOMPurify и
  * примитивы чата; в общем бандле это байты, которые платит каждый вход в
  * портал. lazy() оставляет в основном коде только сам пузырь.
+ *
+ * ПАНЕЛЬ ТЯНЕТСЯ ЗА КРАЙ. Ответ помощника — это текст с таблицей и источниками,
+ * и в колонке 384 на 520 его читают прокруткой. Поэтому панель растягивается,
+ * как окно: за любой край или угол, тянутый край идёт за указателем. Запоминаем
+ * только РАЗМЕР, место остаётся производным от шарика (panelAnchor): панель,
+ * у которой своё место, перестала бы открываться «из шарика», а на другом
+ * мониторе её пришлось бы ловить так же, как уехавший за край шарик. Отсюда
+ * правило отпускания: панель сразу встаёт от шарика в новом размере, а не
+ * остаётся там, где её бросили, — см. settleResize.
  */
 
 const STORAGE_PREFIX = 'otp_assistant_orb:';
-const PANEL_SIZE = { width: 384, height: 520 };
+
+/* Края и углы панели, за которые её тянут: x и y — какие стороны рамки идут
+   за указателем (orbPosition.js: resizePanelRect). Ключ — сторона света, по
+   нему же assistant-orb.css ставит ручку на место и выбирает курсор. */
+const RESIZE_HANDLES = [
+    { key: 'n', y: 'top' },
+    { key: 's', y: 'bottom' },
+    { key: 'w', x: 'left' },
+    { key: 'e', x: 'right' },
+    { key: 'nw', x: 'left', y: 'top' },
+    { key: 'ne', x: 'right', y: 'top' },
+    { key: 'sw', x: 'left', y: 'bottom' },
+    { key: 'se', x: 'right', y: 'bottom' },
+];
 
 /* Разделы, где шарика нет.
  *
@@ -120,9 +145,15 @@ export default function AssistantOrb({
     const [started, setStarted] = useState(false);    // панель хоть раз открывали
     const [pipWindow, setPipWindow] = useState(null);     // окно поверх других окон
     const [pipContainer, setPipContainer] = useState(null);
+    const [panelSize, setPanelSize] = useState(PANEL_SIZE);   // желаемый размер мини-чата
+    const [panelRect, setPanelRect] = useState(null);     // рамка панели, пока её тянут за край
+    const [settled, setSettled] = useState(null);         // рамка, в которой панель отпустили
 
     const buttonRef = useRef(null);
     const dragRef = useRef(null);
+    const resizeRef = useRef(null);
+    const panelRef = useRef(null);
+    const frameRef = useRef(null);                        // рамка панели на экране сейчас
     /* Занятые навигацией полосы (нижний бар на телефоне, колокол в углу) держим
        в ref: их читают обработчики перетаскивания, которые живут в замыкании и
        пересоздаваться на каждый поворот экрана не должны — иначе слушатели
@@ -214,6 +245,7 @@ export default function AssistantOrb({
         setPosition(stored
             ? clampPosition(stored, size, navRef.current)
             : defaultPosition(size, navRef.current));
+        setPanelSize(normalizePanelSize(stored?.panel));
     }, [userId]);
 
     /* Изменение размера окна. Шарик едет вместе с краем, а не остаётся висеть
@@ -242,10 +274,29 @@ export default function AssistantOrb({
         return () => document.removeEventListener('visibilitychange', onVisibility);
     }, []);
 
+    /* Размер панели лежит в той же записи, что и место шарика: это одна
+       настройка одного виджета, и второй ключ на человека означал бы две
+       записи, которые надо читать, чистить и переносить вместе.
+
+       Но пишется каждое порознь — только то, что человек менял в ЭТОЙ вкладке,
+       остальное берётся из хранилища свежим. Иначе вкладка, открытая раньше,
+       первым же сдвигом шарика (или сменой размера окна — она тоже двигает
+       шарик) клала бы рядом с его местом свой устаревший размер и молча
+       стирала растяжение, сделанное в соседней вкладке. */
     useEffect(() => {
         if (!userId || !position || dragging) return;
-        writeStored(userId, position);
+        writeStored(userId, {
+            ...readStored(userId), x: position.x, y: position.y, dock: position.dock,
+        });
     }, [userId, position, dragging]);
+
+    /* position здесь — только признак «запись уже прочитана»: до первой
+       примерки в состоянии лежит стандартный размер, и запись его затёрла бы
+       сохранённый. В зависимостях его нет намеренно — см. выше. */
+    useEffect(() => {
+        if (!userId || !position) return;
+        writeStored(userId, { ...readStored(userId), panel: panelSize });
+    }, [userId, panelSize]);
 
     /* Тычок в шарик. Откреплённый помощник живёт в отдельном окне, и второй,
        встроенной, панели быть не должно: две ленты одного разговора на экране —
@@ -356,9 +407,14 @@ export default function AssistantOrb({
             return;
         }
         try {
+            /* Окно открывается того же размера, что и панель на экране:
+               человек растянул её под свои ответы, и открепление, вернувшее
+               стандартные 384 на 520, читалось бы как сброс. Лишнее браузер
+               срежет сам — больше доли экрана такому окну он не даёт. */
+            const size = frameRef.current || PANEL_SIZE;
             const win = await window.documentPictureInPicture.requestWindow({
-                width: PANEL_SIZE.width,
-                height: PANEL_SIZE.height,
+                width: Math.round(size.width),
+                height: Math.round(size.height),
             });
             win.document.title = 'Помощник';
             cloneDocumentStyles(win);
@@ -417,8 +473,137 @@ export default function AssistantOrb({
 
     const anchor = useMemo(() => {
         if (!position || !viewport) return null;
-        return panelAnchor(position, viewport, PANEL_SIZE);
-    }, [position, viewport]);
+        return panelAnchor(position, viewport, panelSize);
+    }, [position, viewport, panelSize]);
+
+    /* Где панель стоит на экране: там, куда её поставил шарик, а пока её
+       тянут за край — в рамке жеста. */
+    const frame = panelRect || anchor;
+    frameRef.current = frame;
+
+    /* Жест обрывается, если панель встала заново посреди него: её свернули
+       (Escape не ждёт, пока отпустят кнопку), сдвинули шарик, сменился размер
+       окна. useLayoutEffect, а не useEffect: иначе панель успевала бы
+       нарисоваться один кадр в рамке жеста рядом с уже уехавшим шариком. */
+    useLayoutEffect(() => {
+        resizeRef.current = null;
+        setPanelRect(null);
+    }, [open, position, viewport]);
+
+    /* Конец жеста. Размер запоминается, а панель сразу встаёт от шарика — не
+       остаётся там, где её отпустили. За свободный край (от шарика) это одно
+       и то же место. За край у шарика — нет: потянутая вниз панель легла бы на
+       шарик и так бы и висела, а при следующем открытии оказалась бы в другом
+       месте, уже без видимой причины. Пусть лучше переедет сейчас, на глазах:
+       человек видит, что окно выросло, и видит, куда. */
+    const settleResize = useCallback((drag, rect) => {
+        setPanelRect(null);
+        // Жест сорван до первого движения: менять и запоминать нечего.
+        if (!rect) return;
+        setPanelSize((prev) => settledPanelSize(prev, drag.rect, rect));
+        setSettled(rect);
+    }, []);
+
+    /* Переезд от места, где панель отпустили, до места от шарика — плавный:
+       мгновенный скачок окна под рукой читается как сорвавшийся жест. Двигаем
+       transform'ом поверх уже выставленных left и top, то есть работой
+       композитора; при настройке «меньше движения» панель просто встаёт. */
+    useLayoutEffect(() => {
+        const node = panelRef.current;
+        if (!settled || !anchor || !node?.animate) return;
+        const dx = settled.left - anchor.left;
+        const dy = settled.top - anchor.top;
+        if (!dx && !dy) return;
+        if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+        node.animate(
+            [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
+            { duration: 180, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' },
+        );
+    }, [settled]);
+
+    /* Панель тянут за край. Захват указателя — на самой ручке: она ничего не
+       оборачивает и клика не ждёт, поэтому увести его захватом здесь не у кого
+       (ср. колокол на телефоне, где обёртка стоит вокруг чужой кнопки). */
+    const onResizeStart = useCallback((event, handle) => {
+        if (event.button != null && event.button !== 0) return;
+        const active = resizeRef.current;
+        if (active) {
+            /* Жест уже идёт, а на другой край лёг второй палец. Тянуть два
+               края сразу мы не умеем, а подмена жеста бросила бы первый
+               незакрытым: размер на экране есть, в памяти его нет. */
+            if (active.pointerId !== event.pointerId
+                    && active.target.hasPointerCapture?.(active.pointerId)) return;
+            // Прежний жест остался без конца — закрываем его как есть.
+            resizeRef.current = null;
+            settleResize(active, active.last);
+        }
+        const rect = frameRef.current;
+        if (!rect) return;
+        // Иначе нажатие на край начинает выделение текста в ленте под ним
+        // и уводит фокус из поля ввода, где человек набирает вопрос.
+        event.preventDefault();
+        // Панель могла ещё доезжать до места после прошлого жеста. Новый
+        // считается от места, где она встанет, поэтому доезд обрываем: иначе
+        // край первые мгновения шёл бы мимо указателя на остаток пути.
+        panelRef.current?.getAnimations?.().forEach((animation) => animation.cancel());
+        resizeRef.current = {
+            pointerId: event.pointerId,
+            target: event.currentTarget,
+            handle,
+            start: { x: event.clientX, y: event.clientY },
+            rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+            last: null,
+        };
+        try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+        } catch (error) { /* см. перетаскивание шарика */ }
+    }, [settleResize]);
+
+    const onResizeMove = useCallback((event) => {
+        const drag = resizeRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        /* Движение без нажатой кнопки — жест кончился там, откуда pointerup
+           до нас не дошёл (кнопку отпустили поверх системного окна или после
+           Alt-Tab). Номер указателя у мыши всегда один и тот же, и без этой
+           проверки панель потом тянулась бы от простого наведения на край. */
+        if (event.buttons === 0) {
+            resizeRef.current = null;
+            settleResize(drag, drag.last);
+            return;
+        }
+        drag.last = resizePanelRect(drag.rect, drag.handle, {
+            x: event.clientX - drag.start.x,
+            y: event.clientY - drag.start.y,
+        }, viewport || viewportSize());
+        setPanelRect(drag.last);
+    }, [viewport, settleResize]);
+
+    /* Жест кончается тремя путями, и все три сходятся сюда: отпустили
+       (pointerup), жест сорван системой (pointercancel) или у ручки отобран
+       захват указателя (lostpointercapture) — после него движения сюда уже не
+       приходят, и незакрытый жест оставил бы панель в рамке, которой нет в
+       памяти: на экране один размер, в записи другой. */
+    const finishResize = useCallback((event) => {
+        const drag = resizeRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        resizeRef.current = null;
+        if (event.type !== 'lostpointercapture') {
+            try {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            } catch (error) { /* см. выше */ }
+        }
+
+        /* Рамку берём из САМОГО отпускания — по той же причине, что и место
+           шарика: последний pointermove на резком движении браузер не шлёт.
+           У сорванного жеста координаты не обязаны что-либо значить, поэтому
+           там остаётся последняя рамка, до которой дотянули. */
+        settleResize(drag, event.type === 'pointerup'
+            ? resizePanelRect(drag.rect, drag.handle, {
+                x: event.clientX - drag.start.x,
+                y: event.clientY - drag.start.y,
+            }, viewport || viewportSize())
+            : drag.last);
+    }, [viewport, settleResize]);
 
     /* Escape закрывает панель — привычка от всех модалок портала.
        Слушать надо ТО окно, где панель на самом деле. У откреплённого помощника
@@ -538,18 +723,45 @@ export default function AssistantOrb({
 
             {!detached && orbVisible && open && anchor && (
                 <div
-                    className="fixed overflow-hidden rounded-[18px] border border-slate-200/80 bg-white/95 shadow-[0_18px_48px_rgba(15,23,42,0.16),0_2px_8px_rgba(15,23,42,0.06)] backdrop-blur-xl"
+                    ref={panelRef}
+                    className="fixed"
                     style={{
-                        left: anchor.left,
-                        top: anchor.top,
-                        width: anchor.width,
-                        height: anchor.height,
+                        left: frame.left,
+                        top: frame.top,
+                        width: frame.width,
+                        height: frame.height,
                         zIndex: 84,
                     }}
                     role="dialog"
                     aria-label="Помощник"
                 >
-                    {panel}
+                    {/* Скругление и обрезка — на внутренней коробке, а не на
+                        самой панели: ручки краёв торчат ЗА рамку, и
+                        overflow-hidden на общем предке срезал бы их вместе с
+                        углами. relative здесь — опора подтверждению удаления
+                        разговора (absolute inset-0 в AssistantPanel): без неё
+                        оно считалось бы от внешней коробки и вылезло бы
+                        квадратными углами за скругление. */}
+                    <div className="relative h-full overflow-hidden rounded-[18px] border border-slate-200/80 bg-white/95 shadow-[0_18px_48px_rgba(15,23,42,0.16),0_2px_8px_rgba(15,23,42,0.06)] backdrop-blur-xl">
+                        {panel}
+                    </div>
+                    {/* На телефонной раскладке панель и так во всё окно —
+                        тянуть её некуда, и ручек там нет. */}
+                    {!anchor.fullscreen && RESIZE_HANDLES.map((handle) => (
+                        <span
+                            key={handle.key}
+                            className={`aorb-resize aorb-resize--${handle.key}`}
+                            // Край панели — жест мышью, а не элемент управления:
+                            // ни имени, ни роли у него нет, и в дереве
+                            // доступности ему делать нечего.
+                            aria-hidden="true"
+                            onPointerDown={(event) => onResizeStart(event, handle)}
+                            onPointerMove={onResizeMove}
+                            onPointerUp={finishResize}
+                            onPointerCancel={finishResize}
+                            onLostPointerCapture={finishResize}
+                        />
+                    ))}
                 </div>
             )}
 

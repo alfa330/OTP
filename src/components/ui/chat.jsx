@@ -185,13 +185,49 @@ export const ChatComposer = ({
         area.setSelectionRange(end, end);
     }, [focusKey, disabled]);
 
-    useEffect(() => {
+    const fitHeight = useCallback(() => {
         const area = areaRef.current;
         if (!area) return;
         area.style.height = 'auto';
         area.style.height = `${Math.min(area.scrollHeight, 140)}px`;
+    }, []);
+
+    useEffect(() => {
+        fitHeight();
         setRows(value.includes('\n') ? 2 : 1);
-    }, [value]);
+    }, [value, fitHeight]);
+
+    /* Высота поля зависит не только от текста, но и от ШИРИНЫ: тот же вопрос
+       в узкой колонке занимает шесть строк, в широкой — две. А ширина меняется
+       без единого нажатия — панель помощника растягивают за край, окно
+       браузера сужают, — и поле держало бы высоту, подобранную под прежнюю
+       ширину, до следующей набранной буквы: шесть строк пустоты над двумя
+       строками текста или, наоборот, вопрос, ушедший в прокрутку внутри поля.
+
+       Перемер — в следующем кадре, а не прямо в обработчике: он меняет высоту
+       наблюдаемого элемента, и сделанное внутри обработчика браузер считает
+       петлёй («ResizeObserver loop…» в window.onerror). Окно берём у самого
+       поля: помощник бывает откреплён в окно поверх других окон, а кадры
+       вкладки-хозяйки, ушедшей в фон, там не идут. */
+    useEffect(() => {
+        const area = areaRef.current;
+        const view = area?.ownerDocument?.defaultView;
+        if (!area || !view?.ResizeObserver) return undefined;
+        let width = area.offsetWidth;
+        let frame = 0;
+        const observer = new view.ResizeObserver(() => {
+            // На свою же смену высоты не откликаемся — только на ширину.
+            if (area.offsetWidth === width) return;
+            width = area.offsetWidth;
+            view.cancelAnimationFrame(frame);
+            frame = view.requestAnimationFrame(fitHeight);
+        });
+        observer.observe(area);
+        return () => {
+            observer.disconnect();
+            view.cancelAnimationFrame(frame);
+        };
+    }, [fitHeight]);
 
     const submit = () => {
         const trimmed = (value || '').trim();

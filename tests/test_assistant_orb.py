@@ -413,5 +413,296 @@ class PipWindowReuseTests(unittest.TestCase):
                          'перенос стилей PiP-окна скопирован ещё раз')
 
 
+class ResizeTests(unittest.TestCase):
+    """Панель мини-чата тянут за край — как окно.
+
+    Ответ помощника — текст с таблицей и источниками, и в колонке 384 на 520 его
+    читают прокруткой. Геометрию жеста стережёт tests/assistant_orb_position.test.mjs;
+    здесь — разметка и стили, где правка «в одну строку» молча отключает жест
+    или ломает то, что рядом, а увидеть это можно только мышью в браузере.
+    """
+
+    CORNERS = ('nw', 'ne', 'sw', 'se')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.orb = ORB.read_text(encoding='utf-8')
+        cls.panel = PANEL.read_text(encoding='utf-8')
+        cls.chat = (ROOT / 'src' / 'components' / 'ui' / 'chat.jsx').read_text(encoding='utf-8')
+        mount = cls.orb[cls.orb.index('{!detached && orbVisible && open && anchor && ('):]
+        cls.mount = mount[:mount.index('{detached && createPortal(')]
+        # Открывающий тег самой панели и тег ручки — без оглядки на то, как
+        # именно записаны их атрибуты.
+        cls.dialog = cls.mount[cls.mount.index('<div'):cls.mount.index('role="dialog"')]
+        handle = cls.mount[cls.mount.index('RESIZE_HANDLES.map('):]
+        cls.handle = handle[handle.index('<span'):handle.index('/>')]
+        cls.rules = cls._handle_rules(CSS.read_text(encoding='utf-8'))
+
+    @staticmethod
+    def _handle_rules(css):
+        """Объявления ручек по ключу: '' — общее правило, 'n', 'nw'… — свои.
+
+        Комментарии вырезаются, а правило разбирается по смыслу, а не по
+        написанию: перенос объявления на новую строку или перестановка
+        селекторов в группе не должны ронять страж.
+        """
+        plain = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
+        rules = {}
+        for selectors, body in re.findall(r'([^{}]+)\{([^{}]*)\}', plain):
+            declarations = dict(
+                (name.strip(), value.strip())
+                for name, value in re.findall(r'([a-z-]+)\s*:\s*([^;]+);', body))
+            for selector in selectors.split(','):
+                selector = selector.strip()
+                if selector == '.aorb-resize':
+                    rules.setdefault('', {}).update(declarations)
+                elif selector.startswith('.aorb-resize--'):
+                    rules.setdefault(selector[len('.aorb-resize--'):], {}).update(declarations)
+        return rules
+
+    @staticmethod
+    def _px(value):
+        return int(value[:-2])
+
+    def _block(self, start, end):
+        begin = self.orb.index(start)
+        return self.orb[begin:self.orb.index(end, begin)]
+
+    # ── разметка ────────────────────────────────────────────────────────────
+
+    def test_ручки_стоят_снаружи_обрезанной_коробки(self):
+        """Ручки краёв торчат ЗА рамку панели. Скругление с overflow-hidden
+        поэтому живёт на внутренней коробке: на общем предке оно срезало бы
+        ручки вместе с углами, и от жеста остался бы один пиксель границы."""
+        self.assertIn('fixed', self.dialog)
+        self.assertNotIn('overflow-hidden', self.dialog,
+                         'обрезка вернулась на внешнюю коробку — ручки срезаны')
+        inner = re.search(r'<div className="([^"]*rounded-\[18px\][^"]*)"', self.mount)
+        self.assertIsNotNone(inner, 'пропала внутренняя коробка со скруглением')
+        classes = inner.group(1).split()
+        self.assertIn('overflow-hidden', classes)
+        # Высота панели теперь идёт через этот один класс: внешняя коробка
+        # держит только размеры. Без него рамка схлопывается до содержимого,
+        # а длинная лента вырастает за окно и уносит поле ввода за край.
+        self.assertIn('h-full', classes)
+        # Ручки — после внутренней коробки, то есть её сёстры, а не потомки.
+        closed = re.search(r'\{panel\}\s*</div>', self.mount)
+        self.assertIsNotNone(closed, 'панель больше не закрывается перед ручками')
+        self.assertLess(closed.end(), self.mount.index('RESIZE_HANDLES.map('))
+
+    def test_внутренняя_коробка_держит_подтверждение_удаления(self):
+        """Подтверждение удаления разговора — absolute inset-0 внутри панели.
+        Без relative на внутренней коробке оно считалось бы от внешней и вылезло
+        бы квадратными углами за скругление: обрезает только предок-опора."""
+        inner = re.search(r'<div className="([^"]*rounded-\[18px\][^"]*)"', self.mount).group(1)
+        self.assertIn('relative', inner.split())
+        self.assertIn('absolute inset-0 z-10', self.panel)
+
+    def test_панель_рисуется_в_рамке_жеста(self):
+        """Пока край тянут, панель стоит в рамке жеста (frame), а не там, куда
+        её поставил шарик (anchor). Вернуть в стиль anchor — и жест перестанет
+        что-либо двигать, хотя размер по отпусканию всё равно запишется."""
+        for side in ('left', 'top', 'width', 'height'):
+            self.assertRegex(self.dialog, r'\b%s: frame\.%s\b' % (side, side))
+        self.assertIn('const frame = panelRect || anchor;', self.orb)
+        # Переезд по отпусканию двигает саму панель — ей нужен узел.
+        self.assertIn('ref={panelRef}', self.dialog)
+
+    def test_ручка_ведёт_жест_от_нажатия_до_любого_конца(self):
+        """Пять обработчиков — пять звеньев жеста. Без любого из первых трёх
+        панель не тянется вовсе; без двух последних жест, сорванный системой,
+        остаётся незакрытым."""
+        for wiring in ('onPointerDown={(event) => onResizeStart(event, handle)}',
+                       'onPointerMove={onResizeMove}',
+                       'onPointerUp={finishResize}',
+                       'onPointerCancel={finishResize}',
+                       'onLostPointerCapture={finishResize}'):
+            self.assertIn(wiring, self.handle)
+        start = self._block('const onResizeStart', 'const onResizeMove')
+        # Без захвата указатель, обогнавший край, уносит события на то, что под
+        # ним; без preventDefault нажатие на край выделяет текст ленты и уводит
+        # фокус из поля ввода.
+        self.assertIn('event.currentTarget.setPointerCapture(event.pointerId)', start)
+        self.assertIn('event.preventDefault()', start)
+
+    def test_жест_закрывается_и_без_обычного_отпускания(self):
+        """Номер указателя у мыши всегда один и тот же. Жест, оставшийся
+        незакрытым — кнопку отпустили поверх системного окна или после Alt-Tab,
+        у ручки отобрали захват, — продолжался бы от простого наведения на край,
+        а на экране осталась бы рамка, которой нет в памяти."""
+        move = self._block('const onResizeMove', 'const finishResize')
+        guard = move[move.index('if (event.buttons === 0) {'):]
+        guard = guard[:guard.index('}')]
+        self.assertIn('resizeRef.current = null;', guard)
+        self.assertIn('settleResize(drag, drag.last);', guard)
+        self.assertIn('return;', guard)
+        finish = self._block('const finishResize', '/* Escape закрывает панель')
+        # Потеря захвата — тоже конец жеста, а не повод выйти молча.
+        self.assertNotRegex(finish, r"lostpointercapture'\)\s*return")
+        self.assertIn("event.type === 'pointerup'", finish)
+
+    def test_второй_палец_не_перебивает_жест(self):
+        """Жест, подменённый вторым пальцем на другом крае, остался бы
+        незакрытым: его pointerup отсекается по номеру указателя, и размер,
+        видимый на экране, в запись не попадает."""
+        start = self._block('const onResizeStart', 'const onResizeMove')
+        self.assertIn('active.pointerId !== event.pointerId', start)
+        self.assertIn('hasPointerCapture', start)
+        self.assertLess(start.index('const active = resizeRef.current;'),
+                        start.index('resizeRef.current = {'))
+
+    def test_на_телефонной_раскладке_ручек_нет(self):
+        """Там панель и так во всё окно — тянуть её некуда."""
+        self.assertIn('{!anchor.fullscreen && RESIZE_HANDLES.map(', self.mount)
+
+    # ── стили ручек ─────────────────────────────────────────────────────────
+
+    def test_ручки_стоят_на_краях_панели(self):
+        """Без position: absolute ручка встаёт в поток под панелью, без места
+        вдоль края — схлопывается в точку. Жест при этом «есть», попасть в него
+        нельзя."""
+        self.assertEqual(self.rules['']['position'], 'absolute')
+        for side in ('n', 's'):
+            self.assertIn('left', self.rules[side])
+            self.assertIn('right', self.rules[side])
+        for side in ('w', 'e'):
+            self.assertIn('top', self.rules[side])
+            self.assertIn('bottom', self.rules[side])
+
+    def test_ручка_не_заходит_на_полосу_прокрутки(self):
+        """У правого края ленты стоит полоса прокрутки. Ручка, зашедшая внутрь
+        панели глубже границы, отнимает прокрутку у того, кто тянет ползунок, —
+        а «сделать ручку пошире, чтобы легче попадать» выглядит безобидно."""
+        for side, edge, size in (('n', 'top', 'height'), ('s', 'bottom', 'height'),
+                                 ('w', 'left', 'width'), ('e', 'right', 'width')):
+            offset = self._px(self.rules[side][edge])
+            inside = offset + self._px(self.rules[side][size])
+            self.assertLessEqual(inside, 1, f'ручка {side} заходит внутрь панели на {inside} px')
+            self.assertGreaterEqual(-offset, 5, f'ручка {side} снаружи у́же 5 px — в неё не попасть')
+
+    def test_угол_не_дотягивается_до_кнопок_шапки(self):
+        """Угол шире стороны — в него целятся по диагонали. Но крестик в шапке
+        начинается в десяти пикселях от рамки: угол, раздутый «чтобы легче
+        попадать», начинает тянуть панель вместо того, чтобы её закрыть."""
+        for corner in self.CORNERS:
+            rule = self.rules[corner]
+            for edge, size in (('top' if corner[0] == 'n' else 'bottom', 'height'),
+                               ('left' if corner[1] == 'w' else 'right', 'width')):
+                inside = self._px(rule[edge]) + self._px(rule[size])
+                self.assertLessEqual(inside, 8,
+                                     f'угол {corner} заходит внутрь панели на {inside} px')
+
+    def test_ручка_не_отдаёт_жест_прокрутке_страницы(self):
+        """Без touch-action: none браузер на тачскрине забирает жест под
+        прокрутку и присылает pointercancel — та же причина, что у шарика."""
+        self.assertEqual(self.rules['']['touch-action'], 'none')
+
+    def test_ручек_не_видно(self):
+        """Подсказкой служит курсор над краем. Нарисованная ручка — постоянный
+        шум ради жеста, который человек делает один раз."""
+        for key, rule in self.rules.items():
+            for name in rule:
+                self.assertFalse(
+                    name.startswith(('background', 'border', 'box-shadow', 'outline', 'opacity')),
+                    f'у ручки «{key}» появилось оформление: {name}')
+        # Курсор — единственная подсказка, поэтому у каждой ручки он свой и
+        # показывает, куда она тянется: перепутанный угол зовёт тянуть не туда.
+        expected = {'n': 'ns-resize', 's': 'ns-resize', 'w': 'ew-resize', 'e': 'ew-resize',
+                    'nw': 'nwse-resize', 'se': 'nwse-resize',
+                    'ne': 'nesw-resize', 'sw': 'nesw-resize'}
+        found = {key: rule.get('cursor') for key, rule in self.rules.items() if key}
+        self.assertEqual(found, expected)
+
+    # ── память и место ──────────────────────────────────────────────────────
+
+    def test_запоминается_размер_а_место_остаётся_от_шарика(self):
+        """Панель, у которой своё место, перестала бы открываться «из шарика»,
+        а на другом мониторе её пришлось бы ловить, как уехавший за край шарик.
+        Размер лежит в той же записи, что и место шарика, и читается через
+        проверку: запись бывает битой или от версии, где размера ещё не было."""
+        self.assertIn('setPanelSize(normalizePanelSize(stored?.panel))', self.orb)
+        self.assertIn('panelAnchor(position, viewport, panelSize)', self.orb)
+        write = self.orb[self.orb.index('panel: panelSize'):]
+        deps = re.search(r'\},\s*\[([^\]]*)\]\);', write).group(1)
+        self.assertIn('panelSize', deps,
+                      'размер пишется только при сдвиге шарика — растяжение не запомнится')
+
+    def test_вкладка_пишет_только_то_что_меняла(self):
+        """Вкладка, открытая раньше, держит в состоянии прежний размер. Клади
+        она его рядом с местом шарика при каждом сдвиге (а сдвигает шарик и
+        смена размера окна), растяжение из соседней вкладки стиралось бы молча."""
+        writes = re.findall(r'writeStored\(userId, \{(.*?)\}\);', self.orb, re.S)
+        self.assertEqual(len(writes), 2, 'запись места и размера снова слита в одну')
+        for body in writes:
+            self.assertIn('...readStored(userId)', body)
+        place = next(body for body in writes if 'position.x' in body)
+        self.assertNotIn('panel', place, 'запись места шарика снова несёт с собой размер')
+
+    def test_по_отпусканию_панель_встаёт_от_шарика(self):
+        """Оставленная там, где её бросили, панель лежала бы на шарике, а при
+        следующем открытии оказалась бы в другом месте уже без видимой причины.
+        И запоминается только та сторона, которую жест изменил: вторая могла
+        быть ужата окном."""
+        settle = self._block('const settleResize', '}, []);')
+        self.assertIn('setPanelRect(null);', settle)
+        self.assertIn('settledPanelSize(prev, drag.rect, rect)', settle)
+        self.assertIn('setSettled(rect);', settle)
+
+    def test_жест_обрывается_когда_панель_встаёт_заново(self):
+        """Escape не ждёт, пока отпустят кнопку: панель закрыта, а жест жив. Без
+        сброса она открылась бы в рамке оборванного жеста, а при переезде
+        шарика осталась бы висеть на старом месте."""
+        reset = re.search(
+            r'useLayoutEffect\(\(\) => \{([^}]*setPanelRect\(null\);[^}]*)\}, \[([^\]]*)\]\);',
+            self.orb)
+        self.assertIsNotNone(reset, 'пропал сброс рамки жеста')
+        self.assertIn('resizeRef.current = null;', reset.group(1))
+        self.assertEqual([dep.strip() for dep in reset.group(2).split(',')],
+                         ['open', 'position', 'viewport'])
+
+    def test_окно_поверх_других_открывается_в_размере_панели(self):
+        """Человек растянул панель под свои ответы. Открепление, вернувшее
+        стандартные 384 на 520, читалось бы как сброс размера."""
+        self.assertIn('frameRef.current = frame;', self.orb)
+        self.assertIn('const size = frameRef.current || PANEL_SIZE;', self.orb)
+        request = self.orb[self.orb.index('requestWindow({'):]
+        request = request[:request.index('});')]
+        self.assertIn('size.width', request)
+        self.assertIn('size.height', request)
+        self.assertNotIn('PANEL_SIZE', request)
+
+    # ── то, что растягивается вместе с панелью ──────────────────────────────
+
+    def test_экраны_под_узкую_колонку_не_растягиваются_вместе_с_панелью(self):
+        """Замок, пустой чат и подтверждение удаления набраны под 384 пикселя.
+        Растянутые с панелью, они дают строку текста во всю ширину монитора и
+        кнопки по 1300 пикселей."""
+        self.assertIn("const NARROW_COLUMN = 'mx-auto w-full max-w-[384px]';", self.panel)
+        lock = self.panel[self.panel.index('const LockScreen'):self.panel.index('const HistoryScreen')]
+        self.assertIn('${NARROW_COLUMN}', lock)
+        empty = self.panel[self.panel.index('{empty && ('):]
+        self.assertIn('${NARROW_COLUMN}', empty[:empty.index('<Orb variant="hero"')])
+        confirm = self.panel[self.panel.index('{pendingDelete && ('):]
+        self.assertIn('w-full max-w-[336px]', confirm[:confirm.index('Удалить разговор?')])
+
+    def test_поле_ввода_перемеряет_высоту_при_смене_ширины(self):
+        """Тот же вопрос в узкой колонке занимает шесть строк, в широкой — две.
+        Высоту поле подбирало только на ввод, и после растяжения панели над
+        двумя строками оставался пустой блок в шесть.
+
+        Перемер обязан идти в следующем кадре (внутри обработчика браузер
+        считает его петлёй ResizeObserver и шлёт ошибку в window.onerror) и
+        брать окно у самого поля: помощник бывает откреплён в окно поверх
+        других окон, где кадры вкладки-хозяйки не идут."""
+        composer = self.chat[self.chat.index('export const ChatComposer'):]
+        self.assertIn('new view.ResizeObserver(', composer)
+        self.assertIn('area?.ownerDocument?.defaultView', composer)
+        self.assertIn('view.requestAnimationFrame(fitHeight)', composer)
+        observer = composer[composer.index('new view.ResizeObserver('):]
+        observer = observer[:observer.index('observer.observe(area)')]
+        self.assertIn('if (area.offsetWidth === width) return;', observer,
+                      'поле откликается на собственную смену высоты — петля')
+
+
 if __name__ == '__main__':
     unittest.main()
