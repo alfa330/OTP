@@ -2081,6 +2081,37 @@ class Database:
             cursor.execute(
                 "ALTER TABLE group_month_snapshots ADD COLUMN IF NOT EXISTS frozen_at TIMESTAMP"
             )
+            # Модель расчёта у группы необязательна: группу отдела, где по моделям
+            # ничего не считают (бэк-офис), заводят без неё. NULL = своей модели у
+            # группы нет, и сотрудник считается по модели своего направления — той
+            # же лестницей, что и без членства (_load_operator_calculation_models_tx).
+            # Снимок месяца хранит группу «как была», поэтому NULL допустим и в нём.
+            # Дефолт 'operator' остаётся: строка, вставленная без этой колонки,
+            # ведёт себя как раньше.
+            # NOT NULL снимаем под условием — тот же приём, что у users.role выше:
+            # безусловный ALTER на каждом старте брал бы ACCESS EXCLUSIVE на groups,
+            # пока прежний инстанс ещё читает группы почти в каждом запросе.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = current_schema()
+                           AND table_name = 'groups' AND column_name = 'calculation_model_code'
+                           AND is_nullable = 'NO'
+                    ) THEN
+                        ALTER TABLE groups ALTER COLUMN calculation_model_code DROP NOT NULL;
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = current_schema()
+                           AND table_name = 'group_month_snapshots' AND column_name = 'calculation_model_code'
+                           AND is_nullable = 'NO'
+                    ) THEN
+                        ALTER TABLE group_month_snapshots ALTER COLUMN calculation_model_code DROP NOT NULL;
+                    END IF;
+                END $$;
+            """)
             # Журнал смены модели расчёта группы. Каждая запись = одно изменение
             # (old -> new), позволяет откатить случайную смену модели без потери
             # данных: сырьё (daily_hours/метрики чатов) и замороженные снимки
@@ -26682,7 +26713,7 @@ class Database:
             _seg_cursor.execute(
                 """
                 SELECT gom.group_id, gr.name, gr.direction_id, d.name,
-                       gr.calculation_model_code, gom.start_date, gom.end_date
+                       """ + self._GROUP_MEMBER_MODEL_SQL + """, gom.start_date, gom.end_date
                 FROM group_operator_memberships gom
                 JOIN groups gr ON gr.id = gom.group_id
                 LEFT JOIN directions d ON d.id = gr.direction_id
@@ -26954,9 +26985,12 @@ class Database:
                     COALESCE(w.fines, 0) as fines
             """
             if group_id is not None:
+                # У группы без своей модели — модель направления сотрудника
+                # (та же лестница, что в _GROUP_MEMBER_MODEL_SQL; d здесь уже
+                # направление сотрудника).
                 cursor.execute(
                     _sel_prefix
-                    + "                    g.calculation_model_code as calculation_model_code,\n"
+                    + "                    COALESCE(g.calculation_model_code, d.calculation_model_code) as calculation_model_code,\n"
                     + _sel_suffix
                     + """
                     FROM group_operator_memberships gom
@@ -41865,7 +41899,13 @@ class Database:
                 FROM operator_totals ot
                 JOIN groups g ON g.id = ot.group_id
                 JOIN users u ON u.id = ot.operator_id
-                WHERE COALESCE(NULLIF(g.calculation_model_code, ''), 'operator') = 'operator'
+                LEFT JOIN directions od ON od.id = u.direction_id
+                -- у группы без своей модели решает модель направления сотрудника
+                WHERE COALESCE(
+                          NULLIF(g.calculation_model_code, ''),
+                          NULLIF(od.calculation_model_code, ''),
+                          'operator'
+                      ) = 'operator'
                   AND (%s OR g.department_id = %s)
                 ORDER BY g.name, u.name
                 """,
@@ -41938,6 +41978,10 @@ class Database:
     #    указывает ровно на одно живое направление отдела (op_potok → «Поток»).
     #    Если у отдела на модель приходится несколько направлений (у СЗоВ и Теза
     #    это 'operator'), не угадываем.
+    # У группы без модели сравнивать нечего, и направление берётся, только когда
+    # оно в отделе одно («Регионы» у фронт-офисов): спутать его не с чем. Так
+    # группа, заведённая без модели и без направления, даёт оператору то же
+    # направление, что давала, пока форма ставила ей «Операторскую».
     # Выражение ссылается на группу через алиас g.
     _GROUP_EFFECTIVE_DIRECTION_SQL = """
         COALESCE(
@@ -41952,8 +41996,29 @@ class Database:
               WHERE g.direction_id IS NULL
                 AND md.is_active
                 AND md.department_id = g.department_id
-                AND md.calculation_model_code = g.calculation_model_code
+                AND (g.calculation_model_code IS NULL
+                     OR md.calculation_model_code = g.calculation_model_code)
              HAVING COUNT(*) = 1)
+        )
+    """
+
+    # Модель расчёта сотрудника в группе: своя модель группы, а если группе её не
+    # задали — модель направления сотрудника. Лестница та же, что у
+    # _load_operator_calculation_models_tx(as_of=...): иначе «Учёт часов» считал бы
+    # человека операторской моделью, а статусы и синхронизации — моделью направления.
+    # Направление, как и там, берётся ТЕКУЩЕЕ: сменили сотруднику направление —
+    # его незакрытые месяцы в группе без модели пересчитаются по новому. Закрытые
+    # заморожены в group_operator_month_snapshots и не меняются. Группе, где это
+    # важно, модель задают явно — тогда решает она.
+    # Подзапрос выполняется только для групп без модели (COALESCE ленив).
+    # Выражение ссылается на группу через алиас gr, на членство — через gom.
+    _GROUP_MEMBER_MODEL_SQL = """
+        COALESCE(
+            gr.calculation_model_code,
+            (SELECT od.calculation_model_code
+               FROM users ou
+               JOIN directions od ON od.id = ou.direction_id
+              WHERE ou.id = gom.operator_id)
         )
     """
 
@@ -41974,7 +42039,12 @@ class Database:
     """
 
     def _group_row_to_dict(self, row):
-        model_code = normalize_calculation_model_code(row[4], row[11])
+        # Группа без модели так и уходит наружу — None, а не «операторская»:
+        # иначе карточка показывала бы модель, которую группе никто не задавал.
+        model_code = (
+            normalize_calculation_model_code(row[4], row[11])
+            if str(row[4] or '').strip() else None
+        )
         model_desc = CALCULATION_MODEL_DESCRIPTIONS.get(model_code, {})
         return {
             'id': int(row[0]),
@@ -42054,20 +42124,17 @@ class Database:
 
     def create_group(self, name, calculation_model_code=None, direction_id=None,
                      department_id=None, table_url=None, created_by=None):
-        """Создаёт активную группу. Модель валидируется и далее не меняется. Если модель
-        не задана, но задано направление — берётся модель направления."""
+        """Создаёт активную группу. Модель расчёта необязательна: без неё у группы
+        нет своей модели (NULL), и сотрудники считаются по модели своего направления
+        (_GROUP_MEMBER_MODEL_SQL). Модель направления самой группы сюда не
+        подставляется: форма показывает ровно то, что сохранится, и «без модели»
+        при выбранном направлении — осознанный выбор. Задать модель можно позже
+        (change_group_model)."""
+        model_code = (
+            normalize_calculation_model_code(calculation_model_code)
+            if str(calculation_model_code or '').strip() else None
+        )
         with self._get_cursor() as cursor:
-            dir_name = None
-            if calculation_model_code is None and direction_id is not None:
-                cursor.execute(
-                    "SELECT name, calculation_model_code FROM directions WHERE id = %s",
-                    (int(direction_id),),
-                )
-                drow = cursor.fetchone()
-                if drow:
-                    dir_name = drow[0]
-                    calculation_model_code = drow[1]
-            model_code = normalize_calculation_model_code(calculation_model_code, dir_name)
             cursor.execute(
                 """
                 INSERT INTO groups
@@ -45627,7 +45694,8 @@ class Database:
         start = date(year, mon, 1)
         end = date(year, mon, last_day)
         cursor.execute("""
-            SELECT gom.group_id, gr.name, gr.direction_id, d.name, gr.calculation_model_code,
+            SELECT gom.group_id, gr.name, gr.direction_id, d.name,
+                   """ + self._GROUP_MEMBER_MODEL_SQL + """,
                    gom.start_date, gom.end_date
             FROM group_operator_memberships gom
             JOIN groups gr ON gr.id = gom.group_id
@@ -45666,7 +45734,8 @@ class Database:
         if not op_ids:
             return out
         cursor.execute("""
-            SELECT gom.operator_id, gom.group_id, gr.name, gr.calculation_model_code, d.name,
+            SELECT gom.operator_id, gom.group_id, gr.name,
+                   """ + self._GROUP_MEMBER_MODEL_SQL + """, d.name,
                    gom.start_date, gom.end_date
             FROM group_operator_memberships gom
             JOIN groups gr ON gr.id = gom.group_id

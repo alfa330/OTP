@@ -214,6 +214,8 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("extra_metrics JSONB", DB)
 
     def test_group_owns_model_and_status(self):
+        # Так таблицы создаются; у groups и её снимка NOT NULL затем снимается —
+        # модель группы необязательна (tests/test_group_optional_model.py).
         self.assertIn("calculation_model_code VARCHAR(32) NOT NULL DEFAULT 'operator'", DB)
         self.assertIn("status VARCHAR(16) NOT NULL DEFAULT 'active'", DB)
 

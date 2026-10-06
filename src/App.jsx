@@ -125,6 +125,7 @@ import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh, watchAuthTokensFromOtherTabs } from './utils/authRefresh';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { startFileDownload } from './utils/fileDownload';
+import { hoursScreenModelCode } from './utils/hoursScreenModel';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 import {
     WIKI_SPACE_QUERY_PARAM, WIKI_TAB_QUERY_PARAM,
@@ -6523,15 +6524,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Модель расчёта текущего вида: из выбранной группы (приоритет), иначе из
         // загруженных операторов (их модель приходит с бэка по группе). Пусто → legacy
-        // (операторская модель), т.е. поведение как раньше.
+        // (операторская модель), т.е. поведение как раньше. Группа без своей модели и
+        // со смешанным составом — тоже legacy: правило в utils/hoursScreenModel.js.
         const activeCalcModelCode = useMemo(() => {
-            if (selectedGroupId && Array.isArray(groupsList)) {
-                const g = groupsList.find(x => String(x.id) === String(selectedGroupId));
-                const code = String(g?.calculation_model_code || g?.calculationModelCode || '').trim();
-                if (code) return code;
-            }
-            const op0 = Array.isArray(operators) && operators.length ? operators[0] : null;
-            return String(op0?.calculation_model_code || op0?.calculationModelCode || '').trim();
+            const group = selectedGroupId && Array.isArray(groupsList)
+                ? groupsList.find(x => String(x.id) === String(selectedGroupId))
+                : null;
+            return hoursScreenModelCode(group, operators);
         }, [selectedGroupId, groupsList, operators]);
         const isChatModel = activeCalcModelCode === 'chat_manager';
         // Колонка «План успешек» (модель ОП TEZ): показываем, когда в выборке есть операторы tez_op.

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import FaIcon from '../common/FaIcon';
+import InfoHint from '../common/InfoHint';
 import { normalizeRole } from '../../utils/roles';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -7,6 +8,10 @@ import {
     IosBadge, IosModal,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import {
+    EMPTY_GROUP_FORM, NO_GROUP_MODEL_LABEL,
+    createGroupBody, groupFormAfterDirectionPick, groupModelOptions,
+} from '../../utils/groupForm';
 
 // Модель → тон бейджа. Источник истины моделей — каталог с бэка (calculation_models).
 const MODEL_TONE = { operator: 'blue', chat_manager: 'green', tez_line: 'amber', tez_op: 'amber' };
@@ -14,7 +19,8 @@ const FALLBACK_MODELS = [
     { code: 'operator', name: 'Операторская модель' },
     { code: 'chat_manager', name: 'Модель чат-менеджера' },
 ];
-const EMPTY_FORM = { name: '', department_id: '', direction_id: '', calculation_model_code: 'operator' };
+// Модель расчёта необязательна, как и направление; правила формы — в utils/groupForm.js.
+const NO_MODEL_HINT = 'Без модели сотрудники группы считаются по модели своего направления, а без направления — по операторской.';
 
 // Уволенные не должны попадать в селекторы добавления и в активный состав.
 const FIRED_STATUSES = new Set(['fired', 'dismissal']);
@@ -61,7 +67,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     // create modal
     const [createOpen, setCreateOpen] = useState(false);
-    const [form, setForm] = useState({ ...EMPTY_FORM });
+    const [form, setForm] = useState({ ...EMPTY_GROUP_FORM });
     const [suggestions, setSuggestions] = useState([]);
     const [saving, setSaving] = useState(false);
 
@@ -71,7 +77,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     // model change / rollback modal
     const [modelGroup, setModelGroup] = useState(null);
-    const [newModelCode, setNewModelCode] = useState('operator');
+    const [newModelCode, setNewModelCode] = useState('');
     const [modelHistory, setModelHistory] = useState([]);
     const [modelHistoryLoading, setModelHistoryLoading] = useState(false);
     const [modelBusy, setModelBusy] = useState(false);
@@ -150,8 +156,6 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     useEffect(() => { fetchGroups(); fetchAux(); }, [fetchGroups, fetchAux]);
 
-    const dirModelOf = (dir) => String(dir?.calculationModelCode || dir?.calculation_model_code || 'operator');
-
     // Кандидаты на добавление сужаются до отдела открытой группы (как видит глава отдела).
     // Группа без отдела — без сужения; запись без department_id в скоуп не попадает.
     const membersDeptId = membersGroup?.department_id ?? null;
@@ -205,20 +209,14 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     }, [visibleGroups, departments]);
 
     /* ─── create ─── */
-    const openCreate = () => { setForm({ ...EMPTY_FORM }); setSuggestions([]); setCreateOpen(true); };
-    const closeCreate = () => { setCreateOpen(false); setForm({ ...EMPTY_FORM }); setSuggestions([]); };
+    const openCreate = () => { setForm({ ...EMPTY_GROUP_FORM }); setSuggestions([]); setCreateOpen(true); };
+    const closeCreate = () => { setCreateOpen(false); setForm({ ...EMPTY_GROUP_FORM }); setSuggestions([]); };
 
     const submitCreate = async (force = false) => {
         if (!form.name.trim()) { showToastRef.current?.('Укажите название группы', 'error'); return; }
         setSaving(true);
         try {
-            const body = {
-                name: form.name.trim(),
-                calculation_model_code: form.calculation_model_code,
-                direction_id: form.direction_id ? Number(form.direction_id) : null,
-                department_id: form.department_id ? Number(form.department_id) : null,
-            };
-            if (force) body.force = true;
+            const body = createGroupBody(form, { force });
             const { ok, data } = await api('/api/admin/groups', { method: 'POST', body });
             if (data.status === 'suggestions') {
                 setSuggestions(data.suggestions || []);
@@ -292,7 +290,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     /* ─── model change / rollback ─── */
     const openModel = async (g) => {
         setModelGroup(g);
-        setNewModelCode(g.calculation_model_code || 'operator');
+        setNewModelCode(g.calculation_model_code || '');
         setModelHistory([]);
         setModelHistoryLoading(true);
         try {
@@ -317,7 +315,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     };
 
     const submitModelChange = async () => {
-        if (!modelGroup) return;
+        if (!modelGroup || !newModelCode) return;
         if (newModelCode === modelGroup.calculation_model_code) { closeModel(); return; }
         setModelBusy(true);
         try {
@@ -345,7 +343,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             });
             if (ok && data.group) {
                 applyGroupUpdate(data.group);
-                setNewModelCode(data.group.calculation_model_code);
+                setNewModelCode(data.group.calculation_model_code || '');
                 showToastRef.current?.('Модель откачена', 'success');
                 await reloadModelHistory(modelGroup.id);
             } else {
@@ -612,13 +610,18 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                             <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0">
                                     <div className="truncate font-semibold text-slate-900" title={g.name}>{g.name}</div>
-                                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                        <IosBadge tone={MODEL_TONE[g.calculation_model_code] || 'slate'}>
-                                            <FaIcon className={`fas ${g.calculation_model_code === 'chat_manager' ? 'fa-comments' : 'fa-headset'}`} />
-                                            {g.calculation_model_name || modelName(g.calculation_model_code)}
-                                        </IosBadge>
-                                        {g.status === 'archived' && <IosBadge tone="amber">архив</IosBadge>}
-                                    </div>
+                                    {/* У группы без модели плашки модели нет — как нет строки направления у группы без него. */}
+                                    {(g.calculation_model_code || g.status === 'archived') && (
+                                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                            {g.calculation_model_code && (
+                                                <IosBadge tone={MODEL_TONE[g.calculation_model_code] || 'slate'}>
+                                                    <FaIcon className={`fas ${g.calculation_model_code === 'chat_manager' ? 'fa-comments' : 'fa-headset'}`} />
+                                                    {g.calculation_model_name || modelName(g.calculation_model_code)}
+                                                </IosBadge>
+                                            )}
+                                            {g.status === 'archived' && <IosBadge tone="amber">архив</IosBadge>}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                             <div className="text-[12.5px] text-slate-500 space-y-0.5">
@@ -662,7 +665,7 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 open={createOpen}
                 onClose={closeCreate}
                 title="Новая группа"
-                subtitle="Модель расчёта можно сменить позже кнопкой «Модель» (с возможностью отката)"
+                subtitle="Задать модель можно позже кнопкой «Модель»"
                 footer={(
                     <>
                         <button className={iosBtnSecondary} onClick={closeCreate} disabled={saving}>Отмена</button>
@@ -691,24 +694,20 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         <CustomSelect
                             value={form.direction_id}
                             placeholder="— без направления —"
-                            onChange={(v) => {
-                                const dir = directions.find((x) => String(x.id) === String(v));
-                                setForm({
-                                    ...form,
-                                    direction_id: v,
-                                    calculation_model_code: dir ? dirModelOf(dir) : form.calculation_model_code,
-                                    department_id: form.department_id || (dir ? String(dir.department_id ?? dir.departmentId ?? '') : form.department_id),
-                                });
-                            }}
+                            onChange={(v) => setForm(groupFormAfterDirectionPick(form, v, directions))}
                             options={[{ value: '', label: '— без направления —' }, ...directions.map((d) => ({ value: String(d.id), label: d.name }))]}
                         />
                     </div>
                     <div>
-                        <div className={iosGroupLabel}>Модель расчёта</div>
+                        <div className={`${iosGroupLabel} flex items-center gap-1.5`}>
+                            Модель расчёта (опционально)
+                            <InfoHint side="left" text={NO_MODEL_HINT} />
+                        </div>
                         <CustomSelect
                             value={form.calculation_model_code}
+                            placeholder={NO_GROUP_MODEL_LABEL}
                             onChange={(v) => setForm({ ...form, calculation_model_code: v })}
-                            options={calcModels.map((m) => ({ value: m.code, label: m.name }))}
+                            options={groupModelOptions(calcModels)}
                         />
                     </div>
 
@@ -756,7 +755,9 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 open={!!modelGroup}
                 onClose={closeModel}
                 title={modelGroup ? `Модель расчёта: ${modelGroup.name}` : 'Модель расчёта'}
-                subtitle="Смену модели можно откатить — учёт часов и закрытые месяцы не теряются"
+                /* Первую модель группы откатить нельзя (вернуться к «без модели» нечем),
+                   поэтому обещание отката показываем только там, где оно выполнимо. */
+                subtitle={modelGroup?.calculation_model_code ? 'Смену модели можно откатить — учёт часов и закрытые месяцы не теряются' : undefined}
                 maxWidth="max-w-xl"
                 footer={(
                     <>
@@ -764,9 +765,9 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         <button
                             className={iosBtnPrimary}
                             onClick={submitModelChange}
-                            disabled={modelBusy || !modelGroup || newModelCode === modelGroup?.calculation_model_code}
+                            disabled={modelBusy || !modelGroup || !newModelCode || newModelCode === modelGroup?.calculation_model_code}
                         >
-                            Сменить модель
+                            {modelGroup?.calculation_model_code ? 'Сменить модель' : 'Задать модель'}
                         </button>
                     </>
                 )}
@@ -775,22 +776,32 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 <div className="space-y-4">
                     <div>
                         <div className={iosGroupLabel}>Текущая модель</div>
-                        <IosBadge tone={MODEL_TONE[modelGroup.calculation_model_code] || 'slate'}>
-                            {modelGroup.calculation_model_name || modelName(modelGroup.calculation_model_code)}
-                        </IosBadge>
+                        {modelGroup.calculation_model_code ? (
+                            <IosBadge tone={MODEL_TONE[modelGroup.calculation_model_code] || 'slate'}>
+                                {modelGroup.calculation_model_name || modelName(modelGroup.calculation_model_code)}
+                            </IosBadge>
+                        ) : (
+                            <div className="flex items-center gap-1.5 px-1 text-[13px] text-slate-400">
+                                не задана
+                                <InfoHint side="left" text={NO_MODEL_HINT} />
+                            </div>
+                        )}
                     </div>
                     <div>
                         <div className={iosGroupLabel}>Новая модель</div>
                         <CustomSelect
                             value={newModelCode}
+                            placeholder="— выберите модель —"
                             onChange={setNewModelCode}
                             options={calcModels.map((m) => ({ value: m.code, label: m.name }))}
                         />
                     </div>
-                    {newModelCode !== modelGroup.calculation_model_code && (
+                    {newModelCode && newModelCode !== modelGroup.calculation_model_code && (
                         <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 text-[12.5px] text-amber-700">
                             <FaIcon className="fas fa-triangle-exclamation mr-1" />
-                            Модель влияет на метрики и расчёт зарплаты для незакрытых месяцев. Закрытые (замороженные) месяцы не изменятся. Если передумаете — изменение можно откатить ниже, данные не потеряются.
+                            Модель влияет на метрики и расчёт зарплаты для незакрытых месяцев. Закрытые (замороженные) месяцы не изменятся. {modelGroup.calculation_model_code
+                                ? 'Если передумаете — изменение можно откатить ниже, данные не потеряются.'
+                                : 'Снять модель потом нельзя — только сменить на другую.'}
                         </div>
                     )}
 
