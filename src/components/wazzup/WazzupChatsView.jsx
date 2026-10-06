@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -14,6 +14,7 @@ import {
     buildWazzupChatLink, findWazzupChatExact, matchWazzupChatsByPhone, syncWazzupChatDeepLink,
     normalizeWazzupAccount, WAZZUP_DEFAULT_ACCOUNT,
 } from './chatLink';
+import { lateDeliveryNote, localDayKey } from './messageTime';
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
@@ -200,6 +201,7 @@ function MediaContent({ msg, light }) {
 function MessageBubble({ msg }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
+    const lateNote = lateDeliveryNote(msg);
     return (
         <div className={`flex ${out ? 'justify-end' : 'justify-start'} px-4`}>
             <div className={`max-w-[75%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
@@ -226,7 +228,12 @@ function MessageBubble({ msg }) {
                         </span>
                     )}
                     {msg.isEdited && !msg.isDeleted && <span>изменено</span>}
-                    <span>{fmtTime(msg.dt)}</span>
+                    {lateNote ? (
+                        <span className="flex cursor-help items-center gap-0.5" title={lateNote}
+                              aria-label={lateNote} data-testid="wazzup-late-delivery">
+                            <Clock3 size={10} /> {fmtTime(msg.dt)}
+                        </span>
+                    ) : <span>{fmtTime(msg.dt)}</span>}
                     {out && msg.status && STATUS_LABELS[msg.status] && <span>· {STATUS_LABELS[msg.status]}</span>}
                 </div>
             </div>
@@ -1136,13 +1143,13 @@ export default function WazzupChatsView(props) {
         if (selected) loadThread(selected);
     };
 
-    // Группировка ленты по дням для разделителей
+    // Группировка ленты по дням для разделителей — по местному дню (messageTime.js)
     const threadWithDays = useMemo(() => {
         if (!thread) return [];
         const out = [];
         let lastDay = null;
         thread.forEach((m) => {
-            const day = (m.dt || '').slice(0, 10);
+            const day = localDayKey(m.dt);
             if (day && day !== lastDay) { out.push({ _day: fmtDay(m.dt), messageId: `day-${day}` }); lastDay = day; }
             out.push(m);
         });

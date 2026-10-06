@@ -8516,7 +8516,11 @@ def wazzup_webhook(token):
         # Проверочный запрос при регистрации webhooksUri
         return jsonify({"ok": True}), 200
     try:
-        stored = db.store_wazzup_messages(payload.get('messages'), account=account)
+        # Момент прихода нужен опоздавшим входящим канала на обычном WhatsApp:
+        # Wazzup досылает их со временем отправки, а оператор видит их сейчас
+        # (wazzup/delivery.py).
+        stored = db.store_wazzup_messages(payload.get('messages'), account=account,
+                                          received_at=datetime.now(timezone.utc))
         updated = db.update_wazzup_statuses(payload.get('statuses'))
     except Exception:
         logging.exception("wazzup webhook: ошибка записи")
@@ -8688,16 +8692,19 @@ def api_wazzup_chat_messages():
         with db._get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT message_id, dt, is_echo, type, text, content_uri,
-                       author_name, author_id, status, is_edited, is_deleted
+                       author_name, author_id, status, is_edited, is_deleted, wazzup_dt
                   FROM wazzup_messages WHERE {' AND '.join(where)}
-                 ORDER BY dt DESC LIMIT %s""", params + [limit + 1])
+                 ORDER BY dt DESC, message_id DESC LIMIT %s""", params + [limit + 1])
             rows = cursor.fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
+        # wazzupDt — время отправки по WhatsApp у входящего, которое Wazzup
+        # доставил с опозданием (dt у такого — минута доставки).
         items = [{'messageId': r[0], 'dt': r[1].isoformat() if r[1] else None,
                   'isEcho': r[2], 'type': r[3], 'text': r[4], 'contentUri': r[5],
                   'authorName': r[6], 'authorId': r[7], 'status': r[8],
-                  'isEdited': r[9], 'isDeleted': r[10]}
+                  'isEdited': r[9], 'isDeleted': r[10],
+                  'wazzupDt': r[11].isoformat() if r[11] else None}
                  for r in reversed(rows)]  # в ответе — по возрастанию времени
         return jsonify({"status": "success", "items": items, "hasMore": has_more}), 200
     except Exception as error:

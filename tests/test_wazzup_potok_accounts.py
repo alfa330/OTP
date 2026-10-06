@@ -384,7 +384,8 @@ class WiringSourceTests(unittest.TestCase):
         for table in ("wazzup_messages", "wazzup_chats", "wazzup_operator_map"):
             self.assertIn(f"ALTER TABLE {table}\n                    ADD COLUMN IF NOT EXISTS account TEXT NOT NULL DEFAULT 'op';",
                           DB_SOURCE.replace("\r\n", "\n"), table)
-        self.assertIn("def store_wazzup_messages(self, messages, account='op'):", DB_SOURCE)
+        self.assertIn("def store_wazzup_messages(self, messages, account='op', received_at=None):",
+                      DB_SOURCE)
         self.assertIn("def cleanup_wazzup_messages(self, retention_days=45):", DB_SOURCE)
         self.assertIn("WHERE m.account = %s AND (e.le IS NULL OR m.dt > e.le)", DB_SOURCE,
                       "эпизоды ИИ-оценки — только по историческому аккаунту")
@@ -398,7 +399,7 @@ class WiringSourceTests(unittest.TestCase):
         # деплоем загрузка истории доводится сама, без ручного перезапуска
         self.assertIn("db, account='potok', days=wazzup_potok_sync.DEFAULT_HISTORY_DAYS))", API_SOURCE)
         self.assertIn("account = wazzup_accounts.account_by_webhook_token(token)", API_SOURCE)
-        self.assertIn("db.store_wazzup_messages(payload.get('messages'), account=account)", API_SOURCE)
+        self.assertIn("db.store_wazzup_messages(payload.get('messages'), account=account,", API_SOURCE)
         # каждая читающая ручка валидирует аккаунт и отвечает 400 на чужой
         self.assertGreaterEqual(API_SOURCE.count('return jsonify({"error": "unknown account"}), 400'), 5)
         self.assertNotIn("_WAZZUP_KAZ_TRANS = str.maketrans", API_SOURCE,
