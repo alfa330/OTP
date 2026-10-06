@@ -61,7 +61,7 @@ def run(args):
                 author_name TEXT, author_id TEXT, status TEXT, is_edited BOOLEAN,
                 is_deleted BOOLEAN, wazzup_dt TIMESTAMPTZ
             );
-            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT);
+            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT);
             CREATE TABLE wazzup_chats (
                 account TEXT, channel_id TEXT, chat_id TEXT, chat_type TEXT,
                 contact_name TEXT, contact_phone TEXT, last_message_at TIMESTAMPTZ,

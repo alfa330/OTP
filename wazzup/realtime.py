@@ -14,7 +14,8 @@ MAX_EVENT_BYTES = 256 * 1024
 MAX_BUFFER_BYTES = 8 * 1024 * 1024
 _DELIVERY_RANK = {'pending': 0, 'sent': 1, 'error': 2, 'delivered': 3, 'read': 4}
 _MESSAGE_FIELDS = ('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
-                   'authorName', 'authorId', 'status', 'isEdited', 'isDeleted', 'wazzupDt')
+                   'authorName', 'authorId', 'status', 'isEdited', 'isDeleted', 'wazzupDt',
+                   'replyToMessageId', 'replyText', 'replyAuthorName')
 _CHAT_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone',
                 'lastMessageAt', 'lastMessageText', 'lastMessageIsEcho',
                 'messagesCount', 'inboundCount', 'outboundCount')
@@ -22,7 +23,8 @@ _CHAT_FIELDS = ('channelId', 'chatId', 'chatType', 'contactName', 'contactPhone'
 _HYDRATE_SQL = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
            COALESCE(o.author_name,m.author_name),m.author_id,m.status,
-           m.is_edited,m.is_deleted,m.wazzup_dt,
+           m.is_edited,m.is_deleted,m.wazzup_dt,o.reply_to_message_id,
+           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name,
            c.channel_id,c.chat_id,c.chat_type,c.contact_name,c.contact_phone,
            c.last_message_at,c.last_message_text,c.last_message_is_echo,
            c.messages_count,c.inbound_count,c.outbound_count
@@ -31,6 +33,8 @@ _HYDRATE_SQL = """
         ON o.message_id=m.message_id AND o.account=m.account
       LEFT JOIN wazzup_chats c
         ON c.account=m.account AND c.channel_id=m.channel_id AND c.chat_id=m.chat_id
+      LEFT JOIN wazzup_messages r ON r.message_id=o.reply_to_message_id AND r.account=m.account
+        AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
      WHERE m.account='op' AND m.message_id=ANY(%s)
 """
 
@@ -87,9 +91,9 @@ def broadcast_changes(cursor, changes, event_broker):
         for event in events:
             row = rows.get(event['messageId'])
             if row is not None and event.get('statusOnly') is not True:
-                event = dict(event, message=_json_item(_MESSAGE_FIELDS, row[:12]), status=row[8])
-                if row[12] is not None:
-                    event['chat'] = _json_item(_CHAT_FIELDS, row[12:])
+                event = dict(event, message=_json_item(_MESSAGE_FIELDS, row[:15]), status=row[8])
+                if row[15] is not None:
+                    event['chat'] = _json_item(_CHAT_FIELDS, row[15:])
             event_broker.publish(event)
 
     for event in changes:

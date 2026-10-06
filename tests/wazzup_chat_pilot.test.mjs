@@ -80,7 +80,9 @@ test('chat identity separates account, channel and opaque chat identifiers', () 
 
 test('empty composer has disabled send and does not perform requests on render', () => {
     const html = render();
-    assert.match(html, /Ответ в WhatsApp/);
+    assert.doesNotMatch(html, /Ответ в WhatsApp/);
+    assert.match(html, /rows="1"/);
+    assert.match(html, /Shift\+Enter/);
     assert.match(html, /<button[^>]+disabled=""/);
     assert.doesNotMatch(html, /readOnly=""/);
 });
@@ -129,7 +131,7 @@ await build({
 });
 const { default: InteractiveComposer } = await import(pathToFileURL(interactiveOutput));
 
-const createHarness = (post, { storage = new Map() } = {}) => {
+const createHarness = (post, { storage = new Map(), props = {} } = {}) => {
     const slots = [];
     let index = 0;
     let effects = [];
@@ -154,15 +156,17 @@ const createHarness = (post, { storage = new Map() } = {}) => {
             slots[i] = { dependencies };
             effects.push(() => { old?.cleanup?.(); slots[i].cleanup = effect(); });
         },
-        render() {
+        render(nextProps) {
+            if (nextProps) Object.assign(props, nextProps);
             index = 0;
-            const wrapper = InteractiveComposer({ apiBaseUrl: '/test-only', headers: () => ({}), chat });
+            const wrapper = InteractiveComposer({ apiBaseUrl: '/test-only', headers: () => ({}), chat, ...props });
             const result = wrapper.type(wrapper.props);
             const pendingEffects = effects;
             effects = [];
             pendingEffects.forEach((effect) => effect());
             return result;
         },
+        unmount() { slots.forEach((slot) => slot?.cleanup?.()); },
         storage,
     };
     globalThis.__wazzupPilotHarness = harness;
@@ -315,14 +319,14 @@ test('only explicit conversation check clears uncertain send; reset does not sen
         form = harness.render();
         await form.props.onSubmit();
         form = harness.render();
-        let reset = findElement(form, (el) => el.type === 'button' && el.props.type === 'button');
+        let reset = findElement(form, (el) => el.type === 'button' && el.props.children === 'Начать новое сообщение');
         assert.equal(reset.props.disabled, true);
         reset.props.onClick();
         assert.equal(findElement(harness.render(), (el) => el.type === 'textarea').props.readOnly, true);
         findElement(form, (el) => el.type === 'input' && el.props.type === 'checkbox')
             .props.onChange({ target: { checked: true } });
         form = harness.render();
-        reset = findElement(form, (el) => el.type === 'button' && el.props.type === 'button');
+        reset = findElement(form, (el) => el.type === 'button' && el.props.children === 'Начать новое сообщение');
         assert.equal(reset.props.disabled, false);
         reset.props.onClick();
         form = harness.render();
@@ -336,4 +340,156 @@ test('only explicit conversation check clears uncertain send; reset does not sen
         if (previousStorage === undefined) delete globalThis.sessionStorage;
         else globalThis.sessionStorage = previousStorage;
     }
+});
+
+const withHarness = async (post, body, options) => {
+    const previousStorage = globalThis.sessionStorage;
+    const h = createHarness(post, options);
+    try { await body(h); }
+    finally {
+        h.unmount();
+        delete globalThis.__wazzupPilotHarness;
+        if (previousStorage === undefined) delete globalThis.sessionStorage;
+        else globalThis.sessionStorage = previousStorage;
+    }
+};
+const field = (form) => findElement(form, (el) => el.type === 'textarea');
+const action = (form, label) => findElement(form, (el) => el.type === 'button' && el.props['aria-label'] === label);
+
+test('Enter sends once, Shift+Enter preserves a newline and IME composition never submits', async () => {
+    const sends = [];
+    await withHarness(async (url, payload) => {
+        sends.push(payload);
+        return { data: { state: 'sent', messageId: 'accepted' } };
+    }, async (h) => {
+        field(h.render()).props.onChange({ target: { value: 'Добрый день' } });
+        const input = field(h.render());
+        let prevented = 0;
+        const base = { key: 'Enter', preventDefault: () => { prevented += 1; } };
+        input.props.onKeyDown({ ...base, shiftKey: true });
+        input.props.onKeyDown({ ...base, nativeEvent: { isComposing: true } });
+        input.props.onKeyDown({ ...base, nativeEvent: { keyCode: 229 } });
+        assert.equal(sends.length, 0);
+        assert.equal(prevented, 0);
+        input.props.onKeyDown(base);
+        input.props.onKeyDown(base);
+        assert.equal(sends.length, 1);
+        assert.equal(sends[0].text, 'Добрый день');
+        assert.equal(prevented, 2);
+        await Promise.resolve();
+    });
+});
+
+test('AI translation and paraphrase edit a draft only, support undo and preserve the reply target', async () => {
+    const requests = [];
+    const replyTo = { messageId: 'original', text: 'Вопрос клиента', authorName: 'Клиент' };
+    await withHarness(async (url, body) => {
+        requests.push({ url, body });
+        return { data: { text: body.action === 'kk' ? 'Сәлеметсіз бе!' : 'Добрый день!' } };
+    }, async (h) => {
+        field(h.render()).props.onChange({ target: { value: 'привет' } });
+        await action(h.render(), 'Қазақшаға аудару').props.onClick();
+        let form = h.render();
+        assert.equal(field(form).props.value, 'Сәлеметсіз бе!');
+        assert.match(requests[0].url, /\/assist$/);
+        assert.deepEqual(requests[0].body, { account: 'op', action: 'kk', text: 'привет' });
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).replyTo.messageId, 'original');
+        action(form, 'Вернуть исходный текст').props.onClick();
+        assert.equal(field(h.render()).props.value, 'привет');
+        await action(h.render(), 'Перефразировать').props.onClick();
+        assert.equal(requests[1].body.action, 'rewrite');
+        assert.equal(field(h.render()).props.value, 'Добрый день!');
+        await action(h.render(), 'Перевести на русский').props.onClick();
+        assert.equal(requests[2].body.action, 'ru');
+        assert.equal(requests.some(({ url }) => url.endsWith('/send')), false);
+    }, { props: { replyTo } });
+});
+
+test('editing cancels AI and stale completions cannot overwrite newer text or a replacement request', async () => {
+    const requests = [];
+    await withHarness((url, body, config) => new Promise((resolve) => {
+        requests.push({ body, config, resolve });
+    }), async (h) => {
+        field(h.render()).props.onChange({ target: { value: 'Первый черновик' } });
+        const first = action(h.render(), 'Перефразировать').props.onClick();
+        assert.equal(action(h.render(), 'Отправить').props.disabled, true);
+        field(h.render()).props.onChange({ target: { value: 'Новый черновик' } });
+        assert.equal(requests[0].config.signal.aborted, true);
+        const second = action(h.render(), 'Перевести на русский').props.onClick();
+        requests[0].resolve({ data: { text: 'Устаревший ответ' } });
+        await first;
+        assert.equal(field(h.render()).props.value, 'Новый черновик');
+        assert.equal(action(h.render(), 'Отправить').props.disabled, true);
+        requests[1].resolve({ data: { text: 'Актуальный ответ' } });
+        await second;
+        assert.equal(field(h.render()).props.value, 'Актуальный ответ');
+        assert.equal(action(h.render(), 'Отправить').props.disabled, false);
+    });
+});
+
+test('leaving a chat cancels AI without changing its persisted draft', async () => {
+    let request;
+    await withHarness((url, body, config) => new Promise((resolve) => { request = { config, resolve }; }), async (h) => {
+        field(h.render()).props.onChange({ target: { value: 'Оставить этот черновик' } });
+        const pending = action(h.render(), 'Перефразировать').props.onClick();
+        h.unmount();
+        assert.equal(request.config.signal.aborted, true);
+        request.resolve({ data: { text: 'Поздний ответ' } });
+        await pending;
+        assert.equal(JSON.parse(h.storage.get(pilotDraftStorageKey(chat))).text, 'Оставить этот черновик');
+    });
+});
+
+test('approved WABA templates cannot be rewritten or translated and rejected AI keeps original text', async () => {
+    let requests = 0;
+    await withHarness(async () => { requests += 1; throw { response: { data: { error: 'Сервис временно занят' } } }; }, async (h) => {
+        let form = h.render();
+        findElement(form, (el) => typeof el.props?.onChoose === 'function').props.onChoose({ text: '[[approved]]', preview: 'Здравствуйте!' });
+        form = h.render();
+        for (const label of ['Перевести на русский', 'Қазақшаға аудару', 'Перефразировать']) {
+            assert.equal(action(form, label).props.disabled, true);
+            await action(form, label).props.onClick();
+        }
+        assert.equal(requests, 0);
+        findElement(form, (el) => el.type === 'button' && el.props.children === 'Убрать шаблон').props.onClick();
+        field(h.render()).props.onChange({ target: { value: 'Исходный текст' } });
+        await action(h.render(), 'Перефразировать').props.onClick();
+        assert.equal(field(h.render()).props.value, 'Исходный текст');
+        assert.equal(requests, 1);
+        assert.ok(findElement(h.render(), (el) => el.props?.role === 'alert'));
+    });
+});
+
+test('uncertain reply keeps its original target across new selection and remount; success clears only original target', async () => {
+    const replies = [];
+    const cleared = [];
+    const selected = { messageId: 'reply-original', text: 'Первый вопрос', authorName: 'Клиент' };
+    const replacement = { messageId: 'reply-new', text: 'Другой вопрос' };
+    let accepted = false;
+    const post = async (url, payload) => {
+        replies.push(payload);
+        if (!accepted) throw { code: 'ECONNABORTED' };
+        return { data: { state: 'sent', messageId: 'accepted-reply' } };
+    };
+    let storage;
+    await withHarness(post, async (h) => {
+        storage = h.storage;
+        field(h.render()).props.onChange({ target: { value: 'Ответ на первый вопрос' } });
+        await h.render().props.onSubmit();
+        assert.equal(replies[0].replyToMessageId, 'reply-original');
+        let form = h.render({ replyTo: replacement });
+        assert.equal(action(form, 'Отменить ответ').props.disabled, true);
+        await form.props.onSubmit();
+        assert.deepEqual(replies[1], replies[0]);
+    }, { props: { replyTo: selected } });
+    await withHarness(post, async (h) => {
+        let form = h.render();
+        const preview = findElement(form, (el) => el.props?.['data-testid'] === 'wazzup-reply-preview');
+        assert.ok(findElement(preview, (el) => el.props?.children === 'Первый вопрос'));
+        accepted = true;
+        await form.props.onSubmit();
+        assert.deepEqual(replies[2], replies[0]);
+        assert.deepEqual(cleared, ['reply-original']);
+        assert.equal(storage.size, 0);
+    }, { storage, props: { replyTo: replacement, onCancelReply: (id) => cleared.push(id) } });
 });

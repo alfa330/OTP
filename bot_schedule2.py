@@ -8683,32 +8683,22 @@ def api_wazzup_chat_messages():
         limit = min(max(int(request.args.get('limit', 50)), 1), 200)
     except (TypeError, ValueError):
         limit = 50
-    where = ["account = %s", "channel_id = %s", "chat_id = %s"]
+    where = ["m.account = %s", "m.channel_id = %s", "m.chat_id = %s"]
     params = [account, channel_id, chat_id]
     if before:
-        where.append("dt < %s")
+        where.append("m.dt < %s")
         params.append(before)
     try:
         with db._get_cursor() as cursor:
-            cursor.execute(f"""
-                SELECT message_id, dt, is_echo, type, text, content_uri,
-                       COALESCE((SELECT o.author_name FROM wazzup_pilot_outbox o
-                           WHERE o.account=wazzup_messages.account
-                             AND o.message_id=wazzup_messages.message_id), author_name),
-                       author_id, status, is_edited, is_deleted, wazzup_dt
-                  FROM wazzup_messages WHERE {' AND '.join(where)}
-                 ORDER BY dt DESC, message_id DESC LIMIT %s""", params + [limit + 1])
+            from wazzup.pilot import MESSAGE_SELECT, message_item
+            cursor.execute(MESSAGE_SELECT + " WHERE " + ' AND '.join(where)
+                           + " ORDER BY m.dt DESC, m.message_id DESC LIMIT %s", params + [limit + 1])
             rows = cursor.fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
         # wazzupDt — время отправки по WhatsApp у входящего, которое Wazzup
         # доставил с опозданием (dt у такого — минута доставки).
-        items = [{'messageId': r[0], 'dt': r[1].isoformat() if r[1] else None,
-                  'isEcho': r[2], 'type': r[3], 'text': r[4], 'contentUri': r[5],
-                  'authorName': r[6], 'authorId': r[7], 'status': r[8],
-                  'isEdited': r[9], 'isDeleted': r[10],
-                  'wazzupDt': r[11].isoformat() if r[11] else None}
-                 for r in reversed(rows)]  # в ответе — по возрастанию времени
+        items = [message_item(row) for row in reversed(rows)]
         return jsonify({"status": "success", "items": items, "hasMore": has_more}), 200
     except Exception as error:
         logging.exception("wazzup chat messages failed")

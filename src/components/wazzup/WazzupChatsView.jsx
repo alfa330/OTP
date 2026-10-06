@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronUp, Headset, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
-    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3,
+    Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -19,6 +19,8 @@ import useChatPilot from './useChatPilot';
 import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
 import { mergePilotMessages, pilotChatKey } from './chatPilot';
+import { firstVisibleMessage, messageQuote } from './threadPresentation';
+import './chatThread.css';
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
@@ -202,13 +204,14 @@ function MediaContent({ msg, light }) {
 }
 
 /* Пузырь в стиле iMessage: исходящие — синие справа, входящие — белые слева. */
-const MessageBubble = React.memo(function MessageBubble({ msg }) {
+const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
     return (
-        <div className={`flex ${out ? 'justify-end' : 'justify-start'} px-4`}>
-            <div className={`max-w-[75%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${
+        <div data-message-id={msg.messageId} data-message-date={msg.dt}
+            className={`wazzup-message-row flex items-start gap-1.5 ${out ? 'justify-end' : 'justify-start'} px-3 sm:px-4`}>
+            <div className={`wazzup-message-bubble min-w-0 max-w-[85%] rounded-2xl px-3 py-2 text-[16px] leading-[1.45] shadow-[0_1px_1px_rgba(15,23,42,0.05)] sm:max-w-[78%] ${
                 out ? 'rounded-br-md bg-blue-500 text-white'
                     : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60'
             } ${msg.isDeleted ? 'opacity-70' : ''}`}>
@@ -217,6 +220,13 @@ const MessageBubble = React.memo(function MessageBubble({ msg }) {
                         <Headset size={11} /> {msg.authorName}
                     </div>
                 )}
+                {quote && <button type="button" onClick={() => onQuote?.(quote.messageId)}
+                    title="Перейти к исходному сообщению"
+                    className={`mb-2 block w-full overflow-hidden rounded-lg border-l-[3px] px-2.5 py-1.5 text-left text-[13px] ${
+                        out ? 'border-blue-100 bg-white/15 text-blue-50' : 'border-blue-400 bg-slate-100 text-slate-600'}`}>
+                    <span className="block truncate font-semibold">{quote.author}</span>
+                    <span className="line-clamp-2 whitespace-pre-wrap break-words">{quote.text}</span>
+                </button>}
                 {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={out} /></div>}
                 {msg.text && <div className="whitespace-pre-wrap break-words">{msg.text}</div>}
                 {!msg.text && !hasMedia && (
@@ -224,7 +234,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg }) {
                         [{msg.type || 'сообщение'}]
                     </div>
                 )}
-                <div className={`mt-0.5 flex items-center justify-end gap-1.5 text-[10px] ${
+                <div className={`mt-0.5 flex flex-wrap items-center justify-end gap-1.5 text-[11px] ${
                     out ? 'text-blue-100/90' : 'text-slate-400'}`}>
                     {msg.isDeleted && (
                         <span className={`flex items-center gap-0.5 ${out ? 'text-blue-50' : 'text-rose-500'}`}>
@@ -241,9 +251,55 @@ const MessageBubble = React.memo(function MessageBubble({ msg }) {
                     {out && msg.status && STATUS_LABELS[msg.status] && <span>· {STATUS_LABELS[msg.status]}</span>}
                 </div>
             </div>
+            {onReply && !msg.isDeleted && <button type="button" onClick={() => onReply(msg)}
+                aria-label="Ответить на сообщение" title="Ответить на сообщение"
+                className={`wazzup-message-reply mt-1 shrink-0 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${out ? 'order-first' : ''}`}>
+                <Reply size={17} />
+            </button>}
         </div>
     );
 });
+
+// Own state keeps scrolling from rerendering the message list or composer.
+function ThreadScrollDate({ box, chatKey }) {
+    const [date, setDate] = useState('');
+    const [visible, setVisible] = useState(false);
+    useEffect(() => {
+        const element = box.current;
+        if (!element) return undefined;
+        let nodes = null;
+        const observer = new MutationObserver(() => { nodes = null; });
+        observer.observe(element.firstElementChild || element, { childList: true });
+        let frame = null;
+        let hide = setTimeout(() => setVisible(false), 900);
+        const scrolled = () => {
+            clearTimeout(hide);
+            hide = setTimeout(() => setVisible(false), 900);
+            if (frame !== null) return;
+            frame = requestAnimationFrame(() => {
+                frame = null;
+                if (!nodes) nodes = [...element.querySelectorAll('[data-message-date]')];
+                const row = firstVisibleMessage(nodes, element.getBoundingClientRect().top + 8);
+                const value = row?.dataset.messageDate;
+                if (!value) return;
+                setDate(fmtDay(value));
+                setVisible(true);
+            });
+        };
+        element.addEventListener('scroll', scrolled, { passive: true });
+        return () => {
+            element.removeEventListener('scroll', scrolled);
+            observer.disconnect();
+            if (frame !== null) cancelAnimationFrame(frame);
+            clearTimeout(hide);
+        };
+    }, [box, chatKey]);
+    useEffect(() => { setVisible(false); setDate(''); }, [chatKey]);
+    return <div aria-hidden="true"
+        className={`pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center transition-opacity duration-200 motion-reduce:transition-none ${visible ? 'opacity-100' : 'opacity-0'}`}>
+        {date && <span className="rounded-full bg-white/95 px-3 py-1 text-[12px] font-medium text-slate-600 shadow-sm ring-1 ring-slate-200/80 backdrop-blur-sm">{date}</span>}
+    </div>;
+}
 
 const SegButton = ({ active, onClick, icon: Icon, children }) => (
     <button onClick={onClick}
@@ -837,6 +893,7 @@ export default function WazzupChatsView(props) {
     const [appliedSearch, setAppliedSearch] = useState('');
     const [selected, setSelected] = useState(null);       // {channelId, chatId, ...}
     const [thread, setThread] = useState(null);
+    const [replySelection, setReplySelection] = useState(null);
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
     /* Переход по ссылке: пока номер разрешается в чат, лента не имеет права
@@ -858,6 +915,37 @@ export default function WazzupChatsView(props) {
     const chatsRequest = useRef({ id: 0, controller: null });
     const threadRequest = useRef({ id: 0, controller: null });
     const threadBox = useRef(null);
+    const quoteHighlight = useRef({ node: null, timer: null });
+    const selectedKey = pilotChatKey(account, selected);
+    const chooseReply = useCallback((message) => {
+        setReplySelection({ key: selectedKey, message: { ...message } });
+    }, [selectedKey]);
+    const cancelReply = useCallback((messageId) => {
+        setReplySelection((current) => current?.key === selectedKey
+            && (!messageId || current.message.messageId === messageId) ? null : current);
+    }, [selectedKey]);
+    const jumpToQuote = useCallback((messageId) => {
+        const row = [...(threadBox.current?.querySelectorAll('[data-message-id]') || [])]
+            .find((node) => node.dataset.messageId === messageId);
+        if (!row) {
+            showToast?.('Исходное сообщение не загружено. Нажмите «Более ранние» или откройте чат в Wazzup.', 'info');
+            return;
+        }
+        clearTimeout(quoteHighlight.current.timer);
+        quoteHighlight.current.node?.removeAttribute('data-quote-highlight');
+        row.scrollIntoView({ block: 'center', behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        row.dataset.quoteHighlight = 'true';
+        quoteHighlight.current = { node: row, timer: setTimeout(() => {
+            row.removeAttribute('data-quote-highlight');
+        }, 1400) };
+    }, [showToast]);
+    useEffect(() => {
+        setReplySelection(null);
+        return () => {
+            clearTimeout(quoteHighlight.current.timer);
+            quoteHighlight.current.node?.removeAttribute('data-quote-highlight');
+        };
+    }, [selectedKey]);
     const searchDebounce = useRef(null);
     const pilotView = useRef({});
     pilotView.current = { key: pilotChatKey(account, selected), thread, selected, account, mainTab };
@@ -1298,6 +1386,10 @@ export default function WazzupChatsView(props) {
         });
         return out;
     }, [thread]);
+    const threadQuotes = useMemo(() => {
+        const byId = new Map((thread || []).map((message) => [message.messageId, message]));
+        return new Map((thread || []).map((message) => [message.messageId, messageQuote(message, byId)]));
+    }, [thread]);
 
     const activeChannels = (channels || []).filter((c) => (c.chatsCount || 0) > 0 || c.state === 'active');
 
@@ -1369,7 +1461,7 @@ export default function WazzupChatsView(props) {
                  style={{ height: 'calc(100vh - 170px)', minHeight: 420,
                           display: mainTab === 'chats' ? undefined : 'none' }}>
                 {/* Каналы */}
-                <div className="hidden w-56 shrink-0 flex-col overflow-y-auto border-r border-slate-100 bg-slate-50/70 py-1.5 md:flex">
+                <div className="wazzup-scrollbar hidden w-56 shrink-0 flex-col overflow-y-auto border-r border-slate-100 bg-slate-50/70 py-1.5 md:flex">
                     <button onClick={() => pickChannel('')}
                             className={`mx-1.5 rounded-lg px-3 py-2.5 text-left text-[13.5px] transition ${
                                 !channelId ? 'bg-white font-semibold text-slate-900 shadow-sm ring-1 ring-slate-200/60'
@@ -1412,15 +1504,15 @@ export default function WazzupChatsView(props) {
                         </div>
                         {pilot.enabled && <div className="mt-2 flex items-center gap-2 text-xs">
                             <button type="button" onClick={() => setUnreadOnly(!unreadOnly)}
-                                aria-pressed={unreadOnly} title="Общие для всей команды. Учитываются новые входящие после включения счётчика."
-                                className={`rounded-full px-3 py-1.5 ${unreadOnly ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}>
-                                Непрочитанные · {unread.total}
+                                aria-pressed={unreadOnly} title="Общий счётчик сообщений, ожидающих ответа команды"
+                                className={`rounded-full px-3 py-1.5 ${unreadOnly ? 'bg-orange-600 text-white' : 'bg-orange-50 text-orange-700'}`}>
+                                Ожидают ответа · {unread.total}
                             </button>
                             {unread.error && <button type="button" onClick={() => unread.refresh().catch(() => {})}
                                 className="text-amber-700" title={unread.error}>Обновить счётчик</button>}
                         </div>}
                     </div>
-                    <div className="flex-1 overflow-y-auto py-1">
+                    <div className="wazzup-scrollbar flex-1 overflow-y-auto py-1">
                         {chats === null && (
                             <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
                                 <Loader2 size={15} className="animate-spin" /> Загрузка чатов…
@@ -1436,7 +1528,7 @@ export default function WazzupChatsView(props) {
                                 {/* «База пуста» и «фильтр ничего не нашёл» — разные вещи.
                                     Раньше в эту строку попадали только руками через
                                     поиск, а с переходом по ссылке это штатный экран. */}
-                                {unreadOnly ? 'Нет непрочитанных сообщений' : appliedSearch || channelId
+                                {unreadOnly ? 'Нет сообщений, ожидающих ответа' : appliedSearch || channelId
                                     ? 'Ничего не нашлось по этому фильтру'
                                     : 'Чатов пока нет — сбор идёт с 17.07.2026'}
                             </div>
@@ -1460,7 +1552,7 @@ export default function WazzupChatsView(props) {
                                                 {chat.lastMessageIsEcho && <Headset size={11} className="shrink-0 text-blue-500" />}
                                                 <span className="truncate">{previewText(chat.lastMessageText)}</span>
                                                 {pilot.enabled && unread.items[pilotChatKey('op', chat)]?.unreadCount > 0 &&
-                                                    <span className="ml-auto rounded-full bg-emerald-600 px-1.5 text-[11px] font-semibold text-white">
+                                                    <span className="ml-auto rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold text-white">
                                                         {unread.items[pilotChatKey('op', chat)].unreadCount}
                                                     </span>}
                                             </div>
@@ -1534,7 +1626,7 @@ export default function WazzupChatsView(props) {
                     )}
                     {selected && (
                         <>
-                            <div className="flex items-center justify-between gap-2 border-b border-slate-200/70 bg-white/85 px-4 py-2.5 backdrop-blur-xl">
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/70 bg-white/85 px-4 py-2.5 backdrop-blur-xl">
                                 <div className="flex min-w-0 items-center gap-2.5">
                                     <Avatar name={selected.contactName || selected.contactPhone || selected.chatId} />
                                     <div className="min-w-0">
@@ -1547,12 +1639,15 @@ export default function WazzupChatsView(props) {
                                         </div>
                                     </div>
                                 </div>
-                                <div className="flex shrink-0 items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
                                     {pilot.enabled && unread.items[pilotChatKey('op', selected)]?.unreadCount > 0 &&
                                         <button type="button" onClick={() => unread.markRead(selected)}
-                                            title="Отметить прочитанным для всей команды, включая сообщения вне доступной истории"
-                                            className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
-                                            Прочитано
+                                            title="Закрыть ожидающие ответа сообщения для всей команды"
+                                            className="inline-flex items-center gap-1.5 rounded-full border border-orange-500 bg-white py-1 pl-2.5 pr-1 text-xs font-semibold text-orange-600 transition hover:bg-orange-50">
+                                            Ответ не нужен
+                                            <span className="flex min-h-5 min-w-5 items-center justify-center rounded-full bg-orange-600 px-1 text-[11px] text-white">
+                                                {unread.items[pilotChatKey('op', selected)].unreadCount}
+                                            </span>
                                         </button>}
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
@@ -1581,7 +1676,10 @@ export default function WazzupChatsView(props) {
                                     )}
                                 </div>
                             </div>
-                            <div ref={threadBox} className="flex-1 space-y-1.5 overflow-y-auto py-3">
+                            <div className="relative min-h-0 flex-1">
+                            <ThreadScrollDate box={threadBox} chatKey={selectedKey} />
+                            <div ref={threadBox} className="wazzup-scrollbar h-full overflow-y-auto py-3">
+                            <div className="mx-auto w-full max-w-[900px] space-y-2">
                                 {thread === null && (
                                     <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
                                         <Loader2 size={15} className="animate-spin" /> Загрузка переписки…
@@ -1604,15 +1702,20 @@ export default function WazzupChatsView(props) {
                                         </span>
                                     </div>
                                 ) : (
-                                    <MessageBubble key={m.messageId} msg={m} />
+                                    <MessageBubble key={m.messageId} msg={m} quote={threadQuotes.get(m.messageId)}
+                                        onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote} />
                                 ))}
                                 {thread !== null && thread.length === 0 && (
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
                                 )}
                             </div>
+                            </div>
+                            </div>
                             {pilotCanSend && (
                                 <ChatPilotComposer key={pilotChatKey(account, selected)} chat={selected}
                                     apiBaseUrl={apiBaseUrl} headers={headers} maxLength={pilot.capability.maxTextLength}
+                                    replyTo={replySelection?.key === selectedKey ? replySelection.message : null}
+                                    onCancelReply={cancelReply}
                                     onSent={() => {
                                         refreshPilotThread().catch(() => showToast?.('Обновите переписку для проверки отправки', 'error'));
                                         loadChats({ silent: true }).catch(() => {});

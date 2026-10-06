@@ -64,14 +64,17 @@ class MemoryCursor:
         elif sql.startswith('SELECT chat_type FROM wazzup_chats'):
             self.row = ('whatsapp',)
         elif sql.startswith('INSERT INTO wazzup_pilot_outbox'):
-            request_id, channel, chat, text, user_id, _name = values
+            request_id, channel, chat, text, user_id, _name, reply_to = values
             if request_id not in self.db.outbox:
                 self.db.outbox[request_id] = ['op', channel, chat, text, user_id,
-                                              'sending', None, None, None]
+                                              'sending', None, None, None, reply_to]
                 self.row = (request_id,)
         elif sql.startswith('UPDATE wazzup_pilot_outbox SET state='):
             state, message_id, code, explanation, request_id = values
-            self.db.outbox[request_id][5:] = [state, message_id, code, explanation]
+            self.db.outbox[request_id][5:9] = [state, message_id, code, explanation]
+        elif sql.startswith("SELECT 1 FROM wazzup_messages WHERE account='op'"):
+            item = self.db.messages.get(values[2])
+            self.row = (1,) if item and item.get('account') == 'op' and item.get('channelId') == values[0] and item.get('chatId') == values[1] and not item.get('isDeleted') else None
         elif sql.startswith('SELECT 1 FROM wazzup_messages'):
             self.row = (1,) if values[0] in self.db.messages else None
         else:
@@ -94,7 +97,7 @@ class RefreshDatabase:
                 is_echo BOOLEAN, type TEXT, text TEXT, content_uri TEXT, author_name TEXT,
                 author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT
             );
-            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT);
+            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT);
         ''')
 
     def get_user(self, **_):
@@ -228,6 +231,26 @@ class PilotRoutesTests(unittest.TestCase):
         self.assertEqual(409, response.status_code)
         self.assertEqual('REQUEST_CONFLICT', response.get_json()['code'])
         self.transport.post.assert_called_once()
+
+    def test_reply_is_scoped_to_chat_and_immutable_on_retry(self):
+        self.db.messages['original'] = dict(account='op', channelId=CHANNEL, chatId=self.body['chatId'])
+        body = dict(self.body, replyToMessageId='original')
+        self.assertEqual(201, self.client.post('/api/wazzup/pilot/send', json=body).status_code)
+        self.assertEqual('original', self.transport.post.call_args.kwargs['json']['refMessageId'])
+        self.assertEqual(200, self.client.post('/api/wazzup/pilot/send', json=body).status_code)
+        self.assertEqual(409, self.client.post('/api/wazzup/pilot/send', json=self.body).status_code)
+        self.assertEqual(409, self.client.post('/api/wazzup/pilot/send', json=dict(body,replyToMessageId='other')).status_code)
+        self.transport.post.assert_called_once()
+
+    def test_reply_rejects_cross_chat_deleted_and_invalid_targets(self):
+        for item in (dict(account='potok', channelId=CHANNEL, chatId=self.body['chatId']),
+                     dict(account='op', channelId=CHANNEL, chatId='another'),
+                     dict(account='op', channelId=CHANNEL, chatId=self.body['chatId'],isDeleted=True)):
+            self.db.messages['original'] = item
+            self.assertEqual(400, self.client.post('/api/wazzup/pilot/send',json=dict(self.body,replyToMessageId='original')).status_code)
+        for invalid in ([], {}, 4, 'x'*201):
+            self.assertEqual(400, self.client.post('/api/wazzup/pilot/send',json=dict(self.body,replyToMessageId=invalid)).status_code)
+        self.transport.post.assert_not_called()
 
     def test_timeout_is_ambiguous_and_same_request_never_replays(self):
         self.transport.post.side_effect = requests.Timeout('Synthetic timeout')

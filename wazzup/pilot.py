@@ -33,16 +33,19 @@ def eligible_user(user):
 def message_item(row):
     return dict(zip(('messageId', 'dt', 'isEcho', 'type', 'text', 'contentUri',
                      'authorName', 'authorId', 'status', 'isEdited', 'isDeleted',
-                     'wazzupDt'),
+                     'wazzupDt', 'replyToMessageId', 'replyText', 'replyAuthorName'),
                     [v.isoformat() if isinstance(v, datetime) else v for v in row]))
 
 
 MESSAGE_SELECT = """
     SELECT m.message_id,m.dt,m.is_echo,m.type,m.text,m.content_uri,
            COALESCE(o.author_name,m.author_name),m.author_id,m.status,
-           m.is_edited,m.is_deleted,m.wazzup_dt
+           m.is_edited,m.is_deleted,m.wazzup_dt,o.reply_to_message_id,
+           CASE WHEN r.is_deleted THEN NULL ELSE r.text END,r.author_name
       FROM wazzup_messages m
       LEFT JOIN wazzup_pilot_outbox o ON o.message_id=m.message_id AND o.account=m.account
+      LEFT JOIN wazzup_messages r ON r.message_id=o.reply_to_message_id AND r.account=m.account
+          AND r.channel_id=m.channel_id AND r.chat_id=m.chat_id
 """
 
 
@@ -66,6 +69,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
     from .templates import register_template_routes, validate_template_message, render_template_preview
     register_template_routes(bp, actor, require_api_key, preflight, db,
                              excluded_channels=EXCLUDED_CHANNELS)
+    from .assist import register_assist_routes
+    register_assist_routes(bp, actor, require_api_key, preflight)
 
     @bp.route('', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -160,6 +165,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         if tuple(row[:5]) != ('op', body['channelId'], body['chatId'], body['text'], user[0]):
             return jsonify(error='Этот идентификатор уже использован для другого сообщения',
                            code='REQUEST_CONFLICT', retryable=False), 409
+        if (row[9] if len(row) > 9 else None) != body.get('replyToMessageId'):
+            return jsonify(error='У этой отправки уже выбран другой ответ', code='REQUEST_CONFLICT', retryable=False), 409
         state = row[5]
         if state == 'sent':
             return jsonify(status='success', state=state, messageId=row[6],
@@ -182,6 +189,10 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
         if body.get('account') != 'op':
             return jsonify(error='Пилот работает только в аккаунте Верификаторов'), 403
         cid, chat, text = body.get('channelId'), body.get('chatId'), body.get('text')
+        reply_to = body.get('replyToMessageId')
+        if reply_to is not None and (not isinstance(reply_to, str) or len(reply_to) > 200 or not reply_to.strip()):
+            return jsonify(error='Некорректное сообщение для ответа'), 400
+        body['replyToMessageId'] = reply_to
         if (not isinstance(cid, str) or not isinstance(chat, str) or not isinstance(text, str)
                 or not text.strip() or len(text) > MAX_TEXT or not chat.strip() or len(chat) > 100):
             return jsonify(error='Введите сообщение длиной до 4096 символов'), 400
@@ -198,7 +209,7 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             return jsonify(error='Ключ отправки не настроен'), 503
         # Replay before channel checks, even if it was subsequently disconnected.
         with db._get_cursor() as cur:
-            cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message "
+            cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id "
                         "FROM wazzup_pilot_outbox WHERE request_id=%s", (request_id,))
             previous = cur.fetchone()
         if previous:
@@ -216,14 +227,19 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             known = cur.fetchone()
             if not known or known[0] != 'whatsapp':
                 return jsonify(error='Выберите существующий личный чат WhatsApp'), 400
+            if reply_to:
+                cur.execute("SELECT 1 FROM wazzup_messages WHERE account='op' AND channel_id=%s AND chat_id=%s "
+                            "AND message_id=%s AND NOT is_deleted", (cid, chat, reply_to))
+                if not cur.fetchone():
+                    return jsonify(error='Сообщение для ответа не найдено в этом чате'), 400
             cur.execute("""INSERT INTO wazzup_pilot_outbox
-                (request_id,account,channel_id,chat_id,chat_type,text,user_id,author_name)
-                VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s)
+                (request_id,account,channel_id,chat_id,chat_type,text,user_id,author_name,reply_to_message_id)
+                VALUES (%s,'op',%s,%s,'whatsapp',%s,%s,%s,%s)
                 ON CONFLICT(request_id) DO NOTHING RETURNING request_id""",
-                (request_id, cid, chat, text, user[0], user[2]))
+                (request_id, cid, chat, text, user[0], user[2], reply_to))
             claimed = cur.fetchone()
             if not claimed:
-                cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message "
+                cur.execute("SELECT account,channel_id,chat_id,text,user_id,state,message_id,error_code,error_message,reply_to_message_id "
                             "FROM wazzup_pilot_outbox WHERE request_id=%s", (request_id,))
                 return replay(cur.fetchone(), body, user)
         # Transaction committed before network I/O. Never retry an ambiguous POST.
@@ -233,7 +249,8 @@ def build_pilot_blueprint(*, db, require_api_key, guard, channels, preflight,
             response = transport.post('https://api.wazzup24.com/v3/message',
                 headers={'Authorization': 'Bearer ' + key}, timeout=(5, 20),
                 json={'channelId': cid, 'chatId': chat, 'chatType': 'whatsapp',
-                      'text': text, 'crmMessageId': request_id, 'clearUnanswered': True})
+                      'text': text, 'crmMessageId': request_id, 'clearUnanswered': True,
+                      **({'refMessageId': reply_to} if reply_to else {})})
             try:
                 data = response.json()
             except ValueError:

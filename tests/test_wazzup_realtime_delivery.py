@@ -5,6 +5,7 @@ import threading
 import unittest
 
 from wazzup.realtime import EventBroker, HYDRATE_BATCH_SIZE, broadcast_changes
+from wazzup.pilot import MESSAGE_SELECT, message_item
 
 
 class Archive:
@@ -17,7 +18,7 @@ class Archive:
                 is_echo BOOLEAN, type TEXT, text TEXT, content_uri TEXT, author_name TEXT,
                 author_id TEXT, status TEXT, is_edited BOOLEAN, is_deleted BOOLEAN, wazzup_dt TEXT
             );
-            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT);
+            CREATE TABLE wazzup_pilot_outbox (account TEXT, message_id TEXT, author_name TEXT, reply_to_message_id TEXT);
             CREATE TABLE wazzup_chats (
                 account TEXT, channel_id TEXT, chat_id TEXT, chat_type TEXT, contact_name TEXT,
                 contact_phone TEXT, last_message_at TEXT, last_message_text TEXT,
@@ -26,13 +27,16 @@ class Archive:
             );
         ''')
 
-    def add(self, message_id, *, account='op', status='read', text='Complete message', author=None):
+    def add(self, message_id, *, account='op', status='read', text='Complete message', author=None,
+            channel='channel', chat='chat', deleted=False, reply_to=None,
+            provider_author='Provider author'):
         self.connection.execute('INSERT INTO wazzup_messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (account, 'channel', 'chat', message_id, '2026-10-06T10:00:00+00:00', True, 'text', text,
-             None, 'Provider author', None, status, False, False, None))
-        if author:
-            self.connection.execute('INSERT INTO wazzup_pilot_outbox VALUES (?,?,?)',
-                                    (account, message_id, author))
+            (account, channel, chat, message_id, '2026-10-06T10:00:00+00:00', True, 'text', text,
+             None, provider_author, None, status, False, deleted, None))
+        if author or reply_to:
+            self.connection.execute('''INSERT INTO wazzup_pilot_outbox
+                (account,message_id,author_name,reply_to_message_id) VALUES (?,?,?,?)''',
+                (account, message_id, author, reply_to))
 
     def summary(self):
         self.connection.execute('INSERT INTO wazzup_chats VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -41,9 +45,11 @@ class Archive:
 
     def execute(self, sql, params):
         self.calls.append((sql, params))
-        ids = params[0]
-        sql = sql.replace('m.message_id=ANY(%s)', 'm.message_id IN (' + ','.join('?' * len(ids)) + ')')
-        self.cursor = self.connection.execute(sql, ids)
+        if 'm.message_id=ANY(%s)' in sql:
+            ids = params[0]
+            sql = sql.replace('m.message_id=ANY(%s)', 'm.message_id IN (' + ','.join('?' * len(ids)) + ')')
+            params = ids
+        self.cursor = self.connection.execute(sql.replace('%s', '?'), params)
 
     def fetchall(self):
         return self.cursor.fetchall()
@@ -64,6 +70,84 @@ class RealtimeDeliveryTests(unittest.TestCase):
         self.broker = EventBroker()
         for _ in range(6):
             self.assertTrue(self.broker.acquire())
+
+    def quote_from_delivery_and_history(self, message_id):
+        """Exercise both production SQL queries and their field-to-JSON mapping."""
+        sequence = self.broker.current_seq()
+        broadcast_changes(self.archive, [change(message_id)], self.broker)
+        events, _ = self.broker.wait(sequence)
+        self.assertEqual(1, len(events))
+        live = events[0]['message']
+        self.archive.execute(MESSAGE_SELECT + '''
+            WHERE m.account=%s AND m.channel_id=%s AND m.chat_id=%s AND m.message_id=%s
+            ORDER BY m.dt DESC, m.message_id DESC LIMIT 51''',
+            ('op', 'channel', 'chat', message_id))
+        rows = self.archive.fetchall()
+        self.assertEqual(1, len(rows))
+        history = message_item(rows[0])
+        self.assertEqual(live, history, 'Initial history and SSE must render the same reply')
+        return live, events[0].get('chat')
+
+    def test_reply_quote_hydrates_original_and_preserves_message_and_chat_field_offsets(self):
+        self.archive.add('original', text='When will the documents be ready?', provider_author='Original author')
+        self.archive.add('answer', text='They are ready.', author='Reply operator', reply_to='original')
+        self.archive.summary()
+
+        message, chat = self.quote_from_delivery_and_history('answer')
+
+        self.assertEqual('original', message['replyToMessageId'])
+        self.assertEqual('When will the documents be ready?', message['replyText'])
+        self.assertEqual('Original author', message['replyAuthorName'])
+        self.assertEqual('They are ready.', message['text'])
+        self.assertEqual('Reply operator', message['authorName'])
+        self.assertEqual('read', message['status'])
+        self.assertEqual('Test name', chat['contactName'])
+        self.assertEqual('70000000000', chat['contactPhone'])
+        self.assertEqual(12, chat['messagesCount'])
+        self.assertEqual(2, len(self.archive.calls), 'One shared hydration query and one history query')
+
+    def test_reply_quote_never_reads_original_from_another_account_channel_or_chat(self):
+        for label, scope in (
+                ('account', {'account': 'potok'}),
+                ('channel', {'channel': 'another-channel'}),
+                ('chat', {'chat': 'another-chat'})):
+            with self.subTest(scope=label):
+                original_id, reply_id = 'foreign-' + label, 'reply-' + label
+                self.archive.add(original_id, text='Private foreign text', provider_author='Foreign author', **scope)
+                self.archive.add(reply_id, text='Local message', reply_to=original_id)
+
+                message, _ = self.quote_from_delivery_and_history(reply_id)
+
+                self.assertEqual(original_id, message['replyToMessageId'])
+                self.assertIsNone(message['replyText'])
+                self.assertIsNone(message['replyAuthorName'])
+                self.assertNotIn('Private foreign text', json.dumps(message))
+                self.assertNotIn('Foreign author', json.dumps(message))
+
+    def test_reply_quote_does_not_attach_outbox_metadata_from_another_account(self):
+        self.archive.add('original', text='Original text')
+        self.archive.add('message', text='Local message')
+        self.archive.connection.execute('''INSERT INTO wazzup_pilot_outbox
+            (account,message_id,author_name,reply_to_message_id) VALUES (?,?,?,?)''',
+            ('potok', 'message', 'Foreign operator', 'original'))
+
+        message, _ = self.quote_from_delivery_and_history('message')
+
+        self.assertEqual('Provider author', message['authorName'])
+        self.assertIsNone(message['replyToMessageId'])
+        self.assertIsNone(message['replyText'])
+        self.assertIsNone(message['replyAuthorName'])
+
+    def test_reply_quote_hides_deleted_original_text_in_history_and_realtime(self):
+        self.archive.add('deleted-original', text='Deleted confidential text', deleted=True)
+        self.archive.add('answer', text='Visible reply', reply_to='deleted-original')
+
+        message, _ = self.quote_from_delivery_and_history('answer')
+
+        self.assertEqual('deleted-original', message['replyToMessageId'])
+        self.assertIsNone(message['replyText'])
+        self.assertEqual('Visible reply', message['text'])
+        self.assertNotIn('Deleted confidential text', json.dumps(message))
 
     def test_six_readers_share_one_query_and_local_author_and_chat_summary(self):
         self.archive.add('message', author='Local operator')

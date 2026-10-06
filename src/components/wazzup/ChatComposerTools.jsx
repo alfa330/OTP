@@ -1,11 +1,11 @@
 import React, { lazy, Suspense, useEffect, useState } from 'react';
 import axios from 'axios';
-import { Plus, Smile, X, Pencil, Trash2 } from 'lucide-react';
+import { Slash, Smile, X, Pencil, Trash2 } from 'lucide-react';
 import { prepareTemplate } from './chatTemplates';
 
 const EmojiPicker = lazy(() => import('./ChatEmojiPicker'));
 
-export default function ChatComposerTools({ apiBaseUrl, headers, channelId, locked, slash, onChoose, onEmoji }) {
+export default function ChatComposerTools({ apiBaseUrl, headers, channelId, locked, emojiDisabled, slash, onChoose, onEmoji }) {
     const [panel, setPanel] = useState(null);
     const [items, setItems] = useState([]);
     const [warnings, setWarnings] = useState([]);
@@ -56,18 +56,22 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
         } catch (e) { setError(e.response?.data?.error || 'Не удалось удалить шаблон'); }
         finally { setBusy(false); }
     };
-    return <div className="relative mb-2">
-        <div className="flex gap-2">
-            <button type="button" disabled={locked} aria-expanded={panel === 'templates'}
+    return <div className="shrink-0">
+        <div className="flex gap-0.5">
+            <button type="button" disabled={locked} aria-label="Шаблоны сообщений" title="Шаблоны сообщений · /" aria-expanded={panel === 'templates'}
                 onClick={() => { setPanel(panel === 'templates' ? null : 'templates'); setSearch(''); }}
-                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40">
-                <Plus size={17} /> Шаблоны · /</button>
-            <button type="button" disabled={locked} aria-label="Выбрать эмодзи" aria-expanded={panel === 'emoji'}
+                className="inline-flex h-10 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40">
+                <Slash size={18} /></button>
+            <button type="button" disabled={locked || emojiDisabled} aria-label="Выбрать эмодзи" title="Выбрать эмодзи" aria-expanded={panel === 'emoji'}
                 onClick={() => setPanel(panel === 'emoji' ? null : 'emoji')}
-                className="rounded-lg px-2 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-40"><Smile size={17} /></button>
+                className="inline-flex h-10 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40"><Smile size={19} /></button>
         </div>
         {panel && !locked && <div role="dialog" aria-label={panel === 'emoji' ? 'Эмодзи' : 'Шаблоны сообщений'}
-            onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setPanel(null); } }}
+            onKeyDown={(e) => {
+                if (e.key === 'Escape') { e.stopPropagation(); setPanel(null); }
+                // Enter in template search/variable fields must not submit the message form.
+                if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.preventDefault();
+            }}
             className="absolute bottom-full left-0 z-20 mb-2 w-full max-w-md rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
             <div className="mb-2 flex items-center justify-between text-sm font-semibold">
                 <span>{panel === 'emoji' ? 'Эмодзи' : 'Шаблоны сообщений'}</span>

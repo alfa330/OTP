@@ -22,6 +22,13 @@ def inbound(message_id='inbound-1', **updates):
     return result
 
 
+def reply(message_id='reply-1', **updates):
+    result = inbound(message_id, isEcho=True, status='sent', authorName='Other operator',
+                     dateTime='2026-10-06T08:01:00Z')
+    result.update(updates)
+    return result
+
+
 def read_state(cursor, channel='channel', chat='70000000000'):
     cursor.execute('''SELECT unread_count,last_inbound_id,revision FROM wazzup_chat_read_state
                       WHERE account='op' AND channel_id=%s AND chat_id=%s''', (channel, chat))
@@ -234,3 +241,187 @@ def test_unread_notifications_are_transactional_and_include_read_clearing(pg):
     assert len(events) == 1
     assert events[0]['unreadCount'] == 0
     assert events[0]['unreadVersion'] == 2
+
+
+@postgres
+@pytest.mark.parametrize('status', [None, 'sent', 'delivered', 'read'])
+def test_reply_from_another_wazzup_operator_clears_waiting_messages(pg, status):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound(), inbound('inbound-2')])
+    db.store_wazzup_messages([reply(status=status)])
+    assert read_state(cursor) == (0, 'inbound-2', 3)
+    cursor.execute('SELECT COUNT(*) FROM wazzup_unanswered_messages')
+    assert cursor.fetchone() == (0,)
+    db.store_wazzup_messages([reply(status=status)])
+    assert read_state(cursor) == (0, 'inbound-2', 3)
+
+
+@postgres
+@pytest.mark.parametrize('status', ['pending', 'error', 'failed', 'accepted'])
+def test_unconfirmed_or_failed_outgoing_does_not_hide_waiting_messages(pg, status):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound(), reply(status=status)])
+    assert read_state(cursor) == (1, 'inbound-1', 1)
+    db.update_wazzup_statuses([dict(messageId='reply-1', status='delivered')])
+    assert read_state(cursor) == (0, 'inbound-1', 2)
+
+
+@postgres
+def test_late_reply_and_status_clear_only_the_inbounds_preceding_that_reply(pg):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound(), reply(status='pending'),
+                              inbound('inbound-2', dateTime='2026-10-06T08:02:00Z')])
+    db.update_wazzup_statuses([dict(messageId='reply-1', status='sent')])
+    assert read_state(cursor) == (1, 'inbound-2', 3)
+    db.store_wazzup_messages([reply('older-echo', dateTime='2026-10-06T08:00:30Z')])
+    assert read_state(cursor) == (1, 'inbound-2', 3)
+    db.store_wazzup_messages([inbound('late-inbound', dateTime='2026-10-06T08:00:10Z')])
+    assert read_state(cursor) == (1, 'inbound-2', 3)
+    cursor.execute('SELECT message_id FROM wazzup_unanswered_messages')
+    assert cursor.fetchall() == [('inbound-2',)]
+
+
+@postgres
+def test_reply_uses_original_messenger_time_not_adjusted_archive_time(pg):
+    _, cursor, database, _ = pg
+    db = database()
+    # Simulate the archive's late-delivery normalization at insert time.
+    cursor.execute('''INSERT INTO wazzup_messages
+        (message_id,channel_id,chat_id,chat_type,dt,wazzup_dt,is_echo)
+        VALUES('late-inbound','channel','70000000000','whatsapp',
+               '2026-10-06T08:02:00Z','2026-10-06T08:00:00Z',FALSE)''')
+    db.store_wazzup_messages([reply()])
+    assert read_state(cursor) == (0, 'late-inbound', 2)
+
+
+@postgres
+def test_auto_greeting_does_not_dismiss_but_native_wazzup_reply_does(pg):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound(), reply('bot', authorName=None, authorId=None,
+                                              sentFromApp=False)])
+    assert read_state(cursor) == (1, 'inbound-1', 1)
+    db.store_wazzup_messages([reply('native', authorName=None, authorId=None,
+                                  sentFromApp=True)])
+    assert read_state(cursor) == (0, 'inbound-1', 2)
+
+
+@postgres
+def test_own_outbox_reply_can_clear_without_vendor_author_fields(pg):
+    import uuid
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound()])
+    cursor.execute('''INSERT INTO wazzup_pilot_outbox
+        (request_id,account,channel_id,chat_id,chat_type,text,user_id,message_id)
+        VALUES(%s,'op','channel','70000000000','whatsapp','Reply',1,'our-reply')''',
+        (str(uuid.uuid4()),))
+    db.store_wazzup_messages([reply('our-reply', authorName=None, authorId=None, status='pending')])
+    assert read_state(cursor) == (1, 'inbound-1', 1)
+    db.update_wazzup_statuses([dict(messageId='our-reply', status='sent')])
+    assert read_state(cursor) == (0, 'inbound-1', 2)
+
+
+@postgres
+def test_deleting_a_pending_inbound_updates_shared_counter_once(pg):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound(), inbound('inbound-2')])
+    db.store_wazzup_messages([inbound(isDeleted=True)])
+    assert read_state(cursor) == (1, 'inbound-2', 3)
+    db.store_wazzup_messages([inbound(isDeleted=True)])
+    assert read_state(cursor) == (1, 'inbound-2', 3)
+
+
+@postgres
+def test_echo_before_first_inbound_prevents_reopening_old_messages(pg):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([reply(), inbound()])
+    assert read_state(cursor)[0] == 0
+    db.store_wazzup_messages([inbound('new-inbound', dateTime='2026-10-06T08:02:00Z')])
+    assert read_state(cursor) == (1, 'new-inbound', 1)
+
+
+@postgres
+def test_manual_dismissal_does_not_reopen_after_duplicate_or_old_echo(pg):
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound()])
+    client_for(db).post('/api/wazzup/pilot/read', json=body())
+    db.store_wazzup_messages([inbound(), reply(dateTime='2026-10-06T07:59:00Z')])
+    assert read_state(cursor) == (0, 'inbound-1', 2)
+    cursor.execute('SELECT COUNT(*) FROM wazzup_unanswered_messages')
+    assert cursor.fetchone() == (0,)
+    db.store_wazzup_messages([inbound('new-inbound', dateTime='2026-10-06T08:02:00Z')])
+    assert read_state(cursor) == (1, 'new-inbound', 3)
+
+
+@postgres
+def test_schema_upgrade_reconciles_only_existing_counter_tail_once(pg):
+    from wazzup.unread import init_unread_schema
+    _, cursor, database, _ = pg
+    db = database()
+    cursor.execute('ALTER TABLE wazzup_messages DISABLE TRIGGER wazzup_unread_insert')
+    db.store_wazzup_messages([inbound('dismissed-old'),
+        inbound('answered-inbound', dateTime='2026-10-06T08:00:30Z'), reply(),
+        inbound('still-pending', dateTime='2026-10-06T08:02:00Z'),
+        inbound('untracked-history', chatId='other-chat')])
+    cursor.execute('''INSERT INTO wazzup_chat_read_state
+        (account,channel_id,chat_id,unread_count,last_inbound_id,revision,unanswered_ready)
+        VALUES('op','channel','70000000000',2,'still-pending',9,FALSE)''')
+    cursor.execute('ALTER TABLE wazzup_messages ENABLE TRIGGER wazzup_unread_insert')
+    init_unread_schema(cursor)
+    assert read_state(cursor) == (1, 'still-pending', 10)
+    cursor.execute('SELECT message_id FROM wazzup_unanswered_messages')
+    assert cursor.fetchall() == [('still-pending',)]
+    assert read_state(cursor, chat='other-chat') is None
+    init_unread_schema(cursor)
+    assert read_state(cursor) == (1, 'still-pending', 10)
+
+
+@postgres
+def test_schema_upgrade_preserves_manually_dismissed_zero_counter(pg):
+    from wazzup.unread import init_unread_schema
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound()])
+    client_for(db).post('/api/wazzup/pilot/read', json=body())
+    cursor.execute('UPDATE wazzup_chat_read_state SET unanswered_ready=FALSE')
+    init_unread_schema(cursor)
+    assert read_state(cursor) == (0, 'inbound-1', 2)
+
+
+@postgres
+@pytest.mark.parametrize('first', ['reply', 'inbound'])
+def test_first_reply_racing_with_first_inbound_never_loses_answer(pg, first):
+    connection, cursor, database, connect = pg
+    db = database()
+    other = connect()
+    other_db = database(other)
+    messages = {'reply': reply(), 'inbound': inbound()}
+    db.store_wazzup_messages([messages[first]])
+    started, done, failures = threading.Event(), threading.Event(), []
+
+    def second_message():
+        try:
+            started.set()
+            other_db.store_wazzup_messages([messages['inbound' if first == 'reply' else 'reply']])
+            other.commit()
+        except Exception as error:
+            failures.append(error)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=second_message, daemon=True)
+    thread.start()
+    assert started.wait(1)
+    assert not done.wait(.15)
+    connection.commit()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert not failures
+    assert read_state(cursor)[0] == 0

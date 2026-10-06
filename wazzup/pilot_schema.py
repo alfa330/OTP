@@ -16,6 +16,7 @@ def init_schema(cursor):
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_wazzup_pilot_account_message
             ON wazzup_pilot_outbox(account, message_id) WHERE message_id IS NOT NULL;
+        ALTER TABLE wazzup_pilot_outbox ADD COLUMN IF NOT EXISTS reply_to_message_id TEXT;
         CREATE TABLE IF NOT EXISTS wazzup_status_receipts (
             account TEXT NOT NULL, message_id TEXT NOT NULL, status TEXT NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

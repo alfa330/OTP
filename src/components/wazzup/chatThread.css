@@ -1,0 +1,40 @@
+.wazzup-scrollbar,
+.wazzup-thin-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+    scrollbar-gutter: stable;
+}
+
+.wazzup-scrollbar::-webkit-scrollbar,
+.wazzup-thin-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+.wazzup-scrollbar::-webkit-scrollbar-track,
+.wazzup-thin-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.wazzup-scrollbar::-webkit-scrollbar-thumb,
+.wazzup-thin-scrollbar::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 999px;
+}
+.wazzup-scrollbar::-webkit-scrollbar-thumb:hover,
+.wazzup-thin-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+.wazzup-message-row { scroll-margin-block: 64px; }
+.wazzup-message-row[data-quote-highlight='true'] > .wazzup-message-bubble {
+    outline: 2px solid #38bdf8;
+    outline-offset: 3px;
+}
+
+.wazzup-message-reply {
+    opacity: .65;
+    transition: opacity 120ms, background-color 120ms;
+}
+.wazzup-message-row:hover .wazzup-message-reply,
+.wazzup-message-reply:focus-visible { opacity: 1; }
+
+@media (hover: hover) and (pointer: fine) {
+    .wazzup-message-reply { opacity: 0; }
+    .wazzup-message-row:focus-within .wazzup-message-reply { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .wazzup-message-reply { transition: none; }
+}

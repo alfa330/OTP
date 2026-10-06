@@ -25,10 +25,9 @@ export function reconcileUnreadSnapshot(rows, current, touched, startedAt) {
     return snapshot;
 }
 
-export default function useSharedChatUnread({ enabled, active, selected, thread, box, apiBaseUrl, headers }) {
+export default function useSharedChatUnread({ enabled, selected, apiBaseUrl, headers }) {
     const [items, setItems] = useState({});
     const [error, setError] = useState('');
-    const [viewport, setViewport] = useState(0);
     const state = useRef({ items: {}, epoch: 0, events: 0, touched: {}, loading: null,
         controller: null, acknowledgements: new Map(), metadata: new Map() });
     const latest = useRef({});
@@ -91,12 +90,11 @@ export default function useSharedChatUnread({ enabled, active, selected, thread,
             state.current.touched = Object.fromEntries(Object.keys(snapshot).map((key) => [key, state.current.touched[key] || 0]));
             setItems(snapshot);
             setError('');
-            setViewport((value) => value + 1);
         })();
         state.current.loading = request;
         try { await request; } catch (e) {
             if (controller.signal.aborted) return;
-            if (epoch === state.current.epoch) setError('Не удалось обновить непрочитанные');
+            if (epoch === state.current.epoch) setError('Не удалось обновить чаты, ожидающие ответа');
             throw e;
         } finally { if (state.current.loading === request) state.current.loading = null; }
     };
@@ -116,27 +114,6 @@ export default function useSharedChatUnread({ enabled, active, selected, thread,
             state.current.loading = null;
         };
     }, [enabled, apiBaseUrl]);
-    const key = pilotChatKey('op', selected);
-    const unread = items[key];
-    useEffect(() => {
-        if (!enabled || !active) return undefined;
-        const element = box.current;
-        let atBottom = element && element.scrollHeight - element.scrollTop - element.clientHeight <= 80;
-        const changed = () => setViewport((value) => value + 1);
-        const scrolled = () => {
-            const next = element && element.scrollHeight - element.scrollTop - element.clientHeight <= 80;
-            // Do not rerender the whole chat screen for every scroll pixel.
-            if (next !== atBottom) { atBottom = next; changed(); }
-        };
-        element?.addEventListener('scroll', scrolled, { passive: true });
-        document.addEventListener('visibilitychange', changed);
-        window.addEventListener('focus', changed);
-        return () => {
-            element?.removeEventListener('scroll', scrolled);
-            document.removeEventListener('visibilitychange', changed);
-            window.removeEventListener('focus', changed);
-        };
-    }, [enabled, active, key, thread === null]);
     const markRead = async (chat = selected, seenMessageId) => {
         const row = state.current.items[pilotChatKey('op', chat)];
         if (!latest.current.enabled || !row?.unreadCount || (seenMessageId && row.lastInboundId !== seenMessageId)) return;
@@ -154,19 +131,10 @@ export default function useSharedChatUnread({ enabled, active, selected, thread,
             if (data.item) apply([data.item]);
             setError('');
         } catch {
-            if (!controller.signal.aborted && epoch === state.current.epoch) setError('Не удалось сохранить отметку прочтения');
+            if (!controller.signal.aborted && epoch === state.current.epoch) setError('Не удалось сохранить отметку «Ответ не нужен»');
         } finally {
             if (state.current.acknowledgements.get(ackKey) === controller) state.current.acknowledgements.delete(ackKey);
         }
     };
-    useEffect(() => {
-        if (!enabled || !active || !unread?.unreadCount || !thread?.some((m) => m.messageId === unread.lastInboundId)) return undefined;
-        const timer = setTimeout(async () => {
-            const element = box.current;
-            if (document.hidden || !document.hasFocus() || !element || element.scrollHeight - element.scrollTop - element.clientHeight > 80) return;
-            await markRead(selected, unread.lastInboundId);
-        }, 500);
-        return () => clearTimeout(timer);
-    }, [enabled, active, key, unread?.unreadCount, unread?.lastInboundId, thread, viewport, apiBaseUrl]);
     return { items, apply, refresh, markRead, error, total: Object.values(items).reduce((sum, row) => sum + row.unreadCount, 0) };
 }

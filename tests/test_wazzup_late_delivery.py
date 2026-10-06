@@ -747,8 +747,12 @@ class WiringTests(unittest.TestCase):
         self.assertIn("db.store_wazzup_messages(batch, account=account)", potok)
 
     def test_thread_api_returns_wazzup_time(self):
-        self.assertTrue("author_id, status, is_edited, is_deleted, wazzup_dt" in API_SOURCE)
-        self.assertIn("'wazzupDt': r[11].isoformat() if r[11] else None", API_SOURCE)
+        from wazzup.pilot import MESSAGE_SELECT, message_item
+        from datetime import datetime, timezone
+        self.assertIn('MESSAGE_SELECT', API_SOURCE)
+        self.assertIn('m.wazzup_dt', MESSAGE_SELECT)
+        stamp = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        self.assertEqual(message_item([None] * 11 + [stamp])['wazzupDt'], stamp.isoformat())
 
     def test_thread_view_uses_local_day_and_late_note(self):
         self.assertIn("const day = localDayKey(m.dt);", VIEW_SOURCE)

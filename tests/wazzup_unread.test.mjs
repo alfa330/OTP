@@ -47,7 +47,7 @@ function harness() {
     };
 }
 
-test('auto read needs visible bottom and the exact rendered message; ACK is single flight and race-safe', async () => {
+test('opening/scrolling never clears pending reply; manual ACK is single flight and race-safe', async () => {
     const h=harness(); await h.flush();
     h.output.apply([row(1)]); await h.flush();
     h.doc.hidden=true; await h.tick(); assert.equal(h.posts.length,0);
@@ -56,10 +56,12 @@ test('auto read needs visible bottom and the exact rendered message; ACK is sing
     // An incoming notification updates the ref before a scheduled React render.
     h.output.apply([row(2,2,'m2')]); await h.tick(); assert.equal(h.posts.length,0);
     h.options.thread=[{ messageId:'m2' }]; h.output.apply([row(2,2,'m2')]); await h.flush();
-    await h.tick(); assert.equal(h.posts.length,1); assert.equal(h.posts[0].payload.seenMessageId,'m2');
+    await h.tick(); assert.equal(h.posts.length,0);
+    const acknowledged=h.output.markRead(chat);
+    assert.equal(h.posts.length,1); assert.equal(h.posts[0].payload.seenMessageId,'m2');
     const duplicate=h.output.markRead(chat); await duplicate; assert.equal(h.posts.length,1);
     h.output.apply([row(3,3,'m3')]); await h.flush();
-    h.posts[0].resolve({ data: { item: row(2,0,'m2') } }); await h.flush();
+    h.posts[0].resolve({ data: { item: row(2,0,'m2') } }); await acknowledged; await h.flush();
     assert.equal(h.output.items[key].unreadCount,3);
     h.close();
 });
