@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Loader2, Plus, X } from 'lucide-react';
-import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSegmented, IosSection } from '../ui/ios';
+import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSection } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import {
-    CONTRACT_THRESHOLD, SOURCE_OPTIONS, TYPE_OPTIONS, fmtDate, fmtMoney, itemsTotal, parseAmount, priceTrend,
-    trendLabel,
+    ATTACHMENT_LABELS, CONTRACT_THRESHOLD, DEFAULT_UNIT, HINTS, SOURCE_OPTIONS, SUPPLIER_KIND_OPTIONS, TYPE_OPTIONS,
+    VAT_OPTIONS, fmtDate, fmtMoney, isBlankItem, itemProblem, itemQuantity, itemTotal, itemsTotal, parseAmount,
+    priceTrend, trendLabel, unitOptions,
 } from './paymentsMeta';
 import {
-    AmountInput, ErrorBox, Field, FilePicker, NoticeBox, UserSelect, appendPayloadFiles, errorText,
+    AmountInput, Choice, ErrorBox, Field, FieldHint, FilePicker, NoticeBox, QuantityInput, UserSelect,
+    appendPayloadFiles, errorText,
 } from './paymentsUi';
 
 /*
@@ -28,7 +30,21 @@ import {
  * Файлы (реестр поставщиков, КП) прикладываются здесь же при создании: без
  * них шаг 1 не отпишется, и заставлять человека открывать карточку ради этого
  * незачем. При правке файлы живут в карточке.
+ *
+ * Форма рассчитана на человека, который видит её впервые (решение владельца
+ * 06.10.2026): у каждого выбора под «i» — зачем поле и что значит каждый
+ * вариант (тексты — HINTS в paymentsMeta.js); позиции устроены как таблица в
+ * счёте поставщика — количество, единица ИЗ СПИСКА, цена за единицу и сумма
+ * строки, чтобы было видно, из чего складывается итог.
  */
+
+// Сетка строки позиции на широком экране. До 768 px мобильная оболочка сайта
+// схлопывает произвольные сетки в одну колонку, поэтому там строка собрана на
+// flex, а сетка включается только с md.
+const ITEM_GRID = 'md:grid md:grid-cols-[minmax(0,1fr)_72px_100px_124px_112px_28px] md:items-center md:gap-2';
+/* На телефоне шапки таблицы нет — подпись стоит над каждым полем строки: без неё
+   «20 · шт · 2 500» — три числа без объяснения, что из них количество, а что цена. */
+const ITEM_CAPTION = 'mb-1 block px-1 text-[10.5px] font-medium uppercase tracking-wider text-slate-400 md:hidden';
 
 const EXTRA_FIELDS = [
     { key: 'branch', label: 'Филиал / регион' },
@@ -40,7 +56,13 @@ const EXTRA_FIELDS = [
     { key: 'notes', label: 'Примечания' },
 ];
 
-const newItem = () => ({ key: Math.random().toString(36).slice(2, 9), name: '', quantity: 1, unit: '', unit_price: 0 });
+const newItem = () => ({ key: Math.random().toString(36).slice(2, 9), name: '', quantity: '1', unit: DEFAULT_UNIT, unit_price: 0 });
+
+// Количество из базы («5.000») — в том виде, как его набирает человек («5», «2,5»).
+const quantityText = (value) => {
+    const number = parseAmount(value);
+    return number ? String(number).replace('.', ',') : '1';
+};
 
 const emptyDraft = (me, manager) => ({
     expense_name: '',
@@ -59,6 +81,8 @@ const emptyDraft = (me, manager) => ({
     due_on: '',
     department_id: me?.department_id || null,
     manager_id: manager?.id || null,
+    supplier_kind: null,
+    supplier_vat: null,
     items: [newItem()],
 });
 
@@ -79,10 +103,12 @@ const draftFromRequest = (request, items) => ({
     due_on: request.due_on ? String(request.due_on).slice(0, 10) : '',
     department_id: request.department_id ?? null,
     manager_id: request.manager_id ?? null,
+    supplier_kind: request.supplier_kind ?? null,
+    supplier_vat: request.supplier_vat ?? null,
     items: (items && items.length ? items : [{}]).map((item) => ({
         key: Math.random().toString(36).slice(2, 9),
         name: item.name || '',
-        quantity: parseAmount(item.quantity) || 1,
+        quantity: quantityText(item.quantity),
         unit: item.unit || '',
         unit_price: parseAmount(item.unit_price),
     })),
@@ -226,12 +252,18 @@ const PaymentRequestForm = ({
         }
     };
 
+    /* Форму поставщика и НДС инициатор называет на шаге 4. В форме заявки они
+       есть, только чтобы поправить уже выбранное: при создании лишний вопрос
+       не нужен. */
+    const supplierEditable = Boolean(editing && (draft.supplier_kind || draft.supplier_vat === true || draft.supplier_vat === false));
+
     const validate = () => {
         if (!draft.expense_name.trim()) return 'Укажите наименование расхода';
-        const filled = draft.items.filter((item) => item.name.trim());
-        if (!filled.length) return 'Добавьте хотя бы одну позицию';
-        if (filled.some((item) => parseAmount(item.quantity) <= 0)) return 'Количество в позиции должно быть больше нуля';
-        if (total <= 0) return 'Сумма заявки должна быть больше нуля';
+        const filled = draft.items.filter((item) => !isBlankItem(item));
+        if (!filled.length) return 'Добавьте хотя бы одну позицию: что покупаем, сколько и по какой цене';
+        const problem = filled.map(itemProblem).find(Boolean);
+        if (problem) return problem;
+        if (total <= 0) return 'Сумма заявки должна быть больше нуля — укажите цену за единицу';
         if (!draft.counterparty_id) return 'Выберите контрагента';
         if (!draft.category_id) return 'Выберите категорию расхода';
         if (!editing && !files.length) return 'Приложите реестр поставщиков или КП — без них шаг 1 не пройти';
@@ -243,10 +275,16 @@ const PaymentRequestForm = ({
         if (problem) { setError(problem); return; }
         setSaving(true);
         setError('');
+        // Форма поставщика и НДС уходят, только если их здесь правили: иначе форма,
+        // открытая до шага 4, при сохранении затёрла бы выбранное на шаге пустым.
+        const { supplier_kind: supplierKind, supplier_vat: supplierVat, ...rest } = draft;
         const payload = {
-            ...draft,
-            items: draft.items.filter((item) => item.name.trim()).map((item) => ({
-                name: item.name.trim(), quantity: parseAmount(item.quantity) || 1, unit: item.unit || null,
+            ...rest,
+            ...(supplierEditable ? { supplier_kind: supplierKind, supplier_vat: supplierVat } : {}),
+            // Те же строки, что посчитаны в «Итого» на экране: пустые не уходят,
+            // а строка без названия или количества до сюда не доходит (validate).
+            items: draft.items.filter((item) => !isBlankItem(item)).map((item) => ({
+                name: item.name.trim(), quantity: itemQuantity(item), unit: item.unit || null,
                 unit_price: parseAmount(item.unit_price),
             })),
         };
@@ -272,8 +310,11 @@ const PaymentRequestForm = ({
         }
     };
 
-    const kinds = useMemo(() => (stepFiles.length ? stepFiles : ['supplier_registry', 'offer', 'other'])
-        .map((value) => ({ value, label: ({ supplier_registry: 'Реестр поставщиков', offer: 'Коммерческое предложение', other: 'Другое' })[value] || value })), [stepFiles]);
+    const kinds = useMemo(() => {
+        const list = stepFiles.length ? stepFiles : ['supplier_registry', 'offer'];
+        return (list.includes('other') ? list : [...list, 'other'])
+            .map((value) => ({ value, label: ATTACHMENT_LABELS[value] || value }));
+    }, [stepFiles]);
 
     return (
         <IosModal
@@ -281,7 +322,7 @@ const PaymentRequestForm = ({
             onClose={onClose}
             title={editing ? `Заявка №${request.id} — правка` : 'Новая заявка на закуп'}
             subtitle={editing ? request.expense_name : 'Шаг 1 из 12 · Согласование закупки'}
-            maxWidth="max-w-2xl"
+            maxWidth="max-w-3xl"
             footer={(
                 <>
                     <button type="button" className={iosBtnSecondary} onClick={onClose} disabled={saving}>Отмена</button>
@@ -306,57 +347,82 @@ const PaymentRequestForm = ({
                         />
                     </Field>
 
-                    <div className="space-y-1.5">
-                        <div className="flex items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                            Позиции
-                        </div>
+                    <Field as="div" label="Позиции" required optionalMark={false} hint={HINTS.items}>
                         <div className="overflow-hidden rounded-xl ring-1 ring-slate-200/70">
-                            <div className="hidden grid-cols-[1fr_84px_72px_128px_32px] gap-2 bg-slate-50 px-3 py-1.5 text-[11px] uppercase tracking-wider text-slate-500 sm:grid">
-                                <span>Товар / услуга</span><span>Кол-во</span><span>Ед.</span><span className="text-right">Цена за ед.</span><span />
+                            <div className={`hidden ${ITEM_GRID} bg-slate-50 px-3 py-1.5 text-[11px] uppercase tracking-wider text-slate-500`}>
+                                <span>Товар или услуга</span>
+                                <span>Кол-во</span>
+                                <span>Ед. изм.</span>
+                                <span className="text-right">Цена за ед., ₸</span>
+                                <span className="text-right">Сумма, ₸</span>
+                                <span />
                             </div>
                             {draft.items.map((item) => {
                                 const remove = () => setDraft((prev) => ({
                                     ...prev,
                                     items: prev.items.length > 1 ? prev.items.filter((row) => row.key !== item.key) : [newItem()],
                                 }));
+                                const blank = isBlankItem(item);
+                                const nameMissing = !blank && !item.name.trim();
+                                const quantityBad = !blank && !(itemQuantity(item) > 0);
                                 return (
-                                    <div key={item.key} className="border-t border-slate-200/60 px-3 py-2 sm:grid sm:grid-cols-[1fr_84px_72px_128px_32px] sm:items-center sm:gap-2">
-                                        <div className="flex items-center gap-2 sm:contents">
+                                    <div key={item.key} className={`border-t border-slate-200/60 px-3 py-2 ${ITEM_GRID}`}>
+                                        <div className="flex items-center gap-2 md:contents">
                                             <input
-                                                className={`${iosInput} flex-1 py-2 text-[13.5px]`}
-                                                placeholder="Наименование"
+                                                className={`${iosInput} min-w-0 flex-1 py-2 text-[13.5px] ${nameMissing ? 'ring-2 ring-rose-300' : ''}`}
+                                                placeholder="Например: Бумага А4, 500 листов"
+                                                aria-label="Товар или услуга"
+                                                aria-invalid={nameMissing || undefined}
                                                 value={item.name}
                                                 onChange={(event) => updateItem(item.key, { name: event.target.value })}
                                                 maxLength={300}
                                             />
-                                            <button type="button" aria-label="Убрать позицию" className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 sm:hidden" onClick={remove}>
+                                            <button type="button" aria-label="Убрать позицию" className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 md:hidden" onClick={remove}>
                                                 <X size={14} />
                                             </button>
                                         </div>
-                                        <div className="mt-2 grid grid-cols-[84px_72px_1fr] gap-2 sm:contents">
-                                            <input
-                                                className={`${iosInput} py-2 text-[13.5px] tabular-nums`}
-                                                inputMode="decimal"
-                                                aria-label="Количество"
-                                                value={item.quantity}
-                                                onChange={(event) => updateItem(item.key, { quantity: event.target.value })}
-                                            />
-                                            <input
-                                                className={`${iosInput} py-2 text-[13.5px]`}
-                                                placeholder="шт"
-                                                aria-label="Единица"
-                                                value={item.unit}
-                                                onChange={(event) => updateItem(item.key, { unit: event.target.value })}
-                                                maxLength={32}
-                                            />
-                                            <AmountInput
-                                                ariaLabel="Цена за единицу"
-                                                className="py-2 text-right text-[13.5px]"
-                                                value={item.unit_price}
-                                                onChange={(value) => updateItem(item.key, { unit_price: value })}
-                                            />
+                                        <div className="mt-2 flex gap-2 md:contents">
+                                            <div className="w-[72px] shrink-0 md:w-auto">
+                                                <span className={ITEM_CAPTION}>Кол-во</span>
+                                                <QuantityInput
+                                                    className="py-2 text-[13.5px]"
+                                                    value={item.quantity}
+                                                    invalid={quantityBad}
+                                                    onChange={(value) => updateItem(item.key, { quantity: value })}
+                                                />
+                                            </div>
+                                            <div className="w-[100px] shrink-0 md:w-auto">
+                                                <span className={ITEM_CAPTION}>Ед. изм.</span>
+                                                <CustomSelect
+                                                    value={item.unit || null}
+                                                    onChange={(value) => updateItem(item.key, { unit: value || '' })}
+                                                    options={unitOptions(item.unit)}
+                                                    placeholder="ед."
+                                                    variant="ios"
+                                                    textClassName="text-[13.5px] text-slate-900"
+                                                    ariaLabel="Единица измерения"
+                                                />
+                                            </div>
+                                            <div className="min-w-0 flex-1 md:flex-none">
+                                                <span className={`${ITEM_CAPTION} text-right`}>Цена за ед., ₸</span>
+                                                <AmountInput
+                                                    ariaLabel="Цена за единицу"
+                                                    className="py-2 text-right text-[13.5px]"
+                                                    value={item.unit_price}
+                                                    onChange={(value) => updateItem(item.key, { unit_price: value })}
+                                                />
+                                            </div>
                                         </div>
-                                        <button type="button" aria-label="Убрать позицию" className="hidden h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 sm:grid" onClick={remove}>
+                                        {/* Сумма строки — чтобы формула была на виду: количество × цена. */}
+                                        <div className="mt-1.5 flex items-baseline justify-between gap-2 text-[12.5px] text-slate-500 md:mt-0 md:block md:text-right">
+                                            <span className="md:hidden">Сумма: количество × цена</span>
+                                            {/* На компьютере «₸» стоит в шапке колонки, на телефоне шапки нет — знак у числа. */}
+                                            <span className="text-[13.5px] tabular-nums text-slate-900">
+                                                {blank ? '—' : fmtMoney(itemTotal(item), { currency: false })}
+                                                {!blank && <span className="md:hidden">{'\u00a0₸'}</span>}
+                                            </span>
+                                        </div>
+                                        <button type="button" aria-label="Убрать позицию" className="hidden h-7 w-7 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 md:grid" onClick={remove}>
                                             <X size={14} />
                                         </button>
                                     </div>
@@ -371,10 +437,10 @@ const PaymentRequestForm = ({
                                 </div>
                             </div>
                         </div>
-                    </div>
+                    </Field>
 
                     <div className="grid gap-3 sm:grid-cols-2">
-                        <Field label="Категория" required>
+                        <Field label="Категория" required hint={HINTS.category}>
                             <CustomSelect
                                 value={draft.category_id}
                                 onChange={(value) => setDraft((prev) => ({ ...prev, category_id: value, subcategory_id: null }))}
@@ -385,17 +451,21 @@ const PaymentRequestForm = ({
                                 ariaLabel="Категория"
                             />
                         </Field>
-                        <Field label="Подкатегория">
-                            <CustomSelect
-                                value={draft.subcategory_id}
-                                onChange={(value) => set('subcategory_id', value)}
-                                options={[{ value: null, label: '—' }, ...subcategories.map((item) => ({ value: item.id, label: item.name }))]}
-                                placeholder={draft.category_id ? (subcategories.length ? 'Выберите' : 'У категории нет подкатегорий') : 'Сначала категория'}
-                                disabled={!draft.category_id || !subcategories.length}
-                                variant="ios"
-                                ariaLabel="Подкатегория"
-                            />
-                        </Field>
+                        {/* У категории без подкатегорий поля нет вовсе: заблокированный
+                            список, в котором нечего выбрать, только отвлекает. */}
+                        {(!draft.category_id || subcategories.length > 0) && (
+                            <Field label="Подкатегория" hint={HINTS.subcategory}>
+                                <CustomSelect
+                                    value={draft.subcategory_id}
+                                    onChange={(value) => set('subcategory_id', value)}
+                                    options={[{ value: null, label: 'Без подкатегории' }, ...subcategories.map((item) => ({ value: item.id, label: item.name }))]}
+                                    placeholder={draft.category_id ? 'Без подкатегории' : 'Сначала выберите категорию'}
+                                    disabled={!draft.category_id}
+                                    variant="ios"
+                                    ariaLabel="Подкатегория"
+                                />
+                            </Field>
+                        )}
                     </div>
                 </IosSection>
 
@@ -458,22 +528,34 @@ const PaymentRequestForm = ({
                         </NoticeBox>
                     )}
 
-                    {/* Сегменты — своей строкой каждый: «Ежемесячный» и «Фиксированный»
-                        в половине ширины окна не помещались и вылезали за карточку. */}
+                    {/* Сегменты — рядом, пока помещаются, иначе друг под другом:
+                        «Ежемесячный» и «Фиксированный» в половине ширины окна вылезали
+                        за карточку. */}
                     <div className="flex flex-wrap gap-x-6 gap-y-3">
-                        <Field label="Источник оплаты" required>
-                            <div><IosSegmented value={draft.payment_source} options={SOURCE_OPTIONS} onChange={(value) => set('payment_source', value)} ariaLabel="Источник оплаты" /></div>
+                        <Field as="div" label="Источник оплаты" required hint={HINTS.source}>
+                            <Choice value={draft.payment_source} options={SOURCE_OPTIONS} onChange={(value) => set('payment_source', value)} ariaLabel="Источник оплаты" />
                         </Field>
-                        <Field label="Тип оплаты" required>
-                            <div><IosSegmented value={draft.payment_type} options={TYPE_OPTIONS} onChange={(value) => set('payment_type', value)} ariaLabel="Тип оплаты" /></div>
+                        <Field as="div" label="Тип оплаты" required hint={HINTS.type}>
+                            <Choice value={draft.payment_type} options={TYPE_OPTIONS} onChange={(value) => set('payment_type', value)} ariaLabel="Тип оплаты" />
                         </Field>
                     </div>
 
+                    {supplierEditable && (
+                        <div className="flex flex-wrap gap-x-6 gap-y-3">
+                            <Field as="div" label="Поставщик" optionalMark={false} hint={HINTS.supplierKind}>
+                                <Choice value={draft.supplier_kind} options={SUPPLIER_KIND_OPTIONS} onChange={(value) => set('supplier_kind', value)} ariaLabel="Форма поставщика" />
+                            </Field>
+                            <Field as="div" label="НДС" optionalMark={false} hint={HINTS.supplierVat}>
+                                <Choice value={draft.supplier_vat} options={VAT_OPTIONS} onChange={(value) => set('supplier_vat', value)} ariaLabel="НДС поставщика" />
+                            </Field>
+                        </div>
+                    )}
+
                     <div className="grid gap-3 sm:grid-cols-2">
-                        <Field label="Проект">
+                        <Field label="Проект" hint={HINTS.project}>
                             <CustomSelect value={draft.project_id} onChange={(value) => set('project_id', value)} options={projectOptions} placeholder="Без проекта" variant="ios" ariaLabel="Проект" searchable={projectOptions.length > 8} />
                         </Field>
-                        <Field label="Отдел закупа" required optionalMark={false}>
+                        <Field label="Отдел закупа" required optionalMark={false} hint={HINTS.department}>
                             <CustomSelect value={draft.department_id} onChange={(value) => set('department_id', value)} options={departmentOptions} placeholder="Отдел" variant="ios" ariaLabel="Отдел" />
                         </Field>
                     </div>
@@ -493,12 +575,12 @@ const PaymentRequestForm = ({
                                         </Field>
                                     )}
                                     {key === 'legal_entity_id' && (
-                                        <Field label={meta.label} hint="С какого нашего юр. лица идёт оплата. Обязательно к шагу 7.">
+                                        <Field label={meta.label} hint={{ ...HINTS.legalEntity, outro: 'Можно не указывать сейчас: бухгалтерия назовёт его на шаге 5.' }}>
                                             <CustomSelect value={draft.legal_entity_id} onChange={(value) => set('legal_entity_id', value)} options={legalEntityOptions} placeholder={legalEntityOptions.length ? 'Выберите юр. лицо' : 'Справочник пуст'} variant="ios" ariaLabel="Юр. лицо" />
                                         </Field>
                                     )}
                                     {key === 'contract_id' && (
-                                        <Field label={meta.label} hint="Договор с этим контрагентом. Для счетов свыше 300 000 ₸ обязателен действующий.">
+                                        <Field label={meta.label} hint={HINTS.contract}>
                                             <CustomSelect value={draft.contract_id} onChange={(value) => set('contract_id', value)} options={contractOptions} placeholder={draft.counterparty_id ? (contractOptions.length ? 'Выберите договор' : 'У контрагента нет договоров в системе') : 'Сначала контрагент'} disabled={!draft.counterparty_id || !contractOptions.length} variant="ios" ariaLabel="Договор" />
                                         </Field>
                                     )}
@@ -542,7 +624,10 @@ const PaymentRequestForm = ({
                 <IosSection title="Согласующие">
                     <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">
-                            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Руководитель (шаг 2)</div>
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                Руководитель (шаг 2)
+                                <FieldHint hint={HINTS.manager} />
+                            </div>
                             {!managerEditing ? (
                                 <div className="text-[13.5px] text-slate-900">
                                     {manager ? manager.name : <span className="text-slate-500">не определён — шаг 2 будет пропущен</span>}
@@ -563,7 +648,7 @@ const PaymentRequestForm = ({
                 </IosSection>
 
                 {!editing && (
-                    <IosSection title="Документы к закупу" hint="Реестр поставщиков со сравнением цен и ссылками на товар либо КП, если альтернатив нет. Без файла шаг 1 не пройти.">
+                    <IosSection title={<span className="inline-flex items-center gap-1.5">Документы к закупу <FieldHint hint={HINTS.documents} /></span>}>
                         <FilePicker files={files} onChange={setFiles} kinds={kinds} />
                     </IosSection>
                 )}

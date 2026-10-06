@@ -2,9 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_UNIT,
+  HINTS,
+  ORIGINALS_OPTIONS,
+  PARTY_KIND_OPTIONS,
+  PAYMENT_ORDER_OPTIONS,
+  POWER_OF_ATTORNEY_OPTIONS,
+  PREVIOUSLY_PAID_OPTIONS,
+  RECEIVED_OPTIONS,
   REGISTRY_COLUMNS,
+  SOURCE_OPTIONS,
   STATE_FILTERS,
   STATE_META,
+  SUPPLIER_KIND_OPTIONS,
+  TYPE_OPTIONS,
+  UNITS,
+  VAT_OPTIONS,
+  invoiceDescriptionDraft,
+  isBlankItem,
+  itemProblem,
+  itemQuantity,
+  itemTotal,
+  lastPaymentToCounterparty,
+  previousPaymentNote,
+  receiptComment,
+  requisitesDraft,
+  stepReturnNote,
+  supplierLabel,
+  toScaled,
+  unitOptions,
   approverBasisLine,
   cardNumberLabel,
   daysUntil,
@@ -193,4 +219,207 @@ test('динамика цены — только для того же товар
   assert.deepEqual(priceTrend(rows), { 3: 6 });
   assert.equal(trendLabel(6), '+6 %');
   assert.equal(trendLabel(-4), '−4 %');
+});
+
+/* ── Позиции: количество, единица, цена, сумма ─────────────────────────────── */
+
+test('единица измерения — из списка; вписанная руками в старой заявке не теряется', () => {
+  assert.ok(UNITS.includes(DEFAULT_UNIT));
+  assert.equal(new Set(UNITS).size, UNITS.length, 'единицы не повторяются');
+  // в списке только слова: числу, которое примут за второе количество, там не место
+  for (const unit of UNITS) assert.ok(!/^\d/.test(unit), unit);
+  assert.deepEqual(unitOptions('шт').map((o) => o.value), UNITS);
+  const legacy = unitOptions('бут.');
+  assert.equal(legacy.length, UNITS.length + 1);
+  assert.deepEqual(legacy[legacy.length - 1], { value: 'бут.', label: 'бут.' });
+  assert.deepEqual(unitOptions('').map((o) => o.value), UNITS);
+});
+
+// Те же пары стоят в tests/test_payments_workflow.py (LINE_TOTALS): форма и сервер
+// обязаны сойтись до тиына. Меняете одну таблицу — меняйте обе.
+const LINE_TOTALS = [
+  ['5', '2000', 10000],
+  ['2,5', '10,01', 25.03],
+  ['1,5', '33,33', 50],
+  ['0,333', '3', 1],
+  ['3', '0,335', 1.02],
+  ['1,0005', '100', 100.1],
+  ['0,0004', '100', 0],
+  ['1234567,891', '98765,43', 121932628618.81],
+  ['20', '2 500', 50000],
+  ['7', '0,1', 0.7],
+  ['0.1', '0.2', 0.02],
+  ['3', '1 234,565', 3703.71],
+  ['2.675', '1', 2.68],
+  ['1', '2.675', 2.68],
+];
+
+test('строка считается как на сервере: количество × цена, до тиына, половина вверх', () => {
+  for (const [quantity, price, expected] of LINE_TOTALS) {
+    assert.equal(itemTotal({ quantity, unit_price: price }), expected, `${quantity} × ${price}`);
+  }
+  // цена приходит из поля числом — результат тот же
+  assert.equal(itemTotal({ quantity: '2,5', unit_price: 10.01 }), 25.03);
+  assert.equal(itemTotal({ quantity: 1.5, unit_price: 33.33 }), 50);
+});
+
+test('итог заявки — сумма строк, каждая округлена сама', () => {
+  const line = { name: 'Сахар', quantity: '1,5', unit: 'кг', unit_price: 33.33 };
+  assert.equal(itemsTotal([line, line]), 100, 'не 99,99: строки 50 + 50');
+  assert.equal(itemsTotal([{ quantity: '0,1', unit_price: '0,1' }, { quantity: '0,2', unit_price: '0,1' }]), 0.03);
+  assert.equal(itemsTotal([]), 0);
+  assert.equal(itemsTotal(null), 0);
+});
+
+test('пустое количество — ноль, а не «одна штука»', () => {
+  assert.equal(itemQuantity({ quantity: '' }), 0);
+  assert.equal(itemQuantity({ quantity: null }), 0);
+  assert.equal(itemQuantity({ quantity: '2,5' }), 2.5);
+  assert.equal(itemQuantity({ quantity: ' 1 000 ' }), 1000);
+  assert.equal(itemQuantity({ quantity: '1,2,3' }), 0, 'нечитаемое число — не количество');
+  assert.equal(itemTotal({ quantity: '', unit_price: 700 }), 0);
+});
+
+test('что не так со строкой позиции — словами', () => {
+  assert.equal(isBlankItem({ name: '', quantity: '1', unit: 'шт', unit_price: 0 }), true, 'новая строка — пустая');
+  assert.equal(isBlankItem({ name: 'Бумага', quantity: '1', unit_price: 0 }), false);
+  assert.equal(isBlankItem({ name: '', quantity: '1', unit_price: 500 }), false);
+  assert.equal(itemProblem({ name: '', quantity: '1', unit_price: 0 }), '');
+  assert.equal(itemProblem({ name: 'Бумага', quantity: '20', unit_price: 2500 }), '');
+  assert.match(itemProblem({ name: '', quantity: '1', unit_price: 500 }), /нет названия/);
+  assert.match(itemProblem({ name: 'Бумага', quantity: '', unit_price: 2500 }), /количество/);
+  assert.match(itemProblem({ name: 'Бумага', quantity: '0', unit_price: 2500 }), /количество/);
+  assert.match(itemProblem({ name: 'Бумага', quantity: '0,0004', unit_price: 2500 }), /количество/);
+  assert.match(itemProblem({ name: 'Бумага', quantity: '1', unit_price: -5 }), /отрицательной/);
+});
+
+test('деньги округляются до тиына по записи числа, а не по двоичной дроби', () => {
+  assert.equal(toScaled('2,5', 3), 2500);
+  assert.equal(toScaled('1 234,565', 2), 123457);
+  assert.equal(toScaled('-0,0005', 3), -1);
+  assert.equal(toScaled('.5', 2), 50);
+  assert.equal(toScaled('5.', 2), 500);
+  assert.equal(toScaled('abc', 2), 0);
+  assert.equal(toScaled(NaN, 2), 0);
+  assert.ok(Object.is(toScaled('-0', 2), 0), 'минус ноль наружу не выходит');
+  assert.equal(fmtMoney(0.999), '1 ₸', 'раньше выходило «0,100»');
+  assert.equal(fmtMoney(1.005), '1,01 ₸');
+  assert.equal(fmtMoney(0.994), '0,99 ₸');
+  assert.equal(fmtMoney(0.1 + 0.2), '0,30 ₸');
+  assert.equal(fmtMoney(-0.004), '0 ₸');
+  assert.equal(fmtMoney(999999999999.99), '999 999 999 999,99 ₸');
+});
+
+/* ── Подсказки под «i» и варианты выбора ───────────────────────────────────── */
+
+test('у каждой подсказки есть фраза «зачем поле», у вариантов — имя и смысл', () => {
+  const keys = Object.keys(HINTS);
+  assert.ok(keys.length >= 25);
+  for (const key of keys) {
+    const hint = HINTS[key];
+    assert.ok(typeof hint.intro === 'string' && hint.intro.length >= 10, `${key}: нет вводной фразы`);
+    for (const option of hint.options || []) {
+      assert.equal(option.length, 2, `${key}: вариант — пара «имя, смысл»`);
+      assert.ok(option[0] && option[1], `${key}: пустой вариант`);
+    }
+  }
+});
+
+test('подсказка называет ровно те варианты, что стоят в селекторе', () => {
+  const pairs = [
+    ['source', SOURCE_OPTIONS], ['type', TYPE_OPTIONS], ['supplierKind', SUPPLIER_KIND_OPTIONS],
+    ['supplierVat', VAT_OPTIONS], ['vatPayer', VAT_OPTIONS], ['partyKind', PARTY_KIND_OPTIONS],
+    ['powerOfAttorney', POWER_OF_ATTORNEY_OPTIONS], ['paymentOrder', PAYMENT_ORDER_OPTIONS],
+    ['previouslyPaid', PREVIOUSLY_PAID_OPTIONS], ['received', RECEIVED_OPTIONS], ['originals', ORIGINALS_OPTIONS],
+  ];
+  for (const [key, options] of pairs) {
+    assert.deepEqual(
+      HINTS[key].options.map(([name]) => name).sort(),
+      options.map((option) => option.label).sort(),
+      `${key}: подсказка и селектор разошлись`,
+    );
+  }
+});
+
+test('выбор из двух вариантов: «нет» идёт первым и отличается от «не выбрано»', () => {
+  for (const options of [VAT_OPTIONS, POWER_OF_ATTORNEY_OPTIONS, PAYMENT_ORDER_OPTIONS, PREVIOUSLY_PAID_OPTIONS]) {
+    assert.deepEqual(options.map((option) => option.value), [false, true]);
+  }
+  assert.equal(supplierLabel({}), '');
+  assert.equal(supplierLabel({ supplier_kind: 'too', supplier_vat: false }), 'ТОО, без НДС');
+  assert.equal(supplierLabel({ supplier_kind: 'ip', supplier_vat: true }), 'ИП, с НДС');
+  assert.equal(supplierLabel({ supplier_kind: 'other', supplier_vat: null }), 'Другое', 'НДС не выбран — о нём молчим');
+  assert.equal(supplierLabel({ supplier_vat: false }), 'без НДС');
+});
+
+/* ── Заготовки текстов на шагах ────────────────────────────────────────────── */
+
+test('шаг вернули на доработку — причина берётся из последнего события шага', () => {
+  const events = [
+    { step_no: 7, kind: 'step_done' },
+    { step_no: 7, kind: 'returned', comment: 'Нет печати на счёте' },
+    { step_no: 7, kind: 'attachment_added' },
+  ];
+  assert.equal(stepReturnNote(events, 7).comment, 'Нет печати на счёте');
+  assert.equal(stepReturnNote([...events, { step_no: 7, kind: 'step_done' }], 7), null, 'после отписки возврат уже не показываем');
+  assert.equal(stepReturnNote(events, 6), null);
+  assert.equal(stepReturnNote(null, 7), null);
+});
+
+test('шаг 5: реквизиты подставляются из справочника юр. лиц', () => {
+  assert.equal(requisitesDraft(null), '');
+  assert.equal(requisitesDraft({ name: 'ТОО «Наше»', bin: '123456789012' }), 'ТОО «Наше», БИН 123456789012');
+  assert.equal(
+    requisitesDraft({ name: 'ТОО «Наше»', bin: '123456789012', requisites: ' АО «Банк», ИИК KZ00 ' }),
+    'ТОО «Наше», БИН 123456789012\nАО «Банк», ИИК KZ00',
+  );
+  assert.equal(requisitesDraft({ name: 'ИП Пример' }), 'ИП Пример');
+});
+
+test('шаг 7: описание счёта собирается из заявки', () => {
+  const request = {
+    expense_name: 'Аренда офиса', payment_period: 'октябрь 2026', counterparty_name: 'ТОО «Бизнес-центр»',
+    amount: 1200000, department_name: 'СЗоВ',
+  };
+  assert.equal(
+    invoiceDescriptionDraft(request, 'ТОО «Наше»'),
+    'Аренда офиса, октябрь 2026. Оплата с ТОО «Наше» на ТОО «Бизнес-центр». Сумма 1 200 000 ₸. Отдел: СЗоВ.',
+  );
+  assert.equal(
+    invoiceDescriptionDraft({ expense_name: 'Бумага', amount: 500, counterparty_name: 'ИП Пример' }, ''),
+    'Бумага. Оплата с … на ИП Пример. Сумма 500 ₸.',
+  );
+  assert.equal(invoiceDescriptionDraft(null, 'ТОО'), '');
+});
+
+test('шаг 8: отписка бухгалтерии складывается из выбора, а не пишется руками', () => {
+  assert.equal(previousPaymentNote({ paid: false }), 'Ранее этому поставщику не платили');
+  assert.equal(
+    previousPaymentNote({ paid: true, paidOn: '2026-10-02', paidAmount: 74000 }),
+    'Последняя оплата: 02.10.2026, 74 000 ₸',
+  );
+  assert.equal(previousPaymentNote({ paid: true, paidOn: '', paidAmount: 74000 }), '', '«платили» без даты — не ответ');
+  assert.equal(previousPaymentNote({ paid: true, paidOn: '2026-10-02', paidAmount: 0 }), '');
+  assert.equal(previousPaymentNote({ paid: null }), '', 'не выбрано — пусто, шаг не отпишется');
+  const history = [
+    { request_id: 5, matched: ['category'], paid_on: '2026-10-05' },
+    { request_id: 4, matched: ['counterparty'], paid_on: null },
+    { request_id: 3, matched: ['counterparty', 'category'], paid_on: '2026-10-02', paid_amount: 74000 },
+  ];
+  assert.equal(lastPaymentToCounterparty(history).request_id, 3, 'нужна оплата именно этому поставщику');
+  assert.equal(lastPaymentToCounterparty([]), null);
+});
+
+test('шаг 11: отписка о получении — из двух выборов', () => {
+  assert.equal(receiptComment({ received: 'goods', originals: 'handed' }), 'Получен товар. Оригинал накладной передан в бухгалтерию.');
+  assert.equal(receiptComment({ received: 'service', originals: 'later' }), 'Получена услуга. Оригинал АВР передам в бухгалтерию позже.');
+  assert.equal(receiptComment({ received: 'goods', originals: null }), '');
+  assert.equal(receiptComment({ received: null, originals: 'handed' }), '');
+});
+
+test('история называет форму поставщика и НДС словами', () => {
+  assert.equal(
+    describeEvent({ kind: 'edited', payload: { changes: { supplier_kind: ['too', 'ip'], supplier_vat: [null, true] } } }),
+    'Изменено: Форма поставщика, НДС поставщика',
+  );
 });

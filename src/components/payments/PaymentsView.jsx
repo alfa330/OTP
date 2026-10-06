@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Download, Loader2, Plus, Receipt, Search, SlidersHorizontal, X } from 'lucide-react';
-import { APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
+import { APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import PaymentRequestForm from './PaymentRequestForm';
@@ -10,12 +10,12 @@ import PaymentsDictionaries from './PaymentsDictionaries';
 import PaymentsRoles from './PaymentsRoles';
 import FixedPaymentsPanel from './FixedPaymentsPanel';
 import {
-    REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY, SOURCE_META, SOURCE_OPTIONS, STATE_FILTERS, TYPE_META, TYPE_OPTIONS,
+    HINTS, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY, SOURCE_META, SOURCE_OPTIONS, STATE_FILTERS, TYPE_META, TYPE_OPTIONS,
     cardNumberLabel, defaultRegistryColumns, dueLabel, expenseSubline, exportFileName, fmtDate, fmtDateShort, fmtMoney,
     netAmount, normalizeRegistryColumns, registryTableMinWidth, requestState, responsibleLines, rowTone, stateMeta,
     stepLabel, toneEdge, tonePill, toneRow, toneText,
 } from './paymentsMeta';
-import { ColumnsMenu, NoticeBox, StatePill, errorText } from './paymentsUi';
+import { Choice, ColumnsMenu, Field, NoticeBox, StatePill, errorText } from './paymentsUi';
 
 /*
  * Раздел «Оплата счетов» — бизнес-процесс «Согласование — Оплата счетов» (#179).
@@ -44,6 +44,8 @@ const TABS = [
     { value: 'dictionaries', label: 'Справочники' },
     { value: 'roles', label: 'Участники' },
 ];
+
+const FIXED_ONLY_OPTIONS = [{ value: false, label: 'Все' }, { value: true, label: 'Фиксированные' }];
 
 const EMPTY_FILTERS = {
     responsible_id: null, initiator_id: null, counterparty_id: null, project_id: null,
@@ -477,32 +479,25 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     {filtersOpen && (
                         <div className={`${iosCard} mt-3 p-3.5`}>
                             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Текущий ответственный</span>
+                                <Field label="Текущий ответственный" optionalMark={false}>
                                     <CustomSelect value={filters.responsible_id} onChange={(value) => setFilters((p) => ({ ...p, responsible_id: value || null }))} options={userOptions} placeholder="Все" variant="ios" searchable ariaLabel="Ответственный" />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Инициатор</span>
+                                </Field>
+                                <Field label="Инициатор" optionalMark={false}>
                                     <CustomSelect value={filters.initiator_id} onChange={(value) => setFilters((p) => ({ ...p, initiator_id: value || null }))} options={userOptions} placeholder="Все" variant="ios" searchable ariaLabel="Инициатор" />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Контрагент</span>
+                                </Field>
+                                <Field label="Контрагент" optionalMark={false}>
                                     <CustomSelect value={filters.counterparty_id} onChange={(value) => setFilters((p) => ({ ...p, counterparty_id: value || null }))} options={counterpartyOptions} placeholder="Все контрагенты" variant="ios" searchable ariaLabel="Контрагент" />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Проект</span>
+                                </Field>
+                                <Field label="Проект" optionalMark={false}>
                                     <CustomSelect value={filters.project_id} onChange={(value) => setFilters((p) => ({ ...p, project_id: value || null }))} options={projectOptions} placeholder="Все проекты" variant="ios" ariaLabel="Проект" />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Источник оплаты</span>
+                                </Field>
+                                <Field label="Источник оплаты" optionalMark={false} hint={HINTS.source}>
                                     <CustomSelect value={filters.payment_source} onChange={(value) => setFilters((p) => ({ ...p, payment_source: value || '' }))} options={[{ value: '', label: 'Все' }, ...SOURCE_OPTIONS]} placeholder="Все" variant="ios" ariaLabel="Источник оплаты" />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Тип оплаты</span>
+                                </Field>
+                                <Field label="Тип оплаты" optionalMark={false} hint={HINTS.type}>
                                     <CustomSelect value={filters.payment_type} onChange={(value) => setFilters((p) => ({ ...p, payment_type: value || '' }))} options={[{ value: '', label: 'Все' }, ...TYPE_OPTIONS]} placeholder="Все" variant="ios" ariaLabel="Тип оплаты" />
-                                </label>
-                                <label className="block space-y-1.5">
-                                    <span className={iosGroupLabel}>Создана</span>
+                                </Field>
+                                <Field label="Создана" optionalMark={false}>
                                     <IosDateRangePicker
                                         from={filters.date_from || ''}
                                         to={filters.date_to || ''}
@@ -511,11 +506,10 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                         presets={DATE_PRESETS}
                                         triggerClassName={DATE_TRIGGER}
                                     />
-                                </label>
-                                <label className="flex items-end gap-2 pb-2 text-[13px] text-slate-700">
-                                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-blue-600" checked={filters.fixed_only} onChange={(event) => setFilters((p) => ({ ...p, fixed_only: event.target.checked }))} />
-                                    Только фиксированные платежи
-                                </label>
+                                </Field>
+                                <Field as="div" label="Платежи" optionalMark={false} hint={HINTS.fixedOnly}>
+                                    <Choice value={Boolean(filters.fixed_only)} options={FIXED_ONLY_OPTIONS} onChange={(value) => setFilters((p) => ({ ...p, fixed_only: value }))} stretch ariaLabel="Какие платежи показывать" />
+                                </Field>
                             </div>
                         </div>
                     )}

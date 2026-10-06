@@ -17,7 +17,7 @@
 """
 
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 ROLE_INITIATOR = 'initiator'
 ROLE_MANAGER = 'manager'
@@ -44,50 +44,55 @@ CONTRACT_REQUIRED_OVER = Decimal('300000')
 # missing_requirements). `fields` — поля заявки, которые заполняются на шаге.
 # `returns_to` — куда уходит заявка при возврате на доработку: замечания по
 # закупу правит инициатор на шаге 1, замечания по счёту — на шаге 7.
+# `brief` — что сделать ответственному, простыми словами: этот текст человек
+# видит в карточке на своём шаге и в уведомлении Telegram, поэтому он написан
+# как просьба новичку, а не как пересказ пункта постановки.
 STEPS = (
     {
         'no': 1, 'role': ROLE_INITIATOR, 'phase': 'purchase',
         'title': 'Согласование закупки',
-        'brief': 'Реестр поставщиков со сравнением цен и ссылками либо КП, если альтернатив нет',
+        'brief': 'Приложите реестр поставщиков со сравнением цен и ссылками на товар. '
+                 'Если альтернатив нет — коммерческое предложение (КП).',
         'action': 'Отправить на согласование',
         'files': ('supplier_registry', 'offer'), 'files_required': True,
     },
     {
         'no': 2, 'role': ROLE_MANAGER, 'phase': 'purchase',
         'title': 'Подтверждение целесообразности закупа',
-        'brief': 'Целесообразность закупа и корректный выбор поставщика',
+        'brief': 'Проверьте, нужен ли этот закуп и верно ли выбран поставщик.',
         'action': 'Подтвердить', 'can_reject': True, 'returns_to': 1,
     },
     {
         'no': 3, 'role': ROLE_FOUNDER, 'phase': 'purchase',
         'title': 'Итоговое подтверждение закупа',
-        'brief': 'Сумма и выбор поставщика',
+        'brief': 'Подтвердите закуп окончательно: сумму и выбор поставщика.',
         'action': 'Подтвердить', 'can_reject': True, 'returns_to': 1,
     },
     {
         'no': 4, 'role': ROLE_INITIATOR, 'phase': 'requisites',
         'title': 'Запрос реквизитов у бухгалтерии',
-        'brief': 'ИП/ТОО, НДС или без НДС, сумма; по сумме уточнить, нужен ли договор',
-        'action': 'Реквизиты запрошены',
+        'brief': 'Сообщите бухгалтерии, кто поставщик: ТОО или ИП, с НДС или без. '
+                 'В ответ бухгалтерия даст реквизиты, на которые выставят счёт.',
+        'action': 'Запросить реквизиты', 'fields': ('supplier_kind', 'supplier_vat'),
     },
     {
         'no': 5, 'role': ROLE_ACCOUNTING, 'phase': 'requisites',
         'title': 'Реквизиты для счёта',
-        'brief': 'Бухгалтерия предоставляет реквизиты, на которые выставят счёт',
-        'action': 'Реквизиты предоставлены', 'fields': ('invoice_requisites',),
+        'brief': 'Дайте реквизиты нашего юр. лица, на которые поставщик выставит счёт.',
+        'action': 'Реквизиты предоставлены', 'fields': ('legal_entity_id', 'invoice_requisites'),
     },
     {
         'no': 6, 'role': ROLE_INITIATOR, 'phase': 'invoice',
         'title': 'Запрос счёта у поставщика',
-        'brief': 'Счёт запрашивается на реквизиты из шага 5',
+        'brief': 'Отправьте поставщику реквизиты из шага 5 и попросите выставить на них счёт.',
         'action': 'Счёт запрошен',
     },
     {
         'no': 7, 'role': ROLE_INITIATOR, 'phase': 'invoice',
         'title': 'Согласование счёта на оплату',
-        'brief': 'Счёт вложением; одним текстом — что закупается, за какой период, '
-                 'с какого на какое юр. лицо, сумма, отдел; нужна ли доверенность '
-                 'или платёжное поручение',
+        'brief': 'Приложите счёт и опишите одним текстом: что закупается, за какой период, '
+                 'с какого на какое юр. лицо, сумма, отдел. Отметьте, нужны ли '
+                 'доверенность и платёжное поручение.',
         'action': 'Отправить счёт на согласование',
         'files': ('invoice',), 'files_required': True,
         'fields': ('invoice_description', 'legal_entity_id'),
@@ -95,32 +100,34 @@ STEPS = (
     {
         'no': 8, 'role': ROLE_ACCOUNTING, 'phase': 'invoice',
         'title': 'Проверка счёта',
-        'brief': 'Платили ли раньше: когда и на какую сумму в последний раз',
+        'brief': 'Проверьте, не оплачен ли этот счёт раньше, и укажите последнюю оплату этому поставщику.',
         'action': 'Счёт проверен', 'fields': ('previous_payment_note',), 'returns_to': 7,
     },
     {
         'no': 9, 'role': ROLE_FOUNDER, 'phase': 'invoice',
         'title': 'Подтверждение счёта',
-        'brief': 'Учредитель либо согласующий по Приказу',
+        'brief': 'Подтвердите оплату счёта. Счёт и проверка бухгалтерии — перед вами.',
         'action': 'Подтвердить оплату', 'can_reject': True, 'returns_to': 7,
     },
     {
         'no': 10, 'role': ROLE_ACCOUNTING, 'phase': 'payment',
         'title': 'Оплата счёта',
-        'brief': 'Отписаться об оплате; приложить платёжное поручение или доверенность, если их запрашивали',
+        'brief': 'Оплатите счёт, укажите дату и сумму. Если просили платёжное поручение '
+                 'или доверенность — приложите.',
         'action': 'Оплачено',
         'files': ('payment_order', 'power_of_attorney'), 'fields': ('paid_on', 'paid_amount'),
     },
     {
         'no': 11, 'role': ROLE_INITIATOR, 'phase': 'closing',
         'title': 'Получение товара/услуги',
-        'brief': 'Скан или фото АВР/накладной; оригинал передать в бухгалтерию',
+        'brief': 'Подтвердите получение и приложите скан или фото АВР либо накладной. '
+                 'Оригинал передайте в бухгалтерию.',
         'action': 'Получено', 'files': ('act',), 'files_required': True,
     },
     {
         'no': 12, 'role': ROLE_ACCOUNTING, 'phase': 'closing',
         'title': 'Закрытие заявки',
-        'brief': 'Оригиналы закрывающих документов получены',
+        'brief': 'Подтвердите, что оригиналы закрывающих документов у бухгалтерии.',
         'action': 'Закрыть заявку',
     },
 )
@@ -151,6 +158,20 @@ ATTACHMENT_LABELS = {
 
 BLOCK_CONTRACT_REQUIRED = 'contract_required'
 
+# Форма поставщика на шаге 4 — те же коды, что у контрагентов в справочнике.
+SUPPLIER_KIND_LABELS = {'too': 'ТОО', 'ip': 'ИП', 'other': 'Другое'}
+
+
+def supplier_label(request):
+    """«ТОО, без НДС» — как форма поставщика и НДС читаются в карточке и выгрузке.
+    Пусто, пока на шаге 4 их не выбрали."""
+    kind = SUPPLIER_KIND_LABELS.get(str(request.get('supplier_kind') or '').lower())
+    vat = request.get('supplier_vat')
+    parts = [kind] if kind else []
+    if vat is not None:
+        parts.append('с НДС' if vat else 'без НДС')
+    return ', '.join(parts)
+
 
 def step(no):
     return STEP_BY_NO.get(int(no or 0))
@@ -162,28 +183,67 @@ def step_title(no):
 
 
 def to_decimal(value, default=Decimal('0')):
-    """Деньги приходят числом, строкой с пробелами и запятой, Decimal — сводим к Decimal."""
+    """Деньги приходят числом, строкой с пробелами и запятой, Decimal — сводим к Decimal.
+    Не число (пусто, «abc», «NaN», «Infinity») — `default`."""
     if value is None or value == '':
         return default
     if isinstance(value, Decimal):
-        return value
-    text = str(value)
-    for gap in (' ', ' ', ' ', ' ', '₸', 'тг'):
-        text = text.replace(gap, '')
-    try:
-        return Decimal(text.replace(',', '.'))
-    except (InvalidOperation, ValueError):
-        return default
+        number = value
+    else:
+        text = str(value)
+        for gap in (' ', '\u00a0', '\u202f', '\u2009', '₸', 'тг'):
+            text = text.replace(gap, '')
+        try:
+            number = Decimal(text.replace(',', '.'))
+        except (InvalidOperation, ValueError):
+            return default
+    # «NaN» и «Infinity» Decimal разбирает как числа, а сравнение и округление
+    # на них падают — для денег это не значение.
+    return number if number.is_finite() else default
+
+
+# ─── Позиции: количество × цена ──────────────────────────────────────────────
+#
+# Одна формула на всё: строка = количество × цена за единицу, округлённая до
+# тиына; сумма заявки = сумма строк. Так же считает форма (itemTotal в
+# paymentsMeta.js) — итог на экране и в сохранённой заявке совпадает до тиына.
+# Раньше строка округлялась отдельно, а итог — один раз по неокруглённым
+# произведениям: при дробном количестве «1,5 × 33,33» дважды строки давали
+# 50 + 50, а итог заявки — 99,99.
+
+QUANTITY_STEP = Decimal('0.001')   # столько знаков хранит база
+MONEY_STEP = Decimal('0.01')
+MAX_QUANTITY = Decimal('999999999.999')
+MAX_MONEY = Decimal('999999999999.99')
+
+
+def _rounded(number, step, limit):
+    if abs(number) > limit:
+        # Больше, чем вмещает база: округлять такое нельзя (quantize падает на
+        # слишком длинном числе). Отдаём «чуть больше предела» — проверка полей
+        # заявки назовёт позицию по имени, а не уронит запрос.
+        return (limit + step).copy_sign(number)
+    return number.quantize(step, rounding=ROUND_HALF_UP)
+
+
+def item_quantity(item):
+    """Количество позиции — до тысячных; не указано — одна единица."""
+    return _rounded(to_decimal((item or {}).get('quantity'), Decimal('1')), QUANTITY_STEP, MAX_QUANTITY)
+
+
+def item_price(item):
+    """Цена за единицу — до тиына."""
+    return _rounded(to_decimal((item or {}).get('unit_price')), MONEY_STEP, MAX_MONEY)
+
+
+def item_total(item):
+    """Сумма строки: количество × цена за единицу, до тиына, половина — вверх."""
+    return (item_quantity(item) * item_price(item)).quantize(MONEY_STEP, rounding=ROUND_HALF_UP)
 
 
 def items_total(items):
-    """Сумма заявки — из позиций: количество × цена за единицу, по каждой строке."""
-    total = Decimal('0')
-    for item in items or []:
-        qty = to_decimal(item.get('quantity'), Decimal('1'))
-        price = to_decimal(item.get('unit_price'))
-        total += qty * price
-    return total.quantize(Decimal('0.01'))
+    """Сумма заявки — сумма её строк, каждая округлена сама (как в счёте поставщика)."""
+    return sum((item_total(item) for item in items or []), Decimal('0')).quantize(MONEY_STEP)
 
 
 # ─── Договор ─────────────────────────────────────────────────────────────────
@@ -405,9 +465,10 @@ def missing_requirements(step_no, request, attachments):
     """Чего не хватает, чтобы отписаться на шаге. Пустой список — можно.
 
     `attachments` — вложения ЭТОГО шага (list of {'kind'}). Проверки повторяют
-    постановку: шаг 1 — реестр или КП, шаг 5 — реквизиты, шаг 7 — счёт и текст
-    описания, шаг 8 — отписка о прошлых оплатах, шаг 10 — платёжка/доверенность,
-    если их просили на шаге 7, шаг 11 — АВР/накладная.
+    постановку: шаг 1 — реестр или КП, шаг 4 — форма поставщика и НДС, шаг 5 —
+    реквизиты, шаг 7 — счёт и текст описания, шаг 8 — отписка о прошлых оплатах,
+    шаг 10 — платёжка/доверенность, если их просили на шаге 7, шаг 11 —
+    АВР/накладная.
     """
     item = step(step_no)
     if not item:
@@ -416,6 +477,13 @@ def missing_requirements(step_no, request, attachments):
     missing = []
     if step_no == 1 and not attachments:
         missing.append('Приложите реестр поставщиков со сравнением цен либо КП')
+    if step_no == 4:
+        # Постановка, шаг 4: «предоставить информацию по ИП/ТОО, НДС/не НДС».
+        # None у НДС — «не выбрано»; False — осознанное «без НДС».
+        if str(request.get('supplier_kind') or '').lower() not in SUPPLIER_KIND_LABELS:
+            missing.append('Выберите, кто поставщик: ТОО, ИП или другое')
+        if request.get('supplier_vat') is None:
+            missing.append('Выберите, работает ли поставщик с НДС')
     if step_no == 5 and not str(request.get('invoice_requisites') or '').strip():
         missing.append('Укажите реквизиты, на которые выставить счёт')
     if step_no == 7:

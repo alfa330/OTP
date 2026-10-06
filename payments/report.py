@@ -70,6 +70,8 @@ COLUMNS = (
     ('Подкатегория', 'subcategory_name', 'plain'),
     ('Контрагент', 'counterparty_name', 'plain'),
     ('БИН контрагента', 'counterparty_bin', 'text'),
+    ('Форма поставщика', 'supplier_kind_label', 'plain'),
+    ('НДС поставщика', 'supplier_vat_label', 'plain'),
     ('Юр. лицо (плательщик)', 'legal_entity_name', 'plain'),
     ('Договор', 'contract_number', 'text'),
     ('Источник оплаты', 'source_label', 'plain'),
@@ -158,10 +160,13 @@ def enrich(request, items):
     amount = workflow.to_decimal(request.get('amount'))
     refund = workflow.to_decimal(request.get('refund_amount'))
     row['total_amount'] = amount - refund
+    # Строка читается как в счёте: «что — сколько × цена = сумма строки»; сумма
+    # расхода складывается из этих сумм.
     row['items_text'] = '\n'.join(
-        '%s — %s%s × %s' % (item.get('name'), _qty(item.get('quantity')),
-                            (' ' + item['unit']) if item.get('unit') else '',
-                            workflow.fmt_money(item.get('unit_price')).replace(' ₸', ''))
+        '%s — %s%s × %s = %s' % (item.get('name'), _qty(item.get('quantity')),
+                                 (' ' + item['unit']) if item.get('unit') else '',
+                                 _plain_money(item.get('unit_price')),
+                                 _plain_money(workflow.item_total(item)))
         for item in (items or []))
     basis = request.get('route_basis') or {}
     if basis.get('approver_name'):
@@ -169,9 +174,19 @@ def enrich(request, items):
                                                                            basis.get('order_number') or '—')
     else:
         row['approver_label'] = 'Учредитель'
+    # Форма поставщика и НДС выбраны на шаге 4; до него колонки пустые, а не «без НДС».
+    row['supplier_kind_label'] = workflow.SUPPLIER_KIND_LABELS.get(
+        str(request.get('supplier_kind') or '').lower(), '')
+    vat = request.get('supplier_vat')
+    row['supplier_vat_label'] = '' if vat is None else ('С НДС' if vat else 'Без НДС')
     row['needs_power_of_attorney_label'] = 'Да' if request.get('needs_power_of_attorney') else ''
     row['needs_payment_order_label'] = 'Да' if request.get('needs_payment_order') else ''
     return row
+
+
+def _plain_money(value):
+    """Сумма без знака валюты — в тексте ячейки он повторялся бы в каждой строке."""
+    return workflow.fmt_money(value).replace('\u00a0₸', '')
 
 
 def _qty(value):
@@ -202,7 +217,9 @@ def build_workbook(requests, items_by_request, *, generated_at=None, filters_tex
     if truncated:
         context.append(['Внимание', 'Файл обрезан по потолку строк — сузьте отбор'])
     context.append([])
-    context.append(['Как читать', 'Сумма расхода — из позиций заявки; итоговая сумма = сумма − возврат. '
+    context.append(['Как читать', 'Позиции: «товар — количество × цена за единицу = сумма строки». '
+                                  'Сумма расхода — сумма строк; итоговая сумма = сумма − возврат. '
+                                  'Форма и НДС поставщика выбираются на шаге 4 — до него пусто. '
                                   'БИН, номер карты и номера документов лежат текстом.'])
 
     sheet = workbook.create_sheet('Заявки')

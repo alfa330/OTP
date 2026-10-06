@@ -286,7 +286,7 @@ def find_or_create_category(cursor, name, parent_id=None, actor_id=None):
     return upsert_category(cursor, parent_id=parent_id, name=name, actor_id=actor_id), True
 
 
-_PARTY_FIELDS = ('id', 'name', 'bin', 'kind', 'vat_payer', 'note', 'is_active')
+_PARTY_FIELDS = ('id', 'name', 'bin', 'kind', 'vat_payer', 'requisites', 'note', 'is_active')
 
 
 def list_legal_entities(cursor, include_inactive=False):
@@ -296,18 +296,27 @@ def list_legal_entities(cursor, include_inactive=False):
     return [_map(_PARTY_FIELDS, row) for row in cursor.fetchall()]
 
 
+def read_legal_entity(cursor, entity_id):
+    if not entity_id:
+        return None
+    cursor.execute("SELECT %s FROM payment_legal_entities WHERE id = %%s" % ', '.join(_PARTY_FIELDS),
+                   (int(entity_id),))
+    row = cursor.fetchone()
+    return _map(_PARTY_FIELDS, row) if row else None
+
+
 def upsert_legal_entity(cursor, *, entity_id=None, name, bin_code=None, kind=None, vat_payer=False,
-                        note=None, is_active=True, actor_id=None):
+                        requisites=None, note=None, is_active=True, actor_id=None):
     if entity_id:
         cursor.execute(
             "UPDATE payment_legal_entities SET name = %s, bin = %s, kind = %s, vat_payer = %s, "
-            "note = %s, is_active = %s WHERE id = %s RETURNING id",
-            (name, bin_code, kind, bool(vat_payer), note, bool(is_active), int(entity_id)))
+            "requisites = %s, note = %s, is_active = %s WHERE id = %s RETURNING id",
+            (name, bin_code, kind, bool(vat_payer), requisites, note, bool(is_active), int(entity_id)))
     else:
         cursor.execute(
-            "INSERT INTO payment_legal_entities (name, bin, kind, vat_payer, note, is_active, created_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (name, bin_code, kind, bool(vat_payer), note, bool(is_active), actor_id))
+            "INSERT INTO payment_legal_entities (name, bin, kind, vat_payer, requisites, note, is_active, "
+            "created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (name, bin_code, kind, bool(vat_payer), requisites, note, bool(is_active), actor_id))
     row = cursor.fetchone()
     return row[0] if row else None
 
@@ -527,6 +536,7 @@ _REQUEST_FIELDS = (
     'invoice_requisites', 'invoice_number', 'invoice_date', 'invoice_description',
     'needs_power_of_attorney', 'needs_payment_order', 'previous_payment_note',
     'paid_on', 'paid_amount', 'refund_on', 'refund_amount',
+    'supplier_kind', 'supplier_vat',
     'fixed_template_id',
     'current_step', 'status', 'block_code', 'block_reason', 'current_role_code',
     'current_assignee_id', 'current_assignee_name', 'approver_user_id', 'approval_order_id',
@@ -560,7 +570,7 @@ EDITABLE_FIELDS = (
 )
 # Поля шагов бухгалтерии и оплаты — их правит ответственный шага.
 STEP_FIELDS = ('invoice_requisites', 'previous_payment_note', 'paid_on', 'paid_amount',
-               'refund_on', 'refund_amount')
+               'refund_on', 'refund_amount', 'supplier_kind', 'supplier_vat')
 
 
 def _request_row(row):
@@ -722,7 +732,7 @@ def list_items(cursor, request_id):
         % ', '.join(_ITEM_FIELDS), (int(request_id),))
     items = [_map(_ITEM_FIELDS, row) for row in cursor.fetchall()]
     for item in items:
-        item['total'] = (Decimal(item['quantity'] or 0) * Decimal(item['unit_price'] or 0)).quantize(Decimal('0.01'))
+        item['total'] = workflow.item_total(item)
     return items
 
 
@@ -746,8 +756,8 @@ def replace_items(cursor, request_id, items):
         cursor.execute(
             "INSERT INTO payment_request_items (request_id, position, name, quantity, unit, unit_price) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            (int(request_id), position, item['name'], workflow.to_decimal(item.get('quantity'), Decimal('1')),
-             item.get('unit'), workflow.to_decimal(item.get('unit_price'))))
+            (int(request_id), position, item['name'], workflow.item_quantity(item),
+             item.get('unit'), workflow.item_price(item)))
     total = workflow.items_total(items)
     cursor.execute("UPDATE payment_requests SET amount = %s WHERE id = %s", (total, int(request_id)))
     return total

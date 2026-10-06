@@ -387,6 +387,19 @@ _STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_payment_attachments_request "
     "ON payment_attachments (request_id, step_no, id)",
+
+    # ── Варианты выбором, а не текстом (06.10.2026) ────────────────────────
+    #
+    # Шаг 4 постановки: «предоставить информацию по ИП/ТОО, НДС/не НДС». Раньше
+    # это писали словами в комментарии; теперь форма поставщика и НДС выбираются
+    # и лежат в заявке. CHECK не ставим: набор форм уже сторожит код
+    # (PARTY_KINDS), а новый вариант не должен требовать миграции живой базы.
+    # `supplier_vat` NULL — «ещё не выбрано», это не то же, что «без НДС».
+    "ALTER TABLE payment_requests ADD COLUMN IF NOT EXISTS supplier_kind VARCHAR(8)",
+    "ALTER TABLE payment_requests ADD COLUMN IF NOT EXISTS supplier_vat BOOLEAN",
+    # Реквизиты нашего юр. лица: на шаге 5 бухгалтерия выбирает юр. лицо, и
+    # реквизиты для счёта подставляются отсюда, а не набираются каждый раз.
+    "ALTER TABLE payment_legal_entities ADD COLUMN IF NOT EXISTS requisites TEXT",
 ]
 
 # Trigram-индексы под поиск «содержит» по названию расхода, примечаниям и

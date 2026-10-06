@@ -115,6 +115,198 @@ export const PHASE_LABELS = {
 
 export const TOTAL_STEPS = 12;
 
+/* ── Пояснения к выбору ───────────────────────────────────────────────────────
+   Под «i» у каждого селектора: одна фраза о том, зачем поле, и по строке на
+   вариант. Человек, который пришёл в раздел первый раз, не обязан знать, чем
+   «фиксированный» платёж отличается от «ежемесячного» (решение владельца
+   06.10.2026: «чтобы человеку, который только пришёл, всё было понятно»).
+   Тексты — данными, а не в разметке: один и тот же селектор стоит в форме
+   заявки, в календаре и в фильтрах. */
+export const HINTS = {
+    source: {
+        intro: 'Откуда уйдут деньги.',
+        options: [
+            ['ТОО', 'безналичный платёж с расчётного счёта компании'],
+            ['Кошелёк', 'оплата с корпоративного кошелька'],
+            ['Наличные', 'оплата наличными'],
+        ],
+    },
+    type: {
+        intro: 'Как часто бывает такой расход.',
+        options: [
+            ['Разовый', 'покупка, которая не повторяется'],
+            ['Ежемесячный', 'расход повторяется каждый месяц, но сумма меняется'],
+            ['Фиксированный', 'регулярный платёж с известной суммой и сроком: аренда, абонплата'],
+        ],
+    },
+    category: {
+        intro: 'Статья расходов. По ней бухгалтерия группирует затраты в реестре и в выгрузке.',
+        outro: 'Нет подходящей — попросите администратора раздела добавить её в «Справочниках».',
+    },
+    subcategory: { intro: 'Уточнение внутри категории: например, «Аренда → Аренда офиса». Можно не выбирать.' },
+    project: {
+        intro: 'К какому проекту относится расход.',
+        outro: 'От проекта зависит, кто подтвердит счёт: по Приказу часть счетов согласует Директор по развитию вместо Учредителя.',
+    },
+    department: { intro: 'Отдел, для которого делается закуп. По умолчанию — ваш.' },
+    manager: {
+        intro: 'Ваш непосредственный руководитель: на шаге 2 он подтверждает, что закуп нужен и поставщик выбран верно.',
+        outro: 'Подставляется сам. Если указан не тот человек — измените.',
+    },
+    items: {
+        intro: 'Каждая строка — один товар или услуга, как в счёте поставщика.',
+        options: [
+            ['Количество', 'сколько покупаем'],
+            ['Ед. изм.', 'в чём считаем: штуки, килограммы, месяцы'],
+            ['Цена за ед.', 'цена одной единицы'],
+            ['Сумма', 'количество × цена, считается сама'],
+        ],
+        outro: 'Итог заявки складывается из строк. Обобщения вроде «хоз. товары» не подойдут — перечислите, что именно покупаете.',
+    },
+    documents: {
+        intro: 'Без документа заявка на согласование не уйдёт.',
+        options: [
+            ['Реестр поставщиков', 'таблица: у кого смотрели, цены и ссылки на товар'],
+            ['Коммерческое предложение', 'если поставщик один и сравнивать не с кем'],
+        ],
+    },
+    supplierKind: {
+        intro: 'Кто поставщик по документам. От этого зависит, какие реквизиты даст бухгалтерия.',
+        options: [
+            ['ТОО', 'товарищество с ограниченной ответственностью'],
+            ['ИП', 'индивидуальный предприниматель'],
+            ['Другое', 'физлицо, иностранная компания и прочее — уточните в комментарии'],
+        ],
+    },
+    supplierVat: {
+        intro: 'Плательщик ли поставщик НДС — он сам пишет это в счёте или КП.',
+        options: [
+            ['Без НДС', 'в счёте стоит «Без НДС»'],
+            ['С НДС', 'в счёте выделена сумма НДС'],
+        ],
+    },
+    legalEntity: { intro: 'Наше юр. лицо, на которое поставщик выставит счёт и с которого уйдёт оплата.' },
+    contract: {
+        intro: 'Договор с этим поставщиком.',
+        outro: 'Для счёта свыше 300 000 ₸ действующий договор обязателен: без него счёт останется у вас.',
+    },
+    powerOfAttorney: {
+        intro: 'Доверенность — документ, по которому сотрудник забирает товар у поставщика.',
+        options: [
+            ['Не нужна', 'поставщик привезёт сам или это услуга'],
+            ['Нужна', 'бухгалтерия приложит её при оплате, на шаге 10'],
+        ],
+    },
+    paymentOrder: {
+        intro: 'Платёжное поручение — отметка банка о том, что оплата ушла.',
+        options: [
+            ['Не нужно', 'поставщику хватит самой оплаты'],
+            ['Нужно', 'поставщик просит подтверждение перед отгрузкой — бухгалтерия приложит его на шаге 10'],
+        ],
+    },
+    previouslyPaid: {
+        intro: 'Проверка от двойной оплаты: не платили ли этому поставщику по такому же счёту.',
+        options: [
+            ['Не платили', 'оплат этому поставщику раньше не было'],
+            ['Платили', 'укажите дату и сумму последней оплаты'],
+        ],
+        outro: 'Прошлые оплаты из реестра раздел подсказывает сам.',
+    },
+    received: {
+        intro: 'От этого зависит закрывающий документ.',
+        options: [
+            ['Товар', 'нужна накладная'],
+            ['Услугу', 'нужен акт выполненных работ (АВР)'],
+        ],
+    },
+    originals: {
+        intro: 'Оригинал накладной или АВР с подписью и печатью нужен бухгалтерии: без него она не закроет заявку на шаге 12.',
+        options: [
+            ['Передал в бухгалтерию', 'оригинал уже у бухгалтера'],
+            ['Передам позже', 'бухгалтерия будет ждать оригинал'],
+        ],
+    },
+    vatPayer: {
+        intro: 'Плательщик ли НДС.',
+        options: [
+            ['Без НДС', 'работает без НДС'],
+            ['С НДС', 'плательщик НДС'],
+        ],
+    },
+    partyKind: {
+        intro: 'Организационная форма.',
+        options: [
+            ['ТОО', 'товарищество с ограниченной ответственностью'],
+            ['ИП', 'индивидуальный предприниматель'],
+            ['Другое', 'всё остальное'],
+        ],
+    },
+    active: {
+        intro: 'Видна ли запись при заведении новых заявок.',
+        options: [
+            ['Активна', 'предлагается в списках'],
+            ['Скрыта', 'в новых заявках не предлагается, в старых остаётся как была'],
+        ],
+    },
+    contractStatus: {
+        intro: 'Счёт свыше 300 000 ₸ проходит только по действующему договору.',
+        options: [
+            ['Действующий', 'договор работает — счёт пройдёт'],
+            ['Расторгнут, Отменён, Архивный, Недействующий', 'для проверки счёта договора как будто нет'],
+        ],
+    },
+    orderScope: {
+        intro: 'На что распространяется Приказ.',
+        options: [
+            ['Выбранные', 'только перечисленные ниже'],
+            ['Все', 'любые — отдельная проверка не нужна'],
+        ],
+    },
+    orderStatus: {
+        intro: 'Применяется только действующий Приказ.',
+        options: [
+            ['Действующий', 'по нему счёт уйдёт указанному сотруднику'],
+            ['Отменён', 'не применяется, счёт согласует Учредитель'],
+        ],
+    },
+    periodicity: {
+        intro: 'Как часто повторяется платёж. От этого зависит, когда раздел сам создаст заявку.',
+        options: [
+            ['Ежемесячно, ежеквартально, ежегодно', 'заявка создаётся первого числа месяца, на который приходится срок'],
+            ['Свой интервал', 'каждые N дней; заявка создаётся за несколько дней до срока'],
+        ],
+    },
+    templateActive: {
+        intro: 'Создаёт ли раздел заявки по этому платежу.',
+        options: [
+            ['Активен', 'заявки создаются сами'],
+            ['Приостановлен', 'платёж остаётся в списке, заявки не создаются'],
+        ],
+    },
+    fixedOnly: {
+        intro: 'Какие заявки показывать.',
+        options: [
+            ['Все', 'любые заявки'],
+            ['Фиксированные', 'только регулярные платежи: с типом «Фиксированный» и созданные календарём'],
+        ],
+    },
+};
+
+/* Выбор из двух вариантов — подписи. Значение у «не выбрано» — null. */
+export const VAT_OPTIONS = [{ value: false, label: 'Без НДС' }, { value: true, label: 'С НДС' }];
+export const SUPPLIER_KIND_OPTIONS = [
+    { value: 'too', label: 'ТОО' },
+    { value: 'ip', label: 'ИП' },
+    { value: 'other', label: 'Другое' },
+];
+export const supplierLabel = (request) => {
+    const kind = SUPPLIER_KIND_OPTIONS.find((option) => option.value === request?.supplier_kind)?.label;
+    const vat = request?.supplier_vat;
+    const parts = kind ? [kind] : [];
+    if (vat === true || vat === false) parts.push(vat ? 'с НДС' : 'без НДС');
+    return parts.join(', ');
+};
+
 // Порог договора — тот же, что CONTRACT_REQUIRED_OVER на сервере; сервер отдаёт
 // его в /ping, здесь значение по умолчанию до ответа.
 export const CONTRACT_THRESHOLD = 300000;
@@ -178,19 +370,108 @@ export const parseAmount = (value) => {
     return Number.isFinite(number) ? number : 0;
 };
 
+/* Число из поля или из ответа сервера → целое в долях 10^-digits («2,5» при
+   digits = 3 → 2500), округление — половина вверх. Считаем по ЗАПИСИ числа, а не
+   умножением дроби: в двоичной арифметике 2,5 × 10,01 = 25,02499…, и тиын на
+   экране расходился бы с тем, что сохранит сервер (у него Decimal). */
+export const toScaled = (value, digits) => {
+    if (value === null || value === undefined || value === '') return 0;
+    if (typeof value === 'number' && !Number.isFinite(value)) return 0;
+    const text = typeof value === 'number'
+        ? String(value)
+        : String(value).replace(/[\s₸]/g, '').replace(/тг/gi, '').replace(',', '.');
+    const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(text);
+    if (!match || !(match[2] || match[3])) {
+        // «1e21», «1e-7» — запись с порядком: руками такие числа не вводят.
+        const number = Number(text);
+        return Number.isFinite(number) ? Math.round(number * 10 ** digits) : 0;
+    }
+    const fraction = match[3] || '';
+    const kept = `${fraction}${'0'.repeat(digits)}`.slice(0, digits);
+    const scaled = Number(`${match[2] || '0'}${kept}`) + (Number(fraction[digits] || 0) >= 5 ? 1 : 0);
+    return match[1] === '-' && scaled ? -scaled : scaled;
+};
+
 export const fmtMoney = (value, { currency = true, cents = 'auto' } = {}) => {
-    const number = parseAmount(value);
-    const negative = number < 0;
-    const abs = Math.abs(number);
-    const whole = Math.floor(abs + 1e-9);
-    const rest = Math.round((abs - whole) * 100);
+    // Тиыны — целым числом. Пока дробная часть считалась вычитанием, «0,999»
+    // превращалось в «0,100», а «1,005» — в «1» вместо «1,01».
+    const total = toScaled(value, 2);
+    const negative = total < 0;
+    const abs = Math.abs(total);
+    const whole = Math.floor(abs / 100);
+    const rest = abs % 100;
     let text = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, NBSP);
     if (cents === 'always' || (cents === 'auto' && rest > 0)) text += `,${String(rest).padStart(2, '0')}`;
     return `${negative ? '−' : ''}${text}${currency ? `${NBSP}₸` : ''}`;
 };
 
-export const itemTotal = (item) => parseAmount(item?.quantity || 1) * parseAmount(item?.unit_price);
-export const itemsTotal = (items) => Math.round((items || []).reduce((sum, item) => sum + itemTotal(item), 0) * 100) / 100;
+/* ── Позиции заявки ──────────────────────────────────────────────────────────
+   Строка — как в счёте поставщика: что, сколько, в чём считаем, цена за одну
+   единицу; сумма строки = количество × цена, итог заявки = сумма строк.
+
+   Единица измерения — ВЫБОРОМ из списка, а не полем ввода. В первой версии это
+   было текстовое поле «Ед.» рядом с «Кол-во», и в него вписывали второе число
+   («5» и «100»), ожидая, что оно попадёт в итог (заявка №1 на проде). Список
+   такой ошибки не допускает: в нём только слова. */
+export const DEFAULT_UNIT = 'шт';
+export const UNITS = ['шт', 'уп', 'пачка', 'компл', 'пара', 'рулон', 'кг', 'г', 'л', 'м', 'м²', 'м³',
+    'час', 'день', 'мес', 'год', 'усл'];
+/* У старой заявки единица могла быть вписана руками («бут.», «лиц.») — она
+   остаётся в списке этой строки, иначе правка заявки молча её стёрла бы. */
+export const unitOptions = (current) => {
+    const value = String(current || '').trim();
+    const list = value && !UNITS.includes(value) ? [...UNITS, value] : UNITS;
+    return list.map((unit) => ({ value: unit, label: unit }));
+};
+
+/* Количество — до тысячных, цена — до тиына: столько хранит база, и считать
+   надо из тех же чисел, что потом покажет карточка. */
+const QUANTITY_DIGITS = 3;
+const QUANTITY_SCALE = 10 ** QUANTITY_DIGITS;
+
+/* Пустое количество — это ноль, а не «одна штука»: иначе строка с ценой, но без
+   количества молча попала бы в итог как 1 × цена. */
+const quantityScaled = (item) => {
+    const raw = item?.quantity;
+    if (raw === '' || raw === null || raw === undefined) return 0;
+    return toScaled(raw, QUANTITY_DIGITS);
+};
+export const itemQuantity = (item) => quantityScaled(item) / QUANTITY_SCALE;
+
+/* Сумма строки в тиынах: количество × цена, половина — вверх. Всё в целых:
+   количество делим на целую часть и тысячные, цену — на тысячи тиынов и остаток,
+   и ни одно промежуточное произведение не теряет точность. Та же формула на
+   сервере — workflow.item_total; сумма заявки там и тут — сумма строк. */
+const itemCents = (item) => {
+    const quantity = quantityScaled(item);
+    const price = toScaled(item?.unit_price, 2);
+    const q = Math.abs(quantity);
+    const p = Math.abs(price);
+    const units = Math.floor(q / QUANTITY_SCALE);
+    const part = q % QUANTITY_SCALE;
+    const cents = units * p
+        + part * Math.floor(p / QUANTITY_SCALE)
+        + Math.floor((part * (p % QUANTITY_SCALE) + QUANTITY_SCALE / 2) / QUANTITY_SCALE);
+    return (quantity < 0) !== (price < 0) ? -cents : cents;
+};
+export const itemTotal = (item) => itemCents(item) / 100;
+export const itemsTotal = (items) => (items || []).reduce((sum, item) => sum + itemCents(item), 0) / 100;
+
+/* Строка, в которой ничего не начато: её не считаем и не сохраняем. */
+export const isBlankItem = (item) => !String(item?.name || '').trim() && !parseAmount(item?.unit_price);
+
+/* Что не так со строкой позиции — словами для человека; '' — строка в порядке
+   или пустая. Проверка та же, что на сервере, плюс «цена есть, названия нет»:
+   такая строка видна в итоге на экране, а в заявку не попала бы — итог на
+   экране и в сохранённой заявке расходились бы. */
+export const itemProblem = (item) => {
+    if (isBlankItem(item)) return '';
+    const name = String(item?.name || '').trim();
+    if (!name) return 'У позиции с ценой нет названия — впишите его или удалите строку';
+    if (!(itemQuantity(item) > 0)) return `«${name}»: количество — число больше нуля`;
+    if (parseAmount(item?.unit_price) < 0) return `«${name}»: цена не может быть отрицательной`;
+    return '';
+};
 
 export const fmtQty = (value) => {
     const number = parseAmount(value);
@@ -416,6 +697,75 @@ export const passedStepsLabel = (count) => {
     return `${count} пройденных шагов`;
 };
 
+/* ── Шаги: выбор вместо текста ───────────────────────────────────────────────
+   На шаге человек выбирает вариант, а отписку из выбранного собирает раздел:
+   так её не нужно придумывать, и у всех она читается одинаково. */
+
+export const POWER_OF_ATTORNEY_OPTIONS = [{ value: false, label: 'Не нужна' }, { value: true, label: 'Нужна' }];
+export const PAYMENT_ORDER_OPTIONS = [{ value: false, label: 'Не нужно' }, { value: true, label: 'Нужно' }];
+export const PREVIOUSLY_PAID_OPTIONS = [{ value: false, label: 'Не платили' }, { value: true, label: 'Платили' }];
+export const RECEIVED_OPTIONS = [{ value: 'goods', label: 'Товар' }, { value: 'service', label: 'Услугу' }];
+export const ORIGINALS_OPTIONS = [
+    { value: 'handed', label: 'Передал в бухгалтерию' },
+    { value: 'later', label: 'Передам позже' },
+];
+
+/* Шаг вернули на доработку? Последнее событие шага — «возвращена», а не
+   «отписка»: тогда причина возврата нужна на виду, прямо над формой шага. */
+export const stepReturnNote = (events, stepNo) => {
+    const mine = (events || []).filter((event) => Number(event.step_no) === Number(stepNo)
+        && (event.kind === 'returned' || event.kind === 'step_done'));
+    const last = mine[mine.length - 1];
+    return last && last.kind === 'returned' ? last : null;
+};
+
+/* Шаг 5: реквизиты нашего юр. лица из справочника — заготовка для поля. */
+export const requisitesDraft = (entity) => {
+    if (!entity) return '';
+    const head = [entity.name, entity.bin ? `БИН ${entity.bin}` : ''].filter(Boolean).join(', ');
+    return [head, String(entity.requisites || '').trim()].filter(Boolean).join('\n');
+};
+
+/* Шаг 7: описание счёта «одним текстом» из того, что уже есть в заявке —
+   что закупается, за какой период, с какого на какое юр. лицо, сумма, отдел
+   (перечень из постановки). Человек правит заготовку, а не пишет с нуля. */
+export const invoiceDescriptionDraft = (request, legalEntityName) => {
+    if (!request) return '';
+    const what = [request.expense_name, request.payment_period].filter(Boolean).join(', ');
+    const parts = [what ? `${what}.` : ''];
+    if (legalEntityName || request.counterparty_name) {
+        parts.push(`Оплата с ${legalEntityName || '…'} на ${request.counterparty_name || '…'}.`);
+    }
+    parts.push(`Сумма ${fmtMoney(request.amount)}.`);
+    if (request.department_name) parts.push(`Отдел: ${request.department_name}.`);
+    return parts.filter(Boolean).join(' ');
+};
+
+/* Шаг 8: последняя оплата этому поставщику из справки «История оплат». */
+export const lastPaymentToCounterparty = (history) => (history || [])
+    .find((row) => (row.matched || []).includes('counterparty') && row.paid_on) || null;
+
+/* Шаг 8: отписка бухгалтерии из выбора «платили / не платили». */
+export const previousPaymentNote = ({ paid, paidOn, paidAmount }) => {
+    if (paid === false) return 'Ранее этому поставщику не платили';
+    if (paid === true && paidOn && parseAmount(paidAmount) > 0) {
+        return `Последняя оплата: ${fmtDate(paidOn)}, ${fmtMoney(paidAmount)}`;
+    }
+    return '';
+};
+
+/* Шаг 11: отписка о получении из выбора «товар / услуга» и «оригинал». */
+export const receiptComment = ({ received, originals }) => {
+    if (!received || !originals) return '';
+    const goods = received === 'goods';
+    const head = goods ? 'Получен товар.' : 'Получена услуга.';
+    const paper = goods ? 'накладной' : 'АВР';
+    const tail = originals === 'handed'
+        ? `Оригинал ${paper} передан в бухгалтерию.`
+        : `Оригинал ${paper} передам в бухгалтерию позже.`;
+    return `${head} ${tail}`;
+};
+
 /* ── История ───────────────────────────────────────────────────────────────── */
 
 const FIELD_LABELS = {
@@ -435,6 +785,8 @@ const FIELD_LABELS = {
     card_number: 'Номер карты',
     notes: 'Примечания',
     due_on: 'Срок оплаты',
+    supplier_kind: 'Форма поставщика',
+    supplier_vat: 'НДС поставщика',
     invoice_requisites: 'Реквизиты',
     invoice_number: 'Номер счёта',
     invoice_date: 'Дата счёта',

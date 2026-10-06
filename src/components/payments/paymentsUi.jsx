@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Check, Columns3, Download, FileText, Loader2, Paperclip, Trash2, X } from 'lucide-react';
+import { Check, Columns3, Copy, Download, FileText, Loader2, Paperclip, Trash2, X } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
-import { iosBtnGhost, iosBtnSecondary, iosGroupLabel, iosInput } from '../ui/ios';
+import { iosBtnGhost, iosBtnSecondary, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import {
-    ATTACHMENT_LABELS, fileSizeLabel, fmtMoney, parseAmount, requestState, stateMeta, tonePill,
+    ATTACHMENT_LABELS, fileSizeLabel, fmtMoney, parseAmount, requestState, routeSummary, stateMeta, tonePill,
 } from './paymentsMeta';
 
 /*
@@ -14,19 +14,66 @@ import {
  * раздел не заводит.
  */
 
+/* Пояснение к выбору под «i»: фраза о том, зачем поле, и по строке на вариант.
+   Данные — из HINTS в paymentsMeta.js: { intro, options: [[вариант, смысл]], outro }. */
+export const ChoiceHint = ({ intro, options = [], outro }) => (
+    <div className="space-y-1.5">
+        {intro && <div>{intro}</div>}
+        {options.length > 0 && (
+            <div className="space-y-1">
+                {options.map(([name, meaning]) => (
+                    <div key={name}>
+                        <span className="font-semibold text-slate-800">{name}</span> — {meaning}
+                    </div>
+                ))}
+            </div>
+        )}
+        {outro && <div className="text-slate-500">{outro}</div>}
+    </div>
+);
+
+/* «i» у подписи: строка, готовый узел или описание из HINTS.
+   Пузырь раскрывается вправо от значка (`side="left"`): подпись стоит у левого
+   края поля, и раскрытый влево пузырь вылезал за окно формы. */
+export const FieldHint = ({ hint }) => {
+    if (!hint) return null;
+    if (typeof hint === 'string') return <InfoHint side="left" text={hint} />;
+    if (React.isValidElement(hint)) return <InfoHint side="left">{hint}</InfoHint>;
+    return <InfoHint side="left"><ChoiceHint {...hint} /></InfoHint>;
+};
+
 /* Подпись поля. Пояснение — под «i» у метки, а не строкой под полем (решение
-   владельца 27.08.2026): текст нужен один раз, когда человек не понял поле. */
-export const Field = ({ label, hint, required = false, optionalMark = true, children, className = '' }) => (
-    <label className={`block space-y-1.5 ${className}`}>
-        <span className="flex items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            {label}
-            {!required && optionalMark && (
-                <span className="font-normal normal-case tracking-normal text-slate-400">необязательно</span>
-            )}
-            {hint && <InfoHint text={hint} />}
-        </span>
-        {children}
-    </label>
+   владельца 27.08.2026): текст нужен один раз, когда человек не понял поле.
+   `as="div"` — для полей с несколькими элементами управления внутри (сегменты,
+   файлы): <label> вокруг нескольких кнопок отдавал бы щелчок по подписи первой.
+   Строка подписи одной высоты с «i» и без него (`min-h-5` — высота кнопки
+   InfoHint): иначе в ряду из двух полей то, что с подсказкой, стояло на
+   несколько пикселей ниже соседнего. */
+export const Field = ({ label, hint, required = false, optionalMark = true, children, className = '', as = 'label' }) => {
+    const Tag = as;
+    return (
+        <Tag className={`block space-y-1.5 ${className}`}>
+            <span className="flex min-h-5 items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                {label}
+                {!required && optionalMark && (
+                    <span className="font-normal normal-case tracking-normal text-slate-400">необязательно</span>
+                )}
+                <FieldHint hint={hint} />
+            </span>
+            {children}
+        </Tag>
+    );
+};
+
+/* Выбор из двух-трёх вариантов — сегментами: все варианты видны сразу, щелчок
+   один. Так выбираются «С НДС / Без НДС», «Нужна / Не нужна», «ТОО / ИП»
+   (решение владельца 06.10.2026: такие варианты выбирают, а не пишут словами и
+   не отмечают галочкой). Значение `null` — «ещё не выбрано»: ни один сегмент не
+   подсвечен, и молчаливого «нет» по умолчанию не бывает. */
+export const Choice = ({ value, onChange, options, ariaLabel, stretch = false, disabled = false }) => (
+    <div className={`${stretch ? '' : 'inline-flex max-w-full'} ${disabled ? 'pointer-events-none opacity-60' : ''}`}>
+        <IosSegmented value={value} options={options} onChange={onChange} ariaLabel={ariaLabel} stretch={stretch} />
+    </div>
 );
 
 /* Строка «подпись — значение» в карточке. Пустое значение строку не рисует —
@@ -59,9 +106,19 @@ export const StatePill = ({ request, className = '' }) => {
 export const AmountInput = ({ value, onChange, placeholder = '0', className = '', disabled = false, ariaLabel }) => {
     const [text, setText] = useState(() => (value === '' || value === null || value === undefined ? '' : fmtMoney(value, { currency: false })));
     const [focused, setFocused] = useState(false);
+    const inputRef = useRef(null);
     const shown = focused ? text : (value === '' || value === null || value === undefined || value === 0 ? '' : fmtMoney(value, { currency: false }));
+    /* При входе в поле сумма выделяется целиком: набранное заменяет прежнее
+       значение, а не дописывается к нему. Выделяем в layout-эффекте — сразу
+       после того, как в поле встал «сырой» текст и до первой нажатой клавиши;
+       отложенное выделение (кадром позже) срабатывало посреди быстрого ввода и
+       съедало уже набранные цифры. */
+    useLayoutEffect(() => {
+        if (focused) inputRef.current?.select();
+    }, [focused]);
     return (
         <input
+            ref={inputRef}
             type="text"
             inputMode="decimal"
             aria-label={ariaLabel}
@@ -75,6 +132,22 @@ export const AmountInput = ({ value, onChange, placeholder = '0', className = ''
         />
     );
 };
+
+/* Количество: число, можно дробное («2,5»). При входе в поле значение
+   выделяется целиком — иначе «4» дописывалось к подставленной «1» и выходило
+   «14» (так и случалось на проверке). */
+export const QuantityInput = ({ value, onChange, className = '', ariaLabel = 'Количество', invalid = false }) => (
+    <input
+        type="text"
+        inputMode="decimal"
+        aria-label={ariaLabel}
+        aria-invalid={invalid || undefined}
+        className={`${iosInput} tabular-nums ${invalid ? 'ring-2 ring-rose-300' : ''} ${className}`}
+        value={value}
+        onFocus={(event) => event.target.select()}
+        onChange={(event) => onChange(event.target.value.replace(/[^\d.,]/g, ''))}
+    />
+);
 
 /* Выбор сотрудника — CustomSelect с поиском; варианты собираются один раз. */
 export const UserSelect = ({ users, value, onChange, placeholder = 'Выберите сотрудника', exclude = [], ariaLabel, multiple = false }) => {
@@ -246,6 +319,96 @@ export const AttachmentList = ({ attachments, apiBaseUrl, headers, canRemove, on
                 </div>
             ))}
         </div>
+    );
+};
+
+/* Документы «под рукой» на шаге: короткие кнопки-файлы, чтобы тому, кто
+   согласует или платит, не листать карточку до раздела «Документы». Это не
+   второй список файлов, а только то, что нужно для решения на ЭТОМ шаге (счёт —
+   тому, кто его проверяет; реестр поставщиков — тому, кто подтверждает закуп).
+   Щелчок открывает PDF и картинку, остальное скачивает. */
+export const FileChips = ({ attachments, apiBaseUrl, headers, showToast, label }) => {
+    const [busy, setBusy] = useState(null);
+    if (!attachments || !attachments.length) return null;
+    const open = async (attachment) => {
+        setBusy(attachment.id);
+        try {
+            await downloadAttachment({ apiBaseUrl, headers, attachment, inline: isViewable(attachment) });
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось открыть файл', 'error');
+        } finally {
+            setBusy(null);
+        }
+    };
+    return (
+        <div className="flex flex-wrap items-center gap-1.5">
+            {label && <span className="text-[12.5px] text-slate-500">{label}</span>}
+            {attachments.map((attachment) => (
+                <button
+                    key={attachment.id}
+                    type="button"
+                    onClick={() => open(attachment)}
+                    title={`${ATTACHMENT_LABELS[attachment.kind] || 'Файл'}: ${attachment.file_name}`}
+                    className="inline-flex max-w-[280px] items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[12.5px] text-slate-700 transition hover:bg-slate-200 active:scale-[0.98]"
+                >
+                    {busy === attachment.id
+                        ? <Loader2 size={12} className="shrink-0 animate-spin text-slate-400" />
+                        : <FileText size={12} className="shrink-0 text-slate-400" />}
+                    <span className="truncate">{attachment.file_name}</span>
+                </button>
+            ))}
+        </div>
+    );
+};
+
+/* «Скопировать»: реквизиты из шага 5 инициатор пересылает поставщику — одним
+   щелчком, а не выделением текста мышью. */
+export const CopyButton = ({ text, label = 'Скопировать' }) => {
+    const [done, setDone] = useState(false);
+    const copy = async () => {
+        try {
+            await navigator.clipboard.writeText(String(text || ''));
+            setDone(true);
+            setTimeout(() => setDone(false), 1600);
+        } catch { /* буфер недоступен — текст можно выделить руками */ }
+    };
+    return (
+        <button type="button" onClick={copy} className={`${iosBtnGhost} -mr-2 py-1 text-[12.5px] ${done ? 'text-emerald-600' : 'text-blue-600'}`}>
+            {done ? <Check size={13} /> : <Copy size={13} />}
+            {done ? 'Скопировано' : label}
+        </button>
+    );
+};
+
+/* Основание согласующего счёта под «i»: какой Приказ применён и почему, либо
+   по какому условию он не подошёл (пп. 11–12 ТЗ о Приказах). */
+export const RouteHint = ({ basis }) => {
+    if (!basis) return null;
+    const summary = routeSummary(basis);
+    const evaluations = basis.evaluations || [];
+    return (
+        <InfoHint title="Основание">
+            <div className="space-y-2 text-[12px] leading-snug">
+                <div>
+                    Стандартный согласующий: <b>{basis.standard_label || 'Учредитель'}</b>.
+                    {' '}Фактический: <b>{summary.approver}</b>.
+                </div>
+                {evaluations.length === 0 && <div>Действующих Приказов нет — счёт согласует Учредитель.</div>}
+                {evaluations.map((item) => (
+                    <div key={item.order_id} className="rounded-lg bg-slate-100 px-2 py-1.5">
+                        <div className="font-medium">Приказ №{item.number}{item.issued_on ? ` от ${item.issued_on}` : ''} — {item.applies ? 'применён' : 'не применён'}</div>
+                        <ul className="mt-0.5 space-y-0.5">
+                            {(item.checks || []).map((check) => (
+                                <li key={check.key} className={check.ok ? 'text-slate-600' : 'text-rose-700'}>
+                                    {check.ok ? '✓' : '✗'} {check.label}: {check.detail}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                ))}
+                {basis.conflict && <div className="text-amber-700">Несколько действующих Приказов дают право разным людям — применён приоритетный.</div>}
+            </div>
+        </InfoHint>
     );
 };
 

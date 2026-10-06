@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { CalendarClock, Download, Loader2, Play, Plus, Upload } from 'lucide-react';
-import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal, IosSegmented, IosToggle } from '../ui/ios';
+import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { Pencil, Trash2 } from 'lucide-react';
-import { PERIOD_META, PERIOD_OPTIONS, SOURCE_OPTIONS, fmtDate, fmtMoney } from './paymentsMeta';
-import { AmountInput, ErrorBox, Field, NoticeBox, UserSelect, errorText } from './paymentsUi';
+import { HINTS, PERIOD_META, PERIOD_OPTIONS, SOURCE_OPTIONS, fmtDate, fmtMoney } from './paymentsMeta';
+import { AmountInput, Choice, ErrorBox, Field, NoticeBox, UserSelect, errorText } from './paymentsUi';
+
+const TEMPLATE_ACTIVE_OPTIONS = [{ value: true, label: 'Активен' }, { value: false, label: 'Приостановлен' }];
 
 /*
  * Календарь фиксированных платежей (дополнение Дмитриевой, п. 11).
@@ -277,7 +279,7 @@ const FixedPaymentsPanel = ({ apiBaseUrl, headers, users, dictionaries, me, show
                     <Field label="Наименование" required><input className={iosInput} value={draft.name} onChange={(e) => set('name', e.target.value)} maxLength={300} placeholder="Аренда офиса Алматы" /></Field>
                     <div className="grid gap-3 sm:grid-cols-2">
                         <Field label="Сумма" required><AmountInput value={draft.amount} onChange={(v) => set('amount', v)} ariaLabel="Сумма" /></Field>
-                        <Field label="Периодичность" required>
+                        <Field label="Периодичность" required hint={HINTS.periodicity}>
                             <CustomSelect value={draft.periodicity} onChange={(v) => set('periodicity', v)} options={PERIOD_OPTIONS} variant="ios" ariaLabel="Периодичность" />
                         </Field>
                     </div>
@@ -307,12 +309,14 @@ const FixedPaymentsPanel = ({ apiBaseUrl, headers, users, dictionaries, me, show
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
                         <Field label="Юр. лицо плательщика"><CustomSelect value={draft.legal_entity_id} onChange={(v) => set('legal_entity_id', v)} options={legalEntityOptions} variant="ios" ariaLabel="Юр. лицо" /></Field>
-                        <Field label="Источник оплаты" optionalMark={false}><IosSegmented value={draft.payment_source} options={SOURCE_OPTIONS} onChange={(v) => set('payment_source', v)} stretch ariaLabel="Источник оплаты" /></Field>
+                        <Field as="div" label="Источник оплаты" optionalMark={false} hint={HINTS.source}><Choice value={draft.payment_source} options={SOURCE_OPTIONS} onChange={(v) => set('payment_source', v)} stretch ariaLabel="Источник оплаты" /></Field>
                     </div>
                     <Field label="Филиал / регион"><input className={iosInput} value={draft.branch} onChange={(e) => set('branch', e.target.value)} maxLength={200} /></Field>
                     <Field label="Примечание"><input className={iosInput} value={draft.note} onChange={(e) => set('note', e.target.value)} maxLength={4000} /></Field>
                     {draft.id && (
-                        <div className="flex items-center gap-2 px-1 text-[13.5px] text-slate-700"><IosToggle checked={draft.is_active} onChange={(v) => set('is_active', v)} /> активен — заявки создаются</div>
+                        <Field as="div" label="Создание заявок" optionalMark={false} hint={HINTS.templateActive}>
+                            <Choice value={Boolean(draft.is_active)} options={TEMPLATE_ACTIVE_OPTIONS} onChange={(v) => set('is_active', v)} ariaLabel="Создание заявок по платежу" />
+                        </Field>
                     )}
                 </div>
             </IosModal>

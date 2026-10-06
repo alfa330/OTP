@@ -168,11 +168,43 @@ class ReportTests(unittest.TestCase):
     def test_items_and_approver_are_described(self):
         row = report.enrich(request_row(), [{'name': 'Бумага А4', 'quantity': Decimal('1'), 'unit': 'ед.',
                                               'unit_price': Decimal('2500')}])
-        self.assertEqual(row['items_text'], 'Бумага А4 — 1 ед. × 2 500')
+        self.assertEqual(row['items_text'], 'Бумага А4 — 1 ед. × 2\u00a0500 = 2\u00a0500')
         self.assertIn('Директор по развитию', row['approver_label'])
         self.assertIn('№15', row['approver_label'])
         self.assertEqual(row['step_label'], 'Шаг 7 из 12 · %s' % workflow.step_title(7))
         self.assertEqual(row['needs_power_of_attorney_label'], 'Да')
+
+    def test_item_line_shows_its_own_sum(self):
+        """В строке позиции видна формула целиком — количество × цена = сумма; дробное
+        количество округляется до тиына так же, как в карточке и в форме."""
+        row = report.enrich(request_row(), [
+            {'name': 'Сахар', 'quantity': Decimal('2.500'), 'unit': 'кг', 'unit_price': Decimal('10.01')},
+            {'name': 'Доставка', 'quantity': Decimal('1'), 'unit': None, 'unit_price': Decimal('1500')}])
+        self.assertEqual(row['items_text'],
+                         'Сахар — 2.5 кг × 10,01 = 25,03\nДоставка — 1 × 1\u00a0500 = 1\u00a0500')
+
+    def test_supplier_form_and_vat_columns(self):
+        """Форма поставщика и НДС — отдельными колонками. До шага 4 они пустые: пустое
+        значение НДС не превращается в «Без НДС»."""
+        headers = [column[0] for column in report.COLUMNS]
+        self.assertIn('Форма поставщика', headers)
+        self.assertIn('НДС поставщика', headers)
+        empty = report.enrich(request_row(), [])
+        self.assertEqual((empty['supplier_kind_label'], empty['supplier_vat_label']), ('', ''))
+        chosen = report.enrich(request_row(supplier_kind='ip', supplier_vat=False), [])
+        self.assertEqual((chosen['supplier_kind_label'], chosen['supplier_vat_label']), ('ИП', 'Без НДС'))
+        with_vat = report.enrich(request_row(supplier_kind='too', supplier_vat=True), [])
+        self.assertEqual((with_vat['supplier_kind_label'], with_vat['supplier_vat_label']), ('ТОО', 'С НДС'))
+
+    def test_supplier_choices_match_the_frontend(self):
+        """Варианты выбора на шаге 4 в форме — те же коды и подписи, что на сервере."""
+        source = META_PATH.read_text(encoding='utf-8')
+        block = source.split('export const SUPPLIER_KIND_OPTIONS')[1].split('];')[0]
+        for code, label in workflow.SUPPLIER_KIND_LABELS.items():
+            self.assertIn("{ value: '%s', label: '%s' }" % (code, label), block, code)
+        vat = source.split('export const VAT_OPTIONS')[1].split('];')[0]
+        self.assertIn("{ value: false, label: 'Без НДС' }", vat)
+        self.assertIn("{ value: true, label: 'С НДС' }", vat)
 
     def test_text_warning_patch_targets_the_second_sheet(self):
         calls = []

@@ -205,6 +205,37 @@ class RequirementsTests(unittest.TestCase):
         self.assertEqual(workflow.missing_requirements(7, ok, [{'kind': 'invoice'}]), [])
         self.assertTrue(workflow.missing_requirements(7, ok, [{'kind': 'other'}]), 'файл не того вида — не счёт')
 
+    def test_step_4_needs_the_supplier_form_and_a_vat_choice(self):
+        """Постановка, шаг 4: «информация по ИП/ТОО, НДС/не НДС». Раньше её писали словами
+        в комментарий — и могли не написать вовсе. «Без НДС» — сделанный выбор, а не пустое поле."""
+        self.assertEqual(len(workflow.missing_requirements(4, {}, [])), 2)
+        self.assertEqual(workflow.missing_requirements(4, {'supplier_kind': 'ip', 'supplier_vat': False}, []), [])
+        self.assertEqual(workflow.missing_requirements(4, {'supplier_kind': 'TOO', 'supplier_vat': True}, []), [])
+        only_kind = workflow.missing_requirements(4, {'supplier_kind': 'too'}, [])
+        self.assertEqual(len(only_kind), 1)
+        self.assertIn('НДС', only_kind[0])
+        unknown = workflow.missing_requirements(4, {'supplier_kind': 'ooo', 'supplier_vat': True}, [])
+        self.assertEqual(len(unknown), 1, 'форма не из списка — как невыбранная')
+
+    def test_step_5_needs_requisites(self):
+        self.assertTrue(workflow.missing_requirements(5, {'invoice_requisites': '  '}, []))
+        self.assertEqual(workflow.missing_requirements(5, {'invoice_requisites': 'ТОО «Ай Кор», БИН 1'}, []), [])
+
+    def test_supplier_label_reads_as_words(self):
+        self.assertEqual(workflow.supplier_label({}), '')
+        self.assertEqual(workflow.supplier_label({'supplier_kind': 'too', 'supplier_vat': False}), 'ТОО, без НДС')
+        self.assertEqual(workflow.supplier_label({'supplier_kind': 'ip', 'supplier_vat': True}), 'ИП, с НДС')
+        self.assertEqual(workflow.supplier_label({'supplier_kind': 'other'}), 'Другое')
+        self.assertEqual(workflow.supplier_label({'supplier_vat': False}), 'без НДС')
+
+    def test_every_step_has_a_plain_instruction(self):
+        """Пояснение шага видит человек, который в разделе первый раз: оно есть у каждого
+        шага и написано фразой, а не названием шага."""
+        for step in workflow.STEPS:
+            brief = step.get('brief') or ''
+            self.assertGreaterEqual(len(brief), 40, 'шаг %s: пояснение слишком короткое' % step['no'])
+            self.assertNotEqual(brief.strip(), step['title'])
+
     def test_step_10_files_are_conditional(self):
         base = {'paid_on': date(2026, 9, 1), 'paid_amount': 100}
         self.assertEqual(workflow.missing_requirements(10, base, []), [])
@@ -242,6 +273,77 @@ class StateAndMoneyTests(unittest.TestCase):
         items = [{'name': 'Бумага А4', 'quantity': 1, 'unit_price': '2 500'},
                  {'name': 'Карандаш', 'quantity': 3, 'unit_price': 150}]
         self.assertEqual(workflow.items_total(items), Decimal('2950.00'))
+
+    # Те же пары стоят в tests/payments_meta.test.mjs («строка считается как на сервере»):
+    # форма и сервер обязаны сойтись до тиына. Меняете одну таблицу — меняйте обе.
+    LINE_TOTALS = [
+        ('5', '2000', '10000.00'),
+        ('2,5', '10,01', '25.03'),          # 25,025 — половина вверх; в двоичной дроби вышло бы 25,02
+        ('1,5', '33,33', '50.00'),          # 49,995
+        ('0,333', '3', '1.00'),             # 0,999
+        ('3', '0,335', '1.02'),             # цена сначала до тиына: 0,34
+        ('1,0005', '100', '100.10'),        # количество сначала до тысячных: 1,001
+        ('0,0004', '100', '0.00'),
+        ('1234567,891', '98765,43', '121932628618.81'),
+        ('20', '2 500', '50000.00'),
+        ('7', '0,1', '0.70'),
+        ('0.1', '0.2', '0.02'),
+        ('3', '1 234,565', '3703.71'),
+        ('2.675', '1', '2.68'),
+        ('1', '2.675', '2.68'),
+    ]
+
+    def test_line_total_is_quantity_times_price_rounded_half_up(self):
+        for quantity, price, expected in self.LINE_TOTALS:
+            item = {'quantity': quantity, 'unit_price': price}
+            self.assertEqual(workflow.item_total(item), Decimal(expected), '%s × %s' % (quantity, price))
+
+    def test_request_total_is_the_sum_of_the_lines(self):
+        """Каждая строка округляется сама, итог — сумма строк, как в счёте поставщика.
+        Раньше итог округлялся один раз по неокруглённым произведениям: две строки
+        «1,5 × 33,33» показывали 50 + 50, а заявка сохранялась на 99,99."""
+        lines = [{'quantity': '1,5', 'unit_price': '33,33'}] * 2
+        self.assertEqual(workflow.items_total(lines), Decimal('100.00'))
+        self.assertEqual(workflow.items_total(lines), sum(workflow.item_total(i) for i in lines))
+        self.assertEqual(workflow.items_total([]), Decimal('0.00'))
+
+    def test_missing_quantity_is_one_unit(self):
+        self.assertEqual(workflow.item_total({'unit_price': 700}), Decimal('700.00'))
+        self.assertEqual(workflow.item_total({'quantity': '', 'unit_price': 700}), Decimal('700.00'))
+
+    def test_garbage_numbers_do_not_crash_the_request(self):
+        """«NaN» и «Infinity» Decimal считает числами, а сравнение и округление на них падают;
+        число длиннее, чем вмещает база, роняло quantize. Проверка полей должна назвать
+        позицию, а не отдать 500."""
+        self.assertEqual(workflow.to_decimal('NaN', Decimal('7')), Decimal('7'))
+        self.assertEqual(workflow.to_decimal('Infinity'), Decimal('0'))
+        self.assertEqual(workflow.to_decimal('-inf'), Decimal('0'))
+        self.assertGreater(workflow.item_quantity({'quantity': '1e40'}), workflow.MAX_QUANTITY)
+        self.assertGreater(workflow.item_price({'unit_price': '1e40'}), workflow.MAX_MONEY)
+        self.assertLess(workflow.item_price({'unit_price': '-1e40'}), 0)
+        self.assertEqual(workflow.item_quantity({'quantity': workflow.MAX_QUANTITY}), workflow.MAX_QUANTITY)
+
+
+class TwoWayChoiceTests(unittest.TestCase):
+    """Выбор из двух вариантов (НДС и подобные): «не выбрано» — не «нет»."""
+
+    def setUp(self):
+        from payments import routes
+        self.routes = routes
+
+    def test_empty_is_not_a_refusal(self):
+        for empty in (None, '', 'null'):
+            self.assertIsNone(self.routes._choice_bool(empty))
+
+    def test_both_answers_are_read(self):
+        for yes in (True, 'true', 1, '1', 'да'):
+            self.assertIs(self.routes._choice_bool(yes), True, yes)
+        for no in (False, 'false', 0, '0', 'нет'):
+            self.assertIs(self.routes._choice_bool(no), False, no)
+
+    def test_garbage_is_an_error_not_a_silent_no(self):
+        with self.assertRaises(self.routes.ApiError):
+            self.routes._choice_bool('maybe')
 
 
 if __name__ == '__main__':

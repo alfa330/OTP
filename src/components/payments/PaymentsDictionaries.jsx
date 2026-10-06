@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Loader2, Plus } from 'lucide-react';
-import { iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal, IosSegmented, IosToggle } from '../ui/ios';
+import { iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import {
-    CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, ORDER_STATUS_META, PARTY_KIND_OPTIONS, fmtDate, fmtMoney,
-    parseAmount, tonePill,
+    CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HINTS, ORDER_STATUS_META, PARTY_KIND_OPTIONS, VAT_OPTIONS, fmtDate,
+    fmtMoney, tonePill,
 } from './paymentsMeta';
-import { AmountInput, ErrorBox, Field, UserSelect, errorText } from './paymentsUi';
+import { AmountInput, Choice, ErrorBox, Field, UserSelect, errorText } from './paymentsUi';
 
 /*
  * Справочники раздела: проекты, категории (две ступени), контрагенты, наши
@@ -19,9 +19,17 @@ import { AmountInput, ErrorBox, Field, UserSelect, errorText } from './paymentsU
  * данными (SCHEMAS): колонки списка и поля формы.
  *
  * Удалять можно только то, на что не ссылаются заявки; иначе сервер ответит
- * 409, а строке предлагается снять галочку «активна» — записанное в заявках
- * не должно терять подпись.
+ * 409, а запись предлагается скрыть — записанное в заявках не должно терять
+ * подпись.
+ *
+ * Всё, что выбирается из двух-трёх вариантов (НДС, форма, «активна / скрыта»,
+ * «выбранные / все»), стоит сегментами с пояснением под «i», а не тумблером:
+ * у тумблера не видно, что значит «выключено» (решение владельца 06.10.2026).
  */
+
+const ACTIVE_OPTIONS = [{ value: true, label: 'Активна' }, { value: false, label: 'Скрыта' }];
+const SCOPE_OPTIONS = [{ value: false, label: 'Выбранные' }, { value: true, label: 'Все' }];
+const ORDER_STATUS_OPTIONS = [{ value: 'active', label: 'Действующий' }, { value: 'cancelled', label: 'Отменён' }];
 
 const dateTrigger = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
     + 'text-[14px] tabular-nums text-slate-900 border-0 transition hover:bg-slate-200/70 '
@@ -37,7 +45,7 @@ const TABS = [
 ];
 
 const ActivePill = ({ active }) => (active ? null : (
-    <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11.5px] text-slate-600">не активна</span>
+    <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11.5px] text-slate-600">скрыта</span>
 ));
 
 const StatusPill = ({ meta }) => {
@@ -257,13 +265,22 @@ const PaymentsDictionaries = ({ apiBaseUrl, headers, users, dictionaries, roles 
                 return (
                     <>
                         <Field label="Название" required><input className={iosInput} value={draft.name} onChange={(e) => set('name', e.target.value)} maxLength={200} /></Field>
-                        <div className="grid gap-3 sm:grid-cols-3">
-                            <Field label="Форма"><CustomSelect value={draft.kind} onChange={(v) => set('kind', v)} options={[{ value: null, label: '—' }, ...PARTY_KIND_OPTIONS]} variant="ios" ariaLabel="Форма" /></Field>
-                            <Field label="БИН / ИИН"><input className={`${iosInput} tabular-nums`} inputMode="numeric" value={draft.bin} onChange={(e) => set('bin', e.target.value.replace(/\D/g, '').slice(0, 12))} placeholder="12 цифр" /></Field>
-                            <Field label="НДС" optionalMark={false}>
-                                <div className="flex h-[42px] items-center gap-2 px-1 text-[13.5px] text-slate-700"><IosToggle checked={draft.vat_payer} onChange={(v) => set('vat_payer', v)} /> плательщик</div>
+                        <div className="flex flex-wrap gap-x-6 gap-y-3">
+                            <Field as="div" label="Форма" hint={HINTS.partyKind}>
+                                <Choice value={draft.kind} options={PARTY_KIND_OPTIONS} onChange={(v) => set('kind', v)} ariaLabel="Форма" />
+                            </Field>
+                            <Field as="div" label="НДС" optionalMark={false} hint={HINTS.vatPayer}>
+                                <Choice value={Boolean(draft.vat_payer)} options={VAT_OPTIONS} onChange={(v) => set('vat_payer', v)} ariaLabel="НДС" />
                             </Field>
                         </div>
+                        <Field label="БИН / ИИН" hint="12 цифр. По БИН раздел находит прошлые оплаты этому контрагенту.">
+                            <input className={`${iosInput} tabular-nums`} inputMode="numeric" value={draft.bin} onChange={(e) => set('bin', e.target.value.replace(/\D/g, '').slice(0, 12))} placeholder="12 цифр" />
+                        </Field>
+                        {tab === 'legal_entities' && (
+                            <Field label="Реквизиты" hint="Банк, ИИК, БИК, Кбе, адрес. Когда бухгалтерия на шаге 5 выбирает это юр. лицо, реквизиты подставляются сами.">
+                                <textarea className={`${iosInput} min-h-[88px] resize-y`} value={draft.requisites} onChange={(e) => set('requisites', e.target.value)} maxLength={4000} placeholder={'АО «Банк», ИИК KZ…, БИК …, Кбе 17\nг. Алматы, …'} />
+                            </Field>
+                        )}
                         {tab === 'counterparties' && (
                             <>
                                 <Field label="Реквизиты" hint="Банк, IBAN, адрес — пригодится при запросе счёта."><textarea className={`${iosInput} min-h-[72px] resize-y`} value={draft.requisites} onChange={(e) => set('requisites', e.target.value)} maxLength={4000} /></Field>
@@ -279,18 +296,22 @@ const PaymentsDictionaries = ({ apiBaseUrl, headers, users, dictionaries, roles 
                         <Field label="Контрагент" required>
                             <CustomSelect value={draft.counterparty_id} onChange={(v) => set('counterparty_id', v)} options={counterpartyOptions} placeholder="Выберите контрагента" variant="ios" searchable ariaLabel="Контрагент" />
                         </Field>
+                        {/* По два поля в ряд: в три колонки подписи «Действует до · необязательно · i»
+                            не помещались и переносились, а «i» наезжал на соседнее поле. */}
                         <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Номер договора" required><input className={iosInput} value={draft.number} onChange={(e) => set('number', e.target.value)} maxLength={100} /></Field>
-                            <Field label="Статус" required optionalMark={false}>
-                                <CustomSelect value={draft.status} onChange={(v) => set('status', v)} options={CONTRACT_STATUS_OPTIONS} variant="ios" ariaLabel="Статус договора" />
-                            </Field>
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-3">
                             <Field label="Подписан"><IosDatePicker value={draft.signed_on} onChange={(v) => set('signed_on', v || '')} allowEmpty placeholder="Дата" triggerClassName={dateTrigger} ariaLabel="Дата подписания" /></Field>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Действует с"><IosDatePicker value={draft.starts_on} onChange={(v) => set('starts_on', v || '')} allowEmpty placeholder="Дата" triggerClassName={dateTrigger} ariaLabel="Начало действия" /></Field>
                             <Field label="Действует до" hint="Пусто — бессрочный. Просроченный договор для проверки счёта считается отсутствующим."><IosDatePicker value={draft.ends_on} onChange={(v) => set('ends_on', v || '')} allowEmpty placeholder="Бессрочно" triggerClassName={dateTrigger} ariaLabel="Окончание действия" /></Field>
                         </div>
-                        <Field label="Наше юр. лицо"><CustomSelect value={draft.legal_entity_id} onChange={(v) => set('legal_entity_id', v)} options={[{ value: null, label: '—' }, ...legalEntityOptions]} variant="ios" ariaLabel="Юр. лицо" /></Field>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Статус" required optionalMark={false} hint={HINTS.contractStatus}>
+                                <CustomSelect value={draft.status} onChange={(v) => set('status', v)} options={CONTRACT_STATUS_OPTIONS} variant="ios" ariaLabel="Статус договора" />
+                            </Field>
+                            <Field label="Наше юр. лицо"><CustomSelect value={draft.legal_entity_id} onChange={(v) => set('legal_entity_id', v)} options={[{ value: null, label: '—' }, ...legalEntityOptions]} variant="ios" ariaLabel="Юр. лицо" /></Field>
+                        </div>
                         <Field label="Предмет договора"><input className={iosInput} value={draft.subject} onChange={(e) => set('subject', e.target.value)} maxLength={2000} /></Field>
                         <Field label="Примечание"><input className={iosInput} value={draft.note} onChange={(e) => set('note', e.target.value)} maxLength={2000} /></Field>
                     </>
@@ -305,29 +326,29 @@ const PaymentsDictionaries = ({ apiBaseUrl, headers, users, dictionaries, roles 
                         <Field label="Кому передаётся право согласования" required hint="Например, Директор по развитию. Он согласует счёт на шаге 9 вместо Учредителя — только если счёт подходит под все условия ниже.">
                             <UserSelect users={users} value={draft.delegate_user_id} onChange={(v) => set('delegate_user_id', v)} placeholder="Выберите сотрудника" />
                         </Field>
-                        <div className="grid gap-3 sm:grid-cols-3">
+                        <div className="grid gap-3 sm:grid-cols-2">
                             <Field label="Действует с" required optionalMark={false}><IosDatePicker value={draft.starts_on} onChange={(v) => set('starts_on', v || '')} allowEmpty placeholder="Как дата Приказа" triggerClassName={dateTrigger} ariaLabel="Начало действия" /></Field>
                             <Field label="Действует до" hint="Пусто — бессрочно."><IosDatePicker value={draft.ends_on} onChange={(v) => set('ends_on', v || '')} allowEmpty placeholder="Бессрочно" triggerClassName={dateTrigger} ariaLabel="Окончание действия" /></Field>
-                            <Field label="Лимит суммы" hint="Счёт согласуется по Приказу, только если сумма не превышает лимит. Пусто — без лимита."><AmountInput value={draft.amount_limit} onChange={(v) => set('amount_limit', v)} placeholder="Без лимита" ariaLabel="Лимит суммы" /></Field>
                         </div>
-                        <Field label="Проекты" required optionalMark={false}>
+                        <Field label="Лимит суммы, ₸" hint="Счёт согласуется по Приказу, только если сумма не превышает лимит. Пусто — без лимита."><AmountInput value={draft.amount_limit} onChange={(v) => set('amount_limit', v)} placeholder="Без лимита" ariaLabel="Лимит суммы" /></Field>
+                        <Field as="div" label="Проекты" required optionalMark={false} hint={{ ...HINTS.orderScope, intro: 'На счета каких проектов распространяется Приказ.' }}>
                             <div className="space-y-2">
-                                <div className="flex items-center gap-2 px-1 text-[13.5px] text-slate-700"><IosToggle checked={draft.all_projects} onChange={(v) => set('all_projects', v)} /> Все проекты</div>
+                                <Choice value={Boolean(draft.all_projects)} options={SCOPE_OPTIONS} onChange={(v) => set('all_projects', v)} ariaLabel="Проекты Приказа" />
                                 {!draft.all_projects && (
                                     <CustomSelect value={draft.project_ids} onChange={(v) => set('project_ids', v)} options={projectOptions} placeholder="Выберите проекты" variant="ios" multiple searchable ariaLabel="Проекты" />
                                 )}
                             </div>
                         </Field>
-                        <Field label="Контрагенты" required optionalMark={false} hint="Обязательное условие: поставщик по счёту должен входить в Приказ, иначе применяется стандартный согласующий.">
+                        <Field as="div" label="Контрагенты" required optionalMark={false} hint={{ ...HINTS.orderScope, intro: 'Счета каких поставщиков можно согласовать по Приказу. Если поставщика счёта здесь нет — счёт согласует Учредитель.' }}>
                             <div className="space-y-2">
-                                <div className="flex items-center gap-2 px-1 text-[13.5px] text-slate-700"><IosToggle checked={draft.all_counterparties} onChange={(v) => set('all_counterparties', v)} /> Все контрагенты</div>
+                                <Choice value={Boolean(draft.all_counterparties)} options={SCOPE_OPTIONS} onChange={(v) => set('all_counterparties', v)} ariaLabel="Контрагенты Приказа" />
                                 {!draft.all_counterparties && (
                                     <CustomSelect value={draft.counterparty_ids} onChange={(v) => set('counterparty_ids', v)} options={counterpartyOptions} placeholder="Выберите контрагентов" variant="ios" multiple searchable ariaLabel="Контрагенты" />
                                 )}
                             </div>
                         </Field>
-                        <Field label="Статус" required optionalMark={false}>
-                            <IosSegmented value={draft.status} options={[{ value: 'active', label: 'Действующий' }, { value: 'cancelled', label: 'Отменён' }]} onChange={(v) => set('status', v)} ariaLabel="Статус Приказа" />
+                        <Field as="div" label="Статус" required optionalMark={false} hint={HINTS.orderStatus}>
+                            <Choice value={draft.status} options={ORDER_STATUS_OPTIONS} onChange={(v) => set('status', v)} ariaLabel="Статус Приказа" />
                         </Field>
                         <Field label="Примечание"><input className={iosInput} value={draft.note} onChange={(e) => set('note', e.target.value)} maxLength={2000} /></Field>
                     </>
@@ -412,9 +433,9 @@ const PaymentsDictionaries = ({ apiBaseUrl, headers, users, dictionaries, roles 
                     <ErrorBox text={error} />
                     {renderForm()}
                     {showActiveToggle && editing?.id && (
-                        <div className="flex items-center gap-2 px-1 pt-1 text-[13.5px] text-slate-700">
-                            <IosToggle checked={draft.is_active} onChange={(v) => set('is_active', v)} /> активна — предлагается в новых заявках
-                        </div>
+                        <Field as="div" label="В новых заявках" optionalMark={false} hint={HINTS.active}>
+                            <Choice value={Boolean(draft.is_active)} options={ACTIVE_OPTIONS} onChange={(v) => set('is_active', v)} ariaLabel="Активна ли запись" />
+                        </Field>
                     )}
                 </div>
             </IosModal>

@@ -18,7 +18,6 @@ Blueprint собирается фабрикой и получает зависи
 import json
 import logging
 from datetime import date, datetime
-from decimal import Decimal
 from functools import wraps
 from io import BytesIO
 
@@ -79,6 +78,26 @@ def _bool(value):
     if isinstance(value, bool):
         return value
     return str(value or '').strip().lower() in ('1', 'true', 'yes', 'да', 'on')
+
+
+def _choice_bool(value):
+    """Выбор из двух вариантов: True/False, а None — «ещё не выбрано».
+
+    Отдельно от _bool намеренно: у НДС «не выбрано» и «без НДС» — разные ответы,
+    и пустое значение нельзя молча считать отказом.
+    """
+    if value in (None, '', 'null'):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ('1', 'true', 'yes', 'да', 'on'):
+        return True
+    if text in ('0', 'false', 'no', 'нет', 'off'):
+        return False
+    # Непонятное значение — не «нет»: иначе мусор в запросе записался бы как
+    # осознанное «без НДС».
+    raise ApiError('Выберите один из двух вариантов', code='PAYMENT_REQUEST_INVALID')
 
 
 def _text(value, field, *, required=False, limit=None):
@@ -289,6 +308,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
 
     # ── Проверка полей заявки ───────────────────────────────────────────────
 
+    def _not_a_number(value):
+        """Значение прислали, но числом оно не читается."""
+        return value not in (None, '') and (isinstance(value, bool) or workflow.to_decimal(value, None) is None)
+
     def _validate_request(cursor, payload, ctx, *, creating, current=None):
         fields = {}
         errors = []
@@ -301,22 +324,39 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         items = None
         if raw_items is not None or creating:
             items = []
-            for raw in (raw_items or []):
-                name = _text((raw or {}).get('name'), 'name', limit=300)
+            for raw in (raw_items if isinstance(raw_items, list) else []):
+                raw = raw if isinstance(raw, dict) else {}
+                name = _text(raw.get('name'), 'name', limit=300)
                 if not name:
                     continue
-                qty = workflow.to_decimal((raw or {}).get('quantity'), Decimal('1'))
-                price = workflow.to_decimal((raw or {}).get('unit_price'))
-                if qty <= 0:
+                # Количество и цена — сразу в той точности, в какой лягут в базу:
+                # сумма считается из тех же чисел, что потом покажет карточка.
+                qty = workflow.item_quantity(raw)
+                price = workflow.item_price(raw)
+                # Не число («abc», «NaN») — ошибка, а не молчаливая «одна штука» или
+                # «бесплатно»: пустое количество по умолчанию 1, а нечитаемое — нет.
+                if _not_a_number(raw.get('quantity')):
+                    errors.append('Позиция «%s»: количество должно быть числом' % name)
+                elif qty <= 0:
                     errors.append('Позиция «%s»: количество должно быть больше нуля' % name)
-                if price < 0:
+                elif qty > workflow.MAX_QUANTITY:
+                    errors.append('Позиция «%s»: слишком большое количество' % name)
+                if _not_a_number(raw.get('unit_price')):
+                    errors.append('Позиция «%s»: цена должна быть числом' % name)
+                elif price < 0:
                     errors.append('Позиция «%s»: цена не может быть отрицательной' % name)
-                items.append({'name': name, 'quantity': qty, 'unit': _text((raw or {}).get('unit'), 'unit', limit=32),
+                elif price > workflow.MAX_MONEY:
+                    errors.append('Позиция «%s»: слишком большая цена' % name)
+                items.append({'name': name, 'quantity': qty, 'unit': _text(raw.get('unit'), 'unit', limit=32),
                               'unit_price': price})
             if not items:
                 errors.append('Добавьте хотя бы одну позицию: наименование, количество, цена за единицу')
-            elif workflow.items_total(items) <= 0:
-                errors.append('Сумма заявки должна быть больше нуля')
+            else:
+                total = workflow.items_total(items)
+                if total <= 0:
+                    errors.append('Сумма заявки должна быть больше нуля')
+                elif total > workflow.MAX_MONEY and not any('слишком больш' in e for e in errors):
+                    errors.append('Сумма заявки слишком большая')
 
         for key in ('project_id', 'category_id', 'subcategory_id', 'counterparty_id', 'legal_entity_id',
                     'contract_id', 'department_id', 'manager_id'):
@@ -365,6 +405,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         for key in ('needs_power_of_attorney', 'needs_payment_order'):
             if key in payload:
                 fields[key] = _bool(payload.get(key))
+        if 'supplier_kind' in payload:
+            fields['supplier_kind'] = _party_kind(payload.get('supplier_kind'))
+        if 'supplier_vat' in payload:
+            fields['supplier_vat'] = _choice_bool(payload.get('supplier_vat'))
 
         if 'department_id' in fields:
             dept = queries.department_brief(cursor, fields['department_id'])
@@ -538,7 +582,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 saved = queries.upsert_legal_entity(
                     cursor, entity_id=row_id, name=_text(payload.get('name'), 'name', required=True, limit=200),
                     bin_code=_digits(payload.get('bin')) or None, kind=_party_kind(payload.get('kind')),
-                    vat_payer=_bool(payload.get('vat_payer')), note=_text(payload.get('note'), 'note', limit=2000),
+                    vat_payer=_bool(payload.get('vat_payer')),
+                    requisites=_text(payload.get('requisites'), 'requisites', limit=4000),
+                    note=_text(payload.get('note'), 'note', limit=2000),
                     is_active=_bool(payload.get('is_active', True)), actor_id=ctx['user_id'])
             elif name == 'counterparties':
                 saved = queries.upsert_counterparty(
@@ -758,12 +804,21 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                           comment='Руководитель снят в заявке')
             changes = queries.update_request_fields(cursor, request_id, fields)
             if items is not None:
-                before = [(i['name'], str(i['quantity']), str(i['unit_price'])) for i in queries.list_items(cursor, request_id)]
-                after = [(i['name'], str(i['quantity']), str(i['unit_price'])) for i in items]
+                # Сравниваем значения, а не их запись: «5.000» из базы и «5» из формы —
+                # одно и то же количество. Раньше сравнивались строки и без единицы
+                # измерения: любая правка заявки писала в историю «Изменено: Позиции,
+                # Сумма», а смена одной только единицы могла не сохраниться.
+                def item_key(item):
+                    return (item['name'], workflow.item_quantity(item), item.get('unit') or '',
+                            workflow.item_price(item))
+
+                before = [item_key(i) for i in queries.list_items(cursor, request_id)]
+                after = [item_key(i) for i in items]
                 if before != after:
                     total = queries.replace_items(cursor, request_id, items)
                     changes['items'] = (len(before), len(after))
-                    changes['amount'] = (queries.plain(current.get('amount')), float(total))
+                    if workflow.to_decimal(current.get('amount')) != total:
+                        changes['amount'] = (queries.plain(current.get('amount')), float(total))
             if changes:
                 queries.log_event(cursor, request_id, 'edited', actor, payload={'changes': changes})
             refreshed = queries.read_request(cursor, request_id)
@@ -819,8 +874,22 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
 
             # Поля шага — то, что ответственный вписывает при отписке.
             step_fields = {}
-            if step_no == 5 and 'invoice_requisites' in payload:
-                step_fields['invoice_requisites'] = _text(payload.get('invoice_requisites'), 'invoice_requisites')
+            if step_no == 4:
+                # Форма поставщика и НДС — выбором, а не словами в комментарии.
+                if 'supplier_kind' in payload:
+                    step_fields['supplier_kind'] = _party_kind(payload.get('supplier_kind'))
+                if 'supplier_vat' in payload:
+                    step_fields['supplier_vat'] = _choice_bool(payload.get('supplier_vat'))
+            if step_no == 5:
+                if 'invoice_requisites' in payload:
+                    step_fields['invoice_requisites'] = _text(payload.get('invoice_requisites'), 'invoice_requisites')
+                # Юр. лицо плательщика бухгалтерия называет вместе с реквизитами —
+                # на шаге 7 инициатору останется его только подтвердить.
+                if payload.get('legal_entity_id'):
+                    entity_id = _int(payload.get('legal_entity_id'), 'legal_entity_id')
+                    if not queries.read_legal_entity(cursor, entity_id):
+                        raise ApiError('Юр. лицо не найдено', code='PAYMENT_REQUEST_INVALID')
+                    step_fields['legal_entity_id'] = entity_id
             if step_no == 7:
                 for key in ('invoice_description', 'invoice_number'):
                     if key in payload:

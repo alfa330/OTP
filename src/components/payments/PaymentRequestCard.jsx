@@ -3,15 +3,14 @@ import axios from 'axios';
 import { Ban, Check, ChevronDown, Loader2, Pencil, RotateCcw, Trash2, UserRoundCog, X } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
-import CustomSelect from '../ui/CustomSelect';
-import InfoHint from '../common/InfoHint';
+import PaymentStepForm from './PaymentStepForm';
 import {
     ROLE_LABELS, SOURCE_META, TYPE_META, approverBasisLine, attachmentKindsForStep, cardNumberLabel, describeEvent,
-    dueLabel, fmtDate, fmtDateTime, fmtMoney, fmtQty, isClosed, netAmount, passedStepsLabel, requestState, routeSummary,
-    splitRoute, tonePill,
+    dueLabel, fmtDate, fmtDateTime, fmtMoney, fmtQty, isClosed, netAmount, passedStepsLabel, requestState, splitRoute,
+    supplierLabel, tonePill,
 } from './paymentsMeta';
 import {
-    AmountInput, AttachmentList, ErrorBox, Field, FilePicker, NoticeBox, Row, SectionTitle, StatePill, UserSelect,
+    AmountInput, AttachmentList, ErrorBox, Field, FilePicker, Row, RouteHint, SectionTitle, StatePill, UserSelect,
     appendPayloadFiles, errorText,
 } from './paymentsUi';
 
@@ -27,10 +26,10 @@ import {
  * отписки, будущие — короткими серыми строками.
  *
  * Действие на шаге — прямо в маршруте, а не отдельным окном: это единственное
- * частое действие над заявкой. Форма показывает ровно то, что нужно на ЭТОМ
- * шаге (реквизиты — на 5-м, счёт и описание — на 7-м, дата и сумма оплаты —
- * на 10-м). Пользователю без права на шаг форма не рисуется вовсе — кнопка,
- * которая всегда отвечает отказом, хуже её отсутствия.
+ * частое действие над заявкой. Форма шага — PaymentStepForm.jsx: у каждого шага
+ * своя, с выбором вариантов вместо текста. Пользователю без права на шаг форма
+ * не рисуется вовсе — кнопка, которая всегда отвечает отказом, хуже её
+ * отсутствия.
  *
  * Файлы живут в одном месте — «Документы», с подписью шага. В маршруте их нет
  * (кроме текущего шага, где их прикладывают): один и тот же список дважды на
@@ -45,7 +44,6 @@ const dateTrigger = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3
     + 'focus:outline-none focus:ring-2 focus:ring-blue-500/70 [&>span]:flex-1 [&>span]:text-left';
 
 const EVENTS_SHOWN = 6;
-const PREVIEW_DEBOUNCE_MS = 300;
 
 const shortDateTime = (value) => {
     const text = fmtDateTime(value);
@@ -76,36 +74,6 @@ const StepDot = ({ kind, no }) => {
     return <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-white text-[11px] tabular-nums text-slate-400 ring-1 ring-slate-200">{no}</span>;
 };
 
-const RouteHint = ({ basis }) => {
-    if (!basis) return null;
-    const summary = routeSummary(basis);
-    const evaluations = basis.evaluations || [];
-    return (
-        <InfoHint title="Основание">
-            <div className="space-y-2 text-[12px] leading-snug">
-                <div>
-                    Стандартный согласующий: <b>{basis.standard_label || 'Учредитель'}</b>.
-                    {' '}Фактический: <b>{summary.approver}</b>.
-                </div>
-                {evaluations.length === 0 && <div>Действующих Приказов нет — счёт согласует Учредитель.</div>}
-                {evaluations.map((item) => (
-                    <div key={item.order_id} className="rounded-lg bg-slate-100 px-2 py-1.5">
-                        <div className="font-medium">Приказ №{item.number}{item.issued_on ? ` от ${item.issued_on}` : ''} — {item.applies ? 'применён' : 'не применён'}</div>
-                        <ul className="mt-0.5 space-y-0.5">
-                            {(item.checks || []).map((check) => (
-                                <li key={check.key} className={check.ok ? 'text-slate-600' : 'text-rose-700'}>
-                                    {check.ok ? '✓' : '✗'} {check.label}: {check.detail}
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
-                ))}
-                {basis.conflict && <div className="text-amber-700">Несколько действующих Приказов дают право разным людям — применён приоритетный.</div>}
-            </div>
-        </InfoHint>
-    );
-};
-
 const PaymentRequestCard = ({
     open, onClose, requestId, apiBaseUrl, headers, dictionaries, users, me, onChanged, onEdit, showToast,
 }) => {
@@ -114,16 +82,14 @@ const PaymentRequestCard = ({
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
     const [comment, setComment] = useState('');
-    const [fields, setFields] = useState({});
-    const [files, setFiles] = useState([]);
     const [extraFiles, setExtraFiles] = useState([]);
     const [mode, setMode] = useState(null);       // 'return' | 'reject' | 'cancel' | 'refund' | 'delete' | 'reassign-<n>'
     const [reassignTo, setReassignTo] = useState(null);
     const [refund, setRefund] = useState({ refund_on: '', refund_amount: 0 });
     const [showFolded, setShowFolded] = useState(false);
     const [showAllEvents, setShowAllEvents] = useState(false);
-    const [preview, setPreview] = useState(null);
     const modePanelRef = useRef(null);
+    const errorRef = useRef(null);
 
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
@@ -145,15 +111,19 @@ const PaymentRequestCard = ({
     useEffect(() => {
         if (!open) { setData(null); setMode(null); return; }
         setComment('');
-        setFields({});
-        setFiles([]);
         setExtraFiles([]);
         setMode(null);
         setShowFolded(false);
         setShowAllEvents(false);
-        setPreview(null);
         load();
     }, [open, load]);
+
+    /* Отказ сервера показан над маршрутом, а человек в этот момент у кнопки шага
+       ниже — подкручиваем к тексту ошибки, иначе нажатие выглядит как «ничего
+       не произошло». */
+    useEffect(() => {
+        if (error && data) errorRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, [error, data]);
 
     /* Панель редкого действия открывается из меню в подвале — подкручиваем к ней. */
     useEffect(() => {
@@ -167,51 +137,6 @@ const PaymentRequestCard = ({
     const current = useMemo(() => (active ? steps.find((step) => step.state === 'current') : null), [steps, active]);
     const state = requestState(request);
     const route = useMemo(() => splitRoute(steps), [steps]);
-
-    // Поля шага заполняются значениями заявки, чтобы человек видел и правил
-    // текущее, а не пустое поле поверх уже введённого.
-    useEffect(() => {
-        if (!request || !current) return;
-        const next = {};
-        if (current.step_no === 5) next.invoice_requisites = request.invoice_requisites || '';
-        if (current.step_no === 7) {
-            next.invoice_description = request.invoice_description || '';
-            next.invoice_number = request.invoice_number || '';
-            next.invoice_date = request.invoice_date ? String(request.invoice_date).slice(0, 10) : '';
-            next.legal_entity_id = request.legal_entity_id ?? null;
-            next.contract_id = request.contract_id ?? null;
-            next.needs_power_of_attorney = Boolean(request.needs_power_of_attorney);
-            next.needs_payment_order = Boolean(request.needs_payment_order);
-        }
-        if (current.step_no === 8) next.previous_payment_note = request.previous_payment_note || '';
-        if (current.step_no === 10) {
-            next.paid_on = request.paid_on ? String(request.paid_on).slice(0, 10) : '';
-            next.paid_amount = request.paid_amount ?? request.amount ?? 0;
-        }
-        setFields(next);
-    }, [request, current]);
-
-    /* Шаг 7: ещё ДО отправки видно, кто согласует счёт (Учредитель или
-       согласующий по Приказу) и не остановит ли его правило договора. Сервер
-       считает тем же кодом, что и при отписке, — расхождения быть не может. */
-    const canAct = Boolean(permissions.can_act);
-    const previewContract = fields.contract_id ?? null;
-    const previewDate = fields.invoice_date || '';
-    useEffect(() => {
-        if (!request || current?.step_no !== 7 || !canAct) { setPreview(null); return undefined; }
-        const timer = setTimeout(() => {
-            const params = new URLSearchParams();
-            params.set('amount', String(request.amount || 0));
-            if (request.project_id) params.set('project_id', request.project_id);
-            if (request.counterparty_id) params.set('counterparty_id', request.counterparty_id);
-            if (previewContract) params.set('contract_id', previewContract);
-            if (previewDate) params.set('on_date', previewDate);
-            axios.get(`${apiBaseUrl}/api/payments/route-preview?${params}`, { headers: headers() })
-                .then((response) => setPreview(response.data || null))
-                .catch(() => setPreview(null));
-        }, PREVIEW_DEBOUNCE_MS);
-        return () => clearTimeout(timer);
-    }, [apiBaseUrl, headers, request, current?.step_no, canAct, previewContract, previewDate]);
 
     const apply = useCallback((response) => {
         const next = response?.data;
@@ -231,7 +156,6 @@ const PaymentRequestCard = ({
             if (successText) toastRef.current?.(successText, 'success');
             setMode(null);
             setComment('');
-            setFiles([]);
             setExtraFiles([]);
             return true;
         } catch (err) {
@@ -244,19 +168,19 @@ const PaymentRequestCard = ({
         }
     }, [apply, onChanged]);
 
-    const complete = () => run(() => {
+    const complete = ({ fields: stepFields, comment: stepComment, files: stepFiles }) => run(() => {
         const form = new FormData();
-        form.append('payload', JSON.stringify({ ...fields, comment }));
-        appendPayloadFiles(form, files);
+        form.append('payload', JSON.stringify({ ...stepFields, comment: stepComment }));
+        appendPayloadFiles(form, stepFiles);
         return axios.post(`${apiBaseUrl}/api/payments/requests/${requestId}/steps/${current.step_no}/complete`, form, { headers: headers() });
     }, 'Шаг отписан');
 
-    const returnStep = () => run(() => axios.post(
-        `${apiBaseUrl}/api/payments/requests/${requestId}/steps/${current.step_no}/return`, { comment }, { headers: headers() },
+    const returnStep = (reason) => run(() => axios.post(
+        `${apiBaseUrl}/api/payments/requests/${requestId}/steps/${current.step_no}/return`, { comment: reason }, { headers: headers() },
     ), 'Заявка возвращена на доработку');
 
-    const rejectStep = () => run(() => axios.post(
-        `${apiBaseUrl}/api/payments/requests/${requestId}/steps/${current.step_no}/reject`, { comment }, { headers: headers() },
+    const rejectStep = (reason) => run(() => axios.post(
+        `${apiBaseUrl}/api/payments/requests/${requestId}/steps/${current.step_no}/reject`, { comment: reason }, { headers: headers() },
     ), 'Заявка отклонена');
 
     const cancel = () => run(() => axios.post(
@@ -288,14 +212,6 @@ const PaymentRequestCard = ({
         if (ok) { onChanged?.({ id: requestId, deleted: true }); onClose?.(); }
     };
 
-    const legalEntityOptions = useMemo(() => (dictionaries?.legal_entities || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
-    const contractOptions = useMemo(() => (dictionaries?.contracts || [])
-        .filter((item) => item.counterparty_id === request?.counterparty_id)
-        .map((item) => ({
-            value: item.id,
-            label: `№${item.number}${item.ends_on ? ` до ${fmtDate(item.ends_on)}` : ''}${item.status !== 'active' ? ' · недействующий' : ''}`,
-        })), [dictionaries, request?.counterparty_id]);
-
     const attachmentsByStep = useMemo(() => {
         const map = {};
         (data?.attachments || []).forEach((item) => { (map[item.step_no || 0] ||= []).push(item); });
@@ -307,153 +223,6 @@ const PaymentRequestCard = ({
 
     const stepFileKinds = useMemo(() => attachmentKindsForStep(current), [current]);
     const stepTakesFiles = Boolean(current && (current.files?.length > 0 || current.step_no === 1));
-
-    const renderStepForm = () => {
-        if (!current || !permissions.can_act) return null;
-        const no = current.step_no;
-        const missingFiles = current.files_required && !(attachmentsByStep[no] || []).length && !files.length;
-        const previewReason = no === 7 && preview?.contract_check && !preview.contract_check.ok ? preview.contract_check.reason : '';
-        const previewApprover = no === 7 && preview?.route ? routeSummary(preview.route) : null;
-        return (
-            <div className="mt-2.5 space-y-3 rounded-2xl bg-white p-3.5 ring-1 ring-blue-100">
-                {permissions.acting_as_admin && (
-                    <div className="text-[12px] text-slate-500">
-                        Вы отписываетесь за ответственного ({current.assignee_name || current.role_label}) как администратор раздела — это будет видно в истории.
-                    </div>
-                )}
-                {/* Блок «ожидает договор» на 7-м шаге показывает предпросмотр —
-                    он свежее записанной причины и учитывает выбранный сейчас договор. */}
-                {request.block_code && no !== 7 && <NoticeBox text={request.block_reason} />}
-                {previewReason && <NoticeBox text={previewReason} />}
-                {no === 5 && (
-                    <Field label="Реквизиты для счёта" required optionalMark={false} hint="Юр. лицо, БИН, банк, IBAN — то, на что поставщик выставит счёт.">
-                        <textarea className={`${iosInput} min-h-[96px] resize-y`} value={fields.invoice_requisites || ''} onChange={(event) => setFields((prev) => ({ ...prev, invoice_requisites: event.target.value }))} maxLength={4000} />
-                    </Field>
-                )}
-                {no === 7 && (
-                    <>
-                        <Field label="Описание счёта" required optionalMark={false} hint="Одним текстом: что закупается, за какой период, оплата с какого на какое юр. лицо, сумма, отдел.">
-                            <textarea className={`${iosInput} min-h-[96px] resize-y`} value={fields.invoice_description || ''} onChange={(event) => setFields((prev) => ({ ...prev, invoice_description: event.target.value }))} maxLength={4000} />
-                        </Field>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                            <Field label="Номер счёта">
-                                <input className={iosInput} value={fields.invoice_number || ''} onChange={(event) => setFields((prev) => ({ ...prev, invoice_number: event.target.value }))} maxLength={100} />
-                            </Field>
-                            <Field label="Дата счёта" hint="По ней проверяется действие договора и Приказа.">
-                                <IosDatePicker value={fields.invoice_date || ''} onChange={(value) => setFields((prev) => ({ ...prev, invoice_date: value || '' }))} allowEmpty placeholder="Сегодня" triggerClassName={dateTrigger} ariaLabel="Дата счёта" />
-                            </Field>
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                            <Field label="Юр. лицо плательщика" required optionalMark={false}>
-                                <CustomSelect value={fields.legal_entity_id ?? null} onChange={(value) => setFields((prev) => ({ ...prev, legal_entity_id: value }))} options={legalEntityOptions} placeholder={legalEntityOptions.length ? 'Выберите' : 'Справочник пуст — заведите юр. лица'} variant="ios" ariaLabel="Юр. лицо" />
-                            </Field>
-                            <Field label="Договор" hint={`Обязателен, если сумма выше ${fmtMoney(data?.contract_check?.threshold || 300000)}.`}>
-                                <CustomSelect value={fields.contract_id ?? null} onChange={(value) => setFields((prev) => ({ ...prev, contract_id: value }))} options={[{ value: null, label: 'Без договора' }, ...contractOptions]} placeholder="Без договора" variant="ios" ariaLabel="Договор" />
-                            </Field>
-                        </div>
-                        <div className="flex flex-wrap gap-4 px-1 text-[13px] text-slate-700">
-                            <label className="inline-flex items-center gap-2">
-                                <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-blue-600" checked={Boolean(fields.needs_power_of_attorney)} onChange={(event) => setFields((prev) => ({ ...prev, needs_power_of_attorney: event.target.checked }))} />
-                                Нужна доверенность
-                            </label>
-                            <label className="inline-flex items-center gap-2">
-                                <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-blue-600" checked={Boolean(fields.needs_payment_order)} onChange={(event) => setFields((prev) => ({ ...prev, needs_payment_order: event.target.checked }))} />
-                                Нужно платёжное поручение
-                            </label>
-                        </div>
-                        {previewApprover && !previewReason && (
-                            <div className="rounded-xl bg-slate-50 px-3 py-2 text-[12.5px]">
-                                <div className="flex items-center gap-1.5">
-                                    <span className="text-slate-500">Счёт согласует</span>
-                                    <span className="font-medium text-slate-900">{previewApprover.approver}</span>
-                                    <RouteHint basis={preview.route} />
-                                </div>
-                                {approverBasisLine(preview.route) && <div className="mt-0.5 text-slate-500">{approverBasisLine(preview.route)}</div>}
-                            </div>
-                        )}
-                    </>
-                )}
-                {no === 8 && (
-                    <>
-                        {(data?.history || []).length > 0 && (
-                            <NoticeBox tone="blue" text="">
-                                <div className="text-[11px] font-semibold uppercase tracking-wider text-blue-700/80">Ранее платили</div>
-                                {data.history.slice(0, 3).map((row) => (
-                                    <div key={row.request_id} className="mt-0.5 flex flex-wrap items-baseline justify-between gap-x-3 text-[12.5px]">
-                                        <span className="min-w-0 flex-1 truncate text-blue-900">№{row.request_id} · {row.expense_name}</span>
-                                        <span className="tabular-nums text-blue-900/80">{fmtDate(row.paid_on)} · {fmtMoney(row.paid_amount ?? row.amount)}</span>
-                                    </div>
-                                ))}
-                            </NoticeBox>
-                        )}
-                        <Field label="Проверка счёта" required optionalMark={false} hint="Когда и на какую сумму оплачивали этому контрагенту в последний раз — или что оплат не было.">
-                            <textarea className={`${iosInput} min-h-[72px] resize-y`} value={fields.previous_payment_note || ''} onChange={(event) => setFields((prev) => ({ ...prev, previous_payment_note: event.target.value }))} maxLength={4000} />
-                        </Field>
-                    </>
-                )}
-                {no === 10 && (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        <Field label="Дата оплаты" required optionalMark={false}>
-                            <IosDatePicker value={fields.paid_on || ''} onChange={(value) => setFields((prev) => ({ ...prev, paid_on: value || '' }))} allowEmpty placeholder="Сегодня" triggerClassName={dateTrigger} ariaLabel="Дата оплаты" />
-                        </Field>
-                        <Field label="Оплачено" required optionalMark={false}>
-                            <AmountInput value={fields.paid_amount ?? 0} onChange={(value) => setFields((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Оплаченная сумма" />
-                        </Field>
-                    </div>
-                )}
-                {stepTakesFiles && (
-                    <div className="space-y-1.5">
-                        <div className="flex items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                            Файлы шага
-                            {current.files_required && <span className="font-normal normal-case tracking-normal text-slate-400">обязательно</span>}
-                            {no === 10 && (request.needs_payment_order || request.needs_power_of_attorney) && (
-                                <span className="font-normal normal-case tracking-normal text-slate-400">
-                                    просили: {[request.needs_payment_order && 'платёжное поручение', request.needs_power_of_attorney && 'доверенность'].filter(Boolean).join(', ')}
-                                </span>
-                            )}
-                        </div>
-                        <AttachmentList attachments={attachmentsByStep[no]} apiBaseUrl={apiBaseUrl} headers={headers} canRemove={canRemoveAttachment} onRemove={removeAttachment} showToast={showToast} />
-                        <FilePicker files={files} onChange={setFiles} kinds={stepFileKinds} />
-                    </div>
-                )}
-                <Field label="Комментарий">
-                    <textarea className={`${iosInput} min-h-[56px] resize-y`} value={comment} onChange={(event) => setComment(event.target.value)} maxLength={4000} placeholder="Отписка: что сделано, на что обратить внимание" />
-                </Field>
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <button type="button" className={iosBtnPrimary} disabled={busy || missingFiles} onClick={complete} title={missingFiles ? 'Сначала приложите файл' : undefined}>
-                        {busy && <Loader2 size={14} className="animate-spin" />}
-                        {current.action || 'Отписаться'}
-                    </button>
-                    {permissions.can_return && (
-                        <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setMode(mode === 'return' ? null : 'return')}>
-                            Вернуть на шаг {current.returns_to}
-                        </button>
-                    )}
-                    {permissions.can_reject && (
-                        <button type="button" className={`${iosBtnGhost} text-rose-600 hover:bg-rose-50`} disabled={busy} onClick={() => setMode(mode === 'reject' ? null : 'reject')}>
-                            Отклонить
-                        </button>
-                    )}
-                </div>
-                {(mode === 'return' || mode === 'reject') && (
-                    <div className="space-y-2 rounded-xl bg-slate-50 p-3">
-                        <div className="text-[12.5px] text-slate-600">
-                            {mode === 'return'
-                                ? `Заявка вернётся инициатору на шаг ${current.returns_to}. Напишите, что исправить.`
-                                : 'Заявка будет закрыта как отклонённая. Укажите причину — её увидит инициатор.'}
-                        </div>
-                        <textarea className={`${iosInput} min-h-[56px] resize-y`} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Причина" maxLength={4000} />
-                        <div className="flex gap-2">
-                            <button type="button" className={mode === 'reject' ? `${iosBtnPrimary} bg-rose-600 hover:bg-rose-700` : iosBtnPrimary} disabled={busy || !comment.trim()} onClick={mode === 'return' ? returnStep : rejectStep}>
-                                {mode === 'return' ? 'Вернуть' : 'Отклонить заявку'}
-                            </button>
-                            <button type="button" className={iosBtnSecondary} onClick={() => setMode(null)}>Отмена</button>
-                        </div>
-                    </div>
-                )}
-            </div>
-        );
-    };
 
     /* Строка шага маршрута. Пройденный — одна строка «что · кто · когда» и
        комментарий второй строкой; текущий — раскрыт с формой; будущий — серым,
@@ -531,9 +300,8 @@ const PaymentRequestCard = ({
                                     <UserRoundCog size={12} /> сменить
                                 </button>
                             )}
-                            {/* Описание шага нужно тому, кто ждёт, и на шагах без полей;
-                                у формы с полями то же самое сказано подсказками полей. */}
-                            {step.brief && !basisLine && !(permissions.can_act && step.fields?.length) && <div className="mt-0.5 text-slate-500">{step.brief}</div>}
+                            {/* Что сделать на шаге — простыми словами, для того, кто здесь впервые. */}
+                            {step.brief && <div className="mt-0.5 text-slate-500">{step.brief}</div>}
                         </div>
                     )}
                     {/* Основание согласующего счёта (пп. 11–12 ТЗ о Приказах) — открытым
@@ -559,7 +327,27 @@ const PaymentRequestCard = ({
                     )}
                     {isCurrent && (
                         permissions.can_act
-                            ? renderStepForm()
+                            ? (
+                                <PaymentStepForm
+                                    key={`${request.id}:${step.step_no}`}
+                                    request={request}
+                                    step={step}
+                                    steps={steps}
+                                    data={data}
+                                    permissions={permissions}
+                                    dictionaries={dictionaries}
+                                    apiBaseUrl={apiBaseUrl}
+                                    headers={headers}
+                                    busy={busy}
+                                    showToast={showToast}
+                                    canRemoveAttachment={canRemoveAttachment}
+                                    onRemoveAttachment={removeAttachment}
+                                    onComplete={complete}
+                                    onReturn={returnStep}
+                                    onReject={rejectStep}
+                                    onEdit={() => onEdit?.(request, data.items)}
+                                />
+                            )
                             : (
                                 <div className="mt-1.5 text-[12.5px] text-slate-500">
                                     Ждём отписки: {who}.
@@ -657,7 +445,7 @@ const PaymentRequestCard = ({
                         )}
                     </div>
 
-                    <ErrorBox text={data && error} />
+                    <div ref={errorRef} className="scroll-mt-4"><ErrorBox text={data && error} /></div>
 
                     <div ref={modePanelRef}>
                         {mode === 'cancel' && (
@@ -738,7 +526,7 @@ const PaymentRequestCard = ({
                                 </div>
                             </Row>
                             <Row label="Категория">{[request.category_name, request.subcategory_name].filter(Boolean).join(' → ')}</Row>
-                            <Row label="Контрагент">{request.counterparty_name}{request.counterparty_bin ? ` · БИН ${request.counterparty_bin}` : ''}</Row>
+                            <Row label="Контрагент">{[request.counterparty_name, request.counterparty_bin && `БИН ${request.counterparty_bin}`, supplierLabel(request)].filter(Boolean).join(' · ')}</Row>
                             <Row label="Договор">{request.contract_number ? `№${request.contract_number}` : null}</Row>
                             <Row label="Оплата">{[SOURCE_META[request.payment_source]?.label, TYPE_META[request.payment_type]?.label?.toLowerCase(), request.legal_entity_name && `с ${request.legal_entity_name}`].filter(Boolean).join(' · ')}</Row>
                             <Row label="Период оплаты">{request.payment_period}</Row>
