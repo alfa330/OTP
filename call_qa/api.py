@@ -18,6 +18,7 @@ from . import config
 from . import human_review as human_review_mod
 from . import speaker_roles
 from . import subjects as subjects_mod
+from .asr import second_pass
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
@@ -2192,8 +2193,12 @@ def review_payload(call_id: int, refresh: bool = False,
     return _attach_ai_review(payload)
 
 
-def _resolve_call_source(subject: dict, model: str) -> dict:
-    """Транскрипт звонка: immutable-кэш ASR, иначе GCS → Soniox → кэш."""
+def _resolve_call_source(subject: dict, model: str, may_transcribe=None) -> dict:
+    """Транскрипт звонка: immutable-кэш ASR, иначе GCS → Soniox → кэш. Слабую запись
+    повторно распознаёт Gemini (asr/second_pass.py) — тогда источник оценки она.
+
+    may_transcribe() — будет ли сейчас считаться оценка: платный второй проход
+    делается только тогда, готовая расшифровка берётся из кэша всегда."""
     call_id, audio_path = subject["id"], subject["audio_path"]
     # Вид субъекта — у самого субъекта: тем же путём читается и звонок из АТС
     # (imported_calls), и он обязан ключевать свой транскрипт своим видом,
@@ -2221,6 +2226,7 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
                                                transcript_record.get("tokens"))
         transcript_cache_id = transcript_record["id"]
         transcript_hash = transcript_record["transcript_hash"]
+        duration_ms = transcript_record.get("duration_ms")
     else:
         # Rolling-deploy migration path: reuse the old embedded ASR artifact once,
         # then write it into the dedicated immutable transcript cache.
@@ -2261,19 +2267,43 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
             if config.RAG_TRACE_REQUIRED:
                 raise RuntimeError("не удалось сохранить immutable ASR artifact")
             transcript_cache_id = None
-    return {"asm": asm, "lines": lines, "transcript_cache_id": transcript_cache_id,
-            "transcript_hash": transcript_hash, "source_identity": audio_fp,
-            "source_model": config.SONIOX_MODEL, "source_config": asr_cfg,
-            "extra": {"call_end_party": subject.get("call_end_party") or "unknown"}}
+    source = {"asm": asm, "lines": lines, "transcript_cache_id": transcript_cache_id,
+              "transcript_hash": transcript_hash, "source_identity": audio_fp,
+              "source_model": config.SONIOX_MODEL, "source_config": asr_cfg, "asr": None,
+              "extra": {"call_end_party": subject.get("call_end_party") or "unknown"}}
+    second = second_pass.resolve(
+        call_id=call_id, subject_kind=subject_kind, audio_path=audio_path,
+        audio_fingerprint=audio_fp,
+        first={"mean_conf": asm.get("mean_conf"), "text": asm["text"],
+               "duration_ms": duration_ms, "transcript_cache_id": transcript_cache_id},
+        may_transcribe=may_transcribe or (lambda: False), download=_download)
+    if second:
+        source.update(second)
+    return source
 
 
-def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
+def _will_evaluate(call_id: int, subject_kind: str, refresh: bool) -> bool:
+    """Будет ли сейчас считаться оценка: «Переоценить» либо у субъекта ещё нет
+    успешного прогона. Открытие карточки с готовой оценкой её не пересчитывает — и
+    платное повторное распознавание под него не запускается."""
+    if refresh:
+        return True
+    try:
+        return not runtime_store.latest_evaluation_fingerprint(call_id, subject_kind)
+    except runtime_store.RuntimeSchemaUnavailable:
+        return False
+
+
+def _resolve_wz_episode_source(subject: dict, model: str, may_transcribe=None) -> dict:
     """Транскрипт эпизода чата: заглушки вложений заменяются их содержанием.
 
     Расшифровки картинок/голосовых входят в идентичность транскрипта, поэтому
     появление описания даёт НОВЫЙ прогон, а не тихо переиспользованный кэш.
     Когда сырые сообщения уже удалил 45-дневный ретеншн, переиспользуется ранее
-    заморожённый транскрипт (он богаче заглушек эпизода)."""
+    заморожённый транскрипт (он богаче заглушек эпизода).
+
+    may_transcribe — общий с звонком параметр источника; у переписки повторно
+    распознавать нечего, он не используется."""
     episode_id = subject["id"]
     subject_kind = subject["kind"]
     try:
@@ -2416,7 +2446,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         # человеческая оценка «Случайного чата» (CHATAPP_CHAT_DIRECTION_MAP),
         # поэтому оценки ИИ и человека попадают на одну шкалу и сравнимы.
         direction_id = subjects_mod.criteria_direction_id(direction_id)
-    source = _SOURCE_RESOLVERS[subject_kind](subject, model)
+    source = _SOURCE_RESOLVERS[subject_kind](
+        subject, model, may_transcribe=lambda: _will_evaluate(call_id, subject_kind, refresh))
     asm, lines = source["asm"], source["lines"]
     transcript_cache_id = source["transcript_cache_id"]
     transcript_hash = source["transcript_hash"]
@@ -2500,6 +2531,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             if transcript_cached:
                 cached["transcript"] = speaker_roles.with_speaker_ids(
                     transcript_cached.get("segments"), transcript_cached.get("tokens"))
+                cached["asr"] = second_pass.card_note(transcript_cached.get("payload"))
                 cached["languages"] = transcript_cached.get("languages") or cached.get("languages") or {}
                 cached["asr_mean_conf"] = transcript_cached.get("mean_conf") or 0
             cached["_transcript_cache_id"] = cached_run["transcript_cache_id"]
@@ -2615,6 +2647,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         "operator": subject.get("operator") or "—", "datetime": subject.get("datetime"),
         "human_score": subject.get("human_score"),
         "languages": asm["languages"], "asr_mean_conf": asm["mean_conf"] or 0,
+        "asr": source.get("asr"),
         "transcript": lines, "criteria": criteria,
         "ai_score": _ai_score(direction, result),
         "score_breakdown": _score_breakdown(direction, result),

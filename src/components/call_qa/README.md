@@ -315,6 +315,14 @@ node-тест `tests/ai_qa_filters.test.mjs` сверяет, что обе ст�
 
   // только 'call'
   audio_url, languages: { ru: 62, kk: 38 }, asr_mean_conf,
+  // у реплик звонка есть ещё spk — голос распознавания ('1', '2', …); кто из голосов
+  // оператор, бэкенд решает по цитатам оценки и уже проставляет в speaker
+  speaker_roles: { operator: ['2'], method: 'evidence'|'introduction'|'evidence_criteria'|'talk_share' },
+  // слабую запись повторно распознаёт Gemini — тогда карточка пишет «распознано
+  // повторно» вместо процента, а asr_mean_conf остаётся от первого прохода (Soniox);
+  // реплики, которые два прохода услышали по-разному, несут seg[].u = true и
+  // подсвечиваются так же, как неуверенные слова (seg[].c < 0.5)
+  asr: null | { engine: 'gemini', model, first_pass_conf },
 
   // только 'wz_episode'
   chat: { channel_id, chat_id, contact_name, contact_phone, started_at, ended_at,

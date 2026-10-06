@@ -40,6 +40,7 @@ from . import providers
 from . import media as media_mod
 from .call_end import normalise_call_end_party
 from . import subjects as subjects_mod
+from .asr import second_pass
 from .asr import soniox
 from .evaluation import criteria as criteria_mod
 from .evaluation import criterion_config as cc
@@ -394,6 +395,22 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
         with lock_write:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        # Слабую запись повторно распознаёт Gemini (asr/second_pass.py). Контрольная
+        # точка выше — всегда первый проход: по ней при перезапуске заново решается,
+        # слаба ли запись, а готовый второй проход берётся из immutable-кэша.
+        second = second_pass.resolve(
+            call_id=call["id"], subject_kind=config.SUBJECT_CALL,
+            audio_path=call["audio_path"], audio_fingerprint=audio_fp,
+            first={"mean_conf": rec["asm"].get("mean_conf"), "text": rec["asm"]["text"],
+                   "duration_ms": (cached or {}).get("duration_ms") or rec["asm"].get("duration_ms"),
+                   "transcript_cache_id": rec.get("transcript_cache_id")},
+            may_transcribe=lambda: True, download=_download)
+        if second:
+            rec = {**rec, "toks": [], "segments": second["lines"], "asm": second["asm"],
+                   "transcript_cache_id": second["transcript_cache_id"],
+                   "transcript_hash": second["transcript_hash"],
+                   "source_model": second["source_model"],
+                   "source_config": second["source_config"]}
         return rec
 
     ok = fail = 0

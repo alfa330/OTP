@@ -162,6 +162,17 @@ class VertexError(RuntimeError):
         self.detail = detail
 
 
+def vertex_generate(model: str, payload: dict, *, timeout: float | None = None,
+                    tries: int | None = None, region: str | None = None) -> dict:
+    """Сырой generateContent — для запросов, которым тесен текстовый контракт
+    build_body/post_body: запись звонка уходит в Gemini инлайном (call_qa/asr/gemini.py).
+    Сервисный аккаунт, постоянное соединение и повторы — те же, что у оценки."""
+    region = region or config.VERTEX_LLM_REGION
+    url = f"{_VERTEX.base(region)}/publishers/google/models/{model}:generateContent"
+    return _post(url, payload, timeout=timeout or config.VERTEX_TIMEOUT,
+                 tries=tries or config.VERTEX_TRIES)
+
+
 # ── схема ответа ────────────────────────────────────────────────────────────
 
 _SCHEMA_KEYS = ("type", "properties", "required", "items", "enum", "description",

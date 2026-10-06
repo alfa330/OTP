@@ -109,10 +109,16 @@ const TranscriptLine = memo(function TranscriptLine({ line, onSeek }) {
                     ) : null}
                 </div>
                 <span>
-                    {(line.seg || []).map((s, i) => s.c != null && s.c < 0.5
-                        ? <mark key={i} title={`распознано неуверенно · ${Math.round(s.c * 100)}%`}
-                                className="rounded bg-amber-100 px-0.5 text-amber-800 decoration-amber-400 decoration-dotted underline">{s.t}</mark>
-                        : <span key={i}>{s.t}</span>)}
+                    {(line.seg || []).map((s, i) => {
+                        // Неуверенное место: низкая уверенность слова у Soniox либо
+                        // реплика, которую два распознавания услышали по-разному (s.u).
+                        const doubt = s.u ? 'два распознавания услышали это место по-разному'
+                            : (s.c != null && s.c < 0.5 ? `распознано неуверенно · ${Math.round(s.c * 100)}%` : null);
+                        return doubt
+                            ? <mark key={i} title={doubt}
+                                    className="rounded bg-amber-100 px-0.5 text-amber-800 decoration-amber-400 decoration-dotted underline">{s.t}</mark>
+                            : <span key={i}>{s.t}</span>;
+                    })}
                 </span>
                 <LineMedia media={line.media} />
             </div>
@@ -194,12 +200,18 @@ const CALL_END_LABEL = {
 
 /* Звонок: кто положил трубку, на каком языке говорили и насколько уверенно
    распознано. Сторону завершения видит и ИИ при оценке; неизвестную не
-   показываем — строка «неизвестно» ничего не сообщает, а места занимает. */
+   показываем — строка «неизвестно» ничего не сообщает, а места занимает.
+   Слабую запись повторно распознаёт Gemini (call.asr): процент уверенности у неё —
+   от первого прохода и к показанному тексту не относится, поэтому вместо него
+   пометка, а сам процент — в подсказке. */
 function CallMeta({ call }) {
     const endLabel = CALL_END_LABEL[call.call_end_party];
     const langs = Object.entries(call.languages || {}).sort((a, b) => b[1] - a[1]);
     const text = langs.length === 1 ? LANGUAGE[langs[0][0]] || langs[0][0].toUpperCase()
         : langs.map(([code, pct]) => `${LANGUAGE[code] || code.toUpperCase()} ${pct}%`).join(', ');
+    const secondPass = call.asr?.engine === 'gemini';
+    const firstPass = call.asr?.first_pass_conf != null
+        ? ` (${Math.round(call.asr.first_pass_conf * 100)}%)` : '';
     return (
         <MetaRow evaluation={call.evaluation}>
             {endLabel && (
@@ -214,7 +226,11 @@ function CallMeta({ call }) {
                     <span className="truncate">{text}</span>
                 </span>
             )}
-            {call.asr_mean_conf != null && <span>распознавание {Math.round(call.asr_mean_conf * 100)}%</span>}
+            {secondPass ? (
+                <span title={`Первое распознавание было неуверенным${firstPass}, запись повторно распознала Gemini`}>
+                    распознано повторно
+                </span>
+            ) : call.asr_mean_conf != null && <span>распознавание {Math.round(call.asr_mean_conf * 100)}%</span>}
         </MetaRow>
     );
 }
