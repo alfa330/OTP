@@ -8522,8 +8522,12 @@ def wazzup_webhook(token):
         stored = db.store_wazzup_messages(payload.get('messages'), account=account,
                                           received_at=datetime.now(timezone.utc))
         updated = db.update_wazzup_statuses(payload.get('statuses'), account=account)
-    except Exception:
-        logging.exception("wazzup webhook: ошибка записи")
+        # Persist the original Global events before acknowledging Wazzup.
+        # Syntony HTTP delivery is asynchronous and never blocks this request.
+        wazzup_syntony.enqueue(db, payload, raw_body=request.get_data(), account=account)
+    except Exception as error:
+        # Driver exceptions can include failed SQL rows; never log message bodies.
+        logging.error("wazzup webhook: ошибка записи (%s)", type(error).__name__)
         return jsonify({"error": "internal"}), 500
     return jsonify({"ok": True, "messages": stored, "statuses": updated}), 200
 
@@ -8711,6 +8715,7 @@ from wazzup.names import normalize_name as _wazzup_normalize_name  # noqa: E402
 from wazzup.names import suggest_user as _wazzup_suggest_user  # noqa: E402
 from wazzup import accounts as wazzup_accounts  # noqa: E402
 from wazzup import potok_sync as wazzup_potok_sync  # noqa: E402
+from wazzup import syntony as wazzup_syntony  # noqa: E402
 from wazzup.pilot import build_pilot_blueprint  # noqa: E402
 
 app.register_blueprint(build_pilot_blueprint(
@@ -8719,6 +8724,7 @@ app.register_blueprint(build_pilot_blueprint(
     preflight=_build_cors_preflight_response,
     listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
 ))
+wazzup_syntony.start_worker(db)
 
 
 def _wazzup_account_arg():
