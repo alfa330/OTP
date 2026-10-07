@@ -322,6 +322,10 @@ test('день по графику: третья лента пустая, сов
     assert.ok(track.layout.totals.some((item) => item.label === 'Тренинг'));
     const words = describeMyShiftsTrack(track);
     assert.deepEqual([words.mismatchLabel, words.compliance, words.problems, words.outside], ['нет', '100%', [], []]);
+    // Нет несоответствий — итог серый: красным он становится только когда есть что показать.
+    const html = renderTrack(track);
+    assert.ok(html.includes('text-slate-400">нет<'));
+    assert.ok(!html.includes('text-rose-600'));
 });
 
 test('расчёт соответствия отдаёт несовпавшие минуты отрезками, а прежние числа не меняет', () => {
@@ -862,10 +866,14 @@ test('разметка: две ленты факта стоят под смен�
     assert.equal(count(html, 'bg-rose-500'), 1 + track.layout.spans[0].mismatches.length, 'красное — опоздание и несоответствия');
     assert.ok(html.includes('data-schedule-tooltip="Опоздание • 09:00 — 09:17 • 17 мин"'));
     assert.ok(html.includes('data-schedule-tooltip="Перерыв вместо работы • 12:20 — 13:00 • 40 мин"'));
-    // Узкие отрезки не исчезают: у статуса и опоздания — не уже 2 px, у несоответствия — не уже 1 px.
-    assert.equal(count(html, 'min-width:2px'), track.layout.spans[0].bars.length + 1);
-    assert.equal(count(html, 'min-width:1px'), track.layout.spans[0].mismatches.length);
+    // Узкие отрезки не исчезают: статус, опоздание и несоответствие — не уже 2 px.
+    assert.equal(count(html, 'min-width:2px'), track.layout.spans[0].bars.length + 1 + track.layout.spans[0].mismatches.length);
     assert.equal(count(html, 'opacity-30'), 0, 'пока ничего не выбрано, ничего не гаснет');
+    // Третья лента — той же высоты и формы, что лента статусов (владелец: «сделай более
+    // заметной»), а итог при несоответствиях набран красным и жирнее.
+    assert.equal(count(html, 'class="relative h-5"'), 2);
+    assert.equal(count(html, 'overflow-hidden rounded-md bg-slate-200'), 2);
+    assert.ok(html.includes('font-semibold text-rose-600">2ч 11м<'));
 });
 
 test('разметка: узкие статусы рисуются поверх широких — их не закрывает сосед', () => {

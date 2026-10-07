@@ -247,8 +247,12 @@ class OperatorStatusTrackTests(unittest.TestCase):
         self.assertIn('{mismatchLabel != null && spans.length ? (', track)
         # Статусы и несоответствия лежат ВНУТРИ полосы смены и обрезаются её краями.
         self.assertEqual(track.count("style={{ left: `${span.left}%`, width: `${span.width}%` }}"), 2)
-        self.assertIn('className="absolute inset-y-0 overflow-hidden rounded-md bg-slate-200"', track)
-        self.assertIn('className="absolute inset-y-0 overflow-hidden rounded-full bg-slate-200"', track)
+        self.assertEqual(track.count('className="absolute inset-y-0 overflow-hidden rounded-md bg-slate-200"'), 2)
+        # Третья лента — той же высоты, что лента статусов, и с выделенным итогом:
+        # тонкой серой ниткой она читалась второстепенной (владелец, 07.10.2026).
+        self.assertEqual(track.count('<div className="relative h-5">'), 2)
+        self.assertIn("${hasMismatch ? 'font-semibold text-rose-600' : 'text-slate-400'}", track)
+        self.assertIn('const hasMismatch = spans.some((span) => span.mismatches.length > 0);', track)
         # Прежней полосы на все сутки с делениями часов больше нет.
         self.assertNotIn('[3, 6, 9, 12, 15, 18, 21].map', track)
 

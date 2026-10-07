@@ -368,6 +368,7 @@ export const MyShiftsStatusTrack = ({
     setPickedRef((current) => resolveTrackTap({ ...tap, current }));
   };
   const dimmed = (row, key) => (picked && picked.row === row && picked.key !== key ? ' opacity-30' : '');
+  const hasMismatch = spans.some((span) => span.mismatches.length > 0);
   // На компьютере подробности даёт подсказка по наведению, на телефоне — касание.
   const tooltipOf = (item) => (touch ? undefined : (item.tooltip || undefined));
   /* Узкие статусы рисуются последними, то есть поверх широких. Минимальная
@@ -483,21 +484,25 @@ export const MyShiftsStatusTrack = ({
             {/* Итог уступает место выбранному отрезку: «13:05–13:45 · 40 мин ·
                 Готов, Занят вместо перерыва» занимает всю строку телефона. */}
             {picked?.row === 'mismatch' ? null : (
-              <span className="shrink-0 text-[11px] tabular-nums text-slate-500">{mismatchLabel}</span>
+              <span className={`shrink-0 text-[12px] tabular-nums ${hasMismatch ? 'font-semibold text-rose-600' : 'text-slate-400'}`}>{mismatchLabel}</span>
             )}
           </div>
-          <div className="relative h-2.5">
+          {/* Третья лента — той же высоты и формы, что лента статусов, а итог при
+              несоответствиях набран красным и жирнее: тонкая серая нитка с
+              волосками читалась второстепенной, хотя ради неё день и открывают
+              (владелец, 07.10.2026: «сделай более заметной»). */}
+          <div className="relative h-5">
             {spans.map((span) => (
               <div
                 key={span.key}
-                className="absolute inset-y-0 overflow-hidden rounded-full bg-slate-200"
+                className="absolute inset-y-0 overflow-hidden rounded-md bg-slate-200"
                 style={{ left: `${span.left}%`, width: `${span.width}%` }}
               >
                 {span.mismatches.map((item) => (
                   <div
                     key={item.key}
                     className={`absolute inset-y-0 bg-rose-500 transition-opacity${dimmed('mismatch', item.key)}`}
-                    style={{ left: `${item.left}%`, width: `${item.width}%`, minWidth: '1px' }}
+                    style={{ left: `${item.left}%`, width: `${item.width}%`, minWidth: '2px' }}
                     data-schedule-tooltip={tooltipOf(item)}
                   />
                 ))}
