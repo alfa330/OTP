@@ -17,6 +17,7 @@ APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
 SCHEDULE = ROOT / 'src' / 'components' / 'schedule'
 PHONE = (SCHEDULE / 'MyShiftsMobile.jsx').read_text(encoding='utf-8')
 CSS = (SCHEDULE / 'my-shifts-mobile.css').read_text(encoding='utf-8')
+LAYOUT = (SCHEDULE / 'myShiftsTrackLayout.js').read_text(encoding='utf-8')
 STRIP = (ROOT / 'src' / 'components' / 'resources' / 'ShiftAuctionMobile.jsx').read_text(encoding='utf-8')
 
 
@@ -144,7 +145,12 @@ class PhoneBranchTests(unittest.TestCase):
 
 class OperatorStatusTrackTests(unittest.TestCase):
     """Задача #330: оператор видит свои фактические статусы под лентой смен —
-    тем же таймлайном, что руководитель в «Графиках работы»."""
+    тем же таймлайном, что руководитель в «Графиках работы».
+
+    С 07.10.2026 лент три (решение владельца): смена, статусы ВНУТРИ смены и
+    несоответствия графику. Числа и геометрию сторожит
+    tests/my_shifts_track_layout.test.mjs — он исполняет настоящую сборку дня из
+    App.jsx; здесь только то, где и как она подключена."""
 
     DAY_CARD = (
         "{viewMode === 'day' && myCurrentDayCard && (() => {",
@@ -191,21 +197,117 @@ class OperatorStatusTrackTests(unittest.TestCase):
 
     def test_deviations_are_printed_only_when_they_exist(self):
         """«Опоздание 0 мин» каждый день — ровно тот шум, из-за которого строку
-        перестают читать. Порог переработки тот же, что красит её в сетке."""
+        перестают читать. Слова и пороги живут рядом с раскладкой (один модуль —
+        нарисованное всегда подписано), а раздел только раскрашивает готовое.
+        Порога «переработки» в десять минут у оператора нет — владелец просил
+        отмечать и ранний вход, и задержку после смены."""
         note = block(APP, 'const renderMyStatusTrack = (track,', 'const formatEtaRu =')
-        self.assertIn('metrics.lateTotalMin > 0 &&', note)
-        self.assertIn('metrics.earlyLeaveTotalMin > 0 &&', note)
-        self.assertIn('overtimeMin > 10 &&', note)
+        self.assertIn('const words = describeMyShiftsTrack(track);', note)
+        self.assertIn('{words.problems.map(item => (\n                                <span key={item.key} className="text-rose-600">{item.text}</span>', note)
+        self.assertIn('{words.outside.map(item => (\n                                <span key={item.key} className="text-emerald-600">{item.text}</span>', note)
+        self.assertIn('<span className="font-semibold tabular-nums text-slate-700">{words.compliance}</span>', note)
+        # Шаг переноса строки отклонений задан инлайном: общий слой телефона ставит
+        # таким рядам 8 px между строками, и три отклонения читались тремя абзацами.
+        self.assertIn('<span className="flex flex-wrap items-center gap-x-3" style={{ rowGap: 4 }}>', note)
+        # Своих порогов и своих слов в разделе не осталось.
+        for leftover in ('> 10', 'lateTotalMin', 'earlyLeaveTotalMin', 'beforeMin', 'мин'):
+            self.assertNotIn(leftover, re.sub(r'/\*.*?\*/|//[^\n]*', '', note, flags=re.S), leftover)
+        words = block(LAYOUT, 'export const describeMyShiftsTrack', 'export const pickTrackSegment')
+        for label in ("'опоздание'", "'ранний уход'", "'до смены'", "'после смены'", "'вне смены'"):
+            self.assertIn(label, words)
+        # В сетке руководителя порог остался: там это «переработка», а не метка.
         self.assertIn('specialStatusMatchMetrics.workOutsideShiftMin > 10', APP)
 
     def test_empty_track_is_not_drawn_for_the_operator(self):
         """В сетке пустая дорожка честно пишет «Нет статусов» — руководитель по
         этому и работает. Оператору нажать на пропуск статусов нечем, поэтому у
-        него полосы просто нет."""
-        self.assertIn('if (!bars.length) return null;', PHONE)
+        него полос просто нет."""
+        builder = block(APP, 'const getMyStatusTrackForDate = useCallback(', 'const myCurrentDayStatusTrack')
+        self.assertIn('if (bars.length === 0) return null;', builder)
+        self.assertIn('if (layout.isEmpty) return null;', builder)
+        track = block(PHONE, 'export const MyShiftsStatusTrack', 'export const MyShiftsNoteRow')
+        self.assertIn('if (!spans.length && !outside.length) return null;', track)
         self.assertNotIn('Нет статусов', PHONE)
         self.assertIn('if (!track) return null;', block(APP, 'const renderMyStatusTrack = (track,', 'const formatEtaRu ='))
 
+    def test_three_tapes_shift_statuses_mismatches(self):
+        """Владелец 07.10.2026: первая лента — смена, вторая — статусы и не шире
+        смены, третья — несоответствия. Раскладку считает один модуль на телефон
+        и на компьютер; свою шкалу суток вторая лента больше не занимает."""
+        builder = block(APP, 'const getMyStatusTrackForDate = useCallback(', 'const myCurrentDayStatusTrack')
+        self.assertEqual(builder.count('buildMyShiftsTrackLayout({'), 1)
+        self.assertIn('dayMetrics,\n                    boundaryMetrics\n                });', builder)
+        render = block(APP, 'const renderMyStatusTrack = (track,', 'const formatEtaRu =')
+        for prop in ('spans={layout.spans}', 'outside={layout.outside}', 'mismatchLabel={words.mismatchLabel}',
+                     'key={track.dateKey}', "asOf={track.asOfLabel || ''}"):
+            self.assertIn(prop, render)
+        track = block(PHONE, 'export const MyShiftsStatusTrack', 'export const MyShiftsNoteRow')
+        self.assertLess(track.index("onClick={touch ? pickFrom('status')"), track.index("onClick={touch ? pickFrom('mismatch')"))
+        # Третьей ленты нет там, где не с чем сравнивать (нет смены или статусы до неё не дошли).
+        self.assertIn('{mismatchLabel != null && spans.length ? (', track)
+        # Статусы и несоответствия лежат ВНУТРИ полосы смены и обрезаются её краями.
+        self.assertEqual(track.count("style={{ left: `${span.left}%`, width: `${span.width}%` }}"), 2)
+        self.assertIn('className="absolute inset-y-0 overflow-hidden rounded-md bg-slate-200"', track)
+        self.assertIn('className="absolute inset-y-0 overflow-hidden rounded-full bg-slate-200"', track)
+        # Прежней полосы на все сутки с делениями часов больше нет.
+        self.assertNotIn('[3, 6, 9, 12, 15, 18, 21].map', track)
+
+    def test_late_and_early_leave_belong_to_the_day_the_shift_started(self):
+        """У утра ночной смены ни опоздания, ни раннего ухода: прогон суток считал
+        кусок 00:00–09:00 отдельной сменой, перерыв по графику через полночь
+        выходил «опозданием», а ранний уход стоял на двух днях сразу."""
+        builder = block(APP, 'const getMyStatusTrackForDate = useCallback(', 'const myCurrentDayStatusTrack')
+        self.assertIn('lateTotalMin: Number(boundaryMetrics?.lateTotalMin ?? 0),', builder)
+        self.assertIn('earlyLeaveTotalMin: Number(boundaryMetrics?.earlyLeaveTotalMin ?? 0)', builder)
+        self.assertNotIn('dayMetrics?.lateTotalMin', builder)
+        self.assertNotIn('dayMetrics?.earlyLeaveTotalMin', builder)
+
+    def test_today_is_counted_up_to_the_known_statuses(self):
+        """Смена, заходящая в сегодняшние сутки, считается по момент, по который
+        есть статусы: иначе у линии (выгрузка Oktell несколько раз в сутки) в
+        10:30 стояло «совпадение 12%, ранний уход 475 минут», а третья лента
+        закрасила бы красным ещё не наступившие часы. Потолок уходит в ОБА
+        прогона расчёта."""
+        builder = block(APP, 'const getMyStatusTrackForDate = useCallback(', 'const myCurrentDayStatusTrack')
+        self.assertIn('const dataStillArriving = lastShiftEndMin > todayStartMin;', builder)
+        self.assertIn('const clampEndMin = (!hasLiveTail && dataStillArriving) ? statusesKnownUntilMin : null;', builder)
+        self.assertEqual(builder.count('\n                    clampEndMin\n'), 1)
+        self.assertEqual(builder.count('\n                        clampEndMin\n'), 1)
+        # Мерило — сутки, а не часы браузера: сборка дня не читает время вовсе,
+        # поэтому не устаревает между перерисовками и одинаково считается в тесте.
+        self.assertNotIn('Date.now()', builder)
+        self.assertNotIn('new Date()', builder)
+        self.assertIn('myStatusTrackLive, operatorTodayKey]);', builder)
+        # Остальные экраны потолок не передают — у руководителя расчёт прежний.
+        self.assertEqual(APP.count('clampEndMin\n'), 2)
+        metrics = block(APP, 'const plannerComputeShiftStatusMatchMetrics = (', 'const plannerStatusFormatDuration = (seconds) => {')
+        self.assertIn('clampEndMin = null } = {}) => {', metrics)
+
+    def test_segments_are_tapped_on_the_phone_and_hovered_on_the_desktop(self):
+        """Наведения на телефоне нет: отрезок выбирают касанием, и он встаёт в
+        строку заголовка своей ленты. На компьютере — прежняя подсказка."""
+        phone = block(APP, *self.PHONE_BRANCH)
+        self.assertIn('touch: true', block(phone, 'renderMyStatusTrack(phoneStatusTrack', '})}'))
+        self.assertEqual(APP.count('touch: true'), 1)
+        card = block(APP, *self.DAY_CARD)
+        self.assertIn('{renderMyStatusTrack(myCurrentDayStatusTrack)}', card)
+        render = block(APP, 'const renderMyStatusTrack = (track,', 'const formatEtaRu =')
+        self.assertIn('touch={Boolean(touch)}', render)
+        # Обновлять можно только живые статусы — у выгрузки кнопки нет.
+        self.assertIn('onRefresh={track.canRefresh ? () => loadMyStatusTrack({ silent: false }) : null}', render)
+        track = block(PHONE, 'export const MyShiftsStatusTrack', 'export const MyShiftsNoteRow')
+        self.assertIn("onClick={touch ? pickFrom('status') : undefined}", track)
+        self.assertIn("onClick={touch ? pickFrom('mismatch') : undefined}", track)
+        # Что выбрано, решает проверяемая функция раскладки: ряд, его отрезки,
+        # место касания от левого края ряда и ширина ряда.
+        self.assertIn('const rect = event.currentTarget.getBoundingClientRect();', track)
+        self.assertIn('const tap = { row, segments: segmentsOf[row](), offsetX: event.clientX - rect.left, width: rect.width, targetPx: TRACK_TAP_TARGET_PX };', track)
+        self.assertIn('setPickedRef((current) => resolveTrackTap({ ...tap, current }));', track)
+        # Серый системный прямоугольник нажатия оболочка снимает только с кнопок;
+        # ряды полос — не кнопки, им нужен свой класс.
+        self.assertIn('-webkit-tap-highlight-color: transparent;', block(CSS, 'body.mobile-shell .ms-m-tap {', '}'))
+        # Кнопка «Обновить» внутри ряда не должна заодно выбирать отрезок под собой.
+        self.assertIn('onClick={(event) => { event.stopPropagation(); onRefresh(); }}', track)
 
 if __name__ == '__main__':
     unittest.main()

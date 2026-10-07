@@ -73,6 +73,7 @@ import {
     PhoneLinkRow, PhoneRow, useLastPresent
 } from './components/schedule/MyShiftsMobile';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
+import { buildMyShiftsTrackLayout, describeMyShiftsTrack, formatTrackDuration, formatTrackTime } from './components/schedule/myShiftsTrackLayout';
 import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
 import TrainingNewsLine from './components/schedule/TrainingNewsLine';
 import {
@@ -14572,7 +14573,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
             return coveredUntil;
             };
-            const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
+            const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [], clampEndMin = null } = {}) => {
             /* Идущая смена считается ДО «сейчас», а не на всю длину (задача #330).
                Момент берём из живого хвоста статусов: он и есть «данные по этот
                миг». Иначе в 12:00 у смены 09:00–18:00 знаменателем шли бы все
@@ -14581,12 +14582,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                Часы берём с сервера, а не с часов браузера: у оператора и у
                руководителя число должно быть одно и то же. Дни без живого хвоста
                (вчера, чужой отдел) считаются как раньше — потолка нет. */
-            const liveClampEndMin = (statusBars || []).reduce((acc, seg) => {
+            const liveTailEndMin = (statusBars || []).reduce((acc, seg) => {
                 if (!seg?.isLiveTail) return acc;
                 const end = Number(seg?.endMin ?? seg?.end ?? 0);
                 if (!Number.isFinite(end)) return acc;
                 return acc == null ? end : Math.max(acc, end);
             }, null);
+            /* Тот же потолок можно назвать явно — clampEndMin. Им пользуются
+               «Мои смены» там, где живого хвоста нет, а статусы приезжают
+               выгрузкой: смена считается по момент последнего известного
+               статуса. Хвост, если он есть, точнее и поэтому главнее. Без
+               параметра расчёт прежний — остальные экраны его не передают. */
+            const liveClampEndMin = liveTailEndMin != null
+                ? liveTailEndMin
+                : (clampEndMin != null && Number.isFinite(Number(clampEndMin)) ? Number(clampEndMin) : null);
             const clipToLiveClamp = (list) => (liveClampEndMin == null
                 ? list
                 : list
@@ -14657,14 +14666,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const totalScheduledMin = plannerIntervalsTotalMinutes(shiftIntervals);
             const scheduledBreakMin = plannerIntervalsTotalMinutes(breakIntervals);
             const scheduledWorkMin = plannerIntervalsTotalMinutes(workScheduleIntervals);
+            const workMatchingStatusIntervals = mergeIntervals([...workStatusIntervals, ...matchExcusedStatusIntervals]);
+            const breakMatchingStatusIntervals = mergeIntervals([...breakStatusIntervals, ...matchExcusedStatusIntervals]);
             const matchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(
                 workScheduleIntervals,
-                mergeIntervals([...workStatusIntervals, ...matchExcusedStatusIntervals])
+                workMatchingStatusIntervals
             );
             const matchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(
                 breakIntervals,
-                mergeIntervals([...breakStatusIntervals, ...matchExcusedStatusIntervals])
+                breakMatchingStatusIntervals
             );
+            /* Минуты графика, которые НЕ совпали, — отрезками, а не одним числом:
+               по ним «Мои смены» рисуют полосу несоответствий. Берём остаток от
+               тех же множеств, из которых выше посчитано совпавшее, поэтому их
+               сумма всегда равна totalScheduledMin − matchedTotalMin. */
+            const mismatchIntervals = [
+                ...plannerSubtractIntervals(workScheduleIntervals, workMatchingStatusIntervals)
+                    .map(i => ({ start: i.start, end: i.end, planned: 'work' })),
+                ...plannerSubtractIntervals(breakIntervals, breakMatchingStatusIntervals)
+                    .map(i => ({ start: i.start, end: i.end, planned: 'break' }))
+            ].sort((a, b) => (a.start - b.start) || (a.end - b.end));
             const workStatusTotalMin = plannerIntervalsTotalMinutes(workStatusIntervals);
             const workInsideShiftMin = plannerOverlapMinutesBetweenIntervalSets(workStatusIntervals, shiftIntervals);
             const workOutsideShiftMin = Math.max(0, workStatusTotalMin - workInsideShiftMin);
@@ -14759,6 +14780,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 matchedBreakMin,
                 workOutsideShiftMin,
                 workOutsideShiftIntervals,
+                mismatchIntervals,
                 matchedTotalMin,
                 compliancePct,
                 lateTotalMin,
@@ -24277,68 +24299,113 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                    тех. сбой, офлайн-работа) идут в зачёт тем же помощником, иначе у
                    оператора и у руководителя вышли бы разные проценты за один день. */
                 const shiftParts = getShiftPartsForDate(myTimelineOperator, targetDate) || [];
-                const dayMetrics = shiftParts.length > 0
-                    ? plannerComputeShiftStatusMatchMetrics({
-                        shiftParts,
-                        breakParts: breakPartsFor(shiftParts),
-                        statusBars: [
-                            ...bars,
-                            ...getPlannerStatusMatchCreditedActivityBarsForDate(myTimelineOperator, targetDate, plannerTrainingsByOperator)
-                        ]
-                    })
-                    : null;
                 const shiftStartParts = getShiftStartPartsForDate(myTimelineOperator, targetDate) || [];
+                const contextBars = buildImportedStatusContextBarsForDay(myTimelineOperator.importedStatusTimelineDays, targetDate);
+                /* Смена, которая заходит в сегодняшние сутки, считается по момент, по
+                   который есть статусы. У Тез КЦ его присылает сервер живым хвостом;
+                   у остальных статусы приезжают выгрузкой (Oktell — несколько раз в
+                   сутки, последний статус дописывается до момента выгрузки), и
+                   хвоста нет. Без потолка смена 09:00–18:00 в 10:30 шла в расчёт
+                   целиком: «совпадение 12%, ранний уход 475 минут» у человека,
+                   который сидит на линии, а лента несоответствий закрасила бы
+                   красным ещё не наступившие часы. Дни, целиком оставшиеся во
+                   вчера, считаются полностью, как у руководителя в «Графиках работы».
+                   Мерило — сутки, а не часы: ночная 21:00–09:00 кончается сегодня,
+                   и её вечерняя половина во вчерашнем дне обязана сходиться с
+                   утренней — та же выгрузка, тот же потолок. */
+                const lastShiftEndMin = [...shiftParts, ...shiftStartParts]
+                    .reduce((acc, part) => Math.max(acc, Number(part?.end || 0)), 0);
+                const todayStartMin = (parseDateStr(operatorTodayKey).getTime() - parseDateStr(targetDate).getTime()) / 60000;
+                const statusesKnownUntilMin = contextBars.reduce((acc, seg) => Math.max(acc, Number(seg?.endMin || 0)), 0);
+                const liveTailEndMin = contextBars.reduce((acc, seg) => (
+                    seg?.isLiveTail ? Math.max(acc ?? -Infinity, Number(seg?.endMin || 0)) : acc
+                ), null);
+                const hasLiveTail = liveTailEndMin != null;
+                const dataStillArriving = lastShiftEndMin > todayStartMin;
+                const clampEndMin = (!hasLiveTail && dataStillArriving) ? statusesKnownUntilMin : null;
+
+                const dayMetrics = plannerComputeShiftStatusMatchMetrics({
+                    shiftParts,
+                    breakParts: breakPartsFor(shiftParts),
+                    statusBars: [
+                        ...bars,
+                        ...getPlannerStatusMatchCreditedActivityBarsForDate(myTimelineOperator, targetDate, plannerTrainingsByOperator)
+                    ],
+                    clampEndMin
+                });
                 const boundaryMetrics = shiftStartParts.length > 0
                     ? plannerComputeShiftStatusMatchMetrics({
                         shiftParts: shiftStartParts,
                         breakParts: breakPartsFor(shiftStartParts),
                         statusBars: [
-                            ...buildImportedStatusContextBarsForDay(myTimelineOperator.importedStatusTimelineDays, targetDate),
+                            ...contextBars,
                             ...getPlannerStatusMatchCreditedActivityContextBars(myTimelineOperator, targetDate, plannerTrainingsByOperator)
-                        ]
+                        ],
+                        clampEndMin
                     })
                     : null;
-                const baseMetrics = dayMetrics || boundaryMetrics;
+                const baseMetrics = shiftParts.length > 0 ? dayMetrics : boundaryMetrics;
+                /* Опоздание и ранний уход — только по смене, которая в этот день
+                   началась. У утра ночной смены их нет: прогон суток считает кусок
+                   00:00–09:00 отдельной сменой с началом в полночь, и перерыв по
+                   графику через полночь выходил «опозданием», а ранний уход стоял
+                   сразу на двух днях. Что на утре не сошлось с графиком, показывает
+                   лента несоответствий. */
                 const metrics = baseMetrics
                     ? {
                         ...baseMetrics,
-                        lateTotalMin: Number(boundaryMetrics?.lateTotalMin ?? dayMetrics?.lateTotalMin ?? 0),
-                        earlyLeaveTotalMin: Number(boundaryMetrics?.earlyLeaveTotalMin ?? dayMetrics?.earlyLeaveTotalMin ?? 0)
+                        lateTotalMin: Number(boundaryMetrics?.lateTotalMin ?? 0),
+                        earlyLeaveTotalMin: Number(boundaryMetrics?.earlyLeaveTotalMin ?? 0)
                     }
                     : null;
 
-                const totalsByLabel = new Map();
-                const timelineBars = bars.map((seg, idx) => {
-                    const display = plannerStatusResolveDisplayState(
-                        seg?.stateName || seg?.statusName || seg?.stateKey || '',
-                        seg?.stateNote || seg?.state_note || ''
-                    );
-                    const label = display.label || 'Статус';
-                    const background = getPlannerImportedStatusTone(label).bar;
-                    const minutes = Math.max(0, seg.endMin - seg.startMin);
-                    const totals = totalsByLabel.get(label) || { key: label, label, background, minutes: 0 };
-                    totals.minutes += minutes;
-                    totalsByLabel.set(label, totals);
-                    return {
-                        key: `my-status-${idx}`,
-                        left: (seg.startMin / minutesInDay) * 100,
-                        width: (minutes / minutesInDay) * 100,
-                        background,
-                        tooltip: `${label} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`
-                    };
+                /* Что и где рисовать, решает общая раскладка: статусы только внутри
+                   смены, работа до и после неё — метками, опоздание — красным,
+                   третьей полосой — минуты, не совпавшие с графиком. */
+                const layout = buildMyShiftsTrackLayout({
+                    shiftParts,
+                    statusBars: bars.map(seg => {
+                        const display = plannerStatusResolveDisplayState(
+                            seg?.stateName || seg?.statusName || seg?.stateKey || '',
+                            seg?.stateNote || seg?.state_note || ''
+                        );
+                        const label = display.label || 'Статус';
+                        return {
+                            startMin: seg.startMin,
+                            endMin: seg.endMin,
+                            label,
+                            background: getPlannerImportedStatusTone(label).bar
+                        };
+                    }),
+                    dayMetrics,
+                    boundaryMetrics
                 });
+                if (layout.isEmpty) return null;
 
+                /* Живой канал касается этого дня, если день сегодняшний либо его
+                   смена (ночная со вчера) упирается в текущий статус. Сам по себе
+                   хвост в соседних сутках ничего не значит: у вчерашней дневной
+                   смены сегодняшний «Готов» ни времени, ни кнопки не добавляет. */
+                const isTodayCard = targetDate === operatorTodayKey;
+                const liveTailLimitsDay = hasLiveTail && (isTodayCard || liveTailEndMin < lastShiftEndMin);
+                const liveChannelHere = Boolean(myStatusTrackLive?.asOf) && (isTodayCard || liveTailLimitsDay);
                 return {
-                    bars: timelineBars,
-                    totals: Array.from(totalsByLabel.values()).sort((a, b) => b.minutes - a.minutes),
+                    dateKey: targetDate,
+                    layout,
                     metrics: metrics && metrics.totalScheduledMin > 0 ? metrics : null,
-                    /* «на 11:25» — момент, по который посчитано. Без него живая
-                       полоса выглядит как обычная, и непонятно, почему смена
-                       обрывается на середине. Часы серверные (Алматы), поэтому
-                       берём их из строки, а не из часов браузера. */
-                    asOfLabel: (targetDate === operatorTodayKey && myStatusTrackLive?.asOf)
+                    /* «на 11:25» — момент, по который посчитано. Без него полоса
+                       выглядит как обычная, и непонятно, почему смена обрывается
+                       на середине. Подпись называет то, чем расчёт ограничен на
+                       самом деле: при живом хвосте это серверные часы (Алматы,
+                       берём их из строки, а не из часов браузера); без хвоста —
+                       конец последнего известного статуса, даже если канал живой
+                       (статус поставили раньше, чем за час до смены, и сервер
+                       текущим его не считает). */
+                    asOfLabel: (liveChannelHere && liveTailLimitsDay)
                         ? String(myStatusTrackLive.asOf).slice(11, 16)
-                        : ''
+                        : (clampEndMin != null && clampEndMin < lastShiftEndMin ? formatTrackTime(clampEndMin) : ''),
+                    // Перечитать статусы можно только там, где они приезжают сразу.
+                    canRefresh: liveChannelHere
                 };
             }, [myTimelineOperator, plannerTrainingsByOperator, myStatusTrackLive, operatorTodayKey]);
             const myCurrentDayStatusTrack = useMemo(
@@ -27196,53 +27263,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const rounded = Math.round(((Number(minutes) || 0) / 60) * 10) / 10;
                     return `${String(rounded).replace('.', ',')} ч`;
                 };
-                /* Полоса фактических статусов под лентой смен — одна сборка на телефон
-                   и на компьютер: слова и числа у оператора должны совпадать с тем, что
-                   руководитель видит в «Графиках работы».
+                /* Две полосы факта под лентой смены — статусы внутри смены и
+                   несоответствия графику. Одна сборка на телефон и на компьютер:
+                   слова и числа у оператора должны совпадать с тем, что руководитель
+                   видит в «Графиках работы».
                    Отклонения печатаем ТОЛЬКО когда они есть: «опоздание 0 мин» каждый
                    день — ровно тот шум, из-за которого строку перестают читать. */
-                const renderMyStatusTrack = (track, { withHours = false } = {}) => {
+                const renderMyStatusTrack = (track, { withHours = false, touch = false } = {}) => {
                     if (!track) return null;
-                    const statusDuration = (minutes) => {
-                        const mins = Math.max(0, Math.round(Number(minutes) || 0));
-                        return mins < 60 ? `${mins} мин` : formatHoursMinutes(mins);
-                    };
-                    const metrics = track.metrics;
-                    const overtimeMin = metrics ? Math.round(Number(metrics.workOutsideShiftMin) || 0) : 0;
+                    const { layout } = track;
+                    // Слова и пороги — в describeMyShiftsTrack: там же, где раскладка,
+                    // чтобы подпись не могла разойтись с нарисованным.
+                    const words = describeMyShiftsTrack(track);
                     // Разделителей между отклонениями нет намеренно: на телефоне строка
                     // переносится, и «·» оказывалась первым знаком новой строки —
                     // читалось как обрывок. Цвет и так их разделяет.
-                    const note = metrics ? (
-                        <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                            <span>
-                                Совпадение с графиком{' '}
-                                <span className="font-semibold tabular-nums text-slate-700">
-                                    {metrics.compliancePct != null ? `${Math.round(metrics.compliancePct)}%` : '—'}
+                    // Шаг переноса задан прямо здесь: общий слой телефона ставит таким
+                    // рядам 8 px между строками, и три отклонения читались тремя абзацами.
+                    const note = (words.compliance || words.problems.length > 0 || words.outside.length > 0) ? (
+                        <span className="flex flex-wrap items-center gap-x-3" style={{ rowGap: 4 }}>
+                            {words.compliance && (
+                                <span>
+                                    Совпадение с графиком{' '}
+                                    <span className="font-semibold tabular-nums text-slate-700">{words.compliance}</span>
                                 </span>
-                            </span>
-                            {metrics.lateTotalMin > 0 && (
-                                <span className="text-rose-600">опоздание {formatMinutesOnly(metrics.lateTotalMin)}</span>
                             )}
-                            {metrics.earlyLeaveTotalMin > 0 && (
-                                <span className="text-rose-600">ранний уход {formatMinutesOnly(metrics.earlyLeaveTotalMin)}</span>
-                            )}
-                            {/* Порог в 10 минут — тот же, что красит переработку в
-                                «Графиках работы»: хвост в пару минут после смены есть
-                                почти всегда и переработкой не является. */}
-                            {overtimeMin > 10 && (
-                                <span className="text-emerald-600">сверх смены {formatMinutesOnly(overtimeMin)}</span>
-                            )}
+                            {words.problems.map(item => (
+                                <span key={item.key} className="text-rose-600">{item.text}</span>
+                            ))}
+                            {words.outside.map(item => (
+                                <span key={item.key} className="text-emerald-600">{item.text}</span>
+                            ))}
                         </span>
                     ) : null;
                     return (
                         <MyShiftsStatusTrack
-                            bars={track.bars}
-                            totals={track.totals.map(item => ({ ...item, value: statusDuration(item.minutes) }))}
+                            // Свой экземпляр на день: выбранный пальцем отрезок не
+                            // должен переезжать на соседний день полосы недели.
+                            key={track.dateKey}
+                            spans={layout.spans}
+                            outside={layout.outside}
+                            totals={layout.totals.map(item => ({ ...item, value: formatTrackDuration(item.minutes) }))}
+                            mismatchLabel={words.mismatchLabel}
                             note={note}
                             showHours={Boolean(withHours)}
                             asOf={track.asOfLabel || ''}
                             refreshing={myStatusTrackLoading}
-                            onRefresh={track.asOfLabel ? () => loadMyStatusTrack({ silent: false }) : null}
+                            onRefresh={track.canRefresh ? () => loadMyStatusTrack({ silent: false }) : null}
+                            touch={Boolean(touch)}
                         />
                     );
                 };
@@ -27799,7 +27867,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <MyShiftsTimeline parts={phoneTimelineParts} lines={phoneTimelineLines} nowPercent={phoneNowPercent} />
                                         ) : null}
                                         {renderMyStatusTrack(phoneStatusTrack, {
-                                            withHours: !(phoneTimelineParts.length || phoneTimelineLines.length)
+                                            withHours: !(phoneTimelineParts.length || phoneTimelineLines.length),
+                                            // Наведения на телефоне нет: отрезок выбирают касанием.
+                                            touch: true
                                         })}
                                     </div>
                                 ) : null}

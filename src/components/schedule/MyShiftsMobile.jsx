@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ArrowLeftRight, CalendarPlus, Check, ChevronLeft, ChevronRight, Coffee, Plus, Scissors, UserRound } from 'lucide-react';
 import FaIcon from '../common/FaIcon';
 import { IosBadge, IosToggle, iosCard } from '../ui/ios';
@@ -14,6 +14,7 @@ import {
   AuctionPhoneRow,
   useLastPresent,
 } from '../resources/ShiftAuctionMobile';
+import { resolveTrackTap } from './myShiftsTrackLayout';
 import '../resources/shift-auction-mobile.css';
 import './my-shifts-mobile.css';
 
@@ -269,81 +270,244 @@ export const MyShiftsTimeline = ({
   </div>
 );
 
+/* Палец не попадает в отрезок шириной в пиксель: у каждого отрезка зона касания
+   не уже этого числа пикселей (правило — в pickTrackSegment, myShiftsTrackLayout.js). */
+const TRACK_TAP_TARGET_PX = 14;
+/* Обе подписи одной высоты строки — название мельче выбранного отрезка, и без
+   этого полоса под ними при касании сдвигалась бы на полтора пикселя. */
+const TRACK_ROW_TITLE = 'min-w-0 flex-1 truncate text-[11px] font-semibold uppercase leading-[18px] tracking-wider text-slate-400';
+/* Строка заголовка с кнопкой «Обновить» (24 px) держит эту высоту и тогда,
+   когда кнопка спрятана под выбранный отрезок. */
+const TRACK_ROW_WITH_BUTTON = { ...NO_WRAP, minHeight: 24 };
+
+/* Подпись полосы. Пока отрезок не выбран — её название; после касания на его
+   месте стоит выбранный отрезок («12:20–13:05 · 45 мин · Перерыв»), как
+   значение над графиком в «Экранном времени»: строка та же, вёрстка не прыгает. */
+const TrackRowTitle = ({ label, picked }) => (picked ? (
+  <span className="flex min-w-0 flex-1 items-center gap-1.5" style={NO_WRAP} aria-live="polite">
+    {picked.background || picked.dotClassName ? (
+      <span
+        className={`h-2 w-2 shrink-0 rounded-full ${picked.dotClassName || ''}`}
+        style={picked.background ? { background: picked.background } : undefined}
+        aria-hidden="true"
+      />
+    ) : null}
+    <span className="min-w-0 truncate text-[12px] font-medium leading-[18px] tabular-nums text-slate-700">{picked.text}</span>
+  </span>
+) : (
+  <span className={TRACK_ROW_TITLE}>{label}</span>
+));
+
 /*
- * Полоса фактических статусов телефонии под лентой смен — та же ось 00–24, но
- * тоньше и без подписей часов: часы уже стоят над лентой смен, второй раз это
- * шум. Цвет полосы приходит готовым из общего справочника статусов, поэтому
- * «перерыв» у оператора и у руководителя в «Графиках работы» одного цвета.
- * Подписи под полосой обязательны: наведения на телефоне нет, и без них
- * цветные куски ничего не значат. Совсем узкие статусы («без телефона» на
- * полминуты) держим на 2 px, иначе они исчезают с ленты вовсе.
- * Компонент общий с настольным видом: там у полос ещё и подсказка по наведению.
+ * Две полосы факта под лентой смены: статусы и несоответствия графику.
+ *
+ * Обе стоят ровно под сменой и за её края не выходят — это та же смена, только
+ * разложенная на «что было» и «где не сошлось» (решение владельца, 07.10.2026).
+ * Раньше статусы тянулись на все сутки: смену внутри серого «Выключен» было не
+ * разглядеть, а главное — где человек отошёл от графика — приходилось искать
+ * глазами.
+ *
+ *   Статусы — цвет из общего справочника, поэтому «перерыв» у оператора и у
+ *   руководителя в «Графиках работы» один и тот же. Опоздание — красным в
+ *   начале смены. Работа до начала и после конца — зелёной меткой снаружи:
+ *   она тоньше полосы, чтобы не читаться её продолжением.
+ *   Несоответствия — красным те минуты смены, где статус не совпал с графиком;
+ *   их сумма и есть «100% минус совпадение».
+ *
+ * Что и где рисовать, считает myShiftsTrackLayout.js, здесь только разметка.
+ * Подписи под полосами обязательны: наведения на телефоне нет. Там же отрезок
+ * выбирают касанием; на компьютере у отрезков подсказка по наведению.
+ * Совсем узкие статусы («без телефона» на полминуты) держим на 2 px, иначе они
+ * исчезают с ленты вовсе.
  */
 export const MyShiftsStatusTrack = ({
   label = 'Статусы',
-  bars = [],
+  mismatchTitle = 'Несоответствия',
+  spans = [],
+  outside = [],
   totals = [],
+  mismatchLabel = null,
   note = null,
   showHours = false,
   asOf = '',
   refreshing = false,
   onRefresh = null,
+  touch = false,
+  defaultPicked = null,
 }) => {
-  if (!bars.length) return null;
+  // В состоянии — только «какой отрезок выбран» ({ row, key }): подпись берётся
+  // из свежих данных, иначе после обновления живых статусов в заголовке висел
+  // бы старый «Готов • 10:09 — 10:51» при уже выросшем отрезке.
+  const [pickedRef, setPickedRef] = useState(defaultPicked);
+  if (!spans.length && !outside.length) return null;
+
+  // Статусы выбираются сплошными участками одного цвета, а не по одному:
+  // «Готов» и «Занят» чередуются каждые несколько минут и на полосе слиты.
+  const segmentsOf = {
+    status: () => [
+      ...spans.flatMap((span) => [
+        ...span.late.map((item) => ({ ...item, dotClassName: 'bg-rose-500' })),
+        ...span.runs,
+      ]),
+      ...outside.map((item) => ({ ...item, dotClassName: 'bg-emerald-500' })),
+    ],
+    // У несоответствий точки цвета в подписи нет: ряд одноцветный, а её место
+    // нужнее словам — «13:05–13:45 · 40 мин · Готов, Занят вместо перерыва».
+    mismatch: () => spans.flatMap((span) => span.mismatches),
+  };
+  const pickedSegment = pickedRef ? (segmentsOf[pickedRef.row]().find((item) => item.key === pickedRef.key) || null) : null;
+  const picked = pickedSegment
+    ? { row: pickedRef.row, key: pickedSegment.key, text: pickedSegment.caption, background: pickedSegment.background || null, dotClassName: pickedSegment.dotClassName || '' }
+    : null;
+  // Касание выбирает отрезок по горизонтали — куда бы по высоте ряда ни попал
+  // палец: полоса несоответствий высотой в десять пикселей сама не мишень.
+  // Второе касание того же отрезка или касание мимо — снять выбор.
+  const pickFrom = (row) => (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const tap = { row, segments: segmentsOf[row](), offsetX: event.clientX - rect.left, width: rect.width, targetPx: TRACK_TAP_TARGET_PX };
+    setPickedRef((current) => resolveTrackTap({ ...tap, current }));
+  };
+  const dimmed = (row, key) => (picked && picked.row === row && picked.key !== key ? ' opacity-30' : '');
+  // На компьютере подробности даёт подсказка по наведению, на телефоне — касание.
+  const tooltipOf = (item) => (touch ? undefined : (item.tooltip || undefined));
+  /* Узкие статусы рисуются последними, то есть поверх широких. Минимальная
+     ширина в 2 px выводит узкий кусок за его настоящий край, и сосед, нарисованный
+     позже, закрывал бы этот запас: «без телефона» на минуту оставался бы на
+     ленте полупиксельной ниткой, а подсказка над ним показывала соседа. */
+  const widestFirst = (pieces) => pieces.slice().sort((a, b) => b.width - a.width);
+  const statusPiece = (bar, tooltip) => (
+    <div
+      key={bar.key}
+      className="absolute inset-y-0"
+      // Полпикселя внахлёст: соседние статусы округляются до пикселя каждый
+      // сам по себе, и между ними просвечивала подложка.
+      style={{ left: `${bar.left}%`, width: `calc(${bar.width}% + 0.5px)`, minWidth: '2px', background: bar.background }}
+      data-schedule-tooltip={tooltip}
+    />
+  );
+  const latePiece = (item, tooltip) => (
+    <div
+      key={item.key}
+      className="absolute inset-y-0 bg-rose-500"
+      style={{ left: `${item.left}%`, width: `${item.width}%`, minWidth: '2px' }}
+      data-schedule-tooltip={tooltip}
+    />
+  );
+
   return (
-    <div>
-      {/* «на 11:25» и обновление стоят в строке заголовка, а не над полосой:
-          отдельная панель ради двух знаков — лишний ряд на телефоне. Появляются
-          только там, где статусы живые (сегодняшний день), иначе строка пустая
-          и обещать нечего. */}
-      <div className="mb-1 flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</span>
-        {asOf ? (
-          <span className="shrink-0 text-[11px] tabular-nums text-slate-400">на {asOf}</span>
-        ) : null}
-        {onRefresh ? (
-          <button
-            type="button"
-            onClick={onRefresh}
-            disabled={refreshing}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition active:scale-95 disabled:opacity-50"
-            title="Обновить статусы"
-            aria-label="Обновить статусы"
-          >
-            <FaIcon className={`fas ${refreshing ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} text-[11px]`}></FaIcon>
-          </button>
-        ) : null}
-      </div>
-      {/* Свою шкалу часов рисуем только когда над полосой нет ленты смен (день без
-          смены): два одинаковых ряда цифр подряд читаются как ошибка вёрстки. */}
-      {showHours ? (
-        <div className="relative mb-1 h-4">
-          {[0, 6, 12, 18, 24].map((hour) => (
-            <span
-              key={hour}
-              className="absolute top-0 text-[11px] leading-none tabular-nums text-slate-400"
-              style={{ left: `${(hour / 24) * 100}%`, transform: hour === 0 ? 'none' : hour === 24 ? 'translateX(-100%)' : 'translateX(-50%)' }}
+    <div data-my-status-track>
+      <div className={touch ? 'ms-m-tap' : undefined} onClick={touch ? pickFrom('status') : undefined}>
+        {/* «на 11:25» и обновление стоят в строке заголовка, а не над полосой:
+            отдельная панель ради двух знаков — лишний ряд на телефоне. Время
+            появляется только там, где день посчитан не до конца смены. */}
+        {/* Выбранный отрезок занимает строку целиком — время и кнопка уступают ему
+            место: «09:06–10:02 · 56 мин · Готов, Занят» рядом с ними на
+            телефоне обрезалось. Высота строки при этом держится по кнопке,
+            иначе полоса под ней подпрыгивала бы на каждое касание. */}
+        <div className="mb-1 flex items-center gap-2" style={onRefresh ? TRACK_ROW_WITH_BUTTON : NO_WRAP}>
+          <TrackRowTitle label={label} picked={picked?.row === 'status' ? picked : null} />
+          {asOf && picked?.row !== 'status' ? (
+            <span className="shrink-0 text-[11px] tabular-nums text-slate-400">на {asOf}</span>
+          ) : null}
+          {onRefresh && picked?.row !== 'status' ? (
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); onRefresh(); }}
+              disabled={refreshing}
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition active:scale-95 disabled:opacity-50"
+              title="Обновить статусы"
+              aria-label="Обновить статусы"
             >
-              {String(hour).padStart(2, '0')}
-            </span>
+              <FaIcon className={`fas ${refreshing ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} text-[11px]`}></FaIcon>
+            </button>
+          ) : null}
+        </div>
+        {/* Свою шкалу часов рисуем только когда над полосой нет ленты смен (день без
+            смены): два одинаковых ряда цифр подряд читаются как ошибка вёрстки. */}
+        {showHours ? (
+          <div className="relative mb-1 h-4">
+            {[0, 6, 12, 18, 24].map((hour) => (
+              <span
+                key={hour}
+                className="absolute top-0 text-[11px] leading-none tabular-nums text-slate-400"
+                style={{ left: `${(hour / 24) * 100}%`, transform: hour === 0 ? 'none' : hour === 24 ? 'translateX(-100%)' : 'translateX(-50%)' }}
+              >
+                {String(hour).padStart(2, '0')}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        <div className="relative h-5">
+          {/* У дня без смены полосе не на что опереться — метки работы лежат на
+              светлой дорожке суток, иначе они висели бы в пустоте. */}
+          {!spans.length ? <div className="absolute inset-0 rounded-md bg-slate-100" /> : null}
+          {spans.map((span) => (
+            <div
+              key={span.key}
+              className="absolute inset-y-0 overflow-hidden rounded-md bg-slate-200"
+              style={{ left: `${span.left}%`, width: `${span.width}%` }}
+            >
+              {/* Гаснет слой целиком, а выбранный участок рисуется поверх ещё раз.
+                  Гасить отрезки по одному нельзя: они лежат на полпикселя внахлёст,
+                  и полупрозрачные стыки складывались в частокол полосок. */}
+              <div className={`absolute inset-0 transition-opacity${picked?.row === 'status' ? ' opacity-30' : ''}`}>
+                {widestFirst(span.bars).map((bar) => statusPiece(bar, tooltipOf(bar)))}
+                {span.late.map((item) => latePiece(item, tooltipOf(item)))}
+              </div>
+              {picked?.row === 'status' ? (
+                <>
+                  {span.bars.filter((bar) => bar.runKey === picked.key).map((bar) => statusPiece(bar))}
+                  {span.late.filter((item) => item.key === picked.key).map((item) => latePiece(item))}
+                </>
+              ) : null}
+            </div>
+          ))}
+          {outside.map((item) => (
+            <div
+              key={item.key}
+              className={`absolute top-1/2 h-2 -translate-y-1/2 rounded-full bg-emerald-500 transition-opacity${dimmed('status', item.key)}`}
+              // Метка «раньше смены» держится за свой правый край: минимальная
+              // ширина растит её влево, от смены, а не внутрь полосы.
+              style={item.kind === 'before'
+                ? { right: `${100 - item.left - item.width}%`, width: `${item.width}%`, minWidth: '3px' }
+                : { left: `${item.left}%`, width: `${item.width}%`, minWidth: '3px' }}
+              data-schedule-tooltip={tooltipOf(item)}
+            />
           ))}
         </div>
-      ) : null}
-      <div className="relative h-5 overflow-hidden rounded-lg bg-slate-100">
-        {[3, 6, 9, 12, 15, 18, 21].map((hour) => (
-          <div key={hour} className="absolute inset-y-0 w-px bg-slate-200" style={{ left: `${(hour / 24) * 100}%` }} />
-        ))}
-        {bars.map((bar) => (
-          <div
-            key={bar.key}
-            className="absolute inset-y-0"
-            style={{ left: `${bar.left}%`, width: `${bar.width}%`, minWidth: '2px', background: bar.background }}
-            data-schedule-tooltip={bar.tooltip || undefined}
-          />
-        ))}
       </div>
+      {mismatchLabel != null && spans.length ? (
+        <div className={touch ? 'ms-m-tap mt-2' : 'mt-2'} onClick={touch ? pickFrom('mismatch') : undefined}>
+          <div className="mb-1 flex items-center gap-2" style={NO_WRAP}>
+            <TrackRowTitle label={mismatchTitle} picked={picked?.row === 'mismatch' ? picked : null} />
+            {/* Итог уступает место выбранному отрезку: «13:05–13:45 · 40 мин ·
+                Готов, Занят вместо перерыва» занимает всю строку телефона. */}
+            {picked?.row === 'mismatch' ? null : (
+              <span className="shrink-0 text-[11px] tabular-nums text-slate-500">{mismatchLabel}</span>
+            )}
+          </div>
+          <div className="relative h-2.5">
+            {spans.map((span) => (
+              <div
+                key={span.key}
+                className="absolute inset-y-0 overflow-hidden rounded-full bg-slate-200"
+                style={{ left: `${span.left}%`, width: `${span.width}%` }}
+              >
+                {span.mismatches.map((item) => (
+                  <div
+                    key={item.key}
+                    className={`absolute inset-y-0 bg-rose-500 transition-opacity${dimmed('mismatch', item.key)}`}
+                    style={{ left: `${item.left}%`, width: `${item.width}%`, minWidth: '1px' }}
+                    data-schedule-tooltip={tooltipOf(item)}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {totals.length ? (
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-none">
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-none">
           {totals.map((item) => (
             <span key={item.key} className="inline-flex items-center gap-1.5">
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: item.background }} aria-hidden="true" />
