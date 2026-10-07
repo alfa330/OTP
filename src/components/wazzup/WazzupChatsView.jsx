@@ -1415,6 +1415,14 @@ export default function WazzupChatsView(props) {
         const byId = new Map((thread || []).map((message) => [message.messageId, message]));
         return new Map((thread || []).map((message) => [message.messageId, messageQuote(message, byId)]));
     }, [thread]);
+    const lastIncomingMessageId = useMemo(() => {
+        for (let index = (thread?.length || 0) - 1; index >= 0; index -= 1) {
+            const message = thread[index];
+            if (!message.isEcho && !message.isDeleted) return message.messageId;
+        }
+        return null;
+    }, [thread]);
+    const selectedUnread = selected ? unread.items[pilotChatKey('op', selected)] : null;
 
     const activeChannels = (channels || []).filter((c) => (c.chatsCount || 0) > 0 || c.state === 'active');
 
@@ -1665,15 +1673,6 @@ export default function WazzupChatsView(props) {
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
-                                    {pilot.enabled && unread.items[pilotChatKey('op', selected)]?.unreadCount > 0 &&
-                                        <button type="button" onClick={() => unread.markRead(selected)}
-                                            title="Закрыть ожидающие ответа сообщения для всей команды"
-                                            className="inline-flex items-center gap-1.5 rounded-full border border-orange-500 bg-white py-1 pl-2.5 pr-1 text-xs font-semibold text-orange-600 transition hover:bg-orange-50">
-                                            Ответ не нужен
-                                            <span className="flex min-h-5 min-w-5 items-center justify-center rounded-full bg-orange-600 px-1 text-[11px] text-white">
-                                                {unread.items[pilotChatKey('op', selected)].unreadCount}
-                                            </span>
-                                        </button>}
                                     {/* Пока не пришла строка списка, счётчиков у чата нет.
                                         «0 вх. · 0 исх.» здесь было бы не «нет данных», а
                                         конкретной неправдой — ссылка открывает переписку
@@ -1727,10 +1726,23 @@ export default function WazzupChatsView(props) {
                                         </span>
                                     </div>
                                 ) : (
-                                    <MessageBubble key={m.messageId} msg={m} quote={threadQuotes.get(m.messageId)}
-                                        onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
-                                        onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
-                                            ? openAttachment : undefined} />
+                                    <React.Fragment key={m.messageId}>
+                                        <MessageBubble msg={m} quote={threadQuotes.get(m.messageId)}
+                                            onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
+                                            onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+                                                ? openAttachment : undefined} />
+                                        {pilot.enabled && selectedUnread?.unreadCount > 0 && m.messageId === lastIncomingMessageId &&
+                                            <div className="flex justify-start px-3 sm:px-4">
+                                                <button type="button" onClick={() => unread.markRead(selected, selectedUnread.lastInboundId)}
+                                                    title="Закрыть ожидающие ответа сообщения для всей команды"
+                                                    className="inline-flex items-center gap-1.5 rounded-full border border-orange-500 bg-white py-1 pl-2.5 pr-1 text-xs font-semibold text-orange-600 transition hover:bg-orange-50">
+                                                    Ответ не нужен
+                                                    <span className="flex min-h-5 min-w-5 items-center justify-center rounded-full bg-orange-600 px-1 text-[11px] text-white">
+                                                        {selectedUnread.unreadCount}
+                                                    </span>
+                                                </button>
+                                            </div>}
+                                    </React.Fragment>
                                 ))}
                                 {thread !== null && thread.length === 0 && (
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
