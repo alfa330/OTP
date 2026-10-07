@@ -1,9 +1,8 @@
-import React, { lazy, Suspense, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { Slash, Smile, X, Pencil, Trash2 } from 'lucide-react';
 import { prepareTemplate } from './chatTemplates';
-
-const EmojiPicker = lazy(() => import('./ChatEmojiPicker'));
+import { loadChatEmojiPicker, scheduleEmojiWarmup, warmChatEmojiPicker } from './chatEmojiLoading';
 
 export default function ChatComposerTools({ apiBaseUrl, headers, channelId, locked, emojiDisabled, slash, onChoose, onEmoji }) {
     const [panel, setPanel] = useState(null);
@@ -16,7 +15,22 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
     const [selected, setSelected] = useState(null);
     const [values, setValues] = useState({});
     const [deleting, setDeleting] = useState(null);
+    const [EmojiPicker, setEmojiPicker] = useState(null);
+    const [emojiOpened, setEmojiOpened] = useState(false);
+    const [emojiError, setEmojiError] = useState(false);
+    const [emojiAttempt, setEmojiAttempt] = useState(0);
     const requestHeaders = () => typeof headers === 'function' ? headers() : headers;
+    const warmEmoji = () => { warmChatEmojiPicker().catch(() => {}); };
+    useEffect(() => scheduleEmojiWarmup(warmChatEmojiPicker), []);
+    useEffect(() => {
+        if (panel !== 'emoji' || EmojiPicker) return undefined;
+        let active = true;
+        setEmojiError(false);
+        loadChatEmojiPicker().then((module) => {
+            if (active) setEmojiPicker(() => module.default);
+        }).catch(() => { if (active) setEmojiError(true); });
+        return () => { active = false; };
+    }, [panel, EmojiPicker, emojiAttempt]);
     useEffect(() => { if (slash !== null && !locked) { setPanel('templates'); setSearch(slash); } }, [slash, locked]);
     useEffect(() => {
         if (panel !== 'templates') return undefined;
@@ -63,10 +77,25 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
                 className="inline-flex h-10 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40">
                 <Slash size={18} /></button>
             <button type="button" disabled={locked || emojiDisabled} aria-label="Выбрать эмодзи" title="Выбрать эмодзи" aria-expanded={panel === 'emoji'}
-                onClick={() => setPanel(panel === 'emoji' ? null : 'emoji')}
+                onPointerEnter={warmEmoji} onFocus={warmEmoji} onPointerDown={warmEmoji}
+                onClick={() => { setEmojiOpened(true); setPanel(panel === 'emoji' ? null : 'emoji'); }}
                 className="inline-flex h-10 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40"><Smile size={19} /></button>
         </div>
-        {panel && !locked && <div role="dialog" aria-label={panel === 'emoji' ? 'Эмодзи' : 'Шаблоны сообщений'}
+        {emojiOpened && <div role="dialog" aria-label="Эмодзи" hidden={panel !== 'emoji' || locked || emojiDisabled}
+            onKeyDown={(e) => {
+                if (e.key === 'Escape') { e.stopPropagation(); setPanel(null); }
+                if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.preventDefault();
+            }}
+            className="absolute bottom-full left-0 z-20 mb-2 w-full max-w-md rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+            <div className="mb-2 flex items-center justify-between text-sm font-semibold">
+                <span>Эмодзи</span>
+                <button type="button" aria-label="Закрыть эмодзи" onClick={() => setPanel(null)}><X size={17} /></button>
+            </div>
+            {EmojiPicker ? <EmojiPicker onSelect={onEmoji} /> : emojiError
+                ? <button type="button" onClick={() => setEmojiAttempt((value) => value + 1)} className="text-xs text-blue-600">Повторить загрузку эмодзи</button>
+                : <p className="h-[340px] text-xs text-slate-500" role="status">Загрузка эмодзи…</p>}
+        </div>}
+        {panel === 'templates' && !locked && <div role="dialog" aria-label="Шаблоны сообщений"
             onKeyDown={(e) => {
                 if (e.key === 'Escape') { e.stopPropagation(); setPanel(null); }
                 // Enter in template search/variable fields must not submit the message form.
@@ -74,11 +103,10 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
             }}
             className="absolute bottom-full left-0 z-20 mb-2 w-full max-w-md rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
             <div className="mb-2 flex items-center justify-between text-sm font-semibold">
-                <span>{panel === 'emoji' ? 'Эмодзи' : 'Шаблоны сообщений'}</span>
+                <span>Шаблоны сообщений</span>
                 <button type="button" aria-label="Закрыть" onClick={() => setPanel(null)}><X size={17} /></button>
             </div>
-            {panel === 'emoji' ? <Suspense fallback={<p className="text-xs text-slate-500">Загрузка эмодзи…</p>}>
-                <EmojiPicker onSelect={onEmoji} /></Suspense> : <>
+            <>
                 {error && <p role="alert" className="mb-2 text-xs text-rose-600">{error}</p>}
                 {editing ? <div className="space-y-2">
                     <input aria-label="Название шаблона" value={editing.title} maxLength={100} placeholder="Название"
@@ -129,7 +157,7 @@ export default function ChatComposerTools({ apiBaseUrl, headers, channelId, lock
                     {warnings.length > 0 && <details className="mt-2 text-[11px] text-slate-500"><summary>Доступность шаблонов</summary>
                         {warnings.map((warning) => <p key={warning} className="mt-1">{warning}</p>)}</details>}
                 </>}
-            </>}
+            </>
         </div>}
     </div>;
 }

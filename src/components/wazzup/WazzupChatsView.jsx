@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
@@ -20,7 +20,10 @@ import useSharedChatUnread from './useSharedChatUnread';
 import ChatPilotComposer from './ChatPilotComposer';
 import { mergePilotMessages, pilotChatKey } from './chatPilot';
 import { firstVisibleMessage, messageQuote } from './threadPresentation';
+import { attachmentName, attachmentPreviewKind } from './chatAttachments';
 import './chatThread.css';
+
+const ChatAttachmentViewer = lazy(() => import('./ChatAttachmentViewer'));
 
 /* Чаты Wazzup отдела продаж («Чаты ОП»): просмотр переписки «как в мессенджере»
  * + вкладка «Операторы» (показатели по направлениям и привязка авторов Wazzup
@@ -161,10 +164,27 @@ const Avatar = ({ name, size = 'h-9 w-9', muted = false, icon: Icon = null }) =>
 
 /* Медиа-содержимое пузыря: фото с лайтбоксом, аудио/видео плееры,
  * для остального — аккуратный чип со ссылкой. Битая ссылка → чип. */
-function MediaContent({ msg, light }) {
+function MediaContent({ msg, light, onAttachment }) {
     const [failed, setFailed] = useState(false);
     const [zoom, setZoom] = useState(false);
     const uri = msg.contentUri;
+    const previewKind = onAttachment ? attachmentPreviewKind(msg) : null;
+
+    if (previewKind) {
+        const label = attachmentName(msg) || (previewKind === 'pdf' ? 'PDF-документ' : previewKind === 'image' ? 'Фото' : 'Документ');
+        if (previewKind === 'image' && !failed) return <button type="button" onClick={() => onAttachment(msg)}
+            title="Открыть изображение и извлечь текст" className="block cursor-zoom-in rounded-xl text-left">
+            <img src={uri} alt={label} loading="lazy" onError={() => setFailed(true)} className="max-h-64 w-auto max-w-full rounded-xl" />
+        </button>;
+        return <button type="button" onClick={() => onAttachment(msg)} title="Посмотреть в чате"
+            className={`inline-flex max-w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[14px] font-medium ${
+                light ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
+            <FileText size={20} className="shrink-0" />
+            <span className="min-w-0"><span className="block truncate">{label}</span>
+                <span className={`block text-[11px] font-normal ${light ? 'text-blue-100' : 'text-slate-500'}`}>Просмотреть в чате</span>
+            </span>
+        </button>;
+    }
 
     if (uri && !failed && msg.type === 'image') {
         return (
@@ -204,7 +224,7 @@ function MediaContent({ msg, light }) {
 }
 
 /* Пузырь в стиле iMessage: исходящие — синие справа, входящие — белые слева. */
-const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote }) {
+const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, onQuote, onAttachment }) {
     const out = msg.isEcho;
     const hasMedia = Boolean(MEDIA_LABELS[msg.type]) || (msg.type && msg.type !== 'text');
     const lateNote = lateDeliveryNote(msg);
@@ -227,7 +247,7 @@ const MessageBubble = React.memo(function MessageBubble({ msg, quote, onReply, o
                     <span className="block truncate font-semibold">{quote.author}</span>
                     <span className="line-clamp-2 whitespace-pre-wrap break-words">{quote.text}</span>
                 </button>}
-                {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={out} /></div>}
+                {hasMedia && <div className={msg.text ? 'mb-1' : ''}><MediaContent msg={msg} light={out} onAttachment={onAttachment} /></div>}
                 {msg.text && <div className="whitespace-pre-wrap break-words">{msg.text}</div>}
                 {!msg.text && !hasMedia && (
                     <div className={`italic ${out ? 'text-blue-100' : 'text-slate-400'}`}>
@@ -894,6 +914,7 @@ export default function WazzupChatsView(props) {
     const [selected, setSelected] = useState(null);       // {channelId, chatId, ...}
     const [thread, setThread] = useState(null);
     const [replySelection, setReplySelection] = useState(null);
+    const [attachmentSelection, setAttachmentSelection] = useState(null);
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
     /* Переход по ссылке: пока номер разрешается в чат, лента не имеет права
@@ -917,6 +938,9 @@ export default function WazzupChatsView(props) {
     const threadBox = useRef(null);
     const quoteHighlight = useRef({ node: null, timer: null });
     const selectedKey = pilotChatKey(account, selected);
+    const openAttachment = useCallback((message) => {
+        setAttachmentSelection({ key: selectedKey, message: { ...message } });
+    }, [selectedKey]);
     const chooseReply = useCallback((message) => {
         setReplySelection({ key: selectedKey, message: { ...message } });
     }, [selectedKey]);
@@ -941,6 +965,7 @@ export default function WazzupChatsView(props) {
     }, [showToast]);
     useEffect(() => {
         setReplySelection(null);
+        setAttachmentSelection(null);
         return () => {
             clearTimeout(quoteHighlight.current.timer);
             quoteHighlight.current.node?.removeAttribute('data-quote-highlight');
@@ -1703,7 +1728,9 @@ export default function WazzupChatsView(props) {
                                     </div>
                                 ) : (
                                     <MessageBubble key={m.messageId} msg={m} quote={threadQuotes.get(m.messageId)}
-                                        onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote} />
+                                        onReply={pilotCanSend ? chooseReply : undefined} onQuote={jumpToQuote}
+                                        onAttachment={pilot.enabled && !pilot.capability.excludedChannelIds?.includes(selected.channelId)
+                                            ? openAttachment : undefined} />
                                 ))}
                                 {thread !== null && thread.length === 0 && (
                                     <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
@@ -1725,6 +1752,14 @@ export default function WazzupChatsView(props) {
                     )}
                 </div>
             </div>
+            {attachmentSelection?.key === selectedKey && selected && pilot.enabled &&
+                <Suspense fallback={<IosModal open onClose={() => setAttachmentSelection(null)} title="Просмотр вложения">
+                    <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Открываем просмотр…</div>
+                </IosModal>}>
+                    <ChatAttachmentViewer key={`${selectedKey}:${attachmentSelection.message.messageId}`}
+                        apiBaseUrl={apiBaseUrl} headers={headers} chat={selected} message={attachmentSelection.message}
+                        onClose={() => setAttachmentSelection(null)} />
+                </Suspense>}
         </div>
     );
 }

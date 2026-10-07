@@ -1,0 +1,34 @@
+/* PDF.js TextLayer positioning variables; selection is scoped to our viewer. */
+.wazzup-pdf-text {
+    position: absolute;
+    inset: 0;
+    overflow: clip;
+    line-height: 1;
+    text-align: initial;
+    letter-spacing: normal;
+    word-spacing: normal;
+    text-size-adjust: none;
+    transform-origin: 0 0;
+    forced-color-adjust: none;
+    --min-font-size: 1;
+    --scale-round-x: 1px;
+    --scale-round-y: 1px;
+}
+.wazzup-pdf-text[data-main-rotation='90'] { transform: rotate(90deg) translateY(-100%); }
+.wazzup-pdf-text[data-main-rotation='180'] { transform: rotate(180deg) translate(-100%, -100%); }
+.wazzup-pdf-text[data-main-rotation='270'] { transform: rotate(270deg) translateX(-100%); }
+.wazzup-pdf-text :is(span, br) {
+    position: absolute;
+    color: transparent;
+    white-space: pre;
+    cursor: text;
+    user-select: text;
+    transform-origin: 0 0;
+}
+.wazzup-pdf-text span:not(.markedContent) {
+    font-size: calc(var(--total-scale-factor) * var(--min-font-size) * var(--font-height, 0px));
+    transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(calc(1 / var(--min-font-size)));
+}
+.wazzup-pdf-text .markedContent { display: contents; }
+.wazzup-pdf-text ::selection { background: rgb(59 130 246 / .3); color: transparent; }
+.wazzup-pdf-text br::selection { background: transparent; }

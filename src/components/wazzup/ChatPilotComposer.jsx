@@ -217,7 +217,7 @@ function ChatPilotDraft({ apiBaseUrl, headers, chat, onSent, replyTo, onCancelRe
     return (
         <form onSubmit={submit} className="shrink-0 border-t border-slate-200/70 bg-white p-2.5 sm:px-4"
               data-testid="wazzup-pilot-composer">
-            <div className="relative mx-auto w-full max-w-[900px]">
+            <div className="relative mx-auto w-full max-w-[1040px]">
             {effectiveReply && <div className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-blue-400 bg-blue-50 px-3 py-2 text-sm"
                 data-testid="wazzup-reply-preview">
                 <Reply size={17} className="shrink-0 text-blue-500" />
