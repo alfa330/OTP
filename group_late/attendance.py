@@ -245,6 +245,11 @@ def build_rows(records, marks, employee_lookup, date_iso, now_local=None,
         if not emp_id:
             continue
         seen_ids.add(str(emp_id))
+        # У человека в Workpace бывает несколько карточек; план из графика iCore
+        # несёт их все (`workpaceKeys`), и отметка с любой уже привязана к этой
+        # смене. Без этого отметившийся на второй карточке вставал ниже ещё одной
+        # строкой — «Вне графика», будто график ему не проставлен.
+        seen_ids.update(str(key) for key in (record.get("workpaceKeys") or []) if key)
         raw_marks = _raw_marks_for(record, marks_by_key)
         rows.append(_row(record, raw_marks, employee_lookup, date_iso, now_local, rules))
 

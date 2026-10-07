@@ -166,6 +166,31 @@ def mark_alias_map(records) -> dict[str, str]:
     return alias
 
 
+def card_owners(db) -> dict[str, str]:
+    """{карточка Workpace: ключ человека} — для тех, у кого карточек несколько.
+
+    Нужна там, где строки разных дней сводятся по сотруднику («Последние
+    отметки»). В день со сменой строка человека идёт под первой его карточкой,
+    в день без смены — под той, на которой он отметился, и без сведения он
+    стоял бы в списке дважды. Состав — из кэша `glb_employees`, мост тот же,
+    что у плана и у окна «Сопоставление»: второе правило разошлось бы с ними
+    на одних и тех же людях."""
+    pairs = plan_pairs()
+    if not pairs:
+        return {}
+    today = datetime.now(config.TZ).date()
+    snapshot = db.glb_icore_plan_snapshot(
+        pairs, today, today, db.glb_cached_employee_roster(pairs.keys()))
+    owners = {}
+    for person in snapshot['people']:
+        cards = [str(ext_id) for ext_id in person['workpace_ext_ids'] if ext_id]
+        if len(cards) < 2:
+            continue
+        for ext_id in cards:
+            owners[ext_id] = f"icore:{person['user_id']}"
+    return owners
+
+
 def apply_to_records(db, records, employees, day, employee_lookup=None):
     """Заменить расписание Workpace планом из iCore у переключённых отделов.
 

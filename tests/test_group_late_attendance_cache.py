@@ -36,11 +36,19 @@ def _cached_record(day, **over):
 
 
 class FakeDb:
-    def __init__(self, built=(), cached=()):
+    def __init__(self, built=(), cached=(), people=()):
         self.built = set(built)
         self.cached = list(cached)
         self.stored = []
         self.forgotten = []
+        # Мост «карточка Workpace → наш сотрудник» у отделов с планом из iCore.
+        self.people = list(people)
+
+    def glb_cached_employee_roster(self, department_names=None, source='workpace'):
+        return []
+
+    def glb_icore_plan_snapshot(self, pairs, date_from, date_to, roster):
+        return {"people": self.people, "shifts": [], "unlinked": [], "departments": {}}
 
     def glb_attendance_built_days(self, start, end, **criteria):
         self.built_criteria = criteria
@@ -264,6 +272,50 @@ class LatestMarksTests(unittest.TestCase):
         result, _ = self._latest(db, [today_row])
         ordered = attendance.sort_rows(result["rows"], "recent")
         self.assertEqual([r["employee"] for r in ordered], ["Петров", "Иванов Иван"])
+
+    # Две карточки Workpace у одного человека (боевой случай 07.10.2026). В день со
+    # сменой его строка идёт под первой карточкой, в день без смены — под той, на
+    # которой он отметился: без сведения он стоял бы в списке двумя строками.
+
+    TWO_CARDS = [{"user_id": 509, "workpace_ext_ids": ["card-A", "card-B"]}]
+
+    def _two_cards_case(self, people):
+        old = self.TODAY - timedelta(days=4)
+        db = FakeDb(built=[self.TODAY - timedelta(days=1)], people=people, cached=[
+            _cached_record(old, employee_id="card-B", employee_name="Мағажанов Джаббар",
+                           system="workpace", status=attendance.STATUS_OFF_SCHEDULE),
+        ])
+        today_row = {**_live_row(self.TODAY, name="Магажанов Джаббар"), "employee_id": "card-A",
+                     "last_mark_at": f"{self.TODAY.isoformat()}T08:36:00+05:00"}
+        return db, today_row, old
+
+    def test_two_cards_of_one_person_are_one_line(self):
+        db, today_row, _ = self._two_cards_case(self.TWO_CARDS)
+        result, _ = self._latest(db, [today_row])
+        self.assertEqual([(r["employee_id"], r["date"]) for r in result["rows"]],
+                         [("card-A", self.TODAY.isoformat())])
+
+    def test_the_freshest_mark_wins_whichever_card_it_is_on(self):
+        older = self.TODAY - timedelta(days=6)
+        db, _, old = self._two_cards_case(self.TWO_CARDS)
+        db.cached.append(_cached_record(older, employee_id="card-A",
+                                        employee_name="Магажанов Джаббар", system="workpace"))
+        result, _ = self._latest(db)
+        self.assertEqual([(r["employee_id"], r["date"]) for r in result["rows"]],
+                         [("card-B", old.isoformat())])
+
+    def test_cards_of_different_people_stay_apart(self):
+        db, today_row, old = self._two_cards_case(people=[])
+        result, _ = self._latest(db, [today_row])
+        self.assertEqual(sorted((r["employee_id"], r["date"]) for r in result["rows"]),
+                         [("card-A", self.TODAY.isoformat()), ("card-B", old.isoformat())])
+
+    def test_broken_bridge_does_not_break_the_list(self):
+        db, today_row, _ = self._two_cards_case(self.TWO_CARDS)
+        db.glb_icore_plan_snapshot = mock.Mock(side_effect=RuntimeError("база недоступна"))
+        with self.assertLogs(attendance_cache.logger, level="ERROR"):
+            result, _ = self._latest(db, [today_row])
+        self.assertEqual(len(result["rows"]), 2)
 
 
 if __name__ == "__main__":

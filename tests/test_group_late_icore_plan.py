@@ -25,10 +25,11 @@ import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, time
 from pathlib import Path
+from unittest import mock
 
 from tests import source_cache
 
-from group_late import config, icore_plan
+from group_late import attendance, config, icore_plan
 from group_late.helpers import employee_keys
 from group_late.lateness import find_violations
 from group_late.mutes import MuteSnapshot
@@ -38,6 +39,7 @@ DB_PATH = ROOT / "database.py"
 BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 REPORTS_SOURCE = (ROOT / "group_late" / "reports.py").read_text(encoding="utf-8-sig")
 LATENESS_SOURCE = (ROOT / "group_late" / "lateness.py").read_text(encoding="utf-8-sig")
+ATTENDANCE_SOURCE = (ROOT / "group_late" / "attendance.py").read_text(encoding="utf-8-sig")
 VIEW_SOURCE = (ROOT / "src" / "components" / "group_late" / "GroupLateBotView.jsx").read_text(
     encoding="utf-8-sig")
 
@@ -71,6 +73,10 @@ class StubPlanDb:
     def glb_icore_plan_snapshot(self, pairs, date_from, date_to, roster):
         self.calls.append((dict(pairs), date_from, date_to, list(roster)))
         return self.snapshot
+
+    def glb_cached_employee_roster(self, department_names=None, source='workpace'):
+        return [{"ext_id": "из-кэша", "full_name": "Состав Кэша",
+                 "department_name": name} for name in (department_names or [])]
 
 
 def build(people, shifts, unlinked=(), day=DAY):
@@ -180,6 +186,103 @@ class MarkBindingTests(unittest.TestCase):
                               [shift(1, time(9, 0), time(18, 0))])
         self.assertEqual(icore_plan.mark_alias_map(records),
                          {"card-A": "card-A", "card-B": "card-A"})
+
+    # Экран «Отметок» — третий потребитель плана. Боевой случай 07.10.2026
+    # («Регионы»): план встал на первую карточку человека, отмечается он на второй.
+
+    TWO_CARDS_LOOKUP = {"by_id": {"card-A": WORKPACE_DEPARTMENT, "card-B": WORKPACE_DEPARTMENT},
+                        "by_external_id": {}, "by_name": {}}
+    EVENING = datetime(2026, 8, 26, 21, 0, tzinfo=config.TZ)
+
+    def _two_cards_plan(self, cards=("card-A", "card-B")):
+        _, records, _ = build([person(1, "Магажанов Джаббар", list(cards))],
+                              [shift(1, time(9, 0), time(19, 0))])
+        return records
+
+    def _screen_rows(self, extra_marks=(), cards=("card-A", "card-B")):
+        marks = [
+            {"employeeId": "card-B", "employeeName": "Мағажанов Джаббар",
+             "markDate": "2026-08-26T10:27:00", "markType": 0, "status": 0},
+            {"employeeId": "card-B", "employeeName": "Мағажанов Джаббар",
+             "markDate": "2026-08-26T19:54:00", "markType": 1, "status": 0},
+            *extra_marks,
+        ]
+        return attendance.build_rows(self._two_cards_plan(cards), marks, self.TWO_CARDS_LOOKUP,
+                                     "2026-08-26", self.EVENING)
+
+    def test_mark_on_the_second_card_gives_one_row_on_the_screen(self):
+        """Иначе человек стоит в разделе дважды: строкой с графиком и строкой
+        «Вне графика» под второй карточкой — и выглядит так, будто график ему
+        не проставился."""
+        rows = self._screen_rows()
+        self.assertEqual([(row["employee_id"], row["status"]) for row in rows],
+                         [("card-A", attendance.STATUS_LATE)])
+        self.assertEqual(rows[0]["employee"], "Магажанов Джаббар")
+        self.assertEqual(rows[0]["schedule"], icore_plan.SCHEDULE_LABEL)
+        self.assertEqual(rows[0]["late_minutes"], 87)
+        self.assertEqual(len(rows[0]["marks"]), 2)
+
+    def test_mark_on_a_middle_card_gives_one_row_too(self):
+        """Карточек бывает и три: склеиваются все, а не первая с последней."""
+        rows = self._screen_rows(cards=("card-A", "card-B", "card-C"))
+        self.assertEqual([(row["employee_id"], row["status"]) for row in rows],
+                         [("card-A", attendance.STATUS_LATE)])
+
+    def test_mark_of_another_person_still_shows_up_off_schedule(self):
+        """Склейка — только по карточкам самого человека: чужая отметка без смены
+        остаётся строкой «Вне графика», иначе работа вне графика пропадёт совсем."""
+        rows = self._screen_rows(extra_marks=[
+            {"employeeId": "card-X", "employeeName": "Уалхан Айдар",
+             "markDate": "2026-08-26T09:05:00", "markType": 0, "status": 1}])
+        self.assertEqual(sorted((row["employee_id"], row["status"]) for row in rows),
+                         [("card-A", attendance.STATUS_LATE),
+                          ("card-X", attendance.STATUS_OFF_SCHEDULE)])
+
+    def test_own_schedule_rule_adds_no_row_for_the_second_card(self):
+        """Свой график отдела достраивает строки тем, кого в дне нет. Вторая
+        карточка человека со сменой — не «тот, кого нет»: иначе он получил бы
+        ещё и неявку по правилу."""
+        rules = [{"id": 1, "enabled": True, "scope": "department",
+                  "target": WORKPACE_DEPARTMENT, "mode": "schedule",
+                  "time_start": "10:00", "time_end": "19:00", "weekdays": []}]
+        roster = [
+            {"ext_id": "card-A", "full_name": "МАҒАЖАНОВ ДЖАББАР ЕРБОЛҰЛЫ",
+             "department_name": WORKPACE_DEPARTMENT},
+            {"ext_id": "card-B", "full_name": "Мағажанов Джаббар",
+             "department_name": WORKPACE_DEPARTMENT},
+        ]
+        rows = attendance.build_rows(self._two_cards_plan(), [], self.TWO_CARDS_LOOKUP,
+                                     "2026-08-26", self.EVENING, rules=rules, roster=roster)
+        self.assertEqual([row["employee_id"] for row in rows], ["card-A"])
+
+    # «Последние отметки» сводят дни по человеку: в день со сменой его строка идёт
+    # под первой карточкой, в день без смены — под той, на которой он отметился.
+
+    def test_card_owners_put_all_cards_of_a_person_under_one_key(self):
+        db = StubPlanDb([person(1, "Магажанов Джаббар", ["card-A", "card-B"]),
+                         person(2, "Абдусатарова Дильназ", ["card-C", "card-D", "card-E"])], [])
+        owners = icore_plan.card_owners(db)
+        self.assertEqual(owners["card-A"], owners["card-B"])
+        self.assertEqual(len({owners[card] for card in ("card-C", "card-D", "card-E")}), 1)
+        self.assertNotEqual(owners["card-A"], owners["card-C"])
+
+    def test_card_owners_leave_single_card_people_alone(self):
+        """Ключ строки у них и так один; сводить нечего — и нечего ломать."""
+        db = StubPlanDb([person(1, "Оспан Назым", ["card-1"]), person(2, "Хамкова Дарья")], [])
+        self.assertEqual(icore_plan.card_owners(db), {})
+
+    def test_card_owners_read_the_cached_roster_of_switched_departments(self):
+        db = StubPlanDb([person(1, "Оспан Назым", ["card-1"])], [])
+        icore_plan.card_owners(db)
+        pairs, _, _, roster = db.calls[0]
+        self.assertEqual(pairs, {WORKPACE_DEPARTMENT: OUR_CODE})
+        self.assertEqual([item["department_name"] for item in roster], [WORKPACE_DEPARTMENT])
+
+    def test_card_owners_without_switched_departments_ask_nothing(self):
+        db = StubPlanDb([person(1, "Магажанов Джаббар", ["card-A", "card-B"])], [])
+        with mock.patch.object(config, "ICORE_PLAN_DEPARTMENTS", {}):
+            self.assertEqual(icore_plan.card_owners(db), {})
+        self.assertEqual(db.calls, [])
 
 
 class ApplyToRecordsTests(unittest.TestCase):
@@ -377,9 +480,11 @@ class WiringTests(unittest.TestCase):
                              f"отдел {workpace_name} переключён на план iCore без пары")
 
     def test_both_plan_consumers_are_switched(self):
-        """Опрос и Excel-отчёт обязаны брать план из одного источника, иначе
-        выгрузка и уведомления разойдутся на одних и тех же людях."""
-        for source, label in ((LATENESS_SOURCE, "lateness.py"), (REPORTS_SOURCE, "reports.py")):
+        """Опрос, Excel-отчёт и экран «Отметок» обязаны брать план из одного
+        источника, иначе выгрузка, уведомления и экран разойдутся на одних и тех
+        же людях."""
+        for source, label in ((LATENESS_SOURCE, "lateness.py"), (REPORTS_SOURCE, "reports.py"),
+                              (ATTENDANCE_SOURCE, "attendance.py")):
             self.assertIn("icore_plan.apply_to_records", source, label)
 
     def test_report_receives_the_database(self):

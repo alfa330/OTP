@@ -20,7 +20,7 @@
 import logging
 from datetime import date as date_cls, datetime, timedelta
 
-from group_late import attendance
+from group_late import attendance, icore_plan
 from group_late.config import TZ
 from group_late.departments import clean_department_filters, department_matches
 from group_late.helpers import parse_dt
@@ -248,6 +248,20 @@ def rows_for(db, date_start, date_end, department=None, refresh=False):
     }
 
 
+def _card_owners(db):
+    """Чьи карточки Workpace принадлежат одному человеку (`icore_plan.card_owners`).
+
+    Сбой список не роняет: без сведения человек с двумя карточками просто
+    встанет двумя строками."""
+    if db is None:
+        return {}
+    try:
+        return icore_plan.card_owners(db)
+    except Exception:
+        logger.exception("Отметки: не удалось свести карточки одного сотрудника")
+        return {}
+
+
 def latest_rows(db, department=None, refresh=False):
     """Последняя отметка каждого сотрудника — без привязки к дате.
 
@@ -266,12 +280,15 @@ def latest_rows(db, department=None, refresh=False):
             older = [row for row in older if department_matches(row.get("department"), filters)]
         rows.extend(older)
 
+    owners = _card_owners(db)
     latest = {}
     for row in rows:
         when = parse_dt(row.get("last_mark_at"))
         if when is None:
             continue
         key = row.get("employee_id") or row.get("employee")
+        # Несколько карточек Workpace одного человека — один человек в списке.
+        key = owners.get(key, key)
         if key not in latest or when > latest[key][0]:
             # Время отметки — в поясе компании: по нему экран делит список на
             # дни, а в кэше оно лежит как пришло из источника, бывает и без пояса.
