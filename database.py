@@ -51637,6 +51637,7 @@ class Database:
             )
             VALUES %s
         """, rows)
+        self._glb_reopen_attendance_days_tx(cursor, rows)
         return len(rows)
 
     @contextmanager
@@ -63592,6 +63593,81 @@ class Database:
             cursor.execute(f"DELETE FROM glb_attendance_rows {where}", params)
             cursor.execute(f"DELETE FROM glb_attendance_days {where}", params)
             return cursor.rowcount or 0
+
+    # На сколько дней назад правка графика возвращает день «Отметок» в пересборку.
+    # Глубже не идём намеренно: пересборка перечитывает день из Workpace и Clockster
+    # целиком, а Clockster со временем обезличивает прошлое — давний день после
+    # пересборки потерял бы строки центрального офиса. Такой день пересчитывают
+    # руками, кнопкой «Обновить», уже понимая, что делают.
+    GLB_ATTENDANCE_REOPEN_DAYS = 31
+
+    def _glb_reopen_attendance_days_tx(self, cursor, change_rows):
+        """Правка графика задним числом → день «Отметок» пересобирается.
+
+        У отделов, чей план раздел берёт из «Графиков работы»
+        (`group_late.config.ICORE_PLAN_DEPARTMENTS`), прошедший день уже лежит в
+        кэше со старым планом и сам не меняется: смену внесли позже, а человек
+        так и стоит «Вне графика». День не стираем, а возвращаем в
+        неокончательные: строки остаются на экране, и раздел пересобирает день
+        при следующем открытии периода или ночным досбором. Запись реестра дня
+        остаётся на месте, поэтому часы СВ, которые читают тот же реестр, не
+        задеты. День, собранный прежними правилами, окончателен, как и был.
+
+        `change_rows` — строки журнала правок (`_diff_schedule_day`). Сегодня и
+        будущее не в счёт: сегодняшний день раздел и так собирает живьём.
+        Выходной не в счёт: план складывается из смен. Работает внутри
+        транзакции правки графика и под SAVEPOINT — сбой здесь не должен
+        отменить саму правку."""
+        savepoint = False
+        try:
+            from group_late import config as glb_config
+
+            codes = sorted({str(code or '').strip().lower()
+                            for code in (glb_config.ICORE_PLAN_DEPARTMENTS or {}).values()} - {''})
+            if not codes:
+                return 0
+            today = datetime.now(glb_config.TZ).date()
+            edge = today - timedelta(days=self.GLB_ATTENDANCE_REOPEN_DAYS)
+            days_by_operator = {}
+            for row in change_rows or []:
+                operator_id, day, action = row[0], row[1], row[2]
+                if action in ('day_off_set', 'day_off_cleared'):
+                    continue
+                if isinstance(day, datetime):
+                    day = day.date()
+                if isinstance(day, date) and edge <= day < today:
+                    days_by_operator.setdefault(int(operator_id), set()).add(day)
+            if not days_by_operator:
+                return 0
+
+            cursor.execute("SAVEPOINT sp_glb_reopen_attendance")
+            savepoint = True
+            cursor.execute("""
+                SELECT u.id
+                FROM users u
+                JOIN departments d ON d.id = u.department_id
+                WHERE u.id = ANY(%s) AND lower(d.code) = ANY(%s)
+            """, (sorted(days_by_operator), codes))
+            days = sorted({day for (operator_id,) in cursor.fetchall()
+                           for day in days_by_operator.get(int(operator_id), ())})
+            reopened = 0
+            if days:
+                # Полночь самого дня заведомо раньше порога окончательности (16:00
+                # следующего дня) — тем же признаком раздел отличает день, чьи
+                # ночные смены ещё не закрылись.
+                cursor.execute("""
+                    UPDATE glb_attendance_days
+                    SET built_at = day::timestamp AT TIME ZONE 'Asia/Almaty'
+                    WHERE day = ANY(%s)
+                """, (days,))
+                reopened = cursor.rowcount or 0
+            cursor.execute("RELEASE SAVEPOINT sp_glb_reopen_attendance")
+            return reopened
+        except Exception:
+            logging.exception("Отметки: не удалось вернуть дни в пересборку после правки графика")
+            if savepoint:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_glb_reopen_attendance")
+            return 0
 
     def glb_cleanup_attendance_cache(self, keep_days=None):
         """Чистка кэша по глубине хранения. Гоняется той же ночной джобой."""

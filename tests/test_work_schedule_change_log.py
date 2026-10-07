@@ -27,12 +27,15 @@
 """
 
 import ast
+import logging
 import textwrap
 import unittest
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
+from unittest import mock
 
+from group_late import config as attendance_config
 from tests import source_cache
 
 
@@ -376,6 +379,193 @@ class ScheduleChangeActorWiringTests(unittest.TestCase):
         self.assertIn("_resolve_work_schedule_viewer()", body)
         self.assertIn("_filter_operators_for_requester_scope(", body)
         self.assertNotIn("_resolve_management_requester()", body)
+
+
+class _FixedNow(datetime):
+    """«Сегодня» для проверок — 7 октября 2026: метод сам спрашивает время."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 10, 7, 12, 0, tzinfo=tz)
+
+
+TODAY = date(2026, 10, 7)
+PLAN_OPERATOR = 509      # оператор отдела, чей план «Отметки» берут из графика
+OTHER_OPERATOR = 77      # оператор отдела, у которого план приходит из источников
+
+
+class _ReopenCursor:
+    def __init__(self, plan_operators=(PLAN_OPERATOR,), fail_on=None):
+        self.plan_operators = set(plan_operators)
+        self.fail_on = fail_on
+        self.calls = []
+        self.rowcount = 0
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        flat = " ".join(sql.split())
+        self.calls.append((flat, params))
+        if self.fail_on and flat.startswith(self.fail_on):
+            raise RuntimeError("сбой базы")
+        if flat.startswith("SELECT u.id"):
+            self._rows = [(operator_id,) for operator_id in params[0]
+                          if operator_id in self.plan_operators]
+        elif flat.startswith("UPDATE glb_attendance_days"):
+            self.rowcount = len(params[0])
+
+    def fetchall(self):
+        return self._rows
+
+    def statements(self, prefix):
+        return [call for call in self.calls if call[0].startswith(prefix)]
+
+
+def _class_constant(name):
+    _, module = _parsed_module(DATABASE_PATH)
+    class_node = next(node for node in module.body
+                      if isinstance(node, ast.ClassDef) and node.name == "Database")
+    node = next(item for item in class_node.body
+                if isinstance(item, ast.Assign) and getattr(item.targets[0], "id", None) == name)
+    return ast.literal_eval(node.value)
+
+
+def _make_reopen_dummy():
+    namespace = {"datetime": _FixedNow, "date": date, "timedelta": timedelta, "logging": logging}
+    exec(_function_source(DATABASE_PATH, "_glb_reopen_attendance_days_tx", class_name="Database"),
+         namespace)
+    dummy = type("ReopenDummy", (), {
+        "GLB_ATTENDANCE_REOPEN_DAYS": _class_constant("GLB_ATTENDANCE_REOPEN_DAYS"),
+        "_glb_reopen_attendance_days_tx": namespace["_glb_reopen_attendance_days_tx"],
+    })
+    return dummy()
+
+
+class AttendanceReopenTests(unittest.TestCase):
+    """Правка графика задним числом возвращает день «Отметок» в пересборку.
+
+    Боевой случай 07.10.2026: отделу «Регионы» график на 1–6 октября внесли 6–7
+    октября. Раздел «Отметки» эти дни уже собрал без плана и сам не пересчитывал —
+    58 человеко-дней стояли «Вне графика» при заведённых сменах."""
+
+    WINDOW = _class_constant("GLB_ATTENDANCE_REOPEN_DAYS")
+
+    def setUp(self):
+        self.dummy = _make_reopen_dummy()
+        self.differ = _make_diff_dummy()
+
+    def _rows(self, operator_id, day, before=None, after=None):
+        """Строки журнала — настоящим диффером: раскладку кортежа читает метод."""
+        before = before if before is not None else _state()
+        after = after if after is not None else _state((("09:00", "19:00", "regular"),))
+        return self.differ._diff_schedule_day(operator_id, day, before, after, ACTOR)
+
+    def _reopen(self, rows, cursor=None):
+        cursor = cursor or _ReopenCursor()
+        return self.dummy._glb_reopen_attendance_days_tx(cursor, rows), cursor
+
+    def test_shift_entered_for_a_past_day_reopens_that_day(self):
+        day = TODAY - timedelta(days=2)
+        result, cursor = self._reopen(self._rows(PLAN_OPERATOR, day))
+        self.assertEqual(result, 1)
+        asked = cursor.statements("SELECT u.id")[0][1]
+        self.assertEqual(asked, ([PLAN_OPERATOR], sorted(attendance_config.ICORE_PLAN_DEPARTMENTS.values())))
+        self.assertEqual(cursor.statements("UPDATE glb_attendance_days")[0][1], ([day],))
+
+    def test_removed_and_moved_shifts_count_too(self):
+        day = TODAY - timedelta(days=1)
+        shift = _state((("09:00", "19:00", "regular"),))
+        for after in (_state(), _state((("10:00", "19:00", "regular"),))):
+            with self.subTest(after=after):
+                _, cursor = self._reopen(self._rows(PLAN_OPERATOR, day, before=shift, after=after))
+                self.assertEqual(cursor.statements("UPDATE glb_attendance_days")[0][1], ([day],))
+
+    def test_today_and_future_never_touch_the_cache(self):
+        """Обычная правка графика (вперёд) не должна стоить ни одного запроса:
+        сегодняшний день раздел и так собирает живьём."""
+        rows = self._rows(PLAN_OPERATOR, TODAY) + self._rows(PLAN_OPERATOR, TODAY + timedelta(days=5))
+        result, cursor = self._reopen(rows)
+        self.assertEqual((result, cursor.calls), (0, []))
+
+    def test_day_off_alone_is_not_a_plan_change(self):
+        rows = self._rows(PLAN_OPERATOR, TODAY - timedelta(days=2),
+                          before=_state(), after=_state(day_off=True))
+        self.assertEqual(_actions(rows), ["day_off_set"])
+        result, cursor = self._reopen(rows)
+        self.assertEqual((result, cursor.calls), (0, []))
+
+    def test_departments_with_source_plan_keep_their_days(self):
+        """У остальных отделов план приходит из Workpace и Clockster: правка их
+        графика «Отметки» не меняет, и пересобирать день незачем."""
+        result, cursor = self._reopen(self._rows(OTHER_OPERATOR, TODAY - timedelta(days=2)))
+        self.assertEqual(result, 0)
+        self.assertEqual(cursor.statements("UPDATE"), [])
+
+    def test_only_days_of_plan_operators_are_reopened(self):
+        own_day, foreign_day = TODAY - timedelta(days=3), TODAY - timedelta(days=4)
+        rows = self._rows(PLAN_OPERATOR, own_day) + self._rows(OTHER_OPERATOR, foreign_day)
+        _, cursor = self._reopen(rows)
+        self.assertEqual(cursor.statements("SELECT u.id")[0][1][0], [OTHER_OPERATOR, PLAN_OPERATOR])
+        self.assertEqual(cursor.statements("UPDATE glb_attendance_days")[0][1], ([own_day],))
+
+    def test_days_beyond_the_window_are_left_to_the_refresh_button(self):
+        """Давний день Clockster отдаёт уже неполным — автоматическая пересборка
+        стёрла бы из него строки центрального офиса."""
+        edge = TODAY - timedelta(days=self.WINDOW)
+        _, cursor = self._reopen(self._rows(PLAN_OPERATOR, edge - timedelta(days=1)))
+        self.assertEqual(cursor.calls, [])
+        _, cursor = self._reopen(self._rows(PLAN_OPERATOR, edge))
+        self.assertEqual(cursor.statements("UPDATE glb_attendance_days")[0][1], ([edge],))
+
+    def test_no_switched_department_means_no_work(self):
+        with mock.patch.object(attendance_config, "ICORE_PLAN_DEPARTMENTS", {}):
+            result, cursor = self._reopen(self._rows(PLAN_OPERATOR, TODAY - timedelta(days=2)))
+        self.assertEqual((result, cursor.calls), (0, []))
+
+    def test_failure_never_cancels_the_schedule_edit(self):
+        """Метод зовётся в транзакции правки графика: сбой откатывается до
+        SAVEPOINT и наружу не выходит — иначе вместе с ним пропала бы смена."""
+        for fail_on in ("SELECT u.id", "UPDATE glb_attendance_days"):
+            with self.subTest(fail_on=fail_on):
+                cursor = _ReopenCursor(fail_on=fail_on)
+                with self.assertLogs(level="ERROR"):
+                    result, _ = self._reopen(self._rows(PLAN_OPERATOR, TODAY - timedelta(days=2)),
+                                             cursor)
+                self.assertEqual(result, 0)
+                order = [call[0] for call in cursor.calls]
+                self.assertEqual(order[0], "SAVEPOINT sp_glb_reopen_attendance")
+                self.assertEqual(order[-1], "ROLLBACK TO SAVEPOINT sp_glb_reopen_attendance")
+                self.assertNotIn("RELEASE SAVEPOINT sp_glb_reopen_attendance", order)
+
+    def test_unreadable_change_row_is_not_fatal_either(self):
+        """До SAVEPOINT откатывать нечего — но и наружу сбой выйти не должен."""
+        cursor = _ReopenCursor()
+        with self.assertLogs(level="ERROR"):
+            result = self.dummy._glb_reopen_attendance_days_tx(cursor, [(PLAN_OPERATOR,)])
+        self.assertEqual((result, cursor.calls), (0, []))
+
+    def test_success_releases_the_savepoint(self):
+        _, cursor = self._reopen(self._rows(PLAN_OPERATOR, TODAY - timedelta(days=2)))
+        order = [call[0] for call in cursor.calls]
+        self.assertEqual(order[0], "SAVEPOINT sp_glb_reopen_attendance")
+        self.assertEqual(order[-1], "RELEASE SAVEPOINT sp_glb_reopen_attendance")
+
+    def test_day_is_reopened_not_erased(self):
+        """Строки дня остаются на экране до пересборки, а запись реестра дней —
+        на месте: по ней же часы СВ узнают, какие дни собраны с Clockster."""
+        source = _function_source(DATABASE_PATH, "_glb_reopen_attendance_days_tx", class_name="Database")
+        self.assertNotIn("DELETE", source)
+        self.assertNotIn("glb_attendance_rows", source)
+        _, cursor = self._reopen(self._rows(PLAN_OPERATOR, TODAY - timedelta(days=2)))
+        update = cursor.statements("UPDATE glb_attendance_days")[0][0]
+        self.assertIn("SET built_at = day::timestamp AT TIME ZONE 'Asia/Almaty' WHERE day = ANY(%s)", update)
+
+    def test_history_writer_reopens_after_recording(self):
+        """Точка одна на все пути записи графика (их сторожит
+        test_every_shift_writer_records_history), поэтому и вызов нужен один."""
+        writer = _function_source(DATABASE_PATH, "_record_schedule_day_changes_tx", class_name="Database")
+        insert_at = writer.index("INSERT INTO work_shift_changes")
+        call_at = writer.index("self._glb_reopen_attendance_days_tx(cursor, rows)")
+        self.assertLess(insert_at, call_at)
 
 
 class ScheduleChangeSchemaTests(unittest.TestCase):
