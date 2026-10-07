@@ -277,6 +277,23 @@ class AccessTests(unittest.TestCase):
                     not access.requires_sensitive_qr(ctx) or qr)
                 self.assertEqual(self.reads(ctx, qr)[0], by_route, (role, code, heads, qr))
 
+    def test_granted_section_is_read_through_the_same_two_gates(self):
+        """Раздел выдают и из него самого (кнопка «Доступ») — и помощник читает
+        списки выданным так же, как ручки раздела: на всей сетке, с тем же
+        замком. «Если у пользователя имеется раздел — помощник может его читать»."""
+        for role, code, heads in grid():
+            ctx = person(role, code, heads, grants=('read',))
+            self.assertTrue(access.can_open_section(ctx), (role, code, heads))
+            for qr in (False, True):
+                by_route = not access.requires_sensitive_qr(ctx) or qr
+                self.assertEqual(self.reads(ctx, qr)[0], by_route, (role, code, heads, qr))
+        # Поимённо: кому из чужого отдела что нужно, чтобы помощник прочитал.
+        self.assertTrue(self.reads(person('sv', 'tez', grants=('read',)), False)[0])
+        self.assertTrue(self.reads(person('trainer', 'szov', grants=('read',)), False)[0])
+        for role in ('operator', 'trainee', 'accounting_manager'):
+            self.assertFalse(self.reads(person(role, 'tez', grants=('full',)), False)[0], role)
+            self.assertTrue(self.reads(person(role, 'tez', grants=('full',)), True)[0], role)
+
     def test_qr_is_asked_about_this_person_on_this_cursor(self):
         _opened, asked, cursor = self.reads(person('operator', 'op'), True)
         self.assertEqual(asked, [(10, cursor)])
@@ -1922,10 +1939,12 @@ class RouteTests(unittest.TestCase):
         self.assertNotIn('Списки Байги', self.seen['user'])
 
     def test_section_gate_is_asked_even_when_the_wiki_gate_is_not(self):
-        """Кого вика про QR не спрашивает (кадровик в отделе раздела), раздел
-        спрашивает: наборы должностей под двумя замками разные."""
-        self.wiki_viewer = wiki_person('hr_manager')
-        self.viewer = person('hr_manager', 'szov', user_id=42)
+        """Кого вика про QR не спрашивает, раздел спрашивает: наборы должностей
+        под двумя замками разные. Это стажёр, которому раздел выдан из него
+        самого (кнопка «Доступ»): общий замок портала стажёра не спрашивает,
+        замок раздела — да."""
+        self.wiki_viewer = wiki_person('trainee')
+        self.viewer = person('trainee', 'szov', user_id=42, grants=('read',))
         self.key.return_value = False
         response = self.ask('ВУ ZZ123456 какое место')
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
@@ -1936,6 +1955,22 @@ class RouteTests(unittest.TestCase):
         self.key.return_value = True
         self.ask('ВУ ZZ123456 какое место')
         self.assertIn('Списки Байги', self.seen['user'])
+
+    def test_neither_gate_asks_the_hr_manager_with_a_granted_section(self):
+        """Кадровику портал QR не выдаёт: вика его не спрашивает, и раздел,
+        выданный ему поимённо, — тоже. Без выдачи раздел ему закрыт, где бы он
+        ни числился."""
+        self.wiki_viewer = wiki_person('hr_manager')
+        self.viewer = person('hr_manager', 'hr', user_id=42, grants=('read',))
+        self.key.return_value = False
+        self.ask('ВУ ZZ123456 какое место')
+        self.assertEqual(self.key.call_args_list, [])
+        self.assertIn('Списки Байги', self.seen['user'])
+        for code in ('hr', 'szov', 'op', 'marketing'):
+            self.viewer = person('hr_manager', code, user_id=42)
+            self.key.return_value = True
+            self.ask('ВУ ZZ123456 какое место')
+            self.assertNotIn('Списки Байги', self.seen['user'], code)
 
     def test_tez_space_and_closed_section_get_no_rows(self):
         self.ask('ВУ ZZ123456 какое место', space_id=9)

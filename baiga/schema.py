@@ -118,6 +118,43 @@ _STATEMENTS = [
     )
     """ % _NOW,
 
+    # Выдачи доступа из самого раздела (кнопка «Доступ», 07.10.2026) — поверх
+    # круга, заданного в access.py. subject_type: user / group / department;
+    # level: read / export / full — оба списка держит код, CHECK нет по той же
+    # причине, что у статусов недель. subject_id без внешнего ключа: адресат
+    # трёх видов. Выдача удалённому адресату никому ничего не открывает, а в
+    # листе доступа видна как «удалён» — её снимают руками.
+    """
+    CREATE TABLE IF NOT EXISTS baiga_access_grants (
+        id              SERIAL PRIMARY KEY,
+        subject_type    VARCHAR(16) NOT NULL,
+        subject_id      INTEGER NOT NULL,
+        level           VARCHAR(16) NOT NULL,
+        granted_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        granted_by_name VARCHAR(200),
+        granted_at      TIMESTAMP NOT NULL DEFAULT %s
+    )
+    """ % _NOW,
+
+    # action: grant / change / revoke. След каждой выдачи: в строках ФИО и
+    # номера ВУ, и вопрос «кто открыл раздел этой группе» не должен оставаться
+    # без ответа после того, как выдачу сняли. Подпись адресата — как она
+    # читалась в тот день: группу потом могут переименовать или удалить.
+    """
+    CREATE TABLE IF NOT EXISTS baiga_access_log (
+        id              SERIAL PRIMARY KEY,
+        action          VARCHAR(16) NOT NULL,
+        subject_type    VARCHAR(16) NOT NULL,
+        subject_id      INTEGER NOT NULL,
+        subject_label   VARCHAR(255),
+        level_before    VARCHAR(16),
+        level_after     VARCHAR(16),
+        actor_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        actor_name      VARCHAR(200),
+        created_at      TIMESTAMP NOT NULL DEFAULT %s
+    )
+    """ % _NOW,
+
     # Одна активная загрузка на неделю акции — на этом держится «повторная
     # загрузка заменяет, а не дублирует», даже при двух одновременных загрузках.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_baiga_uploads_active_week "
@@ -135,6 +172,12 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_baiga_rows_zachet ON baiga_rows(zachet)",
 
     "CREATE INDEX IF NOT EXISTS idx_baiga_exports_recent ON baiga_exports(created_at DESC, id DESC)",
+
+    # Один адресат — одна выдача: повторная выдача меняет уровень, а не кладёт
+    # вторую строку. Он же — индекс проверки доступа на каждом запросе раздела.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_baiga_access_grants_subject "
+    "ON baiga_access_grants(subject_type, subject_id)",
+    "CREATE INDEX IF NOT EXISTS idx_baiga_access_log_recent ON baiga_access_log(created_at DESC, id DESC)",
 ]
 
 # Миграции по живой базе. Идут ПОСЛЕ таблиц и ПЕРЕД индексами — порядок держит
@@ -179,9 +222,27 @@ def init_baiga_schema(cursor):
 def schema_is_ready(cursor):
     """Развёрнута ли схема: отличает «раздел ещё не поднялся» от «недель нет».
 
-    Спрашивает последнюю по порядку таблицу: разворот идёт одним SAVEPOINT, так
-    что есть она — есть и остальные.
+    Спрашивает последнюю таблицу недель: разворот идёт одним SAVEPOINT, так что
+    есть она — есть и остальные. Таблицы выдач моложе, о них — grants_ready.
     """
     cursor.execute("SELECT to_regclass('public.baiga_exports') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])
+
+
+# Таблицы выдач появились позже недель (07.10.2026). Их спрашивает проверка
+# доступа — то есть КАЖДЫЙ запрос раздела, — поэтому «есть» запоминается на
+# процесс: таблицы не исчезают, и второй раз спрашивать незачем. «Нет» не
+# запоминается: схема могла развернуться следующим стартом.
+_grants_seen = {'ready': False}
+
+
+def grants_ready(cursor):
+    """Развёрнуты ли таблицы выдач. Нет (миграция не легла) — раздел живёт по
+    кругу из access.py, как до кнопки «Доступ», а не отвечает ошибкой каждому."""
+    if _grants_seen['ready']:
+        return True
+    cursor.execute("SELECT to_regclass('public.baiga_access_log') IS NOT NULL")
+    row = cursor.fetchone()
+    _grants_seen['ready'] = bool(row and row[0])
+    return _grants_seen['ready']

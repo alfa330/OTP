@@ -5,16 +5,14 @@
 вещи сразу (запись журнала, файл, строки, закрытие прежней загрузки), и только
 один курсор гарантирует «все строки или ни одной» (п. 4 постановки).
 
-Контекст доступа — общий с «Посылками»: профиль, отдел и отделы, где человек
-глава, одним запросом.
+Контекст доступа — свой: профиль, отделы, где человек глава, и уровни выдач,
+под которые он подпадает (кнопка «Доступ»), одним запросом.
 """
 
 from psycopg2 import Binary
 from psycopg2.extras import Json, execute_values
 
-from parcels import queries as parcels_queries
-
-load_access_context = parcels_queries.load_access_context
+from . import schema
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
@@ -46,6 +44,105 @@ _UPLOAD_COLUMNS = ', '.join('u.%s' % name for name in UPLOAD_FIELDS)
 
 def _rows(cursor, fields):
     return [dict(zip(fields, raw)) for raw in cursor.fetchall()]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Контекст доступа
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Кто числится в штате: уволенный в портал не входит, а человек в отпуске или
+# на больничном — входит, и выданный раздел у него есть. По этому же признаку
+# считаются люди под выдачей, чтобы число в листе доступа совпадало с кругом.
+_STAFF = "status NOT IN ('fired', 'dismissal')"
+
+# Состав группы — тем же определением, что у вики (wiki/queries.py, my_groups):
+# операторы и супервайзеры с действующим членством в действующей группе. Слово
+# «группа» в выдаче обязано значить то же, что в остальном портале.
+_MEMBERSHIPS = """
+    SELECT group_id, operator_id AS user_id, start_date, end_date
+      FROM group_operator_memberships
+    UNION ALL
+    SELECT group_id, supervisor_id, start_date, end_date
+      FROM group_supervisor_memberships
+"""
+_CURRENT = "m.start_date <= CURRENT_DATE AND (m.end_date IS NULL OR m.end_date >= CURRENT_DATE)"
+
+# Запрос собран склейкой, а не подстановкой через %: в нём живут параметры
+# psycopg2 (%(user_id)s), и двойная подстановка требовала бы считать проценты.
+_CONTEXT_PROFILE = """
+WITH me AS (
+    SELECT id, name, role, department_id, city FROM users WHERE id = %(user_id)s
+),
+headed AS (
+    SELECT d.id, d.code FROM departments d WHERE d.head_user_id = %(user_id)s AND d.is_active
+)"""
+
+# Выдачи, под которые человек подпадает: ему самому, его группе, его отделу.
+# Глава отдела входит в отдел и тогда, когда сам числится в другом, — как в
+# «Посылках» (parcels.access._belongs_to). Отдел — только действующий: закрытому
+# выдача ничего не открывает, как архивной группе, и лист доступа так его и
+# подписывает (list_grants: active).
+_CONTEXT_GRANTS = """,
+my_departments AS (
+    SELECT d.id FROM departments d
+     WHERE d.is_active AND d.id = (SELECT department_id FROM me)
+    UNION
+    SELECT id FROM headed
+),
+my_groups AS (
+    SELECT m.group_id
+      FROM (""" + _MEMBERSHIPS + """) m
+      JOIN groups g ON g.id = m.group_id AND g.status = 'active'
+     WHERE m.user_id = %(user_id)s AND """ + _CURRENT + """
+),
+my_grants AS (
+    SELECT a.level
+      FROM baiga_access_grants a
+     WHERE (a.subject_type = 'user' AND a.subject_id = %(user_id)s)
+        OR (a.subject_type = 'group' AND a.subject_id IN (SELECT group_id FROM my_groups))
+        OR (a.subject_type = 'department' AND a.subject_id IN (SELECT id FROM my_departments))
+)"""
+
+_CONTEXT_COLUMNS = """
+SELECT
+    (SELECT name          FROM me),
+    (SELECT role          FROM me),
+    (SELECT department_id FROM me),
+    (SELECT d.code FROM departments d WHERE d.id = (SELECT department_id FROM me)),
+    (SELECT city          FROM me),
+    COALESCE((SELECT array_agg(id)   FROM headed), '{}'),
+    COALESCE((SELECT array_agg(code) FROM headed), '{}'),
+    """
+
+_CONTEXT_WITH_GRANTS_SQL = (_CONTEXT_PROFILE + _CONTEXT_GRANTS + _CONTEXT_COLUMNS
+                            + "COALESCE((SELECT array_agg(DISTINCT level) FROM my_grants), '{}')")
+_CONTEXT_WITHOUT_GRANTS_SQL = _CONTEXT_PROFILE + _CONTEXT_COLUMNS + "'{}'::varchar[]"
+
+
+def load_access_context(cursor, user_id):
+    """Профиль, главенство и уровни выдач — одним запросом.
+
+    Должность отдаётся как в карточке, а не сведённой к оператору: замку нужно
+    отличать кадровика от оператора (access.requires_sensitive_qr). Таблиц
+    выдач ещё нет (миграция не легла) — контекст тот же, без выдач.
+    """
+    sql = _CONTEXT_WITH_GRANTS_SQL if schema.grants_ready(cursor) else _CONTEXT_WITHOUT_GRANTS_SQL
+    cursor.execute(sql, {'user_id': int(user_id)})
+    row = cursor.fetchone()
+    if not row or row[1] is None:
+        return None
+    name, role, department_id, department_code, city, headed, headed_codes, grant_levels = row
+    return {
+        'user_id': int(user_id),
+        'name': name,
+        'role': str(role or '').strip().lower(),
+        'department_id': department_id,
+        'department_code': department_code,
+        'city': city,
+        'headed_department_ids': list(headed or []),
+        'headed_department_codes': list(headed_codes or []),
+        'grant_levels': list(grant_levels or []),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,4 +485,228 @@ def log_export(cursor, *, kind, actor, rows_count=0, mode=None, filters=None, up
         "VALUES (%(kind)s, %(mode)s, %(filters)s, %(rows)s, %(upload_id)s, %(actor_id)s, %(actor_name)s)",
         {'kind': kind, 'mode': mode, 'filters': Json(filters or {}), 'rows': int(rows_count or 0),
          'upload_id': upload_id, 'actor_id': actor['user_id'], 'actor_name': actor.get('name')},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Доступ: выдачи из раздела (кнопка «Доступ»)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Люди в штате и число людей в каждой группе — общая шапка списка выдач и
+# справочника адресатов: число в строке отвечает на вопрос «кому я открываю».
+_PEOPLE_CTES = """
+WITH staff AS (
+    SELECT id, name, role, department_id FROM users WHERE """ + _STAFF + """
+),
+group_people AS (
+    SELECT m.group_id, COUNT(DISTINCT m.user_id) AS people
+      FROM (""" + _MEMBERSHIPS + """) m
+      JOIN staff s ON s.id = m.user_id
+     WHERE """ + _CURRENT + """
+     GROUP BY 1
+)"""
+
+GRANT_FIELDS = ('id', 'subject_type', 'subject_id', 'level', 'granted_by_name', 'granted_at',
+                'label', 'detail', 'role', 'people', 'active')
+
+
+def list_grants(cursor):
+    """Выдачи с подписями адресатов: отделы, группы, люди — в этом порядке.
+
+    label — как адресат зовётся сейчас (None — его больше нет); detail — отдел
+    группы или человека: одноимённые группы разных отделов и тёзок иначе не
+    различить; people — сколько человек под выдачей; active — жив ли адресат:
+    уволенному, архивной группе и закрытому отделу выдача ничего не открывает.
+    """
+    cursor.execute(_PEOPLE_CTES + """
+        SELECT a.id, a.subject_type, a.subject_id, a.level, a.granted_by_name, a.granted_at,
+               COALESCE(u.name, g.name, d.name),
+               COALESCE(ud.name, gd.name),
+               u.role,
+               CASE a.subject_type
+                    WHEN 'group' THEN COALESCE(gp.people, 0)
+                    WHEN 'department' THEN (SELECT COUNT(*) FROM staff s WHERE s.department_id = d.id)
+               END,
+               CASE a.subject_type
+                    WHEN 'user' THEN COALESCE(u.""" + _STAFF + """, FALSE)
+                    WHEN 'group' THEN COALESCE(g.status = 'active', FALSE)
+                    ELSE COALESCE(d.is_active, FALSE)
+               END
+          FROM baiga_access_grants a
+          LEFT JOIN users u ON a.subject_type = 'user' AND u.id = a.subject_id
+          LEFT JOIN departments ud ON ud.id = u.department_id
+          LEFT JOIN groups g ON a.subject_type = 'group' AND g.id = a.subject_id
+          LEFT JOIN departments gd ON gd.id = g.department_id
+          LEFT JOIN group_people gp ON gp.group_id = g.id
+          LEFT JOIN departments d ON a.subject_type = 'department' AND d.id = a.subject_id
+         ORDER BY CASE a.subject_type WHEN 'department' THEN 1 WHEN 'group' THEN 2 ELSE 3 END,
+                  7 NULLS LAST, a.id
+    """)
+    return _rows(cursor, GRANT_FIELDS)
+
+
+def access_catalog(cursor):
+    """Кому можно выдать: действующие отделы и группы, люди в штате — одним
+    запросом. {вид: [{id, name, detail, role, people}]}."""
+    cursor.execute(_PEOPLE_CTES + """
+        SELECT 'department', d.id, d.name::text, NULL::text, NULL::text,
+               (SELECT COUNT(*) FROM staff s WHERE s.department_id = d.id)
+          FROM departments d
+         WHERE d.is_active
+        UNION ALL
+        SELECT 'group', g.id, g.name::text, gd.name::text, NULL::text, COALESCE(gp.people, 0)
+          FROM groups g
+          LEFT JOIN departments gd ON gd.id = g.department_id
+          LEFT JOIN group_people gp ON gp.group_id = g.id
+         WHERE g.status = 'active'
+        UNION ALL
+        SELECT 'user', s.id, s.name::text, sd.name::text, s.role::text, NULL::bigint
+          FROM staff s
+          LEFT JOIN departments sd ON sd.id = s.department_id
+         ORDER BY 1, 3, 2
+    """)
+    catalog = {'department': [], 'group': [], 'user': []}
+    for kind, ident, name, detail, role, people in cursor.fetchall():
+        catalog[kind].append({'id': ident, 'name': name, 'detail': detail, 'role': role,
+                              'people': None if people is None else int(people)})
+    return catalog
+
+
+def circle_names(cursor, department_codes, user_ids):
+    """Названия отделов круга и имена названных поимённо: ({код: название},
+    {id: имя}). Коды в базе встречаются в разном регистре («SZOV») — сверяем
+    без него, как сам круг."""
+    cursor.execute("""
+        SELECT 'department', lower(trim(d.code)), d.name FROM departments d
+         WHERE d.is_active AND lower(trim(d.code)) = ANY(%(codes)s::text[])
+        UNION ALL
+        SELECT 'user', u.id::text, u.name FROM users u
+         WHERE u.id = ANY(%(users)s::int[]) AND u.""" + _STAFF + """
+    """, {'codes': list(department_codes), 'users': list(user_ids)})
+    departments, people = {}, {}
+    for kind, key, name in cursor.fetchall():
+        if kind == 'department':
+            departments[key] = name
+        else:
+            people[int(key)] = name
+    return departments, people
+
+
+def find_subjects(cursor, subjects):
+    """Подписи живых адресатов из списка (вид, id): {(вид, id): подпись}.
+
+    Кого в ответе нет — уволен, в архиве, закрыт или не существует вовсе:
+    такому не выдают. Проверка одна на всю пачку, а не запрос на адресата.
+    """
+    ids = {'user': [], 'group': [], 'department': []}
+    for kind, ident in subjects:
+        ids[kind].append(int(ident))
+    cursor.execute("""
+        SELECT 'user', u.id, u.name FROM users u
+         WHERE u.id = ANY(%(user)s::int[]) AND u.""" + _STAFF + """
+        UNION ALL
+        SELECT 'group', g.id, g.name FROM groups g
+         WHERE g.id = ANY(%(group)s::int[]) AND g.status = 'active'
+        UNION ALL
+        SELECT 'department', d.id, d.name FROM departments d
+         WHERE d.id = ANY(%(department)s::int[]) AND d.is_active
+    """, ids)
+    return {(kind, int(ident)): name for kind, ident, name in cursor.fetchall()}
+
+
+def lock_access(cursor):
+    """Правки доступа идут по очереди: «было → стало» в журнале и счёт
+    «выдано N» считаются по прочитанному, и два раздающих не должны читать
+    одно и то же состояние."""
+    cursor.execute("SELECT pg_advisory_xact_lock(hashtext('baiga:access'))")
+
+
+def granted_levels(cursor, subjects):
+    """Что адресатам уже выдано: {(вид, id): уровень}."""
+    pairs = tuple((kind, int(ident)) for kind, ident in subjects)
+    if not pairs:
+        return {}
+    cursor.execute(
+        "SELECT subject_type, subject_id, level FROM baiga_access_grants "
+        "WHERE (subject_type, subject_id) IN %(pairs)s", {'pairs': pairs})
+    return {(kind, int(ident)): level for kind, ident, level in cursor.fetchall()}
+
+
+def write_grants(cursor, subjects, level, actor):
+    """Выдать уровень адресатам [(вид, id, подпись)] одной пачкой: нового —
+    добавить, у записанного — сменить уровень. Возвращает (выдано, изменено).
+
+    Адресат, у которого этот уровень уже стоит, не трогается и в журнал не
+    идёт: «выдал» у его выдачи остался бы чужим именем без единой правки.
+    """
+    before = granted_levels(cursor, [(kind, ident) for kind, ident, _ in subjects])
+    fresh = [item for item in subjects if (item[0], item[1]) not in before]
+    changed = [item for item in subjects
+               if (item[0], item[1]) in before and before[(item[0], item[1])] != level]
+    if fresh or changed:
+        execute_values(
+            cursor,
+            "INSERT INTO baiga_access_grants (subject_type, subject_id, level, granted_by, granted_by_name) "
+            "VALUES %s ON CONFLICT (subject_type, subject_id) DO UPDATE SET level = EXCLUDED.level, "
+            "granted_by = EXCLUDED.granted_by, granted_by_name = EXCLUDED.granted_by_name, "
+            "granted_at = " + _NOW,
+            [(kind, ident, level, actor['user_id'], actor.get('name')) for kind, ident, _ in fresh + changed],
+        )
+        log_access(cursor, actor, [
+            {'action': 'grant', 'subject_type': kind, 'subject_id': ident, 'label': label, 'after': level}
+            for kind, ident, label in fresh
+        ] + [
+            {'action': 'change', 'subject_type': kind, 'subject_id': ident, 'label': label,
+             'before': before[(kind, ident)], 'after': level}
+            for kind, ident, label in changed
+        ])
+    return len(fresh), len(changed)
+
+
+GRANT_ROW_FIELDS = ('id', 'subject_type', 'subject_id', 'level', 'label')
+
+
+def get_grant(cursor, grant_id, lock=False):
+    """Одна выдача с подписью адресата (для журнала) или None."""
+    cursor.execute(
+        "SELECT a.id, a.subject_type, a.subject_id, a.level, COALESCE(u.name, g.name, d.name) "
+        "FROM baiga_access_grants a "
+        "LEFT JOIN users u ON a.subject_type = 'user' AND u.id = a.subject_id "
+        "LEFT JOIN groups g ON a.subject_type = 'group' AND g.id = a.subject_id "
+        "LEFT JOIN departments d ON a.subject_type = 'department' AND d.id = a.subject_id "
+        "WHERE a.id = %%(id)s%s" % (' FOR UPDATE OF a' if lock else ''),
+        {'id': int(grant_id)},
+    )
+    raw = cursor.fetchone()
+    return dict(zip(GRANT_ROW_FIELDS, raw)) if raw else None
+
+
+def set_grant_level(cursor, grant, level, actor):
+    cursor.execute(
+        "UPDATE baiga_access_grants SET level = %%(level)s, granted_by = %%(actor_id)s, "
+        "granted_by_name = %%(actor_name)s, granted_at = %s WHERE id = %%(id)s" % _NOW,
+        {'level': level, 'actor_id': actor['user_id'], 'actor_name': actor.get('name'), 'id': grant['id']},
+    )
+    log_access(cursor, actor, [{'action': 'change', 'subject_type': grant['subject_type'],
+                                'subject_id': grant['subject_id'], 'label': grant.get('label'),
+                                'before': grant['level'], 'after': level}])
+
+
+def delete_grant(cursor, grant, actor):
+    cursor.execute("DELETE FROM baiga_access_grants WHERE id = %(id)s", {'id': grant['id']})
+    log_access(cursor, actor, [{'action': 'revoke', 'subject_type': grant['subject_type'],
+                                'subject_id': grant['subject_id'], 'label': grant.get('label'),
+                                'before': grant['level']}])
+
+
+def log_access(cursor, actor, entries):
+    """След правок доступа: кто, кому, что было и что стало — пачкой."""
+    if not entries:
+        return
+    execute_values(
+        cursor,
+        "INSERT INTO baiga_access_log (action, subject_type, subject_id, subject_label, level_before, "
+        "level_after, actor_user_id, actor_name) VALUES %s",
+        [(entry['action'], entry['subject_type'], entry['subject_id'], entry.get('label'),
+          entry.get('before'), entry.get('after'), actor['user_id'], actor.get('name')) for entry in entries],
     )

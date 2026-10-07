@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    ArrowRight, Bike, CalendarDays, ChevronRight, ClipboardList, Download, Layers, Loader2, MapPin, Search, SearchX,
-    SlidersHorizontal, Upload, X,
+    ArrowRight, Bike, CalendarDays, ChevronRight, ClipboardList, Download, KeyRound, Layers, Loader2, MapPin, Search,
+    SearchX, SlidersHorizontal, Upload, X,
 } from 'lucide-react';
-import { APPLE_FONT, IosMenu, IosPager, IosSegmented, iosBtnPrimary, iosCard, iosGroupLabel } from '../ui/ios';
+import {
+    APPLE_FONT, IosMenu, IosPager, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel,
+} from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import useIsMobileShell from '../common/useIsMobileShell';
+import BaigaAccessSheet from './BaigaAccessSheet';
 import BaigaDriverSheet from './BaigaDriverSheet';
 import BaigaJournal from './BaigaJournal';
 import BaigaListModal from './BaigaListModal';
@@ -241,6 +244,7 @@ const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focus = null,
     const [filtersOpen, setFiltersOpen] = useState(() => panelFilterCount(initial.filters) > 0);
     const [listOpen, setListOpen] = useState(false);
     const [uploadOpen, setUploadOpen] = useState(false);
+    const [accessOpen, setAccessOpen] = useState(false);
     const [exporting, setExporting] = useState(false);
     const [reloadKey, setReloadKey] = useState(0);
     const [driver, setDriver] = useState(null);
@@ -539,6 +543,16 @@ const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focus = null,
                             }}
                         />
                     )}
+                    {/* «Доступ» — кому открыт раздел и кому его выдать: у тех, кому
+                        раздавать поручено (baiga/access.py: can_manage_access).
+                        Вид тот же, что у «Выгрузить»: это не главное действие. */}
+                    {capabilities.can_manage_access && (
+                        <button type="button" className={`${iosBtnSecondary} shrink-0`}
+                                onClick={() => setAccessOpen(true)} aria-label="Доступ к разделу">
+                            <KeyRound size={15} />
+                            <span className="hidden sm:inline">Доступ</span>
+                        </button>
+                    )}
                     {capabilities.can_manage && (
                         <button type="button" className={iosBtnPrimary} onClick={() => setUploadOpen(true)}
                                 aria-label="Загрузить неделю">
@@ -567,6 +581,15 @@ const BaigaView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focus = null,
                 headers={headers}
                 weekByStart={weekByStart}
             />
+            {capabilities.can_manage_access && (
+                <BaigaAccessSheet
+                    open={accessOpen}
+                    onClose={() => setAccessOpen(false)}
+                    apiBaseUrl={apiBaseUrl}
+                    headers={headers}
+                    toast={toast}
+                />
+            )}
             {capabilities.can_manage && (
                 <BaigaUploadModal
                     open={uploadOpen}

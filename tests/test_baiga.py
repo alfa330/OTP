@@ -6,6 +6,9 @@
     ведут раздел; главы и супервайзеры ОП и СЗоВ читают; операторы ОП и СЗоВ и
     сотрудники «Маркетинга» читают после QR; остальным закрыто; меню во фронте
     отвечает так же, как сервер;
+  * выдачи из раздела (кнопка «Доступ», решение владельца 07.10.2026): человеку,
+    группе, отделу — только добавляют к кругу; раздают супер-админ и названные
+    поимённо; рядовой и по выдаче входит через QR;
   * разбор файла по п. 3 и п. 7 постановки: колонки по названию, период из
     имени (оба вида) или из «Даты», ошибки блокируют, предупреждения — нет,
     у каждой — лист и строка Excel;
@@ -50,6 +53,7 @@ from openpyxl import Workbook, load_workbook  # noqa: E402
 
 from baiga import access, filters, parse, queries, report, routes, schema  # noqa: E402
 from parcels import access as parcels_access  # noqa: E402
+from tests import source_cache  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 META_JS = ROOT / 'src' / 'components' / 'baiga' / 'baigaMeta.js'
@@ -65,12 +69,14 @@ def _read(path):
     return path.read_text(encoding='utf-8-sig')
 
 
-def person(role='operator', department_code='marketing', headed_codes=(), user_id=10):
+def person(role='operator', department_code='marketing', headed_codes=(), user_id=10, grants=()):
+    """grants — уровни выдач, под которые человек подпадает (кнопка «Доступ»)."""
     return {
         'user_id': user_id, 'name': 'Сотрудник %d' % user_id, 'role': role,
         'department_id': 909, 'department_code': department_code, 'city': 'Алматы',
         'headed_department_ids': [909] if headed_codes else [],
         'headed_department_codes': list(headed_codes),
+        'grant_levels': list(grants),
     }
 
 
@@ -112,9 +118,12 @@ def standard_book():
 # Права
 # ─────────────────────────────────────────────────────────────────────────────
 
-FULL = {'can_open': True, 'can_export': True, 'can_manage': True}
-READ = {'can_open': True, 'can_export': False, 'can_manage': False}
-CLOSED = {'can_open': False, 'can_export': False, 'can_manage': False}
+FULL = {'can_open': True, 'can_export': True, 'can_manage': True, 'can_manage_access': False}
+EXPORT = {'can_open': True, 'can_export': True, 'can_manage': False, 'can_manage_access': False}
+READ = {'can_open': True, 'can_export': False, 'can_manage': False, 'can_manage_access': False}
+CLOSED = {'can_open': False, 'can_export': False, 'can_manage': False, 'can_manage_access': False}
+# Супер-админ ещё и раздаёт доступ — единственный, кому это положено должностью.
+OWNER = dict(FULL, can_manage_access=True)
 
 # Аналитик из именного списка (решение владельца 06.10.2026) — только id.
 ANALYST_ID = 540
@@ -138,7 +147,7 @@ class SwitchTests(unittest.TestCase):
     def test_switch_is_off_and_closes_everyone_else_when_on(self):
         self.assertFalse(access.PILOT_SUPER_ADMIN_ONLY)
         with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
-            self.assertEqual(access.capabilities(person(role='super_admin', department_code=None)), FULL)
+            self.assertEqual(access.capabilities(person(role='super_admin', department_code=None)), OWNER)
             for kwargs in ({'department_code': 'szov'}, {'department_code': 'op'}, {'role': 'marketing_manager'},
                            {'role': 'sv', 'department_code': 'op'},
                            {'role': 'admin', 'department_code': 'szov', 'headed_codes': ('szov',)},
@@ -164,7 +173,7 @@ class AccessTests(unittest.TestCase):
         return access.capabilities(person(**kwargs))
 
     def test_super_admin_does_everything(self):
-        self.assertEqual(self.caps(role='super_admin', department_code=None), FULL)
+        self.assertEqual(self.caps(role='super_admin', department_code=None), OWNER)
 
     def test_marketing_head_has_full_access_whatever_the_base_role(self):
         for role in ('admin', 'sv', 'operator', 'marketing_manager'):
@@ -248,11 +257,14 @@ class AccessTests(unittest.TestCase):
             asked_without_the_list = 0
             for role, code, heads in grid():
                 named = person(role=role, department_code=code, headed_codes=heads, user_id=77)
-                self.assertEqual(access.capabilities(named), FULL, (role, code, heads))
+                self.assertEqual(access.capabilities(named), OWNER if role == 'super_admin' else FULL,
+                                 (role, code, heads))
                 self.assertFalse(access.requires_sensitive_qr(named), (role, code, heads))
                 other = person(role=role, department_code=code, headed_codes=heads, user_id=78)
-                self.assertEqual(access.requires_sensitive_qr(other), parcels_access.requires_sensitive_qr(other),
-                                 (role, code, heads))
+                # Общее правило — замок «Посылок»; раздел шире него ровно на
+                # стажёра, которому раздел можно выдать (GrantAccessTests).
+                expected = parcels_access.requires_sensitive_qr(other) or (role == 'trainee' and not heads)
+                self.assertEqual(access.requires_sensitive_qr(other), expected, (role, code, heads))
                 asked_without_the_list += access.requires_sensitive_qr(other)
             # Сетка не вырождена: среди профилей есть те, кого замок спрашивает.
             self.assertGreater(asked_without_the_list, 10)
@@ -295,6 +307,175 @@ class AccessTests(unittest.TestCase):
             caps = access.capabilities(person(role=role, department_code=code, headed_codes=heads))
             full = role == 'super_admin' or 'marketing' in heads
             self.assertEqual((caps['can_export'], caps['can_manage']), (full, full), (role, code, heads))
+
+
+class GrantAccessTests(unittest.TestCase):
+    """Выдачи из раздела — кнопка «Доступ» (решение владельца 07.10.2026):
+    человеку, группе, отделу. В контексте человека они лежат уровнями
+    (grant_levels) — кому именно выдано, решает запрос (queries.load_access_context)."""
+
+    def setUp(self):
+        patcher = mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_levels_are_a_ladder(self):
+        self.assertEqual(access.LEVELS, ('read', 'export', 'full'))
+        self.assertEqual(access.SUBJECT_TYPES, ('user', 'group', 'department'))
+        for level, caps in (('read', READ), ('export', EXPORT), ('full', FULL)):
+            self.assertEqual(access.capabilities(person(department_code='tez', grants=(level,))), caps, level)
+
+    def test_grant_opens_the_section_whatever_the_role_and_department(self):
+        for role, code, heads in grid():
+            ctx = person(role=role, department_code=code, headed_codes=heads, grants=('read',))
+            self.assertTrue(access.can_open_section(ctx), (role, code, heads))
+
+    def test_grant_only_adds_to_the_circle(self):
+        """Выдача уровень, положенный по кругу, не понижает и круг не сужает."""
+        for role, code, heads in grid():
+            base = person(role=role, department_code=code, headed_codes=heads)
+            by_circle = access.level_of(base)
+            for level in access.LEVELS:
+                granted = access.level_of(dict(base, grant_levels=[level]))
+                self.assertEqual(granted, access.strongest([by_circle, level]), (role, code, heads, level))
+
+    def test_the_strongest_grant_wins_and_junk_opens_nothing(self):
+        self.assertEqual(access.capabilities(person(department_code='tez', grants=('read', 'full', 'export'))), FULL)
+        # Опечатка в базе не открывает ничего — ни сама, ни рядом с настоящим уровнем.
+        for junk in (('owner',), ('READ',), ('',), (None,), ('read ',)):
+            self.assertEqual(access.capabilities(person(department_code='tez', grants=junk)), CLOSED, junk)
+        self.assertEqual(access.capabilities(person(department_code='tez', grants=('owner', 'read'))), READ)
+        # Контекст без поля (старый вызывающий) — выдач нет.
+        bare = person(department_code='tez')
+        del bare['grant_levels']
+        self.assertEqual(access.capabilities(bare), CLOSED)
+
+    def test_granted_rank_and_file_enter_through_qr(self):
+        """Рядовой и по выдаче входит через замок — стажёр тоже: по кругу ему
+        закрыто, а выдать раздел можно, и без замка он читал бы то, что оператор
+        рядом открывает кодом."""
+        for role in ('operator', 'trainee', 'accounting_manager', 'marketing_manager'):
+            for code in GRID_DEPARTMENTS:
+                ctx = person(role=role, department_code=code, grants=('full',))
+                self.assertTrue(access.requires_sensitive_qr(ctx), (role, code))
+                # Глава отдела — уже не рядовой, какой бы ни была должность в карточке.
+                head = person(role=role, department_code=code, headed_codes=('tez',), grants=('full',))
+                self.assertFalse(access.requires_sensitive_qr(head), (role, code))
+        for role in ('sv', 'supervisor', 'trainer', 'admin', 'super_admin'):
+            for code in GRID_DEPARTMENTS:
+                self.assertFalse(access.requires_sensitive_qr(person(role=role, department_code=code,
+                                                                     grants=('read',))), (role, code))
+
+    def test_lock_asks_exactly_those_the_portal_gives_a_code_to(self):
+        """Набор раздела — тот же, по которому портал выдаёт QR: спросить код у
+        должности, которой его не выдают, значит запереть выданный раздел."""
+        from driver_chats.access import QR_GATED_ROLES as wide
+        from wiki.access import QR_GATED_ROLES as common
+        self.assertEqual(access.QR_ASKED_ROLES, frozenset(common) | frozenset(wide))
+        self.assertIn('SENSITIVE_QR_GATED_ROLES = frozenset(_WIKI_QR_GATED_ROLES) | '
+                      'frozenset(_DRIVER_CHATS_QR_GATED_ROLES)\n', _read(BOT_PY))
+        # Кадровик: кода ему портал не выдаёт (решение владельца 22.09.2026) —
+        # раздел по выдаче открыт ему без замка, а по кругу не открыт вовсе.
+        for code in GRID_DEPARTMENTS:
+            self.assertFalse(access.requires_sensitive_qr(person(role='hr_manager', department_code=code,
+                                                                 grants=('read',))), code)
+            self.assertEqual(access.capabilities(person(role='hr_manager', department_code=code)), CLOSED, code)
+
+    def test_every_role_of_the_portal_is_decided_for_the_lock(self):
+        """Раздел выдают любому отделу, а значит — любой должности. Новая
+        должность в портале обязана получить решение: спрашивать её о QR или
+        нет. Без строки здесь она по выдаче отделу читала бы ФИО и номера ВУ
+        без подтверждения — молча."""
+        check = re.search(r"role VARCHAR\(32\) NOT NULL CHECK\(role IN \(([^)]*)\)\)", _read(DATABASE_PY))
+        roles = set(re.findall(r"'([a-z_]+)'", check.group(1)))
+        # Кого замок не спрашивает: старшие (подтверждают сами или им некому) и
+        # кадровик, которому портал код не выдаёт (решение владельца 22.09.2026).
+        not_asked = {'super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'hr_manager'}
+        self.assertEqual(roles, set(access.QR_ASKED_ROLES) | not_asked)
+        self.assertFalse(set(access.QR_ASKED_ROLES) & not_asked)
+        for role in roles:
+            ctx = person(role=role, department_code='tez', grants=('read',))
+            self.assertEqual(access.requires_sensitive_qr(ctx), role not in not_asked, role)
+
+    def test_role_is_read_as_written_in_the_card(self):
+        for role in (' Operator ', 'TRAINEE', 'Marketing_Manager'):
+            self.assertTrue(access.requires_sensitive_qr(person(role=role, department_code='tez', grants=('read',))),
+                            role)
+
+    def test_switch_closes_the_granted_and_the_named(self):
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True), \
+                mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({77})):
+            self.assertEqual(access.capabilities(person(department_code='tez', grants=('full',))), CLOSED)
+            self.assertEqual(access.capabilities(person(department_code='tez', user_id=77)), CLOSED)
+            self.assertEqual(access.capabilities(person(role='super_admin', department_code=None)), OWNER)
+
+    def test_access_is_handed_out_by_the_super_admin_and_the_named_only(self):
+        """Кнопка «Доступ» — «у суперадминов» и названных поимённо. Ни полный
+        доступ к разделу, ни главенство, ни выдача её не дают."""
+        # 415 — глава «Маркетинга», постановщик раздела.
+        self.assertEqual(access.ACCESS_MANAGER_USER_IDS, frozenset({415}))
+        with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({77})):
+            for role, code, heads in grid():
+                named = person(role=role, department_code=code, headed_codes=heads, user_id=77)
+                self.assertTrue(access.can_manage_access(named), (role, code, heads))
+                self.assertTrue(access.can_open_section(named), (role, code, heads))
+                for grants in ((), ('full',)):
+                    other = person(role=role, department_code=code, headed_codes=heads, user_id=78, grants=grants)
+                    self.assertEqual(access.can_manage_access(other), role == 'super_admin',
+                                     (role, code, heads, grants))
+
+    def test_handing_out_access_is_not_full_access(self):
+        """Названному раздел открыт на чтение — кнопка живёт внутри раздела, —
+        а вести его он может только своим уровнем: по кругу или по выдаче."""
+        with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({77})):
+            outsider = person(role='sv', department_code='tez', user_id=77)
+            self.assertEqual(access.capabilities(outsider), dict(READ, can_manage_access=True))
+            self.assertEqual(access.capabilities(dict(outsider, grant_levels=['full'])),
+                             dict(FULL, can_manage_access=True))
+            head = person(role='admin', department_code='marketing', headed_codes=('marketing',), user_id=77)
+            self.assertEqual(access.capabilities(head), OWNER)
+            # Замок — по должности, как у всех: раздающего-оператора он спрашивает.
+            self.assertTrue(access.requires_sensitive_qr(person(department_code='tez', user_id=77)))
+            self.assertFalse(access.requires_sensitive_qr(outsider))
+
+    def test_manager_id_is_read_as_a_number(self):
+        with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({77})):
+            for user_id, named in (('77', True), (77.0, True), (None, False), ('', False), ('77a', False)):
+                ctx = dict(person(department_code='tez'), user_id=user_id)
+                self.assertEqual(access.can_manage_access(ctx), named, repr(user_id))
+
+    def test_circle_rows_describe_the_real_rule(self):
+        """Строки «открыт по умолчанию» в листе доступа — не пересказ, а то же
+        правило: каждая сверяется с настоящим уровнем и замком на образце."""
+        rows = access.circle()
+        self.assertEqual([row['key'] for row in rows], ['super_admin', 'head', 'named', 'lead', 'staff'])
+        by_key = {row['key']: row for row in rows}
+
+        def check(row, ctx):
+            self.assertEqual(access.level_of(ctx), row['level'], (row['key'], ctx['role'], ctx['department_code']))
+            self.assertEqual(access.requires_sensitive_qr(ctx), row['qr'], (row['key'], ctx['role']))
+
+        check(by_key['super_admin'], person(role='super_admin', department_code=None))
+        self.assertEqual(by_key['head']['departments'], (access.MANAGE_DEPARTMENT_CODE,))
+        for code in by_key['head']['departments']:
+            check(by_key['head'], person(role='admin', department_code=code, headed_codes=(code,)))
+        self.assertEqual(by_key['named']['user_ids'], tuple(sorted(access.ANALYST_USER_IDS)))
+        for user_id in by_key['named']['user_ids']:
+            check(by_key['named'], person(department_code='analytik', user_id=user_id))
+        self.assertEqual(by_key['lead']['departments'], access.READ_DEPARTMENT_CODES)
+        for code in by_key['lead']['departments']:
+            check(by_key['lead'], person(role='admin', department_code=code, headed_codes=(code,)))
+            check(by_key['lead'], person(role='sv', department_code=code))
+        self.assertEqual(by_key['staff']['departments'], access.SECTION_DEPARTMENT_CODES)
+        for code in by_key['staff']['departments']:
+            check(by_key['staff'], person(role='operator', department_code=code))
+        # И обратно: всякий, кому раздел открыт без выдач, описан одной из строк.
+        described = {(row['level'], row['qr']) for row in rows}
+        for role, code, heads in grid():
+            ctx = person(role=role, department_code=code, headed_codes=heads)
+            if access.can_open_section(ctx):
+                self.assertIn((access.level_of(ctx), access.requires_sensitive_qr(ctx)), described,
+                              (role, code, heads))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -742,8 +923,8 @@ class SchemaTests(unittest.TestCase):
         cursor = _Cursor()
         schema.init_baiga_schema(cursor)
         kinds = ['table' if 'CREATE TABLE' in sql else 'other' for sql in cursor.statements]
-        self.assertEqual(kinds[:4], ['table'] * 4)
-        self.assertNotIn('table', kinds[4:])
+        self.assertEqual(kinds[:6], ['table'] * 6)
+        self.assertNotIn('table', kinds[6:])
         ddl = [sql for sql in cursor.statements if 'SAVEPOINT' not in sql]
         self.assertTrue(all('IF NOT EXISTS' in sql for sql in ddl))
 
@@ -751,6 +932,31 @@ class SchemaTests(unittest.TestCase):
         ddl = ' '.join(' '.join(statement.split()) for statement in schema._STATEMENTS)
         self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS uq_baiga_uploads_active_week "
                       "ON baiga_uploads(campaign, period_start) WHERE status = 'active'", ddl)
+
+    def test_one_grant_per_subject(self):
+        ddl = ' '.join(' '.join(statement.split()) for statement in schema._STATEMENTS)
+        # На этом ключе стоит и «повторная выдача меняет уровень» (ON CONFLICT),
+        # и поиск выдач человека на каждом запросе раздела.
+        self.assertIn('CREATE UNIQUE INDEX IF NOT EXISTS uq_baiga_access_grants_subject '
+                      'ON baiga_access_grants(subject_type, subject_id)', ddl)
+        self.assertIn('CREATE TABLE IF NOT EXISTS baiga_access_log', ddl)
+
+    def test_grant_tables_are_asked_once_per_process_after_they_appear(self):
+        """Проверка доступа идёт на каждом запросе раздела: «таблицы есть»
+        запоминается на процесс, «нет» — нет (схема могла лечь следующим стартом)."""
+        class Answering(_Cursor):
+            def __init__(self, answers):
+                super().__init__()
+                self.answers = list(answers)
+
+            def fetchone(self):
+                return (self.answers.pop(0),)
+
+        with mock.patch.dict(schema._grants_seen, {'ready': False}):
+            cursor = Answering([False, False, True])
+            self.assertEqual([schema.grants_ready(cursor) for _ in range(5)], [False, False, True, True, True])
+            self.assertEqual(len(cursor.statements), 3)
+            self.assertIn("to_regclass('public.baiga_access_log')", cursor.statements[0])
 
     def test_trigram_index_cannot_break_the_section(self):
         class Failing(_Cursor):
@@ -762,6 +968,246 @@ class SchemaTests(unittest.TestCase):
         cursor = Failing()
         schema.init_baiga_schema(cursor)
         self.assertEqual(cursor.statements[-1], 'ROLLBACK TO SAVEPOINT baiga_trgm')
+
+
+class ContextTests(unittest.TestCase):
+    """Контекст доступа: профиль, главенство и уровни выдач одним запросом.
+    Сам SQL исполняется на стенде и в tests/test_baiga_access_postgres.py."""
+
+    class Cursor:
+        def __init__(self, row):
+            self.row = row
+            self.calls = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((' '.join(sql.split()), params))
+
+        def fetchone(self):
+            return self.row
+
+    def load(self, row, ready=True, user_id=31):
+        cursor = self.Cursor(row)
+        with mock.patch.object(schema, 'grants_ready', lambda cursor: ready):
+            return queries.load_access_context(cursor, user_id), cursor
+
+    def test_role_stays_as_written_and_grant_levels_come_along(self):
+        ctx, cursor = self.load(('Кадрова К. К.', ' HR_Manager ', 168, 'hr', None, [7], ['HR'], ['read', 'full']),
+                                user_id='31')
+        self.assertEqual(ctx, {
+            'user_id': 31, 'name': 'Кадрова К. К.', 'role': 'hr_manager', 'department_id': 168,
+            'department_code': 'hr', 'city': None, 'headed_department_ids': [7],
+            'headed_department_codes': ['HR'], 'grant_levels': ['read', 'full'],
+        })
+        # Замку нужна должность из карточки: «Посылки» свели бы кадровика к
+        # оператору и спросили бы код, которого портал ему не выдаёт.
+        self.assertEqual(parcels_access.normalize_role(ctx['role']), 'operator')
+        self.assertFalse(access.requires_sensitive_qr(dict(ctx, headed_department_ids=[])))
+        self.assertEqual(len(cursor.calls), 1)
+        sql, params = cursor.calls[0]
+        self.assertEqual(params, {'user_id': 31})
+        # Три вида выдач: самому человеку, его группе, его отделу (и отделу,
+        # который он возглавляет, числясь в другом).
+        self.assertIn("(a.subject_type = 'user' AND a.subject_id = %(user_id)s)", sql)
+        self.assertIn("(a.subject_type = 'group' AND a.subject_id IN (SELECT group_id FROM my_groups))", sql)
+        self.assertIn("(a.subject_type = 'department' AND a.subject_id IN (SELECT id FROM my_departments))", sql)
+        # Отдел — свой ДЕЙСТВУЮЩИЙ и возглавляемые (тоже действующие): закрытому
+        # отделу выдача ничего не открывает, как архивной группе.
+        self.assertIn("my_departments AS ( SELECT d.id FROM departments d WHERE d.is_active "
+                      "AND d.id = (SELECT department_id FROM me) UNION SELECT id FROM headed )", sql)
+        self.assertIn("headed AS ( SELECT d.id, d.code FROM departments d "
+                      "WHERE d.head_user_id = %(user_id)s AND d.is_active )", sql)
+        # Группы — ЭТОГО человека, уровни — из ЕГО выдач: без этих двух строк
+        # одна выдача открывала бы раздел всему порталу.
+        self.assertIn("WHERE m.user_id = %(user_id)s AND m.start_date <= CURRENT_DATE", sql)
+        self.assertTrue(sql.endswith("COALESCE((SELECT array_agg(DISTINCT level) FROM my_grants), '{}')"), sql[-90:])
+        self.assertIn("my_grants AS ( SELECT a.level FROM baiga_access_grants a WHERE (a.subject_type = 'user'", sql)
+
+    def test_group_is_the_same_thing_as_in_the_wiki(self):
+        """Состав группы — действующее членство оператора или супервайзера в
+        действующей группе: то же определение, что у вики (my_groups)."""
+        sql = ' '.join(queries._CONTEXT_WITH_GRANTS_SQL.split())
+        wiki = ' '.join(_read(ROOT / 'wiki' / 'queries.py').split())
+        for table, column in (('group_operator_memberships', 'operator_id'),
+                              ('group_supervisor_memberships', 'supervisor_id')):
+            self.assertIn('SELECT group_id, %s' % column, sql)
+            self.assertIn('FROM %s' % table, sql)
+            self.assertIn('FROM %s' % table, wiki)
+        self.assertIn("JOIN groups g ON g.id = m.group_id AND g.status = 'active'", sql)
+        self.assertIn('m.start_date <= CURRENT_DATE AND (m.end_date IS NULL OR m.end_date >= CURRENT_DATE)', sql)
+        self.assertIn("JOIN groups g ON g.id = gom.group_id AND g.status = 'active'", wiki)
+        self.assertIn('gom.start_date <= CURRENT_DATE AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)', wiki)
+
+    def test_without_grant_tables_the_context_is_the_circle_alone(self):
+        ctx, cursor = self.load(('Оператов О. О.', 'operator', 191, 'op', None, [], [], []), ready=False)
+        self.assertEqual(ctx['grant_levels'], [])
+        self.assertEqual(access.capabilities(ctx), READ)
+        sql = cursor.calls[0][0]
+        self.assertNotIn('baiga_access_grants', sql)
+        self.assertNotIn('memberships', sql)
+
+    def test_unknown_user_has_no_context(self):
+        self.assertIsNone(self.load(None)[0])
+        self.assertIsNone(self.load((None, None, None, None, None, [], [], []))[0])
+
+    def test_staff_means_everyone_who_can_still_log_in(self):
+        """Число людей под выдачей и список «кому выдать» считают тех, кто в
+        портал входит: уволенный — нет, человек в отпуске — да."""
+        self.assertEqual(queries._STAFF, "status NOT IN ('fired', 'dismissal')")
+        login = _read(BOT_PY).split("user_status = str(user_profile[11] or '').strip().lower()")[1][:120]
+        self.assertIn("if user_status in ('fired', 'dismissal'):", login)
+
+
+
+class GrantQueryTests(unittest.TestCase):
+    """Запросы выдач — текстом и параметрами, с курсором-записывателем. Что они
+    ЗНАЧАТ на настоящей базе, исполняет tests/test_baiga_access_postgres.py
+    (нужен локальный Postgres); здесь — сторож, который работает везде: условия
+    живости адресата, блокировки и то, что пишется при смене уровня и снятии."""
+
+    ACTOR = {'user_id': 415, 'name': 'Раздающий Р. Р.'}
+
+    class Cursor:
+        def __init__(self, rows=()):
+            self.rows = list(rows)
+            self.calls = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((' '.join(sql.split()), params))
+
+        def fetchall(self):
+            return list(self.rows)
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+    def batches(self):
+        """Подмена пачечной записи: что и в какую таблицу ушло."""
+        written = []
+
+        def record(cursor, sql, values, **kwargs):
+            written.append((' '.join(sql.split()), list(values)))
+
+        patcher = mock.patch.object(queries, 'execute_values', record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return written
+
+    def test_only_living_subjects_are_found(self):
+        cursor = self.Cursor([('user', 31, 'Оператов О. О.'), ('group', 5, 'Регионы')])
+        found = queries.find_subjects(cursor, [('user', 31), ('group', 5), ('department', 44), ('user', '32')])
+        self.assertEqual(found, {('user', 31): 'Оператов О. О.', ('group', 5): 'Регионы'})
+        sql, params = cursor.calls[0]
+        self.assertEqual(params, {'user': [31, 32], 'group': [5], 'department': [44]})
+        # Уволенному, архивной группе и закрытому отделу не выдают.
+        self.assertIn("WHERE u.id = ANY(%(user)s::int[]) AND u.status NOT IN ('fired', 'dismissal')", sql)
+        self.assertIn("WHERE g.id = ANY(%(group)s::int[]) AND g.status = 'active'", sql)
+        self.assertIn("WHERE d.id = ANY(%(department)s::int[]) AND d.is_active", sql)
+
+    def test_catalog_offers_only_the_living(self):
+        cursor = self.Cursor([('department', 44, 'Бухгалтерия', None, None, 1),
+                              ('group', 5, 'Регионы', 'СЗоВ', None, 8),
+                              ('user', 31, 'Оператов О. О.', 'Тез КЦ', 'operator', None)])
+        catalog = queries.access_catalog(cursor)
+        self.assertEqual(catalog, {
+            'department': [{'id': 44, 'name': 'Бухгалтерия', 'detail': None, 'role': None, 'people': 1}],
+            'group': [{'id': 5, 'name': 'Регионы', 'detail': 'СЗоВ', 'role': None, 'people': 8}],
+            'user': [{'id': 31, 'name': 'Оператов О. О.', 'detail': 'Тез КЦ', 'role': 'operator', 'people': None}],
+        })
+        sql = cursor.calls[0][0]
+        self.assertIn("staff AS ( SELECT id, name, role, department_id FROM users "
+                      "WHERE status NOT IN ('fired', 'dismissal') )", sql)
+        self.assertIn("FROM departments d WHERE d.is_active UNION ALL", sql)
+        self.assertIn("WHERE g.status = 'active' UNION ALL", sql)
+        self.assertIn("FROM staff s LEFT JOIN departments sd ON sd.id = s.department_id ORDER BY 1, 3, 2", sql)
+        # Людей в группе считают по действующему членству тех, кто в штате.
+        self.assertIn("JOIN staff s ON s.id = m.user_id WHERE m.start_date <= CURRENT_DATE "
+                      "AND (m.end_date IS NULL OR m.end_date >= CURRENT_DATE) GROUP BY 1", sql)
+
+    def test_sheet_marks_grants_that_open_nothing(self):
+        cursor = self.Cursor()
+        queries.list_grants(cursor)
+        sql = cursor.calls[0][0]
+        self.assertIn("CASE a.subject_type WHEN 'user' THEN COALESCE(u.status NOT IN ('fired', 'dismissal'), FALSE) "
+                      "WHEN 'group' THEN COALESCE(g.status = 'active', FALSE) "
+                      "ELSE COALESCE(d.is_active, FALSE) END", sql)
+        self.assertIn("LEFT JOIN users u ON a.subject_type = 'user' AND u.id = a.subject_id", sql)
+        self.assertIn("LEFT JOIN groups g ON a.subject_type = 'group' AND g.id = a.subject_id", sql)
+        self.assertIn("LEFT JOIN departments d ON a.subject_type = 'department' AND d.id = a.subject_id", sql)
+
+    def test_already_granted_levels_are_asked_in_one_query(self):
+        cursor = self.Cursor([('user', 31, 'read')])
+        self.assertEqual(queries.granted_levels(cursor, [('user', 31), ('group', '5')]), {('user', 31): 'read'})
+        sql, params = cursor.calls[0]
+        self.assertIn('WHERE (subject_type, subject_id) IN %(pairs)s', sql)
+        self.assertEqual(params, {'pairs': (('user', 31), ('group', 5))})
+        # Пустой список — без запроса: «IN ()» базу не спрашивают.
+        empty = self.Cursor()
+        self.assertEqual(queries.granted_levels(empty, []), {})
+        self.assertEqual(empty.calls, [])
+
+    def test_repeat_grant_rewrites_the_level_and_who_granted(self):
+        written = self.batches()
+        with mock.patch.object(queries, 'granted_levels', lambda cursor, subjects: {('user', 31): 'read'}):
+            result = queries.write_grants(self.Cursor(), [('user', 31, 'Оператов О. О.'), ('group', 5, 'Регионы')],
+                                          'full', self.ACTOR)
+        self.assertEqual(result, (1, 1))
+        (grants_sql, grants), (log_sql, log) = written
+        self.assertIn('INSERT INTO baiga_access_grants (subject_type, subject_id, level, granted_by, granted_by_name) '
+                      'VALUES %s ON CONFLICT (subject_type, subject_id) DO UPDATE SET level = EXCLUDED.level, '
+                      'granted_by = EXCLUDED.granted_by, granted_by_name = EXCLUDED.granted_by_name, '
+                      "granted_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')", grants_sql)
+        # Сначала новые, потом сменившие уровень — и у всех выдал тот, кто сохранил.
+        self.assertEqual(grants, [('group', 5, 'full', 415, 'Раздающий Р. Р.'),
+                                  ('user', 31, 'full', 415, 'Раздающий Р. Р.')])
+        self.assertIn('INSERT INTO baiga_access_log (action, subject_type, subject_id, subject_label, level_before, '
+                      'level_after, actor_user_id, actor_name) VALUES %s', log_sql)
+        self.assertEqual(log, [('grant', 'group', 5, 'Регионы', None, 'full', 415, 'Раздающий Р. Р.'),
+                               ('change', 'user', 31, 'Оператов О. О.', 'read', 'full', 415, 'Раздающий Р. Р.')])
+
+    def test_same_level_again_writes_nothing(self):
+        written = self.batches()
+        with mock.patch.object(queries, 'granted_levels', lambda cursor, subjects: {('user', 31): 'full'}):
+            self.assertEqual(queries.write_grants(self.Cursor(), [('user', 31, 'Оператов О. О.')], 'full', self.ACTOR),
+                             (0, 0))
+        self.assertEqual(written, [])
+
+    def test_level_change_updates_this_grant_and_leaves_a_trace(self):
+        written = self.batches()
+        cursor = self.Cursor()
+        grant = {'id': 7, 'subject_type': 'group', 'subject_id': 5, 'level': 'read', 'label': 'Регионы'}
+        queries.set_grant_level(cursor, grant, 'export', self.ACTOR)
+        sql, params = cursor.calls[0]
+        self.assertIn('UPDATE baiga_access_grants SET level = %(level)s, granted_by = %(actor_id)s, '
+                      'granted_by_name = %(actor_name)s, granted_at =', sql)
+        self.assertTrue(sql.endswith('WHERE id = %(id)s'), sql)
+        # В базу уходит НОВЫЙ уровень и номер этой выдачи.
+        self.assertEqual(params, {'level': 'export', 'actor_id': 415, 'actor_name': 'Раздающий Р. Р.', 'id': 7})
+        self.assertEqual(written[0][1], [('change', 'group', 5, 'Регионы', 'read', 'export', 415, 'Раздающий Р. Р.')])
+
+    def test_revoke_deletes_this_grant_and_leaves_a_trace(self):
+        written = self.batches()
+        cursor = self.Cursor()
+        grant = {'id': 7, 'subject_type': 'group', 'subject_id': 5, 'level': 'full', 'label': None}
+        queries.delete_grant(cursor, grant, self.ACTOR)
+        self.assertEqual(cursor.calls, [('DELETE FROM baiga_access_grants WHERE id = %(id)s', {'id': 7})])
+        # Снятие — тоже в журнал, даже когда адресата уже нет и подписать его нечем.
+        self.assertEqual(written[0][1], [('revoke', 'group', 5, None, 'full', None, 415, 'Раздающий Р. Р.')])
+
+    def test_grant_is_read_under_a_row_lock_when_asked(self):
+        row = (7, 'group', 5, 'read', 'Регионы')
+        locked, plain = self.Cursor([row]), self.Cursor([row])
+        self.assertEqual(queries.get_grant(locked, '7', lock=True),
+                         {'id': 7, 'subject_type': 'group', 'subject_id': 5, 'level': 'read', 'label': 'Регионы'})
+        queries.get_grant(plain, 7)
+        self.assertTrue(locked.calls[0][0].endswith('WHERE a.id = %(id)s FOR UPDATE OF a'), locked.calls[0][0])
+        self.assertTrue(plain.calls[0][0].endswith('WHERE a.id = %(id)s'), plain.calls[0][0])
+        self.assertEqual(locked.calls[0][1], {'id': 7})
+        self.assertIsNone(queries.get_grant(self.Cursor(), 7))
+
+    def test_access_edits_take_one_lock_for_the_whole_section(self):
+        cursor = self.Cursor()
+        queries.lock_access(cursor)
+        self.assertEqual(cursor.calls, [("SELECT pg_advisory_xact_lock(hashtext('baiga:access'))", None)])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -779,6 +1225,14 @@ class Store:
         self.writes = []
         self.short_write = False
         self.export_result = None
+        # Доступ: выдачи, их журнал и «живые» адресаты (вид, id) → подпись.
+        self.grants = {}
+        self.access_log = []
+        self.access_locks = 0
+        # Шаги правки доступа по порядку: блокировка обязана идти первой.
+        self.access_steps = []
+        self.subjects = {('user', 31): 'Оператов О. О.', ('user', 32): 'Тренеров Т. Т.',
+                         ('group', 5): 'Регионы', ('department', 44): 'Бухгалтерия'}
 
     # экран и поиск
     def list_weeks(self, cursor, campaign):
@@ -877,6 +1331,74 @@ class Store:
     def log_export(self, cursor, **kwargs):
         self.exports.append(kwargs)
 
+    # доступ
+    def list_grants(self, cursor):
+        return [dict(grant, label=self.subjects.get((grant['subject_type'], grant['subject_id'])),
+                     detail=None, role=None, people=None, active=True)
+                for grant in sorted(self.grants.values(), key=lambda grant: grant['id'])]
+
+    def access_catalog(self, cursor):
+        catalog = {'department': [], 'group': [], 'user': []}
+        for (kind, ident), name in sorted(self.subjects.items()):
+            catalog[kind].append({'id': ident, 'name': name, 'detail': None, 'role': None, 'people': None})
+        return catalog
+
+    def circle_names(self, cursor, codes, user_ids):
+        return ({code: 'Отдел %s' % code for code in codes},
+                {user_id: 'Названный %d' % user_id for user_id in user_ids})
+
+    def find_subjects(self, cursor, subjects):
+        self.access_steps.append('find')
+        return {subject: self.subjects[subject] for subject in subjects if subject in self.subjects}
+
+    def lock_access(self, cursor):
+        self.access_locks += 1
+        self.access_steps.append('lock')
+
+    def granted_levels(self, cursor, subjects):
+        by_subject = {(grant['subject_type'], grant['subject_id']): grant['level'] for grant in self.grants.values()}
+        return {subject: by_subject[subject] for subject in subjects if subject in by_subject}
+
+    def execute_values(self, cursor, sql, values, **kwargs):
+        """Пачечная запись — как её зовёт настоящий queries.write_grants."""
+        if 'baiga_access_grants' in sql:
+            self.access_steps.append('write')
+            for kind, ident, level, actor_id, actor_name in values:
+                found = next((grant for grant in self.grants.values()
+                              if (grant['subject_type'], grant['subject_id']) == (kind, ident)), None)
+                if found is None:
+                    found = {'id': max(self.grants, default=0) + 1, 'subject_type': kind, 'subject_id': ident}
+                    self.grants[found['id']] = found
+                found.update(level=level, granted_by_name=actor_name, granted_at=datetime(2026, 10, 7, 15, 0))
+        elif 'baiga_access_log' in sql:
+            fields = ('action', 'subject_type', 'subject_id', 'label', 'before', 'after', 'actor_id', 'actor_name')
+            self.access_log.extend(dict(zip(fields, row)) for row in values)
+        else:  # pragma: no cover
+            raise AssertionError('неожиданная пачечная запись: %s' % sql)
+
+    def get_grant(self, cursor, grant_id, lock=False):
+        self.access_steps.append('get:locked' if lock else 'get')
+        grant = self.grants.get(int(grant_id))
+        if not grant:
+            return None
+        return dict(grant, label=self.subjects.get((grant['subject_type'], grant['subject_id'])))
+
+    def set_grant_level(self, cursor, grant, level, actor):
+        self.access_steps.append('set')
+        self.access_log.append({'action': 'change', 'subject_type': grant['subject_type'],
+                                'subject_id': grant['subject_id'], 'label': grant.get('label'),
+                                'before': grant['level'], 'after': level,
+                                'actor_id': actor['user_id'], 'actor_name': actor.get('name')})
+        self.grants[grant['id']].update(level=level, granted_by_name=actor.get('name'))
+
+    def delete_grant(self, cursor, grant, actor):
+        self.access_steps.append('delete')
+        self.access_log.append({'action': 'revoke', 'subject_type': grant['subject_type'],
+                                'subject_id': grant['subject_id'], 'label': grant.get('label'),
+                                'before': grant['level'], 'after': None,
+                                'actor_id': actor['user_id'], 'actor_name': actor.get('name')})
+        del self.grants[grant['id']]
+
 
 class FakeDb:
     def __init__(self):
@@ -908,7 +1430,11 @@ class _Base(unittest.TestCase):
                      'zachet_summary', 'find_overlapping_uploads',
                      'lock_week', 'find_active_upload', 'insert_upload', 'insert_file', 'insert_rows',
                      'close_upload', 'mark_replaced_by', 'get_upload', 'read_file', 'list_uploads',
-                     'list_exports', 'log_export'):
+                     'list_exports', 'log_export',
+                     # Доступ. write_grants и log_access — настоящие: подменена только
+                     # пачечная запись под ними (execute_values).
+                     'list_grants', 'access_catalog', 'circle_names', 'find_subjects', 'lock_access',
+                     'granted_levels', 'execute_values', 'get_grant', 'set_grant_level', 'delete_grant'):
             patches[name] = getattr(self.store, name)
         patcher = mock.patch.multiple(queries, **patches)
         patcher.start()
@@ -916,6 +1442,10 @@ class _Base(unittest.TestCase):
         ready = mock.patch.object(schema, 'schema_is_ready', lambda cursor: True)
         ready.start()
         self.addCleanup(ready.stop)
+        self.grants_ready = True
+        grants = mock.patch.object(schema, 'grants_ready', lambda cursor: self.grants_ready)
+        grants.start()
+        self.addCleanup(grants.stop)
         # Ручки проверяются со снятым выключателем; сам выключатель — SwitchTests.
         pilot = mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
         pilot.start()
@@ -979,6 +1509,11 @@ class GateTests(_Base):
             self.client.delete('/api/baiga/uploads/1'),
             self.client.get('/api/baiga/uploads/1/file'),
             self.client.get('/api/baiga/journal'),
+            self.client.get('/api/baiga/access'),
+            self.client.post('/api/baiga/access/grants',
+                             json={'subjects': [{'type': 'user', 'id': 31}], 'level': 'full'}),
+            self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'}),
+            self.client.delete('/api/baiga/access/grants/1'),
         ]
 
     def codes(self, responses):
@@ -1056,10 +1591,13 @@ class GateTests(_Base):
                 (403, 'BAIGA_MANAGE_FORBIDDEN'), (403, 'BAIGA_MANAGE_FORBIDDEN'),
                 (403, 'BAIGA_MANAGE_FORBIDDEN'), (403, 'BAIGA_MANAGE_FORBIDDEN'),
                 (403, 'BAIGA_MANAGE_FORBIDDEN'),
+                (403, 'BAIGA_ACCESS_FORBIDDEN'), (403, 'BAIGA_ACCESS_FORBIDDEN'),
+                (403, 'BAIGA_ACCESS_FORBIDDEN'), (403, 'BAIGA_ACCESS_FORBIDDEN'),
             ], kwargs)
         # Ни одной записи и ни одной строки журнала выгрузок от читающих.
         self.assertEqual(self.store.writes, before)
         self.assertEqual(self.store.exports, [])
+        self.assertEqual((self.store.grants, self.store.access_log, self.store.access_locks), ({}, [], 0))
         self.assertEqual(self.store.uploads[1]['status'], 'active')
 
     def test_heads_and_supervisors_are_not_asked_for_qr(self):
@@ -1117,7 +1655,7 @@ class ScreenAndSearchTests(_Base):
     def test_screen_is_one_request_with_limits(self):
         data = self.client.get('/api/baiga').get_json()
         self.assertTrue(data['schema_ready'])
-        self.assertEqual(data['capabilities'], {'can_open': True, 'can_export': True, 'can_manage': True})
+        self.assertEqual(data['capabilities'], OWNER)
         self.assertEqual(data['limits']['page_sizes'], [50, 100, 500])
 
     def test_search_pages_and_reports_list_misses(self):
@@ -1272,6 +1810,263 @@ class DeleteSourceJournalTests(_Base):
 # Проводка
 # ─────────────────────────────────────────────────────────────────────────────
 
+class AccessSheetTests(_Base):
+    """Лист «Доступ»: ручки /api/baiga/access*. Смотрит супер-админ, пока тест
+    не назначит другого."""
+
+    ACCESS_ROUTES = 4
+
+    def grant(self, subjects, level='read'):
+        return self.client.post('/api/baiga/access/grants', json={
+            'subjects': [{'type': kind, 'id': ident} for kind, ident in subjects], 'level': level})
+
+    def access_routes(self):
+        return [
+            self.client.get('/api/baiga/access'),
+            self.grant([('user', 31)], 'full'),
+            self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'}),
+            self.client.delete('/api/baiga/access/grants/1'),
+        ]
+
+    def state(self):
+        return (json.dumps(self.store.grants, default=str, sort_keys=True), len(self.store.access_log))
+
+    def test_sheet_is_one_request(self):
+        self.assertEqual(self.grant([('group', 5)]).status_code, 200)
+        data = self.client.get('/api/baiga/access').get_json()
+        self.assertEqual(set(data), {'grants', 'circle', 'catalog', 'max_subjects'})
+        self.assertEqual([(grant['subject_type'], grant['label'], grant['level']) for grant in data['grants']],
+                         [('group', 'Регионы', 'read')])
+        self.assertEqual(data['grants'][0]['granted_at'], '2026-10-07T15:00:00')
+        self.assertEqual(data['max_subjects'], access.MAX_GRANT_SUBJECTS)
+        self.assertEqual(set(data['catalog']), {'department', 'group', 'user'})
+        self.assertEqual([item['name'] for item in data['catalog']['user']], ['Оператов О. О.', 'Тренеров Т. Т.'])
+        # Круг — с названиями отделов и именами названных, без кодов и id.
+        circle = {row['key']: row for row in data['circle']}
+        self.assertEqual([row['key'] for row in data['circle']], [row['key'] for row in access.circle()])
+        self.assertEqual(circle['head'], {'key': 'head', 'level': 'full', 'qr': False,
+                                          'departments': ['Отдел marketing'], 'people': []})
+        self.assertEqual(circle['named']['people'], ['Названный %d' % ANALYST_ID])
+        self.assertEqual(circle['staff']['departments'], ['Отдел marketing', 'Отдел op', 'Отдел szov'])
+        self.assertTrue(circle['staff']['qr'])
+        self.assertNotIn('user_ids', json.dumps(data['circle']))
+
+    def test_grant_to_many_at_once(self):
+        response = self.grant([('user', 31), ('group', 5), ('department', 44)], 'export')
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual((data['granted'], data['changed']), (3, 0))
+        # Ответ несёт свежий список — второго запроса «перечитать» листу не нужно.
+        self.assertEqual({(grant['subject_type'], grant['subject_id'], grant['level']) for grant in data['grants']},
+                         {('user', 31, 'export'), ('group', 5, 'export'), ('department', 44, 'export')})
+        self.assertEqual([(entry['action'], entry['subject_type'], entry['label'], entry['before'], entry['after'])
+                          for entry in self.store.access_log],
+                         [('grant', 'user', 'Оператов О. О.', None, 'export'),
+                          ('grant', 'group', 'Регионы', None, 'export'),
+                          ('grant', 'department', 'Бухгалтерия', None, 'export')])
+        # В журнале — тот, кто выдал, а не безымянная запись.
+        self.assertEqual({(entry['actor_id'], entry['actor_name']) for entry in self.store.access_log},
+                         {(self.viewer['user_id'], self.viewer['name'])})
+        self.assertEqual({grant['granted_by_name'] for grant in self.store.grants.values()}, {self.viewer['name']})
+        self.assertEqual(self.store.access_locks, 1)
+        # Блокировка — до чтения адресатов: два раздающих не читают одно состояние.
+        self.assertEqual(self.store.access_steps, ['lock', 'find', 'write'])
+
+    def test_level_change_and_revoke_lock_before_they_read(self):
+        self.grant([('group', 5)], 'read')
+        del self.store.access_steps[:]
+        self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'})
+        self.assertEqual(self.store.access_steps, ['lock', 'get:locked', 'set'])
+        del self.store.access_steps[:]
+        self.client.delete('/api/baiga/access/grants/1')
+        self.assertEqual(self.store.access_steps, ['lock', 'get:locked', 'delete'])
+        # Отказ «выдачи уже нет» — тоже под блокировкой и без записи.
+        del self.store.access_steps[:]
+        self.client.delete('/api/baiga/access/grants/1')
+        self.assertEqual(self.store.access_steps, ['lock', 'get:locked'])
+
+    def test_one_missing_subject_refuses_the_whole_grant(self):
+        """Всё или ничего: половина выданного списка читалась бы как «не
+        удалось» при наполовину открытом разделе."""
+        self.grant([('user', 31)])
+        before = self.state()
+        for subjects in ([('user', 32), ('group', 999)], [('department', 31)], [('user', 5)]):
+            response = self.grant(subjects, 'full')
+            self.assertEqual((response.status_code, response.get_json()['code']),
+                             (422, 'BAIGA_ACCESS_SUBJECT_GONE'), subjects)
+            self.assertEqual(self.state(), before, subjects)
+
+    def test_repeat_grant_changes_the_level_and_the_same_level_is_left_alone(self):
+        self.grant([('user', 31)], 'read')
+        data = self.grant([('user', 31), ('user', 32)], 'full').get_json()
+        self.assertEqual((data['granted'], data['changed']), (1, 1))
+        self.assertEqual(len(self.store.grants), 2)
+        self.assertEqual([(entry['action'], entry['subject_id'], entry['before'], entry['after'])
+                          for entry in self.store.access_log[1:]],
+                         [('grant', 32, None, 'full'), ('change', 31, 'read', 'full')])
+        # Тот же уровень ещё раз: ни записи, ни строки журнала, «выдал» не переписан.
+        self.viewer = person(role='super_admin', department_code=None, user_id=11)
+        before = self.state()
+        data = self.grant([('user', 31), ('user', 32)], 'full').get_json()
+        self.assertEqual((data['granted'], data['changed']), (0, 0))
+        self.assertEqual(self.state(), before)
+        self.assertEqual(len(data['grants']), 2)
+
+    def test_same_subject_twice_in_a_request_counts_once(self):
+        data = self.grant([('user', 31), ('user', 31)], 'read').get_json()
+        self.assertEqual((data['granted'], len(self.store.grants), len(self.store.access_log)), (1, 1, 1))
+
+    def test_bad_requests_are_refused_before_any_write(self):
+        self.grant([('user', 31)])
+        before, locks = self.state(), self.store.access_locks
+        many = [{'type': 'user', 'id': ident} for ident in range(1, access.MAX_GRANT_SUBJECTS + 2)]
+        cases = [
+            ({'subjects': [{'type': 'user', 'id': 32}]}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'subjects': [{'type': 'user', 'id': 32}], 'level': 'owner'}, 'BAIGA_ACCESS_BAD_LEVEL'),
+            ({'level': 'read'}, 'BAIGA_ACCESS_SUBJECT_REQUIRED'),
+            ({'subjects': [], 'level': 'read'}, 'BAIGA_ACCESS_SUBJECT_REQUIRED'),
+            ({'subjects': {'type': 'user', 'id': 32}, 'level': 'read'}, 'BAIGA_ACCESS_SUBJECT_REQUIRED'),
+            ({'subjects': [{'type': 'direction', 'id': 32}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'otp_role', 'id': 32}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'user', 'id': '32'}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'user', 'id': 0}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'user', 'id': -3}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'user', 'id': True}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'user', 'id': 3.5}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [{'type': 'user'}], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': ['user:32'], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': [None], 'level': 'read'}, 'BAIGA_ACCESS_BAD_SUBJECT'),
+            # Хороший адресат рядом с плохим не спасает запрос и не пишется сам.
+            ({'subjects': [{'type': 'user', 'id': 32}, {'type': 'user', 'id': 'x'}], 'level': 'read'},
+             'BAIGA_ACCESS_BAD_SUBJECT'),
+            ({'subjects': many, 'level': 'read'}, 'BAIGA_ACCESS_TOO_MANY'),
+        ]
+        for body, code in cases:
+            response = self.client.post('/api/baiga/access/grants', json=body)
+            self.assertEqual((response.status_code, response.get_json()['code']), (400, code), body)
+            self.assertEqual((self.state(), self.store.access_locks), (before, locks), body)
+        # Ровно предел — проходит разбор (и упирается уже в «нет таких людей»).
+        response = self.client.post('/api/baiga/access/grants', json={'subjects': many[:-1], 'level': 'read'})
+        self.assertEqual(response.get_json()['code'], 'BAIGA_ACCESS_SUBJECT_GONE')
+
+    def test_level_is_changed_and_grant_is_revoked_by_id(self):
+        self.grant([('group', 5)], 'read')
+        response = self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([grant['level'] for grant in response.get_json()['grants']], ['full'])
+        self.assertEqual([(entry['action'], entry['label'], entry['before'], entry['after'])
+                          for entry in self.store.access_log[1:]], [('change', 'Регионы', 'read', 'full')])
+        # Тот же уровень — без записи; незнакомый — отказ; чужого id — нет.
+        before = self.state()
+        self.assertEqual(self.client.patch('/api/baiga/access/grants/1', json={'level': 'full'}).status_code, 200)
+        for body in ({'level': 'owner'}, {}, {'level': None}):
+            response = self.client.patch('/api/baiga/access/grants/1', json=body)
+            self.assertEqual((response.status_code, response.get_json()['code']), (400, 'BAIGA_ACCESS_BAD_LEVEL'))
+        response = self.client.patch('/api/baiga/access/grants/9', json={'level': 'read'})
+        self.assertEqual((response.status_code, response.get_json()['code']), (404, 'BAIGA_ACCESS_GRANT_NOT_FOUND'))
+        self.assertEqual(self.state(), before)
+
+        response = self.client.delete('/api/baiga/access/grants/1')
+        self.assertEqual((response.status_code, response.get_json()['grants']), (200, []))
+        self.assertEqual(self.store.grants, {})
+        self.assertEqual([(entry['action'], entry['label'], entry['before'], entry['after'])
+                          for entry in self.store.access_log[2:]], [('revoke', 'Регионы', 'full', None)])
+        again = self.client.delete('/api/baiga/access/grants/1')
+        self.assertEqual((again.status_code, again.get_json()['code']), (404, 'BAIGA_ACCESS_GRANT_NOT_FOUND'))
+        self.assertEqual(len(self.store.access_log), 3)
+
+    def test_full_access_to_the_section_does_not_hand_out_access(self):
+        """Глава «Маркетинга» ведёт раздел целиком, но раздаёт его только
+        названный поимённо: тот же профиль с чужим id получает отказ."""
+        self.grant([('group', 5)])
+        before = self.state()
+        for viewer in (person(role='admin', department_code='marketing', headed_codes=('marketing',)),
+                       person(department_code='analytik', user_id=ANALYST_ID),
+                       person(role='sv', department_code='tez', grants=('full',)),
+                       person(role='admin', department_code='szov', headed_codes=('szov',))):
+            self.viewer = viewer
+            self.assertTrue(access.can_open_section(viewer))
+            self.assertFalse(self.client.get('/api/baiga').get_json()['capabilities']['can_manage_access'])
+            codes = [(response.status_code, response.get_json()['code']) for response in self.access_routes()]
+            self.assertEqual(codes, [(403, 'BAIGA_ACCESS_FORBIDDEN')] * self.ACCESS_ROUTES, viewer)
+            self.assertEqual(self.state(), before, viewer)
+
+    def test_named_manager_hands_out_access(self):
+        self.viewer = person(role='admin', department_code='marketing', headed_codes=('marketing',), user_id=415)
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], OWNER)
+        self.assertEqual(self.grant([('department', 44)], 'read').status_code, 200)
+        self.assertEqual(self.store.access_log[0]['actor_id'], 415)
+        self.assertEqual(self.client.get('/api/baiga/access').status_code, 200)
+
+    def test_named_manager_outside_the_circle_opens_the_section_and_stays_behind_qr(self):
+        with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({77})):
+            self.viewer = person(role='operator', department_code='tez', user_id=77)
+            self.qr_granted = False
+            codes = {(response.status_code, response.get_json()['code']) for response in self.access_routes()}
+            self.assertEqual(codes, {(403, 'SENSITIVE_ACCESS_REQUIRED')})
+            self.assertEqual(self.store.grants, {})
+            self.qr_granted = True
+            self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'],
+                             dict(READ, can_manage_access=True))
+            self.assertEqual(self.grant([('user', 31)], 'export').status_code, 200)
+            # Свой уровень раздающий поднимает той же выдачей — себе, как любому.
+            self.store.subjects[('user', 77)] = self.viewer['name']
+            self.assertEqual(self.grant([('user', 77)], 'full').status_code, 200)
+
+    def test_switch_closes_the_sheet_for_the_named(self):
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.viewer = person(role='admin', department_code='marketing', headed_codes=('marketing',), user_id=415)
+            codes = {(response.status_code, response.get_json()['code']) for response in self.access_routes()}
+            self.assertEqual(codes, {(403, 'BAIGA_SECTION_CLOSED')})
+            self.viewer = person(role='super_admin', department_code=None)
+            self.assertEqual(self.client.get('/api/baiga/access').status_code, 200)
+
+    def test_not_deployed_tables_answer_plainly_and_the_section_lives(self):
+        """Миграция выдач не легла: лист честно говорит об этом, а раздел
+        работает по кругу — как до кнопки «Доступ»."""
+        self.grants_ready = False
+        codes = [(response.status_code, response.get_json()['code']) for response in self.access_routes()]
+        self.assertEqual(codes, [(409, 'BAIGA_ACCESS_NOT_READY')] * self.ACCESS_ROUTES)
+        self.assertEqual((self.store.grants, self.store.access_log, self.store.access_locks), ({}, [], 0))
+        self.assertEqual(self.client.get('/api/baiga').status_code, 200)
+        self.assertEqual(self.client.post('/api/baiga/rows', json={}).status_code, 200)
+
+    def test_granted_person_gets_exactly_the_granted_level(self):
+        self.upload()
+        for row in self.store.rows:
+            row['period_start'] = date(2026, 9, 21)
+        expected = {
+            'read': (READ, 403, 403),
+            'export': (EXPORT, 200, 403),
+            'full': (FULL, 200, 200),
+        }
+        for level, (caps, export_status, journal_status) in expected.items():
+            self.viewer = person(role='sv', department_code='tez', grants=(level,))
+            self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], caps, level)
+            self.assertEqual(self.client.post('/api/baiga/rows', json={}).status_code, 200, level)
+            self.assertEqual(self.client.post('/api/baiga/export', json={}).status_code, export_status, level)
+            self.assertEqual(self.client.get('/api/baiga/journal').status_code, journal_status, level)
+            self.assertEqual(self.client.get('/api/baiga/access').status_code, 403, level)
+
+    def test_granted_rank_and_file_wait_for_qr_on_every_route(self):
+        for kwargs in ({'role': 'trainee', 'department_code': 'front_office'},
+                       {'role': 'operator', 'department_code': 'tez'},
+                       {'role': 'accounting_manager', 'department_code': 'accounting'}):
+            self.viewer = person(grants=('full',), **kwargs)
+            self.qr_granted = False
+            codes = {(response.status_code, response.get_json()['code'])
+                     for response in (self.client.get('/api/baiga'), self.client.post('/api/baiga/rows', json={}),
+                                      self.client.post('/api/baiga/export', json={}),
+                                      self.client.get('/api/baiga/journal'), self.client.get('/api/baiga/access'))}
+            self.assertEqual(codes, {(403, 'SENSITIVE_ACCESS_REQUIRED')}, kwargs)
+            self.qr_granted = True
+            self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], FULL, kwargs)
+        # Кадровику кода не выдают — выданный раздел открыт ему без замка.
+        self.viewer = person(role='hr_manager', department_code='hr', grants=('read',))
+        self.qr_granted = False
+        self.assertEqual(self.client.get('/api/baiga').get_json()['capabilities'], READ)
+
+
 class WiringTests(unittest.TestCase):
 
     def setUp(self):
@@ -1352,6 +2147,10 @@ class WiringTests(unittest.TestCase):
         head_codes = app[start:app.index('\n};\n', start) + 3]
         start = app.index('const SENSITIVE_QR_GATED_ROLES = ')
         qr_lock = app[start:app.index('\n);\n', app.index('const sensitiveSectionQrRequiredFor = ')) + 3]
+        # Замок раздела спрашивает всех, кому портал выдаёт код: общий замок плюс
+        # замок «Чатов водителей» (стажёр) — sensitiveQrAvailableFor.
+        start = app.index('const driverChatsQrRequiredFor = (userLike) => {')
+        wide_lock = app[start:app.index('\n);\n', app.index('const sensitiveQrAvailableFor = ')) + 3]
         start = app.index('const BAIGA_MANAGE_DEPARTMENT_CODE = ')
         section = app[start:app.index('\n);\n', app.index('const baigaQrRequiredFor = ')) + 3]
         self.assertIn('const canAccessBaigaSectionForUser = ', section)
@@ -1368,7 +2167,7 @@ class WiringTests(unittest.TestCase):
         script = '\n'.join((
             "import { normalizeRole, isDepartmentHead, isSupervisorRole } from '%s';"
             % (ROOT / 'src' / 'utils' / 'roles.js').as_uri(),
-            normalize, head_codes, qr_lock, section,
+            normalize, head_codes, qr_lock, wide_lock, section,
             'const users = %s;' % json.dumps(users),
             'process.stdout.write(JSON.stringify(users.map((u) => %s(u))));' % predicate,
         ))
@@ -1378,9 +2177,13 @@ class WiringTests(unittest.TestCase):
         return answers
 
     @staticmethod
-    def _front_user(role, code, heads, user_id=10):
-        return {'id': user_id, 'role': role, 'department_code': code,
+    def _front_user(role, code, heads, user_id=10, granted=None):
+        user = {'id': user_id, 'role': role, 'department_code': code,
                 'headed_department_id': 1 if heads else None, 'headed_department_codes': list(heads)}
+        if granted is not None:
+            # Флаг профиля: раздел выдан из него самого (bot_schedule2.py).
+            user['baiga_access'] = granted
+        return user
 
     def test_predicate_answers_like_the_server(self):
         """Пункт меню и сервер обязаны совпадать: иначе человек видит пункт, а
@@ -1479,6 +2282,139 @@ class WiringTests(unittest.TestCase):
             ctx = person(role=role, department_code=code, headed_codes=heads)
             self.assertTrue(not access.can_open_section(ctx) or access.requires_sensitive_qr(ctx), code)
 
+    def test_granted_flag_opens_the_menu_item_like_the_server(self):
+        """Выдачу из раздела по должности и отделу не вычислить — её приносит
+        флаг профиля baiga_access. С флагом пункт меню есть у любого сочетания
+        роли, отдела и главенства, как и раздел на сервере с выдачей; без флага
+        и с false — ровно круг раздела."""
+        cases = grid()
+        granted = self._front_answers([self._front_user(*case, granted=True) for case in cases])
+        self.assertEqual(granted, [True] * len(cases))
+        for role, code, heads in cases:
+            self.assertTrue(access.can_open_section(person(role=role, department_code=code, headed_codes=heads,
+                                                           grants=('read',))), (role, code, heads))
+        without = self._front_answers([self._front_user(*case) for case in cases])
+        self.assertEqual(self._front_answers([self._front_user(*case, granted=False) for case in cases]), without)
+        # Выдача — только строгое true: строка из старого кэша профиля ею не станет.
+        odd = [dict(self._front_user('operator', 'tez', ()), baiga_access=value)
+               for value in ('true', 1, 'yes', [], {}, None)]
+        self.assertEqual(self._front_answers(odd), [False] * len(odd))
+
+    def test_lock_on_the_screen_answers_like_the_server_for_the_granted(self):
+        """Вошедшего по выдаче экран и сервер спрашивают о QR одинаково — на
+        всех сочетаниях, включая стажёра (спрашивают) и кадровика (не
+        спрашивают: кода ему портал не выдаёт)."""
+        cases = grid() + [('hr_manager', code, heads) for code in GRID_DEPARTMENTS + ('hr',)
+                          for heads in ((), ('hr',))]
+        asked = 0
+        for user_id in (77, 78):
+            users = [self._front_user(role, code, heads, user_id=user_id, granted=True)
+                     for role, code, heads in cases]
+            locked = self._front_answers(users, analysts=(77,), predicate='baigaQrRequiredFor')
+            with mock.patch.object(access, 'ANALYST_USER_IDS', frozenset({77})):
+                for (role, code, heads), is_locked in zip(cases, locked):
+                    ctx = person(role=role, department_code=code, headed_codes=heads, user_id=user_id,
+                                 grants=('read',))
+                    self.assertEqual(is_locked, access.requires_sensitive_qr(ctx), (role, code, heads, user_id))
+                    asked += is_locked
+        trainees = [self._front_user('trainee', code, (), granted=True) for code in GRID_DEPARTMENTS]
+        self.assertEqual(self._front_answers(trainees, predicate='baigaQrRequiredFor'), [True] * len(trainees))
+        self.assertGreater(asked, 20)
+
+    def test_switch_closes_the_granted_on_the_screen_like_on_the_server(self):
+        users = [self._front_user('operator', 'tez', (), granted=True),
+                 self._front_user('super_admin', None, (), granted=True)]
+        self.assertEqual(self._front_answers(users, pilot=True), [False, True])
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.assertFalse(access.can_open_section(person(department_code='tez', grants=('full',))))
+
+    def _profile_flag(self, ctx=None, error=None):
+        """Настоящая _baiga_section_open_for из монолита — без его импорта."""
+        import logging
+
+        class Db:
+            @contextmanager
+            def _get_cursor(self):
+                yield object()
+
+        def load(cursor, user_id):
+            if error:
+                raise error
+            return dict(ctx, user_id=user_id) if ctx is not None else None
+
+        namespace = {'db': Db(), 'logging': logging}
+        node = source_cache.function_copy(BOT_PY, '_baiga_section_open_for')
+        module = __import__('ast').Module(body=[node], type_ignores=[])
+        exec(compile(module, '<bot:_baiga_section_open_for>', 'exec'), namespace)
+        for patcher in (mock.patch.object(queries, 'load_access_context', load),
+                        mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False),
+                        mock.patch.object(logging, 'exception', lambda *args, **kwargs: None)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return namespace['_baiga_section_open_for']
+
+    def test_profile_flag_is_the_answer_of_the_section_rule(self):
+        """Флаг считает то же правило, что гейт ручек: выдача открывает, круг
+        открывает, остальным — false. Сбой базы не роняет вход в портал."""
+        cases = [(person(role='sv', department_code='tez', grants=('read',)), True),
+                 (person(role='sv', department_code='tez'), False),
+                 (person(department_code='op'), True),
+                 (person(role='trainer', department_code='szov'), False),
+                 (None, False)]
+        for ctx, expected in cases:
+            self.assertIs(self._profile_flag(ctx)(31), expected, ctx)
+        self.assertIs(self._profile_flag(person(grants=('read',)))(None), False)
+        self.assertIs(self._profile_flag(person(grants=('read',)))(0), False)
+        self.assertIs(self._profile_flag(error=RuntimeError('база недоступна'))(31), False)
+        with mock.patch.object(access, 'ACCESS_MANAGER_USER_IDS', frozenset({31})):
+            self.assertIs(self._profile_flag(person(role='sv', department_code='tez'))(31), True)
+
+    def test_profile_carries_the_flag(self):
+        payload = source_cache.function_node(BOT_PY, '_get_user_payload')
+        lines = source_cache.read(BOT_PY).splitlines()
+        body = '\n'.join(lines[payload.lineno - 1:payload.end_lineno])
+        self.assertIn('    baiga_access = _baiga_section_open_for(user_id) if user_id is not None else False\n', body)
+        self.assertIn('        "baiga_access": baiga_access,\n', body)
+        # Сам предикат читает флаг ПОСЛЕ выключателя — иначе выключатель не закрыл бы выданных.
+        predicate = self.app.split('const canAccessBaigaSectionForUser = (userLike) => {')[1].split('\n};')[0]
+        self.assertLess(predicate.index('if (BAIGA_PILOT_SUPER_ADMIN_ONLY) return false;'),
+                        predicate.index('if (userLike?.baiga_access === true) return true;'))
+
+    def test_access_button_opens_the_sheet(self):
+        view = _read(ROOT / 'src' / 'components' / 'baiga' / 'BaigaView.jsx')
+        self.assertIn("import BaigaAccessSheet from './BaigaAccessSheet';", view)
+        button = view.split('{capabilities.can_manage_access && (')[1].split('</button>')[0]
+        self.assertIn('<button type="button" className={`${iosBtnSecondary} shrink-0`}\n'
+                      '                                onClick={() => setAccessOpen(true)} '
+                      'aria-label="Доступ к разделу">', button)
+        self.assertIn('<span className="hidden sm:inline">Доступ</span>', button)
+        sheet = view.split('{capabilities.can_manage_access && (')[2].split('/>')[0]
+        self.assertIn('<BaigaAccessSheet', sheet)
+        self.assertIn('open={accessOpen}', sheet)
+        source = _read(ROOT / 'src' / 'components' / 'baiga' / 'BaigaAccessSheet.jsx')
+        # Четыре ручки листа — те же адреса, что у сервера.
+        for call in ("axios.get(`${apiBaseUrl}/api/baiga/access`",
+                     "axios.post(`${apiBaseUrl}/api/baiga/access/grants`",
+                     "axios.patch(`${apiBaseUrl}/api/baiga/access/grants/${draft.grant.id}`",
+                     "axios.delete(`${apiBaseUrl}/api/baiga/access/grants/${draft.grant.id}`"):
+            self.assertEqual(source.count(call), 1, call)
+        rules = {(rule.rule, tuple(sorted(rule.methods - {'HEAD', 'OPTIONS'})))
+                 for rule in self._url_map() if '/access' in rule.rule}
+        self.assertEqual(rules, {('/api/baiga/access', ('GET',)), ('/api/baiga/access/grants', ('POST',)),
+                                 ('/api/baiga/access/grants/<int:grant_id>', ('PATCH',)),
+                                 ('/api/baiga/access/grants/<int:grant_id>', ('DELETE',))})
+
+    @staticmethod
+    def _url_map():
+        if Flask is None:
+            raise unittest.SkipTest('Flask не установлен')
+        app = Flask('map')
+        app.register_blueprint(routes.build_baiga_blueprint(
+            db=None, require_api_key=lambda handler: handler, build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (None, None, ('Unauthorized', 401)),
+            sensitive_access_granted=lambda user_id: False))
+        return list(app.url_map.iter_rules())
+
     def test_qr_status_is_asked_when_the_section_opens(self):
         """Без этого оператор, не заходивший до «Списков Байги» в другой закрытый
         раздел, остаётся на «Проверяем доступ…» без кнопки QR."""
@@ -1508,16 +2444,26 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(view.count("{capabilities.can_export && tab === 'search' && ("), 1)
         self.assertEqual(view.count('{capabilities.can_manage && ('), 3)
         self.assertIn("if (tab === 'journal' && capabilities.can_manage) {", view)
+        # «Доступ» — кнопка и её окно — по своему праву: полный доступ к разделу
+        # его не даёт.
+        self.assertEqual(view.count('{capabilities.can_manage_access && ('), 2)
         self.assertEqual(len(re.findall(r'capabilities\.can_\w+', view)),
-                         len(re.findall(r'capabilities\.can_(?:export|manage)\b', view)))
+                         len(re.findall(r'capabilities\.can_(?:export|manage|manage_access)\b', view)))
 
     def test_guards_and_registries(self):
         self.assertIn("if (view === 'baiga' && canAccessBaigaSection) return;", self.app)
         self.assertIn("    baiga: ['marketing', 'op', 'szov'],", self.app)
         self.assertIn("    baiga: 'Baiga lists',", self.app)
         self.assertIn("canAccessBaigaSection && deptAllowsInner('baiga'),", self.app)
+        # Тренеру раздел по кругу закрыт, но выдать его можно и ему: без строки
+        # в списке гард вида уводил бы тренера с выданным разделом в «Опросы».
+        # Тренера без выдачи уводит ветка view === 'baiga' (тест ниже).
         trainer = self.app.split('const TRAINER_ALLOWED_VIEWS = Object.freeze([')[1].split(']);')[0]
-        self.assertNotIn("'baiga'", trainer)
+        # Элемент списка, а не слово в комментарии рядом с ним.
+        self.assertRegex(trainer, r"(?m)^    'baiga',$")
+        closed = self.app.split("if (view === 'baiga' && !canAccessBaigaSection) {")[1]
+        closed = closed.split('\n                }\n')[0]
+        self.assertIn("else if (isPlainTrainer) redirectToView('surveys');", closed)
         deps = self.app.split("if (view === 'baiga' && canAccessBaigaSection) return;")[1]
         deps = deps.split('}, [')[1].split(']);')[0]
         self.assertIn('canAccessBaigaSection', deps)

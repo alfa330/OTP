@@ -1288,6 +1288,11 @@ def _get_user_payload(user):
     # iCore Phone»; сам доступ к файлу проверяет _can_download_icore_phone.
     dial_list_line_member = bool(_dial_list_line_member(user_id)) if user_id is not None else False
 
+    # Открыт ли человеку раздел «Списки Байги». Его выдают из самого раздела —
+    # человеку, группе, отделу, — и по должности с отделом портал такую выдачу
+    # не вычислит, а пункт меню показать обязан (canAccessBaigaSectionForUser).
+    baiga_access = _baiga_section_open_for(user_id) if user_id is not None else False
+
     return {
         "role": role,
         "id": user_id,
@@ -1298,6 +1303,7 @@ def _get_user_payload(user):
         "department_id": department_id,
         "department_code": department_code,
         "dial_list_line_member": dial_list_line_member,
+        "baiga_access": baiga_access,
         "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
@@ -65656,6 +65662,27 @@ try:
     logging.info("Раздел «Списки Байги»: Blueprint подключён на /api/baiga")
 except Exception:
     logging.exception("Раздел «Списки Байги»: Blueprint НЕ подключён")
+
+
+def _baiga_section_open_for(user_id):
+    """Открыт ли человеку раздел «Списки Байги» — флаг baiga_access в профиле.
+
+    Тот же контекст и то же правило, что у гейта ручек раздела
+    (baiga.access.can_open_section): флаг и ответ сервера не расходятся. Любой
+    сбой — False: вход в портал из-за раздела падать не должен, а круг по
+    должности и отделу портал считает и сам.
+    """
+    if not user_id:
+        return False
+    try:
+        from baiga import access as baiga_access, queries as baiga_queries
+
+        with db._get_cursor() as cursor:
+            ctx = baiga_queries.load_access_context(cursor, int(user_id))
+        return bool(ctx and baiga_access.can_open_section(ctx))
+    except Exception:
+        logging.exception("Списки Байги: не удалось определить доступ для %s", user_id)
+        return False
 
 
 # ── Раздел «Оплата счетов» (бизнес-процесс «Согласование — Оплата счетов», #179) ──
