@@ -260,7 +260,7 @@ export default function ChatAttachmentViewer({ apiBaseUrl, headers, chat, messag
     const canExtract = Boolean(asset) && !loading && !extracting && (asset.kind !== 'pdf' || Boolean(currentPage));
     return createPortal(<IosModal open onClose={onClose} title={download?.name || attachmentName(message) || 'Просмотр вложения'}
         subtitle={asset?.kind === 'pdf' ? `${asset.pdf.numPages} стр. · Текст можно выделять на странице` : undefined}
-        maxWidth="max-w-6xl" bodyClassName="flex min-h-0 flex-1 flex-col p-0">
+        maxWidth="max-w-6xl" bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col p-0">
         <div ref={container} className="flex min-h-0 flex-1 flex-col" style={{ height: 'min(78vh, 900px)' }}>
             <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-white px-3 py-2">
                 {asset?.kind === 'pdf' && <>
